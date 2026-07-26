@@ -133,7 +133,29 @@ matching = "prefix"
 # coreutils directory already on PATH.
 ```
 
-## 6b. Segment-based prompt (experimental)
+## 6b. Optional startup banner
+
+`winuxfetch` prints a compact Neofetch-style Windows system card. It is a
+separate executable, so normal shell startup stays quiet unless you opt in.
+
+Run it manually:
+
+```bash
+winuxfetch
+winuxfetch --no-logo
+```
+
+Show it once when the interactive REPL starts:
+
+```toml
+[hooks]
+startup = ["winuxfetch"]
+```
+
+`startup` hooks run only in the interactive REPL. They do not run for
+`winuxsh -c ...`, script files, or stdin script execution.
+
+## 6c. Segment-based prompt (experimental)
 
 Enable the p10k-style segment engine by adding to `~/.winshrc.toml`:
 

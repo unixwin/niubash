@@ -679,6 +679,7 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
     println!();
 
     shell.restore_last_working_dir_for_repl();
+    shell.run_startup_hooks();
     let mut line_editor = build_line_editor(shell)?;
     let mut pending = PendingReplInput::default();
 

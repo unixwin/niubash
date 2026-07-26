@@ -10,19 +10,19 @@ use crate::prompt::PromptIndicators;
 
 /// Shell configuration, loaded from `~/.winshrc.toml`.
 #[derive(Debug, Clone, Default)]
- pub struct ShellConfig {
-     /// Prompt indicator symbol (e.g. "%", "\$", "\u276f", "\u3bb")
-     pub prompt_symbol: String,
-     /// Prompt template (e.g. "{user}@{host} {cwd} {symbol}")
-     pub prompt_format: Option<String>,
- /// Optional right-side prompt template.
- pub right_prompt_format: Option<String>,
- /// Optional format for the git prompt segment. Supports `{git_branch}` and
- /// `{git_status}` placeholders, e.g. `git:({git_branch})`. When unset, the
- /// branch name is rendered on its own.
- pub git_prompt_format: Option<String>,
- /// Optional mode-specific prompt indicators.
- pub prompt_indicators: PromptIndicators,
+pub struct ShellConfig {
+    /// Prompt indicator symbol (e.g. "%", "\$", "\u276f", "\u3bb")
+    pub prompt_symbol: String,
+    /// Prompt template (e.g. "{user}@{host} {cwd} {symbol}")
+    pub prompt_format: Option<String>,
+    /// Optional right-side prompt template.
+    pub right_prompt_format: Option<String>,
+    /// Optional format for the git prompt segment. Supports `{git_branch}` and
+    /// `{git_status}` placeholders, e.g. `git:({git_branch})`. When unset, the
+    /// branch name is rendered on its own.
+    pub git_prompt_format: Option<String>,
+    /// Optional mode-specific prompt indicators.
+    pub prompt_indicators: PromptIndicators,
     /// Prompt backend: "template" (legacy) or "segments" (p10k-style).
     pub prompt_style: Option<String>,
     /// Segment preset: "lean" | "classic" | "rainbow" | "pure" | "robbyrussell".
@@ -31,10 +31,11 @@ use crate::prompt::PromptIndicators;
     pub left_prompt_elements: Option<Vec<String>>,
     /// Custom right-prompt segment order (overrides preset).
     pub right_prompt_elements: Option<Vec<String>>,
- }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookConfig {
+    pub startup: Vec<String>,
     pub precmd: Vec<String>,
     pub preexec: Vec<String>,
     pub chpwd: Vec<String>,
@@ -459,6 +460,7 @@ struct WinuxCmdToml {
 
 #[derive(Debug, Deserialize)]
 struct HooksToml {
+    startup: Option<Vec<String>>,
     precmd: Option<Vec<String>>,
     preexec: Option<Vec<String>>,
     chpwd: Option<Vec<String>>,
@@ -844,8 +846,10 @@ fn build_prompt_indicators(parsed: &ShellToml) -> PromptIndicators {
             .unwrap_or(defaults.history_search_fail),
     }
 }
+
 fn build_hook_config(parsed: HooksToml) -> HookConfig {
     HookConfig {
+        startup: parsed.startup.unwrap_or_default(),
         precmd: parsed.precmd.unwrap_or_default(),
         preexec: parsed.preexec.unwrap_or_default(),
         chpwd: parsed.chpwd.unwrap_or_default(),
@@ -1179,12 +1183,14 @@ edit_mode = "unknown"
         let config = parse_config(
             r#"
 [hooks]
+startup = ["winuxfetch"]
 precmd = ["echo before prompt"]
 preexec = ["echo before command"]
 chpwd = ["echo directory changed"]
 "#,
         );
 
+        assert_eq!(config.hooks.startup, vec!["winuxfetch"]);
         assert_eq!(config.hooks.precmd, vec!["echo before prompt"]);
         assert_eq!(config.hooks.preexec, vec!["echo before command"]);
         assert_eq!(config.hooks.chpwd, vec!["echo directory changed"]);

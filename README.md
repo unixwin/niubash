@@ -202,6 +202,11 @@ ll = "ls -la"
 [completions]
 matching = "prefix"           # prefix | substring
 case_sensitive = false
+
+[hooks]
+# Optional: show a Neofetch-style system card once when the REPL starts.
+# This never runs for `winuxsh -c` or script files.
+# startup = ["winuxfetch"]
 ```
 
 Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.md).
@@ -227,7 +232,7 @@ Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.
 - Report a bug?  Open an issue.
 - Want a feature?  Check [the roadmap](DOCS/winuxsh-roadmap.md).
 - Build from source: `cargo build --release`.
-- Release zip includes `winuxsh.exe`, `winuxcmd/winuxcmd.exe`, and `winuxcmd/activate-winuxcmd.sh`.
+- Release zip includes `winuxsh.exe`, `winuxfetch.exe`, `winuxcmd/winuxcmd.exe`, and `winuxcmd/activate-winuxcmd.sh`.
 - On first start, winuxsh runs the activation script once if command links are missing.
 - Run the tests: `cargo test`.
 

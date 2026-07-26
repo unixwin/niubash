@@ -206,6 +206,11 @@ completion_page_size = 10
 history_page_size = 10
 max_entry_lines = 5
 
+[hooks]
+# 可选：REPL 启动时只显示一次 Neofetch 风格系统信息。
+# 不会在 `winuxsh -c` 或脚本文件执行时运行。
+# startup = ["winuxfetch"]
+
 [winuxcmd]
 # 可选覆盖；省略时从 PATH 自动发现。
 # path = "D:/tools/winuxcmd/winuxcmd.exe"

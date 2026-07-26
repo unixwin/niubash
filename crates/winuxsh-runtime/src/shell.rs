@@ -469,15 +469,22 @@ impl Shell {
         self.update_completion_state();
     }
 
+    /// Run native hooks once after REPL startup, before the first prompt.
+    pub fn run_startup_hooks(&mut self) {
+        let hooks = self.hooks.startup.clone();
+        self.run_hook_scripts(&hooks, &[("WINUXSH_REPL_STARTUP", "1".to_string())]);
+        self.update_completion_state();
+    }
+
     /// Run native hooks before rendering the next prompt.
- pub fn run_precmd_hooks(&mut self) {
-     self.run_native_precmd_plugins();
-     let hooks = self.hooks.precmd.clone();
-     let last_exit_code = self.executor.last_exit_code().to_string();
-    // Set in process env so segment prompt can read it via std::env::var.
-    std::env::set_var("WINUXSH_LAST_EXIT_CODE", &last_exit_code);
-     self.run_hook_scripts(&hooks, &[("WINUXSH_LAST_EXIT_CODE", last_exit_code)]);
- }
+    pub fn run_precmd_hooks(&mut self) {
+        self.run_native_precmd_plugins();
+        let hooks = self.hooks.precmd.clone();
+        let last_exit_code = self.executor.last_exit_code().to_string();
+        // Set in process env so segment prompt can read it via std::env::var.
+        std::env::set_var("WINUXSH_LAST_EXIT_CODE", &last_exit_code);
+        self.run_hook_scripts(&hooks, &[("WINUXSH_LAST_EXIT_CODE", last_exit_code)]);
+    }
 
     /// Run native hooks immediately before the user's interactive command.
     pub fn run_preexec_hooks(&mut self, command: &str) {
@@ -1896,16 +1903,19 @@ mod tests {
         let next_arg = shell_quote(&shell_display_path(&next_dir));
 
         let mut shell = test_shell(HookConfig {
+            startup: vec!["HOOK_STARTUP=\"startup:$WINUXSH_REPL_STARTUP\"".to_string()],
             precmd: vec!["HOOK_PRECMD=\"precmd:$WINUXSH_LAST_EXIT_CODE\"".to_string()],
             preexec: vec!["HOOK_PREEXEC=\"preexec:$WINUXSH_PREEXEC_COMMAND\"".to_string()],
             chpwd: vec!["HOOK_CHPWD=\"chpwd:$WINUXSH_OLDPWD->$WINUXSH_PWD\"".to_string()],
         });
 
+        shell.run_startup_hooks();
         shell.run_precmd_hooks();
         shell
             .execute_interactive_line(&format!("cd {}", next_arg))
             .unwrap();
 
+        assert_eq!(shell.executor.get_env("HOOK_STARTUP"), Some("startup:1"));
         assert_eq!(shell.executor.get_env("HOOK_PRECMD"), Some("precmd:0"));
         let preexec = shell.executor.get_env("HOOK_PREEXEC").unwrap_or_default();
         assert!(preexec.starts_with("preexec:cd "), "{preexec}");
@@ -1913,6 +1923,7 @@ mod tests {
         assert!(chpwd.starts_with("chpwd:"), "{chpwd}");
         assert!(chpwd.contains("->"), "{chpwd}");
         assert!(shell.executor.get_env("WINUXSH_LAST_EXIT_CODE").is_none());
+        assert!(shell.executor.get_env("WINUXSH_REPL_STARTUP").is_none());
         assert!(shell.executor.get_env("WINUXSH_PREEXEC_COMMAND").is_none());
         assert!(shell.executor.get_env("WINUXSH_OLDPWD").is_none());
         assert!(shell.executor.get_env("WINUXSH_PWD").is_none());
