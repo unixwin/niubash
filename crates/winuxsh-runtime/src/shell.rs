@@ -33,6 +33,7 @@ use crate::zsh_compat::{
 use crate::winuxcmd;
 
 const DOTENV_MAX_SIZE: u64 = 10 * 1024 * 1024;
+const WINUXSH_RC_FILE: &str = ".winshrc";
 
 /// Top-level shell state.
 pub struct Shell {
@@ -469,10 +470,24 @@ impl Shell {
         self.update_completion_state();
     }
 
-    /// Run native hooks once after REPL startup, before the first prompt.
-    pub fn run_startup_hooks(&mut self) {
-        let hooks = self.hooks.startup.clone();
-        self.run_hook_scripts(&hooks, &[("WINUXSH_REPL_STARTUP", "1".to_string())]);
+    /// Source the user's REPL startup file once before the first prompt.
+    pub fn run_startup_rc(&mut self) {
+        let path = self.home_dir.join(WINUXSH_RC_FILE);
+        let Ok(script) = std::fs::read_to_string(&path) else {
+            return;
+        };
+
+        self.executor.set_env("WINUXSH_REPL_STARTUP", "1");
+        match self.execute_script(&script) {
+            Ok(code) => {
+                if code != 0 {
+                    log::warn!("{} exited with status {}", path.display(), code);
+                }
+                self.sync_alias_mirror_from_script(&script, code);
+            }
+            Err(err) => log::warn!("{} failed: {}", path.display(), err),
+        }
+        let _ = self.execute_script("unset WINUXSH_REPL_STARTUP");
         self.update_completion_state();
     }
 
@@ -834,6 +849,15 @@ impl Shell {
             Some("alias") => self.sync_alias_assignments(&words[1..]),
             Some("unalias") => self.sync_unalias_arguments(&words[1..]),
             _ => {}
+        }
+    }
+
+    fn sync_alias_mirror_from_script(&mut self, script: &str, code: i32) {
+        if code != 0 {
+            return;
+        }
+        for line in script.lines() {
+            self.sync_alias_mirror_from_line(line, code);
         }
     }
 
@@ -1903,19 +1927,16 @@ mod tests {
         let next_arg = shell_quote(&shell_display_path(&next_dir));
 
         let mut shell = test_shell(HookConfig {
-            startup: vec!["HOOK_STARTUP=\"startup:$WINUXSH_REPL_STARTUP\"".to_string()],
             precmd: vec!["HOOK_PRECMD=\"precmd:$WINUXSH_LAST_EXIT_CODE\"".to_string()],
             preexec: vec!["HOOK_PREEXEC=\"preexec:$WINUXSH_PREEXEC_COMMAND\"".to_string()],
             chpwd: vec!["HOOK_CHPWD=\"chpwd:$WINUXSH_OLDPWD->$WINUXSH_PWD\"".to_string()],
         });
 
-        shell.run_startup_hooks();
         shell.run_precmd_hooks();
         shell
             .execute_interactive_line(&format!("cd {}", next_arg))
             .unwrap();
 
-        assert_eq!(shell.executor.get_env("HOOK_STARTUP"), Some("startup:1"));
         assert_eq!(shell.executor.get_env("HOOK_PRECMD"), Some("precmd:0"));
         let preexec = shell.executor.get_env("HOOK_PREEXEC").unwrap_or_default();
         assert!(preexec.starts_with("preexec:cd "), "{preexec}");
@@ -1927,6 +1948,33 @@ mod tests {
         assert!(shell.executor.get_env("WINUXSH_PREEXEC_COMMAND").is_none());
         assert!(shell.executor.get_env("WINUXSH_OLDPWD").is_none());
         assert!(shell.executor.get_env("WINUXSH_PWD").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn winshrc_runs_once_for_repl_startup_shell_customization() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-winshrc-startup");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            r#"
+export WINSHRC_VALUE=from-rc
+alias hello='echo from-alias'
+"#,
+        )
+        .unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        assert_eq!(shell.executor.get_env("WINSHRC_VALUE"), Some("from-rc"));
+        assert_eq!(shell.aliases.get("hello").map(String::as_str), Some("echo from-alias"));
+        assert!(shell.executor.get_env("WINUXSH_REPL_STARTUP").is_none());
 
         let _ = std::fs::remove_dir_all(temp);
     }

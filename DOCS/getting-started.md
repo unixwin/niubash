@@ -106,7 +106,7 @@ git branch -<Tab>           # shows -d, -D, -m, -v, -a, -r
 
 ## 6. Set up your config
 
-Create `~/.winshrc.toml`:
+Create `~/.winshrc.toml` for structured settings:
 
 ```toml
 [shell]
@@ -114,13 +114,6 @@ prompt_format = "{user}@{host} {cwd} {git_prompt} {symbol}"
 
 [editor]
 edit_mode = "vi"
-
-[aliases]
-ll = "ls -la"
-la = "ls -a"
-gst = "git status"
-gco = "git checkout"
-gl = "git log --oneline --graph --decorate --all"
 
 [completions]
 matching = "prefix"
@@ -133,29 +126,26 @@ matching = "prefix"
 # coreutils directory already on PATH.
 ```
 
-## 6b. Optional startup banner
-
-`winuxfetch` prints a compact Neofetch-style Windows system card. It is a
-separate executable, so normal shell startup stays quiet unless you opt in.
-
-Run it manually:
+Create `~/.winshrc` for interactive shell code:
 
 ```bash
-winuxfetch
-winuxfetch --no-logo
+export EDITOR=vim
+alias ll='ls -la'
+alias la='ls -a'
+alias gst='git status'
+alias gco='git checkout'
+alias gl='git log --oneline --graph --decorate --all'
+
+hello() {
+  echo "hello from winuxsh"
+}
 ```
 
-Show it once when the interactive REPL starts:
+`~/.winshrc` is sourced only for the interactive REPL. It does not run for
+`winuxsh -c ...`, script files, or stdin script execution, so agent and CI
+surfaces stay deterministic.
 
-```toml
-[hooks]
-startup = ["winuxfetch"]
-```
-
-`startup` hooks run only in the interactive REPL. They do not run for
-`winuxsh -c ...`, script files, or stdin script execution.
-
-## 6c. Segment-based prompt (experimental)
+## 6b. Segment-based prompt (experimental)
 
 Enable the p10k-style segment engine by adding to `~/.winshrc.toml`:
 

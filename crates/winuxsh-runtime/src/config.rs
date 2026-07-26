@@ -35,7 +35,6 @@ pub struct ShellConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookConfig {
-    pub startup: Vec<String>,
     pub precmd: Vec<String>,
     pub preexec: Vec<String>,
     pub chpwd: Vec<String>,
@@ -460,7 +459,6 @@ struct WinuxCmdToml {
 
 #[derive(Debug, Deserialize)]
 struct HooksToml {
-    startup: Option<Vec<String>>,
     precmd: Option<Vec<String>>,
     preexec: Option<Vec<String>>,
     chpwd: Option<Vec<String>>,
@@ -849,7 +847,6 @@ fn build_prompt_indicators(parsed: &ShellToml) -> PromptIndicators {
 
 fn build_hook_config(parsed: HooksToml) -> HookConfig {
     HookConfig {
-        startup: parsed.startup.unwrap_or_default(),
         precmd: parsed.precmd.unwrap_or_default(),
         preexec: parsed.preexec.unwrap_or_default(),
         chpwd: parsed.chpwd.unwrap_or_default(),
@@ -1183,14 +1180,12 @@ edit_mode = "unknown"
         let config = parse_config(
             r#"
 [hooks]
-startup = ["winuxfetch"]
 precmd = ["echo before prompt"]
 preexec = ["echo before command"]
 chpwd = ["echo directory changed"]
 "#,
         );
 
-        assert_eq!(config.hooks.startup, vec!["winuxfetch"]);
         assert_eq!(config.hooks.precmd, vec!["echo before prompt"]);
         assert_eq!(config.hooks.preexec, vec!["echo before command"]);
         assert_eq!(config.hooks.chpwd, vec!["echo directory changed"]);

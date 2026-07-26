@@ -169,8 +169,11 @@ winuxsh --zsh-native-packs-json
 
 ## 配置
 
-`~/.winshrc.toml` 是原生控制平面。它显式、可回滚，人和 agent 都能检查。
-`.zshrc` 仅作为导入源读取，运行时权威是 TOML。
+`~/.winshrc.toml` 是结构化设置文件，负责 prompt、editor、history、
+completion、native packs 这类可声明配置。
+`~/.winshrc` 是唯一的 REPL 启动脚本文件，负责 `export`、`alias`、函数、
+以及用户想写的 shell 逻辑。
+`.zshrc` 仅作为导入源读取，不作为运行时启动文件。
 
 最小示例：
 
@@ -191,10 +194,6 @@ ignore_space_prefixed = true
 [theme]
 current_theme = "default" # default | dark | light | colorful | ~/.winuxsh/themes/<name>.toml
 
-[aliases]
-ll = "ls -la"
-la = "ls -a"
-
 [completions]
 matching = "prefix" # prefix | substring
 case_sensitive = false
@@ -206,14 +205,21 @@ completion_page_size = 10
 history_page_size = 10
 max_entry_lines = 5
 
-[hooks]
-# 可选：REPL 启动时只显示一次 Neofetch 风格系统信息。
-# 不会在 `winuxsh -c` 或脚本文件执行时运行。
-# startup = ["winuxfetch"]
-
 [winuxcmd]
 # 可选覆盖；省略时从 PATH 自动发现。
 # path = "D:/tools/winuxcmd/winuxcmd.exe"
+```
+
+`~/.winshrc` 使用 shell 语法：
+
+```bash
+export EDITOR=vim
+alias ll='ls -la'
+alias gst='git status'
+
+hello() {
+  echo "hello from winuxsh"
+}
 ```
 
 `{git_prompt}` 占位符在 git 仓库里显示分支和紧凑状态符号，不在 git 目录时为空。

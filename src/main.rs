@@ -192,7 +192,7 @@ fn print_usage() {
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
-    println!("Configuration: ~/.winshrc.toml (see DOCS/ for reference)");
+    println!("Configuration: ~/.winshrc.toml for settings, ~/.winshrc for REPL shell code");
 }
 
 fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {

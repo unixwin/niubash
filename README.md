@@ -140,7 +140,8 @@ winuxsh = rubash (shell engine) + winuxcmd.exe (coreutils) + reedline (REPL)
 | `rubash`  | bash-compatible parser, executor, builtins, functions, heredocs |
 | `winuxcmd`| Unix coreutils (`ls`, `cat`, `grep`, `find`, `cp`, `mv`, `rm`, ...) |
 | `reedline`| Interactive editing, history, Tab completion, autosuggestions |
-| `~/.winshrc.toml` | Configuration — prompt, theme, editor, aliases, more |
+| `~/.winshrc.toml` | Structured settings — prompt, theme, editor, completion |
+| `~/.winshrc` | REPL startup script — `export`, `alias`, functions, shell code |
 | `.zshrc` scan | `--zsh-compat-report` reads your zsh intent → native TOML |
 
 ## For zsh / Oh My Zsh users
@@ -178,7 +179,7 @@ gsta → git stash save    gstp → git stash pop         glg → git log --stat
 ```
 
 Full list: about 40 aliases mirroring oh-my-zsh git plugin.
-User `[aliases]` in `~/.winshrc.toml` override any built-in.
+Put personal aliases in `~/.winshrc` with normal shell syntax.
 
 ## Configuration reference
 
@@ -196,17 +197,21 @@ edit_mode = "emacs"           # emacs | vi
 [theme]
 current_theme = "default"     # default | dark | light | colorful | custom
 
-[aliases]
-ll = "ls -la"
-
 [completions]
 matching = "prefix"           # prefix | substring
 case_sensitive = false
+```
 
-[hooks]
-# Optional: show a Neofetch-style system card once when the REPL starts.
-# This never runs for `winuxsh -c` or script files.
-# startup = ["winuxfetch"]
+Interactive shell customizations go in `~/.winshrc`:
+
+```bash
+export EDITOR=vim
+alias ll='ls -la'
+alias gst='git status'
+
+hello() {
+  echo "hello from winuxsh"
+}
 ```
 
 Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.md).
@@ -232,7 +237,7 @@ Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.
 - Report a bug?  Open an issue.
 - Want a feature?  Check [the roadmap](DOCS/winuxsh-roadmap.md).
 - Build from source: `cargo build --release`.
-- Release zip includes `winuxsh.exe`, `winuxfetch.exe`, `winuxcmd/winuxcmd.exe`, and `winuxcmd/activate-winuxcmd.sh`.
+- Release zip includes `winuxsh.exe`, `winuxcmd/winuxcmd.exe`, and `winuxcmd/activate-winuxcmd.sh`.
 - On first start, winuxsh runs the activation script once if command links are missing.
 - Run the tests: `cargo test`.
 

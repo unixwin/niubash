@@ -90,31 +90,23 @@ fn slash_drive_paths_are_compat_input_not_default_output() {
 }
 
 #[test]
-fn startup_hooks_do_not_run_for_non_interactive_modes() {
-    let temp = unique_temp_dir("winuxsh-host-startup-hooks");
+fn winshrc_does_not_run_for_non_interactive_modes() {
+    let temp = unique_temp_dir("winuxsh-host-winshrc");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
 
-    let config = temp.join("winshrc.toml");
     std::fs::write(
-        &config,
+        home.join(".winshrc"),
         r#"
-[hooks]
-startup = ["echo SHOULD_NOT_PRINT"]
+echo SHOULD_NOT_PRINT
 "#,
     )
     .unwrap();
-    let config_env = native_path(&config);
 
-    let output = run_winuxsh(
-        "echo command-ok",
-        &start,
-        &home,
-        &[("WINUXSH_CONFIG", config_env.clone())],
-    );
-    assert_success(&output, "command-mode startup hook isolation");
+    let output = run_winuxsh("echo command-ok", &start, &home, &[]);
+    assert_success(&output, "command-mode .winshrc isolation");
     assert_eq!(normalize_text(&output.stdout), "command-ok");
 
     let script = temp.join("script.sh");
@@ -125,10 +117,9 @@ startup = ["echo SHOULD_NOT_PRINT"]
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("ZDOTDIR", &home)
-        .env("WINUXSH_CONFIG", &config_env)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh script file: {err}"));
-    assert_success(&output, "script-file startup hook isolation");
+    assert_success(&output, "script-file .winshrc isolation");
     assert_eq!(normalize_text(&output.stdout), "script-ok");
 
     let mut child = Command::new(winuxsh_binary())
@@ -136,7 +127,6 @@ startup = ["echo SHOULD_NOT_PRINT"]
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("ZDOTDIR", &home)
-        .env("WINUXSH_CONFIG", &config_env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -149,7 +139,7 @@ startup = ["echo SHOULD_NOT_PRINT"]
         .write_all(b"echo stdin-ok\n")
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    assert_success(&output, "stdin-script startup hook isolation");
+    assert_success(&output, "stdin-script .winshrc isolation");
     assert_eq!(normalize_text(&output.stdout), "stdin-ok");
 
     let _ = std::fs::remove_dir_all(temp);
