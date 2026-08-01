@@ -15,7 +15,7 @@ use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
 use crate::git_status::{collect_for_prompt, GitPromptSymbols, GitRepoStatus};
-use crate::prompt::PromptIndicators;
+use crate::prompt::{format_local_time, PromptIndicators};
 
 // ---- Segment identifiers ----
 
@@ -212,16 +212,7 @@ fn render_content(
                 Some(format!("\u{2718} {}", code))
             }
         }
-        SegmentId::Time => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let secs = now % 86400;
-            let hours = secs / 3600;
-            let mins = (secs % 3600) / 60;
-            Some(format!("{:02}:{:02}", hours, mins))
-        }
+        SegmentId::Time => Some(format_local_time()),
         SegmentId::PromptChar => Some(config.prompt_symbol.clone()),
         SegmentId::OsIcon => Some("\u{1f4bb}".to_string()),
         SegmentId::Context => {
@@ -675,6 +666,17 @@ mod tests {
         let s = content.unwrap();
         assert_eq!(s.len(), 5);
         assert_eq!(&s[2..3], ":");
+    }
+
+    #[test]
+    fn time_segment_renders_system_local_clock() {
+        let cfg = default_cfg();
+        let content = render_content(&SegmentId::Time, None, &cfg).unwrap();
+        let expected = format_local_time();
+        if content != expected {
+            let expected = format_local_time();
+            assert_eq!(content, expected);
+        }
     }
 
     #[test]

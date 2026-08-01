@@ -178,12 +178,8 @@ impl WinuxshPrompt {
             }
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let time_str = format_time(now);
-        let time_str_24 = format_time_24(now);
+        let time_str = format_local_time();
+        let time_str_24 = time_str.clone();
 
         template
             .replace("{time}", &time_str)
@@ -276,18 +272,32 @@ impl WinuxshPrompt {
     }
 }
 
-fn format_time(unix_secs: u64) -> String {
-    let secs = unix_secs % 86400;
-    let hours = secs / 3600;
-    let mins = (secs % 3600) / 60;
+pub(crate) fn format_local_time() -> String {
+    let (hours, mins) = local_hour_minute();
     format!("{:02}:{:02}", hours, mins)
 }
 
-fn format_time_24(unix_secs: u64) -> String {
-    let secs = unix_secs % 86400;
-    let hours = secs / 3600;
-    let mins = (secs % 3600) / 60;
-    format!("{:02}:{:02}", hours, mins)
+#[cfg(windows)]
+fn local_hour_minute() -> (u32, u32) {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+
+    let mut local_time = std::mem::MaybeUninit::<SYSTEMTIME>::zeroed();
+    unsafe {
+        GetLocalTime(local_time.as_mut_ptr());
+        let local_time = local_time.assume_init();
+        (local_time.wHour as u32, local_time.wMinute as u32)
+    }
+}
+
+#[cfg(not(windows))]
+fn local_hour_minute() -> (u32, u32) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let secs = now % 86400;
+    ((secs / 3600) as u32, ((secs % 3600) / 60) as u32)
 }
 
 #[allow(dead_code)]
@@ -438,6 +448,19 @@ mod tests {
         let prompt = WinuxshPrompt::new(Some("left> ".to_string()), None, None, "default");
 
         assert_eq!(prompt.render_prompt_right(), "");
+    }
+
+    #[test]
+    fn time_tokens_render_system_local_clock() {
+        let prompt =
+            WinuxshPrompt::new(Some("{time} {time_24}".to_string()), None, None, "default");
+
+        let rendered = prompt.render_prompt_left();
+        let expected = format_local_time();
+        if rendered != format!("{expected} {expected}") {
+            let expected = format_local_time();
+            assert_eq!(rendered, format!("{expected} {expected}"));
+        }
     }
 
     #[test]
