@@ -1981,9 +1981,7 @@ impl Shell {
                 .executor_pwd_host_path()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| state.current_dir.clone());
-            state.env_vars = std::env::vars()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            state.env_vars = self.executor.env_vars_snapshot();
             state.aliases = self.aliases.keys().cloned().collect();
         }
     }
@@ -5062,6 +5060,25 @@ export AFTER_SETOPT=ok
 
         shell.execute_interactive_line("unalias gst").unwrap();
         assert!(shell.native_alias_finder_matches("git status").is_empty());
+    }
+
+    #[test]
+    fn completion_state_tracks_shell_local_variables_after_interactive_source() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        shell
+            .execute_interactive_line("SOURCE_COMPLETION_VAR=from-source")
+            .unwrap();
+
+        assert_eq!(
+            shell.executor.get_env("SOURCE_COMPLETION_VAR"),
+            Some("from-source")
+        );
+        assert!(shell
+            .completion_probe("$SOURCE_COMPLETION", "$SOURCE_COMPLETION".len())
+            .contains(&"$SOURCE_COMPLETION_VAR".to_string()));
     }
 
     #[test]
