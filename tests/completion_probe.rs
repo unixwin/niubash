@@ -171,6 +171,16 @@ fn completion_probe_loads_startup_rc_aliases() {
 }
 
 #[test]
+fn completion_probe_loads_startup_rc_functions() {
+    let env = ProbeEnv::new("winuxsh-completion-rc-function");
+    env.write_rc("fetch_repo() { git fetch; }\n");
+
+    let suggestions = run_probe("fetch_", &env, &[]);
+
+    assert_contains(&suggestions, "fetch_repo");
+}
+
+#[test]
 fn path_completion_escapes_spaces_in_candidates() {
     let env = ProbeEnv::new("winuxsh-completion-spaces");
     std::fs::create_dir_all(env.start.join("two dir")).unwrap();

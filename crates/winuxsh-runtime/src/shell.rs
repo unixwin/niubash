@@ -1983,6 +1983,7 @@ impl Shell {
                 .unwrap_or_else(|| state.current_dir.clone());
             state.env_vars = self.executor.env_vars_snapshot();
             state.aliases = self.aliases.keys().cloned().collect();
+            state.functions = self.executor.functions_snapshot().into_iter().collect();
         }
     }
 

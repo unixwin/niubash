@@ -17,6 +17,7 @@ pub struct CompletionState {
     pub current_dir: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub aliases: HashSet<String>,
+    pub functions: HashSet<String>,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -28,6 +29,7 @@ impl CompletionState {
             current_dir,
             env_vars: HashMap::new(),
             aliases: HashSet::new(),
+            functions: HashSet::new(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
         }
@@ -102,12 +104,13 @@ impl WinuxshCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, behavior, plugins) =
+        let (current_dir, env_vars, aliases, functions, behavior, plugins) =
             if let Ok(state) = self.state.lock() {
                 (
                     state.current_dir.clone(),
                     state.env_vars.clone(),
                     state.aliases.clone(),
+                    state.functions.clone(),
                     state.behavior,
                     state.plugins.clone(),
                 )
@@ -126,6 +129,8 @@ impl WinuxshCompleter {
         // only showing PATH executables like `winver` or `winrm`.
         let cwd_dir_suggestions = self.cwd_directory_suggestions_at_command_position(&context);
         let alias_suggestions = self.alias_suggestions_at_command_position(&context, &aliases);
+        let function_suggestions =
+            self.function_suggestions_at_command_position(&context, &functions);
 
         // Try each plugin in order; only the first non-None result is used
         for plugin in &plugins {
@@ -141,10 +146,16 @@ impl WinuxshCompleter {
         if !cwd_dir_suggestions.is_empty() {
             let mut combined = cwd_dir_suggestions;
             combined.extend(alias_suggestions.clone());
+            combined.extend(function_suggestions.clone());
             combined.extend(all_suggestions);
             all_suggestions = combined;
         } else if !alias_suggestions.is_empty() {
             let mut combined = alias_suggestions;
+            combined.extend(function_suggestions.clone());
+            combined.extend(all_suggestions);
+            all_suggestions = combined;
+        } else if !function_suggestions.is_empty() {
+            let mut combined = function_suggestions;
             combined.extend(all_suggestions);
             all_suggestions = combined;
         }
@@ -271,6 +282,47 @@ impl WinuxshCompleter {
             .map(|candidate| Suggestion {
                 value: candidate,
                 description: Some("alias".to_string()),
+                style: None,
+                extra: None,
+                span: Span {
+                    start: span_start,
+                    end: span_end,
+                },
+                append_whitespace: true,
+            })
+            .collect()
+    }
+
+    fn function_suggestions_at_command_position(
+        &self,
+        context: &CompletionContext,
+        functions: &HashSet<String>,
+    ) -> Vec<Suggestion> {
+        if !context.is_command_position() {
+            return Vec::new();
+        }
+        let Some(word) = context.get_current_word() else {
+            return Vec::new();
+        };
+        if word.contains('/') || word.contains('\\') || word.starts_with('.') {
+            return Vec::new();
+        }
+
+        let (span_start, span_end) = context
+            .current_word_span()
+            .unwrap_or((context.cursor_pos, context.cursor_pos));
+        let mut candidates: Vec<_> = functions
+            .iter()
+            .filter(|function| context.behavior.matches(function, &word))
+            .cloned()
+            .collect();
+        candidates.sort();
+
+        candidates
+            .into_iter()
+            .map(|candidate| Suggestion {
+                value: candidate,
+                description: Some("function".to_string()),
                 style: None,
                 extra: None,
                 span: Span {
