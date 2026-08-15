@@ -19,6 +19,32 @@ description: Native Winuxsh execution guidance for Codex running as a first-clas
 - Be conservative with `ls` and relative paths in Codex tool sessions: current integration may report `PWD=C:/Users/Administrator` while external `ls` resolves `.` or `C:/...` arguments incorrectly. Prefer `rg`, `find`, `cat`, `head`, `sed`, or `test -f/-d` with explicit `C:/...` paths for reliable inspection.
 - If a configured `workdir` behaves unexpectedly, keep commands Winuxsh-native and use explicit `C:/...` paths. If one GNU tool mishandles a drive-colon path, try a different native tool or `cd C:/path` plus a simple relative path before considering any launcher fallback.
 
+## Path and Filesystem Model
+
+- Winuxsh supports a real Unix-shaped directory tree inside the selected
+  WinuxCmd installation. When WinuxCmd is installed at
+  `<install>/usr/bin/winuxcmd.exe`, `<install>` is the shell root and the
+  corresponding real directories are `<install>/bin`, `<install>/usr/bin`,
+  `<install>/usr/local/bin`, `<install>/etc`, `<install>/tmp`, and
+  `<install>/dev`.
+- `/`, `/bin`, `/usr/bin`, `/usr/local/bin`, `/etc`, `/tmp`, and `/dev` are
+  supported shell paths. WPM-managed commands and command links use the real
+  installation tree; treat `/usr/bin` as the canonical command directory and
+  do not create a second per-user root or a parallel compatibility tree.
+- POSIX-style paths such as `/usr/bin/tool`, `/etc/config`, and `/tmp/file`
+  are supported by Winuxsh and Rubash. They are shell paths, not a request to
+  launch WSL, MSYS, Cygwin, or another POSIX runtime.
+- Use native `C:/...` paths when passing a path to a Windows executable,
+  installer, WPM artifact, or Windows API. POSIX-style paths are appropriate
+  inside shell scripts and for shell-owned filesystem operations, but native
+  paths are the safer interoperability form.
+- `/dev/null` is the supported device endpoint and maps to Windows `NUL`.
+  The real `/dev` directory may exist for the installation layout, but do not
+  assume arbitrary `/dev/*` names are Windows devices.
+- `~` resolves to the Windows user home used by PowerShell (`USERPROFILE`,
+  with `HOME` kept consistent). Do not replace it with a POSIX `/home/...`
+  directory unless a test fixture explicitly provides one.
+
 ## Command Execution
 
 - Use `rg` or `rg --files` first for searches when available.

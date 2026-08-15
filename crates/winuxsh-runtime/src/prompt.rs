@@ -710,6 +710,7 @@ mod tests {
         let project = home.join("repo").join("project");
         std::fs::create_dir_all(&project).unwrap();
         let _home = EnvGuard::set("HOME", &home.to_string_lossy());
+        let _userprofile = EnvGuard::unset("USERPROFILE");
         let _style = EnvGuard::unset("WINUXSH_PROMPT_CWD_STYLE");
         let _cwd = CwdGuard::enter(&project);
 
@@ -738,6 +739,7 @@ mod tests {
         let project = home.join("repo").join("project");
         std::fs::create_dir_all(&project).unwrap();
         let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&home));
+        let _userprofile = EnvGuard::unset("USERPROFILE");
         let _style = EnvGuard::unset("WINUXSH_PROMPT_CWD_STYLE");
         let _cwd = CwdGuard::enter(&project);
 

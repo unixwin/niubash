@@ -66,6 +66,70 @@ preexec = ["export WINUXSH_REPL_PREEXEC_RAN=yes"]
 }
 
 #[test]
+fn repl_command_loads_primary_rc_aliases_after_long_path_setup() {
+    let temp = unique_temp_dir("winuxsh-repl-command-primary-aliases");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
+    std::fs::write(
+        home.join(".winuxshrc"),
+        r#"
+__test_path_prepend() {
+  [ -n "$1" ] || return 0
+  [ -d "$1" ] || return 0
+  case ";$PATH;" in
+    *";$1;"*) ;;
+    *) PATH="$1;$PATH" ;;
+  esac
+}
+__test_path_prepend "$HOME/bin"
+alias l='printf "alias-l:ok\n"'
+alias ll='printf "alias-ll:ok\n"'
+unset -f __test_path_prepend
+export PATH
+"#,
+    )
+    .unwrap();
+
+    let long_path = (0..1_200)
+        .map(|index| format!("C:/winuxsh-test/path{index:04}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let output = Command::new(winuxsh_binary())
+        .args(["-C", "l; ll; alias l; alias ll"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
+        .env("PATH", long_path)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run primary rc alias test: {err}"));
+
+    assert_success(&output, "repl command primary rc aliases");
+    let stdout = stdout_text(&output);
+    assert!(
+        stdout.contains("alias-l:ok"),
+        "alias l was not expanded: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("alias-ll:ok"),
+        "alias ll was not expanded: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("alias l="),
+        "alias l was not loaded: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("alias ll="),
+        "alias ll was not loaded: {stdout:?}"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn command_mode_keeps_script_semantics_without_repl_startup() {
     let temp = unique_temp_dir("winuxsh-command-mode");
     let home = temp.join("home");

@@ -134,6 +134,9 @@ impl Shell {
 
         // 3. Build rubash Executor after host path selection.
         let mut executor = Executor::new();
+        // Winuxsh always presents an interactive shell, so aliases loaded
+        // from ~/.winuxshrc must expand without requiring a user shopt line.
+        executor.set_shopt_option("expand_aliases", true);
         executor.set_external_file_builtins_enabled(false);
         if let Some(root) = &shell_root {
             executor.set_shell_root(root);
@@ -3270,10 +3273,15 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
         return Ok(None);
     }
 
-    let Some(winuxcmd_path) = winuxcmd_path else {
+    let root = std::env::var_os("WINUXSH_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            PathBuf::from(shell_path_to_host_path(&value.to_string_lossy()))
+        })
+        .or_else(|| winuxcmd_path.map(winuxcmd::installation_root));
+    let Some(root) = root else {
         return Ok(None);
     };
-    let root = winuxcmd::installation_root(winuxcmd_path);
 
     for relative in [
         "bin",
@@ -4222,6 +4230,7 @@ alias hello='echo from-alias'
             shell.aliases.get("hello").map(String::as_str),
             Some("echo from-alias")
         );
+        assert_eq!(shell.execute_interactive_line("hello").unwrap(), 0);
         assert!(shell.executor.get_env("WINUXSH_REPL_STARTUP").is_none());
 
         let _ = std::fs::remove_dir_all(temp);
@@ -4675,8 +4684,8 @@ winuxsh_run_chpwd_hooks() {
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &userprofile);
 
         assert_eq!(
-            host_display_path(&shell_home_dir().unwrap()),
-            host_display_path(&userprofile)
+            crate::path_utils::normalize_existing_host_path(shell_home_dir().unwrap()),
+            crate::path_utils::normalize_existing_host_path(userprofile.clone())
         );
 
         let _ = std::fs::remove_dir_all(temp);
@@ -4788,6 +4797,7 @@ winuxsh_run_chpwd_hooks() {
     #[cfg(windows)]
     #[test]
     fn installed_winuxcmd_root_maps_host_path_helpers() {
+        let _root_guard = EnvVarGuard::set_value("WINUXSH_ROOT", "");
         let root = unique_temp_dir("winuxsh-installed-root");
         let configured = root.join("root");
         let winuxcmd = configured.join("usr/bin/winuxcmd.exe");
@@ -6378,8 +6388,10 @@ winuxsh_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
     }
 
     fn test_shell(hooks: HookConfig) -> Shell {
+        let mut executor = Executor::new();
+        executor.set_shopt_option("expand_aliases", true);
         let mut shell = Shell {
-            executor: Executor::new(),
+            executor,
             completion_state: Arc::new(Mutex::new(CompletionState::new(PathBuf::from(".")))),
             prompt: PromptBackend::Template(WinuxshPrompt::new(None, None, None, "default")),
             home_dir: PathBuf::from("."),

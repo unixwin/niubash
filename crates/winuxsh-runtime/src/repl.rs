@@ -4,15 +4,15 @@ use std::{borrow::Cow, io::Write};
 
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    EditCommand, EditMode, Emacs, FileBackedHistory, KeyCode, KeyModifiers, Keybindings, ListMenu,
-    MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, Vi,
+    EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder,
+    Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal, Vi,
 };
 use rubash::TokenKind;
 
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::WinuxshCompleter;
 use crate::config::{EditorMode, MenuConfig, NativeWidgetBinding, NativeWidgetConfig};
+use crate::history::LiveFileBackedHistory;
 use crate::shell::Shell;
 use crate::syntax_highlighting::WinuxshSyntaxHighlighter;
 
@@ -44,14 +44,15 @@ pub fn spawn_self_update(args: &[String]) -> Option<i32> {
 
 /// Build a `Reedline` instance for the shell.
 pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
-    let history = FileBackedHistory::with_file(shell.history_max_size, shell.history_path.clone())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to open history file {}: {}",
-                shell.history_path.display(),
-                e
-            )
-        })?;
+    let history =
+        LiveFileBackedHistory::with_file(shell.history_max_size, shell.history_path.clone())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to open history file {}: {}",
+                    shell.history_path.display(),
+                    e
+                )
+            })?;
 
     let completer = WinuxshCompleter::new(shell.completion_state.clone());
     let menu_config = shell.menu_config;
@@ -61,7 +62,6 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
             COMPLETION_MENU,
             menu_config.completion_page_size,
             menu_config,
-            MenuInputMode::FullBuffer,
         )),
         completer: Box::new(completer),
     };
@@ -69,7 +69,6 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
         HISTORY_MENU,
         menu_config.history_page_size,
         menu_config,
-        MenuInputMode::IncrementalSearch,
     )));
 
     let mut editor = Reedline::create()
@@ -107,27 +106,12 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
     Ok(editor)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MenuInputMode {
-    FullBuffer,
-    IncrementalSearch,
-}
-
-fn configured_list_menu(
-    name: &str,
-    page_size: usize,
-    config: MenuConfig,
-    input_mode: MenuInputMode,
-) -> ListMenu {
+fn configured_list_menu(name: &str, page_size: usize, config: MenuConfig) -> ListMenu {
     ListMenu::default()
         .with_name(name)
         .with_page_size(page_size)
         .with_max_entry_lines(config.max_entry_lines)
-        .with_only_buffer_difference(menu_uses_only_buffer_difference(input_mode))
-}
-
-fn menu_uses_only_buffer_difference(input_mode: MenuInputMode) -> bool {
-    matches!(input_mode, MenuInputMode::IncrementalSearch)
+        .with_only_buffer_difference(false)
 }
 
 fn history_exclusion_prefix(ignore_space_prefixed: bool) -> Option<String> {
@@ -879,7 +863,6 @@ mod tests {
                 history_page_size: 7,
                 max_entry_lines: 3,
             },
-            MenuInputMode::FullBuffer,
         );
 
         assert_eq!(menu.name(), "custom_menu");
@@ -892,23 +875,13 @@ mod tests {
         // command word and any text before the cursor. Otherwise `cd repo<Tab>` would
         // only get `repo` (and worse, `cmak<Tab>` after menu activation would only get
         // `k`, producing irrelevant PATH suggestions like `kill` or `klist`).
-        let completion_menu = configured_list_menu(
-            COMPLETION_MENU,
-            10,
-            MenuConfig::default(),
-            MenuInputMode::FullBuffer,
-        );
+        let completion_menu = configured_list_menu(COMPLETION_MENU, 10, MenuConfig::default());
         assert_eq!(completion_menu.name(), COMPLETION_MENU);
     }
 
     #[test]
-    fn history_menu_uses_incremental_only_buffer_difference() {
-        let history_menu = configured_list_menu(
-            HISTORY_MENU,
-            7,
-            MenuConfig::default(),
-            MenuInputMode::IncrementalSearch,
-        );
+    fn history_menu_uses_full_buffer_for_search() {
+        let history_menu = configured_list_menu(HISTORY_MENU, 7, MenuConfig::default());
         assert_eq!(history_menu.name(), HISTORY_MENU);
     }
 

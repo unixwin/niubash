@@ -165,6 +165,7 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::LiveFileBackedHistory;
     use reedline::{FileBackedHistory, HistoryItem};
 
     #[test]
@@ -215,5 +216,20 @@ mod tests {
     #[test]
     fn none_style_returns_plain_style() {
         assert!(parse_style("none", Style::new().fg(Color::Red)).is_plain());
+    }
+
+    #[test]
+    fn autosuggest_sees_history_saved_by_another_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut writer = LiveFileBackedHistory::with_file(100, path.clone()).unwrap();
+        let reader = LiveFileBackedHistory::with_file(100, path).unwrap();
+
+        writer
+            .save(HistoryItem::from_command_line("cd D:/projects"))
+            .unwrap();
+
+        let mut hinter = HistoryAutosuggestHinter::new(&AutosuggestConfig::default());
+        assert_eq!(hinter.handle("cd", 2, &reader, false, ""), " D:/projects");
     }
 }
