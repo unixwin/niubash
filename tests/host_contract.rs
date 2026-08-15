@@ -390,6 +390,52 @@ fn native_backslash_drive_paths_work_for_winuxcmd() {
 }
 
 #[test]
+fn installed_winuxcmd_links_back_logical_bin_namespaces_without_root_copies() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let Some(winuxcmd) = real_winuxcmd_for_test() else {
+        return;
+    };
+    let Some(winuxcmd_dir) = winuxcmd.parent() else {
+        return;
+    };
+    if !winuxcmd_dir.join("ls.exe").is_file() {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-installed-winuxcmd-logical-bin");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let root = temp.join("root");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh(
+        "test -x /usr/bin/ls; test -f /usr/bin/ls; /bin/ls /etc >/dev/null; printf x > /etc/path-contract; test -f /etc/path-contract",
+        &start,
+        &home,
+        &[
+            ("WINUXCMD_PATH", native_path(&winuxcmd)),
+            ("WINUXSH_ROOT", native_path(&root)),
+        ],
+    );
+    assert_success(&output, "installed WinuxCmd logical bin provider");
+    assert!(
+        !root.join("usr").join("bin").join("ls.exe").exists(),
+        "WinuxCmd links must stay in the installed provider directory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("etc").join("path-contract")).unwrap(),
+        "x"
+    );
+    assert!(!root.join(".wpm").exists());
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn redirected_recursive_cp_uses_path_command_not_winuxsh_native_builtin() {
     if !cfg!(windows) {
         return;

@@ -21,8 +21,8 @@ winuxsh = rubash + winuxcmd + reedline + oh-my-winuxsh
   highlighting, vi/emacs modes, and prompt rendering.
 - `~/.winuxshrc` is the primary interactive startup file.
 - `~/.winshrc` is an old fallback only when `~/.winuxshrc` is absent.
-- `~/.winshrc.toml` remains legacy/managed structured state for plugin CLI
-  decisions, permissions, bundle versions, tests, and advanced overrides.
+- Plugin CLI decisions, permissions, bundle versions, tests, and advanced
+  overrides are maintained as internal managed state, not user configuration.
 - Plugin inventory, review, doctor, enable/disable, update, and rollback
   surfaces exist.
 - `oh-my-winuxsh` is the official bundled plugin distribution.
@@ -74,6 +74,6 @@ winuxsh = rubash + winuxcmd + reedline + oh-my-winuxsh
 - `rubash` follows latest `unixwin/rubash` master.
 - WinuxCmd stays integrated through PATH injection and command links.
 - `~/.winuxshrc` is the normal user-authored interactive config.
-- `~/.winshrc.toml` is not the default human config surface.
+- Machine-managed state is not a human-authored configuration surface.
 - `oh-my-winuxsh` is the official bundle, not a fork of another shell
   framework.

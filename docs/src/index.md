@@ -53,6 +53,7 @@ C:\Program Files
 | [Install & Self-Update](installer.md) | Installer, portable zip, Windows Terminal profile, updates |
 | [Bash Compatibility Matrix](rubash-bash-compat-matrix.md) | What Bash surface is verified, layer by layer |
 | [Architecture](architecture.md) | rubash + WinuxCmd + reedline, path model, host contract |
+| [Windows Path Contract](windows-path-contract.md) | logical root, dispatcher selection, and layer ownership |
 | [Roadmap](winuxsh-roadmap.md) | What is done, what is next |
 
 ## Get it

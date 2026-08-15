@@ -8,19 +8,25 @@ if [ "$script_dir" = "$script_path" ]; then
   script_dir="."
 fi
 
-if [ -f "$script_dir/winuxcmd.exe" ]; then
-  winuxcmd_dir="$script_dir"
-elif [ -f "./winuxcmd.exe" ]; then
-  winuxcmd_dir="."
+if [ -f "$script_dir/winuxcmd.exe" ] && [ "$(basename "$script_dir")" = "bin" ]; then
+  winuxcmd_bin_dir="$script_dir"
+  winuxcmd_root="$script_dir/../.."
+elif [ -f "$script_dir/winuxcmd.exe" ]; then
+  winuxcmd_bin_dir="$script_dir"
+  winuxcmd_root="$script_dir"
+elif [ -f "./winuxcmd/usr/bin/winuxcmd.exe" ]; then
+  winuxcmd_bin_dir="./winuxcmd/usr/bin"
+  winuxcmd_root="./winuxcmd"
 elif [ -f "./winuxcmd/winuxcmd.exe" ]; then
-  winuxcmd_dir="./winuxcmd"
+  winuxcmd_bin_dir="./winuxcmd"
+  winuxcmd_root="./winuxcmd"
 else
   echo "activate-winuxcmd: winuxcmd.exe not found"
-  echo "Run this script from the release root or from the winuxcmd directory."
+  echo "Run this script from the WinuxCmd usr/bin directory or release root."
   exit 1
 fi
 
-winuxcmd_exe="$winuxcmd_dir/winuxcmd.exe"
+winuxcmd_exe="$winuxcmd_bin_dir/winuxcmd.exe"
 mode="create"
 link_flag=""
 
@@ -34,7 +40,7 @@ case "$1" in
   --help|-h)
     echo "Usage: activate-winuxcmd.sh [--remove] [--symbolic]"
     echo
-    echo "Creates command links next to winuxcmd.exe so ls/cat/grep/etc"
+    echo "Creates command links in usr/bin so ls/cat/grep/etc"
     echo "resolve through PATH when winuxsh starts."
     echo "Modern WinuxCmd builds use WPM for link discovery; older builds"
     echo "fall back to this script's bundled command list."
@@ -55,9 +61,9 @@ esac
 
 if [ "$link_flag" = "" ] && "$winuxcmd_exe" wpm version >/dev/null 2>&1; then
   if [ "$mode" = "remove" ]; then
-    "$winuxcmd_exe" wpm links remove --root "$winuxcmd_dir"
+    "$winuxcmd_exe" wpm links remove --root "$winuxcmd_root"
   else
-    "$winuxcmd_exe" wpm links rebuild --root "$winuxcmd_dir" --force
+    "$winuxcmd_exe" wpm links rebuild --root "$winuxcmd_root" --force
   fi
   exit $?
 fi
@@ -87,16 +93,16 @@ removed=0
 failed=0
 
 if [ "$mode" != "remove" ]; then
-  if [ -f "$winuxcmd_dir/ls.exe" ] && [ -f "$winuxcmd_dir/cat.exe" ] && [ -f "$winuxcmd_dir/grep.exe" ] && [ -f "$winuxcmd_dir/ln.exe" ]; then
+  if [ -f "$winuxcmd_bin_dir/ls.exe" ] && [ -f "$winuxcmd_bin_dir/cat.exe" ] && [ -f "$winuxcmd_bin_dir/grep.exe" ] && [ -f "$winuxcmd_bin_dir/ln.exe" ]; then
     echo "WinuxCmd command links are already active."
     exit 0
   fi
 fi
 
 if [ "$mode" = "remove" ]; then
-  echo "Removing WinuxCmd command links from $winuxcmd_dir"
+  echo "Removing WinuxCmd command links from $winuxcmd_bin_dir"
   for cmd in $commands; do
-    target="$winuxcmd_dir/$cmd.exe"
+    target="$winuxcmd_bin_dir/$cmd.exe"
     if [ -f "$target" ]; then
       "$winuxcmd_exe" rm -f "$target" || failed=$((failed + 1))
       removed=$((removed + 1))
@@ -104,9 +110,9 @@ if [ "$mode" = "remove" ]; then
   done
   echo "Removed: $removed"
 else
-  echo "Creating WinuxCmd command links in $winuxcmd_dir"
+  echo "Creating WinuxCmd command links in $winuxcmd_bin_dir"
   for cmd in $commands; do
-    target="$winuxcmd_dir/$cmd.exe"
+    target="$winuxcmd_bin_dir/$cmd.exe"
     if [ "$link_flag" = "-s" ]; then
       "$winuxcmd_exe" ln -s -f "$winuxcmd_exe" "$target" || failed=$((failed + 1))
     else

@@ -2,12 +2,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
 
 use crate::autosuggest::parse_style;
-use crate::completion::command::CommandCompleter;
+use crate::completion::{command::CommandCompleter, CompletionState};
 use crate::config::SyntaxHighlightConfig;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 
@@ -60,6 +61,7 @@ impl SyntaxKind {
 pub struct WinuxshSyntaxHighlighter {
     styles: HashMap<SyntaxKind, Style>,
     commands: HashSet<String>,
+    completion_state: Option<Arc<Mutex<CompletionState>>>,
     max_length: Option<usize>,
 }
 
@@ -69,6 +71,30 @@ impl WinuxshSyntaxHighlighter {
     }
 
     pub fn new_with_commands<I, S>(config: &SyntaxHighlightConfig, commands: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::new_with_commands_internal(config, commands, None)
+    }
+
+    pub fn new_with_commands_and_state<I, S>(
+        config: &SyntaxHighlightConfig,
+        commands: I,
+        completion_state: Arc<Mutex<CompletionState>>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::new_with_commands_internal(config, commands, Some(completion_state))
+    }
+
+    fn new_with_commands_internal<I, S>(
+        config: &SyntaxHighlightConfig,
+        commands: I,
+        completion_state: Option<Arc<Mutex<CompletionState>>>,
+    ) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -99,6 +125,7 @@ impl WinuxshSyntaxHighlighter {
         Self {
             styles,
             commands: command_set,
+            completion_state,
             max_length: config.max_length,
         }
     }
@@ -197,6 +224,9 @@ fn classify_word(
         }
         if highlighter.is_known_command(&unquoted) {
             return SyntaxKind::Command;
+        }
+        if let Some(path_kind) = path_kind(&unquoted) {
+            return path_kind;
         }
         return SyntaxKind::UnknownToken;
     }
@@ -471,7 +501,7 @@ fn is_shell_builtin(word: &str) -> bool {
 impl WinuxshSyntaxHighlighter {
     fn is_known_command(&self, command: &str) -> bool {
         let lower = command.to_ascii_lowercase();
-        if self.commands.contains(&lower) {
+        if self.is_known_command_name(&lower) {
             return true;
         }
         if lower.ends_with(".exe") || lower.ends_with(".cmd") || lower.ends_with(".bat") {
@@ -479,9 +509,26 @@ impl WinuxshSyntaxHighlighter {
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or(&lower);
-            return self.commands.contains(stem);
+            return self.is_known_command_name(stem);
         }
         false
+    }
+
+    fn is_known_command_name(&self, command: &str) -> bool {
+        if self.commands.contains(command) {
+            return true;
+        }
+
+        self.completion_state
+            .as_ref()
+            .and_then(|state| state.lock().ok())
+            .is_some_and(|state| {
+                state
+                    .aliases
+                    .iter()
+                    .chain(state.functions.iter())
+                    .any(|name| name.eq_ignore_ascii_case(command))
+            })
     }
 }
 
@@ -771,6 +818,46 @@ mod tests {
             style_for(&styled, "which.exe"),
             highlighter.style(SyntaxKind::Command)
         );
+    }
+
+    #[test]
+    fn highlights_dynamic_functions_as_commands() {
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state
+            .lock()
+            .unwrap()
+            .functions
+            .insert("deploy_site".to_string());
+        let highlighter = WinuxshSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state,
+        );
+        let styled = highlighter.highlight("deploy_site --production", 0);
+
+        assert_eq!(
+            style_for(&styled, "deploy_site"),
+            highlighter.style(SyntaxKind::Command)
+        );
+    }
+
+    #[test]
+    fn highlights_existing_paths_at_command_position() {
+        let temp = unique_temp_dir("winuxsh-highlight-command-path");
+        std::fs::create_dir_all(&temp).unwrap();
+        let file = temp.join("script.sh");
+        std::fs::write(&file, "echo ok").unwrap();
+        let line = file.display().to_string();
+
+        let highlighter = WinuxshSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
+        let styled = highlighter.highlight(&line, 0);
+
+        assert_eq!(
+            style_for(&styled, &line),
+            highlighter.style(SyntaxKind::Path)
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

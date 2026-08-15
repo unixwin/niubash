@@ -11,10 +11,10 @@ use anyhow::{anyhow, Result};
 
 /// Locate `winuxcmd.exe` by checking, in order:
 ///   1. `$WINUXCMD_PATH` env var (file or directory)
-///   2. `<exe_dir>/winuxcmd.exe`
-///   3. `<exe_dir>/winuxcmd/winuxcmd.exe`
-///   4. `<exe_dir>/utils/winuxcmd/winuxcmd.exe`
-///   5. `winuxcmd.exe` reachable via current `PATH`
+///   2. `<exe_dir>/usr/bin/winuxcmd.exe`
+///   3. `<exe_dir>/winuxcmd/usr/bin/winuxcmd.exe`
+///   4. `<exe_dir>/utils/winuxcmd/usr/bin/winuxcmd.exe`
+///   5. legacy flat locations and `winuxcmd.exe` on `PATH`
 pub fn find_winuxcmd() -> Option<PathBuf> {
     find_winuxcmd_with_report().found
 }
@@ -119,17 +119,19 @@ pub fn ensure_on_path() -> Result<PathBuf> {
     ensure_on_path_with_override(None)
 }
 
-/// Same as `ensure_on_path`, but an explicit config override takes precedence.
-/// The override may point either to `winuxcmd.exe` or to its containing dir.
-pub fn ensure_on_path_with_override(override_path: Option<&Path>) -> Result<PathBuf> {
-    let exe = match override_path {
+/// Resolve the single WinuxCmd executable selected for this shell session.
+///
+/// Selection belongs to Winuxsh. Rubash receives the returned absolute path
+/// and must not independently discover another dispatcher from PATH.
+pub fn resolve_winuxcmd_with_override(override_path: Option<&Path>) -> Result<PathBuf> {
+    match override_path {
         Some(path) => resolve_winuxcmd_override(path).ok_or_else(|| {
             anyhow!(
                 "configured winuxcmd path '{}' does not point to winuxcmd.exe or a containing directory; checked: {}",
                 path.display(),
                 format_checked_paths(&override_search_descriptions(path))
             )
-        })?,
+        }),
         None => {
             let report = find_winuxcmd_with_report();
             report.found.ok_or_else(|| {
@@ -137,17 +139,60 @@ pub fn ensure_on_path_with_override(override_path: Option<&Path>) -> Result<Path
                     "winuxcmd.exe not found; checked: {}",
                     format_checked_paths(&report.checked)
                 )
-            })?
+            })
         }
-    };
+    }
+}
+
+/// Resolve the selected executable, activate its command links if needed, and
+/// prepend exactly its containing directory to the process PATH.
+pub fn prepare_winuxcmd_with_override(override_path: Option<&Path>) -> Result<PathBuf> {
+    let exe = resolve_winuxcmd_with_override(override_path)?;
     auto_activate_bundled_winuxcmd(&exe);
-    prepend_exe_dir_to_path(&exe)
+    prepend_exe_dir_to_path(&exe)?;
+    Ok(exe)
+}
+
+/// Same as `ensure_on_path`, but an explicit config override takes precedence.
+/// The override may point either to `winuxcmd.exe` or to its containing dir.
+pub fn ensure_on_path_with_override(override_path: Option<&Path>) -> Result<PathBuf> {
+    let exe = prepare_winuxcmd_with_override(override_path)?;
+    Ok(installation_root(&exe).join("usr").join("bin"))
+}
+
+/// Return the real installation root for a selected WinuxCmd executable.
+pub fn installation_root(exe: &Path) -> PathBuf {
+    let Some(bin_dir) = exe.parent() else {
+        return PathBuf::new();
+    };
+    if bin_dir.file_name().is_some_and(|name| name == "bin") {
+        let parent = bin_dir.parent().unwrap_or(bin_dir);
+        if parent.file_name().is_some_and(|name| name == "usr") {
+            return parent.parent().unwrap_or(parent).to_path_buf();
+        }
+        if parent.file_name().is_some_and(|name| name == "local")
+            && parent
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "usr")
+        {
+            return parent
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(parent)
+                .to_path_buf();
+        }
+    }
+    bin_dir.to_path_buf()
 }
 
 fn bundled_winuxcmd_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     [
+        "usr/bin/winuxcmd.exe",
         "winuxcmd.exe",
+        "winuxcmd/usr/bin/winuxcmd.exe",
         "winuxcmd/winuxcmd.exe",
+        "utils/winuxcmd/usr/bin/winuxcmd.exe",
         "utils/winuxcmd/winuxcmd.exe",
     ]
     .into_iter()
@@ -157,7 +202,10 @@ fn bundled_winuxcmd_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 
 fn override_search_descriptions(path: &Path) -> Vec<String> {
     if path.is_dir() {
-        vec![path.join("winuxcmd.exe").display().to_string()]
+        vec![
+            path.join("usr/bin/winuxcmd.exe").display().to_string(),
+            path.join("winuxcmd.exe").display().to_string(),
+        ]
     } else {
         vec![path.display().to_string()]
     }
@@ -183,9 +231,11 @@ fn resolve_winuxcmd_override(path: &Path) -> Option<PathBuf> {
     }
 
     if path.is_dir() {
-        let candidate = path.join("winuxcmd.exe");
-        if candidate.is_file() {
-            return Some(candidate);
+        for relative in ["usr/bin/winuxcmd.exe", "winuxcmd.exe"] {
+            let candidate = path.join(relative);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
 
@@ -193,19 +243,27 @@ fn resolve_winuxcmd_override(path: &Path) -> Option<PathBuf> {
 }
 
 fn prepend_exe_dir_to_path(exe: &Path) -> Result<PathBuf> {
-    let dir = exe
+    let root = installation_root(exe);
+    let exe_dir = exe
         .parent()
         .ok_or_else(|| anyhow!("winuxcmd.exe has no parent directory"))?
         .to_path_buf();
+    let dirs = if exe_dir.ends_with(Path::new("usr/bin")) {
+        vec![
+            root.join("usr/local/bin"),
+            root.join("usr/bin"),
+            root.join("bin"),
+            root.clone(),
+        ]
+    } else {
+        vec![exe_dir.clone()]
+    };
 
     let current_path = std::env::var("PATH").unwrap_or_default();
-    let dir_str = dir.to_string_lossy().to_string();
-
-    if path_starts_with_dir(&current_path, &dir_str) {
-        return Ok(dir);
+    let new_path = path_with_dirs_prepended(&current_path, &dirs);
+    if new_path == current_path {
+        return Ok(exe_dir);
     }
-
-    let new_path = path_with_dir_prepended(&current_path, &dir_str);
     // On Windows, `std::env::set_var` normalizes "PATH" to "Path".
     // Rubash internally uses `env_vars.get("PATH")` (all caps), which
     // is case-sensitive in the HashMap. Force the all-caps entry so rubash
@@ -214,22 +272,64 @@ fn prepend_exe_dir_to_path(exe: &Path) -> Result<PathBuf> {
     std::env::set_var("PATH", &new_path);
     #[cfg(not(windows))]
     std::env::set_var("PATH", &new_path);
-    log::debug!("winuxcmd PATH injected: {}", dir_str);
-    Ok(dir)
+    log::debug!("winuxcmd PATH injected from: {}", root.display());
+    Ok(exe_dir)
 }
 
+fn path_with_dirs_prepended(current_path: &str, dirs: &[PathBuf]) -> String {
+    let desired = dirs
+        .iter()
+        .map(|dir| comparable_path_entry(&dir.to_string_lossy()))
+        .collect::<Vec<_>>();
+    let mut parts: Vec<String> = current_path
+        .split(path_list_separator())
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            let comparable = comparable_path_entry(entry);
+            (!entry.is_empty()
+                && !desired.iter().any(|dir| dir == &comparable)
+                && !is_winuxcmd_installation_entry(entry))
+            .then(|| entry.to_string())
+        })
+        .collect();
+    for dir in dirs.iter().rev() {
+        parts.insert(0, dir.to_string_lossy().to_string());
+    }
+    parts.join(&path_list_separator().to_string())
+}
+
+#[cfg(test)]
 fn path_with_dir_prepended(current_path: &str, dir: &str) -> String {
     let mut parts: Vec<String> = current_path
         .split(path_list_separator())
         .filter_map(|entry| {
             let entry = entry.trim();
-            (!entry.is_empty() && !path_entries_equal(entry, dir)).then(|| entry.to_string())
+            (!entry.is_empty()
+                && !path_entries_equal(entry, dir)
+                && !is_winuxcmd_installation_entry(entry))
+            .then(|| entry.to_string())
         })
         .collect();
     parts.insert(0, dir.to_string());
     parts.join(&path_list_separator().to_string())
 }
 
+fn is_winuxcmd_installation_entry(entry: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let path = PathBuf::from(entry.trim_matches('"'));
+        return path.join("winuxcmd.exe").is_file()
+            || path.join("usr/bin/winuxcmd.exe").is_file();
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        false
+    }
+}
+
+#[cfg(test)]
 fn path_starts_with_dir(current_path: &str, dir: &str) -> bool {
     current_path
         .split(path_list_separator())
@@ -238,6 +338,7 @@ fn path_starts_with_dir(current_path: &str, dir: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn path_entries_equal(left: &str, right: &str) -> bool {
     comparable_path_entry(left) == comparable_path_entry(right)
 }
@@ -432,11 +533,11 @@ mod tests {
         let exe_dir = PathBuf::from("bundle");
         let candidates = bundled_winuxcmd_candidates(&exe_dir);
 
-        assert_eq!(candidates[0], exe_dir.join("winuxcmd.exe"));
-        assert_eq!(candidates[1], exe_dir.join("winuxcmd").join("winuxcmd.exe"));
+        assert_eq!(candidates[0], exe_dir.join("usr/bin/winuxcmd.exe"));
+        assert_eq!(candidates[1], exe_dir.join("winuxcmd.exe"));
         assert_eq!(
             candidates[2],
-            exe_dir.join("utils").join("winuxcmd").join("winuxcmd.exe")
+            exe_dir.join("winuxcmd/usr/bin/winuxcmd.exe")
         );
     }
 

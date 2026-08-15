@@ -89,10 +89,19 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
         editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(&shell.autosuggest)));
     }
     if shell.syntax_highlighting.main_highlighter_enabled() {
-        editor = editor.with_highlighter(Box::new(WinuxshSyntaxHighlighter::new_with_commands(
-            &shell.syntax_highlighting,
-            shell.aliases.keys().map(String::as_str),
-        )));
+        let functions = shell.executor.functions_snapshot();
+        let commands = shell
+            .aliases
+            .keys()
+            .map(String::as_str)
+            .chain(functions.iter().map(String::as_str));
+        editor = editor.with_highlighter(Box::new(
+            WinuxshSyntaxHighlighter::new_with_commands_and_state(
+                &shell.syntax_highlighting,
+                commands,
+                shell.completion_state.clone(),
+            ),
+        ));
     }
 
     Ok(editor)

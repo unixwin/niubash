@@ -46,8 +46,8 @@ export EDITOR=vim
 The legacy files still exist, but they should not be the primary user path:
 
 - `~/.winshrc` is a fallback only when `~/.winuxshrc` is absent.
-- `~/.winshrc.toml` is legacy/managed machine state for plugin CLI records,
-  migration blocks, bundle versions, tests, and advanced overrides.
+- Plugin CLI records, migration blocks, bundle versions, tests, and advanced
+  overrides are internal managed state, not a user configuration file.
 
 Do not put automation-critical behavior only in an interactive rc file. Pass
 needed environment variables directly to `winuxsh -c` or the script process.

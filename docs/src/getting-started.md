@@ -148,10 +148,9 @@ one-shot REPL command path. It does not run for `winuxsh -c ...`, script files,
 or stdin script execution, so agent and CI surfaces stay deterministic.
 
 `~/.winshrc` is a legacy compatibility fallback and is used only when
-`~/.winuxshrc` is absent. `~/.winshrc.toml` remains supported for legacy and
-managed structured state such as plugin CLI enable/disable records, migration
-blocks, completion overrides, test isolation, and advanced machine-editable
-settings. Prefer `~/.winuxshrc` for normal interactive customization.
+`~/.winuxshrc` is absent. Plugin CLI enable/disable records, migration blocks,
+completion overrides, test isolation, and advanced machine state are managed
+internally. Prefer `~/.winuxshrc` for normal interactive customization.
 
 ## 6b. Prompt and theme plugins
 
@@ -166,7 +165,7 @@ WINUXSH_PLUGINS=(prompt-core git)
 
 Useful bundled theme plugins include `theme-minimal`, `theme-classic`,
 `theme-pure`, `theme-robbyrussell`, `theme-p10-lean`, `theme-p10-classic`,
-`theme-p10-rainbow`, and `theme-p10-pure`. Theme TOML assets support named
+`theme-p10-rainbow`, and `theme-p10-pure`. Theme assets support named
 colours, 256-colour indexes, and true-colour `#RRGGBB` foreground/background
 values plus bold, italic, underline, and dimmed flags.
 
@@ -190,26 +189,8 @@ official bundled plugin distribution. It ships first-party packs such as `git`, 
 presets.
 
 The normal interactive shape is the `~/.winuxshrc` plugin list shown above.
-When `winuxsh plugin enable/disable` or migration tooling needs structured
-state, it writes managed records to `~/.winshrc.toml`, for example:
-
-```toml
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["git", "prompts", "keybindings"]
-
-[plugins.git]
-enabled = true
-permissions = ["shell:source", "cwd:read", "process:run:git"]
-
-[plugins.zoxide]
-enabled = false
-permissions = ["cwd:read", "process:run:zoxide"]
-```
-
-New machine-managed config should use `[plugins]`, while user-authored
-interactive startup should use `~/.winuxshrc`. Official shell helper packs can
+`winuxsh plugin enable/disable` and migration tooling update internal managed
+state. Official shell helper packs can
 ship reviewed bundle-local `init.winux` source scripts. If `~/.winuxshrc`
 exists, it is the source-plugin entry point and loads the framework directly.
 Without `~/.winuxshrc`, managed startup can still load enabled source packs

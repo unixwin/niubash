@@ -115,7 +115,8 @@ winuxsh flags/qiu-dance.sh     # GIF 动画，帧率原样保留
 
 - **"这不就是又一个 Git Bash？"** 不是。Git Bash 在 Windows 上模拟 Unix；Winuxsh 是原生 Windows 进程：原生路径、直接执行 Windows 二进制、Bash 兼容发生在语言引擎里，不在假的文件系统里。
 - **"那我还要 WSL 干嘛？"** 各有各的用：真 Linux 内核、Linux Docker、Linux 专用工具链，它依然是把好手。至于剩下的 95%——你需要的不是 WSL，是 Winuxsh。
-- **"我的配置在哪？"** `~/.winuxshrc`——纯 Bash。结构化的插件状态在 `~/.winshrc.toml`。
+- **"我的配置在哪？"** `~/.winuxshrc`——纯 Bash。机器状态由 Winuxsh
+  自己管理，用户不需要维护第二套配置格式。
 
 ---
 

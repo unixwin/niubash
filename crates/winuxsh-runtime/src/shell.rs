@@ -51,6 +51,7 @@ pub struct Shell {
     pub completion_state: Arc<Mutex<CompletionState>>,
     pub prompt: PromptBackend,
     pub home_dir: PathBuf,
+    pub shell_root: Option<PathBuf>,
     pub history_path: PathBuf,
     pub history_max_size: usize,
     pub history_ignore_space_prefixed: bool,
@@ -111,22 +112,35 @@ impl Shell {
     }
 
     fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
-        // 1. Load legacy/managed TOML config if present.
+        // 1. Load legacy/managed machine state if present.
         let config = load_config();
 
-        // 2. WinuxCmd PATH injection (best-effort), honoring config override.
-        if config.winuxcmd_enabled {
-            if let Err(e) = winuxcmd::ensure_on_path_with_override(config.winuxcmd_path.as_deref())
-            {
-                log::debug!("winuxcmd not on PATH: {}", e);
+        // 2. Select the WinuxCmd installation and use its real directory tree
+        // before constructing the executor.
+        let home_dir = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let selected_winuxcmd_path = if config.winuxcmd_enabled {
+            match winuxcmd::prepare_winuxcmd_with_override(None) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    log::debug!("winuxcmd not on PATH: {}", e);
+                    None
+                }
             }
         } else {
             log::debug!("winuxcmd PATH injection disabled by config");
-        }
+            None
+        };
+        let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
 
-        // 4. Build rubash Executor after PATH injection.
+        // 3. Build rubash Executor after host path selection.
         let mut executor = Executor::new();
         executor.set_external_file_builtins_enabled(false);
+        if let Some(root) = &shell_root {
+            executor.set_shell_root(root);
+        }
+        if let Some(winuxcmd_path) = &selected_winuxcmd_path {
+            executor.set_winuxcmd_path(winuxcmd_path);
+        }
         if let Some(script_name) = script_name {
             executor.set_env("__RUBASH_SCRIPT_NAME", script_name);
         }
@@ -138,8 +152,8 @@ impl Shell {
             execute_winuxsh_host_external_command(words, env, &host_plugin_state)
         });
 
-        // 5. Apply legacy/managed TOML aliases so explicit structured config
-        // remains authoritative when names collide.
+        // 5. Apply managed aliases so explicit machine state remains
+        // authoritative when names collide.
         let mut aliases = HashMap::new();
         for (name, value) in &config.aliases {
             if apply_alias(&mut executor, name, value) {
@@ -149,8 +163,8 @@ impl Shell {
             }
         }
 
-        // Official Winuxsh builtin alias packs. User ~/.winshrc.toml aliases
-        // take precedence, and canonical [plugins] state gates each pack.
+        // Official Winuxsh builtin alias packs. Managed aliases take
+        // precedence, and canonical plugin state gates each pack.
         for pack_name in ["git", "docker", "kubectl", "npm"] {
             if !plugin_state.is_enabled(pack_name) {
                 continue;
@@ -250,7 +264,6 @@ impl Shell {
         };
 
         // 7. User-local state files.
-        let home_dir = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
         normalize_executor_home_env(&mut executor, &home_dir);
         ensure_windows_profile_env(&mut executor, &home_dir);
         set_default_winuxsh_framework_env(&mut executor, &home_dir);
@@ -291,6 +304,7 @@ impl Shell {
             completion_state,
             prompt,
             home_dir,
+            shell_root,
             history_path,
             history_max_size: config.history.max_size,
             history_ignore_space_prefixed: config.history.ignore_space_prefixed,
@@ -812,7 +826,8 @@ impl Shell {
         if same_shell_dir(old_pwd, new_pwd) {
             return;
         }
-        if let Some(cwd) = shell_pwd_to_existing_host_dir(new_pwd) {
+        let env = self.executor.env_vars_snapshot();
+        if let Some(cwd) = shell_pwd_to_existing_host_dir(new_pwd, &env) {
             crate::git_status::request_refresh(&cwd);
         }
         self.run_native_chpwd_plugins();
@@ -1214,7 +1229,7 @@ impl Shell {
         let Some(pwd) = self.executor.get_env("PWD").map(str::to_owned) else {
             return;
         };
-        let dotenv_path = PathBuf::from(shell_path_to_host_path(&pwd)).join(".env");
+        let dotenv_path = self.executor.resolve_shell_path(&pwd).join(".env");
         let Ok(metadata) = std::fs::metadata(&dotenv_path) else {
             return;
         };
@@ -1253,7 +1268,7 @@ impl Shell {
             return;
         }
 
-        let host_pwd = shell_path_to_host_path(&pwd);
+        let host_pwd = self.executor.resolve_shell_path(&pwd);
         let command_path =
             resolve_native_command_path("zoxide").unwrap_or_else(|| PathBuf::from("zoxide"));
         let status = Command::new(command_path)
@@ -1352,7 +1367,11 @@ impl Shell {
             return Ok(1);
         };
         let base = args.first().map(String::as_str).unwrap_or(".");
-        let host_base = resolve_shell_path_argument(&pwd, base);
+        let host_base = resolve_shell_path_argument_with_env(
+            &pwd,
+            base,
+            &self.executor.env_vars_snapshot(),
+        );
         let candidates = directory_selector_candidates(&host_base);
         if candidates.is_empty() {
             return Ok(1);
@@ -1361,7 +1380,7 @@ impl Shell {
         let Some(selected) = run_native_fzf_selector(&candidates) else {
             return Ok(1);
         };
-        let selected = host_path_to_shell_path(&selected);
+        let selected = host_path_to_shell_path_with_root(&selected, self.shell_root.as_deref());
         self.execute_line(&format!("cd {}", shell_quote(&selected)))
     }
 
@@ -1699,7 +1718,7 @@ impl Shell {
 
     fn executor_pwd_host_path(&self) -> Option<PathBuf> {
         let pwd = self.executor.get_env("PWD")?;
-        let host_path = PathBuf::from(shell_path_to_host_path(pwd));
+        let host_path = self.executor.resolve_shell_path(pwd);
         host_path.is_dir().then_some(host_path)
     }
 
@@ -1707,7 +1726,10 @@ impl Shell {
         let Ok(cwd) = std::env::current_dir() else {
             return;
         };
-        let normalized_pwd = host_path_to_shell_path(&cwd.to_string_lossy());
+        let normalized_pwd = host_path_to_shell_path_with_root(
+            &cwd.to_string_lossy(),
+            self.shell_root.as_deref(),
+        );
         self.executor.set_env("PWD", &normalized_pwd);
     }
 
@@ -1715,7 +1737,8 @@ impl Shell {
         let Some(path) = self.executor.get_env("PATH") else {
             return;
         };
-        let process_path = process_path_from_shell_path_list(path);
+        let env = self.executor.env_vars_snapshot();
+        let process_path = process_path_from_shell_path_list(path, Some(&env));
         std::env::set_var("PATH", &process_path);
         if cfg!(windows) && process_path != path {
             self.executor.set_env("PATH", &process_path);
@@ -1727,30 +1750,38 @@ impl Shell {
             Some(p) => p.to_string(),
             None => {
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let pwd = host_path_to_shell_path(&cwd.to_string_lossy());
+                let pwd = host_path_to_shell_path_with_root(
+                    &cwd.to_string_lossy(),
+                    self.shell_root.as_deref(),
+                );
                 self.executor.set_env("PWD", &pwd);
                 return;
             }
         };
-        let host_pwd = shell_path_to_host_path(&pwd);
-        let target = if cfg!(windows) {
-            PathBuf::from(host_pwd.replace("/", "\\"))
-        } else {
-            PathBuf::from(&host_pwd)
-        };
+        let host_pwd = self.executor.resolve_shell_path(&pwd);
+        let target = host_pwd.clone();
         if !target.is_dir() {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let pwd = host_path_to_shell_path(&cwd.to_string_lossy());
+            let pwd = host_path_to_shell_path_with_root(
+                &cwd.to_string_lossy(),
+                self.shell_root.as_deref(),
+            );
             self.executor.set_env("PWD", &pwd);
             return;
         }
         if std::env::set_current_dir(&target).is_err() {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let pwd = host_path_to_shell_path(&cwd.to_string_lossy());
+            let pwd = host_path_to_shell_path_with_root(
+                &cwd.to_string_lossy(),
+                self.shell_root.as_deref(),
+            );
             self.executor.set_env("PWD", &pwd);
             return;
         }
-        let normalized_pwd = host_path_to_shell_path(&host_pwd);
+        let normalized_pwd = host_path_to_shell_path_with_root(
+            &host_pwd.to_string_lossy(),
+            self.shell_root.as_deref(),
+        );
         self.executor.set_env("PWD", &normalized_pwd);
         if let Some(old_pwd) = self.executor.get_env("OLDPWD").map(str::to_owned) {
             let normalized_old_pwd = normalize_shell_visible_path(&old_pwd);
@@ -3107,7 +3138,8 @@ fn is_forbidden_dotenv_key(key: &str) -> bool {
 fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
     let home = host_path_to_shell_path(&home_dir.to_string_lossy());
     let current = executor.get_env("HOME").unwrap_or_default();
-    let should_update = current.trim().is_empty()
+    let should_update = cfg!(windows)
+        || current.trim().is_empty()
         || current.contains('\\')
         || (cfg!(windows) && is_slash_drive_path(current));
     if should_update && !home.is_empty() {
@@ -3225,10 +3257,36 @@ fn is_winuxsh_framework_dir(path: &Path) -> bool {
     path.join("oh-my-winuxsh.winux").is_file()
 }
 
-fn shell_pwd_to_existing_host_dir(pwd: &str) -> Option<PathBuf> {
-    let host = shell_path_to_host_path(pwd);
-    let path = PathBuf::from(host);
+fn shell_pwd_to_existing_host_dir(
+    pwd: &str,
+    env: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    let path = Executor::resolve_shell_path_from_env(pwd, env);
     path.is_dir().then_some(path)
+}
+
+fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
+    if !cfg!(windows) {
+        return Ok(None);
+    }
+
+    let Some(winuxcmd_path) = winuxcmd_path else {
+        return Ok(None);
+    };
+    let root = winuxcmd::installation_root(winuxcmd_path);
+
+    for relative in [
+        "bin",
+        "usr/bin",
+        "usr/local/bin",
+        "etc",
+        "var",
+        "tmp",
+        "dev",
+    ] {
+        std::fs::create_dir_all(root.join(relative))?;
+    }
+    Ok(Some(root))
 }
 
 fn is_slash_drive_path(value: &str) -> bool {
@@ -3262,18 +3320,27 @@ fn sanitize_cache_file_suffix(value: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn resolve_shell_path_argument(pwd: &str, arg: &str) -> PathBuf {
+    resolve_shell_path_argument_with_env(pwd, arg, &HashMap::new())
+}
+
+fn resolve_shell_path_argument_with_env(
+    pwd: &str,
+    arg: &str,
+    env: &HashMap<String, String>,
+) -> PathBuf {
     if let Some(path) = resolve_current_user_tilde_path(arg) {
         return path;
     }
 
-    let normalized = shell_path_to_host_path(arg);
-    let candidate = PathBuf::from(&normalized);
+    let candidate = Executor::resolve_shell_path_from_env(arg, env);
+    let normalized = arg.replace('\\', "/");
     if candidate.is_absolute() || is_windows_drive_path(&normalized) {
         return candidate;
     }
 
-    PathBuf::from(shell_path_to_host_path(pwd)).join(candidate)
+    Executor::resolve_shell_path_from_env(pwd, env).join(candidate)
 }
 
 fn resolve_current_user_tilde_path(arg: &str) -> Option<PathBuf> {
@@ -3542,7 +3609,7 @@ fn run_process_plugin_invocation_capture_with_env(
 fn apply_shell_env_to_process_command(command: &mut Command, env: &HashMap<String, String>) {
     for (name, value) in env {
         if name.eq_ignore_ascii_case("PATH") {
-            command.env(name, process_path_from_shell_path_list(value));
+            command.env(name, process_path_from_shell_path_list(value, Some(env)));
         } else {
             command.env(name, value);
         }
@@ -3551,7 +3618,7 @@ fn apply_shell_env_to_process_command(command: &mut Command, env: &HashMap<Strin
 
 fn process_working_dir_from_shell_env(env: &HashMap<String, String>) -> Option<PathBuf> {
     let pwd = env.get("PWD")?;
-    let cwd = PathBuf::from(shell_path_to_host_path(pwd));
+    let cwd = Executor::resolve_shell_path_from_env(pwd, env);
     cwd.is_dir().then_some(cwd)
 }
 
@@ -3589,7 +3656,7 @@ fn resolve_native_command_path_with_env(
 ) -> Option<PathBuf> {
     let path = env
         .get("PATH")
-        .map(|path| process_path_from_shell_path_list(path))
+        .map(|path| process_path_from_shell_path_list(path, Some(env)))
         .or_else(|| std::env::var("PATH").ok())?;
     resolve_native_command_path_with_path(command, path)
 }
@@ -3633,14 +3700,17 @@ fn sync_executor_path_from_process_path(executor: &mut Executor) {
     }
 }
 
-fn process_path_from_shell_path_list(value: &str) -> String {
+fn process_path_from_shell_path_list(
+    value: &str,
+    env: Option<&HashMap<String, String>>,
+) -> String {
     if !cfg!(windows) {
         return value.to_string();
     }
 
     split_shell_path_list(value)
         .into_iter()
-        .map(|entry| shell_path_entry_to_process_path(&entry))
+        .flat_map(|entry| shell_path_entry_to_process_paths(&entry, env))
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -3665,12 +3735,41 @@ fn split_shell_path_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn shell_path_entry_to_process_path(entry: &str) -> String {
+fn shell_path_entry_to_process_paths(
+    entry: &str,
+    env: Option<&HashMap<String, String>>,
+) -> Vec<String> {
     if cfg!(windows) {
-        shell_path_to_host_path(entry).replace('/', "\\")
+        let paths = env
+            .map(|env| Executor::resolve_shell_path_process_entries_from_env(entry, env))
+            .unwrap_or_else(|| vec![PathBuf::from(shell_path_to_host_path(entry))]);
+        paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().replace('/', "\\"))
+            .collect()
     } else {
-        entry.to_string()
+        vec![entry.to_string()]
     }
+}
+
+fn host_path_to_shell_path_with_root(value: &str, root: Option<&Path>) -> String {
+    let normalized = value.replace('\\', "/");
+    let Some(root) = root else {
+        return host_path_to_shell_path(&normalized);
+    };
+
+    let root = root.to_string_lossy().replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    if normalized.eq_ignore_ascii_case(root) {
+        return "/".to_string();
+    }
+    if normalized.len() > root.len()
+        && normalized[..root.len()].eq_ignore_ascii_case(root)
+        && normalized.as_bytes().get(root.len()) == Some(&b'/')
+    {
+        return format!("/{}", &normalized[root.len() + 1..]);
+    }
+    host_path_to_shell_path(&normalized)
 }
 
 fn host_path_to_shell_path(value: &str) -> String {
@@ -4563,6 +4662,26 @@ winuxsh_run_chpwd_hooks() {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn shell_home_dir_prefers_userprofile_over_home() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let temp = unique_temp_dir("winuxsh-userprofile-home-precedence");
+        let home = temp.join("home");
+        let userprofile = temp.join("userprofile");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&userprofile).unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &userprofile);
+
+        assert_eq!(
+            host_display_path(&shell_home_dir().unwrap()),
+            host_display_path(&userprofile)
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     #[test]
     fn startup_rc_uses_shell_style_userprofile_when_home_is_empty() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
@@ -4655,15 +4774,54 @@ winuxsh_run_chpwd_hooks() {
     fn process_path_from_shell_path_list_converts_msys_drive_entries() {
         if cfg!(windows) {
             assert_eq!(
-                process_path_from_shell_path_list("/c/Users/me/bin;C:/Windows/System32"),
+                process_path_from_shell_path_list("/c/Users/me/bin;C:/Windows/System32", None),
                 r"C:\Users\me\bin;C:\Windows\System32"
             );
         } else {
             assert_eq!(
-                process_path_from_shell_path_list("/home/me/bin:/usr/bin"),
+                process_path_from_shell_path_list("/home/me/bin:/usr/bin", None),
                 "/home/me/bin:/usr/bin"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_winuxcmd_root_maps_host_path_helpers() {
+        let root = unique_temp_dir("winuxsh-installed-root");
+        let configured = root.join("root");
+        let winuxcmd = configured.join("usr/bin/winuxcmd.exe");
+        std::fs::create_dir_all(winuxcmd.parent().unwrap()).unwrap();
+        std::fs::write(&winuxcmd, b"test").unwrap();
+        let shell_root = prepare_shell_root(Some(&winuxcmd)).unwrap();
+        assert_eq!(shell_root, Some(configured.clone()));
+
+        let mut env = HashMap::new();
+        env.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            configured.to_string_lossy().to_string(),
+        );
+        assert_eq!(
+            process_path_from_shell_path_list("/usr/bin:/bin", Some(&env)),
+            format!(
+                r"{}\usr\bin;{}\bin",
+                configured.display(),
+                configured.display()
+            )
+        );
+        assert_eq!(
+            Executor::resolve_shell_path_from_env("/etc", &env),
+            configured.join("etc")
+        );
+        assert_eq!(
+            host_path_to_shell_path_with_root(
+                &configured.join("etc").to_string_lossy(),
+                Some(&configured),
+            ),
+            "/etc"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -6225,6 +6383,7 @@ winuxsh_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             completion_state: Arc::new(Mutex::new(CompletionState::new(PathBuf::from(".")))),
             prompt: PromptBackend::Template(WinuxshPrompt::new(None, None, None, "default")),
             home_dir: PathBuf::from("."),
+            shell_root: None,
             history_path: PathBuf::from(".winuxsh_history"),
             history_max_size: 10000,
             history_ignore_space_prefixed: false,

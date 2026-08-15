@@ -114,7 +114,8 @@ Under the hood: [rubash](https://github.com/unixwin/rubash) (Bash engine) · Win
 
 - **Another Git Bash?** No — Git Bash emulates Unix on top of Windows. Winuxsh is a native Windows process: native paths, direct Windows binary execution, Bash compatibility in the language engine, not a fake filesystem.
 - **Still need WSL?** Sure — for real Linux kernels, Linux Docker, Linux-only toolchains. For the other 95% of your day: you don't need WSL. You need Winuxsh.
-- **Where's my config?** `~/.winuxshrc` — plain Bash. Structured plugin state lives in `~/.winshrc.toml`.
+- **Where's my config?** `~/.winuxshrc` — plain Bash. Winuxsh manages its own
+  machine state; users do not need to maintain a second configuration format.
 
 ---
 

@@ -420,7 +420,6 @@ struct CompletionsToml {
 #[derive(Debug, Deserialize)]
 struct WinuxCmdToml {
     enabled: Option<bool>,
-    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -546,7 +545,6 @@ pub struct FullConfig {
     pub completion_dirs: Vec<PathBuf>,
     pub completion_behavior: CompletionBehavior,
     pub winuxcmd_enabled: bool,
-    pub winuxcmd_path: Option<PathBuf>,
     pub hooks: HookConfig,
     pub plugins: PluginConfig,
     pub autosuggest: AutosuggestConfig,
@@ -572,7 +570,6 @@ impl Default for FullConfig {
             completion_dirs: Vec::new(),
             completion_behavior: CompletionBehavior::default(),
             winuxcmd_enabled: true,
-            winuxcmd_path: None,
             hooks: HookConfig::default(),
             plugins: PluginConfig::default(),
             autosuggest: AutosuggestConfig::default(),
@@ -684,7 +681,6 @@ fn build_config(parsed: WinshrcToml) -> FullConfig {
             .as_ref()
             .and_then(|w| w.enabled)
             .unwrap_or(true),
-        winuxcmd_path: parsed.winuxcmd.and_then(|w| w.path).map(PathBuf::from),
         hooks: parsed.hooks.map(build_hook_config).unwrap_or_default(),
         plugins,
         autosuggest: parsed
@@ -1159,20 +1155,15 @@ chpwd = ["echo directory changed"]
     }
 
     #[test]
-    fn parses_winuxcmd_enabled_and_path() {
+    fn parses_winuxcmd_enabled() {
         let config = parse_config(
             r#"
 [winuxcmd]
 enabled = false
-path = "D:/tools/winuxcmd/winuxcmd.exe"
 "#,
         );
 
         assert!(!config.winuxcmd_enabled);
-        assert_eq!(
-            config.winuxcmd_path,
-            Some(PathBuf::from("D:/tools/winuxcmd/winuxcmd.exe"))
-        );
     }
 
     #[test]
