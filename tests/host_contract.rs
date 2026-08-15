@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn winuxsh_binary() -> PathBuf {
     let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
@@ -884,6 +884,74 @@ fn script_file_args_populate_positional_parameters() {
     assert!(stdout.contains("n=2"), "{stdout}");
     assert!(stdout.contains("one=first"), "{stdout}");
     assert!(stdout.contains("all=first second"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn script_file_while_read_redirect_does_not_wait_for_parent_stdin() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-script-read-redirect");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::write(start.join("list.txt"), "alpha\nbeta\n").unwrap();
+    let script = start.join("read-list.sh");
+    std::fs::write(
+        &script,
+        "count=0\nwhile IFS= read -r file; do\n  printf '<%s>\\n' \"$file\"\n  count=$((count + 1))\ndone < list.txt\nprintf 'count=%s\\n' \"$count\"\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(winuxsh_binary())
+        .arg(&script)
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh script read redirect: {err}"));
+    let _open_parent_stdin = child.stdin.take().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "script exited with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("script read from parent stdin instead of redirected list.txt");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    drop(_open_parent_stdin);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(
+        normalize_text(stdout.as_bytes()),
+        "<alpha>\n<beta>\ncount=2"
+    );
+    assert_eq!(normalize_text(stderr.as_bytes()), "");
 
     let _ = std::fs::remove_dir_all(temp);
 }
