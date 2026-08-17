@@ -270,6 +270,7 @@ impl Shell {
         // 7. User-local state files.
         normalize_executor_home_env(&mut executor, &home_dir);
         ensure_windows_profile_env(&mut executor, &home_dir);
+        ensure_prompt_terminal_env(&mut executor);
         set_default_winuxsh_framework_env(&mut executor, &home_dir);
         let history_path = config
             .history
@@ -539,6 +540,7 @@ impl Shell {
     pub fn run_startup_rc(&mut self) {
         normalize_executor_home_env(&mut self.executor, &self.home_dir);
         ensure_windows_profile_env(&mut self.executor, &self.home_dir);
+        ensure_prompt_terminal_env(&mut self.executor);
         self.sync_gitstatus_prompt_env();
         let rc_path = self.startup_rc_path();
         let primary_rc = rc_path.as_ref().is_some_and(|path| {
@@ -681,6 +683,7 @@ impl Shell {
         };
 
         self.bash_prompt_command_running = true;
+        ensure_prompt_terminal_env(&mut self.executor);
         self.executor.set_last_exit_code(last_exit_code);
         let _ = self.execute_script(&command);
         self.executor.set_last_exit_code(last_exit_code);
@@ -691,11 +694,7 @@ impl Shell {
         if !self.bash_prompt_env_active() {
             return;
         }
-        let ps1 = self
-            .executor
-            .get_env("PS1")
-            .unwrap_or("\\$ ")
-            .to_string();
+        let ps1 = self.executor.get_env("PS1").unwrap_or("\\$ ").to_string();
         let ps2 = self.executor.get_env("PS2").unwrap_or("> ").to_string();
         let left = self.executor.expand_prompt_string_mut(&ps1);
         let multiline = self.executor.expand_prompt_string_mut(&ps2);
@@ -1444,11 +1443,8 @@ impl Shell {
             return Ok(1);
         };
         let base = args.first().map(String::as_str).unwrap_or(".");
-        let host_base = resolve_shell_path_argument_with_env(
-            &pwd,
-            base,
-            &self.executor.env_vars_snapshot(),
-        );
+        let host_base =
+            resolve_shell_path_argument_with_env(&pwd, base, &self.executor.env_vars_snapshot());
         let candidates = directory_selector_candidates(&host_base);
         if candidates.is_empty() {
             return Ok(1);
@@ -1803,10 +1799,8 @@ impl Shell {
         let Ok(cwd) = std::env::current_dir() else {
             return;
         };
-        let normalized_pwd = host_path_to_shell_path_with_root(
-            &cwd.to_string_lossy(),
-            self.shell_root.as_deref(),
-        );
+        let normalized_pwd =
+            host_path_to_shell_path_with_root(&cwd.to_string_lossy(), self.shell_root.as_deref());
         self.executor.set_env("PWD", &normalized_pwd);
     }
 
@@ -3251,6 +3245,10 @@ fn ensure_windows_profile_env(executor: &mut Executor, home_dir: &Path) {
     );
 }
 
+fn ensure_prompt_terminal_env(executor: &mut Executor) {
+    set_executor_env_if_missing_or_empty(executor, "COLUMNS", "80");
+}
+
 fn set_executor_env_if_missing_or_empty(executor: &mut Executor, name: &str, value: &str) {
     if executor
         .get_env(name)
@@ -3334,10 +3332,7 @@ fn is_winuxsh_framework_dir(path: &Path) -> bool {
     path.join("oh-my-winuxsh.winux").is_file()
 }
 
-fn shell_pwd_to_existing_host_dir(
-    pwd: &str,
-    env: &HashMap<String, String>,
-) -> Option<PathBuf> {
+fn shell_pwd_to_existing_host_dir(pwd: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let path = Executor::resolve_shell_path_from_env(pwd, env);
     path.is_dir().then_some(path)
 }
@@ -3349,9 +3344,7 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
 
     let root = std::env::var_os("WINUXSH_ROOT")
         .filter(|value| !value.is_empty())
-        .map(|value| {
-            PathBuf::from(shell_path_to_host_path(&value.to_string_lossy()))
-        })
+        .map(|value| PathBuf::from(shell_path_to_host_path(&value.to_string_lossy())))
         .or_else(|| winuxcmd_path.map(winuxcmd::installation_root));
     let Some(root) = root else {
         return Ok(None);
@@ -3782,10 +3775,7 @@ fn sync_executor_path_from_process_path(executor: &mut Executor) {
     }
 }
 
-fn process_path_from_shell_path_list(
-    value: &str,
-    env: Option<&HashMap<String, String>>,
-) -> String {
+fn process_path_from_shell_path_list(value: &str, env: Option<&HashMap<String, String>>) -> String {
     if !cfg!(windows) {
         return value.to_string();
     }
@@ -3873,6 +3863,7 @@ fn normalize_shell_visible_path(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_support::PROCESS_STATE_LOCK;
+    use reedline::Prompt;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5517,6 +5508,68 @@ BACKTICK_VALUE=`whoami`
         assert_eq!(cached.trim(), target_shell_path);
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn bash_prompt_command_updates_ps1_before_prompt_render() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.executor.set_env(
+            "PROMPT_COMMAND",
+            "PS1=\"status:$? cols:${COLUMNS:-missing}> \"",
+        );
+        shell.executor.set_last_exit_code(7);
+
+        shell.run_precmd_hooks();
+
+        match &shell.prompt {
+            PromptBackend::Bash(prompt) => {
+                assert_eq!(prompt.render_prompt_left(), "status:7 cols:80> ");
+            }
+            _ => panic!("expected Bash prompt backend"),
+        }
+        assert_eq!(shell.executor.last_exit_code(), 7);
+    }
+
+    #[test]
+    fn bash_ps1_prompt_escapes_render_from_executor_state() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .executor
+            .set_env("PS1", "user:\\u host:\\h dir:\\w \\\\$ ");
+        shell.executor.set_env("PS2", "more> ");
+
+        shell.run_precmd_hooks();
+
+        match &shell.prompt {
+            PromptBackend::Bash(prompt) => {
+                let left = prompt.render_prompt_left();
+                assert!(left.contains("user:"), "{left}");
+                assert!(left.contains("host:"), "{left}");
+                assert!(left.contains("dir:"), "{left}");
+                assert!(!left.contains("\\u"), "{left}");
+                assert_eq!(prompt.render_prompt_multiline_indicator(), "more> ");
+            }
+            _ => panic!("expected Bash prompt backend"),
+        }
+    }
+
+    #[test]
+    fn bash_ps0_runs_before_interactive_command() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.executor.set_env(
+            "PS0",
+            "${STARSHIP_START_TIME:$((STARSHIP_START_TIME=12345,0)):0}",
+        );
+
+        assert_eq!(shell.execute_interactive_line(":").unwrap(), 0);
+
+        assert_eq!(shell.executor.get_env("STARSHIP_START_TIME"), Some("12345"));
     }
 
     #[test]

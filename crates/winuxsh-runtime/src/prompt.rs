@@ -582,10 +582,46 @@ impl Prompt for WinuxshPrompt {
     }
 }
 
+/// Bash-compatible prompt values rendered from PS1/PS2 after the shell has run
+/// public Bash prompt hooks such as PROMPT_COMMAND.
+pub struct BashPrompt {
+    left: String,
+    multiline: String,
+}
+
+impl BashPrompt {
+    pub fn new(left: String, multiline: String) -> Self {
+        Self { left, multiline }
+    }
+}
+
+impl Prompt for BashPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.left)
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.multiline)
+    }
+
+    fn render_prompt_history_search_indicator(&self, _search: PromptHistorySearch) -> Cow<'_, str> {
+        Cow::Borrowed("(history search) ")
+    }
+}
+
 /// Backend selector for the prompt: legacy template engine or new segment engine.
 pub enum PromptBackend {
     Template(WinuxshPrompt),
     Segments(SegmentPromptAdapter),
+    Bash(BashPrompt),
 }
 
 impl Prompt for PromptBackend {
@@ -593,6 +629,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_left(),
             PromptBackend::Segments(p) => p.render_prompt_left(),
+            PromptBackend::Bash(p) => p.render_prompt_left(),
         }
     }
 
@@ -600,6 +637,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_right(),
             PromptBackend::Segments(p) => p.render_prompt_right(),
+            PromptBackend::Bash(p) => p.render_prompt_right(),
         }
     }
 
@@ -607,6 +645,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_indicator(mode),
             PromptBackend::Segments(p) => p.render_prompt_indicator(mode),
+            PromptBackend::Bash(p) => p.render_prompt_indicator(mode),
         }
     }
 
@@ -614,6 +653,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_multiline_indicator(),
             PromptBackend::Segments(p) => p.render_prompt_multiline_indicator(),
+            PromptBackend::Bash(p) => p.render_prompt_multiline_indicator(),
         }
     }
 
@@ -621,6 +661,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_history_search_indicator(search),
             PromptBackend::Segments(p) => p.render_prompt_history_search_indicator(search),
+            PromptBackend::Bash(p) => p.render_prompt_history_search_indicator(search),
         }
     }
 }
