@@ -61,7 +61,7 @@ but the separation is useful.
 
 Recommended v2.2 config direction:
 
-- Keep `~/.winshrc.toml` for backward compatibility.
+- Keep structured plugin state in manifest-backed registry files.
 - Add a minimal `[editor]` section for `edit_mode = "emacs" | "vi"`.
 - Add a minimal `[history]` section only after Ctrl+R/search behavior needs user
   controls.

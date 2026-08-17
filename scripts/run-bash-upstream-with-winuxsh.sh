@@ -176,10 +176,7 @@ for runner in "${RUNNERS[@]}"; do
   refuse_unsafe_dir "$workdir"
   safe_rm_rf "$workdir"
   mkdir -p "$tmpdir" "$test_home" "$guard_bin" "$expected_dir"
-  cat >"$test_home/.winshrc.toml" <<'EOF'
-[winuxcmd]
-enabled = false
-EOF
+  : # Bash upstream tests use no user config.
   cp -R "$BASH_TEST_DIR" "$test_workdir"
   cp "$BASH_TEST_DIR"/*.right "$expected_dir"/
   find "$test_workdir" "$expected_dir" -maxdepth 1 -type f -name '*.right' -exec sed -i 's/\r$//' {} +
@@ -285,7 +282,6 @@ EOF
     env \
       HOME="$test_home" \
       USERPROFILE="$test_home" \
-      WINUXSH_CONFIG="$test_home/.winshrc.toml" \
       THIS_SH="$SHELL_BIN" \
       BUILD_DIR="$BASH_UPSTREAM_DIR" \
       BASH_TSTOUT="$tmpdir/bashtst.out" \

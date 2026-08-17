@@ -27,7 +27,7 @@ use crate::config::{
 use crate::git_status::GitPromptSymbols;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::plugins::{PluginKind, PluginProcessSpec, PluginRuntimeState, OFFICIAL_BUNDLE_NAME};
-use crate::prompt::{GitPromptDecor, PromptBackend, PromptIndicators, WinuxshPrompt};
+use crate::prompt::{BashPrompt, GitPromptDecor, PromptBackend, PromptIndicators, WinuxshPrompt};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
 };
@@ -73,6 +73,7 @@ pub struct Shell {
     pub line_editor: Option<Reedline>,
     plugin_prompt_sync: PluginPromptSyncConfig,
     process_stdin_pipeline_bridge: bool,
+    bash_prompt_command_running: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +113,7 @@ impl Shell {
     }
 
     fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
-        // 1. Load legacy/managed machine state if present.
+        // 1. Load runtime defaults and environment-backed state.
         let config = load_config();
 
         // 2. Select the WinuxCmd installation and use its real directory tree
@@ -329,6 +330,7 @@ impl Shell {
             line_editor: None,
             plugin_prompt_sync,
             process_stdin_pipeline_bridge: false,
+            bash_prompt_command_running: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
         shell.update_completion_state();
@@ -604,6 +606,9 @@ impl Shell {
         if !self.plugin_prompt_sync.enabled {
             return;
         }
+        if self.bash_prompt_env_active() {
+            return;
+        }
 
         let left_template = self
             .executor
@@ -649,6 +654,71 @@ impl Shell {
         prompt.set_git_status_snapshot(git_status_snapshot);
         prompt.set_git_prompt_decor(git_prompt_decor);
         self.prompt = PromptBackend::Template(prompt);
+    }
+
+    fn bash_prompt_env_active(&self) -> bool {
+        self.executor
+            .get_env("PROMPT_COMMAND")
+            .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .executor
+                .get_env("PS1")
+                .is_some_and(|value| !value.is_empty())
+    }
+
+    fn run_bash_prompt_command(&mut self, last_exit_code: i32) {
+        if self.bash_prompt_command_running {
+            return;
+        }
+        let Some(command) = self
+            .executor
+            .get_env("PROMPT_COMMAND")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+
+        self.bash_prompt_command_running = true;
+        self.executor.set_last_exit_code(last_exit_code);
+        let _ = self.execute_script(&command);
+        self.executor.set_last_exit_code(last_exit_code);
+        self.bash_prompt_command_running = false;
+    }
+
+    fn sync_bash_prompt_from_env(&mut self) {
+        if !self.bash_prompt_env_active() {
+            return;
+        }
+        let ps1 = self
+            .executor
+            .get_env("PS1")
+            .unwrap_or("\\$ ")
+            .to_string();
+        let ps2 = self.executor.get_env("PS2").unwrap_or("> ").to_string();
+        let left = self.executor.expand_prompt_string_mut(&ps1);
+        let multiline = self.executor.expand_prompt_string_mut(&ps2);
+        self.prompt = PromptBackend::Bash(BashPrompt::new(left, multiline));
+    }
+
+    fn run_bash_ps0_preexec(&mut self) {
+        let Some(ps0) = self
+            .executor
+            .get_env("PS0")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let last_exit_code = self.executor.last_exit_code();
+        self.executor.set_env("PS0", &ps0);
+        let rendered = self.executor.expand_prompt_string_mut(&ps0);
+        if !rendered.is_empty() {
+            let _ = std::io::stdout().write_all(rendered.as_bytes());
+            let _ = std::io::stdout().flush();
+        }
+        self.executor.set_last_exit_code(last_exit_code);
     }
 
     fn git_status_from_prompt_env(&self) -> Option<crate::git_status::GitRepoStatus> {
@@ -789,13 +859,14 @@ impl Shell {
 
     /// Run native hooks before rendering the next prompt.
     pub fn run_precmd_hooks(&mut self) {
+        let last_exit_code = self.executor.last_exit_code();
         self.run_native_precmd_plugins();
         self.sync_gitstatus_prompt_env();
         let hooks = self.hooks.precmd.clone();
-        let last_exit_code = self.executor.last_exit_code().to_string();
+        let last_exit_code_string = last_exit_code.to_string();
         // Set in process env so segment prompt can read it via std::env::var.
-        std::env::set_var("WINUXSH_LAST_EXIT_CODE", &last_exit_code);
-        let context = [("WINUXSH_LAST_EXIT_CODE", last_exit_code)];
+        std::env::set_var("WINUXSH_LAST_EXIT_CODE", &last_exit_code_string);
+        let context = [("WINUXSH_LAST_EXIT_CODE", last_exit_code_string)];
         if self.uses_primary_startup_rc() {
             self.run_framework_hook_runner("winuxsh_run_precmd_hooks", &context);
         } else {
@@ -803,6 +874,8 @@ impl Shell {
         }
         self.run_process_plugin_hooks("precmd", &context);
         self.run_hook_scripts(&hooks, &context);
+        self.run_bash_prompt_command(last_exit_code);
+        self.sync_bash_prompt_from_env();
         self.sync_prompt_from_plugin_env();
     }
 
@@ -822,6 +895,7 @@ impl Shell {
         }
         self.run_process_plugin_hooks("preexec", &context);
         self.run_hook_scripts(&hooks, &context);
+        self.run_bash_ps0_preexec();
     }
 
     /// Run native hooks when the interactive command changed directories.
@@ -3846,7 +3920,6 @@ mod tests {
         let bin = temp.join("bin");
         let home = temp.join("home");
         let next_dir = temp.join("next");
-        let config_path = temp.join(".winshrc.toml");
         let log_path = temp.join("process-hook.log");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&next_dir).unwrap();
@@ -3857,19 +3930,7 @@ mod tests {
             1000,
         );
         write_fake_process_hook(&bin, 0, false);
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["process-hook"]
-"#,
-        )
-        .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -3907,27 +3968,14 @@ load = ["process-hook"]
         let temp = unique_temp_dir("winuxsh-source-plugin-startup");
         let bundle = temp.join("bundle");
         let home = temp.join("home");
-        let config_path = temp.join(".winshrc.toml");
         std::fs::create_dir_all(&home).unwrap();
         write_source_plugin_test_bundle(&bundle, "9.9.8");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["source-test"]
-"#,
-        )
-        .unwrap();
         std::fs::write(
             home.join(WINUXSH_LEGACY_RC_FILE),
             "export SOURCE_PLUGIN_USER_RC_SEES=\"$SOURCE_PLUGIN_VALUE\"\nalias source_alias='echo user-override'\n",
         )
         .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -3964,21 +4012,9 @@ load = ["source-test"]
         let temp = unique_temp_dir("winuxsh-framework-source-plugin-root");
         let bundle = temp.join("bundle");
         let home = temp.join("home");
-        let config_path = temp.join(".winshrc.toml");
         std::fs::create_dir_all(&home).unwrap();
         write_framework_source_plugin_test_bundle(&bundle, "9.9.12");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-"#,
-        )
-        .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -4011,21 +4047,9 @@ bundles = ["oh-my-winuxsh"]
         let temp = unique_temp_dir("winuxsh-framework-plugin-prompt-sync");
         let bundle = temp.join("bundle");
         let home = temp.join("home");
-        let config_path = temp.join(".winshrc.toml");
         std::fs::create_dir_all(&home).unwrap();
         write_framework_source_plugin_test_bundle(&bundle, "9.9.14");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-"#,
-        )
-        .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -4053,21 +4077,9 @@ bundles = ["oh-my-winuxsh"]
         let temp = unique_temp_dir("winuxsh-framework-plugin-prompt-snapshot");
         let bundle = temp.join("bundle");
         let home = temp.join("home");
-        let config_path = temp.join(".winshrc.toml");
         std::fs::create_dir_all(&home).unwrap();
         write_framework_source_plugin_test_bundle(&bundle, "9.9.16");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-"#,
-        )
-        .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -4090,51 +4102,6 @@ bundles = ["oh-my-winuxsh"]
     }
 
     #[test]
-    fn explicit_toml_prompt_stays_authoritative_over_plugin_template() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-framework-plugin-prompt-native");
-        let bundle = temp.join("bundle");
-        let home = temp.join("home");
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::create_dir_all(&home).unwrap();
-        write_framework_source_plugin_test_bundle(&bundle, "9.9.15");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[shell]
-prompt_format = "USER:{prompt_char} "
-prompt_symbol = "$"
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-"#,
-        )
-        .unwrap();
-
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
-        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
-        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
-
-        let mut shell = Shell::new().unwrap();
-        shell.home_dir = home;
-        shell.run_startup_rc();
-
-        let rendered = reedline::Prompt::render_prompt_left(&shell.prompt).into_owned();
-        assert_eq!(
-            shell.executor.get_env("WINUXSH_PROMPT_LEFT"),
-            Some("PLUGIN:{git}{prompt_char} ")
-        );
-        assert!(rendered.contains("USER:"), "{rendered:?}");
-        assert!(rendered.contains('$'), "{rendered:?}");
-        assert!(!rendered.contains("PLUGIN:"), "{rendered:?}");
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
     fn source_plugin_scripts_run_for_interactive_lifecycle_hooks() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
@@ -4142,7 +4109,6 @@ bundles = ["oh-my-winuxsh"]
         let bundle = temp.join("bundle");
         let home = temp.join("home");
         let next_dir = temp.join("next");
-        let config_path = temp.join(".winshrc.toml");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&next_dir).unwrap();
         write_source_plugin_test_bundle_with_hooks(
@@ -4150,19 +4116,7 @@ bundles = ["oh-my-winuxsh"]
             "9.9.9",
             &["startup", "precmd", "preexec", "chpwd"],
         );
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["source-test"]
-"#,
-        )
-        .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -4270,26 +4224,14 @@ alias hello='echo from-alias'
         let temp = unique_temp_dir("winuxsh-primary-rc-plugin-entrypoint");
         let bundle = temp.join("bundle");
         let home = temp.join("home");
-        let config_path = temp.join(".winshrc.toml");
         std::fs::create_dir_all(&home).unwrap();
         write_framework_source_plugin_test_bundle(&bundle, "9.9.17");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-"#,
-        )
-        .unwrap();
         std::fs::write(
             home.join(WINUXSH_RC_FILE),
             "export WINUXSH_RC_ENTRYPOINT=primary\n",
         )
         .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -4314,19 +4256,8 @@ bundles = ["oh-my-winuxsh"]
         let temp = unique_temp_dir("winuxsh-primary-rc-framework-hooks");
         let bundle = temp.join("bundle");
         let home = temp.join("home");
-        let config_path = temp.join(".winshrc.toml");
         std::fs::create_dir_all(&home).unwrap();
         write_framework_source_plugin_test_bundle(&bundle, "9.9.18");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-"#,
-        )
-        .unwrap();
         std::fs::write(
             home.join(WINUXSH_RC_FILE),
             r#"
@@ -4343,7 +4274,6 @@ winuxsh_run_chpwd_hooks() {
         )
         .unwrap();
 
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -5595,9 +5525,6 @@ BACKTICK_VALUE=`whoami`
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("winuxsh-default-plugin-git");
         std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(&config_path, "[winuxcmd]\nenabled = false\n").unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
 
         let shell = Shell::new().unwrap();
 
@@ -5611,204 +5538,12 @@ BACKTICK_VALUE=`whoami`
     }
 
     #[test]
-    fn user_git_aliases_override_official_builtin_git_pack() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-plugin-git-alias-precedence");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[aliases]
-gst = "echo user-git-status"
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["git"]
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert_eq!(
-            shell.aliases.get("gst").map(String::as_str),
-            Some("echo user-git-status")
-        );
-        assert_eq!(
-            shell.aliases.get("gco").map(String::as_str),
-            Some("git checkout")
-        );
-        assert!(shell.plugins.is_enabled("git"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn explicit_plugin_git_disable_blocks_builtin_alias_pack() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-disable-plugin-git");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = []
-
-[plugins.git]
-enabled = false
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert!(!shell.aliases.contains_key("gst"));
-        assert!(!shell.plugins.is_enabled("git"));
-        assert!(shell.plugins.has_decision("git"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn canonical_plugins_enable_docker_builtin_alias_pack() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-plugin-docker");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = []
-
-[plugins.docker]
-enabled = true
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert_eq!(
-            shell.aliases.get("dps").map(String::as_str),
-            Some("docker ps")
-        );
-        assert!(shell.plugins.is_enabled("docker"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn explicit_plugin_docker_disable_blocks_builtin_alias_pack() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-disable-plugin-docker");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["docker"]
-
-[plugins.docker]
-enabled = false
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert!(!shell.aliases.contains_key("dps"));
-        assert!(!shell.plugins.is_enabled("docker"));
-        assert!(shell.plugins.has_decision("docker"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn user_aliases_override_official_builtin_alias_packs() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-plugin-alias-precedence");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[aliases]
-dps = "echo user-docker"
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["docker"]
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert_eq!(
-            shell.aliases.get("dps").map(String::as_str),
-            Some("echo user-docker")
-        );
-        assert!(shell.plugins.is_enabled("docker"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
     fn external_bundle_alias_pack_does_not_use_official_fallback_aliases() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("winuxsh-external-git-alias-fallback");
         let bundle = temp.join("bundle");
-        let config_path = temp.join(".winshrc.toml");
         write_external_aliasless_git_bundle(&bundle, "9.9.13");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
         let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
         let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
         let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
@@ -5818,243 +5553,6 @@ bundles = ["oh-my-winuxsh"]
         assert!(shell.plugins.is_enabled("git"));
         assert!(!shell.aliases.contains_key("gst"));
         assert!(!shell.aliases.contains_key("gco"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn explicit_keybindings_disable_blocks_native_widgets() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-disable-keybindings");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = []
-
-[plugins.keybindings]
-enabled = false
-
-[native_widgets]
-enabled = true
-presets = ["history_substring_search"]
-import_bindkeys = true
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert!(!shell.native_widgets.enabled);
-        assert!(shell.native_widgets.presets.is_empty());
-        assert!(!shell.plugins.is_enabled("keybindings"));
-        assert!(shell.plugins.has_decision("keybindings"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn explicit_prompts_disable_blocks_segment_prompt_preset() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-disable-prompts");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[shell]
-prompt_style = "segments"
-segment_preset = "classic"
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = []
-
-[plugins.prompts]
-enabled = false
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert!(matches!(shell.prompt, PromptBackend::Template(_)));
-        assert!(!shell.plugins.is_enabled("prompts"));
-        assert!(shell.plugins.has_decision("prompts"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn installed_bundle_prompt_preset_drives_segment_prompt() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-bundle-prompt-preset");
-        let bundle = temp.join("bundle");
-        std::fs::create_dir_all(bundle.join("packs").join("prompts")).unwrap();
-        std::fs::create_dir_all(bundle.join("prompts")).unwrap();
-        std::fs::write(
-            bundle.join("bundle.toml"),
-            r#"name = "oh-my-winuxsh"
-version = "9.9.9"
-api = "winuxsh:plugin-bundle@0.1.0"
-min_winuxsh = "0.8.3"
-[packs]
-default = ["prompts"]
-available = ["prompts"]
-[layout]
-packs_dir = "packs"
-prompts_dir = "prompts"
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            bundle.join("packs").join("prompts").join("plugin.toml"),
-            r#"name = "prompts"
-bundle = "oh-my-winuxsh"
-version = "9.9.9"
-kind = "builtin"
-api = "winuxsh:plugin@0.1.0"
-category = "ux"
-summary = "Installed prompt presets"
-default = true
-permissions = []
-required_binaries = []
-[exports]
-aliases = false
-completions = []
-prompt_segments = ["cwd"]
-hooks = []
-commands = []
-keybindings = []
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            bundle.join("prompts").join("segments.toml"),
-            r#"[segments.cwd]
-id = "dir"
-description = "test cwd segment"
-[segments.prompt_char]
-id = "prompt_char"
-description = "test prompt char segment"
-[presets.classic]
-left = ["cwd", "prompt_char"]
-right = []
-separator = "|"
-"#,
-        )
-        .unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"[winuxcmd]
-enabled = false
-[shell]
-prompt_style = "segments"
-segment_preset = "classic"
-prompt_symbol = "$"
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-        let _path_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
-        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
-        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
-
-        let shell = Shell::new().unwrap();
-        let rendered = match &shell.prompt {
-            PromptBackend::Segments(prompt) => prompt.inner.render_left(),
-            PromptBackend::Template(_) => panic!("expected segment prompt"),
-        };
-
-        assert!(rendered.contains('|'), "{rendered:?}");
-        assert!(shell.plugins.is_enabled("prompts"));
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn canonical_plugins_enable_zoxide_native_shim() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-plugin-zoxide");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["zoxide"]
-
-[plugins.zoxide]
-enabled = true
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert!(shell.native_plugin_enabled("zoxide"));
-        assert!(shell.plugins.is_enabled("zoxide"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn explicit_plugin_disable_overrides_native_zoxide_preset() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-plugin-zoxide-disable-native");
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join(".winshrc.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = []
-
-[plugins.zoxide]
-enabled = false
-
-[native_plugins]
-enabled = true
-presets = ["zoxide"]
-"#,
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
-
-        let shell = Shell::new().unwrap();
-
-        assert!(!shell.native_plugin_enabled("zoxide"));
-        assert!(!shell.plugins.is_enabled("zoxide"));
-        assert!(shell.plugins.has_decision("zoxide"));
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -6417,6 +5915,7 @@ winuxsh_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             line_editor: None,
             plugin_prompt_sync: PluginPromptSyncConfig::disabled(),
             process_stdin_pipeline_bridge: false,
+            bash_prompt_command_running: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
         shell

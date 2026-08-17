@@ -12,7 +12,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
   completions, prompt segments, hooks, and optional `.winux` startup code are
   visible and reviewable.
 - `~/.winuxshrc` is the user-authored interactive entry point.
-- `~/.winshrc.toml` is legacy/managed structured state.
+- Manifest-backed registry files hold structured plugin state.
 
 ## Runtime Sequence
 

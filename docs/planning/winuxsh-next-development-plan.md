@@ -6,7 +6,7 @@
 - Keep shell semantics in rubash and host behavior in Winuxsh.
 - Make `oh-my-winuxsh` the maintained first-party plugin bundle.
 - Keep configuration understandable: user script in `~/.winuxshrc`, managed
-  state in `~/.winshrc.toml`.
+  state in the manifest-backed plugin registry.
 
 ## Workstreams
 

@@ -21,8 +21,8 @@ winuxsh = rubash + winuxcmd + reedline + oh-my-winuxsh
 
 - `~/.winuxshrc` is the primary interactive startup file.
 - `~/.winshrc` remains an old fallback only when `~/.winuxshrc` does not exist.
-- `~/.winshrc.toml` is managed state for plugin CLI operations, permissions,
-  bundle versions, tests, and advanced overrides.
+- Plugin CLI operations, bundle versions, tests, and advanced overrides use
+  the manifest-backed registry.
 
 ## Plugin Model
 

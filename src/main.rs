@@ -18,10 +18,6 @@
 //!   winuxsh plugin update oh-my-winuxsh --from <path> → install a bundle release
 //!   winuxsh plugin update oh-my-winuxsh --github-release latest → download/install bundle
 //!   winuxsh plugin rollback oh-my-winuxsh → roll back to the previous bundle
-//!   winuxsh plugin plan enable <name> [--json] → preview plugin TOML
-//!   winuxsh plugin install <name> → install an official plugin
-//!   winuxsh plugin uninstall <name> → uninstall an official plugin
-//!   winuxsh plugin enable <name> → write managed plugin TOML
 //!   winuxsh --completion-probe "line" [cursor] → print REPL completions
 //!   winuxsh --install-wt-profile → add/update the Windows Terminal profile
 //!   winuxsh --self-update → download and run the latest installer
@@ -279,18 +275,12 @@ fn print_usage() {
     println!("  plugin update oh-my-winuxsh --github-release latest|vX.Y.Z [--json]");
     println!("                            Install bundle release");
     println!("  plugin rollback oh-my-winuxsh [--json]  Roll back bundle release");
-    println!("  plugin plan enable <name> [--json]  Preview managed plugin TOML");
-    println!("  plugin plan disable <name> [--json] Preview managed plugin TOML");
-    println!("  plugin install <name>     Install official plugin from active bundle");
-    println!("  plugin uninstall <name>   Uninstall official plugin from active bundle");
-    println!("  plugin enable <name>      Write managed plugin TOML");
-    println!("  plugin disable <name>     Write managed plugin TOML");
     println!();
     println!();
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
-    println!("Configuration: ~/.winuxshrc for interactive startup; ~/.winshrc and ~/.winshrc.toml remain legacy/managed fallbacks");
+    println!("Configuration: ~/.winuxshrc for interactive startup; ~/.winshrc remains a compatibility fallback");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
@@ -338,15 +328,6 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         "review" => run_plugin_review_command(&args[3..]),
         "update" => run_plugin_update_command(&args[3..]),
         "rollback" => run_plugin_rollback_command(&args[3..]),
-        "plan" => run_plugin_plan_command(&args[3..]),
-        "install" => run_plugin_install_command(args),
-        "uninstall" => run_plugin_uninstall_command(args),
-        "enable" => {
-            run_plugin_apply_command(args, winuxsh_runtime::plugins::PluginConfigAction::Enable)
-        }
-        "disable" => {
-            run_plugin_apply_command(args, winuxsh_runtime::plugins::PluginConfigAction::Disable)
-        }
         unknown => anyhow::bail!("unknown plugin subcommand '{}'", unknown),
     }
 }
@@ -629,148 +610,6 @@ fn read_checksum_file(path: &PathBuf) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("checksum file {} is empty", path.display()))?;
     Ok(checksum.to_string())
 }
-fn run_plugin_plan_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(action_raw) = args.get(0) else {
-        anyhow::bail!("plugin plan requires an action: enable or disable");
-    };
-    let Some(name) = args.get(1) else {
-        anyhow::bail!("plugin plan {} requires a plugin name", action_raw);
-    };
-    let json = parse_plugin_json_flag(&args[2..])?;
-    let action = plugin_config_action_from_str(action_raw)?;
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let plan = winuxsh_runtime::plugins::plugin_config_plan_for_path(&config_path, name, action)?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&plan)?);
-    } else {
-        println!("{}", plan.toml);
-    }
-    Ok(())
-}
-
-fn run_plugin_apply_command(
-    args: &[String],
-    action: winuxsh_runtime::plugins::PluginConfigAction,
-) -> anyhow::Result<()> {
-    let Some(name) = args.get(3) else {
-        anyhow::bail!(
-            "plugin {} requires a plugin name",
-            plugin_config_action_name(action)
-        );
-    };
-    reject_plugin_options(&args[4..])?;
-
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary =
-        winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(&config_path, name, action)?;
-
-    println!(
-        "{} plugin '{}' in {}",
-        plugin_config_action_past_tense(summary.action),
-        summary.plugin,
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed plugin block");
-    } else {
-        println!("Added a new winuxsh-managed plugin block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    Ok(())
-}
-
-fn run_plugin_install_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(name) = args.get(3) else {
-        anyhow::bail!("plugin install requires a plugin name");
-    };
-    reject_plugin_options(&args[4..])?;
-
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary = winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(
-        &config_path,
-        name,
-        winuxsh_runtime::plugins::PluginConfigAction::Enable,
-    )?;
-
-    println!(
-        "Installed plugin '{}' in {}",
-        summary.plugin,
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed plugin block");
-    } else {
-        println!("Added a new winuxsh-managed plugin block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    println!("Review: winuxsh plugin review {}", summary.plugin);
-    Ok(())
-}
-
-fn run_plugin_uninstall_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(name) = args.get(3) else {
-        anyhow::bail!("plugin uninstall requires a plugin name");
-    };
-    reject_plugin_options(&args[4..])?;
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary = winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(
-        &config_path,
-        name,
-        winuxsh_runtime::plugins::PluginConfigAction::Disable,
-    )?;
-    println!(
-        "Uninstalled plugin '{}' in {}",
-        summary.plugin,
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed plugin block");
-    } else {
-        println!("Added a new winuxsh-managed plugin block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    println!("Install: winuxsh plugin install {}", summary.plugin);
-    Ok(())
-}
-fn plugin_config_action_from_str(
-    value: &str,
-) -> anyhow::Result<winuxsh_runtime::plugins::PluginConfigAction> {
-    match value {
-        "enable" => Ok(winuxsh_runtime::plugins::PluginConfigAction::Enable),
-        "disable" => Ok(winuxsh_runtime::plugins::PluginConfigAction::Disable),
-        unknown => anyhow::bail!("unknown plugin plan action '{}'", unknown),
-    }
-}
-
-fn plugin_config_action_name(action: winuxsh_runtime::plugins::PluginConfigAction) -> &'static str {
-    match action {
-        winuxsh_runtime::plugins::PluginConfigAction::Enable => "enable",
-        winuxsh_runtime::plugins::PluginConfigAction::Disable => "disable",
-    }
-}
-
-fn plugin_config_action_past_tense(
-    action: winuxsh_runtime::plugins::PluginConfigAction,
-) -> &'static str {
-    match action {
-        winuxsh_runtime::plugins::PluginConfigAction::Enable => "Enabled",
-        winuxsh_runtime::plugins::PluginConfigAction::Disable => "Disabled",
-    }
-}
-
-fn reject_plugin_options(args: &[String]) -> anyhow::Result<()> {
-    for arg in args {
-        anyhow::bail!("unknown plugin option '{}'", arg);
-    }
-    Ok(())
-}
 
 fn parse_plugin_json_flag(args: &[String]) -> anyhow::Result<bool> {
     let mut json = false;
@@ -821,12 +660,8 @@ fn print_plugin_usage() {
     println!("                            Download, verify, and install GitHub release");
     println!("  rollback oh-my-winuxsh [--json]");
     println!("                            Roll back to the previous bundle");
-    println!("  plan enable <name> [--json]   Preview managed plugin TOML");
-    println!("  plan disable <name> [--json]  Preview managed plugin TOML");
     println!("  install <name>           Install official plugin from active bundle");
     println!("  uninstall <name>         Uninstall official plugin from active bundle");
-    println!("  enable <name>             Write managed plugin TOML");
-    println!("  disable <name>            Write managed plugin TOML");
 }
 
 fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {

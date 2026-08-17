@@ -188,7 +188,7 @@ instructions explicit.
 
 ## Config Boundary
 
-Managed plugin CLI state can still be recorded in `~/.winshrc.toml`:
+The manifest-backed registry records managed plugin CLI state:
 
 ```toml
 [plugins]
@@ -209,9 +209,9 @@ alias ll='ls -la'
 export EDITOR=vim
 ```
 
-Do not delete TOML support outright. RC is the human entry point, but the
-plugin system still needs deterministic, auditable, machine-editable state for
-CLI-managed permissions, bundle versions, tests, and rollback.
+The legacy TOML rc path is removed. RC is the human entry point, while the
+plugin system still needs deterministic, auditable, machine-editable manifest
+state for CLI-managed permissions, bundle versions, tests, and rollback.
 
 ## Migration From Current Winuxsh
 

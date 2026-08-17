@@ -42,36 +42,6 @@ fn partial_command_word_suggests_command() {
 }
 
 #[test]
-fn substring_completion_config_suggests_middle_command_match() {
-    let env = ProbeEnv::new("winuxsh-completion-substring");
-    env.write_config(
-        r#"
-[completions]
-matching = "substring"
-"#,
-    );
-
-    let suggestions = run_probe("ep", &env, &[]);
-
-    assert_contains(&suggestions, "grep");
-}
-
-#[test]
-fn command_completion_result_cap_limits_blank_tab() {
-    let env = ProbeEnv::new("winuxsh-completion-result-cap");
-    env.write_config(
-        r#"
-[completions]
-max_command_results = 1
-"#,
-    );
-
-    let suggestions = run_probe("", &env, &[]);
-
-    assert_eq!(suggestions.len(), 1, "got {suggestions:?}");
-}
-
-#[test]
 fn path_command_is_suggested_by_prefix() {
     if !cfg!(windows) {
         return;
@@ -194,24 +164,6 @@ fn path_completion_escapes_spaces_in_candidates() {
 }
 
 #[test]
-fn case_sensitive_completion_config_respects_path_case() {
-    let env = ProbeEnv::new("winuxsh-completion-case-sensitive");
-    env.write_config(
-        r#"
-[completions]
-case_sensitive = true
-"#,
-    );
-    std::fs::write(env.start.join("Alpha.txt"), "alpha").unwrap();
-
-    let lower = run_probe("ls a", &env, &[]);
-    assert_not_contains(&lower, "Alpha.txt");
-
-    let upper = run_probe("ls A", &env, &[]);
-    assert_contains(&upper, "Alpha.txt");
-}
-
-#[test]
 fn path_completion_matches_escaped_spaces_in_input() {
     let env = ProbeEnv::new("winuxsh-completion-escaped-input");
     let parent = env.start.join("parent dir");
@@ -307,31 +259,6 @@ fn git_completion_suggests_daily_subcommands_and_flags() {
     assert_contains(&push_flags, "--force");
     assert_contains(&push_flags, "--force-with-lease");
 }
-
-#[test]
-fn disabling_git_plugin_removes_git_completion_definitions() {
-    let env = ProbeEnv::new("winuxsh-completion-git-disabled");
-    env.write_config(
-        r#"[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = []
-
-[plugins.git]
-enabled = false
-"#,
-    );
-
-    let flags = run_probe("git commit --", &env, &[]);
-
-    assert_not_contains(&flags, "--message");
-    assert_not_contains(&flags, "--amend");
-    assert_not_contains(&flags, "--no-verify");
-}
-
 fn run_probe(line: &str, env: &ProbeEnv, extra_env: &[(&str, String)]) -> Vec<String> {
     let output = run_winuxsh_probe(line, &env.start, &env.home, extra_env);
     assert_success(&output, line);
@@ -345,8 +272,7 @@ fn run_winuxsh_probe(line: &str, cwd: &Path, home: &Path, extra_env: &[(&str, St
         .arg(line)
         .current_dir(cwd)
         .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"));
+        .env("USERPROFILE", home);
 
     for (key, value) in extra_env {
         command.env(key, value);
@@ -487,10 +413,6 @@ impl ProbeEnv {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&start).unwrap();
         Self { root, home, start }
-    }
-
-    fn write_config(&self, content: &str) {
-        std::fs::write(self.home.join(".winshrc.toml"), content).unwrap();
     }
 
     fn write_rc(&self, content: &str) {

@@ -17,7 +17,7 @@ script.
   of another shell framework.
 - `~/.winshrc` remains a compatibility fallback only when `~/.winuxshrc` is
   absent.
-- `~/.winshrc.toml` remains legacy/managed structured state for plugin CLI
+- The manifest-backed registry stores structured plugin CLI state for
   enablement, permissions, bundle versions, tests, and advanced
   machine-editable overrides.
 - Plugin manifests are the control plane; `.winux` source files are the trusted

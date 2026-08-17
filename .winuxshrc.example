@@ -1,7 +1,6 @@
 # Winuxsh interactive rc - example.
 # Copy this file to ~/.winuxshrc to adopt it. That file is Winuxsh's primary
-# interactive entry point; ~/.winshrc.toml remains only as legacy/managed
-# state for tools and the plugin CLI (never the place for your aliases).
+# interactive entry point for aliases, plugins, and shell startup.
 
 WINUXSH_THEME=p10-classic
 WINUXSH_THEME_PLUGIN=theme-p10-classic

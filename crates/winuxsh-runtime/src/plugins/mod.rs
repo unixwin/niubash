@@ -20,8 +20,6 @@ const PLUGIN_INDEX_SIGNATURE_POLICY: &str = "unsupported";
 const PROCESS_PLUGIN_PROTOCOL: &str = "winuxsh:process-plugin@0.1.0";
 const COMMAND_NOT_FOUND_PROVIDER: &str = "command-not-found";
 const SOURCE_PLUGIN_HOOKS: &[&str] = &["startup", "precmd", "preexec", "chpwd"];
-const MANAGED_BLOCK_START: &str = "# >>> winuxsh plugins >>>";
-const MANAGED_BLOCK_END: &str = "# <<< winuxsh plugins <<<";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
@@ -160,28 +158,6 @@ impl PluginRuntimeState {
     pub fn has_decision(&self, name: &str) -> bool {
         self.decisions.contains(name)
     }
-}
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginConfigAction {
-    Enable,
-    Disable,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginConfigPlan {
-    pub plugin: String,
-    pub action: PluginConfigAction,
-    pub config_path: PathBuf,
-    pub toml: String,
-    pub replaced_existing_block: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginConfigApplySummary {
-    pub plugin: String,
-    pub action: PluginConfigAction,
-    pub config_path: PathBuf,
-    pub backup_path: Option<PathBuf>,
-    pub replaced_existing_block: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginBundleStatus {
@@ -1888,121 +1864,6 @@ fn plugin_env_read_permission_name(permission: &str) -> Option<&str> {
         return None;
     }
     Some(name)
-}
-pub fn plugin_config_plan_for_path(
-    config_path: &Path,
-    name: &str,
-    action: PluginConfigAction,
-) -> anyhow::Result<PluginConfigPlan> {
-    let inventory = active_plugin_inventory();
-    let external_bundle = plugin_trust_source(&inventory) == "external_bundle";
-    let pack = inventory
-        .packs
-        .into_iter()
-        .find(|pack| pack.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| anyhow!("unknown plugin '{}'", name))?;
-    if external_bundle {
-        anyhow::bail!(
-            "refusing to write managed config for external bundle plugin '{}'; third-party registry trust is not implemented yet",
-            pack.name
-        );
-    }
-    let existing = fs::read_to_string(config_path).unwrap_or_default();
-    let replaced_existing_block =
-        existing.contains(MANAGED_BLOCK_START) && existing.contains(MANAGED_BLOCK_END);
-    if existing.contains("[plugins]") && !replaced_existing_block {
-        anyhow::bail!("refusing to overwrite user-authored [plugins] table; edit it manually or remove it before using winuxsh plugin commands");
-    }
-    Ok(PluginConfigPlan {
-        plugin: pack.name.clone(),
-        action,
-        config_path: config_path.to_path_buf(),
-        toml: managed_plugin_config_block(&pack, action),
-        replaced_existing_block,
-    })
-}
-pub fn apply_plugin_config_plan_to_path(
-    config_path: &Path,
-    name: &str,
-    action: PluginConfigAction,
-) -> anyhow::Result<PluginConfigApplySummary> {
-    let plan = plugin_config_plan_for_path(config_path, name, action)?;
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let existing = fs::read_to_string(config_path).unwrap_or_default();
-    let backup_path = if config_path.exists() {
-        let backup = backup_path_for_config(config_path);
-        fs::write(&backup, &existing)?;
-        Some(backup)
-    } else {
-        None
-    };
-    let next = if plan.replaced_existing_block {
-        replace_managed_plugin_block(&existing, &plan.toml)?
-    } else if existing.trim().is_empty() {
-        format!("{}\n", plan.toml)
-    } else {
-        format!("{}\n{}\n", existing.trim_end(), plan.toml)
-    };
-    fs::write(config_path, next)?;
-    Ok(PluginConfigApplySummary {
-        plugin: plan.plugin,
-        action: plan.action,
-        config_path: config_path.to_path_buf(),
-        backup_path,
-        replaced_existing_block: plan.replaced_existing_block,
-    })
-}
-fn managed_plugin_config_block(pack: &PluginPackRecord, action: PluginConfigAction) -> String {
-    let enabled = matches!(action, PluginConfigAction::Enable);
-    let load = if enabled {
-        format!("[{:?}]", pack.name)
-    } else {
-        "[]".to_string()
-    };
-    format!(
-        "{MANAGED_BLOCK_START}\n[plugins]\nenabled = true\nbundles = [\"{OFFICIAL_BUNDLE_NAME}\"]\nload = {load}\n\n[plugins.{}]\nenabled = {}\npermissions = {}\n{MANAGED_BLOCK_END}",
-        pack.name,
-        if enabled { "true" } else { "false" },
-        toml_string_array(&pack.permissions)
-    )
-}
-fn toml_string_array(values: &[String]) -> String {
-    format!(
-        "[{}]",
-        values
-            .iter()
-            .map(|value| format!("{:?}", value))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-fn replace_managed_plugin_block(existing: &str, block: &str) -> anyhow::Result<String> {
-    let start = existing
-        .find(MANAGED_BLOCK_START)
-        .ok_or_else(|| anyhow!("managed plugin block start marker missing"))?;
-    let end_start = existing
-        .find(MANAGED_BLOCK_END)
-        .ok_or_else(|| anyhow!("managed plugin block end marker missing"))?;
-    let end = end_start + MANAGED_BLOCK_END.len();
-    Ok(format!(
-        "{}{}{}",
-        &existing[..start],
-        block,
-        &existing[end..]
-    ))
-}
-fn backup_path_for_config(config_path: &Path) -> PathBuf {
-    let file_name = config_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("winuxsh-config");
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    config_path.with_file_name(format!("{file_name}.{stamp}.bak"))
 }
 pub fn apply_plugin_bundle_update_from_path(
     bundle_name: &str,

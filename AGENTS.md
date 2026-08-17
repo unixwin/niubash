@@ -19,7 +19,7 @@
 - WinuxCmd stays integrated through PATH injection and command links. Do not reintroduce FFI/DLL command routing.
 - The plugin system is Winuxsh-native and built into winuxsh. `oh-my-winuxsh` is the official bundled plugin distribution.
 - Use `~/.winuxshrc` as the primary interactive user entry point for plugin lists, theme selection, exports, aliases, functions, and shell startup logic. Keep `~/.winshrc` only as a compatibility fallback when `~/.winuxshrc` is absent.
-- Keep `~/.winshrc.toml` as legacy/managed structured state for plugin CLI enablement, permissions, bundle versions, tests, and advanced machine-editable overrides. Do not make it the default user-authored shell configuration surface.
+- Keep structured plugin and bundle assets in their manifest-backed TOML files; user startup configuration belongs in `~/.winuxshrc`.
 - Use the manifest-backed registry as the control plane for every runtime. Use `source` packs with bundle-local `.winux` scripts for reviewed shell helpers, keep `builtin` for host-owned native behavior and fallback, and keep process plugins for external-tool adapters and debug bridges.
 
 ## Development Rules
