@@ -35,6 +35,7 @@ use crate::prompt_segments::{
 use crate::winuxcmd;
 
 const DOTENV_MAX_SIZE: u64 = 10 * 1024 * 1024;
+const COMPATIBLE_SHELL_PATH_ENV: &str = "WINUXSH_COMPATIBLE_SHELL_PATH";
 const COMMAND_NOT_FOUND_PROVIDER_NAME: &str = "command-not-found";
 #[allow(dead_code)]
 const COMMAND_NOT_FOUND_PROVIDER_MAX_OUTPUT_BYTES: usize = 16 * 1024;
@@ -144,6 +145,9 @@ impl Shell {
         }
         if let Some(winuxcmd_path) = &selected_winuxcmd_path {
             executor.set_winuxcmd_path(winuxcmd_path);
+        }
+        if let Some(shell_path) = compatible_shell_path_from_env() {
+            executor.set_compatible_shell_path(shell_path);
         }
         if let Some(script_name) = script_name {
             executor.set_env("__RUBASH_SCRIPT_NAME", script_name);
@@ -3337,6 +3341,14 @@ fn shell_pwd_to_existing_host_dir(pwd: &str, env: &HashMap<String, String>) -> O
     path.is_dir().then_some(path)
 }
 
+fn compatible_shell_path_from_env() -> Option<PathBuf> {
+    let path = std::env::var_os(COMPATIBLE_SHELL_PATH_ENV)?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
 fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
     if !cfg!(windows) {
         return Ok(None);
@@ -3866,6 +3878,25 @@ mod tests {
     use reedline::Prompt;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn compatible_shell_path_env_is_explicit_and_non_empty() {
+        let _lock = PROCESS_STATE_LOCK.lock().unwrap();
+
+        {
+            let _guard = EnvVarGuard::unset(COMPATIBLE_SHELL_PATH_ENV);
+            assert_eq!(compatible_shell_path_from_env(), None);
+        }
+
+        {
+            let _guard = EnvVarGuard::set_value(COMPATIBLE_SHELL_PATH_ENV, "");
+            assert_eq!(compatible_shell_path_from_env(), None);
+        }
+
+        let shell_path = std::env::temp_dir().join("winuxsh-compatible-shell.exe");
+        let _guard = EnvVarGuard::set(COMPATIBLE_SHELL_PATH_ENV, &shell_path);
+        assert_eq!(compatible_shell_path_from_env(), Some(shell_path));
+    }
 
     #[test]
     fn native_lifecycle_hooks_run_for_interactive_commands() {
@@ -6023,6 +6054,12 @@ winuxsh_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
         fn set_value(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
             Self { key, previous }
         }
     }
