@@ -4,6 +4,8 @@ param(
     [string]$Configuration = "release",
     [string]$Target,
     [string]$Arch,
+    [string]$BashShimPath,
+    [string]$ShShimPath,
     [string]$OhMyWinuxshBundlePath,
     [switch]$SkipOhMyWinuxshBundle,
     [switch]$AllowPathWinuxCmd
@@ -40,6 +42,56 @@ try {
     }
     if (-not (Test-Path -LiteralPath $winuxshExe)) {
         throw "winuxsh.exe not found at $winuxshExe"
+    }
+
+    function Resolve-RubashShim {
+        param(
+            [string]$Name,
+            [string]$ExplicitPath
+        )
+
+        if ($ExplicitPath) {
+            if (-not (Test-Path -LiteralPath $ExplicitPath)) {
+                throw "$Name shim not found at $ExplicitPath"
+            }
+            return (Resolve-Path -LiteralPath $ExplicitPath).Path
+        }
+
+        $rubashRoot = Join-Path $RepoRoot "..\rubash"
+        if (-not (Test-Path -LiteralPath (Join-Path $rubashRoot "Cargo.toml"))) {
+            throw "$Name shim source not found. Pass -$($Name.Substring(0, 1).ToUpper())$($Name.Substring(1))ShimPath C:\path\to\$name.exe"
+        }
+
+        if ($Target) {
+            $shimExe = Join-Path $rubashRoot "target\$Target\$Configuration\$name.exe"
+        }
+        else {
+            $shimExe = Join-Path $rubashRoot "target\$Configuration\$name.exe"
+        }
+        if (-not (Test-Path -LiteralPath $shimExe)) {
+            $buildArgs = @("build", "--manifest-path", (Join-Path $rubashRoot "Cargo.toml"), "--bin", $Name, "--locked")
+            if ($Configuration -eq "release") {
+                $buildArgs += "--release"
+            }
+            if ($Target) {
+                $buildArgs += @("--target", $Target)
+            }
+            cargo @buildArgs
+        }
+        if (-not (Test-Path -LiteralPath $shimExe)) {
+            throw "$name.exe not found at $shimExe"
+        }
+        return $shimExe
+    }
+
+    $bashShimExe = Resolve-RubashShim -Name "bash" -ExplicitPath $BashShimPath
+    if ($ShShimPath) {
+        $shShimExe = Resolve-RubashShim -Name "sh" -ExplicitPath $ShShimPath
+    }
+    else {
+        # TODO(posix-mode): replace with a dedicated sh.exe shim if we decide
+        # to make /bin/sh enter POSIX mode instead of matching bash behavior.
+        $shShimExe = $bashShimExe
     }
 
     if (-not $WinuxCmdPath -and $AllowPathWinuxCmd) {
@@ -106,11 +158,16 @@ try {
 
     Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "winuxcmd\bin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "winuxcmd\usr\bin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets") | Out-Null
 
     Copy-Item -LiteralPath $winuxshExe -Destination (Join-Path $stageDir "winuxsh.exe") -Force
     Copy-Item -LiteralPath $WinuxCmdPath -Destination (Join-Path $stageDir "winuxcmd\usr\bin\winuxcmd.exe") -Force
+    Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\bash.exe") -Force
+    Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\sh.exe") -Force
+    Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\bin\bash.exe") -Force
+    Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\bin\sh.exe") -Force
     Copy-Item -LiteralPath $activationScript -Destination (Join-Path $stageDir "winuxcmd\usr\bin\activate-winuxcmd.sh") -Force
     foreach ($iconFile in $iconFiles) {
         Copy-Item -LiteralPath $iconFile -Destination (Join-Path $stageDir "assets") -Force
