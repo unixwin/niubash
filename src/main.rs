@@ -30,8 +30,19 @@ use std::process::ExitCode;
 mod self_update;
 const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-winuxsh";
 const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "winuxsh-plugin-bundles";
+const WINUXSH_MAIN_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    std::thread::Builder::new()
+        .name("winuxsh-main".to_string())
+        .stack_size(WINUXSH_MAIN_STACK_SIZE)
+        .spawn(run_main)
+        .expect("spawn winuxsh main thread")
+        .join()
+        .unwrap_or_else(|_| ExitCode::from(1))
+}
+
+fn run_main() -> ExitCode {
     // Initialize logging (only error level by default)
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Error)
