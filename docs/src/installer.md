@@ -62,9 +62,11 @@ prints a short hint to run `self-update` in the REPL or
 `winuxsh --self-update` outside it. Set
 `WINUXSH_UPDATE_CHECK=0` or `WINUXSH_NO_UPDATE_CHECK=1` to disable the reminder.
 
-The portable zip keeps the same first-start WinuxCmd activation flow: if command
-links are missing, Winuxsh runs `winuxcmd/activate-winuxcmd.sh` once from the
-bundle so `ls`, `cat`, `grep`, and friends resolve normally.
+The installer invokes `winuxcmd.exe wpm links rebuild --root ... --force` after
+copying the files, so the bundled commands are materialized immediately. On NTFS,
+WPM creates hard links to the installed `winuxcmd.exe`. The portable zip keeps the
+first-start fallback: if command links are missing, Winuxsh runs
+`winuxcmd/activate-winuxcmd.sh` once from the bundle.
 
 ## Updating WinuxCmd with WPM
 
