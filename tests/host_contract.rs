@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn winuxsh_binary() -> PathBuf {
@@ -1089,11 +1089,19 @@ fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
     let _ = stdout.read(&mut buffer).unwrap_or(0);
     drop(stdout);
 
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(3));
+
     let mut stderr = String::new();
     if let Some(mut child_stderr) = child.stderr.take() {
         child_stderr.read_to_string(&mut stderr).unwrap();
     }
-    let _ = child.wait().unwrap();
+
+    let _ = std::fs::remove_dir_all(temp);
+
+    assert!(
+        status.is_some(),
+        "winuxsh did not exit after stdout pipe closed; stderr: {stderr:?}"
+    );
 
     assert!(
         !stderr.contains("Broken pipe")
@@ -1101,8 +1109,6 @@ fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
             && !stderr.contains("管道正在被关闭"),
         "stderr should not contain scary broken pipe text: {stderr:?}"
     );
-
-    let _ = std::fs::remove_dir_all(temp);
 }
 
 fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String)]) -> Output {
@@ -1121,6 +1127,28 @@ fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String
     command
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"))
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 fn assert_success(output: &Output, context: &str) {
