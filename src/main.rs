@@ -23,7 +23,7 @@
 //!   winuxsh --self-update → download and run the latest installer
 //!   self-update / update-winuxsh → REPL commands for Winuxsh self-update
 
-use std::io::Read;
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -53,6 +53,13 @@ fn run_main() -> ExitCode {
     winuxsh_runtime::ctrl_c::install();
 
     let args: Vec<String> = std::env::args().collect();
+    if let Some(name) = args
+        .get(1)
+        .and_then(|arg| arg.strip_prefix("--internal-"))
+        .filter(|name| matches!(*name, "yes" | "head" | "wc"))
+    {
+        run_internal_pipeline_utility(name, &args[2..]);
+    }
 
     if let Err(e) = run(&args) {
         if is_broken_pipe_error(&e) {
@@ -103,11 +110,13 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             let mut shell = winuxsh_runtime::Shell::new()?;
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
+            shell.executor.set_env("BASH_EXECUTION_STRING", &args[2]);
             if let Some(command_name) = args.get(3) {
                 shell.executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
                 shell.executor.set_positional_params(args[4..].to_vec());
             }
             let code = shell.execute_script(&args[2])?;
+            let code = shell.finish_with_exit_trap(code)?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -126,6 +135,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             shell.executor.set_positional_params(args[2..].to_vec());
             let content = std::fs::read_to_string(&script)?;
             let code = shell.execute_script(&content)?;
+            let code = shell.finish_with_exit_trap(code)?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -199,6 +209,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
             0 => {
                 if !pending.is_empty() {
                     let code = shell.execute_script(&pending.join("\n"))?;
+                    let code = shell.finish_with_exit_trap(code)?;
                     if code != 0 {
                         std::process::exit(code);
                     }
@@ -220,11 +231,16 @@ fn run_stdin_script() -> anyhow::Result<()> {
 
         let code = shell.execute_script(&script)?;
         if code != 0 {
+            let code = shell.finish_with_exit_trap(code)?;
             std::process::exit(code);
         }
         pending.clear();
     }
 
+    let code = shell.finish_with_exit_trap(0)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
     Ok(())
 }
 
@@ -247,6 +263,87 @@ fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
     }
 
     Ok(read)
+}
+
+fn run_internal_pipeline_utility(name: &str, args: &[String]) -> ! {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    match name {
+        "yes" => {
+            let line = if args.is_empty() {
+                "y".to_string()
+            } else {
+                args.join(" ")
+            };
+            let chunk = format!("{line}\n").repeat(256);
+            loop {
+                if stdout.write_all(chunk.as_bytes()).is_err() || stdout.flush().is_err() {
+                    std::process::exit(0);
+                }
+            }
+        }
+        "head" => {
+            let count = internal_head_line_count(args).unwrap_or(10);
+            let mut input = std::io::BufReader::new(stdin.lock());
+            let mut line = Vec::new();
+            for _ in 0..count {
+                line.clear();
+                match input.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if stdout.write_all(&line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = stdout.flush();
+            std::process::exit(0);
+        }
+        "wc" => {
+            let mut input = stdin.lock();
+            let mut buffer = [0_u8; 8192];
+            let mut lines = 0usize;
+            loop {
+                match input.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(size) => {
+                        lines += buffer[..size].iter().filter(|byte| **byte == b'\n').count()
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = writeln!(stdout, "{lines}");
+            std::process::exit(0);
+        }
+        _ => std::process::exit(127),
+    }
+}
+
+fn internal_head_line_count(args: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "-n" {
+            return args.get(index + 1)?.parse().ok();
+        }
+        if let Some(value) = arg.strip_prefix("-n") {
+            if !value.is_empty() {
+                return value.parse().ok();
+            }
+        }
+        if let Some(value) = arg.strip_prefix('-') {
+            if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
+                return value.parse().ok();
+            }
+        }
+        if let Some(value) = arg.strip_prefix("--lines=") {
+            return value.parse().ok();
+        }
+        index += 1;
+    }
+    None
 }
 
 fn print_usage() {

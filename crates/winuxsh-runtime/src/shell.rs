@@ -136,6 +136,9 @@ impl Shell {
 
         // 3. Build rubash Executor after host path selection.
         let mut executor = Executor::new();
+        if let Some(shell_name) = std::env::args().next() {
+            executor.set_env("__RUBASH_SHELL_NAME", &shell_name);
+        }
         // Winuxsh always presents an interactive shell, so aliases loaded
         // from ~/.winuxshrc must expand without requiring a user shopt line.
         executor.set_shopt_option("expand_aliases", true);
@@ -1869,6 +1872,20 @@ impl Shell {
     /// Last exit code from rubash executor.
     pub fn last_exit_code(&self) -> i32 {
         self.executor.last_exit_code()
+    }
+
+    /// Run shell process teardown semantics that live in rubash's binary entry.
+    pub fn finish_with_exit_trap(&mut self, status: i32) -> anyhow::Result<i32> {
+        match self.executor.run_exit_trap_with_status(status) {
+            Ok(code) => Ok(code),
+            Err(rubash::executor::ExecuteError::ExitCode(code)) => Ok(code),
+            Err(e) => {
+                if !is_broken_pipe_execute_error(&e) {
+                    eprintln!("winuxsh: {}", e);
+                }
+                Ok(1)
+            }
+        }
     }
 
     /// Execute an entire script (multi-line) via rubash full AST execution.

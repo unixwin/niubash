@@ -189,6 +189,152 @@ echo SHOULD_NOT_PRINT
 }
 
 #[test]
+fn command_mode_sets_bash_execution_string() {
+    let temp = unique_temp_dir("winuxsh-host-bash-execution-string");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let script = "printf '%s' \"$BASH_EXECUTION_STRING\"";
+    let output = run_winuxsh(script, &start, &home, &[]);
+    assert_success(&output, "BASH_EXECUTION_STRING");
+    assert_eq!(normalize_text(&output.stdout), script);
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn rubash_executor_sees_winuxsh_shell_name() {
+    let temp = unique_temp_dir("winuxsh-host-shell-name");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh("printf '%s' \"$__RUBASH_SHELL_NAME\"", &start, &home, &[]);
+    assert_success(&output, "rubash shell name");
+    assert!(
+        normalize_text(&output.stdout)
+            .to_ascii_lowercase()
+            .contains("winuxsh"),
+        "stdout was {:?}",
+        normalize_text(&output.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn exit_trap_runs_for_non_interactive_modes() {
+    let temp = unique_temp_dir("winuxsh-host-exit-trap");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let command_marker = temp.join("command-marker");
+    let output = run_winuxsh(
+        &format!(
+            "trap 'printf command > {}' EXIT; true",
+            shell_quote(&shell_path(&command_marker))
+        ),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "command-mode EXIT trap");
+    assert_eq!(std::fs::read_to_string(&command_marker).unwrap(), "command");
+
+    let script_marker = temp.join("script-marker");
+    let script = temp.join("script.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "trap 'printf script > {}' EXIT\ntrue\n",
+            shell_quote(&shell_path(&script_marker))
+        ),
+    )
+    .unwrap();
+    let output = Command::new(winuxsh_binary())
+        .arg(&script)
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap_or_else(|err| panic!("spawn winuxsh script file: {err}"));
+    assert_success(&output, "script-file EXIT trap");
+    assert_eq!(std::fs::read_to_string(&script_marker).unwrap(), "script");
+
+    let stdin_marker = temp.join("stdin-marker");
+    let mut child = Command::new(winuxsh_binary())
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh stdin script: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            format!(
+                "trap 'printf stdin > {}' EXIT\ntrue\n",
+                shell_quote(&shell_path(&stdin_marker))
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "stdin-script EXIT trap");
+    assert_eq!(std::fs::read_to_string(&stdin_marker).unwrap(), "stdin");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn internal_pipeline_helpers_work_when_rubash_is_embedded() {
+    let temp = unique_temp_dir("winuxsh-host-internal-pipeline");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let mut child = Command::new(winuxsh_binary())
+        .arg("--internal-wc")
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh internal wc: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"one\ntwo\nthree\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "embedded internal wc helper");
+    assert_eq!(normalize_text(&output.stdout), "3");
+
+    let output = run_winuxsh("yes ok | head -n 3 | wc", &start, &home, &[]);
+    assert_success(&output, "embedded internal pipeline helpers");
+    assert!(
+        normalize_text(&output.stdout).starts_with('3'),
+        "stdout was {:?}",
+        normalize_text(&output.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn temporary_assignment_reaches_nested_winuxsh_child() {
     let temp = unique_temp_dir("winuxsh-host-nested-env");
     let home = temp.join("home");
