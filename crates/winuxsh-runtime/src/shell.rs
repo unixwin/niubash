@@ -145,6 +145,9 @@ impl Shell {
         if let Some(shell_name) = std::env::args().next() {
             executor.set_env("__RUBASH_SHELL_NAME", &shell_name);
         }
+        // Starship is initialized through its Bash integration even when
+        // Winuxsh is invoked through the sh/bash command shims.
+        executor.set_env("STARSHIP_SHELL", "bash");
         if cfg!(windows) && shell_was_missing {
             if let Ok(exe) = std::env::current_exe() {
                 executor.set_env("SHELL", &host_path_to_shell_path(&exe.to_string_lossy()));

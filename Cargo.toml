@@ -1,6 +1,6 @@
 [package]
 name = "winuxsh"
-version = "0.10.9"
+version = "0.10.10"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"

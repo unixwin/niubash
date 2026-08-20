@@ -226,6 +226,21 @@ fn rubash_executor_sees_winuxsh_shell_name() {
 }
 
 #[test]
+fn starship_receives_bash_shell_identity() {
+    let temp = unique_temp_dir("winuxsh-host-starship-shell");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh("printf '%s' \"$STARSHIP_SHELL\"", &start, &home, &[]);
+    assert_success(&output, "Starship shell name");
+    assert_eq!(normalize_text(&output.stdout), "bash");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn exit_trap_runs_for_non_interactive_modes() {
     let temp = unique_temp_dir("winuxsh-host-exit-trap");
     let home = temp.join("home");
