@@ -135,9 +135,20 @@ impl Shell {
         let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
 
         // 3. Build rubash Executor after host path selection.
+        let shell_was_missing = std::env::var_os("SHELL").is_none();
+        if cfg!(windows) {
+            // Keep the embedded Rubash path-display contract active for the
+            // entire shell lifetime; `cd` consults the process environment.
+            std::env::set_var("WINUXSH_SHELL_PATH_STYLE", "native");
+        }
         let mut executor = Executor::new();
         if let Some(shell_name) = std::env::args().next() {
             executor.set_env("__RUBASH_SHELL_NAME", &shell_name);
+        }
+        if cfg!(windows) && shell_was_missing {
+            if let Ok(exe) = std::env::current_exe() {
+                executor.set_env("SHELL", &host_path_to_shell_path(&exe.to_string_lossy()));
+            }
         }
         // Winuxsh always presents an interactive shell, so aliases loaded
         // from ~/.winuxshrc must expand without requiring a user shopt line.
@@ -1352,11 +1363,12 @@ impl Shell {
         }
 
         let host_pwd = self.executor.resolve_shell_path(&pwd);
+        let host_pwd_display = host_pwd.to_string_lossy().replace('\\', "/");
         let command_path =
             resolve_native_command_path("zoxide").unwrap_or_else(|| PathBuf::from("zoxide"));
         let status = Command::new(command_path)
             .arg("add")
-            .arg(&host_pwd)
+            .arg(&host_pwd_display)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -2469,6 +2481,14 @@ fn rewrite_winuxcmd_command_shims_in_stage(
         return;
     };
 
+    // Rubash keeps quoted glob-like characters behind an internal marker until
+    // execution. Winuxsh rewrites the AST before Rubash executes it, so restore
+    // those literals at this external-command boundary.
+    for token in &mut tokens[start..end] {
+        token.value = token.value.replace('\x11', "");
+        token.raw = token.raw.replace('\x11', "");
+    }
+
     match winuxcmd_command_shim(&tokens[command_index]) {
         Some(WinuxCmdShim::Exe { target }) => {
             tokens[command_index].value = target.to_string();
@@ -3249,7 +3269,7 @@ fn ensure_windows_profile_env(executor: &mut Executor, home_dir: &Path) {
         return;
     }
 
-    set_executor_env_if_missing_or_empty(executor, "USERPROFILE", &home);
+    executor.set_env("USERPROFILE", &home);
     if let Some((drive, path)) = windows_drive_and_home_path(&home) {
         set_executor_env_if_missing_or_empty(executor, "HOMEDRIVE", &drive);
         set_executor_env_if_missing_or_empty(executor, "HOMEPATH", &path);
@@ -3875,7 +3895,17 @@ fn host_path_to_shell_path_with_root(value: &str, root: Option<&Path>) -> String
 
 fn host_path_to_shell_path(value: &str) -> String {
     if cfg!(windows) {
-        return value.replace('\\', "/");
+        let normalized = value.replace('\\', "/");
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b'/'
+        {
+            let drive = (bytes[1] as char).to_ascii_uppercase();
+            return format!("{drive}:{}", &normalized[2..]);
+        }
+        return normalized;
     }
     value.to_string()
 }
@@ -5562,6 +5592,7 @@ BACKTICK_VALUE=`whoami`
     fn bash_prompt_command_updates_ps1_before_prompt_render() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
+        let _columns_guard = EnvVarGuard::set_value("COLUMNS", "80");
         let mut shell = test_shell(HookConfig::default());
         shell.executor.set_env(
             "PROMPT_COMMAND",
@@ -5678,7 +5709,7 @@ version = {version:?}
 api = "winuxsh:plugin-bundle@0.1.0"
 min_winuxsh = "0.8.3"
 [packs]
-default = []
+default = ["process-hook"]
 available = ["process-hook"]
 [layout]
 packs_dir = "packs"
@@ -5696,7 +5727,7 @@ kind = "process"
 api = "winuxsh:plugin@0.1.0"
 category = "workflow"
 summary = "Process plugin lifecycle hook fixture."
-default = false
+default = true
 permissions = ["cwd:read", "process:run:winuxsh-process-hook"]
 required_binaries = ["winuxsh-process-hook"]
 [exports]
@@ -5740,7 +5771,7 @@ version = {version:?}
 api = "winuxsh:plugin-bundle@0.1.0"
 min_winuxsh = "0.8.3"
 [packs]
-default = []
+default = ["source-test"]
 available = ["source-test"]
 [layout]
 packs_dir = "packs"
@@ -5758,7 +5789,7 @@ kind = "source"
 api = "winuxsh:plugin@0.1.0"
 category = "workflow"
 summary = "Source plugin startup fixture."
-default = false
+default = true
 permissions = ["shell:source"]
 required_binaries = []
 [exports]
