@@ -2819,7 +2819,10 @@ fn normalize_native_windows_path_literals(input: &str) -> String {
             while index < chars.len() && !is_shell_word_boundary(chars[index]) {
                 let path_ch = chars[index];
                 if path_ch == '\\' {
-                    output.push('/');
+                    // Double the separator so Rubash's lexer returns one literal
+                    // backslash instead of treating it as a shell escape.
+                    output.push('\\');
+                    output.push('\\');
                     changed = true;
                 } else {
                     output.push(path_ch);
@@ -4841,15 +4844,15 @@ winuxsh_run_chpwd_hooks() {
         if cfg!(windows) {
             assert_eq!(
                 normalize_native_windows_path_literals(r"ls C:\Users\me"),
-                "ls C:/Users/me"
+                r"ls C:\\Users\\me"
             );
             assert_eq!(
                 normalize_native_windows_path_literals(r"ls --root=C:\Users\me"),
-                "ls --root=C:/Users/me"
+                r"ls --root=C:\\Users\\me"
             );
             assert_eq!(
                 normalize_native_windows_path_literals(r"echo foo\ bar C:\Users\me"),
-                r"echo foo\ bar C:/Users/me"
+                r"echo foo\ bar C:\\Users\\me"
             );
             assert_eq!(
                 normalize_native_windows_path_literals(r"echo 'C:\Users\me'"),
@@ -4879,8 +4882,8 @@ winuxsh_run_chpwd_hooks() {
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
 
-        assert_eq!(ast.commands[0].words[1], "C:/Users/me");
-        assert_eq!(ast.commands[1].words[1], "C:/Users/me");
+        assert_eq!(ast.commands[0].words[1], "C:\x14Users\x14me");
+        assert_eq!(ast.commands[1].words[1], "C:\x14Users\x14me");
     }
 
     #[test]
