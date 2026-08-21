@@ -144,6 +144,21 @@ try {
         if (-not $resolvedOhMyWinuxshBundlePath) {
             throw "oh-my-winuxsh bundle not found. Pass -OhMyWinuxshBundlePath C:\path\to\oh-my-winuxsh or -SkipOhMyWinuxshBundle."
         }
+
+        $bundleToml = Get-Content -LiteralPath (Join-Path $resolvedOhMyWinuxshBundlePath "bundle.toml") -Raw
+        $availableMatch = [regex]::Match($bundleToml, '(?ms)^\s*available\s*=\s*\[(.*?)\]')
+        if (-not $availableMatch.Success) {
+            throw "oh-my-winuxsh bundle manifest has no [packs].available list: $resolvedOhMyWinuxshBundlePath"
+        }
+        $availablePacks = [regex]::Matches($availableMatch.Groups[1].Value, '"([^"]+)"') |
+            ForEach-Object { $_.Groups[1].Value }
+        foreach ($packName in $availablePacks) {
+            $packManifest = Join-Path $resolvedOhMyWinuxshBundlePath (Join-Path "packs\$packName" "plugin.toml")
+            $frameworkManifest = Join-Path $resolvedOhMyWinuxshBundlePath (Join-Path "plugins\$packName" "plugin.toml")
+            if (-not (Test-Path -LiteralPath $packManifest) -and -not (Test-Path -LiteralPath $frameworkManifest)) {
+                throw "oh-my-winuxsh bundle pack '$packName' is listed in bundle.toml but missing from packs/ and plugins/: $packManifest"
+            }
+        }
     }
 
     $distDir = Join-Path $RepoRoot "dist"

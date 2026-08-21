@@ -236,6 +236,30 @@ fn plugin_themes_lists_user_and_bundle_sources_only() {
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
+fn plugin_themes_survive_missing_optional_legacy_pack() {
+    let temp = temp_dir("plugin-themes-missing-legacy-pack");
+    let bundle = temp.join("bundle");
+    write_theme_test_bundle(&bundle, "9.9.11");
+    let manifest_path = bundle.join("bundle.toml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap().replace(
+        "available = [\"themes\"]",
+        "available = [\"themes\", \"env-sync\"]",
+    );
+    fs::write(manifest_path, manifest).unwrap();
+
+    let output = run_winuxsh_with_env(
+        &["plugin", "themes"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle)],
+    );
+    assert_success(&output, "plugin themes with missing legacy pack");
+    assert!(
+        stdout_text(&output).contains("testmarket source=bundle"),
+        "{}",
+        stdout_text(&output)
+    );
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
 fn plugin_themes_marks_external_bundle_trust_source() {
     let temp = temp_dir("plugin-themes-external-catalog");
     let bundle = temp.join("bundle");

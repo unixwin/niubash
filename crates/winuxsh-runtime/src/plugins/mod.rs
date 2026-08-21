@@ -595,6 +595,14 @@ fn load_legacy_bundle_pack_records(
             .join(&bundle.layout.packs_dir)
             .join(&name)
             .join("plugin.toml");
+        if !manifest_path.is_file() {
+            log::warn!(
+                "skipping missing optional bundle pack '{}' at {}",
+                name,
+                manifest_path.display()
+            );
+            continue;
+        }
         let text = fs::read_to_string(&manifest_path)
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
         let manifest: BundlePackToml = toml::from_str(&text)
