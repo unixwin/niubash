@@ -567,13 +567,39 @@ fn resolve_path(word: &str) -> PathBuf {
         None
     };
 
-    let path = expanded.unwrap_or_else(|| PathBuf::from(word));
+    let path = expanded
+        .or_else(|| resolve_logical_shell_path(&word))
+        .unwrap_or_else(|| PathBuf::from(word));
     if path.is_absolute() {
         path
     } else {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
+    }
+}
+
+fn resolve_logical_shell_path(word: &str) -> Option<PathBuf> {
+    let normalized = word.replace('\\', "/");
+    let root = std::env::var_os("WINUXSH_ROOT").map(PathBuf::from)?;
+    if normalized == "/" {
+        return Some(root);
+    }
+    if normalized == "/home" || normalized.starts_with("/home/") {
+        let users = shell_home_dir()?.parent()?.to_path_buf();
+        let rest = normalized
+            .trim_start_matches("/home")
+            .trim_start_matches('/');
+        return Some(if rest.is_empty() {
+            users
+        } else {
+            users.join(rest)
+        });
+    }
+    let rest = normalized.strip_prefix('/')?;
+    match rest.split('/').next() {
+        Some("bin" | "dev" | "etc" | "opt" | "tmp" | "usr" | "var") => Some(root.join(rest)),
+        _ => None,
     }
 }
 
