@@ -76,7 +76,22 @@ try {
             if ($Target) {
                 $buildArgs += @("--target", $Target)
             }
-            cargo @buildArgs
+            $previousRustFlags = $env:RUSTFLAGS
+            try {
+                $env:RUSTFLAGS = ""
+                & cargo @buildArgs
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to build $Name shim."
+                }
+            }
+            finally {
+                if ($null -eq $previousRustFlags) {
+                    Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+                }
+                else {
+                    $env:RUSTFLAGS = $previousRustFlags
+                }
+            }
         }
         if (-not (Test-Path -LiteralPath $shimExe)) {
             throw "$name.exe not found at $shimExe"
