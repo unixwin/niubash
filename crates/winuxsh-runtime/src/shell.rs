@@ -4,10 +4,12 @@
 //! (prompt, history, completion). All shell language semantics are delegated
 //! to rubash; this layer only adds the Windows-facing UX.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -142,8 +144,31 @@ impl Shell {
             std::env::set_var("WINUXSH_SHELL_PATH_STYLE", "native");
         }
         let mut executor = Executor::new();
-        if let Some(shell_name) = std::env::args().next() {
-            executor.set_env("__RUBASH_SHELL_NAME", &shell_name);
+        // Reedline is the interactive history owner. Keep Rubash's Bash
+        // history machinery disabled in the host shell so HISTFILE cannot
+        // create a second, competing history stream.
+        executor.set_shell_option("history", false);
+        executor.unset_env("HISTFILE");
+        // Winuxsh delegates Windows elevation to external providers such as the
+        // WPM gsudo package. The experimental Rubash builtin is opt-in only.
+        if std::env::var("WINUXSH_ENABLE_RUBASH_SUDO").as_deref() != Ok("1") {
+            executor.set_builtin_disabled("sudo", true);
+        }
+        let shell_name = std::env::var("WINUXSH_INVOKED_AS")
+            .ok()
+            .or_else(|| std::env::args().next());
+        if let Some(shell_name) = shell_name {
+            let invoked_name = shell_name
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&shell_name)
+                .trim_end_matches(".exe")
+                .to_ascii_lowercase();
+            executor.set_env("__RUBASH_SHELL_NAME", &invoked_name);
+            if matches!(invoked_name.as_str(), "sh" | "ash") {
+                executor.set_env("__RUBASH_POSIX_MODE", "1");
+                executor.set_shell_option("posix", true);
+            }
         }
         // Starship is initialized through its Bash integration even when
         // Winuxsh is invoked through the sh/bash command shims.
@@ -298,6 +323,18 @@ impl Shell {
             .path
             .clone()
             .unwrap_or_else(|| home_dir.join(".winuxsh_history"));
+        let history_provider = crate::history::RubashHistoryProvider::with_file(
+            config.history.max_size,
+            history_path.clone(),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "failed to open history provider {}: {}",
+                history_path.display(),
+                error
+            )
+        })?;
+        executor.set_history_provider(Rc::new(RefCell::new(history_provider)));
         let last_working_dir_cache_path = default_last_working_dir_cache_path(&home_dir);
 
         // 8. Completion state.

@@ -127,6 +127,38 @@ winuxcmd.exe wpm links rebuild --force
 Do not assume `/usr/bin` exists. Winuxsh is a Windows process using Windows
 executables and command links.
 
+## Elevated Commands
+
+Winuxsh disables Rubash's experimental `sudo` builtin by default. Windows
+elevation is delegated to the WPM `gsudo` package, which owns UAC, process
+creation, environment forwarding, and console handling.
+
+```bash
+command -v gsudo
+gsudo --version
+gsudo your-command args
+```
+
+Install or repair it through the active WPM provider when necessary:
+
+```bash
+wpm search gsudo
+wpm install gsudo
+wpm links rebuild --force
+```
+
+Do not alias `sudo` automatically in shared scripts. A user who wants the
+Unix spelling interactively can add this to `~/.winuxshrc`:
+
+```bash
+alias sudo='gsudo'
+```
+
+The embedded Rubash elevation builtin remains available only for host
+integrators. Set `WINUXSH_ENABLE_RUBASH_SUDO=1` before starting Winuxsh, or run
+`enable sudo` in a shell that supports an elevation handler. This is not the
+recommended Windows path.
+
 ## Windows Paths And Home
 
 Prefer durable Windows paths in scripts:

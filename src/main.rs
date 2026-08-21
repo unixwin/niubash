@@ -27,6 +27,8 @@ use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use rubash::invocation::ShellInvocation;
+
 mod self_update;
 const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-winuxsh";
 const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "winuxsh-plugin-bundles";
@@ -81,6 +83,12 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     }
 
     let first = &args[1];
+    if first.starts_with('-')
+        && !matches!(first.as_str(), "-h" | "--help" | "-V" | "--version" | "-C" | "--repl-command")
+        && ShellInvocation::parse(&args[1..]).is_ok()
+    {
+        return run_shell_invocation(&args[1..]);
+    }
     match first.as_str() {
         "-h" | "--help" => {
             print_usage();
@@ -142,6 +150,49 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
+    let invocation = ShellInvocation::parse(args)
+        .map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
+    let mut shell = if invocation.read_stdin {
+        winuxsh_runtime::Shell::new_for_stdin_script()?
+    } else {
+        winuxsh_runtime::Shell::new()?
+    };
+    invocation
+        .apply_to_executor(&mut shell.executor)
+        .map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
+    shell.executor.inherit_process_stdin();
+    shell.enable_process_stdin_pipeline_bridge();
+
+    if let Some(command) = invocation.command {
+        shell.executor.set_env("BASH_EXECUTION_STRING", &command);
+        let code = shell.execute_script(&command)?;
+        let code = shell.finish_with_exit_trap(code)?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    if let Some(script_name) = invocation.script {
+        shell.executor.set_env("__RUBASH_SCRIPT_NAME", &script_name);
+        let content = std::fs::read_to_string(script_arg_to_host_path(&script_name))?;
+        let code = shell.execute_script(&content)?;
+        let code = shell.finish_with_exit_trap(code)?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    let mut content = String::new();
+    std::io::stdin().read_to_string(&mut content)?;
+    let code = shell.execute_script(&content)?;
+    let code = shell.finish_with_exit_trap(code)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 fn script_arg_to_host_path(value: &str) -> PathBuf {

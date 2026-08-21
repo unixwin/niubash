@@ -58,6 +58,112 @@ fn cwd_cd_pwd_and_windows_child_process_agree() {
 }
 
 #[test]
+fn history_and_fc_use_the_host_history_provider() {
+    let temp = unique_temp_dir("winuxsh-host-history-provider");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let history = home.join(".winuxsh_history");
+    std::fs::write(&history, "first command\nsecond command\n").unwrap();
+
+    let output = run_winuxsh("history; fc 2", &start, &home, &[]);
+    assert_success(&output, "host history provider");
+    let stdout = normalize_text(&output.stdout);
+    assert!(stdout.contains("1  first command"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("2  second command"),
+        "stdout was {stdout:?}"
+    );
+
+    let saved = run_winuxsh("history -s third command", &start, &home, &[]);
+    assert_success(&saved, "host history save");
+    assert!(std::fs::read_to_string(&history)
+        .unwrap()
+        .contains("third command"));
+
+    let deleted = run_winuxsh("history -d 2", &start, &home, &[]);
+    assert_success(&deleted, "host history delete");
+    let after_delete = std::fs::read_to_string(&history).unwrap();
+    assert!(!after_delete.contains("second command"));
+    assert!(after_delete.contains("third command"));
+
+    let cleared = run_winuxsh("history -c", &start, &home, &[]);
+    assert_success(&cleared, "host history clear");
+    assert_eq!(std::fs::read_to_string(&history).unwrap(), "");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn host_shell_keeps_rubash_history_storage_disabled() {
+    let temp = unique_temp_dir("winuxsh-host-history-owner");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let rubash_history = temp.join("rubash-history");
+
+    let output = run_winuxsh(
+        "test -z \"$HISTFILE\"",
+        &start,
+        &home,
+        &[("HISTFILE", rubash_history.to_string_lossy().into_owned())],
+    );
+
+    assert_success(&output, "host history ownership");
+    assert!(
+        !rubash_history.exists(),
+        "Rubash must not create a second host history file"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn bash_style_noexec_option_reaches_rubash() {
+    let temp = unique_temp_dir("winuxsh-host-noexec");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = Command::new(winuxsh_binary())
+        .args(["-n", "-c", "printf should-not-run"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+
+    assert_success(&output, "Bash -n host invocation");
+    assert!(
+        output.stdout.is_empty(),
+        "-n unexpectedly executed the command"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn bash_style_errexit_option_reaches_rubash() {
+    let temp = unique_temp_dir("winuxsh-host-errexit");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = Command::new(winuxsh_binary())
+        .args(["-e", "-c", "false; printf should-not-run"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "-e continued after failure");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn slash_drive_paths_are_compat_input_not_default_output() {
     if !cfg!(windows) {
         return;

@@ -12,6 +12,61 @@ use reedline::{
     Result, SearchQuery,
 };
 
+/// Adapter exposing the host Reedline history to Rubash builtins.
+pub(crate) struct RubashHistoryProvider {
+    inner: LiveFileBackedHistory,
+}
+
+impl std::fmt::Debug for RubashHistoryProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RubashHistoryProvider")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RubashHistoryProvider {
+    pub(crate) fn with_file(capacity: usize, path: PathBuf) -> Result<Self> {
+        Ok(Self {
+            inner: LiveFileBackedHistory::with_file(capacity, path)?,
+        })
+    }
+}
+
+impl rubash::history::HistoryProvider for RubashHistoryProvider {
+    fn entries(&mut self) -> io::Result<Vec<String>> {
+        let items = self
+            .inner
+            .search(SearchQuery::all_that_contain_rev(String::new()))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(items
+            .into_iter()
+            .rev()
+            .map(|item| item.command_line)
+            .collect())
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.inner
+            .clear()
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    fn append(&mut self, command: String) -> io::Result<()> {
+        self.inner
+            .save(HistoryItem::from_command_line(command))
+            .map(|_| ())
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    fn replace(&mut self, entries: Vec<String>) -> io::Result<()> {
+        self.clear()?;
+        for entry in entries {
+            self.append(entry)?;
+        }
+        Ok(())
+    }
+}
+
 const HISTORY_LOCK_ERROR: &str = "history mutex is poisoned";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
