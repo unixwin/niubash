@@ -91,6 +91,35 @@ winuxsh --self-update        # the shell itself
 wpm update winuxcmd          # the Unix commands it ships with
 ```
 
+## Bash And sh Command Links
+
+When the WinuxCmd installer creates `bash.exe`, `sh.exe`, or `ash.exe` command
+links to Winuxsh, the link launcher must pass the invocation identity without
+relying on the resolved executable path:
+
+```text
+WINUXSH_INVOKED_AS=bash
+WINUXSH_INVOKED_AS=sh
+WINUXSH_INVOKED_AS=ash
+```
+
+Winuxsh already consumes this value before constructing Rubash. `sh` and `ash`
+select POSIX mode; `bash` keeps Bash mode. A plain `winuxsh.exe` launch must
+leave the variable unset. The launcher must preserve all original argv values
+and must not implement a second shell-option parser.
+
+Installer acceptance tests for the WinuxCmd link provider:
+
+```sh
+bash.exe -c 'test -z "$POSIXLY_CORRECT"'
+sh.exe -c 'set -o | grep posix'
+ash.exe -c 'set -o | grep posix'
+```
+
+This repository does not create the command links. The installation provider
+currently needs to implement this contract; do not replace it with a
+`current_exe()` heuristic in Winuxsh.
+
 ## Bundled Plugin Baseline
 
 Release packages also stage the official `oh-my-winuxsh` bundle under:
