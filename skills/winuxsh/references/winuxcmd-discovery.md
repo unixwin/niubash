@@ -31,11 +31,12 @@ command -v ls
 command -v cat
 command -v grep
 command -v find
+command -v pathchk
 ls --version 2>/dev/null || ls --help | head -20
 grep --version 2>/dev/null || grep --help | head -20
 ```
 
-Users may have WinuxCmd, GNU coreutils, uutils, BusyBox, Git, Node-installed
+Users may have WinuxCmd, GNU coreutils, other Rust coreutils builds, BusyBox, Git, Node-installed
 CLIs, or other providers on PATH. Windows `find.exe` is especially
 collision-prone; inspect `command -v find` before assuming GNU-style `find`
 flags.
