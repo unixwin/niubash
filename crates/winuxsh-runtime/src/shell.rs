@@ -2870,7 +2870,10 @@ fn mask_first_positional_pattern(
                 i += 2;
                 continue;
             }
-            if let Some(name) = arg.strip_prefix("--").and_then(|rest| rest.split('=').next()) {
+            if let Some(name) = arg
+                .strip_prefix("--")
+                .and_then(|rest| rest.split('=').next())
+            {
                 let long = format!("--{name}");
                 if pattern_opts.contains(&long.as_str()) || file_opts.contains(&long.as_str()) {
                     pattern_via_option = true;
