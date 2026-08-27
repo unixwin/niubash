@@ -58,6 +58,7 @@ pub struct Shell {
     pub history_path: PathBuf,
     pub history_max_size: usize,
     pub history_ignore_space_prefixed: bool,
+    pub history_mode: crate::config::HistoryMode,
     pub menu_config: MenuConfig,
     pub editor_mode: EditorMode,
     pub autosuggest: AutosuggestConfig,
@@ -117,7 +118,8 @@ impl Shell {
 
     fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
         // 1. Load runtime defaults and environment-backed state.
-        let config = load_config();
+        let mut config = load_config();
+        config.history = config.history.with_env_overrides();
 
         // 2. Select the WinuxCmd installation and use its real directory tree
         // before constructing the executor.
@@ -326,6 +328,7 @@ impl Shell {
         let history_provider = crate::history::RubashHistoryProvider::with_file(
             config.history.max_size,
             history_path.clone(),
+            config.history.mode,
         )
         .map_err(|error| {
             anyhow::anyhow!(
@@ -371,6 +374,7 @@ impl Shell {
             history_path,
             history_max_size: config.history.max_size,
             history_ignore_space_prefixed: config.history.ignore_space_prefixed,
+            history_mode: config.history.mode,
             menu_config: config.menus,
             editor_mode: config.editor.edit_mode,
             autosuggest: config.autosuggest.with_env_overrides(),
@@ -6281,6 +6285,7 @@ winuxsh_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             history_path: PathBuf::from(".winuxsh_history"),
             history_max_size: 10000,
             history_ignore_space_prefixed: false,
+            history_mode: crate::config::HistoryMode::default(),
             menu_config: MenuConfig::default(),
             editor_mode: EditorMode::Emacs,
             autosuggest: AutosuggestConfig::default(),

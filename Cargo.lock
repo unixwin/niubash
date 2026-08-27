@@ -1407,6 +1407,7 @@ dependencies = [
  "colored",
  "dirs",
  "env_logger",
+ "fd-lock",
  "filetime",
  "glob",
  "globset",
