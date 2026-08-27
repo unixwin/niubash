@@ -2639,14 +2639,18 @@ fn normalize_winuxcmd_slash_drive_command(command: &mut rubash::parser::CommandN
         }
     }
 
-    let Some(command_name) = command.words.first() else {
+    let Some(command_name) = command.words.first().cloned() else {
         return;
     };
-    if !is_winuxcmd_path_command(command_name) {
+    if !is_winuxcmd_path_command(&command_name) {
         return;
     }
 
-    for word in command.words.iter_mut().skip(1) {
+    let translate = winuxcmd_path_translation_mask(&command_name, &command.words);
+    for (index, word) in command.words.iter_mut().enumerate() {
+        if index == 0 || !translate.get(index).copied().unwrap_or(true) {
+            continue;
+        }
         if let Some(normalized) = slash_drive_arg_to_windows_native(word) {
             *word = normalized;
         }
@@ -2761,6 +2765,173 @@ const WINUXCMD_PATH_COMMANDS: &[&str] = &[
     "wc",
     "xxd",
 ];
+
+/// Per-argument mask controlling which WinuxCmd command arguments may be
+/// slash-drive translated. Pattern, regex, or script operands of `grep`,
+/// `sed`, `awk`, and `find` are left untouched so a `/x/`-shaped pattern is
+/// not rewritten into a Windows drive path (unixwin/winuxsh#61).
+fn winuxcmd_path_translation_mask(command_name: &str, words: &[String]) -> Vec<bool> {
+    let mut mask = vec![true; words.len()];
+    if let Some(first) = mask.first_mut() {
+        *first = false;
+    }
+
+    let name = command_name.trim_end_matches(".exe").to_ascii_lowercase();
+    match name.as_str() {
+        "grep" => mask_first_positional_pattern(
+            words,
+            &mut mask,
+            &["-e", "--regexp"],
+            &["-f", "--file"],
+            &[
+                "-m",
+                "--max-count",
+                "-A",
+                "--after-context",
+                "-B",
+                "--before-context",
+                "-C",
+                "--context",
+                "-d",
+                "--devices",
+                "-D",
+                "--directories",
+            ],
+        ),
+        "sed" => mask_first_positional_pattern(
+            words,
+            &mut mask,
+            &["-e", "--expression"],
+            &["-f", "--file"],
+            &[],
+        ),
+        "awk" => mask_first_positional_pattern(words, &mut mask, &[], &["-f", "--file"], &[]),
+        "find" => mask_find_expression(words, &mut mask),
+        _ => {}
+    }
+    mask
+}
+
+fn short_option_char(opts: &[&str]) -> Option<char> {
+    opts.iter().find_map(|opt| {
+        let bytes = opt.as_bytes();
+        if bytes.len() == 2 && bytes[0] == b'-' && bytes[1].is_ascii_alphabetic() {
+            Some(bytes[1] as char)
+        } else {
+            None
+        }
+    })
+}
+
+/// Marks the first positional operand of a pattern/script command as
+/// non-translatable. `pattern_opts` consume a separate pattern value,
+/// `file_opts` consume a separate file operand, and `value_opts` consume a
+/// numeric or action value; any of the first two suppresses the positional
+/// pattern. Attached `--opt=value` and `-oVALUE` clusters carry the value in
+/// the same token and only gate the positional operand.
+fn mask_first_positional_pattern(
+    words: &[String],
+    mask: &mut [bool],
+    pattern_opts: &[&str],
+    file_opts: &[&str],
+    value_opts: &[&str],
+) {
+    let pattern_short = short_option_char(pattern_opts);
+    let file_short = short_option_char(file_opts);
+
+    let mut pattern_via_option = false;
+    let mut after_dashdash = false;
+    let mut first_positional: Option<usize> = None;
+    let mut i = 1;
+    while i < words.len() {
+        let arg = words[i].as_str();
+        if !after_dashdash && arg == "--" {
+            after_dashdash = true;
+            i += 1;
+            continue;
+        }
+        let is_option = !after_dashdash && arg.starts_with('-') && arg.len() > 1;
+
+        if is_option {
+            if pattern_opts.contains(&arg) {
+                pattern_via_option = true;
+                if let Some(slot) = mask.get_mut(i + 1) {
+                    *slot = false;
+                }
+                i += 2;
+                continue;
+            }
+            if file_opts.contains(&arg) {
+                pattern_via_option = true;
+                i += 2;
+                continue;
+            }
+            if value_opts.contains(&arg) {
+                i += 2;
+                continue;
+            }
+            if let Some(name) = arg
+                .strip_prefix("--")
+                .and_then(|rest| rest.split('=').next())
+            {
+                let long = format!("--{name}");
+                if pattern_opts.contains(&long.as_str()) || file_opts.contains(&long.as_str()) {
+                    pattern_via_option = true;
+                }
+            } else if let Some(cluster) = arg.strip_prefix('-') {
+                if let Some(first) = cluster.chars().next() {
+                    if Some(first) == pattern_short || Some(first) == file_short {
+                        pattern_via_option = true;
+                    }
+                }
+            }
+        } else if first_positional.is_none() {
+            first_positional = Some(i);
+        }
+        i += 1;
+    }
+
+    if !pattern_via_option {
+        if let Some(idx) = first_positional {
+            if let Some(slot) = mask.get_mut(idx) {
+                *slot = false;
+            }
+        }
+    }
+}
+
+/// Marks `find` pattern-primary values (`-name`, `-path`, `-regex`, ...) as
+/// non-translatable. Leading non-option operands are starting paths and stay
+/// translatable.
+fn mask_find_expression(words: &[String], mask: &mut [bool]) {
+    let pattern_primaries = [
+        "-name",
+        "-path",
+        "-regex",
+        "-iregex",
+        "-ipath",
+        "-lname",
+        "-wholename",
+        "-ilname",
+        "-iwholename",
+    ];
+    let mut in_expression = false;
+    let mut i = 1;
+    while i < words.len() {
+        let arg = words[i].as_str();
+        if !in_expression && (arg.starts_with('-') || matches!(arg, "!" | "(" | ")")) {
+            in_expression = true;
+        }
+        if in_expression && pattern_primaries.contains(&arg) {
+            if let Some(slot) = mask.get_mut(i + 1) {
+                *slot = false;
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+}
 
 fn slash_drive_arg_to_windows_native(value: &str) -> Option<String> {
     if let Some(path) = slash_drive_path_to_windows_native(value) {
@@ -4965,6 +5136,47 @@ winuxsh_run_chpwd_hooks() {
                 and_or_list.commands[1].words[1],
                 "/c/Users/tmp/test.XXXXXX.tmp"
             );
+        }
+    }
+
+    #[test]
+    fn winuxcmd_pattern_operands_are_not_slash_drive_translated() {
+        let tokens = tokenize(
+            "grep -F \"/h/\" /c/Users/file; grep /h/ /c/Users/file; grep -e /h/ /c/Users/file; grep -f /c/patfile /c/Users/file; grep -A 2 /h/ /c/Users/file; sed /h/d /c/Users/file; awk /h/ /c/Users/file; find /c/Users -name /h/ -print; find /e/ -maxdepth 1",
+        );
+        let mut ast = parse(&tokens);
+        normalize_winuxcmd_slash_drive_args(&mut ast);
+
+        if cfg!(windows) {
+            assert_eq!(ast.commands[0].words[2], "/h/");
+            assert_eq!(ast.commands[0].words[3], "C:/Users/file");
+            assert_eq!(ast.commands[1].words[1], "/h/");
+            assert_eq!(ast.commands[1].words[2], "C:/Users/file");
+            assert_eq!(ast.commands[2].words[2], "/h/");
+            assert_eq!(ast.commands[2].words[3], "C:/Users/file");
+            assert_eq!(ast.commands[3].words[2], "C:/patfile");
+            assert_eq!(ast.commands[3].words[3], "C:/Users/file");
+            assert_eq!(ast.commands[4].words[1], "-A");
+            assert_eq!(ast.commands[4].words[2], "2");
+            assert_eq!(ast.commands[4].words[3], "/h/");
+            assert_eq!(ast.commands[4].words[4], "C:/Users/file");
+            assert_eq!(ast.commands[5].words[1], "/h/d");
+            assert_eq!(ast.commands[5].words[2], "C:/Users/file");
+            assert_eq!(ast.commands[6].words[1], "/h/");
+            assert_eq!(ast.commands[6].words[2], "C:/Users/file");
+            assert_eq!(ast.commands[7].words[1], "C:/Users");
+            assert_eq!(ast.commands[7].words[3], "/h/");
+            assert_eq!(ast.commands[8].words[1], "E:/");
+        } else {
+            assert_eq!(ast.commands[0].words[2], "/h/");
+            assert_eq!(ast.commands[0].words[3], "/c/Users/file");
+            assert_eq!(ast.commands[3].words[2], "/c/patfile");
+            assert_eq!(ast.commands[4].words[3], "/h/");
+            assert_eq!(ast.commands[5].words[1], "/h/d");
+            assert_eq!(ast.commands[6].words[1], "/h/");
+            assert_eq!(ast.commands[7].words[1], "/c/Users");
+            assert_eq!(ast.commands[7].words[3], "/h/");
+            assert_eq!(ast.commands[8].words[1], "/e/");
         }
     }
 

@@ -318,8 +318,7 @@ fn is_winuxcmd_installation_entry(entry: &str) -> bool {
     #[cfg(windows)]
     {
         let path = PathBuf::from(entry.trim_matches('"'));
-        return path.join("winuxcmd.exe").is_file()
-            || path.join("usr/bin/winuxcmd.exe").is_file();
+        return path.join("winuxcmd.exe").is_file() || path.join("usr/bin/winuxcmd.exe").is_file();
     }
 
     #[cfg(not(windows))]
@@ -535,10 +534,7 @@ mod tests {
 
         assert_eq!(candidates[0], exe_dir.join("usr/bin/winuxcmd.exe"));
         assert_eq!(candidates[1], exe_dir.join("winuxcmd.exe"));
-        assert_eq!(
-            candidates[2],
-            exe_dir.join("winuxcmd/usr/bin/winuxcmd.exe")
-        );
+        assert_eq!(candidates[2], exe_dir.join("winuxcmd/usr/bin/winuxcmd.exe"));
     }
 
     #[test]
