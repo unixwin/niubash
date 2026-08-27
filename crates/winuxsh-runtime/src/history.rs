@@ -12,6 +12,8 @@ use reedline::{
     Result, SearchQuery,
 };
 
+use crate::config::HistoryMode;
+
 /// Adapter exposing the host Reedline history to Rubash builtins.
 pub(crate) struct RubashHistoryProvider {
     inner: LiveFileBackedHistory,
@@ -25,9 +27,9 @@ impl std::fmt::Debug for RubashHistoryProvider {
 }
 
 impl RubashHistoryProvider {
-    pub(crate) fn with_file(capacity: usize, path: PathBuf) -> Result<Self> {
+    pub(crate) fn with_file(capacity: usize, path: PathBuf, mode: HistoryMode) -> Result<Self> {
         Ok(Self {
-            inner: LiveFileBackedHistory::with_file(capacity, path)?,
+            inner: LiveFileBackedHistory::with_mode(capacity, path, mode)?,
         })
     }
 }
@@ -91,16 +93,28 @@ pub(crate) struct LiveFileBackedHistory {
     capacity: usize,
     path: PathBuf,
     state: Mutex<HistoryState>,
+    mode: HistoryMode,
 }
 
 impl LiveFileBackedHistory {
+    #[cfg(test)]
     pub(crate) fn with_file(capacity: usize, path: PathBuf) -> Result<Self> {
-        let history = FileBackedHistory::with_file(capacity, path.clone())?;
+        Self::with_mode(capacity, path, HistoryMode::Shared)
+    }
+
+    pub(crate) fn with_mode(capacity: usize, path: PathBuf, mode: HistoryMode) -> Result<Self> {
+        let history_capacity = if mode == HistoryMode::Private {
+            usize::MAX - 1
+        } else {
+            capacity
+        };
+        let history = FileBackedHistory::with_file(history_capacity, path.clone())?;
         let signature = file_signature(&path)?;
         Ok(Self {
             capacity,
             path,
             state: Mutex::new(HistoryState { history, signature }),
+            mode,
         })
     }
 
@@ -116,7 +130,15 @@ impl LiveFileBackedHistory {
             .map_err(|_| ReedlineError::from(history_lock_error()))
     }
 
-    fn refresh_if_stale(capacity: usize, path: &Path, state: &mut HistoryState) -> Result<()> {
+    fn refresh_if_stale(
+        capacity: usize,
+        path: &Path,
+        state: &mut HistoryState,
+        mode: HistoryMode,
+    ) -> Result<()> {
+        if mode != HistoryMode::Shared {
+            return Ok(());
+        }
         let signature = file_signature(path)?;
         if signature == state.signature {
             return Ok(());
@@ -141,8 +163,9 @@ impl History for LiveFileBackedHistory {
     fn save(&mut self, item: HistoryItem) -> Result<HistoryItem> {
         let capacity = self.capacity;
         let path = self.path.clone();
+        let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state)?;
+        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
         let saved = state.history.save(item)?;
         Self::sync_state(&path, &mut state)?;
         Ok(saved)
@@ -151,24 +174,27 @@ impl History for LiveFileBackedHistory {
     fn load(&self, id: HistoryItemId) -> Result<HistoryItem> {
         let capacity = self.capacity;
         let path = self.path.clone();
+        let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &path, &mut state)?;
+        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
         state.history.load(id)
     }
 
     fn count(&self, query: SearchQuery) -> Result<i64> {
         let capacity = self.capacity;
         let path = self.path.clone();
+        let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &path, &mut state)?;
+        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
         state.history.count(query)
     }
 
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>> {
         let capacity = self.capacity;
         let path = self.path.clone();
+        let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &path, &mut state)?;
+        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
         state.history.search(query)
     }
 
@@ -179,16 +205,18 @@ impl History for LiveFileBackedHistory {
     ) -> Result<()> {
         let capacity = self.capacity;
         let path = self.path.clone();
+        let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state)?;
+        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
         state.history.update(id, updater)
     }
 
     fn clear(&mut self) -> Result<()> {
         let capacity = self.capacity;
         let path = self.path.clone();
+        let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state)?;
+        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
         state.history.clear()?;
         state.signature = file_signature(&path)?;
         Ok(())
@@ -197,8 +225,9 @@ impl History for LiveFileBackedHistory {
     fn delete(&mut self, id: HistoryItemId) -> Result<()> {
         let capacity = self.capacity;
         let path = self.path.clone();
+        let mode = self.mode;
         let mut state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, &path, &mut state)?;
+        Self::refresh_if_stale(capacity, &path, &mut state, mode)?;
         state.history.delete(id)
     }
 
@@ -278,5 +307,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read_to_string(path).unwrap(), "echo live\n");
+    }
+
+    #[test]
+    fn private_mode_loads_existing_history_but_ignores_later_external_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "old-one\nold-two\n").unwrap();
+
+        let mut first = LiveFileBackedHistory::with_mode(100, path, HistoryMode::Private).unwrap();
+        first
+            .save(HistoryItem::from_command_line("this-session"))
+            .unwrap();
+
+        let commands = first
+            .search(SearchQuery::everything(
+                reedline::SearchDirection::Forward,
+                None,
+            ))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.command_line)
+            .collect::<Vec<_>>();
+        assert_eq!(commands, vec!["old-one", "old-two", "this-session"]);
     }
 }

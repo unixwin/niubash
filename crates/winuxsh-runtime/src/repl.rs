@@ -44,15 +44,18 @@ pub fn spawn_self_update(args: &[String]) -> Option<i32> {
 
 /// Build a `Reedline` instance for the shell.
 pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
-    let history =
-        LiveFileBackedHistory::with_file(shell.history_max_size, shell.history_path.clone())
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to open history file {}: {}",
-                    shell.history_path.display(),
-                    e
-                )
-            })?;
+    let history = LiveFileBackedHistory::with_mode(
+        shell.history_max_size,
+        shell.history_path.clone(),
+        shell.history_mode,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "failed to open history file {}: {}",
+            shell.history_path.display(),
+            e
+        )
+    })?;
 
     let completer = WinuxshCompleter::new(shell.completion_state.clone());
     let menu_config = shell.menu_config;

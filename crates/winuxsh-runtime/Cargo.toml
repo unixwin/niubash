@@ -9,6 +9,7 @@ description = "Runtime crate for winuxsh: rubash-backed shell REPL on Windows"
 [dependencies]
 rubash = { path = "../../../rubash" }
 reedline = "0.33"
+fd-lock = "4.0"
 anyhow = "1.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
