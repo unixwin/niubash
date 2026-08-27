@@ -84,7 +84,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 
     let first = &args[1];
     if first.starts_with('-')
-        && !matches!(first.as_str(), "-h" | "--help" | "-V" | "--version" | "-C" | "--repl-command")
+        && !matches!(
+            first.as_str(),
+            "-h" | "--help" | "-V" | "--version" | "-C" | "--repl-command"
+        )
         && ShellInvocation::parse(&args[1..]).is_ok()
     {
         return run_shell_invocation(&args[1..]);
@@ -153,8 +156,8 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
-    let invocation = ShellInvocation::parse(args)
-        .map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
+    let invocation =
+        ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
     let mut shell = if invocation.read_stdin {
         winuxsh_runtime::Shell::new_for_stdin_script()?
     } else {

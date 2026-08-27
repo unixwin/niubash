@@ -9,7 +9,11 @@ fn winuxsh_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("debug")
-        .join(if cfg!(windows) { "winuxsh.exe" } else { "winuxsh" })
+        .join(if cfg!(windows) {
+            "winuxsh.exe"
+        } else {
+            "winuxsh"
+        })
 }
 
 #[test]
