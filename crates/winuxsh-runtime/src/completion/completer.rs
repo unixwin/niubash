@@ -17,6 +17,7 @@ pub struct CompletionState {
     pub current_dir: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub aliases: HashSet<String>,
+    pub functions: HashSet<String>,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -28,6 +29,7 @@ impl CompletionState {
             current_dir,
             env_vars: HashMap::new(),
             aliases: HashSet::new(),
+            functions: HashSet::new(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
         }
@@ -102,12 +104,13 @@ impl WinuxshCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, behavior, plugins) =
+        let (current_dir, env_vars, aliases, functions, behavior, plugins) =
             if let Ok(state) = self.state.lock() {
                 (
                     state.current_dir.clone(),
                     state.env_vars.clone(),
                     state.aliases.clone(),
+                    state.functions.clone(),
                     state.behavior,
                     state.plugins.clone(),
                 )
@@ -119,13 +122,15 @@ impl WinuxshCompleter {
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
         let mut all_suggestions = Vec::new();
 
-        // At command position, also surface matching directories from the
-        // current working directory ahead of PATH command matches. This
-        // mirrors the Windows-shell expectation that `win` in a folder
-        // containing `winuxsh/` should offer `winuxsh/` first, instead of
-        // only showing PATH executables like `winver` or `winrm`.
-        let cwd_dir_suggestions = self.cwd_directory_suggestions_at_command_position(&context);
+        // At command position, also surface matching entries from the current
+        // working directory ahead of PATH command matches. This mirrors the
+        // Windows-shell expectation that `win` in a folder containing
+        // `./winuxsh/` should offer `./winuxsh/` first, instead of only showing
+        // PATH executables like `winver` or `winrm`.
+        let cwd_path_suggestions = self.cwd_path_suggestions_at_command_position(&context);
         let alias_suggestions = self.alias_suggestions_at_command_position(&context, &aliases);
+        let function_suggestions =
+            self.function_suggestions_at_command_position(&context, &functions);
 
         // Try each plugin in order; only the first non-None result is used
         for plugin in &plugins {
@@ -136,15 +141,21 @@ impl WinuxshCompleter {
             }
         }
 
-        // Directories from cwd take priority over PATH commands so users can
-        // `cd winuxsh`/open `winuxsh/` without typing `./` first.
-        if !cwd_dir_suggestions.is_empty() {
-            let mut combined = cwd_dir_suggestions;
+        // Current-directory paths take priority over PATH commands so users can
+        // complete local files and directories without typing `./` first.
+        if !cwd_path_suggestions.is_empty() {
+            let mut combined = cwd_path_suggestions;
             combined.extend(alias_suggestions.clone());
+            combined.extend(function_suggestions.clone());
             combined.extend(all_suggestions);
             all_suggestions = combined;
         } else if !alias_suggestions.is_empty() {
             let mut combined = alias_suggestions;
+            combined.extend(function_suggestions.clone());
+            combined.extend(all_suggestions);
+            all_suggestions = combined;
+        } else if !function_suggestions.is_empty() {
+            let mut combined = function_suggestions;
             combined.extend(all_suggestions);
             all_suggestions = combined;
         }
@@ -166,19 +177,17 @@ impl WinuxshCompleter {
         all_suggestions
     }
 
-    /// Build directory-only suggestions from the current working directory
-    /// when the cursor is at command position. Returns suggestions with the
-    /// same `span`/`append_whitespace` shape as the rest of the pipeline.
-    fn cwd_directory_suggestions_at_command_position(
+    /// Build current-directory path suggestions when the cursor is at command
+    /// position. Returns suggestions with the same `span` shape as the rest of
+    /// the pipeline.
+    fn cwd_path_suggestions_at_command_position(
         &self,
         context: &CompletionContext,
     ) -> Vec<Suggestion> {
         if !context.is_command_position() {
             return Vec::new();
         }
-        let Some(word) = context.get_current_word() else {
-            return Vec::new();
-        };
+        let word = context.get_current_word().unwrap_or_default();
         // Skip flag-like input and explicit path indicators; those are handled
         // by the path completer with its own prefix preservation rules.
         if word.starts_with('-')
@@ -188,30 +197,29 @@ impl WinuxshCompleter {
         {
             return Vec::new();
         }
-        if word.is_empty() {
-            return Vec::new();
-        }
 
         let entries = match std::fs::read_dir(&context.current_dir) {
             Ok(entries) => entries,
             Err(_) => return Vec::new(),
         };
 
-        let mut candidates: Vec<String> = Vec::new();
+        let mut candidates: Vec<CwdPathCandidate> = Vec::new();
         for entry in entries.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
             if !context.behavior.matches(&file_name, &word) {
                 continue;
             }
             let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            if !is_dir {
-                continue;
-            }
             if file_name.starts_with('.') && !word.starts_with('.') {
                 continue;
             }
             let escaped = shell_escape_path_segment(&file_name);
-            candidates.push(format!("{escaped}/"));
+            let value = if is_dir {
+                format!("./{escaped}/")
+            } else {
+                format!("./{escaped}")
+            };
+            candidates.push(CwdPathCandidate { is_dir, value });
         }
 
         if candidates.is_empty() {
@@ -228,7 +236,8 @@ impl WinuxshCompleter {
         candidates
             .into_iter()
             .map(|candidate| Suggestion {
-                value: candidate,
+                append_whitespace: !candidate.is_dir,
+                value: candidate.value,
                 description: None,
                 style: None,
                 extra: None,
@@ -236,7 +245,6 @@ impl WinuxshCompleter {
                     start: span_start,
                     end: span_end,
                 },
-                append_whitespace: false,
             })
             .collect()
     }
@@ -271,6 +279,47 @@ impl WinuxshCompleter {
             .map(|candidate| Suggestion {
                 value: candidate,
                 description: Some("alias".to_string()),
+                style: None,
+                extra: None,
+                span: Span {
+                    start: span_start,
+                    end: span_end,
+                },
+                append_whitespace: true,
+            })
+            .collect()
+    }
+
+    fn function_suggestions_at_command_position(
+        &self,
+        context: &CompletionContext,
+        functions: &HashSet<String>,
+    ) -> Vec<Suggestion> {
+        if !context.is_command_position() {
+            return Vec::new();
+        }
+        let Some(word) = context.get_current_word() else {
+            return Vec::new();
+        };
+        if word.contains('/') || word.contains('\\') || word.starts_with('.') {
+            return Vec::new();
+        }
+
+        let (span_start, span_end) = context
+            .current_word_span()
+            .unwrap_or((context.cursor_pos, context.cursor_pos));
+        let mut candidates: Vec<_> = functions
+            .iter()
+            .filter(|function| context.behavior.matches(function, &word))
+            .cloned()
+            .collect();
+        candidates.sort();
+
+        candidates
+            .into_iter()
+            .map(|candidate| Suggestion {
+                value: candidate,
+                description: Some("function".to_string()),
                 style: None,
                 extra: None,
                 span: Span {
@@ -319,6 +368,32 @@ fn should_append_completion_whitespace(completion: &str) -> bool {
         .trim_end_matches('\'')
         .trim_end();
     !(value.ends_with('/') || value.ends_with('\\'))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CwdPathCandidate {
+    is_dir: bool,
+    value: String,
+}
+
+impl Ord for CwdPathCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.is_dir, other.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => self
+                .value
+                .to_ascii_lowercase()
+                .cmp(&other.value.to_ascii_lowercase())
+                .then_with(|| self.value.cmp(&other.value)),
+        }
+    }
+}
+
+impl PartialOrd for CwdPathCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Completer for WinuxshCompleter {
@@ -400,8 +475,8 @@ mod cwd_priority_tests {
 
         let dir_suggestion = suggestions
             .iter()
-            .find(|suggestion| suggestion.value == "winuxsh/")
-            .unwrap_or_else(|| panic!("expected winuxsh/ ahead of PATH, got {suggestions:?}"));
+            .find(|suggestion| suggestion.value == "./winuxsh/")
+            .unwrap_or_else(|| panic!("expected ./winuxsh/ ahead of PATH, got {suggestions:?}"));
         assert_eq!(dir_suggestion.span.start, 0);
         assert_eq!(dir_suggestion.span.end, 3);
         assert!(!dir_suggestion.append_whitespace);
@@ -410,15 +485,15 @@ mod cwd_priority_tests {
         assert!(
             !suggestions
                 .iter()
-                .any(|suggestion| suggestion.value == "other/"),
-            "unexpected other/ in {suggestions:?}"
+                .any(|suggestion| suggestion.value == "./other/"),
+            "unexpected ./other/ in {suggestions:?}"
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
-    fn command_position_does_not_offer_cwd_files_only_directories() {
+    fn command_position_offers_matching_cwd_file_with_dot_slash() {
         let temp_dir = unique_temp_dir("winuxsh-cwd-priority-files");
         std::fs::create_dir_all(&temp_dir).unwrap();
         std::fs::write(temp_dir.join("winuxfile.txt"), "x").unwrap();
@@ -427,16 +502,44 @@ mod cwd_priority_tests {
         let mut completer = WinuxshCompleter::new(state);
         let suggestions = completer.complete("win", 3);
 
-        // A plain file at command position should never be offered as a
-        // command-position directory candidate. We only collect directories
-        // via the cwd shortcut, so file names must not appear even when they
-        // share the typed prefix. PATH commands may still show up via the
-        // command plugin, but no `winuxfile.txt` style entry.
+        let file_suggestion = suggestions
+            .iter()
+            .find(|suggestion| suggestion.value == "./winuxfile.txt")
+            .unwrap_or_else(|| panic!("expected cwd file with ./, got {suggestions:?}"));
+        assert_eq!(file_suggestion.span.start, 0);
+        assert_eq!(file_suggestion.span.end, 3);
+        assert!(file_suggestion.append_whitespace);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn command_position_empty_input_offers_cwd_entries() {
+        let temp_dir = unique_temp_dir("winuxsh-cwd-priority-empty");
+        std::fs::create_dir_all(temp_dir.join("localdir")).unwrap();
+        std::fs::write(temp_dir.join("localfile.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join(".hidden"), "x").unwrap();
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = WinuxshCompleter::new(state);
+        let suggestions = completer.complete("", 0);
+
+        let dir_suggestion = suggestions
+            .iter()
+            .find(|suggestion| suggestion.value == "./localdir/")
+            .unwrap_or_else(|| panic!("expected cwd dir on empty Tab, got {suggestions:?}"));
+        assert!(!dir_suggestion.append_whitespace);
+
+        let file_suggestion = suggestions
+            .iter()
+            .find(|suggestion| suggestion.value == "./localfile.txt")
+            .unwrap_or_else(|| panic!("expected cwd file on empty Tab, got {suggestions:?}"));
+        assert!(file_suggestion.append_whitespace);
         assert!(
             !suggestions
                 .iter()
-                .any(|suggestion| suggestion.value.contains("winuxfile")),
-            "file leaked into cwd directory suggestions: {suggestions:?}"
+                .any(|suggestion| suggestion.value == ".hidden"),
+            "hidden file leaked without dot prefix: {suggestions:?}"
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);

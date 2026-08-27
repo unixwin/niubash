@@ -58,23 +58,16 @@ fn loads_toml_definitions_from_dir() {
 }
 
 #[test]
-fn loads_builtin_winuxcmd_definitions_without_user_dirs() {
+fn runtime_does_not_load_winuxcmd_definitions_without_bundle_or_user_dirs() {
     let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
     {
         let mut s = state.lock().unwrap();
         s.load_completion_dirs(&[]);
     }
 
-    assert_suggests(&state, "ls -", "--all");
-    assert_suggests(&state, "grep -", "--ignore-case");
-    assert_suggests(&state, "find -", "-name");
-    assert_suggests(&state, "cat -", "--number");
-    assert_suggests(&state, "cp -", "--recursive");
-    assert_suggests(&state, "mv -", "--target-directory");
-    assert_suggests(&state, "rm -", "--force");
-    assert_suggests(&state, "mkdir -", "--parents");
-    assert_suggests(&state, "touch -", "--no-create");
-    assert_suggests(&state, "chmod -", "--recursive");
+    assert_not_suggests(&state, "ls -", "--all");
+    assert_not_suggests(&state, "grep -", "--ignore-case");
+    assert_not_suggests(&state, "find -", "-name");
 }
 
 #[test]
@@ -90,11 +83,26 @@ fn command_completion_handles_empty_and_partial_command_words() {
 }
 
 #[test]
-fn substring_behavior_applies_to_builtin_flag_definitions() {
+fn substring_behavior_applies_to_loaded_flag_definitions() {
+    let temp_dir = unique_temp_dir("winuxsh-substring-loaded-completion");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(
+        temp_dir.join("grep.toml"),
+        r#"
+command = "grep"
+description = "test grep"
+
+[[flags]]
+long = "--ignore-case"
+description = "fixture flag"
+"#,
+    )
+    .unwrap();
+
     let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
     {
         let mut s = state.lock().unwrap();
-        s.load_completion_dirs(&[]);
+        s.load_completion_dirs(&[temp_dir.clone()]);
     }
 
     assert_not_suggests(&state, "grep -case", "--ignore-case");
@@ -107,10 +115,12 @@ fn substring_behavior_applies_to_builtin_flag_definitions() {
             ..CompletionBehavior::default()
         },
     );
+
+    let _ = std::fs::remove_dir_all(temp_dir);
 }
 
 #[test]
-fn user_toml_overrides_builtin_definition() {
+fn user_toml_loads_command_definition_without_runtime_defaults() {
     let temp_dir = unique_temp_dir("winuxsh-completion-override");
     std::fs::create_dir_all(&temp_dir).unwrap();
     std::fs::write(
@@ -139,14 +149,14 @@ description = "fixture override flag"
 }
 
 #[test]
-fn translated_zsh_definitions_are_loaded_before_user_dirs() {
+fn injected_definitions_are_loaded_before_user_dirs() {
     let imported = CommandDef {
-        command: "ztool".to_string(),
-        description: Some("imported from zsh".to_string()),
+        command: "fixture-tool".to_string(),
+        description: Some("injected completion definition".to_string()),
         flags: vec![FlagDef {
             short: None,
-            long: Some("--zsh-imported".to_string()),
-            description: Some("zsh imported flag".to_string()),
+            long: Some("--injected".to_string()),
+            description: Some("injected fixture flag".to_string()),
             takes_value: false,
             values_source: None,
         }],
@@ -159,18 +169,18 @@ fn translated_zsh_definitions_are_loaded_before_user_dirs() {
         s.load_completion_dirs_with_definitions(&[], vec![imported]);
     }
 
-    assert_suggests(&state, "ztool -", "--zsh-imported");
+    assert_suggests(&state, "fixture-tool -", "--injected");
 }
 
 #[test]
-fn translated_zsh_definitions_merge_with_builtins() {
+fn injected_definitions_load_without_runtime_defaults() {
     let imported = CommandDef {
         command: "ls".to_string(),
-        description: Some("imported zsh ls".to_string()),
+        description: Some("injected ls completion".to_string()),
         flags: vec![FlagDef {
             short: None,
-            long: Some("--zsh-extra".to_string()),
-            description: Some("extra zsh flag".to_string()),
+            long: Some("--injected-extra".to_string()),
+            description: Some("extra injected flag".to_string()),
             takes_value: false,
             values_source: None,
         }],
@@ -183,18 +193,18 @@ fn translated_zsh_definitions_merge_with_builtins() {
         s.load_completion_dirs_with_definitions(&[], vec![imported]);
     }
 
-    assert_suggests(&state, "ls -", "--all");
-    assert_suggests(&state, "ls -", "--zsh-extra");
+    assert_not_suggests(&state, "ls -", "--all");
+    assert_suggests(&state, "ls -", "--injected-extra");
 }
 
 #[test]
-fn user_toml_overrides_translated_zsh_definitions() {
-    let temp_dir = unique_temp_dir("winuxsh-zsh-completion-override");
+fn user_toml_overrides_injected_definitions() {
+    let temp_dir = unique_temp_dir("winuxsh-injected-completion-override");
     std::fs::create_dir_all(&temp_dir).unwrap();
     std::fs::write(
-        temp_dir.join("ztool.toml"),
+        temp_dir.join("fixture-tool.toml"),
         r#"
-command = "ztool"
+command = "fixture-tool"
 description = "user override"
 
 [[flags]]
@@ -205,12 +215,12 @@ description = "user override flag"
     .unwrap();
 
     let imported = CommandDef {
-        command: "ztool".to_string(),
-        description: Some("imported from zsh".to_string()),
+        command: "fixture-tool".to_string(),
+        description: Some("injected completion definition".to_string()),
         flags: vec![FlagDef {
             short: None,
-            long: Some("--zsh-imported".to_string()),
-            description: Some("zsh imported flag".to_string()),
+            long: Some("--injected".to_string()),
+            description: Some("injected fixture flag".to_string()),
             takes_value: false,
             values_source: None,
         }],
@@ -223,8 +233,8 @@ description = "user override flag"
         s.load_completion_dirs_with_definitions(&[temp_dir.clone()], vec![imported]);
     }
 
-    assert_suggests(&state, "ztool -", "--user-only");
-    assert_not_suggests(&state, "ztool -", "--zsh-imported");
+    assert_suggests(&state, "fixture-tool -", "--user-only");
+    assert_not_suggests(&state, "fixture-tool -", "--injected");
 
     let _ = std::fs::remove_dir_all(temp_dir);
 }

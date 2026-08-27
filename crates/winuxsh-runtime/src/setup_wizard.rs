@@ -1,11 +1,11 @@
-//! First-run setup wizard (Oh-My-Zsh style).
+//! First-run setup wizard.
 //!
 //! Guides the user through initial interactive configuration, then writes a
-//! normal shell rc file. Structured TOML remains a legacy/managed surface, not
-//! the default user entry point.
+//! normal shell rc file.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::path_utils::shell_home_dir;
@@ -122,7 +122,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
                 "  \u{1f3a8}  Segment preset",
                 "classic",
                 &["classic", "lean", "rainbow", "pure", "robbyrussell"],
-                "  \u{2502}  classic       = P10K classic layout\n  \u{2502}  lean          = P10K lean layout\n  \u{2502}  rainbow       = P10K rainbow colours\n  \u{2502}  pure          = P10K pure layout\n  \u{2502}  robbyrussell  = Oh My Zsh default feel",
+                "  \u{2502}  classic       = P10K classic layout\n  \u{2502}  lean          = P10K lean layout\n  \u{2502}  rainbow       = P10K rainbow colours\n  \u{2502}  pure          = P10K pure layout\n  \u{2502}  robbyrussell  = compact classic prompt feel",
             ))
         } else {
             None
@@ -144,6 +144,13 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     } else {
         prompt_yn("  \u{1f500}  Load Git helper aliases/functions", true)
     };
+    let starship_git_enabled = prompt_enabled
+        && git_enabled
+        && starship_available()
+        && prompt_yn(
+            "  \u{1f680}  Use Starship for the Git prompt segment",
+            false,
+        );
 
     // --- Generate shell rc ---
     let rc_content = generate_rc(
@@ -154,6 +161,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         &cwd_style,
         prompt_enabled,
         git_enabled,
+        starship_git_enabled,
         segment_preset.as_deref(),
     );
 
@@ -194,6 +202,7 @@ fn generate_rc(
     cwd_style: &str,
     prompt_enabled: bool,
     git_enabled: bool,
+    starship_git_enabled: bool,
     segment_preset: Option<&str>,
 ) -> String {
     let theme = if prompt_enabled { theme } else { "" };
@@ -201,58 +210,49 @@ fn generate_rc(
     let (prompt_template, right_template) = if prompt_style == "segments" {
         match segment_preset.unwrap_or("classic") {
             "pure" => (
-                "{cwd} {git_prompt} {command_execution_time}{newline}{prompt_char} ".to_string(),
+                "{cwd} {git} {command_execution_time}{newline}{prompt_char} ".to_string(),
                 String::new(),
             ),
             "robbyrussell" => (
-                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                "{cwd} {git}{newline}{prompt_char} ".to_string(),
                 String::new(),
             ),
             "lean" => (
-                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                "{cwd} {git}{newline}{prompt_char} ".to_string(),
                 String::new(),
             ),
             "rainbow" | "classic" => (
-                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                "{cwd} {git}{newline}{prompt_char} ".to_string(),
                 "{status}{time} ".to_string(),
             ),
             _ => (
-                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                "{cwd} {git}{newline}{prompt_char} ".to_string(),
                 "{status}{time} ".to_string(),
             ),
         }
     } else {
         match (prompt_style, right_prompt) {
-            ("powerline", "time") => ("{cwd} {git_prompt} ".to_string(), "{time} ".to_string()),
-            ("powerline", "full") => (
-                "{cwd} {git_prompt} ".to_string(),
-                "{time} {git_branch} ".to_string(),
-            ),
-            ("powerline", _) => ("{cwd} {git_prompt} ".to_string(), String::new()),
+            ("powerline", "time") => ("{cwd} {git} ".to_string(), "{time} ".to_string()),
+            ("powerline", "full") => ("{cwd} {git} ".to_string(), "{time} {git} ".to_string()),
+            ("powerline", _) => ("{cwd} {git} ".to_string(), String::new()),
             ("multiline", "time") => (
-                "{user}@{host} {time}\n{cwd} {git_prompt} ".to_string(),
+                "{user}@{host} {time}\n{cwd} {git} ".to_string(),
                 String::new(),
             ),
             ("multiline", "full") => (
-                "{user}@{host} {time}\n{cwd} {git_prompt} ".to_string(),
-                "{git_branch} ".to_string(),
+                "{user}@{host} {time}\n{cwd} {git} ".to_string(),
+                "{git} ".to_string(),
             ),
-            ("multiline", _) => (
-                "{user}@{host}\n{cwd} {git_prompt} ".to_string(),
-                String::new(),
-            ),
+            ("multiline", _) => ("{user}@{host}\n{cwd} {git} ".to_string(), String::new()),
             ("classic", "time") => (
-                "{user}@{host} {cwd} {git_prompt} ".to_string(),
+                "{user}@{host} {cwd} {git} ".to_string(),
                 "{time} ".to_string(),
             ),
             ("classic", "full") => (
-                "{user}@{host} {cwd} {git_prompt} ".to_string(),
-                "{time} {git_branch} ".to_string(),
+                "{user}@{host} {cwd} {git} ".to_string(),
+                "{time} {git} ".to_string(),
             ),
-            ("classic", _) => (
-                "{user}@{host} {cwd} {git_prompt} ".to_string(),
-                String::new(),
-            ),
+            ("classic", _) => ("{user}@{host} {cwd} {git} ".to_string(), String::new()),
             ("minimal", "time") => ("{cwd} ".to_string(), "{time} ".to_string()),
             ("minimal", "full") => ("{cwd} ".to_string(), "{time} {git_branch} ".to_string()),
             _ => ("{cwd} ".to_string(), String::new()),
@@ -273,7 +273,12 @@ fn generate_rc(
     } else {
         String::new()
     };
-    let plugins = plugin_load_shell_array(prompt_enabled, git_enabled);
+    let plugins = plugin_load_shell_array(prompt_enabled, git_enabled, starship_git_enabled);
+    let starship_segment_setup = if starship_git_enabled {
+        "WINUXSH_STARSHIP_SEGMENTS=git\nexport WINUXSH_STARSHIP_SEGMENTS\n".to_string()
+    } else {
+        String::new()
+    };
     let segment_note = segment_preset
         .map(|preset| format!("# Segment preset selected during setup: {preset}\n"))
         .unwrap_or_default();
@@ -289,7 +294,7 @@ fn generate_rc(
     format!(
         r#"# Winuxsh interactive rc — generated by the setup wizard.
 # Edit this file with normal Winuxsh/bash syntax.
-# Legacy ~/.winshrc.toml is still read when present, but new interactive setup
+# Structured TOML manifests are not user startup configuration; new interactive setup
 # should live here.
 
 WINUXSH_THEME={}
@@ -301,6 +306,7 @@ export WINUXSH_THEME WINUXSH_THEME_PLUGIN WINUXSH_PROMPT_SYMBOL
 export WINUXSH_PROMPT_CWD_STYLE WINUXSH_DISABLE_DEFAULT_PLUGINS
 
 WINUXSH_PLUGINS={}
+{}
 {}
 if [ -z "${{HOME:-}}" ] && [ -n "${{USERPROFILE:-}}" ]; then
   case "$USERPROFILE" in
@@ -339,12 +345,17 @@ unset __winuxsh_bundle __winuxsh_home_drive __winuxsh_home_rest
         shell_quote(symbol),
         shell_quote(cwd_style),
         plugins,
+        starship_segment_setup,
         segment_note,
         prompt_call,
     )
 }
 
-fn plugin_load_shell_array(prompt_enabled: bool, git_enabled: bool) -> String {
+fn plugin_load_shell_array(
+    prompt_enabled: bool,
+    git_enabled: bool,
+    starship_git_enabled: bool,
+) -> String {
     let mut plugins = Vec::new();
     if prompt_enabled {
         plugins.push("prompt-core".to_string());
@@ -352,7 +363,20 @@ fn plugin_load_shell_array(prompt_enabled: bool, git_enabled: bool) -> String {
     if git_enabled {
         plugins.push("git".to_string());
     }
+    if starship_git_enabled {
+        plugins.push("starship".to_string());
+    }
     format!("({})", plugins.join(" "))
+}
+
+fn starship_available() -> bool {
+    Command::new("starship")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn theme_plugin_name(theme: &str) -> String {
@@ -536,7 +560,9 @@ mod tests {
 
     #[test]
     fn generated_rc_uses_shell_entrypoint_not_toml_sections() {
-        let rc = generate_rc("minimal", "minimal", "time", ">", "home", true, true, None);
+        let rc = generate_rc(
+            "minimal", "minimal", "time", ">", "home", true, true, false, None,
+        );
 
         assert!(rc.contains("WINUXSH_THEME_PLUGIN='theme-minimal'"));
         assert!(rc.contains("WINUXSH_PROMPT_CWD_STYLE='home'"));
@@ -552,7 +578,9 @@ mod tests {
 
     #[test]
     fn generated_rc_can_disable_git_prompt_tokens() {
-        let rc = generate_rc("minimal", "classic", "full", "$", "full", true, false, None);
+        let rc = generate_rc(
+            "minimal", "classic", "full", "$", "full", true, false, false, None,
+        );
 
         assert!(rc.contains("WINUXSH_THEME_PLUGIN='theme-minimal'"));
         assert!(rc.contains("WINUXSH_PROMPT_CWD_STYLE='full'"));
@@ -564,7 +592,7 @@ mod tests {
 
     #[test]
     fn generated_rc_can_disable_prompt_theme_plugins() {
-        let rc = generate_rc("", "off", "off", ">", "basename", false, true, None);
+        let rc = generate_rc("", "off", "off", ">", "basename", false, true, false, None);
 
         assert!(rc.contains("WINUXSH_THEME=''"));
         assert!(rc.contains("WINUXSH_THEME_PLUGIN=''"));
@@ -574,6 +602,29 @@ mod tests {
         assert!(rc.contains("# Prompt/theme plugins disabled by setup."));
         assert!(!rc.contains("winuxsh_prompt_use_template"));
         assert!(!rc.contains("prompt_format ="));
+    }
+
+    #[test]
+    fn generated_rc_can_delegate_git_segment_to_starship() {
+        let rc = generate_rc(
+            "spaceship",
+            "multiline",
+            "off",
+            "%",
+            "home",
+            true,
+            true,
+            true,
+            None,
+        );
+
+        assert!(rc.contains("WINUXSH_THEME_PLUGIN='theme-spaceship'"));
+        assert!(rc.contains("WINUXSH_PLUGINS=(prompt-core git starship)"));
+        assert!(rc.contains("WINUXSH_STARSHIP_SEGMENTS=git"));
+        assert!(rc.contains("winuxsh_prompt_use_template"));
+        assert!(rc.contains("{git}"));
+        assert!(!rc.contains("WINUXSH_PROMPT_BACKEND"));
+        assert!(!rc.contains("STARSHIP_CONFIG"));
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

@@ -6,8 +6,7 @@ status: draft
 
 # Oh My Winuxsh Bundle Plan
 
-`oh-my-winuxsh` is the official Winuxsh plugin bundle. It is not an Oh My Zsh
-fork and not a zsh plugin compatibility layer.
+`oh-my-winuxsh` is the official Winuxsh plugin bundle.
 
 The synchronized execution plan is in
 [Plugin System Roadmap](plugin-system-roadmap.md).
@@ -183,13 +182,13 @@ winuxsh plugin update oh-my-winuxsh --github-release v1.0.0 --json
 winuxsh plugin rollback oh-my-winuxsh
 ```
 
-The plan/apply behavior should mirror the existing safe zsh import flow:
+The plan/apply behavior should mirror safe managed-config updates:
 preview first, write only managed TOML blocks, create backups, and keep rollback
 instructions explicit.
 
 ## Config Boundary
 
-Managed plugin CLI state can still be recorded in `~/.winshrc.toml`:
+The manifest-backed registry records managed plugin CLI state:
 
 ```toml
 [plugins]
@@ -210,35 +209,17 @@ alias ll='ls -la'
 export EDITOR=vim
 ```
 
-Do not delete TOML support outright. RC is the human entry point, but the
-plugin system still needs deterministic, auditable, machine-editable state for
-CLI-managed permissions, bundle versions, migration blocks, tests, and rollback.
+The legacy TOML rc path is removed. RC is the human entry point, while the
+plugin system still needs deterministic, auditable, machine-editable manifest
+state for CLI-managed permissions, bundle versions, tests, and rollback.
 
 ## Migration From Current Winuxsh
 
 1. Keep current behavior working.
 2. Add plugin registry entries for existing built-in packs.
 3. Add `[plugins]` config as the managed machine-editable surface.
-4. Keep old `[zsh.native_plugins]` and `[zsh.native_widgets]` as compatibility
-   reads only.
-5. Update docs and CLI help to say "official Winuxsh plugins".
-6. Move old zsh-specific commands toward migration-only wording.
-7. Add `oh-my-winuxsh` bundle update support.
-
-## Migration From zsh
-
-`winuxsh migrate zsh` may inspect `.zshrc` and say:
-
-```text
-Detected familiar workflow:
-  plugins=(git zoxide)
-
-Suggested Winuxsh plugins:
-  oh-my-winuxsh/git
-  oh-my-winuxsh/zoxide
-```
-
-It should not say that Winuxsh supports zsh plugins.
+4. Update docs and CLI help to say "official Winuxsh plugins".
+5. Add `oh-my-winuxsh` bundle update support.
 
 ## Repository Status
 

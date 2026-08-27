@@ -7,7 +7,7 @@ status: active
 # Winuxsh v2.2 Nushell Reference Plan
 
 > Goal: before changing runtime behavior, use modern Windows shell references to keep
-> winuxsh aligned with its target experience: bash/zsh-like workflow on Windows,
+> winuxsh aligned with its target experience: Bash-compatible workflow on Windows,
 > powered by rubash + winuxcmd + reedline.
 
 ## Reference Scope
@@ -20,7 +20,7 @@ status: active
   - history search and edit modes
   - theming / prompt customization
   - config loading and compatibility migration
-- Treat Nushell as UX/architecture reference, not shell-language reference. Winuxsh targets bash/zsh-like behavior via rubash, not Nushell syntax or pipeline semantics.
+- Treat Nushell as UX/architecture reference, not shell-language reference. Winuxsh targets Bash-compatible behavior via rubash, not Nushell syntax or pipeline semantics.
 - Keep winuxsh's locked architecture:
   - shell language semantics stay in rubash
   - coreutils stay as winuxcmd.exe through PATH injection

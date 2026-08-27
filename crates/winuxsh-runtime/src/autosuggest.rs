@@ -1,11 +1,11 @@
-//! Native zsh-autosuggestions-style history hints.
+//! Native Winuxsh history autosuggestions.
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Hinter, History, SearchQuery};
 
 use crate::config::AutosuggestConfig;
 
-/// Reedline hinter that implements the history strategy from zsh-autosuggestions.
+/// Reedline hinter that suggests the latest history entry matching the prefix.
 pub struct HistoryAutosuggestHinter {
     style: Style,
     current_hint: String,
@@ -15,7 +15,7 @@ pub struct HistoryAutosuggestHinter {
 impl HistoryAutosuggestHinter {
     pub fn new(config: &AutosuggestConfig) -> Self {
         Self {
-            style: parse_zsh_highlight_style(&config.highlight_style),
+            style: parse_highlight_style(&config.highlight_style),
             current_hint: String::new(),
             buffer_max_size: config.buffer_max_size,
         }
@@ -89,11 +89,11 @@ fn first_hint_token(hint: &str) -> String {
     hint.get(..end).unwrap_or_default().to_string()
 }
 
-pub fn parse_zsh_highlight_style(value: &str) -> Style {
-    parse_zsh_style(value, Style::new().fg(Color::Fixed(8)))
+pub fn parse_highlight_style(value: &str) -> Style {
+    parse_style(value, Style::new().fg(Color::Fixed(8)))
 }
 
-pub fn parse_zsh_style(value: &str, default_style: Style) -> Style {
+pub fn parse_style(value: &str, default_style: Style) -> Style {
     let value = value.trim();
     if value.eq_ignore_ascii_case("none") {
         return Style::new();
@@ -165,6 +165,7 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::LiveFileBackedHistory;
     use reedline::{FileBackedHistory, HistoryItem};
 
     #[test]
@@ -203,8 +204,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_zsh_highlight_style_subset() {
-        let style = parse_zsh_highlight_style("fg=#ff00ff,bg=cyan,bold,underline");
+    fn parses_highlight_style_subset() {
+        let style = parse_highlight_style("fg=#ff00ff,bg=cyan,bold,underline");
 
         assert_eq!(style.foreground, Some(Color::Rgb(255, 0, 255)));
         assert_eq!(style.background, Some(Color::Cyan));
@@ -214,6 +215,21 @@ mod tests {
 
     #[test]
     fn none_style_returns_plain_style() {
-        assert!(parse_zsh_style("none", Style::new().fg(Color::Red)).is_plain());
+        assert!(parse_style("none", Style::new().fg(Color::Red)).is_plain());
+    }
+
+    #[test]
+    fn autosuggest_sees_history_saved_by_another_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut writer = LiveFileBackedHistory::with_file(100, path.clone()).unwrap();
+        let reader = LiveFileBackedHistory::with_file(100, path).unwrap();
+
+        writer
+            .save(HistoryItem::from_command_line("cd D:/projects"))
+            .unwrap();
+
+        let mut hinter = HistoryAutosuggestHinter::new(&AutosuggestConfig::default());
+        assert_eq!(hinter.handle("cd", 2, &reader, false, ""), " D:/projects");
     }
 }

@@ -46,8 +46,8 @@ export EDITOR=vim
 The legacy files still exist, but they should not be the primary user path:
 
 - `~/.winshrc` is a fallback only when `~/.winuxshrc` is absent.
-- `~/.winshrc.toml` is legacy/managed machine state for plugin CLI records,
-  migration blocks, bundle versions, tests, and advanced overrides.
+- Plugin CLI records, migration blocks, bundle versions, tests, and advanced
+  overrides are internal managed state, not a user configuration file.
 
 Do not put automation-critical behavior only in an interactive rc file. Pass
 needed environment variables directly to `winuxsh -c` or the script process.
@@ -72,6 +72,22 @@ winuxsh_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{status}{time} "
 Theme assets can use named colors, 256-color indexes, and true-color
 `#RRGGBB` foreground/background values. Prefer changing the theme plugin or
 theme asset instead of hardcoding prompt rendering in shell core.
+
+## History Modes
+
+Set `WINUXSH_HISTORY_MODE` in `~/.winuxshrc` when multiple shells share a
+history file:
+
+```bash
+WINUXSH_HISTORY_MODE=private
+export WINUXSH_HISTORY_MODE
+```
+
+- `shared` (default) refreshes navigation from other shells.
+- `session` keeps the startup snapshot stable for navigation while builtins can
+  observe later file updates.
+- `private` loads the complete history file at startup, then keeps later
+  navigation changes local to the current shell while appending its own commands.
 
 ## Git Prompt Performance
 
@@ -126,6 +142,38 @@ winuxcmd.exe wpm links rebuild --force
 
 Do not assume `/usr/bin` exists. Winuxsh is a Windows process using Windows
 executables and command links.
+
+## Elevated Commands
+
+Winuxsh disables Rubash's experimental `sudo` builtin by default. Windows
+elevation is delegated to the WPM `gsudo` package, which owns UAC, process
+creation, environment forwarding, and console handling.
+
+```bash
+command -v gsudo
+gsudo --version
+gsudo your-command args
+```
+
+Install or repair it through the active WPM provider when necessary:
+
+```bash
+wpm search gsudo
+wpm install gsudo
+wpm links rebuild --force
+```
+
+Do not alias `sudo` automatically in shared scripts. A user who wants the
+Unix spelling interactively can add this to `~/.winuxshrc`:
+
+```bash
+alias sudo='gsudo'
+```
+
+The embedded Rubash elevation builtin remains available only for host
+integrators. Set `WINUXSH_ENABLE_RUBASH_SUDO=1` before starting Winuxsh, or run
+`enable sudo` in a shell that supports an elevation handler. This is not the
+recommended Windows path.
 
 ## Windows Paths And Home
 

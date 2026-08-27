@@ -1,6 +1,6 @@
-﻿[package]
+[package]
 name = "winuxsh"
-version = "0.10.3"
+version = "0.10.13"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
@@ -28,5 +28,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Network
 
 [dev-dependencies]
 sha2 = "0.10"
-wat = "1.254"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }

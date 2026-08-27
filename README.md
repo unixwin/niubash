@@ -34,7 +34,7 @@ Winuxsh gives it all back:
 - **Unix commands included** — `ls`, `cat`, `grep`, `find`, `test`, `printf`, ... via WinuxCmd. Nothing to install.
 - **Real Windows programs, direct** — `git.exe`, `node.exe`, `python.exe`, `cargo.exe`. Your PATH is your PATH.
 - **A prompt you'll enjoy** — 27 themes (agnoster, spaceship, tokyonight, p10 family...), a git prompt that grows teeth, syntax highlighting, autosuggestions, vi/emacs modes.
-- **Plugins with a permission model** — 40+ packs (`git`, `docker`, `kubectl`, `npm`, `zoxide`, `fzf`, `thefuck`, ...); third parties run sandboxed in WASM.
+- **Plugins with a permission model** — 40+ packs (`git`, `docker`, `kubectl`, `npm`, `zoxide`, `fzf`, `thefuck`, ...); reviewed source packs and process adapters declare the host access they need.
 
 ## AI-native
 
@@ -78,14 +78,20 @@ cargo build --release && target\release\winuxsh.exe
 
 Keep it current: `winuxsh --self-update`.
 
-## Moved from zsh?
+## Configuration
 
-Winuxsh scans your `.zshrc`, shows you a plan, and applies it with a backup:
+`~/.winuxshrc` is the interactive entry point. Put your theme, prompt,
+plugins, exports, aliases, and functions there:
 
 ```sh
-winuxsh --zsh-compat-report
-winuxsh --zsh-compat-import-apply
+WINUXSH_THEME=spaceship
+WINUXSH_PLUGINS=(prompt-core git)
+[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
 ```
+
+History sharing can be selected with `WINUXSH_HISTORY_MODE=shared`,
+`session`, or `private`. See [Advanced usage](docs/src/advanced-usage.md)
+for the behavior of each mode.
 
 ## Terminal toys
 
@@ -104,7 +110,7 @@ Truecolor half-block pixels, no Python or Pillow needed at runtime:
 
 ## Documentation
 
-Full docs site: **[docs](https://unixwin.github.io/winuxsh/)** · [Getting started](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [Advanced usage](docs/src/advanced-usage.md) · [Zsh migration](docs/src/zsh-migration-guide.md) · [Architecture](docs/src/architecture.md)
+Full docs site: **[docs](https://unixwin.github.io/winuxsh/)** · [Getting started](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [Advanced usage](docs/src/advanced-usage.md) · [Architecture](docs/src/architecture.md)
 
 Under the hood: [rubash](https://github.com/unixwin/rubash) (Bash engine) · WinuxCmd (Unix commands) · [reedline](https://github.com/nushell/reedline) (line editor)
 
@@ -112,7 +118,8 @@ Under the hood: [rubash](https://github.com/unixwin/rubash) (Bash engine) · Win
 
 - **Another Git Bash?** No — Git Bash emulates Unix on top of Windows. Winuxsh is a native Windows process: native paths, direct Windows binary execution, Bash compatibility in the language engine, not a fake filesystem.
 - **Still need WSL?** Sure — for real Linux kernels, Linux Docker, Linux-only toolchains. For the other 95% of your day: you don't need WSL. You need Winuxsh.
-- **Where's my config?** `~/.winuxshrc` — plain Bash. Structured plugin state lives in `~/.winshrc.toml`.
+- **Where's my config?** `~/.winuxshrc` — plain Bash. Winuxsh manages its own
+  machine state; users do not need to maintain a second configuration format.
 
 ---
 

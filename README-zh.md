@@ -33,7 +33,7 @@ Winuxsh 全部还给你：
 - **Unix 命令随包附赠** — `ls`、`cat`、`grep`、`find`、`test`、`printf`…… 来自 WinuxCmd，什么都不用装。
 - **真 Windows 程序，直接调** — `git.exe`、`node.exe`、`python.exe`、`cargo.exe`。你的 PATH 就是你的 PATH。
 - **一个你愿意天天看的 prompt** — 27 款主题（agnoster、spaceship、tokyonight、p10 家族……）、会"长牙"的 git 提示、语法高亮、自动建议、vi/emacs 双模式。
-- **带权限模型的插件** — 40+ 随包插件（`git`、`docker`、`kubectl`、`npm`、`zoxide`、`fzf`、`thefuck`……），第三方插件跑在 WASM 沙箱里。
+- **带权限模型的插件** — 40+ 随包插件（`git`、`docker`、`kubectl`、`npm`、`zoxide`、`fzf`、`thefuck`……），受审阅的 source 插件和 process 适配器都会声明所需的宿主权限。
 
 ## AI 原生
 
@@ -80,13 +80,15 @@ cargo build --release && target\release\winuxsh.exe
 
 保持最新：`winuxsh --self-update`。
 
-## 从 zsh 搬过来？
+## 配置
 
-Winuxsh 先扫描你的 `.zshrc`，给你看计划，确认后再应用，自动备份：
+`~/.winuxshrc` 是交互式入口。主题、prompt、插件、环境变量、alias、
+函数都放这里：
 
 ```sh
-winuxsh --zsh-compat-report
-winuxsh --zsh-compat-import-apply
+WINUXSH_THEME=spaceship
+WINUXSH_PLUGINS=(prompt-core git)
+[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
 ```
 
 ## 终端彩蛋
@@ -105,7 +107,7 @@ winuxsh flags/qiu-dance.sh     # GIF 动画，帧率原样保留
 
 ## 文档
 
-完整文档站：**[docs](https://unixwin.github.io/winuxsh/)** · [快速上手](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [高级用法](docs/src/advanced-usage.md) · [Zsh 迁移指南](docs/src/zsh-migration-guide.md) · [架构](docs/src/architecture.md)
+完整文档站：**[docs](https://unixwin.github.io/winuxsh/)** · [快速上手](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [高级用法](docs/src/advanced-usage.md) · [架构](docs/src/architecture.md)
 
 底层三件套：[rubash](https://github.com/unixwin/rubash)（Bash 引擎）· WinuxCmd（Unix 命令）· [reedline](https://github.com/nushell/reedline)（行编辑器）
 
@@ -113,7 +115,8 @@ winuxsh flags/qiu-dance.sh     # GIF 动画，帧率原样保留
 
 - **"这不就是又一个 Git Bash？"** 不是。Git Bash 在 Windows 上模拟 Unix；Winuxsh 是原生 Windows 进程：原生路径、直接执行 Windows 二进制、Bash 兼容发生在语言引擎里，不在假的文件系统里。
 - **"那我还要 WSL 干嘛？"** 各有各的用：真 Linux 内核、Linux Docker、Linux 专用工具链，它依然是把好手。至于剩下的 95%——你需要的不是 WSL，是 Winuxsh。
-- **"我的配置在哪？"** `~/.winuxshrc`——纯 Bash。结构化的插件状态在 `~/.winshrc.toml`。
+- **"我的配置在哪？"** `~/.winuxshrc`——纯 Bash。机器状态由 Winuxsh
+  自己管理，用户不需要维护第二套配置格式。
 
 ---
 

@@ -260,28 +260,6 @@ fn cache_key_to_filename(key: &str) -> String {
 // ExternalCompletionPlugin
 // ─────────────────────────────────────────────────────────────────────────────
 
-const DEFAULT_COMPLETION_DEFS: &[(&str, &str)] = &[
-    ("cat", include_str!("../../completions/defaults/cat.toml")),
-    (
-        "chmod",
-        include_str!("../../completions/defaults/chmod.toml"),
-    ),
-    ("cp", include_str!("../../completions/defaults/cp.toml")),
-    ("ls", include_str!("../../completions/defaults/ls.toml")),
-    ("find", include_str!("../../completions/defaults/find.toml")),
-    ("grep", include_str!("../../completions/defaults/grep.toml")),
-    (
-        "mkdir",
-        include_str!("../../completions/defaults/mkdir.toml"),
-    ),
-    ("mv", include_str!("../../completions/defaults/mv.toml")),
-    ("rm", include_str!("../../completions/defaults/rm.toml")),
-    (
-        "touch",
-        include_str!("../../completions/defaults/touch.toml"),
-    ),
-];
-
 /// Completion plugin that reads per-command completion definitions from a
 /// directory of TOML files and provides flag/argument completion for them.
 pub struct ExternalCompletionPlugin {
@@ -307,7 +285,7 @@ impl ExternalCompletionPlugin {
 
     /// Add already-translated command definitions.
     ///
-    /// This is used by compatibility importers such as zsh/Oh My Zsh. Callers
+    /// This is used by injected completion definitions. Callers
     /// control priority by choosing when to invoke it relative to `load_dir()`.
     pub fn load_definitions<I>(&mut self, definitions: I)
     where
@@ -335,31 +313,17 @@ impl ExternalCompletionPlugin {
         }
     }
 
-    /// Create a plugin with bundled winuxcmd completion definitions loaded.
+    /// Create a plugin with no compiled completion assets.
+    ///
+    /// First-party static command definitions live in the active
+    /// `oh-my-winuxsh` bundle. The runtime only owns the completion engine and
+    /// user/plugin loading paths, so bundle assets can update independently of
+    /// the shell binary.
     pub fn new() -> Self {
-        let mut plugin = Self {
+        Self {
             definitions: HashMap::new(),
             mem_cache: Mutex::new(HashMap::new()),
             cache_dir: resolve_cache_dir(),
-        };
-        plugin.load_builtin_defaults();
-        plugin
-    }
-
-    fn load_builtin_defaults(&mut self) {
-        for (name, contents) in DEFAULT_COMPLETION_DEFS {
-            match toml::from_str::<CommandDef>(contents) {
-                Ok(def) => {
-                    self.definitions.insert(def.command.clone(), def);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "ExternalCompletionPlugin: failed to load built-in definition {}: {}",
-                        name,
-                        e
-                    );
-                }
-            }
         }
     }
 

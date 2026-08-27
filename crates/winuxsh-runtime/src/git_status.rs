@@ -1,4 +1,4 @@
-//! Git repository status for the prompt (oh-my-zsh-style).
+//! Git repository status for Winuxsh prompt segments.
 //!
 //! Runs `git` sub-processes (read-only, with `GIT_OPTIONAL_LOCKS=0`) to gather
 //! branch, dirty-state, staged/unstaged/untracked counts, ahead/behind, stashes,
@@ -186,8 +186,8 @@ impl Default for GitPromptSymbols {
             deleted: "✖".to_string(),
             ahead: "↑".to_string(),
             behind: "↓".to_string(),
-            // oh-my-zsh uses a flag for stash entries. The dollar sign
-            // collides visually with the prompt indicator, so keep the flag.
+            // The dollar sign collides visually with the prompt indicator, so
+            // keep a flag-style stash marker.
             stashes: "⚑".to_string(),
             conflicts: "✖".to_string(),
             separator: " ".to_string(),
@@ -388,60 +388,63 @@ fn start_worker(service: Arc<GitStatusService>) {
         .spawn(move || {
             let mut daemon = GitStatusDaemonClient::spawn();
             loop {
-            let request = {
-                let mut state = service.state.lock().unwrap();
-                loop {
-                    if let Some(request) = state.queue.pop_front() {
-                        state.pending.remove(&request.cwd);
-                        state
-                            .in_flight
-                            .insert(request.cwd.clone(), request.generation);
-                        break request;
+                let request = {
+                    let mut state = service.state.lock().unwrap();
+                    loop {
+                        if let Some(request) = state.queue.pop_front() {
+                            state.pending.remove(&request.cwd);
+                            state
+                                .in_flight
+                                .insert(request.cwd.clone(), request.generation);
+                            break request;
+                        }
+                        state = service.ready.wait(state).unwrap();
                     }
-                    state = service.ready.wait(state).unwrap();
-                }
-            };
+                };
 
-            let status = match daemon.as_mut().and_then(|client| client.collect(&request.cwd)) {
-                Some(status) => status,
-                None => {
-                    daemon = GitStatusDaemonClient::spawn();
-                    daemon
-                        .as_mut()
-                        .and_then(|client| client.collect(&request.cwd))
-                        .unwrap_or_else(|| collect_uncached(&request.cwd))
-                }
-            };
+                let status = match daemon
+                    .as_mut()
+                    .and_then(|client| client.collect(&request.cwd))
+                {
+                    Some(status) => status,
+                    None => {
+                        daemon = GitStatusDaemonClient::spawn();
+                        daemon
+                            .as_mut()
+                            .and_then(|client| client.collect(&request.cwd))
+                            .unwrap_or_else(|| collect_uncached(&request.cwd))
+                    }
+                };
 
-            let mut state = service.state.lock().unwrap();
-            if request.generation < state.clear_generation {
+                let mut state = service.state.lock().unwrap();
+                if request.generation < state.clear_generation {
+                    state.in_flight.remove(&request.cwd);
+                    continue;
+                }
                 state.in_flight.remove(&request.cwd);
-                continue;
+                let latest = state
+                    .latest_requested
+                    .get(&request.cwd)
+                    .copied()
+                    .unwrap_or(request.generation);
+                let needs_rerun = latest > request.generation;
+                state.cache.insert(
+                    request.cwd.clone(),
+                    GitStatusCacheEntry {
+                        status,
+                        cached_at: Instant::now(),
+                        dirty: needs_rerun,
+                    },
+                );
+                if needs_rerun && !state.pending.contains(&request.cwd) {
+                    state.pending.insert(request.cwd.clone());
+                    state.queue.push_back(GitStatusRequest {
+                        cwd: request.cwd.clone(),
+                        generation: latest,
+                    });
+                    service.ready.notify_one();
+                }
             }
-            state.in_flight.remove(&request.cwd);
-            let latest = state
-                .latest_requested
-                .get(&request.cwd)
-                .copied()
-                .unwrap_or(request.generation);
-            let needs_rerun = latest > request.generation;
-            state.cache.insert(
-                request.cwd.clone(),
-                GitStatusCacheEntry {
-                    status,
-                    cached_at: Instant::now(),
-                    dirty: needs_rerun,
-                },
-            );
-            if needs_rerun && !state.pending.contains(&request.cwd) {
-                state.pending.insert(request.cwd.clone());
-                state.queue.push_back(GitStatusRequest {
-                    cwd: request.cwd.clone(),
-                    generation: latest,
-                });
-                service.ready.notify_one();
-            }
-        }
         });
 }
 
@@ -772,7 +775,7 @@ mod tests {
         assert!(c.contains("?")); // untracked literal
         assert!(c.contains("↑")); // ahead
         assert!(c.contains("↓")); // behind
-        assert!(c.contains("⚑")); // stashes (oh-my-zsh style)
+        assert!(c.contains("⚑")); // stashes
     }
 
     #[test]

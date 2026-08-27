@@ -1,13 +1,14 @@
-//! Native zsh-syntax-highlighting-style line highlighter.
+//! Native Winuxsh line highlighter.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
 
-use crate::autosuggest::parse_zsh_style;
-use crate::completion::command::CommandCompleter;
+use crate::autosuggest::parse_style;
+use crate::completion::{command::CommandCompleter, CompletionState};
 use crate::config::SyntaxHighlightConfig;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 
@@ -33,7 +34,7 @@ enum SyntaxKind {
 }
 
 impl SyntaxKind {
-    fn zsh_key(self) -> &'static str {
+    fn style_key(self) -> &'static str {
         match self {
             Self::Default => "default",
             Self::UnknownToken => "unknown-token",
@@ -56,11 +57,11 @@ impl SyntaxKind {
     }
 }
 
-/// Reedline highlighter that implements a conservative subset of zsh's `main`
-/// highlighter.
+/// Reedline highlighter for common shell tokens.
 pub struct WinuxshSyntaxHighlighter {
     styles: HashMap<SyntaxKind, Style>,
     commands: HashSet<String>,
+    completion_state: Option<Arc<Mutex<CompletionState>>>,
     max_length: Option<usize>,
 }
 
@@ -74,11 +75,35 @@ impl WinuxshSyntaxHighlighter {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        Self::new_with_commands_internal(config, commands, None)
+    }
+
+    pub fn new_with_commands_and_state<I, S>(
+        config: &SyntaxHighlightConfig,
+        commands: I,
+        completion_state: Arc<Mutex<CompletionState>>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::new_with_commands_internal(config, commands, Some(completion_state))
+    }
+
+    fn new_with_commands_internal<I, S>(
+        config: &SyntaxHighlightConfig,
+        commands: I,
+        completion_state: Option<Arc<Mutex<CompletionState>>>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let mut styles = default_styles();
         for (key, value) in &config.styles {
-            if let Some(kind) = kind_from_zsh_key(key) {
+            if let Some(kind) = kind_from_style_key(key) {
                 let default = styles.get(&kind).copied().unwrap_or_default();
-                styles.insert(kind, parse_zsh_style(value, default));
+                styles.insert(kind, parse_style(value, default));
             }
         }
 
@@ -100,6 +125,7 @@ impl WinuxshSyntaxHighlighter {
         Self {
             styles,
             commands: command_set,
+            completion_state,
             max_length: config.max_length,
         }
     }
@@ -198,6 +224,9 @@ fn classify_word(
         }
         if highlighter.is_known_command(&unquoted) {
             return SyntaxKind::Command;
+        }
+        if let Some(path_kind) = path_kind(&unquoted) {
+            return path_kind;
         }
         return SyntaxKind::UnknownToken;
     }
@@ -472,7 +501,7 @@ fn is_shell_builtin(word: &str) -> bool {
 impl WinuxshSyntaxHighlighter {
     fn is_known_command(&self, command: &str) -> bool {
         let lower = command.to_ascii_lowercase();
-        if self.commands.contains(&lower) {
+        if self.is_known_command_name(&lower) {
             return true;
         }
         if lower.ends_with(".exe") || lower.ends_with(".cmd") || lower.ends_with(".bat") {
@@ -480,9 +509,26 @@ impl WinuxshSyntaxHighlighter {
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or(&lower);
-            return self.commands.contains(stem);
+            return self.is_known_command_name(stem);
         }
         false
+    }
+
+    fn is_known_command_name(&self, command: &str) -> bool {
+        if self.commands.contains(command) {
+            return true;
+        }
+
+        self.completion_state
+            .as_ref()
+            .and_then(|state| state.lock().ok())
+            .is_some_and(|state| {
+                state
+                    .aliases
+                    .iter()
+                    .chain(state.functions.iter())
+                    .any(|name| name.eq_ignore_ascii_case(command))
+            })
     }
 }
 
@@ -521,13 +567,39 @@ fn resolve_path(word: &str) -> PathBuf {
         None
     };
 
-    let path = expanded.unwrap_or_else(|| PathBuf::from(word));
+    let path = expanded
+        .or_else(|| resolve_logical_shell_path(&word))
+        .unwrap_or_else(|| PathBuf::from(word));
     if path.is_absolute() {
         path
     } else {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
+    }
+}
+
+fn resolve_logical_shell_path(word: &str) -> Option<PathBuf> {
+    let normalized = word.replace('\\', "/");
+    let root = std::env::var_os("WINUXSH_ROOT").map(PathBuf::from)?;
+    if normalized == "/" {
+        return Some(root);
+    }
+    if normalized == "/home" || normalized.starts_with("/home/") {
+        let users = shell_home_dir()?.parent()?.to_path_buf();
+        let rest = normalized
+            .trim_start_matches("/home")
+            .trim_start_matches('/');
+        return Some(if rest.is_empty() {
+            users
+        } else {
+            users.join(rest)
+        });
+    }
+    let rest = normalized.strip_prefix('/')?;
+    match rest.split('/').next() {
+        Some("bin" | "dev" | "etc" | "opt" | "tmp" | "usr" | "var") => Some(root.join(rest)),
+        _ => None,
     }
 }
 
@@ -626,7 +698,7 @@ fn is_shell_escape_target(ch: char) -> bool {
         )
 }
 
-fn kind_from_zsh_key(key: &str) -> Option<SyntaxKind> {
+fn kind_from_style_key(key: &str) -> Option<SyntaxKind> {
     let key = key.to_ascii_lowercase();
     [
         SyntaxKind::Default,
@@ -648,7 +720,7 @@ fn kind_from_zsh_key(key: &str) -> Option<SyntaxKind> {
         SyntaxKind::Comment,
     ]
     .into_iter()
-    .find(|kind| kind.zsh_key() == key)
+    .find(|kind| kind.style_key() == key)
 }
 
 fn default_styles() -> HashMap<SyntaxKind, Style> {
@@ -772,6 +844,46 @@ mod tests {
             style_for(&styled, "which.exe"),
             highlighter.style(SyntaxKind::Command)
         );
+    }
+
+    #[test]
+    fn highlights_dynamic_functions_as_commands() {
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state
+            .lock()
+            .unwrap()
+            .functions
+            .insert("deploy_site".to_string());
+        let highlighter = WinuxshSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state,
+        );
+        let styled = highlighter.highlight("deploy_site --production", 0);
+
+        assert_eq!(
+            style_for(&styled, "deploy_site"),
+            highlighter.style(SyntaxKind::Command)
+        );
+    }
+
+    #[test]
+    fn highlights_existing_paths_at_command_position() {
+        let temp = unique_temp_dir("winuxsh-highlight-command-path");
+        std::fs::create_dir_all(&temp).unwrap();
+        let file = temp.join("script.sh");
+        std::fs::write(&file, "echo ok").unwrap();
+        let line = file.display().to_string();
+
+        let highlighter = WinuxshSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
+        let styled = highlighter.highlight(&line, 0);
+
+        assert_eq!(
+            style_for(&styled, &line),
+            highlighter.style(SyntaxKind::Path)
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

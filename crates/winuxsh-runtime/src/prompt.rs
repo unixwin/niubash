@@ -582,10 +582,46 @@ impl Prompt for WinuxshPrompt {
     }
 }
 
+/// Bash-compatible prompt values rendered from PS1/PS2 after the shell has run
+/// public Bash prompt hooks such as PROMPT_COMMAND.
+pub struct BashPrompt {
+    left: String,
+    multiline: String,
+}
+
+impl BashPrompt {
+    pub fn new(left: String, multiline: String) -> Self {
+        Self { left, multiline }
+    }
+}
+
+impl Prompt for BashPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.left)
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.multiline)
+    }
+
+    fn render_prompt_history_search_indicator(&self, _search: PromptHistorySearch) -> Cow<'_, str> {
+        Cow::Borrowed("(history search) ")
+    }
+}
+
 /// Backend selector for the prompt: legacy template engine or new segment engine.
 pub enum PromptBackend {
     Template(WinuxshPrompt),
     Segments(SegmentPromptAdapter),
+    Bash(BashPrompt),
 }
 
 impl Prompt for PromptBackend {
@@ -593,6 +629,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_left(),
             PromptBackend::Segments(p) => p.render_prompt_left(),
+            PromptBackend::Bash(p) => p.render_prompt_left(),
         }
     }
 
@@ -600,6 +637,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_right(),
             PromptBackend::Segments(p) => p.render_prompt_right(),
+            PromptBackend::Bash(p) => p.render_prompt_right(),
         }
     }
 
@@ -607,6 +645,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_indicator(mode),
             PromptBackend::Segments(p) => p.render_prompt_indicator(mode),
+            PromptBackend::Bash(p) => p.render_prompt_indicator(mode),
         }
     }
 
@@ -614,6 +653,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_multiline_indicator(),
             PromptBackend::Segments(p) => p.render_prompt_multiline_indicator(),
+            PromptBackend::Bash(p) => p.render_prompt_multiline_indicator(),
         }
     }
 
@@ -621,6 +661,7 @@ impl Prompt for PromptBackend {
         match self {
             PromptBackend::Template(p) => p.render_prompt_history_search_indicator(search),
             PromptBackend::Segments(p) => p.render_prompt_history_search_indicator(search),
+            PromptBackend::Bash(p) => p.render_prompt_history_search_indicator(search),
         }
     }
 }
@@ -710,15 +751,24 @@ mod tests {
         let project = home.join("repo").join("project");
         std::fs::create_dir_all(&project).unwrap();
         let _home = EnvGuard::set("HOME", &home.to_string_lossy());
+        let _userprofile = EnvGuard::unset("USERPROFILE");
         let _style = EnvGuard::unset("WINUXSH_PROMPT_CWD_STYLE");
         let _cwd = CwdGuard::enter(&project);
 
-        let prompt = WinuxshPrompt::new(Some("{cwd} {cwd_base} %~".to_string()), None, None, "default");
+        let prompt = WinuxshPrompt::new(
+            Some("{cwd} {cwd_base} %~".to_string()),
+            None,
+            None,
+            "default",
+        );
         let rendered = prompt.render_prompt_left();
 
         assert!(rendered.contains("~/repo/project"), "{rendered:?}");
         assert!(rendered.contains("project"), "{rendered:?}");
-        assert!(!rendered.contains(&home.to_string_lossy().to_string()), "{rendered:?}");
+        assert!(
+            !rendered.contains(&home.to_string_lossy().to_string()),
+            "{rendered:?}"
+        );
 
         let _ = std::fs::remove_dir_all(home);
     }
@@ -730,6 +780,7 @@ mod tests {
         let project = home.join("repo").join("project");
         std::fs::create_dir_all(&project).unwrap();
         let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&home));
+        let _userprofile = EnvGuard::unset("USERPROFILE");
         let _style = EnvGuard::unset("WINUXSH_PROMPT_CWD_STYLE");
         let _cwd = CwdGuard::enter(&project);
 
@@ -745,8 +796,12 @@ mod tests {
 
     #[test]
     fn structured_git_snapshot_is_repainted_with_theme_colours() {
-        let mut prompt =
-            WinuxshPrompt::new(Some("{git}{prompt_char}".to_string()), None, None, "default");
+        let mut prompt = WinuxshPrompt::new(
+            Some("{git}{prompt_char}".to_string()),
+            None,
+            None,
+            "default",
+        );
         prompt.set_git_status_snapshot(Some(GitRepoStatus {
             branch: Some("feature".to_string()),
             dirty: true,
@@ -874,7 +929,9 @@ mod tests {
 
     fn ansi_style_before<'a>(rendered: &'a str, needle: &str) -> &'a str {
         let idx = rendered.find(needle).expect("needle should be rendered");
-        let start = rendered[..idx].rfind("\u{1b}[").expect("style should exist");
+        let start = rendered[..idx]
+            .rfind("\u{1b}[")
+            .expect("style should exist");
         &rendered[start..idx]
     }
 

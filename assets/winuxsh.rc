@@ -1,0 +1,2 @@
+#define IDI_WINUXSH 101
+IDI_WINUXSH ICON "winuxsh-icon.ico"

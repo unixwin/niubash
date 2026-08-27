@@ -148,10 +148,9 @@ one-shot REPL command path. It does not run for `winuxsh -c ...`, script files,
 or stdin script execution, so agent and CI surfaces stay deterministic.
 
 `~/.winshrc` is a legacy compatibility fallback and is used only when
-`~/.winuxshrc` is absent. `~/.winshrc.toml` remains supported for legacy and
-managed structured state such as plugin CLI enable/disable records, migration
-blocks, completion overrides, test isolation, and advanced machine-editable
-settings. Prefer `~/.winuxshrc` for normal interactive customization.
+`~/.winuxshrc` is absent. Plugin CLI enable/disable records, migration blocks,
+completion overrides, test isolation, and advanced machine state are managed
+internally. Prefer `~/.winuxshrc` for normal interactive customization.
 
 ## 6b. Prompt and theme plugins
 
@@ -166,7 +165,7 @@ WINUXSH_PLUGINS=(prompt-core git)
 
 Useful bundled theme plugins include `theme-minimal`, `theme-classic`,
 `theme-pure`, `theme-robbyrussell`, `theme-p10-lean`, `theme-p10-classic`,
-`theme-p10-rainbow`, and `theme-p10-pure`. Theme TOML assets support named
+`theme-p10-rainbow`, and `theme-p10-pure`. Theme assets support named
 colours, 256-colour indexes, and true-colour `#RRGGBB` foreground/background
 values plus bold, italic, underline, and dimmed flags.
 
@@ -182,63 +181,26 @@ Available template tokens include `{cwd}`, `{cwd_base}`, `{user_host}`,
 startup/precmd so late Git work warms the next prompt instead of redrawing the
 line the user is typing on.
 
-## 7. Import your .zshrc (optional)
-
-If you already have a `.zshrc` with Oh My Zsh, let winuxsh inspect it:
-
-```sh
-winuxsh --zsh-compat-report
-winuxsh --zsh-compat-import-plan
-```
-
-Review the plan. If it looks safe (it scans, does not blindly source):
-
-```sh
-winuxsh --zsh-compat-import-apply
-winuxsh --zsh-compat-doctor
-```
-
-## 8. Official plugin bundle
+## 7. Official plugin bundle
 
 Winuxsh has a built-in plugin system. `oh-my-winuxsh` is the
-official bundled plugin distribution, not an Oh My Zsh fork and not zsh plugin
-support. It ships first-party packs such as `git`, `docker`, `kubectl`,
+official bundled plugin distribution. It ships first-party packs such as `git`, `docker`, `kubectl`,
 `npm`, `zoxide`, `direnv`, `dotenv`, `fzf`, prompt presets, and keybinding
 presets.
 
 The normal interactive shape is the `~/.winuxshrc` plugin list shown above.
-When `winuxsh plugin enable/disable` or migration tooling needs structured
-state, it writes managed records to `~/.winshrc.toml`, for example:
-
-```toml
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["git", "prompts", "keybindings"]
-
-[plugins.git]
-enabled = true
-permissions = ["shell:source", "cwd:read", "process:run:git"]
-
-[plugins.zoxide]
-enabled = false
-permissions = ["cwd:read", "process:run:zoxide"]
-```
-
-Existing `[zsh.native_plugins]` and `[zsh.native_widgets]` config remains a
-legacy migration compatibility surface. New machine-managed config should use
-`[plugins]`, while user-authored interactive startup should use `~/.winuxshrc`.
-Official shell helper packs can ship reviewed bundle-local `init.winux` source
-scripts. If `~/.winuxshrc` exists, it is the source-plugin entry point and
-loads the framework directly. Without `~/.winuxshrc`, the legacy managed
-startup path can still load enabled source packs before fallback `~/.winshrc`.
-Use `winuxsh plugin list`, `winuxsh plugin search`, `winuxsh plugin themes`,
-and `winuxsh plugin review` for current inventory, theme sources, and
-permission checks; legacy `--zsh-native-packs` remains migration-only.
+`winuxsh plugin enable/disable` and migration tooling update internal managed
+state. Official shell helper packs can
+ship reviewed bundle-local `init.winux` source scripts. If `~/.winuxshrc`
+exists, it is the source-plugin entry point and loads the framework directly.
+Without `~/.winuxshrc`, managed startup can still load enabled source packs
+before fallback `~/.winshrc`. Use `winuxsh plugin list`,
+`winuxsh plugin search`, `winuxsh plugin themes`, and
+`winuxsh plugin review` for current inventory, theme sources, and permission
+checks.
 
 ## What next
 
-- [Zsh Migration Guide](zsh-migration-guide.md) for detailed `.zshrc` import
 - [Plugin System Direction](../planning/plugin-system-direction.md) for the v3 plugin model
 - [Plugin System Roadmap](../planning/plugin-system-roadmap.md) for the execution sequence
 - [Oh My Winuxsh Bundle Plan](../planning/oh-my-winuxsh-bundle-plan.md) for the official bundle

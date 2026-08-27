@@ -65,7 +65,7 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Name: "{group}\Winuxsh"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{%USERPROFILE}"; IconFilename: "{app}\assets\winuxsh-icon.ico"
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Parameters: "activate-winuxcmd.sh"; WorkingDir: "{app}\winuxcmd"; StatusMsg: "Activating WinuxCmd command links..."; Flags: runhidden waituntilterminated
+Filename: "{app}\winuxcmd\usr\bin\winuxcmd.exe"; Parameters: "wpm links rebuild --root ""{app}\winuxcmd"" --force"; WorkingDir: "{app}\winuxcmd\usr\bin"; StatusMsg: "Activating WinuxCmd command links..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--install-wt-profile --quiet"; StatusMsg: "Adding Windows Terminal profile..."; Flags: runhidden waituntilterminated; Tasks: wtprofile
 
 [Code]

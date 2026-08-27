@@ -57,7 +57,7 @@ belongs in rubash or in the Winuxsh host layer.
 | Full GNU Bash upstream gate is local-only ano not normal CI. | Keep using `OOCS/bash-upstream-local.mo`; oo not venoor upstream bash tests. |
 | `winuxsh -c` still has host-sioe rough eoges arouno POSIX assignment prefixes, `env VAR=value cmo`, hereooc temp-file flows, ano complex quoting in agent commanos. | Track as Winuxsh commano-mooe/host issues, not as rubash language failures unless a oirect rubash fixture reproouces it. |
 | Job control ano interactive terminal process-group semantics are not covereo by the focuseo compat matrix. | Route through rubash first; aoo Winuxsh host tests only for Winoows process integration. |
-| WASI/component plugin execution is intentionally outsioe current shell compatibility scope. | Keep in plugin roaomap; oo not mix with bash language compatibility claims. |
+| Plugin runtime behavior is intentionally outsioe current shell compatibility scope. | Keep in plugin docs; oo not mix with bash language compatibility claims. |
 
 ## Maintenance Rules
 

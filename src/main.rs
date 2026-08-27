@@ -8,13 +8,6 @@
 //!   winuxsh --help | -h      → usage
 //!   winuxsh --version        → version (winuxsh / rubash / winuxcmd)
 //!   winuxsh setup            → re-run the interactive prompt/plugin wizard
-//!   winuxsh --zsh-compat-report      → scan zsh config and print report
-//!   winuxsh --zsh-compat-report-json → scan zsh config and print JSON report
-//!   winuxsh --zsh-compat-import-plan → print a reviewable .winshrc.toml patch
-//!   winuxsh --zsh-compat-import-apply → write the import patch with a backup
-//!   winuxsh --zsh-compat-import-status → inspect import block and backups
-//!   winuxsh --zsh-compat-import-rollback-plan → print restore command
-//!   winuxsh --zsh-compat-doctor → summarize zsh compatibility health
 //!   winuxsh plugin list [--json] → list official Winuxsh plugins
 //!   winuxsh plugin info <name> [--json] → inspect one official plugin
 //!   winuxsh plugin search [query] [--json] → discover official plugins
@@ -25,27 +18,33 @@
 //!   winuxsh plugin update oh-my-winuxsh --from <path> → install a bundle release
 //!   winuxsh plugin update oh-my-winuxsh --github-release latest → download/install bundle
 //!   winuxsh plugin rollback oh-my-winuxsh → roll back to the previous bundle
-//!   winuxsh plugin plan enable <name> [--json] → preview plugin TOML
-//!   winuxsh plugin install <name> → install an official plugin
-//!   winuxsh plugin uninstall <name> → uninstall an official plugin
-//!   winuxsh plugin enable <name> → write managed plugin TOML
-//!   winuxsh --zsh-native-packs → list legacy zsh migration pack mappings
-//!   winuxsh --zsh-native-packs-json → list legacy zsh migration mappings as JSON
-//!   winuxsh --zsh-profile-plan <profile> → print a native zsh profile TOML plan
 //!   winuxsh --completion-probe "line" [cursor] → print REPL completions
 //!   winuxsh --install-wt-profile → add/update the Windows Terminal profile
 //!   winuxsh --self-update → download and run the latest installer
 //!   self-update / update-winuxsh → REPL commands for Winuxsh self-update
 
-use std::io::Read;
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use rubash::invocation::ShellInvocation;
 
 mod self_update;
 const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-winuxsh";
 const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "winuxsh-plugin-bundles";
+const WINUXSH_MAIN_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    std::thread::Builder::new()
+        .name("winuxsh-main".to_string())
+        .stack_size(WINUXSH_MAIN_STACK_SIZE)
+        .spawn(run_main)
+        .expect("spawn winuxsh main thread")
+        .join()
+        .unwrap_or_else(|_| ExitCode::from(1))
+}
+
+fn run_main() -> ExitCode {
     // Initialize logging (only error level by default)
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Error)
@@ -56,6 +55,13 @@ fn main() -> ExitCode {
     winuxsh_runtime::ctrl_c::install();
 
     let args: Vec<String> = std::env::args().collect();
+    if let Some(name) = args
+        .get(1)
+        .and_then(|arg| arg.strip_prefix("--internal-"))
+        .filter(|name| matches!(*name, "yes" | "head" | "wc"))
+    {
+        run_internal_pipeline_utility(name, &args[2..]);
+    }
 
     if let Err(e) = run(&args) {
         if is_broken_pipe_error(&e) {
@@ -77,6 +83,12 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     }
 
     let first = &args[1];
+    if first.starts_with('-')
+        && !matches!(first.as_str(), "-h" | "--help" | "-V" | "--version" | "-C" | "--repl-command")
+        && ShellInvocation::parse(&args[1..]).is_ok()
+    {
+        return run_shell_invocation(&args[1..]);
+    }
     match first.as_str() {
         "-h" | "--help" => {
             print_usage();
@@ -87,46 +99,6 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "--gitstatus-daemon" => winuxsh_runtime::git_status::run_daemon_stdio(),
-        "--zsh-compat-report" => {
-            print_zsh_compat_report(false)?;
-            Ok(())
-        }
-        "--zsh-compat-report-json" => {
-            print_zsh_compat_report(true)?;
-            Ok(())
-        }
-        "--zsh-compat-import-plan" => {
-            print_zsh_compat_import_plan()?;
-            Ok(())
-        }
-        "--zsh-compat-import-apply" => {
-            apply_zsh_compat_import_plan()?;
-            Ok(())
-        }
-        "--zsh-compat-import-status" => {
-            print_zsh_compat_import_status()?;
-            Ok(())
-        }
-        "--zsh-compat-import-rollback-plan" => {
-            print_zsh_compat_import_rollback_plan()?;
-            Ok(())
-        }
-        "--zsh-compat-doctor" => {
-            print_zsh_compat_doctor()?;
-            Ok(())
-        }
-        "--zsh-native-packs" => {
-            print_zsh_native_packs(false)?;
-            Ok(())
-        }
-        "--zsh-native-packs-json" => {
-            print_zsh_native_packs(true)?;
-            Ok(())
-        }
-        "--zsh-profile-plan" => {
-            print_zsh_profile_plan(args)?;
-            Ok(())
-        }
         "--completion-probe" => {
             print_completion_probe(args)?;
             Ok(())
@@ -146,11 +118,13 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             let mut shell = winuxsh_runtime::Shell::new()?;
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
+            shell.executor.set_env("BASH_EXECUTION_STRING", &args[2]);
             if let Some(command_name) = args.get(3) {
                 shell.executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
                 shell.executor.set_positional_params(args[4..].to_vec());
             }
             let code = shell.execute_script(&args[2])?;
+            let code = shell.finish_with_exit_trap(code)?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -169,12 +143,56 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             shell.executor.set_positional_params(args[2..].to_vec());
             let content = std::fs::read_to_string(&script)?;
             let code = shell.execute_script(&content)?;
+            let code = shell.finish_with_exit_trap(code)?;
             if code != 0 {
                 std::process::exit(code);
             }
             Ok(())
         }
     }
+}
+
+fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
+    let invocation = ShellInvocation::parse(args)
+        .map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
+    let mut shell = if invocation.read_stdin {
+        winuxsh_runtime::Shell::new_for_stdin_script()?
+    } else {
+        winuxsh_runtime::Shell::new()?
+    };
+    invocation
+        .apply_to_executor(&mut shell.executor)
+        .map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
+    shell.executor.inherit_process_stdin();
+    shell.enable_process_stdin_pipeline_bridge();
+
+    if let Some(command) = invocation.command {
+        shell.executor.set_env("BASH_EXECUTION_STRING", &command);
+        let code = shell.execute_script(&command)?;
+        let code = shell.finish_with_exit_trap(code)?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    if let Some(script_name) = invocation.script {
+        shell.executor.set_env("__RUBASH_SCRIPT_NAME", &script_name);
+        let content = std::fs::read_to_string(script_arg_to_host_path(&script_name))?;
+        let code = shell.execute_script(&content)?;
+        let code = shell.finish_with_exit_trap(code)?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    let mut content = String::new();
+    std::io::stdin().read_to_string(&mut content)?;
+    let code = shell.execute_script(&content)?;
+    let code = shell.finish_with_exit_trap(code)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 fn script_arg_to_host_path(value: &str) -> PathBuf {
@@ -242,6 +260,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
             0 => {
                 if !pending.is_empty() {
                     let code = shell.execute_script(&pending.join("\n"))?;
+                    let code = shell.finish_with_exit_trap(code)?;
                     if code != 0 {
                         std::process::exit(code);
                     }
@@ -263,11 +282,16 @@ fn run_stdin_script() -> anyhow::Result<()> {
 
         let code = shell.execute_script(&script)?;
         if code != 0 {
+            let code = shell.finish_with_exit_trap(code)?;
             std::process::exit(code);
         }
         pending.clear();
     }
 
+    let code = shell.finish_with_exit_trap(0)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
     Ok(())
 }
 
@@ -290,6 +314,87 @@ fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
     }
 
     Ok(read)
+}
+
+fn run_internal_pipeline_utility(name: &str, args: &[String]) -> ! {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    match name {
+        "yes" => {
+            let line = if args.is_empty() {
+                "y".to_string()
+            } else {
+                args.join(" ")
+            };
+            let chunk = format!("{line}\n").repeat(256);
+            loop {
+                if stdout.write_all(chunk.as_bytes()).is_err() || stdout.flush().is_err() {
+                    std::process::exit(0);
+                }
+            }
+        }
+        "head" => {
+            let count = internal_head_line_count(args).unwrap_or(10);
+            let mut input = std::io::BufReader::new(stdin.lock());
+            let mut line = Vec::new();
+            for _ in 0..count {
+                line.clear();
+                match input.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if stdout.write_all(&line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = stdout.flush();
+            std::process::exit(0);
+        }
+        "wc" => {
+            let mut input = stdin.lock();
+            let mut buffer = [0_u8; 8192];
+            let mut lines = 0usize;
+            loop {
+                match input.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(size) => {
+                        lines += buffer[..size].iter().filter(|byte| **byte == b'\n').count()
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = writeln!(stdout, "{lines}");
+            std::process::exit(0);
+        }
+        _ => std::process::exit(127),
+    }
+}
+
+fn internal_head_line_count(args: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "-n" {
+            return args.get(index + 1)?.parse().ok();
+        }
+        if let Some(value) = arg.strip_prefix("-n") {
+            if !value.is_empty() {
+                return value.parse().ok();
+            }
+        }
+        if let Some(value) = arg.strip_prefix('-') {
+            if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
+                return value.parse().ok();
+            }
+        }
+        if let Some(value) = arg.strip_prefix("--lines=") {
+            return value.parse().ok();
+        }
+        index += 1;
+    }
+    None
 }
 
 fn print_usage() {
@@ -329,28 +434,12 @@ fn print_usage() {
     println!("  plugin update oh-my-winuxsh --github-release latest|vX.Y.Z [--json]");
     println!("                            Install bundle release");
     println!("  plugin rollback oh-my-winuxsh [--json]  Roll back bundle release");
-    println!("  plugin plan enable <name> [--json]  Preview managed plugin TOML");
-    println!("  plugin plan disable <name> [--json] Preview managed plugin TOML");
-    println!("  plugin install <name>     Install official plugin from active bundle");
-    println!("  plugin uninstall <name>   Uninstall official plugin from active bundle");
-    println!("  plugin enable <name>      Write managed plugin TOML");
-    println!("  plugin disable <name>     Write managed plugin TOML");
     println!();
-    println!("  --zsh-compat-report       Scan ~/.zshrc, show safe-import report");
-    println!("  --zsh-compat-report-json  Same, as JSON");
-    println!("  --zsh-compat-import-plan  Generate a .winshrc.toml import patch");
-    println!("  --zsh-compat-import-apply Apply the patch (with backup)");
-    println!("  --zsh-compat-import-status Inspect import block and backup");
-    println!("  --zsh-compat-import-rollback-plan  Show restore command");
-    println!("  --zsh-compat-doctor       Legacy zsh migration health summary");
     println!();
-    println!("  --zsh-native-packs        Legacy: list zsh migration pack mappings");
-    println!("  --zsh-native-packs-json   Legacy: same, as JSON");
-    println!("  --zsh-profile-plan <profile>  Print TOML for a profile");
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
-    println!("Configuration: ~/.winuxshrc for interactive startup; ~/.winshrc and ~/.winshrc.toml remain legacy/managed fallbacks");
+    println!("Configuration: ~/.winuxshrc for interactive startup; ~/.winshrc remains a compatibility fallback");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
@@ -398,15 +487,6 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         "review" => run_plugin_review_command(&args[3..]),
         "update" => run_plugin_update_command(&args[3..]),
         "rollback" => run_plugin_rollback_command(&args[3..]),
-        "plan" => run_plugin_plan_command(&args[3..]),
-        "install" => run_plugin_install_command(args),
-        "uninstall" => run_plugin_uninstall_command(args),
-        "enable" => {
-            run_plugin_apply_command(args, winuxsh_runtime::plugins::PluginConfigAction::Enable)
-        }
-        "disable" => {
-            run_plugin_apply_command(args, winuxsh_runtime::plugins::PluginConfigAction::Disable)
-        }
         unknown => anyhow::bail!("unknown plugin subcommand '{}'", unknown),
     }
 }
@@ -414,7 +494,7 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
 fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {
     let json = parse_plugin_json_flag(args)?;
     let config = winuxsh_runtime::config::load();
-    let report = winuxsh_runtime::plugins::plugin_doctor_report(&config.plugins, &config.zsh);
+    let report = winuxsh_runtime::plugins::plugin_doctor_report(&config.plugins);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -429,8 +509,7 @@ fn run_plugin_review_command(args: &[String]) -> anyhow::Result<()> {
     };
     let json = parse_plugin_json_flag(&args[1..])?;
     let config = winuxsh_runtime::config::load();
-    let review =
-        winuxsh_runtime::plugins::plugin_permission_review(name, &config.plugins, &config.zsh)?;
+    let review = winuxsh_runtime::plugins::plugin_permission_review(name, &config.plugins)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&review)?);
     } else {
@@ -690,148 +769,6 @@ fn read_checksum_file(path: &PathBuf) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("checksum file {} is empty", path.display()))?;
     Ok(checksum.to_string())
 }
-fn run_plugin_plan_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(action_raw) = args.get(0) else {
-        anyhow::bail!("plugin plan requires an action: enable or disable");
-    };
-    let Some(name) = args.get(1) else {
-        anyhow::bail!("plugin plan {} requires a plugin name", action_raw);
-    };
-    let json = parse_plugin_json_flag(&args[2..])?;
-    let action = plugin_config_action_from_str(action_raw)?;
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let plan = winuxsh_runtime::plugins::plugin_config_plan_for_path(&config_path, name, action)?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&plan)?);
-    } else {
-        println!("{}", plan.toml);
-    }
-    Ok(())
-}
-
-fn run_plugin_apply_command(
-    args: &[String],
-    action: winuxsh_runtime::plugins::PluginConfigAction,
-) -> anyhow::Result<()> {
-    let Some(name) = args.get(3) else {
-        anyhow::bail!(
-            "plugin {} requires a plugin name",
-            plugin_config_action_name(action)
-        );
-    };
-    reject_plugin_options(&args[4..])?;
-
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary =
-        winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(&config_path, name, action)?;
-
-    println!(
-        "{} plugin '{}' in {}",
-        plugin_config_action_past_tense(summary.action),
-        summary.plugin,
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed plugin block");
-    } else {
-        println!("Added a new winuxsh-managed plugin block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    Ok(())
-}
-
-fn run_plugin_install_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(name) = args.get(3) else {
-        anyhow::bail!("plugin install requires a plugin name");
-    };
-    reject_plugin_options(&args[4..])?;
-
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary = winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(
-        &config_path,
-        name,
-        winuxsh_runtime::plugins::PluginConfigAction::Enable,
-    )?;
-
-    println!(
-        "Installed plugin '{}' in {}",
-        summary.plugin,
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed plugin block");
-    } else {
-        println!("Added a new winuxsh-managed plugin block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    println!("Review: winuxsh plugin review {}", summary.plugin);
-    Ok(())
-}
-
-fn run_plugin_uninstall_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(name) = args.get(3) else {
-        anyhow::bail!("plugin uninstall requires a plugin name");
-    };
-    reject_plugin_options(&args[4..])?;
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary = winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(
-        &config_path,
-        name,
-        winuxsh_runtime::plugins::PluginConfigAction::Disable,
-    )?;
-    println!(
-        "Uninstalled plugin '{}' in {}",
-        summary.plugin,
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed plugin block");
-    } else {
-        println!("Added a new winuxsh-managed plugin block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    println!("Install: winuxsh plugin install {}", summary.plugin);
-    Ok(())
-}
-fn plugin_config_action_from_str(
-    value: &str,
-) -> anyhow::Result<winuxsh_runtime::plugins::PluginConfigAction> {
-    match value {
-        "enable" => Ok(winuxsh_runtime::plugins::PluginConfigAction::Enable),
-        "disable" => Ok(winuxsh_runtime::plugins::PluginConfigAction::Disable),
-        unknown => anyhow::bail!("unknown plugin plan action '{}'", unknown),
-    }
-}
-
-fn plugin_config_action_name(action: winuxsh_runtime::plugins::PluginConfigAction) -> &'static str {
-    match action {
-        winuxsh_runtime::plugins::PluginConfigAction::Enable => "enable",
-        winuxsh_runtime::plugins::PluginConfigAction::Disable => "disable",
-    }
-}
-
-fn plugin_config_action_past_tense(
-    action: winuxsh_runtime::plugins::PluginConfigAction,
-) -> &'static str {
-    match action {
-        winuxsh_runtime::plugins::PluginConfigAction::Enable => "Enabled",
-        winuxsh_runtime::plugins::PluginConfigAction::Disable => "Disabled",
-    }
-}
-
-fn reject_plugin_options(args: &[String]) -> anyhow::Result<()> {
-    for arg in args {
-        anyhow::bail!("unknown plugin option '{}'", arg);
-    }
-    Ok(())
-}
 
 fn parse_plugin_json_flag(args: &[String]) -> anyhow::Result<bool> {
     let mut json = false;
@@ -882,12 +819,8 @@ fn print_plugin_usage() {
     println!("                            Download, verify, and install GitHub release");
     println!("  rollback oh-my-winuxsh [--json]");
     println!("                            Roll back to the previous bundle");
-    println!("  plan enable <name> [--json]   Preview managed plugin TOML");
-    println!("  plan disable <name> [--json]  Preview managed plugin TOML");
     println!("  install <name>           Install official plugin from active bundle");
     println!("  uninstall <name>         Uninstall official plugin from active bundle");
-    println!("  enable <name>             Write managed plugin TOML");
-    println!("  disable <name>            Write managed plugin TOML");
 }
 
 fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
@@ -951,174 +884,6 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
     for suggestion in shell.completion_probe(line, cursor_pos) {
         println!("{}", suggestion);
     }
-    Ok(())
-}
-
-fn print_zsh_compat_import_plan() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    println!(
-        "{}",
-        winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report)
-    );
-    Ok(())
-}
-
-fn apply_zsh_compat_import_plan() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    let plan = winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report);
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary = winuxsh_runtime::zsh_compat::apply_import_plan_to_config(&config_path, &plan)?;
-
-    println!(
-        "Wrote zsh compatibility import block to {}",
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed zsh import block");
-    } else {
-        println!("Added a new winuxsh-managed zsh import block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    Ok(())
-}
-
-fn print_zsh_compat_import_status() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    let plan = winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report);
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let status = winuxsh_runtime::zsh_compat::inspect_import_config_status(&config_path, &plan)?;
-
-    println!("Config: {}", status.config_path.display());
-    println!("Exists: {}", yes_no(status.config_exists));
-    println!(
-        "Managed block: {}",
-        zsh_import_block_state_label(status.block_state)
-    );
-    if status.toml_valid {
-        println!("TOML: valid");
-    } else {
-        println!(
-            "TOML: invalid ({})",
-            status.toml_error.as_deref().unwrap_or("unknown error")
-        );
-    }
-    println!(
-        "Next apply: {}",
-        zsh_import_apply_readiness_label(status.apply_readiness)
-    );
-    if let Some(error) = status.apply_error {
-        println!("Apply detail: {}", error);
-    }
-    println!("Backups: {}", status.backup_paths.len());
-    if let Some(path) = status.backup_paths.last() {
-        println!("Latest backup: {}", path.display());
-    }
-    Ok(())
-}
-
-fn print_zsh_compat_import_rollback_plan() -> anyhow::Result<()> {
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let plan = winuxsh_runtime::zsh_compat::inspect_import_rollback_plan(&config_path)?;
-
-    println!("Config: {}", plan.config_path.display());
-    println!("Backups: {}", plan.backup_paths.len());
-    if let Some(path) = plan.latest_backup_path {
-        println!("Latest backup: {}", path.display());
-    } else {
-        println!("Latest backup: none");
-    }
-    if let Some(command) = plan.restore_command {
-        println!("Restore command:");
-        println!("{}", command);
-    } else {
-        println!("Restore command: unavailable (no backups found)");
-    }
-    Ok(())
-}
-
-fn print_zsh_compat_doctor() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    let plan = winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report);
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let status = winuxsh_runtime::zsh_compat::inspect_import_config_status(&config_path, &plan)?;
-    let rollback = winuxsh_runtime::zsh_compat::inspect_import_rollback_plan(&config_path)?;
-
-    println!(
-        "{}",
-        winuxsh_runtime::zsh_compat::zsh_compat_doctor_text(&report, &status, &rollback)
-    );
-    Ok(())
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
-}
-
-fn zsh_import_block_state_label(
-    state: winuxsh_runtime::zsh_compat::ZshImportBlockState,
-) -> &'static str {
-    match state {
-        winuxsh_runtime::zsh_compat::ZshImportBlockState::Missing => "missing",
-        winuxsh_runtime::zsh_compat::ZshImportBlockState::Present => "present",
-        winuxsh_runtime::zsh_compat::ZshImportBlockState::Malformed => "malformed",
-    }
-}
-
-fn zsh_import_apply_readiness_label(
-    readiness: winuxsh_runtime::zsh_compat::ZshImportApplyReadiness,
-) -> &'static str {
-    match readiness {
-        winuxsh_runtime::zsh_compat::ZshImportApplyReadiness::AddNewBlock => "add new block",
-        winuxsh_runtime::zsh_compat::ZshImportApplyReadiness::ReplaceExistingBlock => {
-            "replace existing block"
-        }
-        winuxsh_runtime::zsh_compat::ZshImportApplyReadiness::Blocked => "blocked",
-    }
-}
-
-fn print_zsh_compat_report(json: bool) -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    if json {
-        println!("{}", report.to_json_pretty()?);
-    } else {
-        println!("{}", report.to_human());
-    }
-    Ok(())
-}
-
-fn print_zsh_native_packs(json: bool) -> anyhow::Result<()> {
-    if json {
-        println!("{}", winuxsh_runtime::zsh_compat::native_zsh_packs_json()?);
-    } else {
-        println!("{}", winuxsh_runtime::zsh_compat::native_zsh_packs_text());
-    }
-    Ok(())
-}
-
-fn print_zsh_profile_plan(args: &[String]) -> anyhow::Result<()> {
-    let Some(profile) = args.get(2) else {
-        anyhow::bail!("--zsh-profile-plan requires a profile: agent or zsh-lite");
-    };
-    println!(
-        "{}",
-        winuxsh_runtime::zsh_compat::zsh_profile_plan_toml_for_name(profile)?
-    );
     Ok(())
 }
 

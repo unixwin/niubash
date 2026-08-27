@@ -1,6 +1,6 @@
-﻿[package]
+[package]
 name = "winuxsh-runtime"
-version = "0.10.3"
+version = "0.10.13"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
@@ -9,6 +9,7 @@ description = "Runtime crate for winuxsh: rubash-backed shell REPL on Windows"
 [dependencies]
 rubash = { path = "../../../rubash" }
 reedline = "0.33"
+fd-lock = "4.0"
 anyhow = "1.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -17,8 +18,6 @@ toml = "0.8"
 dirs = "5.0"
 filetime = "0.2"
 sha2 = "0.10"
-wasmparser = "0.244"
-wasmi = "2.0.0-beta.9"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 colored = "2.1"
 log = "0.4"

@@ -490,5 +490,3 @@ fg = "not-a-color"
         std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
     }
 }
-
-

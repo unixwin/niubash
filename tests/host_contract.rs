@@ -5,8 +5,8 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn winuxsh_binary() -> PathBuf {
     let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
@@ -54,6 +54,112 @@ fn cwd_cd_pwd_and_windows_child_process_agree() {
         stdout[0]
     );
 
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn history_and_fc_use_the_host_history_provider() {
+    let temp = unique_temp_dir("winuxsh-host-history-provider");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let history = home.join(".winuxsh_history");
+    std::fs::write(&history, "first command\nsecond command\n").unwrap();
+
+    let output = run_winuxsh("history; fc 2", &start, &home, &[]);
+    assert_success(&output, "host history provider");
+    let stdout = normalize_text(&output.stdout);
+    assert!(stdout.contains("1  first command"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("2  second command"),
+        "stdout was {stdout:?}"
+    );
+
+    let saved = run_winuxsh("history -s third command", &start, &home, &[]);
+    assert_success(&saved, "host history save");
+    assert!(std::fs::read_to_string(&history)
+        .unwrap()
+        .contains("third command"));
+
+    let deleted = run_winuxsh("history -d 2", &start, &home, &[]);
+    assert_success(&deleted, "host history delete");
+    let after_delete = std::fs::read_to_string(&history).unwrap();
+    assert!(!after_delete.contains("second command"));
+    assert!(after_delete.contains("third command"));
+
+    let cleared = run_winuxsh("history -c", &start, &home, &[]);
+    assert_success(&cleared, "host history clear");
+    assert_eq!(std::fs::read_to_string(&history).unwrap(), "");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn host_shell_keeps_rubash_history_storage_disabled() {
+    let temp = unique_temp_dir("winuxsh-host-history-owner");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let rubash_history = temp.join("rubash-history");
+
+    let output = run_winuxsh(
+        "test -z \"$HISTFILE\"",
+        &start,
+        &home,
+        &[("HISTFILE", rubash_history.to_string_lossy().into_owned())],
+    );
+
+    assert_success(&output, "host history ownership");
+    assert!(
+        !rubash_history.exists(),
+        "Rubash must not create a second host history file"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn bash_style_noexec_option_reaches_rubash() {
+    let temp = unique_temp_dir("winuxsh-host-noexec");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = Command::new(winuxsh_binary())
+        .args(["-n", "-c", "printf should-not-run"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+
+    assert_success(&output, "Bash -n host invocation");
+    assert!(
+        output.stdout.is_empty(),
+        "-n unexpectedly executed the command"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn bash_style_errexit_option_reaches_rubash() {
+    let temp = unique_temp_dir("winuxsh-host-errexit");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = Command::new(winuxsh_binary())
+        .args(["-e", "-c", "false; printf should-not-run"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "-e continued after failure");
     let _ = std::fs::remove_dir_all(temp);
 }
 
@@ -161,7 +267,6 @@ echo SHOULD_NOT_PRINT
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh script file: {err}"));
     assert_success(&output, "script-file .winshrc isolation");
@@ -171,7 +276,6 @@ echo SHOULD_NOT_PRINT
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -186,6 +290,167 @@ echo SHOULD_NOT_PRINT
     let output = child.wait_with_output().unwrap();
     assert_success(&output, "stdin-script .winshrc isolation");
     assert_eq!(normalize_text(&output.stdout), "stdin-ok");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn command_mode_sets_bash_execution_string() {
+    let temp = unique_temp_dir("winuxsh-host-bash-execution-string");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let script = "printf '%s' \"$BASH_EXECUTION_STRING\"";
+    let output = run_winuxsh(script, &start, &home, &[]);
+    assert_success(&output, "BASH_EXECUTION_STRING");
+    assert_eq!(normalize_text(&output.stdout), script);
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn rubash_executor_sees_winuxsh_shell_name() {
+    let temp = unique_temp_dir("winuxsh-host-shell-name");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh("printf '%s' \"$__RUBASH_SHELL_NAME\"", &start, &home, &[]);
+    assert_success(&output, "rubash shell name");
+    assert!(
+        normalize_text(&output.stdout)
+            .to_ascii_lowercase()
+            .contains("winuxsh"),
+        "stdout was {:?}",
+        normalize_text(&output.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn starship_receives_bash_shell_identity() {
+    let temp = unique_temp_dir("winuxsh-host-starship-shell");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh("printf '%s' \"$STARSHIP_SHELL\"", &start, &home, &[]);
+    assert_success(&output, "Starship shell name");
+    assert_eq!(normalize_text(&output.stdout), "bash");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn exit_trap_runs_for_non_interactive_modes() {
+    let temp = unique_temp_dir("winuxsh-host-exit-trap");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let command_marker = temp.join("command-marker");
+    let output = run_winuxsh(
+        &format!(
+            "trap 'printf command > {}' EXIT; true",
+            shell_quote(&shell_path(&command_marker))
+        ),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "command-mode EXIT trap");
+    assert_eq!(std::fs::read_to_string(&command_marker).unwrap(), "command");
+
+    let script_marker = temp.join("script-marker");
+    let script = temp.join("script.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "trap 'printf script > {}' EXIT\ntrue\n",
+            shell_quote(&shell_path(&script_marker))
+        ),
+    )
+    .unwrap();
+    let output = Command::new(winuxsh_binary())
+        .arg(&script)
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .output()
+        .unwrap_or_else(|err| panic!("spawn winuxsh script file: {err}"));
+    assert_success(&output, "script-file EXIT trap");
+    assert_eq!(std::fs::read_to_string(&script_marker).unwrap(), "script");
+
+    let stdin_marker = temp.join("stdin-marker");
+    let mut child = Command::new(winuxsh_binary())
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh stdin script: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            format!(
+                "trap 'printf stdin > {}' EXIT\ntrue\n",
+                shell_quote(&shell_path(&stdin_marker))
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "stdin-script EXIT trap");
+    assert_eq!(std::fs::read_to_string(&stdin_marker).unwrap(), "stdin");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn internal_pipeline_helpers_work_when_rubash_is_embedded() {
+    let temp = unique_temp_dir("winuxsh-host-internal-pipeline");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let mut child = Command::new(winuxsh_binary())
+        .arg("--internal-wc")
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh internal wc: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"one\ntwo\nthree\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "embedded internal wc helper");
+    assert_eq!(normalize_text(&output.stdout), "3");
+
+    let output = run_winuxsh("yes ok | head -n 3 | wc", &start, &home, &[]);
+    assert_success(&output, "embedded internal pipeline helpers");
+    assert!(
+        normalize_text(&output.stdout).starts_with('3'),
+        "stdout was {:?}",
+        normalize_text(&output.stdout)
+    );
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -214,7 +479,7 @@ fn temporary_assignment_reaches_nested_winuxsh_child() {
 }
 
 #[test]
-fn zsh_setopt_is_supported_when_sourcing_startup_rc() {
+fn rubash_setopt_is_visible_when_sourcing_startup_rc() {
     let temp = unique_temp_dir("winuxsh-host-setopt");
     let home = temp.join("home");
     let start = temp.join("start");
@@ -387,6 +652,52 @@ fn native_backslash_drive_paths_work_for_winuxcmd() {
         stdout.iter().any(|line| line.contains("marker.txt")),
         "ls output did not include marker.txt: {stdout:?}"
     );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn installed_winuxcmd_links_back_logical_bin_namespaces_without_root_copies() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let Some(winuxcmd) = real_winuxcmd_for_test() else {
+        return;
+    };
+    let Some(winuxcmd_dir) = winuxcmd.parent() else {
+        return;
+    };
+    if !winuxcmd_dir.join("ls.exe").is_file() {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-installed-winuxcmd-logical-bin");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let root = temp.join("root");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh(
+        "test -x /usr/bin/ls; test -f /usr/bin/ls; /bin/ls /etc >/dev/null; printf x > /etc/path-contract; test -f /etc/path-contract",
+        &start,
+        &home,
+        &[
+            ("WINUXCMD_PATH", native_path(&winuxcmd)),
+            ("WINUXSH_ROOT", native_path(&root)),
+        ],
+    );
+    assert_success(&output, "installed WinuxCmd logical bin provider");
+    assert!(
+        !root.join("usr").join("bin").join("ls.exe").exists(),
+        "WinuxCmd links must stay in the installed provider directory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("etc").join("path-contract")).unwrap(),
+        "x"
+    );
+    assert!(!root.join(".wpm").exists());
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -614,7 +925,6 @@ fn piped_stdin_without_args_runs_plain_script_surface() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -652,7 +962,6 @@ fn piped_stdin_without_args_runs_multiline_compound_block() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -685,7 +994,6 @@ fn piped_stdin_without_args_runs_heredoc_as_one_chunk() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -725,7 +1033,6 @@ fn piped_stdin_child_script_reads_unconsumed_parent_input() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .env("THIS_SH", shell_path(&winuxsh_binary()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -789,7 +1096,6 @@ fn command_mode_pipeline_first_stage_reads_host_stdin() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -836,7 +1142,6 @@ fn script_file_args_populate_positional_parameters() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
 
@@ -846,6 +1151,74 @@ fn script_file_args_populate_positional_parameters() {
     assert!(stdout.contains("n=2"), "{stdout}");
     assert!(stdout.contains("one=first"), "{stdout}");
     assert!(stdout.contains("all=first second"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn script_file_while_read_redirect_does_not_wait_for_parent_stdin() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-script-read-redirect");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::write(start.join("list.txt"), "alpha\nbeta\n").unwrap();
+    let script = start.join("read-list.sh");
+    std::fs::write(
+        &script,
+        "count=0\nwhile IFS= read -r file; do\n  printf '<%s>\\n' \"$file\"\n  count=$((count + 1))\ndone < list.txt\nprintf 'count=%s\\n' \"$count\"\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(winuxsh_binary())
+        .arg(&script)
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh script read redirect: {err}"));
+    let _open_parent_stdin = child.stdin.take().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "script exited with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("script read from parent stdin instead of redirected list.txt");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    drop(_open_parent_stdin);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(
+        normalize_text(stdout.as_bytes()),
+        "<alpha>\n<beta>\ncount=2"
+    );
+    assert_eq!(normalize_text(stderr.as_bytes()), "");
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -873,7 +1246,6 @@ fn slash_drive_script_file_argument_executes_script() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh slash-drive script: {err}"));
 
@@ -974,7 +1346,6 @@ fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -985,11 +1356,19 @@ fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
     let _ = stdout.read(&mut buffer).unwrap_or(0);
     drop(stdout);
 
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(3));
+
     let mut stderr = String::new();
     if let Some(mut child_stderr) = child.stderr.take() {
         child_stderr.read_to_string(&mut stderr).unwrap();
     }
-    let _ = child.wait().unwrap();
+
+    let _ = std::fs::remove_dir_all(temp);
+
+    assert!(
+        status.is_some(),
+        "winuxsh did not exit after stdout pipe closed; stderr: {stderr:?}"
+    );
 
     assert!(
         !stderr.contains("Broken pipe")
@@ -997,8 +1376,6 @@ fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
             && !stderr.contains("管道正在被关闭"),
         "stderr should not contain scary broken pipe text: {stderr:?}"
     );
-
-    let _ = std::fs::remove_dir_all(temp);
 }
 
 fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String)]) -> Output {
@@ -1008,8 +1385,7 @@ fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String
         .arg(script)
         .current_dir(cwd)
         .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("ZDOTDIR", home);
+        .env("USERPROFILE", home);
 
     for (key, value) in extra_env {
         command.env(key, value);
@@ -1018,6 +1394,28 @@ fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String
     command
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"))
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 fn assert_success(output: &Output, context: &str) {

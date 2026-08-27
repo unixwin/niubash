@@ -1,6 +1,7 @@
 interface:
-  display_name: "Winuxsh"
-  short_description: "Windows-native Bash and coreutils"
-  default_prompt: "Use $winuxsh to run Bash through Winuxsh from pwsh/Codex, use native Windows paths, discover WinuxCmd/WPM utilities, and verify behavior against the active binary."
+  display_name: "Winuxsh Native Codex"
+  short_description: "Run Codex directly inside native Winuxsh."
+  default_prompt: "Use $winuxsh-native-codex for native Winuxsh shell tasks."
+
 policy:
   allow_implicit_invocation: true

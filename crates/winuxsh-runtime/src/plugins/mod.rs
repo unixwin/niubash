@@ -1,6 +1,6 @@
 //! Winuxsh-native plugin inventory, bundle assets, and plugin CLI helpers.
 use crate::completion::external::{CommandDef, FlagDef, SubcommandDef};
-use crate::config::{PluginConfig, ZshConfig};
+use crate::config::PluginConfig;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::theme::Theme;
 use anyhow::{anyhow, Context};
@@ -18,11 +18,8 @@ const PLUGIN_BUNDLE_API_VERSION: &str = "winuxsh:plugin-bundle@0.1.0";
 const PLUGIN_INDEX_SCHEMA: &str = "winuxsh:plugin-index@0.1.0";
 const PLUGIN_INDEX_SIGNATURE_POLICY: &str = "unsupported";
 const PROCESS_PLUGIN_PROTOCOL: &str = "winuxsh:process-plugin@0.1.0";
-const WASM_PLUGIN_PROTOCOL: &str = "winuxsh:wasm-plugin@0.1.0";
 const COMMAND_NOT_FOUND_PROVIDER: &str = "command-not-found";
 const SOURCE_PLUGIN_HOOKS: &[&str] = &["startup", "precmd", "preexec", "chpwd"];
-const MANAGED_BLOCK_START: &str = "# >>> winuxsh plugins >>>";
-const MANAGED_BLOCK_END: &str = "# <<< winuxsh plugins <<<";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
@@ -30,7 +27,6 @@ pub enum PluginKind {
     Source,
     Bridge,
     Process,
-    Wasm,
 }
 impl PluginKind {
     fn as_str(self) -> &'static str {
@@ -39,7 +35,6 @@ impl PluginKind {
             Self::Source => "source",
             Self::Bridge => "bridge",
             Self::Process => "process",
-            Self::Wasm => "wasm",
         }
     }
 }
@@ -95,23 +90,8 @@ pub struct PluginProcessSpec {
 pub struct PluginSourceSpec {
     pub entry: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginWasmSpec {
-    pub protocol: String,
-    pub module: String,
-    pub sha256: String,
-    #[serde(default)]
-    pub wit_world: Option<String>,
-    #[serde(default = "default_timeout_millis")]
-    pub timeout_millis: u64,
-    #[serde(default = "default_wasm_memory_pages")]
-    pub max_memory_pages: u32,
-}
 fn default_timeout_millis() -> u64 {
     1000
-}
-fn default_wasm_memory_pages() -> u32 {
-    16
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginPackRecord {
@@ -133,8 +113,6 @@ pub struct PluginPackRecord {
     pub source: Option<PluginSourceSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<PluginProcessSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wasm: Option<PluginWasmSpec>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInventory {
@@ -180,28 +158,6 @@ impl PluginRuntimeState {
     pub fn has_decision(&self, name: &str) -> bool {
         self.decisions.contains(name)
     }
-}
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginConfigAction {
-    Enable,
-    Disable,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginConfigPlan {
-    pub plugin: String,
-    pub action: PluginConfigAction,
-    pub config_path: PathBuf,
-    pub toml: String,
-    pub replaced_existing_block: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginConfigApplySummary {
-    pub plugin: String,
-    pub action: PluginConfigAction,
-    pub config_path: PathBuf,
-    pub backup_path: Option<PathBuf>,
-    pub replaced_existing_block: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginBundleStatus {
@@ -401,8 +357,6 @@ struct BundlePackToml {
     source: Option<PluginSourceSpec>,
     #[serde(default)]
     process: Option<PluginProcessSpec>,
-    #[serde(default)]
-    wasm: Option<PluginWasmSpec>,
 }
 #[derive(Debug, Deserialize)]
 struct FrameworkPluginToml {
@@ -531,7 +485,7 @@ struct BundleKeybindingToml {
     key: String,
     action: String,
 }
-pub fn effective_plugin_state(config: &PluginConfig, zsh: &ZshConfig) -> PluginRuntimeState {
+pub fn effective_plugin_state(config: &PluginConfig) -> PluginRuntimeState {
     let mut state = PluginRuntimeState::default();
     if !config.enabled
         || !config
@@ -545,9 +499,6 @@ pub fn effective_plugin_state(config: &PluginConfig, zsh: &ZshConfig) -> PluginR
         if pack.default {
             state.enabled.insert(pack.name);
         }
-    }
-    for legacy in legacy_enabled_plugins(zsh) {
-        state.enabled.insert(legacy);
     }
     for name in &config.load {
         state.enabled.insert(name.clone());
@@ -564,23 +515,6 @@ pub fn effective_plugin_state(config: &PluginConfig, zsh: &ZshConfig) -> PluginR
         }
     }
     state
-}
-fn legacy_enabled_plugins(zsh: &ZshConfig) -> Vec<String> {
-    if !zsh.native_plugins.enabled {
-        return Vec::new();
-    }
-    zsh.native_plugins
-        .presets
-        .iter()
-        .filter_map(|preset| legacy_preset_matches_plugin(preset))
-        .collect()
-}
-fn legacy_preset_matches_plugin(preset: &str) -> Option<String> {
-    match preset.to_ascii_lowercase().as_str() {
-        "zoxide" | "direnv" | "dotenv" | "fzf" | "command-not-found" | "last-working-dir"
-        | "thefuck" => Some(preset.to_ascii_lowercase()),
-        _ => None,
-    }
 }
 pub fn active_plugin_inventory() -> PluginInventory {
     active_plugin_inventory_result().unwrap_or_else(|err| {
@@ -661,6 +595,14 @@ fn load_legacy_bundle_pack_records(
             .join(&bundle.layout.packs_dir)
             .join(&name)
             .join("plugin.toml");
+        if !manifest_path.is_file() {
+            log::warn!(
+                "skipping missing optional bundle pack '{}' at {}",
+                name,
+                manifest_path.display()
+            );
+            continue;
+        }
         let text = fs::read_to_string(&manifest_path)
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
         let manifest: BundlePackToml = toml::from_str(&text)
@@ -679,7 +621,6 @@ fn load_legacy_bundle_pack_records(
             exports: manifest.exports,
             source: manifest.source,
             process: manifest.process,
-            wasm: manifest.wasm,
         });
     }
     Ok(packs)
@@ -742,9 +683,7 @@ fn load_framework_plugin_records(
         };
         packs.push(PluginPackRecord {
             name: manifest.name.clone(),
-            bundle: manifest
-                .bundle
-                .unwrap_or_else(|| bundle.name.clone()),
+            bundle: manifest.bundle.unwrap_or_else(|| bundle.name.clone()),
             version: manifest.version,
             kind: manifest.kind,
             api: manifest
@@ -762,7 +701,6 @@ fn load_framework_plugin_records(
             exports: manifest.exports,
             source,
             process: None,
-            wasm: None,
         });
     }
     Ok(packs)
@@ -812,7 +750,10 @@ fn framework_plugin_category(name: &str, exports: &PluginExportsRecord) -> Plugi
     PluginCategory::Workflow
 }
 fn framework_plugin_default(name: &str) -> bool {
-    matches!(name, "prompt-core" | "git" | "theme-minimal" | "keybindings")
+    matches!(
+        name,
+        "prompt-core" | "git" | "theme-minimal" | "keybindings"
+    )
 }
 fn framework_plugin_sort_key(name: &str) -> u8 {
     match name {
@@ -918,7 +859,7 @@ fn compiled_plugin_packs() -> Vec<PluginPackRecord> {
             false,
             &["cwd:read", "shell:cwd:write", "process:run:fzf"],
             &["fzf"],
-            exports(false, &[], &[], &[], &["zsh-interactive-cd"], &[], &[]),
+            exports(false, &[], &[], &[], &["cdf", "fzf-cd"], &[], &[]),
         ),
         static_pack(
             "command-not-found",
@@ -1018,7 +959,6 @@ fn static_pack(
         exports,
         source: None,
         process: None,
-        wasm: None,
     }
 }
 fn exports(
@@ -1096,7 +1036,6 @@ fn plugin_execution_model(pack: &PluginPackRecord) -> &'static str {
         PluginKind::Bridge => "host_bridge",
         PluginKind::Process if !pack.exports.providers.is_empty() => "process_provider",
         PluginKind::Process => "process",
-        PluginKind::Wasm => "wasm_command",
     }
 }
 fn plugin_externalization_class(pack: &PluginPackRecord) -> &'static str {
@@ -1118,14 +1057,13 @@ fn plugin_externalization_class(pack: &PluginPackRecord) -> &'static str {
         "zoxide" | "direnv" | "dotenv" | "fzf" | "last-working-dir" | "thefuck" => {
             "shell_effect_candidate"
         }
-        "process-echo" | "process-hook" | "wasm-hello" => "fixture",
+        "process-echo" | "process-hook" => "fixture",
         _ => match pack.kind {
             PluginKind::Builtin if builtin_pack_is_asset_only(pack) => "declarative_asset",
             PluginKind::Builtin => "host_builtin",
             PluginKind::Source => "shell_source",
             PluginKind::Bridge => "host_bridge",
             PluginKind::Process => "external_tool_adapter",
-            PluginKind::Wasm => "wasm_code_bearing",
         },
     }
 }
@@ -1221,7 +1159,7 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
         ),
         "command-not-found" => readiness(
             "process_provider_available_builtin_until_migration",
-            "bundle_migration_decision,wasm_provider_abi",
+            "bundle_migration_decision,provider_abi",
             false,
             true,
             "compiled_native_hints",
@@ -1269,13 +1207,6 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
             false,
             "none",
         ),
-        "wasm-hello" => readiness(
-            "wasm_command_fixture",
-            "provider_effect_abi_separate",
-            false,
-            false,
-            "none",
-        ),
         _ => match plugin_externalization_class(pack) {
             "declarative_asset" => readiness(
                 "asset_only_declarative_schema_tbd",
@@ -1319,13 +1250,6 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
                     "native_host_bridge",
                 ),
                 PluginKind::Process => readiness("process_adapter", "none", false, false, "none"),
-                PluginKind::Wasm => readiness(
-                    "wasm_command",
-                    "provider_effect_abi_separate",
-                    false,
-                    false,
-                    "none",
-                ),
             },
         },
     }
@@ -1505,21 +1429,6 @@ pub fn plugin_pack_text(name: &str) -> Option<String> {
         out.push_str(&format!("  command: {}\n", process.command));
         out.push_str(&format!("  args: {}\n", list_or_none(&process.args)));
         out.push_str(&format!("  timeout_millis: {}\n", process.timeout_millis));
-        out.push_str(&format!(
-            "  commands: {}\n",
-            list_or_none(&pack.exports.commands)
-        ));
-    }
-    if let Some(wasm) = &pack.wasm {
-        out.push_str("WASM:\n");
-        out.push_str(&format!("  protocol: {}\n", wasm.protocol));
-        out.push_str(&format!("  module: {}\n", wasm.module));
-        out.push_str(&format!("  sha256: {}\n", wasm.sha256));
-        if let Some(world) = &wasm.wit_world {
-            out.push_str(&format!("  wit_world: {}\n", world));
-        }
-        out.push_str(&format!("  timeout_millis: {}\n", wasm.timeout_millis));
-        out.push_str(&format!("  max_memory_pages: {}\n", wasm.max_memory_pages));
         out.push_str(&format!(
             "  commands: {}\n",
             list_or_none(&pack.exports.commands)
@@ -1714,8 +1623,8 @@ fn plugin_bundle_status_message(inventory: &PluginInventory, installed: bool) ->
         _ => "using plugin bundle",
     }
 }
-pub fn plugin_doctor_report(config: &PluginConfig, zsh: &ZshConfig) -> PluginDoctorReport {
-    let state = effective_plugin_state(config, zsh);
+pub fn plugin_doctor_report(config: &PluginConfig) -> PluginDoctorReport {
+    let state = effective_plugin_state(config);
     let inventory = active_plugin_inventory();
     let source = inventory.source.clone();
     let trust_source = inventory.trust_source.clone();
@@ -1786,7 +1695,6 @@ pub fn plugin_doctor_text(report: &PluginDoctorReport) -> String {
 pub fn plugin_permission_review(
     name: &str,
     config: &PluginConfig,
-    zsh: &ZshConfig,
 ) -> anyhow::Result<PluginPermissionReview> {
     let inventory = active_plugin_inventory();
     let trust_source = plugin_trust_source(&inventory).to_string();
@@ -1795,11 +1703,9 @@ pub fn plugin_permission_review(
         .into_iter()
         .find(|pack| pack.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| anyhow!("unknown plugin '{}'", name))?;
-    let state = effective_plugin_state(config, zsh);
+    let state = effective_plugin_state(config);
     let mut notes = Vec::new();
-    if pack.kind == PluginKind::Wasm {
-        notes.push("Winuxsh wasmi sandbox without native process permissions".to_string());
-    } else if pack.kind == PluginKind::Source {
+    if pack.kind == PluginKind::Source {
         notes.push(
             "Source pack; startup code is sourced into the current interactive shell session."
                 .to_string(),
@@ -1817,7 +1723,7 @@ pub fn plugin_permission_review(
             "Mixed pack: static bundle assets are declarative, while dynamic behavior remains Winuxsh-owned.".to_string(),
         ),
         "pure_provider_candidate" => notes.push(
-            "Provider candidate; process provider binding exists for command-not-found, while WASM providers still require a separate ABI.".to_string(),
+            "Provider candidate; process provider binding exists for command-not-found while a stable provider ABI is finalized.".to_string(),
         ),
         "shell_effect_candidate" => notes.push(
             "Shell-effect pack remains host-owned until env/cwd/history effects are explicit and permissioned.".to_string(),
@@ -1849,7 +1755,7 @@ pub fn plugin_permission_review(
         permissions: pack
             .permissions
             .iter()
-            .map(|token| permission_detail(token, &pack))
+            .map(|token| permission_detail(token))
             .collect(),
         missing_required_binaries: missing_required_binaries(&pack.required_binaries),
         install_command,
@@ -1903,7 +1809,7 @@ fn plugin_trust_source_for(bundle: &str, source: &str) -> &'static str {
         _ => "local_override",
     }
 }
-fn permission_detail(token: &str, pack: &PluginPackRecord) -> PermissionReviewItem {
+fn permission_detail(token: &str) -> PermissionReviewItem {
     let (risk, scope, description) = if let Some(command) = token.strip_prefix("process:run:") {
         (
             "high",
@@ -1941,12 +1847,6 @@ fn permission_detail(token: &str, pack: &PluginPackRecord) -> PermissionReviewIt
             "environment",
             "May modify process environment for this shell session.".to_string(),
         )
-    } else if pack.kind == PluginKind::Wasm {
-        (
-            "low",
-            "wasm",
-            "Runs inside the Winuxsh wasmi sandbox.".to_string(),
-        )
     } else {
         (
             "medium",
@@ -1972,121 +1872,6 @@ fn plugin_env_read_permission_name(permission: &str) -> Option<&str> {
         return None;
     }
     Some(name)
-}
-pub fn plugin_config_plan_for_path(
-    config_path: &Path,
-    name: &str,
-    action: PluginConfigAction,
-) -> anyhow::Result<PluginConfigPlan> {
-    let inventory = active_plugin_inventory();
-    let external_bundle = plugin_trust_source(&inventory) == "external_bundle";
-    let pack = inventory
-        .packs
-        .into_iter()
-        .find(|pack| pack.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| anyhow!("unknown plugin '{}'", name))?;
-    if external_bundle {
-        anyhow::bail!(
-            "refusing to write managed config for external bundle plugin '{}'; third-party registry trust is not implemented yet",
-            pack.name
-        );
-    }
-    let existing = fs::read_to_string(config_path).unwrap_or_default();
-    let replaced_existing_block =
-        existing.contains(MANAGED_BLOCK_START) && existing.contains(MANAGED_BLOCK_END);
-    if existing.contains("[plugins]") && !replaced_existing_block {
-        anyhow::bail!("refusing to overwrite user-authored [plugins] table; edit it manually or remove it before using winuxsh plugin commands");
-    }
-    Ok(PluginConfigPlan {
-        plugin: pack.name.clone(),
-        action,
-        config_path: config_path.to_path_buf(),
-        toml: managed_plugin_config_block(&pack, action),
-        replaced_existing_block,
-    })
-}
-pub fn apply_plugin_config_plan_to_path(
-    config_path: &Path,
-    name: &str,
-    action: PluginConfigAction,
-) -> anyhow::Result<PluginConfigApplySummary> {
-    let plan = plugin_config_plan_for_path(config_path, name, action)?;
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let existing = fs::read_to_string(config_path).unwrap_or_default();
-    let backup_path = if config_path.exists() {
-        let backup = backup_path_for_config(config_path);
-        fs::write(&backup, &existing)?;
-        Some(backup)
-    } else {
-        None
-    };
-    let next = if plan.replaced_existing_block {
-        replace_managed_plugin_block(&existing, &plan.toml)?
-    } else if existing.trim().is_empty() {
-        format!("{}\n", plan.toml)
-    } else {
-        format!("{}\n{}\n", existing.trim_end(), plan.toml)
-    };
-    fs::write(config_path, next)?;
-    Ok(PluginConfigApplySummary {
-        plugin: plan.plugin,
-        action: plan.action,
-        config_path: config_path.to_path_buf(),
-        backup_path,
-        replaced_existing_block: plan.replaced_existing_block,
-    })
-}
-fn managed_plugin_config_block(pack: &PluginPackRecord, action: PluginConfigAction) -> String {
-    let enabled = matches!(action, PluginConfigAction::Enable);
-    let load = if enabled {
-        format!("[{:?}]", pack.name)
-    } else {
-        "[]".to_string()
-    };
-    format!(
-        "{MANAGED_BLOCK_START}\n[plugins]\nenabled = true\nbundles = [\"{OFFICIAL_BUNDLE_NAME}\"]\nload = {load}\n\n[plugins.{}]\nenabled = {}\npermissions = {}\n{MANAGED_BLOCK_END}",
-        pack.name,
-        if enabled { "true" } else { "false" },
-        toml_string_array(&pack.permissions)
-    )
-}
-fn toml_string_array(values: &[String]) -> String {
-    format!(
-        "[{}]",
-        values
-            .iter()
-            .map(|value| format!("{:?}", value))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-fn replace_managed_plugin_block(existing: &str, block: &str) -> anyhow::Result<String> {
-    let start = existing
-        .find(MANAGED_BLOCK_START)
-        .ok_or_else(|| anyhow!("managed plugin block start marker missing"))?;
-    let end_start = existing
-        .find(MANAGED_BLOCK_END)
-        .ok_or_else(|| anyhow!("managed plugin block end marker missing"))?;
-    let end = end_start + MANAGED_BLOCK_END.len();
-    Ok(format!(
-        "{}{}{}",
-        &existing[..start],
-        block,
-        &existing[end..]
-    ))
-}
-fn backup_path_for_config(config_path: &Path) -> PathBuf {
-    let file_name = config_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("winuxsh-config");
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    config_path.with_file_name(format!("{file_name}.{stamp}.bak"))
 }
 pub fn apply_plugin_bundle_update_from_path(
     bundle_name: &str,
@@ -2270,7 +2055,6 @@ fn validate_bundle_inventory_for_update(
             PluginKind::Source => validate_source_pack_contract(pack, root)?,
             PluginKind::Bridge => validate_bridge_pack_contract(pack)?,
             PluginKind::Process => validate_process_pack_contract(pack)?,
-            PluginKind::Wasm => validate_wasm_pack_contract(pack, root)?,
         }
     }
     validate_bundle_index_for_update(
@@ -2493,12 +2277,6 @@ fn validate_provider_exports_contract(pack: &PluginPackRecord) -> anyhow::Result
                 pack.name
             );
         }
-        PluginKind::Wasm => {
-            anyhow::bail!(
-                "wasm pack '{}' must not export providers until a WASM provider ABI is implemented",
-                pack.name
-            );
-        }
     }
     if !pack
         .permissions
@@ -2561,9 +2339,9 @@ fn validate_source_pack_contract(pack: &PluginPackRecord, root: &Path) -> anyhow
     Ok(())
 }
 fn validate_bridge_pack_contract(pack: &PluginPackRecord) -> anyhow::Result<()> {
-    if pack.source.is_some() || pack.process.is_some() || pack.wasm.is_some() {
+    if pack.source.is_some() || pack.process.is_some() {
         anyhow::bail!(
-            "bridge pack '{}' must not declare source, process, or wasm runtime blocks",
+            "bridge pack '{}' must not declare source or process runtime blocks",
             pack.name
         );
     }
@@ -2605,82 +2383,6 @@ fn validate_process_pack_contract(pack: &PluginPackRecord) -> anyhow::Result<()>
     }
     if process.timeout_millis == 0 {
         anyhow::bail!("process pack '{}' timeout_millis must be > 0", pack.name);
-    }
-    Ok(())
-}
-fn validate_wasm_pack_contract(pack: &PluginPackRecord, root: &Path) -> anyhow::Result<()> {
-    let wasm = pack
-        .wasm
-        .as_ref()
-        .ok_or_else(|| anyhow!("wasm pack '{}' is missing [wasm]", pack.name))?;
-    if pack.default {
-        anyhow::bail!("wasm pack '{}' must be explicit opt-in", pack.name);
-    }
-    if wasm.protocol != WASM_PLUGIN_PROTOCOL {
-        anyhow::bail!(
-            "wasm pack '{}' protocol '{}' does not match {}",
-            pack.name,
-            wasm.protocol,
-            WASM_PLUGIN_PROTOCOL
-        );
-    }
-    if !pack.required_binaries.is_empty() {
-        anyhow::bail!(
-            "wasm pack '{}' must not declare native required_binaries",
-            pack.name
-        );
-    }
-    if pack
-        .permissions
-        .iter()
-        .any(|permission| permission.starts_with("process:run:"))
-    {
-        anyhow::bail!(
-            "wasm pack '{}' must not declare native process permissions",
-            pack.name
-        );
-    }
-    if pack.exports.aliases
-        || !pack.exports.hooks.is_empty()
-        || !pack.exports.keybindings.is_empty()
-        || !pack.exports.themes.is_empty()
-    {
-        anyhow::bail!(
-            "wasm pack '{}' may only export commands, completions, or prompt_segments",
-            pack.name
-        );
-    }
-    validate_wasm_module_artifact(pack, wasm, root)
-}
-fn validate_wasm_module_artifact(
-    pack: &PluginPackRecord,
-    wasm: &PluginWasmSpec,
-    root: &Path,
-) -> anyhow::Result<()> {
-    let module_path = root.join(&wasm.module);
-    let bytes = fs::read(&module_path)
-        .with_context(|| format!("failed to read wasm module {}", module_path.display()))?;
-    if !bytes.starts_with(b"\0asm") {
-        anyhow::bail!(
-            "wasm pack '{}' module {} is not a WebAssembly binary",
-            pack.name,
-            module_path.display()
-        );
-    }
-    let actual = sha256_bytes(&bytes);
-    if !actual.eq_ignore_ascii_case(&wasm.sha256) {
-        anyhow::bail!(
-            "wasm pack '{}' module checksum mismatch: expected {}, got {}",
-            pack.name,
-            wasm.sha256,
-            actual
-        );
-    }
-    if wasm.timeout_millis == 0 || wasm.max_memory_pages == 0 {
-        anyhow::bail!(
-            "wasm pack '{}' timeout and memory limits must be > 0",
-            pack.name
-        );
     }
     Ok(())
 }
@@ -3197,11 +2899,6 @@ fn file_sha256(path: &Path) -> anyhow::Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
-}
-fn sha256_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
 }
 fn is_zip_path(path: &Path) -> bool {
     path.extension()

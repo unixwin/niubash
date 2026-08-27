@@ -190,10 +190,37 @@ fn validate_installer_payload(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
+fn active_install_dir() -> Option<PathBuf> {
+    install_root_for_executable(&std::env::current_exe().ok()?)
+}
+
+#[cfg(windows)]
+fn install_root_for_executable(executable: &Path) -> Option<PathBuf> {
+    let mut candidate = executable.parent()?.to_path_buf();
+    for _ in 0..5 {
+        if candidate.join("winuxsh.exe").is_file() && candidate.join("winuxcmd").is_dir() {
+            return Some(candidate);
+        }
+        candidate = candidate.parent()?.to_path_buf();
+    }
+    None
+}
+
+#[cfg(windows)]
 fn launch_installer(installer_path: &Path) -> Result<()> {
     let operation = wide_null("open");
     let file = wide_null(&installer_path.to_string_lossy());
-    let parameters = wide_null(&INSTALLER_ARGS.join(" "));
+    let mut parameters = INSTALLER_ARGS.join(" ");
+    if let Some(install_dir) = active_install_dir() {
+        // Keep self-update on the installation that launched it. Without an
+        // explicit /DIR, Inno Setup may install a second copy under the
+        // user's default LocalAppData path and leave this copy unchanged.
+        parameters.push_str(" /DIR=\"");
+        parameters.push_str(&install_dir.to_string_lossy());
+        parameters.push('\"');
+        println!("Update target: {}", install_dir.display());
+    }
+    let parameters = wide_null(&parameters);
     let result = unsafe {
         ShellExecuteW(
             ptr::null_mut(),
@@ -955,6 +982,23 @@ mod tests {
             latest_tag_from_url("https://github.com/unixwin/winuxsh/releases/latest"),
             None
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn finds_install_root_from_winuxcmd_shim_path() {
+        let root = std::env::temp_dir().join(format!(
+            "winuxsh-self-update-root-test-{}",
+            std::process::id()
+        ));
+        let shim = root.join("winuxcmd").join("bin").join("sh.exe");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("winuxcmd")).unwrap();
+        std::fs::write(root.join("winuxsh.exe"), b"MZ").unwrap();
+        std::fs::write(&shim, b"MZ").unwrap();
+
+        assert_eq!(install_root_for_executable(&shim), Some(root.clone()));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]

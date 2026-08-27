@@ -1,225 +1,29 @@
----
-tags: [winuxsh, roadmap, native-windows, agent-terminal, v2.3]
-created: 2026-07-17
-status: active
----
-
 # Winuxsh Next Development Plan
 
-> Updated product frame: winuxsh is a Windows-native, non-isolated, bash/zsh-like
-> terminal for both users and agents. It is not MSYS2, Git Bash, Cygwin, WSL,
-> PowerShell compatibility mode, or Nushell semantics.
+## Focus
 
-## Development Principles
+- Stabilize Winuxsh as a Windows-native Bash-compatible shell.
+- Keep shell semantics in rubash and host behavior in Winuxsh.
+- Make `oh-my-winuxsh` the maintained first-party plugin bundle.
+- Keep configuration understandable: user script in `~/.winuxshrc`, managed
+  state in the manifest-backed plugin registry.
 
-- Keep shell syntax, parser, executor, builtins, and job-related semantics in rubash.
-- Track the latest `unixwin/rubash` `master`; fix shell semantics upstream in
-  rubash rather than carrying long-term host-layer workarounds.
-- Keep coreutils in `winuxcmd.exe`, discovered through PATH injection.
-- Keep the terminal process native to Windows:
-  - no filesystem root isolation
-  - `~` means the Windows user home
-  - env/PATH/cwd/stdout/stderr/exit-code are normal Windows process state
-- Keep non-interactive behavior agent-friendly:
-  - no banners
-  - stable stdout/stderr separation
-  - exact exit code propagation
-  - deterministic `-c` and script execution
-- Treat zsh / Oh My Zsh compatibility as a migration adapter and maintenance
-  surface, not the primary future roadmap. Keep import/report behavior safe and
-  reviewable, but do not grow winuxsh toward a zsh interpreter or ZLE runtime.
-- Use Winuxsh-native WASM/WASI plugins as the v3 extension target for
-  completion, prompt, lifecycle hooks, and helper commands.
-- Use Nushell only as a secondary reference for modern config/menu design and
-  reedline integration, not shell language or pipeline semantics.
+## Workstreams
 
-## Phase 0 - Hygiene Before More Features
+1. Host contract hardening: cwd, env, PATH, command links, stdin/stdout/stderr,
+   exit status, and script argument behavior.
+2. Plugin bundle hardening: manifests, permissions, review output, doctor
+   diagnostics, update/rollback, and installed bundle discovery.
+3. Prompt hardening: theme-owned layout, prompt-core rendering, native Git
+   provider, optional Starship-backed Git provider.
+4. Completion hardening: bundle-owned static tables, user override ordering,
+   runtime completion adapters, and cache invalidation.
+5. Installer hardening: reliable PATH setup, WinuxCmd activation, command-link
+   repair, and Windows Terminal profile creation.
 
-- Fix CI warnings:
-  - replace unsupported `rust-version` input with the setup action's supported
-    `toolchain` input
-  - update checkout action if needed to remove Node deprecation warning
-- Push the corrected positioning docs after review.
-- Keep `.tmp/` and external reference clones out of commits.
+## Reference Policy
 
-Verification:
-
-- `cargo fmt --check`
-- `cargo build --locked`
-- `cargo test --lib -p winuxsh-runtime --locked`
-- GitHub Actions master CI green without avoidable workflow warnings.
-
-## Phase 1 - Windows Native Terminal Contract
-
-- Add host-level tests or smoke fixtures for:
-  - `~` / home resolution uses Windows user home
-  - cwd is inherited and updated natively
-  - PATH injection preserves existing Windows PATH entries and prepends winuxcmd
-  - stdout, stderr, and exit code behave predictably in `-c`
-  - script mode stays quiet and deterministic for agents
-- Document the native contract in README and architecture docs.
-- Avoid any MSYS2/Git Bash/WSL path translation layer.
-
-Verification:
-
-- Existing compat suite remains green.
-- New host-contract tests run without requiring PowerShell aliases.
-
-## Phase 2 - v2.2 Completion Closeout
-
-- Audit `winuxcmd.exe --list` and each high-use `winuxcmd.exe <cmd> --help`.
-- Decide `tar` source before adding `tar.toml`.
-- Continue built-in completion coverage for remaining stable winuxcmd commands.
-- Keep definitions generated or audited from winuxcmd help output, not guessed.
-- Preserve user TOML override priority over built-ins.
-
-Verification:
-
-- `cargo test -p winuxsh-runtime --test completion --locked`
-- Add tests for each new command family.
-
-## Phase 3 - Agent-Friendly Error and Command UX
-
-- Improve command-not-found output:
-  - concise message
-  - no PowerShell suggestions
-  - optional nearest winuxcmd/PATH suggestion
-- Ensure external command failures preserve the command's stderr.
-- Avoid extra friendly text in non-interactive mode unless explicitly requested.
-- Normalize obvious native Windows drive literals before rubash tokenization so
-  `C:\Users\...` user input remains a usable Windows path instead of becoming
-  `C:Users...`.
-- Add a REPL multiline collector so pasted `if` / `for` / `while` / function
-  blocks show the continuation prompt and execute as one rubash script.
-- Add docs for agent usage patterns:
-  - `winuxsh -c`
-  - script execution
-  - expected exit-code behavior
-
-Verification:
-
-- CLI tests for command-not-found and non-zero exit behavior.
-
-## Phase 4 - Zsh Compatibility Foundation
-
-- Maintain the zsh UX compatibility work that already exists, but keep this
-  phase scoped to migration safety and diagnostics.
-- Add a zsh profile scanner before implementing broad plugin compatibility.
-  The scanner reads and translates, but does not execute arbitrary zsh scripts:
-  - `.zshrc`
-  - safe `.zshenv` assignments
-  - `ZDOTDIR`
-  - `plugins=(...)`
-  - `ZSH_THEME`
-  - simple aliases/exports/path/fpath/zstyle/bindkey
-- Add an explicit import/report command path before automatic startup import:
-  - `winuxsh --import-zsh` or equivalent CLI surface
-  - dry-run diagnostics for unsupported zsh/ZLE/plugin constructs
-  - native `.winshrc.toml` suggestions for stable settings
-- `[history]` config is implemented:
-  - `path`
-  - `max_size`
-  - `ignore_space_prefixed`
-- Add prompt polish:
-  - right prompt
-  - vi/emacs prompt indicators
-  - configurable multiline indicator
-- `[completions]` UX config is implemented:
-  - case sensitivity
-  - prefix vs substring matching
-  - max external command results
-- `[menus]` UX config is implemented:
-  - completion menu page size
-  - history menu page size
-  - max entry lines for long suggestions
-- Standard ZLE bindkey subset is implemented:
-  - `bindkey KEY beginning-of-line` / `end-of-line`
-  - word movement, delete, kill-line, accept-line, clear-screen
-  - reviewable import-plan entry without sourcing zsh functions
-- Implement autosuggestions natively in reedline, honoring common
-  `ZSH_AUTOSUGGEST_*` settings where practical.
-- Implement syntax highlighting natively with rubash/reedline, honoring a
-  useful subset of `ZSH_HIGHLIGHT_STYLES`.
-
-Verification:
-
-- Runtime unit tests for config parsing.
-- REPL keybinding tests preserve Tab completion and Ctrl+R.
-
-## Phase 4.5 - Execution Contract Smoke
-
-- Status: Phase 30 complete. `rubash` pinned to
-  `f451e16937437d49a2575fbc197345a498d68576`, which executes structured
-  AND/OR lists left-to-right with normal shell short-circuit semantics.
-- Status: Phase 29 complete. Added a deterministic `bash_smoke` compat fixture
-  distilled from the user's manual transcript. Keep dynamic `date` output and
-  external `bash -c` out of the smoke path so the test remains Windows-native
-  and stable.
-- Add a repeatable bash smoke fixture from the user's manual terminal script,
-  but only after failures are split into focused regressions.
-- Cover conditionals, loops, functions, pipelines, redirection, command
-  substitution, Windows-native paths, and exit status.
-- Fix the current AND/OR list semantics gap: `false && a || b` and
-  `[ 1 -eq 2 ] && a || b` must skip the true branch and run the fallback.
-- `$?` is verified correct when `winuxsh -c` is invoked from fixture files or
-  PowerShell single quotes; avoid PowerShell double-quoted `$?` in tests.
-- Prefer a rubash fix and pinned rev update; do not reimplement AND/OR
-  execution in winuxsh.
-
-Verification:
-
-- focused AND/OR regression tests.
-- `bash_smoke` compat fixture.
-- `cargo test --lib -p winuxsh-runtime --locked`
-- `cargo test --test compat --locked -- --ignored`
-- `cargo build --locked`
-
-## Phase 5 - Packaging and Defaults
-
-- Provide a Windows Terminal profile recommendation.
-- Provide a minimal default `.winshrc.toml` optimized for users and agents.
-- Add the official Winuxsh plugin bundle plan:
-  `plugin-system-direction.md` and
-  `oh-my-winuxsh-bundle-plan.md`.
-- Keep config backward compatible.
-- Keep zsh migration as an onboarding adapter before designing any online
-  plugin registry:
-  - completion assets
-  - alias-only migration hints
-  - themes/prompt snippets
-  - native Winuxsh plugin suggestions
-- Keep direct zsh plugin execution out of scope:
-  - import completion-only and alias-only intent first
-  - translate simple prompt/theme snippets second
-  - reimplement autosuggestions/highlighting natively
-  - report and skip arbitrary ZLE/zmodload/zpty plugins
-
-Verification:
-
-- Fresh checkout/build instructions work on Windows.
-- No required MSYS2/Git Bash/WSL dependency appears in docs or scripts.
-
-## Phase 6 - v3 Design Gate
-
-- Plugin framework is the v3 design topic, starting with a built-in registry
-  and `oh-my-winuxsh` official bundle:
-  - `kind = "builtin"` first-party packs
-  - `[plugins]` TOML control plane
-  - bundle update and rollback
-  - process bridge for external tools
-  - WASM/WASI as the preferred long-term third-party runtime
-  - completion providers
-  - prompt/theme providers
-  - lifecycle hooks and helper commands
-- Do not design plugins that extend rubash parser/executor.
-- Build a rubash capability matrix before considering any host-level semantic
-  work.
-
-Definition of ready for v3:
-
-- v2.2/v2.3 native terminal contract is documented and tested.
-- winuxcmd completion coverage is broad enough for daily use.
-- agent non-interactive behavior is stable.
-- master CI is green and warning-light.
-- zsh compatibility is clearly framed as migration/maintenance, not the core
-  growth engine.
+Reference other shells for proven interaction patterns, but do not promise
+runtime compatibility with their configuration language, plugin API, or editor
+internals. Winuxsh should borrow the framework shape that works: named packs,
+small startup scripts, prompt/theme separation, and user-owned shell config.

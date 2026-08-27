@@ -61,7 +61,7 @@ but the separation is useful.
 
 Recommended v2.2 config direction:
 
-- Keep `~/.winshrc.toml` for backward compatibility.
+- Keep structured plugin state in manifest-backed registry files.
 - Add a minimal `[editor]` section for `edit_mode = "emacs" | "vi"`.
 - Add a minimal `[history]` section only after Ctrl+R/search behavior needs user
   controls.
@@ -77,7 +77,7 @@ continues to flow through rubash PATH lookup and winuxcmd shims.
 Practical rule:
 
 - Completion may be Windows-aware about executable suffixes.
-- Execution must remain bash/zsh-like and should not adopt PowerShell wildcard,
+- Execution must remain Bash-compatible and should not adopt PowerShell wildcard,
   quoting, or pipeline semantics.
 - Do not add `.ps1` behavior unless explicitly scoped as a completion-only
   convenience and reviewed separately.

@@ -62,9 +62,11 @@ prints a short hint to run `self-update` in the REPL or
 `winuxsh --self-update` outside it. Set
 `WINUXSH_UPDATE_CHECK=0` or `WINUXSH_NO_UPDATE_CHECK=1` to disable the reminder.
 
-The portable zip keeps the same first-start WinuxCmd activation flow: if command
-links are missing, Winuxsh runs `winuxcmd/activate-winuxcmd.sh` once from the
-bundle so `ls`, `cat`, `grep`, and friends resolve normally.
+The installer invokes `winuxcmd.exe wpm links rebuild --root ... --force` after
+copying the files, so the bundled commands are materialized immediately. On NTFS,
+WPM creates hard links to the installed `winuxcmd.exe`. The portable zip keeps the
+first-start fallback: if command links are missing, Winuxsh runs
+`winuxcmd/activate-winuxcmd.sh` once from the bundle.
 
 ## Updating WinuxCmd with WPM
 
@@ -88,6 +90,35 @@ So the update story has two parts:
 winuxsh --self-update        # the shell itself
 wpm update winuxcmd          # the Unix commands it ships with
 ```
+
+## Bash And sh Command Links
+
+When the WinuxCmd installer creates `bash.exe`, `sh.exe`, or `ash.exe` command
+links to Winuxsh, the link launcher must pass the invocation identity without
+relying on the resolved executable path:
+
+```text
+WINUXSH_INVOKED_AS=bash
+WINUXSH_INVOKED_AS=sh
+WINUXSH_INVOKED_AS=ash
+```
+
+Winuxsh already consumes this value before constructing Rubash. `sh` and `ash`
+select POSIX mode; `bash` keeps Bash mode. A plain `winuxsh.exe` launch must
+leave the variable unset. The launcher must preserve all original argv values
+and must not implement a second shell-option parser.
+
+Installer acceptance tests for the WinuxCmd link provider:
+
+```sh
+bash.exe -c 'test -z "$POSIXLY_CORRECT"'
+sh.exe -c 'set -o | grep posix'
+ash.exe -c 'set -o | grep posix'
+```
+
+This repository does not create the command links. The installation provider
+currently needs to implement this contract; do not replace it with a
+`current_exe()` heuristic in Winuxsh.
 
 ## Bundled Plugin Baseline
 

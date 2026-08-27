@@ -5,13 +5,12 @@ runtime.
 ## Goal
 Move `command-not-found` from host-only builtin behavior toward a provider
 contract where a process pack can now receive deterministic missing
-command context and return suggestion lines; WASM provider invocation remains future work.
-The current WASM ABI remains command-only even though args, cwd, and permission-gated env reads are implemented. Do not reuse command execution as a
-hidden provider contract until the host explicitly supports provider invocation,
-provider output capture, timeout handling, and fallback behavior.
+command context and return suggestion lines. Do not reuse ordinary command
+execution as a hidden provider contract; provider output capture, timeout
+handling, and fallback behavior must remain explicit host behavior.
 Process packs may use `exports.providers = ["command-not-found"]` with `command:diagnose` as a
-guarded provider binding. The official bundle can still keep this pack builtin; that marker does not replace the host
-builtin or make WASM packs provider-capable.
+guarded provider binding. The official bundle can still keep this pack builtin;
+that marker does not replace the host builtin.
 ## Current Native Behavior
 Today Winuxsh generates missing-command diagnostics inside the host:
 - base line: `winuxsh: <command>: command not found`;
@@ -43,7 +42,7 @@ Failure behavior:
 - provider stderr is diagnostic-only and should be suppressed or debug-logged by
   default.
 ## Current Host Binding
-Status: process-provider binding implemented; WASM provider binding is still future work.
+Status: process-provider binding implemented.
 Winuxsh now has tested helpers for:
 - building a provider request from the missing command, optional args, optional
   cwd, and available package-search helpers;
@@ -52,25 +51,13 @@ Winuxsh now has tested helpers for:
   fallback to the compiled native hints;
 - preserving the base command-not-found diagnostic before
   any provider or fallback suggestions.
-The shell now invokes enabled process providers for this surface from command mode. The
-compiled native implementation remains the fallback renderer until WASM provider
-runtime binding lands.
-## WASM Shape Under Consideration
-Do not treat this as final schema. Candidate shape:
-- manifest advertises a provider export such as `command-not-found`;
-- module exports a provider entrypoint distinct from
-  `winuxsh_plugin_main() -> i32`;
-- existing cwd/env read imports remain permission-gated;
-- provider-specific host imports expose the missing command and host facts;
-- provider output is captured by the host and parsed as newline-delimited
-  suggestion lines.
-This keeps provider output separate from command stdout and avoids pretending
-that a command plugin is a provider plugin.
+The shell now invokes enabled process providers for this surface from command
+mode. The compiled native implementation remains the fallback renderer.
 ## Open Decisions
 - Manifest representation beyond today's guarded `exports.providers` marker:
   provider-specific tables, versioning, output limits, and runtime binding.
-- Runtime representation: keep the current process provider binding, add a future WASM provider entrypoint
-  adapter, or both.
+- Runtime representation: keep the current process provider binding or add a
+  host-owned bridge when a provider should stay in core.
 - Output framing: newline-delimited text, length-prefixed records, or JSON.
 - Host facts: whether package-manager availability is passed as booleans, a
   compact string map, or separate host imports.

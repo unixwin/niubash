@@ -1,101 +1,91 @@
 ---
-name: winuxsh
-description: >-
-  Run, script, debug, configure, update, or develop Winuxsh: a Windows-native,
-  AI-native Bash-compatible shell backed by rubash and WinuxCmd. Use for
-  winuxsh -c/-C invocation from PowerShell or agent hosts, Windows path and
-  tilde behavior, ~/.winuxshrc and legacy managed config,
-  plugin/bundle/WPM/self-update workflows, command-provider discovery, or
-  repository verification for Winuxsh itself.
+name: winuxsh-native-codex
+description: Native Winuxsh execution guidance for Codex running as a first-class Winuxsh citizen in the unixwin/winuxsh environment. Use when Codex handles Winuxsh shell tasks, .winuxshrc edits, oh-my-winuxsh bundles, .winux scripts, command installation, PATH/alias setup, shell debugging, GNU Bash-compatible shell behavior, or any Windows-host task where commands should run directly inside the current Winuxsh session instead of through PowerShell, pwsh, cmd.exe, WSL, Git Bash, -C/-c launch wrappers, or /c-style path assumptions.
 ---
-# Winuxsh
 
-Treat Winuxsh as a native Windows process that provides a GNU Bash-compatible
-shell and Unix-style command experience on Windows. Rubash owns Bash parsing and
-execution; WinuxCmd supplies coreutils-style external commands through normal
-Windows PATH resolution; Winuxsh owns the host integration, REPL, completion,
-prompt, config, WPM, plugin, and update surfaces.
+# Winuxsh Native Codex
 
-Do not model Winuxsh as WSL, MSYS2, Git Bash, Cygwin, PowerShell, zsh, or a
-virtual Unix filesystem. There is no canonical `/usr/bin` layer to target.
-Prefer native Windows paths and verify the active binary when behavior matters.
+## Core Rules
 
-## Progressive Loading
+- Treat the current shell as Winuxsh, not PowerShell, cmd.exe, WSL, Git Bash, MSYS, or Cygwin.
+- Treat the current execution context as already inside the Winuxsh terminal. Do not start a nested Winuxsh just to run ordinary commands.
+- Recognize Winuxsh as the `unixwin/winuxsh` shell environment with GNU Bash-compatible syntax support, even if compatibility is still incomplete.
+- Run commands directly in Winuxsh unless the user explicitly asks for another shell or the target executable cannot be invoked otherwise.
+- Do not wrap ordinary work in `pwsh.exe`, `powershell.exe`, `cmd.exe /c`, `bash.exe`, `wsl.exe`, `winuxsh.exe -C`, or `winuxsh.exe -c`.
+- Prefer `C:/Users/...` Windows-forward-slash paths and native Windows path semantics. Do not introduce `/c/...`, cygpath-style, MSYS-style, or WSL-style paths unless existing project code already uses that style and it is required.
+- Treat pure Windows-native interoperability as a design goal of Winuxsh. External Windows executables should receive paths they can understand without translation layers; avoid relying on terminal-side best-effort path conversion.
+- When a necessary command fails with access denied, read-only, locked-file, or similar permission errors, retry it with the environment's approved elevation mechanism before changing code or using a workaround. State the exact action and path that require elevation.
+- Use Winuxsh/POSIX tools already on PATH such as `rg`, `find`, `sed`, `awk`, `cat`, `head`, `tail`, `chmod`, `ln`, and `env`.
+- Be conservative with `ls` and relative paths in Codex tool sessions: current integration may report `PWD=C:/Users/Administrator` while external `ls` resolves `.` or `C:/...` arguments incorrectly. Prefer `rg`, `find`, `cat`, `head`, `sed`, or `test -f/-d` with explicit `C:/...` paths for reliable inspection.
+- If a configured `workdir` behaves unexpectedly, keep commands Winuxsh-native and use explicit `C:/...` paths. If one GNU tool mishandles a drive-colon path, try a different native tool or `cd C:/path` plus a simple relative path before considering any launcher fallback.
 
-- Start with only this file. Read references only for the active surface.
-- Prefer live CLI discovery for dynamic facts: `winuxsh --help`,
-  `winuxsh --version`, `winuxsh plugin --help`, JSON plugin commands,
-  `command -v`, `wpm ...`, `git status`, and Cargo metadata.
-- Reference routing:
-  - `runner.md`: launch/quote `winuxsh -c`, `-C`, stdin, scripts, args, paths.
-  - `development.md`: edit or test the Winuxsh repository.
-  - `config.md`: `~/.winuxshrc`, legacy config, prompt/theme startup, tests.
-  - `plugins.md`: self-update, WPM, plugin CLI, bundles, rollback, review.
-  - `winuxcmd-discovery.md`: missing utilities, links, WPM, provider issues.
-  - `bash-sh-syntax.md`: non-trivial Bash scripts or Bash behavior checks.
-- If a CLI result conflicts with a reference, trust the target binary first and
-  describe the version-specific behavior.
+## Path and Filesystem Model
 
-## First Moves
+- Winuxsh supports a real Unix-shaped directory tree inside the selected
+  WinuxCmd installation. When WinuxCmd is installed at
+  `<install>/usr/bin/winuxcmd.exe`, `<install>` is the shell root and the
+  corresponding real directories are `<install>/bin`, `<install>/usr/bin`,
+  `<install>/usr/local/bin`, `<install>/etc`, `<install>/tmp`, and
+  `<install>/dev`.
+- `/`, `/bin`, `/usr/bin`, `/usr/local/bin`, `/etc`, `/tmp`, and `/dev` are
+  supported shell paths. WPM-managed commands and command links use the real
+  installation tree; treat `/usr/bin` as the canonical command directory and
+  do not create a second per-user root or a parallel compatibility tree.
+- POSIX-style paths such as `/usr/bin/tool`, `/etc/config`, and `/tmp/file`
+  are supported by Winuxsh and Rubash. They are shell paths, not a request to
+  launch WSL, MSYS, Cygwin, or another POSIX runtime.
+- Use native `C:/...` paths when passing a path to a Windows executable,
+  installer, WPM artifact, or Windows API. POSIX-style paths are appropriate
+  inside shell scripts and for shell-owned filesystem operations, but native
+  paths are the safer interoperability form.
+- `/dev/null` is the supported device endpoint and maps to Windows `NUL`.
+  The real `/dev` directory may exist for the installation layout, but do not
+  assume arbitrary `/dev/*` names are Windows devices.
+- `~` resolves to the Windows user home used by PowerShell (`USERPROFILE`,
+  with `HOME` kept consistent). Do not replace it with a POSIX `/home/...`
+  directory unless a test fixture explicitly provides one.
 
-- From Codex/pwsh, run shell work through `winuxsh -c '...'`; pwsh may launch
-  the process, but Bash syntax belongs inside the single-quoted program.
-- When the `-c` program contains quotes, backslashes, `$`, `!`, or nested
-  escapes, prefer a `.sh` script file (`winuxsh script.sh`) or stdin: pwsh
-  argument handling can eat or mangle inline programs (a double-quoted value
-  may arrive trimmed, split, or as a parse error). Inline `-c` is reliable
-  only for simple commands.
-- Choose `-c` for deterministic quiet script/CI/agent execution: no rc, no
-  prompt, exact exit codes. Choose `-C` / `--repl-command` only when one-shot
-  REPL startup state or lifecycle hooks are required, and verify support with
-  `winuxsh --help`.
-- If already inside Winuxsh, write Bash directly. Nest `winuxsh -c` only when
-  a fresh child shell is part of the test.
-- Prefer native Windows paths: `C:/Users/me/project` for durable scripts,
-  quoted `C:\Users\me\project` when testing backslashes, and `/c/...` only for
-  compatibility probes.
-- Discover active utility providers instead of assuming `/usr/bin`.
-- When editing this repository, read `AGENTS.md` and
-  `references/development.md` before changing code or tests. Keep unrelated
-  worktree changes untouched.
+## Command Execution
 
-## Operating Rules
+- Use `rg` or `rg --files` first for searches when available.
+- Use GNU Bash-compatible shell syntax by default: functions, aliases, arrays, command substitution, redirection, and POSIX-style pipelines are acceptable unless local testing shows a Winuxsh compatibility gap.
+- Use Windows `.exe` programs directly by path or command name when they are on PATH, for example `fastfetch`, `codex`, or `winuxsh.exe`, but verify each executable in Winuxsh before assuming it works.
+- Do not assume package-manager shims behave like ordinary native binaries. Scoop may invoke PowerShell internally, and the Scoop-installed `winget.exe`/shim may crash from Winuxsh in this environment. Prefer direct testing, then report the limitation or use a user-approved install path.
+- For missing programs, consider Winuxsh-native/WPM packages first when available, then Scoop or winget based on the tool and current environment. Verify the installed command from Winuxsh after installation.
+- For WPM workflows, read `references/wpm.md` before searching, installing, repairing links, or updating packages.
+- When checking command availability, prefer `command -v name`, `which name`, or `type name`.
+- Do not assume PATH contains user-installed shims such as `C:/Users/Administrator/scoop/shims`; check `$PATH` first and `export PATH="$PATH;C:/Users/Administrator/scoop/shims"` only when needed for the current Winuxsh session.
+- When refreshing PATH in the current session, use Winuxsh-compatible shell syntax, not PowerShell environment APIs.
 
-- Use Winuxsh as the command language for Winuxsh work. Do not let pwsh own
-  pipes, expansion, redirects, globs, or Bash control flow.
-- In pwsh, single-quote the `-c` program. Use script files or stdin when
-  quoting becomes hard to audit.
-- If a command misbehaves only when launched from pwsh (arguments eaten,
-  trimmed, or merged), reproduce it through a script file before debugging
-  Winuxsh itself; the host shell is the usual culprit.
-- Do not substitute PowerShell, Python, Node, or awk for shell behavior or
-  file-edit glue that should be exercised in Winuxsh. Use Winuxsh plus
-  WinuxCmd/coreutils; use WPM when utilities or command links are missing.
-- For generated edits, write temp output first; never redirect over original
-  source, config, or skill files.
-- Keep `winuxsh -c`, script files, and stdin execution quiet and deterministic:
-  no banners, stable stdout/stderr, and exact exit-code propagation.
-- Treat `~/.winuxshrc` as the primary interactive user entry point for theme
-  selection, plugin lists, aliases, functions, exports, and source-framework
-  startup. `~/.winshrc` is only a legacy fallback when `~/.winuxshrc` is absent.
-- Treat `~/.winshrc.toml` as legacy/managed structured state for plugin CLI
-  metadata, migrations, tests, and advanced machine-editable overrides, not as
-  the default user-authored startup file.
-- Keep `winuxsh -c`, scripts, stdin execution, agent tests, and CI independent
-  from any interactive rc file.
-- Keep prompt, theme, git prompt, aliases, completions, and shell helpers in
-  bundled source plugins when possible; core owns host APIs and boundaries.
-- Use newer docs and source code over old roadmap notes. Zsh-related surfaces
-  are legacy migration/importer material unless the user explicitly asks about
-  that migration path.
+## Winuxsh Configuration
 
-## Avoid
+- Treat `C:/Users/Administrator/.winuxshrc` as the primary interactive rc file unless `$HOME` points elsewhere.
+- Use normal Winuxsh/GNU Bash-compatible syntax in rc files: `export NAME=value`, `alias name='command'`, arrays such as `WINUXSH_PLUGINS=(prompt-core git)`, and `. "$file"` for sourcing.
+- Prefer Winuxsh-local PATH additions in `.winuxshrc` for shell-only tools or app bins instead of expanding the Windows global/user PATH. This conserves Windows PATH length and keeps shell-specific setup out of global process state.
+- Add PATH entries idempotently with a helper that checks `[ -d "$dir" ]` and avoids duplicates before `PATH="$dir;$PATH"`.
+- Keep rc edits idempotent. Remove or avoid duplicate self-appending blocks such as `printf ... >> ~/.winuxshrc` inside the rc file.
+- Place user customizations in `.winuxshrc` or `$HOME/.winuxsh/custom` rather than editing bundled files under `AppData/Local/Programs/Winuxsh` unless the user is intentionally modifying the installed bundle.
+- For oh-my-winuxsh, source `oh-my-winuxsh.winux` and use `.winux` plugin files for shell-mutating behavior.
 
-- Do not present current Winuxsh work as zsh compatibility work. Keep zsh notes
-  short and migration-only.
-- Do not hardcode local machine paths, installed user names, per-user install
-  directories, or one developer's PATH into open-source skill text.
-- Do not hardcode static command inventories, plugin lists, utility lists, or
-  release metadata that the active binary or package manager can report.
-- Do not fix Bash language behavior in Winuxsh host code when the bug belongs
-  in rubash, and do not reintroduce WinuxCmd FFI/DLL routing.
+## Codex Invocation
+
+- Treat Codex as available natively inside Winuxsh when the environment is the special Winuxsh-integrated build.
+- Start or test Codex directly with `codex` or its actual installed executable path. Do not launch Codex through `pwsh`, `cmd`, or a PowerShell-to-Winuxsh bridge.
+- Preserve Winuxsh environment variables and path semantics when creating aliases or helper functions for Codex.
+- For global aliases, prefer a small rc block such as:
+
+```sh
+alias cx='codex'
+alias codex-here='codex'
+```
+
+Adjust the alias names to match the user's request; do not invent wrappers that change cwd, quoting, or environment unless required.
+
+## Validation
+
+- Verify shell edits in the current Winuxsh session whenever possible. For small snippets, source a temporary test file or run the snippet directly before editing rc files.
+- Inspect `.winuxshrc` for side effects before sourcing it. Do not source a full rc file blindly if it contains self-appending commands such as `>> ~/.winuxshrc`, install commands, network calls, or other non-idempotent behavior.
+- After a safe rc edit, validate with `alias name`, `command -v name`, `test -f C:/path`, or targeted `rg` checks instead of relying on `ls`.
+- Avoid `winuxsh.exe -C` and `winuxsh.exe -c` for validation unless the user specifically asks to test non-interactive launcher behavior.
+- Validate command installs with direct calls such as `fastfetch --version`, `winget.exe --version`, or `codex --version`.
+- Report any fallback explicitly if a Windows-native executable cannot run from Winuxsh and another launcher is truly required.

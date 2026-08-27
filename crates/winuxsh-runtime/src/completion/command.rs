@@ -14,9 +14,10 @@ static PATH_CMD_CACHE: Mutex<Option<(Vec<String>, Vec<String>)>> = Mutex::new(No
 pub struct CommandCompleter;
 
 impl CommandCompleter {
-    /// Get all available commands (built-in + PATH)
+    /// Get all available commands (built-in + common + PATH)
     pub fn get_all_commands() -> Vec<String> {
         let mut commands = Self::get_builtin_commands();
+        commands.extend(Self::get_common_commands());
         commands.extend(Self::get_path_commands_cached());
         commands.sort();
         commands.dedup();
@@ -336,6 +337,13 @@ mod tests {
         );
         let result = CommandCompleter::complete(&ctx).unwrap().unwrap();
         assert!(result.completions.contains(&"grep".to_string()));
+    }
+
+    #[test]
+    fn command_completion_includes_common_commands_for_partial_input() {
+        let ctx = CompletionContext::new(std::path::PathBuf::from("."), "oh-".to_string(), 3);
+        let result = CommandCompleter::complete(&ctx).unwrap().unwrap();
+        assert!(result.completions.contains(&"oh-my-winuxsh".to_string()));
     }
 
     #[test]

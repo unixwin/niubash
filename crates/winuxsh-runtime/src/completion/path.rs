@@ -143,7 +143,7 @@ impl PathQuery {
             let dir_part = &word[..last_sep];
             let prefix = word[last_sep + 1..].to_string();
             let base_dir = if dir_part.is_empty() {
-                PathBuf::from(&display_prefix)
+                resolve_base_dir(current_dir, "/")
             } else {
                 resolve_base_dir(current_dir, dir_part)
             };
@@ -206,6 +206,9 @@ impl PartialOrd for PathCandidate {
 }
 
 fn resolve_base_dir(current_dir: &Path, dir_part: &str) -> PathBuf {
+    if let Some(path) = resolve_logical_shell_dir(dir_part) {
+        return path;
+    }
     if let Some(path) = expand_tilde_path(dir_part) {
         return path;
     }
@@ -219,6 +222,30 @@ fn resolve_base_dir(current_dir: &Path, dir_part: &str) -> PathBuf {
         path
     } else {
         current_dir.join(path)
+    }
+}
+
+fn resolve_logical_shell_dir(value: &str) -> Option<PathBuf> {
+    let normalized = value.replace('\\', "/");
+    let root = std::env::var_os("WINUXSH_ROOT").map(PathBuf::from)?;
+    if normalized == "/" {
+        return Some(root);
+    }
+    if normalized == "/home" || normalized.starts_with("/home/") {
+        let users = shell_home_dir()?.parent()?.to_path_buf();
+        let rest = normalized
+            .trim_start_matches("/home")
+            .trim_start_matches('/');
+        return Some(if rest.is_empty() {
+            users
+        } else {
+            users.join(rest)
+        });
+    }
+    let rest = normalized.strip_prefix('/')?;
+    match rest.split('/').next() {
+        Some("bin" | "dev" | "etc" | "opt" | "tmp" | "usr" | "var") => Some(root.join(rest)),
+        _ => None,
     }
 }
 

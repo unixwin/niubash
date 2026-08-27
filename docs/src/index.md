@@ -41,8 +41,8 @@ C:\Program Files
   teeth inside any repository, syntax highlighting, autosuggestions, vi and
   emacs modes, and Ctrl+R history search.
 - **Plugins with a permission model.** 40+ bundled packs (`git`, `docker`,
-  `kubectl`, `npm`, `zoxide`, `direnv`, `fzf`, `thefuck`, ...), with third
-  parties sandboxed in a WASM host behind declared permissions.
+  `kubectl`, `npm`, `zoxide`, `direnv`, `fzf`, `thefuck`, ...), with reviewed
+  source packs and process adapters declaring the host access they need.
 
 ## The documentation
 
@@ -51,9 +51,9 @@ C:\Program Files
 | [Getting Started](getting-started.md) | Zero to a git prompt in ten minutes |
 | [Advanced Usage](advanced-usage.md) | Execution modes, startup files, themes, plugins, completion, debugging |
 | [Install & Self-Update](installer.md) | Installer, portable zip, Windows Terminal profile, updates |
-| [Zsh Migration Guide](zsh-migration-guide.md) | Moving `.zshrc` and Oh My Zsh habits over safely |
 | [Bash Compatibility Matrix](rubash-bash-compat-matrix.md) | What Bash surface is verified, layer by layer |
 | [Architecture](architecture.md) | rubash + WinuxCmd + reedline, path model, host contract |
+| [Windows Path Contract](windows-path-contract.md) | logical root, dispatcher selection, and layer ownership |
 | [Roadmap](winuxsh-roadmap.md) | What is done, what is next |
 
 ## Get it

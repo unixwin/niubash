@@ -7,8 +7,14 @@
 use std::path::PathBuf;
 
 pub(crate) fn shell_home_dir() -> Option<PathBuf> {
-    home_env_path("HOME")
-        .or_else(|| home_env_path("USERPROFILE"))
+    #[cfg(windows)]
+    let names = ["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let names = ["HOME", "USERPROFILE"];
+
+    names
+        .into_iter()
+        .find_map(home_env_path)
         .or_else(dirs::home_dir)
         .map(normalize_existing_host_path)
 }

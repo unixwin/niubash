@@ -21,46 +21,63 @@ fn winuxsh_binary() -> PathBuf {
 }
 
 #[test]
-fn repl_command_runs_startup_rc_and_lifecycle_hooks_without_banner() {
-    let temp = unique_temp_dir("winuxsh-repl-command");
+fn repl_command_loads_primary_rc_aliases_after_long_path_setup() {
+    let temp = unique_temp_dir("winuxsh-repl-command-primary-aliases");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(home.join("bin")).unwrap();
     std::fs::create_dir_all(&start).unwrap();
     std::fs::write(
-        home.join(".winshrc.toml"),
+        home.join(".winuxshrc"),
         r#"
-[hooks]
-precmd = ["export WINUXSH_REPL_PRECMD_RAN=yes"]
-preexec = ["export WINUXSH_REPL_PREEXEC_RAN=yes"]
+__test_path_prepend() {
+  [ -n "$1" ] || return 0
+  [ -d "$1" ] || return 0
+  case ";$PATH;" in
+    *";$1;"*) ;;
+    *) PATH="$1;$PATH" ;;
+  esac
+}
+__test_path_prepend "$HOME/bin"
+alias l='printf "alias-l:ok\n"'
+alias ll='printf "alias-ll:ok\n"'
+unset -f __test_path_prepend
+export PATH
 "#,
     )
     .unwrap();
-    std::fs::write(
-        home.join(".winshrc"),
-        "export WINUXSH_REPL_COMMAND_RC=loaded\n",
-    )
-    .unwrap();
 
-    let output = run_winuxsh(
-        &[
-            "-C",
-            "echo rc:$WINUXSH_REPL_COMMAND_RC precmd:$WINUXSH_REPL_PRECMD_RAN preexec:$WINUXSH_REPL_PREEXEC_RAN",
-        ],
-        &start,
-        &home,
-    );
+    let long_path = (0..1_200)
+        .map(|index| format!("C:/winuxsh-test/path{index:04}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let output = Command::new(winuxsh_binary())
+        .args(["-C", "l; ll; alias l; alias ll"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("PATH", long_path)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run primary rc alias test: {err}"));
 
-    assert_success(&output, "repl command");
+    assert_success(&output, "repl command primary rc aliases");
     let stdout = stdout_text(&output);
-    assert_eq!(
-        stdout.trim(),
-        "rc:loaded precmd:yes preexec:yes",
-        "stdout was {stdout:?}"
+    assert!(
+        stdout.contains("alias-l:ok"),
+        "alias l was not expanded: {stdout:?}"
     );
     assert!(
-        !stdout.contains("Winuxsh "),
-        "one-shot REPL command should not print the interactive banner"
+        stdout.contains("alias-ll:ok"),
+        "alias ll was not expanded: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("alias l="),
+        "alias l was not loaded: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("alias ll="),
+        "alias ll was not loaded: {stdout:?}"
     );
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -72,15 +89,6 @@ fn command_mode_keeps_script_semantics_without_repl_startup() {
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(
-        home.join(".winshrc.toml"),
-        r#"
-[hooks]
-precmd = ["export WINUXSH_REPL_PRECMD_RAN=yes"]
-preexec = ["export WINUXSH_REPL_PREEXEC_RAN=yes"]
-"#,
-    )
-    .unwrap();
     std::fs::write(
         home.join(".winshrc"),
         "export WINUXSH_REPL_COMMAND_RC=loaded\n",
@@ -112,7 +120,6 @@ fn command_mode_can_source_user_winshrc_explicitly() {
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(home.join(".winshrc.toml"), "").unwrap();
     std::fs::write(
         home.join(".winshrc"),
         "export WINUXSH_EXPLICIT_SOURCE_RC=loaded\n",
@@ -140,7 +147,6 @@ fn repl_command_cat_expands_tilde_paths_through_normal_command_resolution() {
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(home.join(".winshrc.toml"), "").unwrap();
     std::fs::write(
         home.join(".winshrc"),
         "export WINUXSH_TILDE_CAT_RC=loaded\n",
@@ -158,54 +164,6 @@ fn repl_command_cat_expands_tilde_paths_through_normal_command_resolution() {
 }
 
 #[test]
-fn repl_command_primary_rc_tilde_uses_windows_home_when_home_env_is_empty() {
-    if !cfg!(windows) {
-        return;
-    }
-
-    let temp = unique_temp_dir("winuxsh-repl-command-primary-tilde-empty-home");
-    let home = temp.join("home");
-    let start = temp.join("start");
-    let bin = temp.join("bin");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&start).unwrap();
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
-    std::fs::write(home.join(".winuxshrc"), "# primary marker\n").unwrap();
-    std::fs::write(
-        bin.join("cat.cmd"),
-        "@echo off\r\nset \"arg=%~1\"\r\necho arg=%arg%\r\nif \"%arg:~0,3%\"==\"/c/\" exit /b 12\r\nset \"fsarg=%arg:/=\\%\"\r\ntype \"%fsarg%\"\r\n",
-    )
-    .unwrap();
-
-    let old_path = std::env::var_os("PATH");
-    let mut paths = vec![bin.clone()];
-    if let Some(old_path) = old_path {
-        paths.extend(std::env::split_paths(&old_path));
-    }
-    let output = Command::new(winuxsh_binary())
-        .args(["-C", "cat ~/.winuxshrc"])
-        .current_dir(&start)
-        .env("HOME", "")
-        .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
-        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
-        .env("PATH", std::env::join_paths(paths).unwrap())
-        .output()
-        .unwrap_or_else(|err| panic!("failed to run winuxsh primary tilde test: {err}"));
-
-    assert_success(&output, "repl command primary rc external cat tilde");
-    let stdout = stdout_text(&output);
-    assert!(stdout.contains("arg="), "stdout was {stdout:?}");
-    assert!(
-        !stdout.contains("arg=/c/"),
-        "external command received slash-drive path: {stdout:?}"
-    );
-    assert!(stdout.contains("# primary marker"), "stdout was {stdout:?}");
-    let _ = std::fs::remove_dir_all(temp);
-}
-
-#[test]
 fn command_mode_compound_commands_keep_home_paths_native() {
     if !cfg!(windows) {
         return;
@@ -218,7 +176,6 @@ fn command_mode_compound_commands_keep_home_paths_native() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
     std::fs::write(home.join(".winuxshrc"), "# primary marker\n").unwrap();
     std::fs::write(
         bin.join("cat.cmd"),
@@ -239,8 +196,6 @@ fn command_mode_compound_commands_keep_home_paths_native() {
         .current_dir(&start)
         .env("HOME", "")
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
-        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env("PATH", std::env::join_paths(paths).unwrap())
         .output()
         .unwrap_or_else(|err| panic!("failed to run winuxsh command mode native home test: {err}"));
@@ -263,8 +218,7 @@ fn repl_command_file_commands_expand_tilde_paths_through_normal_command_resoluti
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(home.join(".winshrc.toml"), "").unwrap();
-    std::fs::write(home.join(".winshrc"), "").unwrap();
+    std::fs::write(home.join(".winuxshrc"), "").unwrap();
 
     let output = run_winuxsh(
         &[
@@ -283,41 +237,12 @@ fn repl_command_file_commands_expand_tilde_paths_through_normal_command_resoluti
 }
 
 #[test]
-fn repl_command_file_command_prefers_path_over_winuxsh_native_helpers() {
-    if !cfg!(windows) {
-        return;
-    }
-
-    let temp = unique_temp_dir("winuxsh-repl-command-path-cat");
-    let home = temp.join("home");
-    let start = temp.join("start");
-    let bin = temp.join("bin");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&start).unwrap();
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
-    std::fs::write(home.join(".winshrc"), "").unwrap();
-    std::fs::write(bin.join("cat.cmd"), "@echo off\r\necho external-cat %*\r\n").unwrap();
-
-    let output =
-        run_winuxsh_with_extra_path(&["-C", "cat --definitely-external"], &start, &home, &bin);
-
-    assert_success(&output, "repl command path cat");
-    assert_eq!(
-        stdout_text(&output).trim(),
-        "external-cat --definitely-external"
-    );
-    let _ = std::fs::remove_dir_all(temp);
-}
-
-#[test]
 fn command_mode_sets_shell_to_current_exe_when_missing() {
     let temp = unique_temp_dir("winuxsh-command-mode-shell-env");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
 
     let bin = winuxsh_binary();
     let output = Command::new(&bin)
@@ -325,8 +250,6 @@ fn command_mode_sets_shell_to_current_exe_when_missing() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
-        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env_remove("SHELL")
         .env_remove("BASH")
         .output()
@@ -388,44 +311,15 @@ fn gitstatus_daemon_returns_repo_snapshot_over_persistent_stdio() {
 }
 
 fn run_winuxsh(args: &[&str], start: &Path, home: &Path) -> Output {
-    run_winuxsh_command(args, start, home, None)
-}
-
-fn run_winuxsh_with_extra_path(
-    args: &[&str],
-    start: &Path,
-    home: &Path,
-    extra_path: &Path,
-) -> Output {
-    run_winuxsh_command(args, start, home, Some(extra_path))
-}
-
-fn run_winuxsh_command(
-    args: &[&str],
-    start: &Path,
-    home: &Path,
-    extra_path: Option<&Path>,
-) -> Output {
     let mut command = Command::new(winuxsh_binary());
     command
         .args(args)
         .current_dir(start)
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("ZDOTDIR", home)
-        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env_remove("WINUXSH_REPL_COMMAND_RC")
         .env_remove("WINUXSH_REPL_PRECMD_RAN")
         .env_remove("WINUXSH_REPL_PREEXEC_RAN");
-
-    if let Some(extra_path) = extra_path {
-        let old_path = std::env::var_os("PATH");
-        let mut paths = vec![extra_path.to_path_buf()];
-        if let Some(old_path) = old_path {
-            paths.extend(std::env::split_paths(&old_path));
-        }
-        command.env("PATH", std::env::join_paths(paths).unwrap());
-    }
 
     command
         .output()
