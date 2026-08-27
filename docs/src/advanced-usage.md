@@ -73,6 +73,22 @@ Theme assets can use named colors, 256-color indexes, and true-color
 `#RRGGBB` foreground/background values. Prefer changing the theme plugin or
 theme asset instead of hardcoding prompt rendering in shell core.
 
+## History Modes
+
+Set `WINUXSH_HISTORY_MODE` in `~/.winuxshrc` when multiple shells share a
+history file:
+
+```bash
+WINUXSH_HISTORY_MODE=private
+export WINUXSH_HISTORY_MODE
+```
+
+- `shared` (default) refreshes navigation from other shells.
+- `session` keeps the startup snapshot stable for navigation while builtins can
+  observe later file updates.
+- `private` loads the complete history file at startup, then keeps later
+  navigation changes local to the current shell while appending its own commands.
+
 ## Git Prompt Performance
 
 Git status should be consumed as a coherent prompt snapshot, not rendered by

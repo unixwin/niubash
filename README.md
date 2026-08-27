@@ -89,6 +89,10 @@ WINUXSH_PLUGINS=(prompt-core git)
 [ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
 ```
 
+History sharing can be selected with `WINUXSH_HISTORY_MODE=shared`,
+`session`, or `private`. See [Advanced usage](docs/src/advanced-usage.md)
+for the behavior of each mode.
+
 ## Terminal toys
 
 Winuxsh's terminal isn't just for commands — it prints pictures. The

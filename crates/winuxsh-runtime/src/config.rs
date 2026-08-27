@@ -52,23 +52,21 @@ impl Default for EditorMode {
     }
 }
 
-impl EditorMode {
-}
+impl EditorMode {}
 
 #[derive(Debug, Clone, Default)]
 pub struct EditorConfig {
     pub edit_mode: EditorMode,
 }
 
-
-/// History mode controlling how history is shared across shell sessions.
+/// History mode controlling how entries are shared across shell sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryMode {
-    /// Shared live history across all shell instances (default, backward compatible)
+    /// Live cross-session history, preserving the legacy behavior.
     Shared,
-    /// Stable navigation snapshot at startup + own commands; builtins see live updates
+    /// Startup snapshot for navigation; builtins can see live file updates.
     Session,
-    /// Isolated history - only this session's commands
+    /// Startup snapshot for navigation; this session's later entries stay local.
     Private,
 }
 
@@ -79,8 +77,8 @@ impl Default for HistoryMode {
 }
 
 impl HistoryMode {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
             "shared" => Some(Self::Shared),
             "session" => Some(Self::Session),
             "private" => Some(Self::Private),
@@ -102,24 +100,22 @@ impl Default for HistoryConfig {
         Self {
             path: None,
             max_size: 10000,
+            mode: HistoryMode::default(),
             ignore_space_prefixed: false,
-            mode: HistoryMode::default(),
-            mode: HistoryMode::default(),
-        };
+        }
+    }
+}
+
 impl HistoryConfig {
-    /// Apply environment variable overrides to this config.
     pub fn with_env_overrides(mut self) -> Self {
-        if let Ok(mode_str) = std::env::var("WINUXSH_HISTORY_MODE") {
-            if let Some(mode) = HistoryMode::parse(&mode_str) {
+        if let Ok(value) = std::env::var("WINUXSH_HISTORY_MODE") {
+            if let Some(mode) = HistoryMode::parse(&value) {
                 self.mode = mode;
             } else {
                 eprintln!("winuxsh: WINUXSH_HISTORY_MODE must be one of: shared, session, private");
             }
         }
         self
-    }
-}
-
     }
 }
 
