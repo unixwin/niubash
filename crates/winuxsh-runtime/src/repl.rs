@@ -45,7 +45,7 @@ pub fn spawn_self_update(args: &[String]) -> Option<i32> {
 /// Build a `Reedline` instance for the shell.
 pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
     let history =
-        LiveFileBackedHistory::with_file(shell.history_max_size, shell.history_path.clone())
+        LiveFileBackedHistory::with_mode(shell.history_max_size, shell.history_path.clone(), shell.history_mode)
             .map_err(|e| {
                 anyhow::anyhow!(
                     "failed to open history file {}: {}",

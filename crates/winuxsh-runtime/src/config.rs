@@ -60,10 +60,40 @@ pub struct EditorConfig {
     pub edit_mode: EditorMode,
 }
 
+
+/// History mode controlling how history is shared across shell sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryMode {
+    /// Shared live history across all shell instances (default, backward compatible)
+    Shared,
+    /// Stable navigation snapshot at startup + own commands; builtins see live updates
+    Session,
+    /// Isolated history - only this session's commands
+    Private,
+}
+
+impl Default for HistoryMode {
+    fn default() -> Self {
+        Self::Shared
+    }
+}
+
+impl HistoryMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "shared" => Some(Self::Shared),
+            "session" => Some(Self::Session),
+            "private" => Some(Self::Private),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryConfig {
     pub path: Option<PathBuf>,
     pub max_size: usize,
+    pub mode: HistoryMode,
     pub ignore_space_prefixed: bool,
 }
 
@@ -73,7 +103,23 @@ impl Default for HistoryConfig {
             path: None,
             max_size: 10000,
             ignore_space_prefixed: false,
+            mode: HistoryMode::default(),
+            mode: HistoryMode::default(),
+        };
+impl HistoryConfig {
+    /// Apply environment variable overrides to this config.
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(mode_str) = std::env::var("WINUXSH_HISTORY_MODE") {
+            if let Some(mode) = HistoryMode::parse(&mode_str) {
+                self.mode = mode;
+            } else {
+                eprintln!("winuxsh: WINUXSH_HISTORY_MODE must be one of: shared, session, private");
+            }
         }
+        self
+    }
+}
+
     }
 }
 
@@ -436,4 +482,3 @@ impl Default for FullConfig {
 pub fn load() -> FullConfig {
     FullConfig::default()
 }
-
