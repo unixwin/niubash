@@ -632,6 +632,7 @@ impl Shell {
             Err(err) => log::warn!("{} failed: {}", path.display(), err),
         }
         let _ = self.execute_script("unset WINUXSH_REPL_STARTUP");
+        self.sync_process_path_from_executor_path();
         self.update_completion_state();
         self.sync_prompt_from_plugin_env();
     }
@@ -4586,6 +4587,39 @@ winuxsh_run_chpwd_hooks() {
         );
         assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
         assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn run_startup_rc_syncs_process_path_from_executor() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-rc-path-sync");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Simulate a user rc that appends a new directory to PATH.
+        let extra_dir = temp.join("extra-bin");
+        std::fs::create_dir_all(&extra_dir).unwrap();
+        let forward = extra_dir.to_string_lossy().replace('\', "/");
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            format!("export PATH="$PATH:{}"", forward),
+        )
+        .unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        // After rc, std::env must reflect the executor PATH (including the new dir).
+        let process_path = std::env::var("PATH").unwrap_or_default();
+        let normalized_extra = forward.to_uppercase().replace('/', "\");
+        assert!(
+            process_path.to_uppercase().contains(&normalized_extra),
+            "std::env PATH should contain the new directory after run_startup_rc;              got: {}",
+            process_path
+        );
 
         let _ = std::fs::remove_dir_all(temp);
     }

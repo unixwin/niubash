@@ -65,6 +65,10 @@ impl CompletionPlugin for CommandCompletionPlugin {
     fn complete(&self, context: &CompletionContext) -> Option<CompletionResult> {
         CommandCompleter::complete(context).ok().flatten()
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -918,6 +922,10 @@ impl CompletionPlugin for ExternalCompletionPlugin {
 
     fn on_directory_changed(&self, _new_dir: &Path) {
         // Path-based caches could be invalidated here in the future
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

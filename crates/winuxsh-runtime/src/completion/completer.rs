@@ -81,6 +81,27 @@ impl CompletionState {
         }
         self.add_plugin(Arc::new(external));
     }
+
+    /// Collect command names known to loaded completion plugins.
+    ///
+    /// External TOML definitions (from oh-my-winuxsh, user overrides, etc.)
+    /// register command names that the syntax highlighter should treat as
+    /// valid even when the binary is extensionless and not in the
+    /// compiled-in command set.
+    pub fn plugin_command_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for plugin in &self.plugins {
+            // ExternalCompletionPlugin exposes definition_names()
+            // via downcast. CommandCompletionPlugin has no extra names.
+            if let Some(ext) = plugin
+                .as_any()
+                .downcast_ref::<ExternalCompletionPlugin>()
+            {
+                names.extend(ext.definition_names().into_iter().map(str::to_string));
+            }
+        }
+        names
+    }
 }
 
 /// Custom completer for WinSH

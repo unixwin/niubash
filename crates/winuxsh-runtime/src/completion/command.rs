@@ -221,11 +221,19 @@ impl CommandCompleter {
                             if file_type.is_file() {
                                 let file_name = entry.file_name().to_string_lossy().to_string();
 
-                                // Check if it's executable by extension
+                                // Recognise Windows executables and shell scripts.
+                                // Extensionless files in PATH are skipped because
+                                // Windows PATH dirs commonly contain LICENSE, README,
+                                // etc. Extensionless tools like dsh are covered by
+                                // oh-my-winuxsh or the common-commands list.
                                 let is_executable = file_name.ends_with(".exe")
                                     || file_name.ends_with(".bat")
                                     || file_name.ends_with(".cmd")
-                                    || file_name.ends_with(".ps1");
+                                    || file_name.ends_with(".ps1")
+                                    || file_name.ends_with(".sh")
+                                    || file_name.ends_with(".bash")
+                                    || file_name.ends_with(".zsh")
+                                    || file_name.ends_with(".winuxsh");
 
                                 if is_executable {
                                     // Remove extension for cleaner completion

@@ -86,6 +86,10 @@ impl CompletionPlugin for RuntimeCompletionPlugin {
         let source = self.sources.get(&command)?;
         self.complete_for_source(source, context)
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 fn run_runtime_completion(

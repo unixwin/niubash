@@ -527,6 +527,7 @@ impl WinuxshSyntaxHighlighter {
                     .aliases
                     .iter()
                     .chain(state.functions.iter())
+                    .chain(state.plugin_command_names().iter())
                     .any(|name| name.eq_ignore_ascii_case(command))
             })
     }
@@ -922,6 +923,36 @@ mod tests {
         );
         assert!(highlighter.style(SyntaxKind::Command).is_bold);
         assert_eq!(highlighter.highlight("echo", 0).buffer[0].0, Style::new());
+    }
+
+    #[test]
+    fn highlights_plugin_provided_commands() {
+        use crate::completion::external::{CommandDef, ExternalCompletionPlugin};
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        {
+            let mut s = state.lock().unwrap();
+            let mut ext = ExternalCompletionPlugin::new();
+            ext.load_definitions(vec![CommandDef {
+                command: "dsh".to_string(),
+                description: Some("DeepSeek Harness CLI".to_string()),
+                flags: vec![],
+                subcommands: vec![],
+            }]);
+            s.add_plugin(Arc::new(ext));
+        }
+
+        let highlighter = WinuxshSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state,
+        );
+        let styled = highlighter.highlight("dsh web", 0);
+
+        assert_eq!(
+            style_for(&styled, "dsh"),
+            highlighter.style(SyntaxKind::Command)
+        );
     }
 
     fn style_for(styled: &StyledText, fragment: &str) -> Style {

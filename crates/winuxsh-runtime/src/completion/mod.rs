@@ -214,6 +214,9 @@ pub trait CompletionPlugin: Send + Sync {
 
     /// Called when the working directory changes
     fn on_directory_changed(&self, _new_dir: &std::path::Path) {}
+
+    /// Upcast to Any for downcasting in CompletionState.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Completion result
