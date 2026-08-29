@@ -168,7 +168,7 @@ $ niu_moo "Bash, 原生登陆 Windows。"
 
 `NIU_BANNER=1` 打开启动时的块字符大字横幅；`niu_moo` 随便喂一句话。
 oh-my-niu 的主题、prompt 和 git 状态段都是这头牛在驱动；
-[logo](assets/niubash-icon.svg) 上那对角，就是它头上那对。
+[logo](assets/niubash-icon-256.png) 上那对角，就是它头上那对。
 
 ## 对比
 

@@ -193,7 +193,7 @@ $ niu_moo "Bash, native on Windows."
 Turn on the block-letter startup banner with `NIU_BANNER=1`, or moo at
 will -- `niu_moo` takes any message. The bull also powers the oh-my-niu
 themes, prompt and git status segments; the horns on
-[the logo](assets/niubash-icon.svg) are the same two horns.
+[the logo](assets/niubash-icon-256.png) are the same two horns.
 
 ## FAQ
 

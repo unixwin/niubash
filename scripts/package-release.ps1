@@ -128,7 +128,6 @@ try {
         Join-Path $RepoRoot "assets\niubash-icon-256.png"
         Join-Path $RepoRoot "assets\niubash-icon-64.png"
         Join-Path $RepoRoot "assets\niubash-icon.png"
-        Join-Path $RepoRoot "assets\niubash-icon.svg"
     )
     foreach ($iconFile in $iconFiles) {
         if (-not (Test-Path -LiteralPath $iconFile)) {
