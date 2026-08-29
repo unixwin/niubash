@@ -241,3 +241,45 @@ jobs:
           fail_on_unmatched_files: true
           overwrite_files: true
           generate_release_notes: true
+
+  publish-crates:
+    name: publish to crates.io
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Resolve release inputs
+        id: release
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Invalid release tag '$tag'"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout release tag
+        shell: pwsh
+        run: |
+          git fetch --tags --force
+          git checkout "${{ steps.release.outputs.tag }}"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Publish niubash-runtime to crates.io
+        run: cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: Publish niubash to crates.io
+        run: cargo publish --locked -p niubash --token ${{ secrets.CRATES_IO_TOKEN }}
