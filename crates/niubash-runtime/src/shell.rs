@@ -111,7 +111,10 @@ impl Shell {
     /// Construct a fresh shell: load config, install Ctrl+C handler, inject
     /// winuxcmd onto PATH, set up completion state and history.
     pub fn new() -> anyhow::Result<Self> {
-        Self::new_with_script_name(Some("niubash"))
+        // `niu` is the sole public executable. Keep `$0` aligned with the
+        // user-facing command; explicit script and `-c` names still override
+        // this value at their call sites.
+        Self::new_with_script_name(Some("niu"))
     }
 
     /// Construct a shell for scripts arriving on process stdin.
@@ -4457,6 +4460,22 @@ mod tests {
         assert!(rendered.contains('%'), "{rendered:?}");
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn standard_prompt_does_not_expose_private_use_markers() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = Shell::new().unwrap();
+        shell.run_precmd_hooks();
+        let rendered = reedline::Prompt::render_prompt_left(&shell.prompt).into_owned();
+
+        assert!(
+            !rendered
+                .chars()
+                .any(|ch| (0xE000..=0xE0FF).contains(&(ch as u32))),
+            "prompt contains a raw-byte marker: {rendered:?}"
+        );
     }
 
     #[test]

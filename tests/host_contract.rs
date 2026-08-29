@@ -328,6 +328,21 @@ fn rubash_executor_sees_niu_shell_name() {
 }
 
 #[test]
+fn niu_reports_niu_as_interactive_shell_zero() {
+    let temp = unique_temp_dir("niubash-host-shell-zero");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_niu("printf '%s' \"$0\"", &start, &home, &[]);
+    assert_success(&output, "shell $0");
+    assert_eq!(normalize_text(&output.stdout), "niu");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn starship_receives_bash_shell_identity() {
     let temp = unique_temp_dir("niubash-host-starship-shell");
     let home = temp.join("home");
