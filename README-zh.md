@@ -150,6 +150,26 @@ ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 
 <img src="assets/demo-drama.gif" alt="动画剧情：用户和 codex 对话，PowerShell 吃掉参数，用户崩溃，niubash 救场" width="520"/>
 
+## 这头牛
+
+每个 niubash 安装都自带一头会说话的牛。在 `~/.niubashrc` 里引入官方
+[oh-my-niu](https://github.com/unixwin/oh-my-niu) 之后：
+
+```text
+$ niu_moo "Bash, 原生登陆 Windows。"
+ _________________________
+< Bash, 原生登陆 Windows。 >
+ -------------------------
+        \   ^___^
+         \  (oo)\_______
+            (__)\       )\/                ||----w |
+                ||     ||
+```
+
+`NIU_BANNER=1` 打开启动时的块字符大字横幅；`niu_moo` 随便喂一句话。
+oh-my-niu 的主题、prompt 和 git 状态段都是这头牛在驱动；
+[logo](assets/niubash-icon.svg) 上那对角，就是它头上那对。
+
 ## 对比
 
 | | niubash | WSL | Git Bash | PowerShell | CMD |

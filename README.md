@@ -173,6 +173,28 @@ This is what that feels like from the other side of the keyboard:
 
 One binary. One process. No distro to patch, no emulation layer to appease.
 
+## The bull
+
+Every niubash install ships with a mascot that talks. With the official
+[oh-my-niu](https://github.com/unixwin/oh-my-niu) bundle sourced from your
+`~/.niubashrc`:
+
+```text
+$ niu_moo "Bash, native on Windows."
+ ___________________________
+< Bash, native on Windows. >
+ ---------------------------
+        \   ^___^
+         \  (oo)\_______
+            (__)\       )\/                ||----w |
+                ||     ||
+```
+
+Turn on the block-letter startup banner with `NIU_BANNER=1`, or moo at
+will -- `niu_moo` takes any message. The bull also powers the oh-my-niu
+themes, prompt and git status segments; the horns on
+[the logo](assets/niubash-icon.svg) are the same two horns.
+
 ## FAQ
 
 - **Another Git Bash?** No — Git Bash emulates Unix on top of Windows:

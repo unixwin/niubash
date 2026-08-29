@@ -7,6 +7,8 @@ NIU_THEME_PLUGIN=theme-p10-classic
 NIU_PROMPT_SYMBOL="❯"
 export NIU_THEME NIU_THEME_PLUGIN NIU_PROMPT_SYMBOL
 
+# NIU_BANNER=1  # greet with the block-letter niubash banner (from oh-my-niu)
+
 # Official bundled source plugins. Theme is selected separately above.
 NIU_PLUGINS=(prompt-core git common-aliases path-tools extract)
 
