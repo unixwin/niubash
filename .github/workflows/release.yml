@@ -278,6 +278,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
+      # Publishing needs version-annotated path deps so cargo can swap the
+      # path for a registry dependency. The rubash deps carry no version yet
+      # because rubash master is still 0.3.0 and CI path builds would fail
+      # the ^1.0.0 check; re-add version = "1.0.0" once rubash 1.0.0 is on
+      # crates.io.
       - name: Publish niubash-runtime to crates.io
         run: cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
 

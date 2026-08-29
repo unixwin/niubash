@@ -24,7 +24,7 @@ resolver = "2"
 
 [dependencies]
 niubash-runtime = { path = "crates/niubash-runtime", version = "1.0.0" }
-rubash = { path = "../rubash", version = "1.0.0" }
+rubash = { path = "../rubash" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
