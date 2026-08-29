@@ -9,7 +9,6 @@ pub fn stdio_is_interactive() -> bool {
         && platform::stdout_is_terminal()
         && platform::stderr_is_terminal()
 }
-
 #[cfg(windows)]
 mod platform {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -41,7 +40,6 @@ mod platform {
         }
     }
 }
-
 #[cfg(unix)]
 mod platform {
     extern "C" {

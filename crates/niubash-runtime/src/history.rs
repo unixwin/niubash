@@ -14,6 +14,56 @@ use reedline::{
 
 use crate::config::HistoryMode;
 
+/// On Windows, reset the DACL of the history file to grant the current
+/// process full access. This handles the case where the file was created
+/// by a different security context (e.g., Codex sandbox) and has
+/// restrictive ACLs that cause "Access Denied" (os error 5) on read.
+///
+/// Setting a NULL DACL with the PROTECTED flag removes all access control,
+/// which is safe for user-local state files like shell history.
+#[cfg(windows)]
+fn reset_history_file_dacl(path: &std::path::Path) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
+            windows_sys::Win32::Security::DACL_SECURITY_INFORMATION
+                | windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(), // pSidOwner
+            std::ptr::null_mut(), // pSidGroup
+            std::ptr::null_mut(), // pDacl (NULL = full access)
+            std::ptr::null_mut(), // pSacl
+        );
+        // Best-effort: ignore errors; the caller will report the real I/O error if retry still fails.
+    }
+}
+
+/// Best-effort fix: if the file exists and we suspect ACL issues, reset the DACL.
+/// On non-Windows platforms this is a no-op.
+fn ensure_history_file_accessible(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        // Only attempt if the file exists (Path::exists returns false on any error, including permission denied).
+        // Try to get metadata; if it fails with PermissionDenied, fix the DACL.
+        match std::fs::metadata(path) {
+            Ok(_) => {} // File exists and is accessible – nothing to do.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                reset_history_file_dacl(path);
+            }
+            _ => {} // Not found or other error – nothing to fix here.
+        }
+    }
+    let _ = path; // suppress unused-variable warning on non-windows
+}
+
 /// Adapter exposing the host Reedline history to Rubash builtins.
 pub(crate) struct RubashHistoryProvider {
     inner: LiveFileBackedHistory,
@@ -103,6 +153,11 @@ impl LiveFileBackedHistory {
     }
 
     pub(crate) fn with_mode(capacity: usize, path: PathBuf, mode: HistoryMode) -> Result<Self> {
+        // On Windows, ensure the history file has accessible ACLs before opening.
+        // Codex sandbox and similar environments may create files with restrictive
+        // permissions that block read access (os error 5).
+        ensure_history_file_accessible(&path);
+
         let history_capacity = if mode == HistoryMode::Private {
             usize::MAX - 1
         } else {
@@ -139,6 +194,10 @@ impl LiveFileBackedHistory {
         if mode != HistoryMode::Shared {
             return Ok(());
         }
+
+        // On Windows, fix ACLs before re-reading the file from disk.
+        ensure_history_file_accessible(path);
+
         let signature = file_signature(path)?;
         if signature == state.signature {
             return Ok(());
@@ -263,6 +322,22 @@ fn file_signature(path: &Path) -> io::Result<FileSignature> {
             modified: metadata.modified().ok(),
         }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(FileSignature::default()),
+        #[cfg(windows)]
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            // On Windows, the history file may have restrictive ACLs from a
+            // different security context (e.g., Codex sandbox). Reset the
+            // DACL and retry once.
+            reset_history_file_dacl(path);
+            match fs::metadata(path) {
+                Ok(metadata) => Ok(FileSignature {
+                    exists: true,
+                    len: metadata.len(),
+                    modified: metadata.modified().ok(),
+                }),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(FileSignature::default()),
+                Err(e) => Err(e),
+            }
+        }
         Err(error) => Err(error),
     }
 }
