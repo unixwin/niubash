@@ -26,11 +26,13 @@ try {
 
     if ($Target) {
         $niubashExe = Join-Path $RepoRoot "target\$Target\$Configuration\niu.exe"
+        $niubashAliasExe = Join-Path $RepoRoot "target\$Target\$Configuration\niubash.exe"
     }
     else {
         $niubashExe = Join-Path $RepoRoot "target\$Configuration\niu.exe"
+        $niubashAliasExe = Join-Path $RepoRoot "target\$Configuration\niubash.exe"
     }
-    if (-not (Test-Path -LiteralPath $niubashExe)) {
+    if (-not (Test-Path -LiteralPath $niubashExe) -or -not (Test-Path -LiteralPath $niubashAliasExe)) {
         $buildArgs = @("build", "--locked")
         if ($Configuration -eq "release") {
             $buildArgs += "--release"
@@ -42,6 +44,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $niubashExe)) {
         throw "niu.exe not found at $niubashExe"
+    }
+    if (-not (Test-Path -LiteralPath $niubashAliasExe)) {
+        throw "niubash.exe not found at $niubashAliasExe"
     }
 
     function Resolve-RubashShim {
@@ -192,6 +197,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets") | Out-Null
 
     Copy-Item -LiteralPath $niubashExe -Destination (Join-Path $stageDir "niu.exe") -Force
+    Copy-Item -LiteralPath $niubashAliasExe -Destination (Join-Path $stageDir "niubash.exe") -Force
     Copy-Item -LiteralPath $WinuxCmdPath -Destination (Join-Path $stageDir "winuxcmd\usr\bin\winuxcmd.exe") -Force
     Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\bash.exe") -Force
     Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\sh.exe") -Force

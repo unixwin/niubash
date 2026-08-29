@@ -5,8 +5,8 @@
 </p>
 
 > **Bash, native on Windows.** No WSL. No VM. No `/mnt/c`. No cmdlet dialect.
-> One `niu.exe`: the shell your fingers already know — and the one your AI
-> agent actually speaks.
+> Two names, one shell — `niu` or `niubash`: the shell your fingers already
+> know, and the one your AI agent actually speaks.
 
 [English](README.md) · [中文](README-zh.md)
 
@@ -17,7 +17,8 @@
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/unixwin/niubash)](https://github.com/unixwin/niubash/stargazers)
 
-One native Windows binary, now at v1.0.0. Bash syntax. Windows paths. Real
+One native Windows shell (installed as both `niu` and `niubash`), now at
+v1.0.0. Bash syntax. Windows paths. Real
 Windows programs. Unix commands included. No emulation layer between your
 command and your tools — and nothing for your AI agent to trip over.
 
@@ -53,7 +54,7 @@ Unix commands). From source:
 
 ```sh
 git clone https://github.com/unixwin/niubash.git && cd niubash
-cargo build --release && target\release\niu.exe
+cargo build --release && target\release\niu.exe   # niubash.exe too — same shell, two names
 ```
 
 Then:
@@ -107,7 +108,7 @@ Keep it current: `niu --self-update` (or `self-update` inside the shell).
 ## Architecture
 
 ```
-niu.exe
+niu.exe / niubash.exe
 ├── niubash host layer (Rust)     reedline line editing · themes · completions · plugins · Ctrl+C
 ├── rubash engine (lib, Rust)     lexer / parser / executor / builtins
 └── winuxcmd.exe command layer (C++)  Unix coreutils as real binaries, PATH command links
@@ -230,11 +231,3 @@ developer. ★
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
-
-<!--
-Slogan candidates (the body uses the primary):
-
-Primary: Bash, native on Windows. No WSL. No VM. No `/mnt/c`. No cmdlet dialect.
-Backup 1: One `niu.exe`. All of Bash. Zero emulation.
-Backup 2: The shell your fingers already know — and the one your agent actually speaks.
--->

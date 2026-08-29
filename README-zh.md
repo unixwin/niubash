@@ -6,7 +6,7 @@
 
 > **Bash 原生登陆 Windows——牛来了。**
 > 不用 WSL，不开虚拟机，没有 `/mnt/c`，没有 cmdlet 方言。
-> 一个 `niu.exe`：你手指肌肉记得的那个 shell，也是你 AI agent 天生会说的那个 shell。
+> 两个名字一个 shell——`niu` 或 `niubash`：你手指肌肉记得的那个，也是你 AI agent 天生会说的那个。
 
 中文 · [English](README.md)
 
@@ -17,7 +17,7 @@
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/unixwin/niubash)](https://github.com/unixwin/niubash/stargazers)
 
-一个原生 Windows 单二进制，v1.0.0 正式版。Bash 语法。Windows 路径。真 Windows 程序。
+一个原生 Windows shell（同时以 `niu` 和 `niubash` 两个名字安装），v1.0.0 正式版。Bash 语法。Windows 路径。真 Windows 程序。
 Unix 命令随包附赠。你的命令和你的工具之间，没有模拟层，也没有翻译官——
 你 AI agent 想摔跤都没地方摔。
 
@@ -51,7 +51,7 @@ niubash 全部还给你：
 
 ```sh
 git clone https://github.com/unixwin/niubash.git && cd niubash
-cargo build --release && target\release\niu.exe
+cargo build --release && target\release\niu.exe   # niubash.exe 同样可用——一个 shell，两个名字
 ```
 
 然后：
@@ -104,7 +104,7 @@ hello() { echo "hello from niu"; }
 ## 架构
 
 ```
-niu.exe
+niu.exe / niubash.exe
 ├── niubash 宿主层（Rust）       reedline 行编辑 · 主题 · 补全 · 插件 · Ctrl+C
 ├── rubash 语言引擎（lib，Rust）  lexer / parser / executor / builtins
 └── winuxcmd.exe 命令层（C++）   Unix coreutils 真二进制，PATH 命令链接注入
@@ -216,11 +216,3 @@ oh-my-niu 的主题、prompt 和 git 状态段都是这头牛在驱动；
 ## License
 
 GPL-3.0-or-later，详见 [LICENSE](LICENSE)。
-
-<!--
-Slogan 备选池（正文使用主选）：
-
-主选：Bash 原生登陆 Windows——牛来了。
-备选 1：牛市来了：一个 niu.exe，Bash、Unix 命令、真 Windows 工具全仓满仓。
-备选 2：不用 WSL 的第 N 天，牛来了。
--->

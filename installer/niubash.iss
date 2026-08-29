@@ -41,7 +41,7 @@ SolidCompression=yes
 WizardStyle=modern
 ChangesEnvironment=yes
 CloseApplications=yes
-CloseApplicationsFilter=niu.exe
+CloseApplicationsFilter=niu.exe,niubash.exe
 RestartApplications=no
 #if AppArch == "arm64"
 ArchitecturesAllowed=arm64
@@ -148,7 +148,7 @@ begin
 
   Exec(
     ExpandConstant('{sys}\taskkill.exe'),
-    '/IM niu.exe /F',
+    '/IM niu.exe /IM niubash.exe /F',
     '',
     SW_HIDE,
     ewWaitUntilTerminated,
