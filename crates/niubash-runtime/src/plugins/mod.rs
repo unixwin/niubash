@@ -11,7 +11,14 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-pub const OFFICIAL_BUNDLE_NAME: &str = "oh-my-winuxsh";
+pub const OFFICIAL_BUNDLE_NAME: &str = "oh-my-niu";
+/// Pre-rename bundle identity. Bundles installed under this name keep
+/// working: they stay on the official lookup/trust/update paths.
+pub const OFFICIAL_BUNDLE_LEGACY_NAMES: &[&str] = &["oh-my-niu"];
+
+pub fn is_official_bundle_name(name: &str) -> bool {
+    name == OFFICIAL_BUNDLE_NAME || OFFICIAL_BUNDLE_LEGACY_NAMES.contains(&name)
+}
 const OFFICIAL_BUNDLE_VERSION: &str = "1.0.0";
 const PLUGIN_API_VERSION: &str = "niubash:plugin@0.1.0";
 const PLUGIN_BUNDLE_API_VERSION: &str = "niubash:plugin-bundle@0.1.0";
@@ -495,7 +502,7 @@ pub fn effective_plugin_state(config: &PluginConfig) -> PluginRuntimeState {
         || !config
             .bundles
             .iter()
-            .any(|bundle| bundle == OFFICIAL_BUNDLE_NAME)
+            .any(|bundle| is_official_bundle_name(bundle))
     {
         return state;
     }
@@ -1805,7 +1812,7 @@ fn plugin_trust_source(inventory: &PluginInventory) -> &str {
     inventory.trust_source.as_str()
 }
 fn plugin_trust_source_for(bundle: &str, source: &str) -> &'static str {
-    if bundle != OFFICIAL_BUNDLE_NAME {
+    if !is_official_bundle_name(bundle) {
         return "external_bundle";
     }
     match source {
@@ -1882,7 +1889,7 @@ pub fn apply_plugin_bundle_update_from_path(
     source_path: &Path,
     expected_checksum: Option<&str>,
 ) -> anyhow::Result<PluginBundleUpdateSummary> {
-    if bundle_name != OFFICIAL_BUNDLE_NAME {
+    if !is_official_bundle_name(bundle_name) {
         anyhow::bail!(
             "unsupported bundle '{}'; only {} is supported",
             bundle_name,
@@ -1979,7 +1986,7 @@ pub fn apply_plugin_bundle_update_from_path(
 pub fn apply_plugin_bundle_rollback(
     bundle_name: &str,
 ) -> anyhow::Result<PluginBundleRollbackSummary> {
-    if bundle_name != OFFICIAL_BUNDLE_NAME {
+    if !is_official_bundle_name(bundle_name) {
         anyhow::bail!(
             "unsupported bundle '{}'; only {} is supported",
             bundle_name,
@@ -2020,7 +2027,7 @@ fn validate_bundle_inventory_for_update(
     expected_checksum: Option<&str>,
     actual_checksum: Option<&str>,
 ) -> anyhow::Result<()> {
-    if inventory.bundle != OFFICIAL_BUNDLE_NAME {
+    if !is_official_bundle_name(&inventory.bundle) {
         anyhow::bail!(
             "bundle name '{}' does not match {}",
             inventory.bundle,
@@ -2440,7 +2447,7 @@ pub fn plugin_aliases(pack_name: &str) -> Option<Vec<(String, String)>> {
             .packs
             .iter()
             .find(|pack| pack.name == pack_name && pack.exports.aliases)?;
-        if inventory.bundle == OFFICIAL_BUNDLE_NAME {
+        if is_official_bundle_name(&inventory.bundle) {
             if let Some(aliases) = load_bundle_aliases_from_path(root, pack) {
                 return Some(aliases);
             }
@@ -2516,7 +2523,7 @@ pub fn plugin_completion_defs(state: &PluginRuntimeState) -> Vec<CommandDef> {
             requested.extend(pack.exports.completions.iter().cloned());
         }
     }
-    if inventory.bundle == OFFICIAL_BUNDLE_NAME {
+    if is_official_bundle_name(&inventory.bundle) {
         for name in requested {
             if loaded.contains(&name) {
                 continue;

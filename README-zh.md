@@ -73,8 +73,8 @@ NIU_THEME_PLUGIN=theme-p10-classic
 NIU_PLUGINS=(prompt-core git common-aliases)
 export NIU_THEME NIU_THEME_PLUGIN
 
-# 官方插件发行版 oh-my-winuxsh
-[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+# 官方插件发行版 oh-my-niu
+[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
 
 alias ll='ls -la'
 alias gst='git status'
@@ -116,7 +116,7 @@ niu.exe
   上游修，Windows 上每一个 bash 用户一起受益。
 - **winuxcmd 是命令层，不是 DLL** — 没有 FFI、没有路由表魔法。它就是普通
   Windows 进程，rubash 通过正常 PATH 找到 `ls`、`grep` 这些命令链接。
-- **oh-my-winuxsh 是官方插件发行版** — 随 niubash 发行，manifest 声明权限，
+- **oh-my-niu 是官方插件发行版** — 随 niubash 发行，manifest 声明权限，
   审阅过的 source pack + process 适配器两种形态。
 - 非目标：Linux/macOS 原生 shell 产品。rubash 可跨平台复用，但 niubash
   的目标就是 Windows——把一件事做牛。

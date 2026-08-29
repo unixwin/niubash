@@ -6,7 +6,7 @@ environment while keeping extensions maintainable.
 ## Architecture
 
 ```text
-niubash = rubash + winuxcmd + reedline + oh-my-winuxsh
+niubash = rubash + winuxcmd + reedline + oh-my-niu
 ```
 
 - `rubash` owns shell language semantics.
@@ -14,7 +14,7 @@ niubash = rubash + winuxcmd + reedline + oh-my-winuxsh
 - `reedline` owns interactive editing primitives.
 - Niubash owns Windows host integration, prompt rendering, plugin loading, and
   configuration.
-- `oh-my-winuxsh` owns first-party plugin assets and reviewed `.winux` helper
+- `oh-my-niu` owns first-party plugin assets and reviewed `.winux` helper
   scripts.
 
 ## Configuration
@@ -26,7 +26,7 @@ niubash = rubash + winuxcmd + reedline + oh-my-winuxsh
 
 ## Plugin Model
 
-- Load named packs from `oh-my-winuxsh`.
+- Load named packs from `oh-my-niu`.
 - Keep pack manifests auditable.
 - Use asset packs for aliases, completions, themes, and keybinding metadata.
 - Use `.winux` source packs for reviewed shell mutation.

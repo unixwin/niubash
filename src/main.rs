@@ -15,9 +15,9 @@
 //!   niu plugin bundle status [--json] → inspect official bundle install state
 //!   niu plugin doctor [--json] → diagnose plugin configuration health
 //!   niu plugin review <name> [--json] → review plugin permissions
-//!   niu plugin update oh-my-winuxsh --from <path> → install a bundle release
-//!   niu plugin update oh-my-winuxsh --github-release latest → download/install bundle
-//!   niu plugin rollback oh-my-winuxsh → roll back to the previous bundle
+//!   niu plugin update oh-my-niu --from <path> → install a bundle release
+//!   niu plugin update oh-my-niu --github-release latest → download/install bundle
+//!   niu plugin rollback oh-my-niu → roll back to the previous bundle
 //!   niubash --completion-probe "line" [cursor] → print REPL completions
 //!   niubash --install-wt-profile → add/update the Windows Terminal profile
 //!   niubash --self-update → download and run the latest installer
@@ -30,7 +30,7 @@ use std::process::ExitCode;
 use rubash::invocation::ShellInvocation;
 
 mod self_update;
-const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-winuxsh";
+const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-niu";
 const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "niubash-plugin-bundles";
 const NIU_MAIN_STACK_SIZE: usize = 32 * 1024 * 1024;
 
@@ -441,11 +441,11 @@ fn print_usage() {
     println!("  plugin search [query] [--json]  Discover official plugins");
     println!("  plugin themes [--json]    List user and bundle themes");
     println!("  plugin bundle status [--json]  Inspect official bundle install state");
-    println!("  plugin update oh-my-winuxsh --from <path>");
+    println!("  plugin update oh-my-niu --from <path>");
     println!("      [--checksum <sha>|--checksum-file <path>] [--json]");
-    println!("  plugin update oh-my-winuxsh --github-release latest|vX.Y.Z [--json]");
+    println!("  plugin update oh-my-niu --github-release latest|vX.Y.Z [--json]");
     println!("                            Install bundle release");
-    println!("  plugin rollback oh-my-winuxsh [--json]  Roll back bundle release");
+    println!("  plugin rollback oh-my-niu [--json]  Roll back bundle release");
     println!();
     println!();
     println!();
@@ -824,12 +824,12 @@ fn print_plugin_usage() {
     println!("  bundle status [--json]    Inspect official bundle install state");
     println!("  doctor [--json]           Diagnose plugin configuration health");
     println!("  review <name> [--json]    Review plugin permissions before enabling");
-    println!("  update oh-my-winuxsh --from <path>");
+    println!("  update oh-my-niu --from <path>");
     println!("      [--checksum <sha>|--checksum-file <path>] [--json]");
     println!("                            Install a local bundle directory or zip");
-    println!("  update oh-my-winuxsh --github-release latest|vX.Y.Z [--json]");
+    println!("  update oh-my-niu --github-release latest|vX.Y.Z [--json]");
     println!("                            Download, verify, and install GitHub release");
-    println!("  rollback oh-my-winuxsh [--json]");
+    println!("  rollback oh-my-niu [--json]");
     println!("                            Roll back to the previous bundle");
     println!("  install <name>           Install official plugin from active bundle");
     println!("  uninstall <name>         Uninstall official plugin from active bundle");

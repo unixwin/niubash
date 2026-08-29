@@ -13,7 +13,7 @@ script.
 
 - `~/.niubashrc` is the primary interactive entry point for plugin lists, theme
   selection, prompt templates, exports, aliases, functions, and startup logic.
-- `oh-my-winuxsh` is the official bundled plugin distribution. It is not a fork
+- `oh-my-niu` is the official bundled plugin distribution. It is not a fork
   of another shell framework.
 - `~/.winshrc` remains a compatibility fallback only when `~/.niubashrc` is
   absent.
@@ -38,7 +38,7 @@ niubash core
   - permission model
   - bundle update / rollback plumbing
 
-oh-my-winuxsh bundled distribution
+oh-my-niu bundled distribution
   - official first-party plugin manifests
   - .winux source scripts
   - aliases, completions, functions, prompt presets, prompt segments
@@ -87,7 +87,7 @@ The framework should be structured around small, auditable packs:
 
 ```toml
 name = "git"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = "1.0.0"
 kind = "source"
 api = "niubash:plugin@0.1.0"
@@ -112,7 +112,7 @@ show_ahead_behind = true
 ## Implementation Order
 
 1. Keep the current plugin CLI and manifest registry focused on `[plugins]`.
-2. Load the bundled `oh-my-winuxsh` baseline from the installed bundle path.
+2. Load the bundled `oh-my-niu` baseline from the installed bundle path.
 3. Move first-party data assets into the bundle where safe.
 4. Use `.winux` source packs for reviewed shell helpers.
 5. Keep core shell machinery in Niubash: rubash integration, reedline

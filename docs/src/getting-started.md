@@ -124,11 +124,11 @@ if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
 fi
 
 if [ -z "${NIUBASH:-}" ]; then
-  NIUBASH="$HOME/.oh-my-winuxsh"
+  NIUBASH="$HOME/.oh-my-niu"
   export NIUBASH
 fi
 
-[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
 niubash_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{time} " 2>/dev/null || true
 
 export EDITOR=vim
@@ -183,7 +183,7 @@ line the user is typing on.
 
 ## 7. Official plugin bundle
 
-Niubash has a built-in plugin system. `oh-my-winuxsh` is the
+Niubash has a built-in plugin system. `oh-my-niu` is the
 official bundled plugin distribution. It ships first-party packs such as `git`, `docker`, `kubectl`,
 `npm`, `zoxide`, `direnv`, `dotenv`, `fzf`, prompt presets, and keybinding
 presets.
@@ -203,6 +203,6 @@ checks.
 
 - [Plugin System Direction](../planning/plugin-system-direction.md) for the v3 plugin model
 - [Plugin System Roadmap](../planning/plugin-system-roadmap.md) for the execution sequence
-- [Oh My Niubash Bundle Plan](../planning/oh-my-winuxsh-bundle-plan.md) for the official bundle
+- [Oh My Niubash Bundle Plan](../planning/oh-my-niu-bundle-plan.md) for the official bundle
 - [Roadmap](niubash-roadmap.md) to see what is planned
 - Source at [github.com/unixwin/niubash](https://github.com/unixwin/niubash)

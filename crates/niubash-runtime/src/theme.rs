@@ -1,7 +1,7 @@
 //! Theme API for niubash.
 //!
 //! Niubash core owns the style schema and resolution hooks. Official themes
-//! live in external bundles such as oh-my-winuxsh. Core does not ship
+//! live in external bundles such as oh-my-niu. Core does not ship
 //! selectable official themes.
 
 use std::path::{Path, PathBuf};
@@ -60,7 +60,7 @@ pub fn by_name(name: &str) -> Theme {
     }
 
     log::warn!(
-        "Theme '{}' not found in user themes or active bundles; oh-my-winuxsh theme bundle may be missing or invalid",
+        "Theme '{}' not found in user themes or active bundles; oh-my-niu theme bundle may be missing or invalid",
         name
     );
     Theme::default_theme()

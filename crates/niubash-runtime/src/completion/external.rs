@@ -320,7 +320,7 @@ impl ExternalCompletionPlugin {
     /// Create a plugin with no compiled completion assets.
     ///
     /// First-party static command definitions live in the active
-    /// `oh-my-winuxsh` bundle. The runtime only owns the completion engine and
+    /// `oh-my-niu` bundle. The runtime only owns the completion engine and
     /// user/plugin loading paths, so bundle assets can update independently of
     /// the shell binary.
     pub fn new() -> Self {

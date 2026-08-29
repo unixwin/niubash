@@ -37,7 +37,7 @@ export NIU_THEME NIU_THEME_PLUGIN NIU_PROMPT_SYMBOL
 
 NIU_PLUGINS=(prompt-core git common-aliases path-tools extract)
 
-[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
 
 alias ll='ls -la'
 export EDITOR=vim
@@ -65,7 +65,7 @@ NIU_THEME_PLUGIN=theme-p10-lean
 NIU_PLUGINS=(prompt-core git)
 export NIU_THEME NIU_THEME_PLUGIN
 
-[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
 niubash_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{status}{time} " 2>/dev/null || true
 ```
 
@@ -199,13 +199,13 @@ niubash --self-update
 
 winuxcmd.exe wpm update winuxcmd
 
-niu plugin update oh-my-winuxsh --github-release latest
-niu plugin rollback oh-my-winuxsh
+niu plugin update oh-my-niu --github-release latest
+niu plugin rollback oh-my-niu
 ```
 
 - `niubash --self-update` updates the shell.
 - `wpm update winuxcmd` updates command packages and command links.
-- `plugin update oh-my-winuxsh` updates the official plugin bundle.
+- `plugin update oh-my-niu` updates the official plugin bundle.
 
 ## Debug Checklist
 

@@ -10,7 +10,7 @@ Niubash is a Windows-native, non-isolated Bash-compatible shell for humans and
 agents.
 
 ```text
-niubash = rubash + winuxcmd + reedline + oh-my-winuxsh
+niubash = rubash + winuxcmd + reedline + oh-my-niu
 ```
 
 ## Done
@@ -25,7 +25,7 @@ niubash = rubash + winuxcmd + reedline + oh-my-winuxsh
   overrides are maintained as internal managed state, not user configuration.
 - Plugin inventory, review, doctor, enable/disable, update, and rollback
   surfaces exist.
-- `oh-my-winuxsh` is the official bundled plugin distribution.
+- `oh-my-niu` is the official bundled plugin distribution.
 - Git completions, Git prompt status, prompt templates, and p10-style segment
   presets are available.
 - Host contract tests cover cwd, env, stdin, stdout/stderr, script args,
@@ -50,7 +50,7 @@ niubash = rubash + winuxcmd + reedline + oh-my-winuxsh
 
 - Normalize first-party pack manifests around exports and permissions.
 - Move more alias/completion/theme assets from compiled fallback into the
-  bundled `oh-my-winuxsh` distribution.
+  bundled `oh-my-niu` distribution.
 - Split prompt responsibilities clearly:
   - theme owns layout and connective text;
   - prompt-core renders templates;
@@ -75,5 +75,5 @@ niubash = rubash + winuxcmd + reedline + oh-my-winuxsh
 - WinuxCmd stays integrated through PATH injection and command links.
 - `~/.niubashrc` is the normal user-authored interactive config.
 - Machine-managed state is not a human-authored configuration surface.
-- `oh-my-winuxsh` is the official bundle, not a fork of another shell
+- `oh-my-niu` is the official bundle, not a fork of another shell
   framework.

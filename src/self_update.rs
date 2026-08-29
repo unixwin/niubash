@@ -894,12 +894,8 @@ mod tests {
     #[test]
     fn builds_generic_github_release_asset_url() {
         assert_eq!(
-            github_release_asset_url(
-                "unixwin/oh-my-winuxsh",
-                "v1.0.0",
-                "oh-my-winuxsh-1.0.0.zip"
-            ),
-            "https://github.com/unixwin/oh-my-winuxsh/releases/download/v1.0.0/oh-my-winuxsh-1.0.0.zip"
+            github_release_asset_url("unixwin/oh-my-niu", "v1.0.0", "oh-my-niu-1.0.0.zip"),
+            "https://github.com/unixwin/oh-my-niu/releases/download/v1.0.0/oh-my-niu-1.0.0.zip"
         );
     }
 

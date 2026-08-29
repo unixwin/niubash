@@ -81,7 +81,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         let theme_list = theme::list_available_names();
         if theme_list.is_empty() {
             anyhow::bail!(
-                "No Niubash themes found. The oh-my-winuxsh bundle is required and should be preinstalled."
+                "No Niubash themes found. The oh-my-niu bundle is required and should be preinstalled."
             );
         }
         let theme_refs: Vec<&str> = theme_list.iter().map(String::as_str).collect();
@@ -97,7 +97,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
             "  \u{1f3a8}  Colour theme",
             default_theme,
             &theme_refs,
-            "  \u{2502}  Choose the plugin-owned prompt colour scheme. Official themes come from oh-my-winuxsh.",
+            "  \u{2502}  Choose the plugin-owned prompt colour scheme. Official themes come from oh-my-niu.",
         );
 
         // --- Prompt symbol ---
@@ -324,8 +324,8 @@ if [ -z "${{HOME:-}}" ] && [ -n "${{USERPROFILE:-}}" ]; then
 fi
 
 if [ -z "${{NIUBASH:-}}" ]; then
-  for __niubash_bundle in "$HOME/.oh-my-winuxsh" "$HOME/.niubash/oh-my-winuxsh" "$HOME/.niubash/bundles/oh-my-winuxsh"/* "$NIU_APP_BUNDLE_PATH"; do
-    if [ -f "$__niubash_bundle/oh-my-winuxsh.winux" ]; then
+  for __niubash_bundle in "$HOME/.oh-my-niu" "$HOME/.niubash/oh-my-niu" "$HOME/.niubash/bundles/oh-my-niu"/* "$NIU_APP_BUNDLE_PATH"; do
+    if [ -f "$__niubash_bundle/oh-my-niu.winux" ]; then
       NIUBASH="$__niubash_bundle"
       export NIUBASH
       break
@@ -333,8 +333,8 @@ if [ -z "${{NIUBASH:-}}" ]; then
   done
 fi
 
-if [ -f "$NIUBASH/oh-my-winuxsh.winux" ]; then
-  . "$NIUBASH/oh-my-winuxsh.winux"
+if [ -f "$NIUBASH/oh-my-niu.winux" ]; then
+  . "$NIUBASH/oh-my-niu.winux"
 fi
 
 {}
@@ -569,7 +569,7 @@ mod tests {
         assert!(rc.contains("NIU_DISABLE_DEFAULT_PLUGINS=1"));
         assert!(rc.contains("NIU_PLUGINS=(prompt-core git)"));
         assert!(rc.contains("\"$NIU_APP_BUNDLE_PATH\""));
-        assert!(rc.contains(". \"$NIUBASH/oh-my-winuxsh.winux\""));
+        assert!(rc.contains(". \"$NIUBASH/oh-my-niu.winux\""));
         assert!(rc.contains("niubash_prompt_use_template '{cwd} ' '{time} '"));
         assert!(!rc.contains("[plugins]"));
         assert!(!rc.contains("[shell]"));

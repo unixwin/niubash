@@ -7,7 +7,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
 
 - The plugin registry, bundle inventory, permission review, doctor output, and
   enable/disable control plane exist.
-- `oh-my-winuxsh` is the official bundled distribution.
+- `oh-my-niu` is the official bundled distribution.
 - First-party packs are being moved behind manifests so their aliases,
   completions, prompt segments, hooks, and optional `.winux` startup code are
   visible and reviewable.

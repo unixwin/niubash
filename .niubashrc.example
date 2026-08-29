@@ -26,10 +26,10 @@ if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
   export HOME
 fi
 
-# Locate the bundled oh-my-winuxsh framework if NIUBASH is not set.
+# Locate the bundled oh-my-niu framework if NIUBASH is not set.
 if [ -z "${NIUBASH:-}" ]; then
-  for __niubash_bundle in "$HOME/.oh-my-winuxsh" "$HOME/.niubash/oh-my-winuxsh" "$HOME/.niubash/bundles/oh-my-winuxsh"/*; do
-    if [ -f "$__niubash_bundle/oh-my-winuxsh.winux" ]; then
+  for __niubash_bundle in "$HOME/.oh-my-niu" "$HOME/.niubash/oh-my-niu" "$HOME/.niubash/bundles/oh-my-niu"/*; do
+    if [ -f "$__niubash_bundle/oh-my-niu.winux" ]; then
       NIUBASH="$__niubash_bundle"
       export NIUBASH
       break
@@ -37,7 +37,7 @@ if [ -z "${NIUBASH:-}" ]; then
   done
 fi
 
-[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
 
 # Personal aliases and environment.
 alias grep='grep --color=auto'

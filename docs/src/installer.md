@@ -122,20 +122,20 @@ currently needs to implement this contract; do not replace it with a
 
 ## Bundled Plugin Baseline
 
-Release packages also stage the official `oh-my-winuxsh` bundle under:
+Release packages also stage the official `oh-my-niu` bundle under:
 
 ```text
-bundles\oh-my-winuxsh
+bundles\oh-my-niu
 ```
 
 The runtime checks that app-bundled path after user-managed bundle locations:
 
 ```text
-%LOCALAPPDATA%\Niubash\bundles\oh-my-winuxsh\current
-%LOCALAPPDATA%\Niubash\bundles\oh-my-winuxsh\<version>
-bundles\oh-my-winuxsh
+%LOCALAPPDATA%\Niubash\bundles\oh-my-niu\current
+%LOCALAPPDATA%\Niubash\bundles\oh-my-niu\<version>
+bundles\oh-my-niu
 ```
 
 Fresh offline installs can still list and use official plugins, while
-`niu plugin update oh-my-winuxsh ...` can replace the baseline without
+`niu plugin update oh-my-niu ...` can replace the baseline without
 rewriting the application install directory.

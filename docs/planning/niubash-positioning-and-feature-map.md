@@ -9,7 +9,7 @@ not an emulation layer.
 - Native Windows process model and paths.
 - Bundled Unix-style commands through WinuxCmd command links.
 - Interactive shell UX through reedline.
-- First-party plugin bundle through `oh-my-winuxsh`.
+- First-party plugin bundle through `oh-my-niu`.
 
 ## Feature Ownership
 
@@ -22,7 +22,7 @@ not an emulation layer.
 | Prompt rendering and theme selection | Niubash prompt-core and active theme |
 | Git status provider | Niubash native provider or Starship-backed provider |
 | Plugin manifests and bundle loading | Niubash |
-| First-party aliases/completions/themes/helpers | oh-my-winuxsh |
+| First-party aliases/completions/themes/helpers | oh-my-niu |
 
 ## Plugin Shape
 

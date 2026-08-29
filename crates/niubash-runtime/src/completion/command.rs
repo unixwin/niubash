@@ -129,7 +129,7 @@ impl CommandCompleter {
             "array".to_string(),
             "plugin".to_string(),
             "theme".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "git".to_string(),
             "code".to_string(),
             "code-insiders".to_string(),
@@ -225,7 +225,7 @@ impl CommandCompleter {
                                 // Extensionless files in PATH are skipped because
                                 // Windows PATH dirs commonly contain LICENSE, README,
                                 // etc. Extensionless tools like dsh are covered by
-                                // oh-my-winuxsh or the common-commands list.
+                                // oh-my-niu or the common-commands list.
                                 let is_executable = file_name.ends_with(".exe")
                                     || file_name.ends_with(".bat")
                                     || file_name.ends_with(".cmd")
@@ -351,7 +351,7 @@ mod tests {
     fn command_completion_includes_common_commands_for_partial_input() {
         let ctx = CompletionContext::new(std::path::PathBuf::from("."), "oh-".to_string(), 3);
         let result = CommandCompleter::complete(&ctx).unwrap().unwrap();
-        assert!(result.completions.contains(&"oh-my-winuxsh".to_string()));
+        assert!(result.completions.contains(&"oh-my-niu".to_string()));
     }
 
     #[test]

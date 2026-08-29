@@ -75,8 +75,8 @@ NIU_THEME_PLUGIN=theme-p10-classic
 NIU_PLUGINS=(prompt-core git common-aliases)
 export NIU_THEME NIU_THEME_PLUGIN
 
-# the official plugin distribution, oh-my-winuxsh
-[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+# the official plugin distribution, oh-my-niu
+[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
 
 alias ll='ls -la'
 alias gst='git status'
@@ -122,7 +122,7 @@ niu.exe
 - **winuxcmd is a command layer, not a DLL** — no FFI, no routing magic.
   It is an ordinary Windows process; rubash finds `ls`, `grep` and friends
   through the normal Windows PATH.
-- **oh-my-winuxsh is the official plugin distribution** — shipped with
+- **oh-my-niu is the official plugin distribution** — shipped with
   niubash, manifest-declared permissions, in two shapes: reviewed source
   packs and process adapters.
 - Non-goal: a native Linux/macOS shell product. rubash is portable, but

@@ -45,8 +45,8 @@ jobs:
       - name: Checkout rubash path dependency
         run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
 
-      - name: Checkout oh-my-winuxsh bundle
-        run: git clone --depth 1 https://github.com/unixwin/oh-my-winuxsh.git ../oh-my-winuxsh
+      - name: Checkout oh-my-niu bundle
+        run: git clone --depth 1 https://github.com/unixwin/oh-my-niu.git ../oh-my-niu
 
       - name: Resolve release inputs
         id: release
@@ -154,7 +154,7 @@ jobs:
           ./scripts/package-release.ps1 `
             -Version "${{ steps.release.outputs.version }}" `
             -WinuxCmdPath "${{ steps.winuxcmd.outputs.exe }}" `
-            -OhMyNiubashBundlePath "..\oh-my-winuxsh" `
+            -OhMyNiubashBundlePath "..\oh-my-niu" `
             -Configuration release `
             -Target "${{ matrix.rust_target }}" `
             -Arch "${{ matrix.arch }}"

@@ -105,7 +105,7 @@ Niubash 自己维护，用户不需要编辑其存储格式。
 
 v3 插件系统是 Niubash 自己的插件系统。
 
-- `oh-my-winuxsh` 作为官方 bundled plugin distribution 随 niubash 发行。
+- `oh-my-niu` 作为官方 bundled plugin distribution 随 niubash 发行。
 - git/docker/kubectl/npm 这类 shell helper 可以作为
   `kind = "source"` 的 first-party pack，从 bundle 内 `init.winux` 加载。
 - zoxide/direnv/dotenv/fzf 等需要更强 host 行为的能力继续由
@@ -192,7 +192,7 @@ niubash/
 - v2.2: rubash rewrite 稳定化、补全增强、Vi/Ctrl+R、配置一致性、用户主题
 - v2.3: Windows 原生 terminal contract、agent 友好的非交互式行为、history/prompt/completion UX
 - v2.4: 交互体验 polish（右 prompt、提示、补全菜单、默认配置）
-- v3: 内置 Niubash 插件系统；`oh-my-winuxsh` 作为官方 bundled plugin
+- v3: 内置 Niubash 插件系统；`oh-my-niu` 作为官方 bundled plugin
   distribution；先用 `builtin` registry 统一现有 first-party packs，再引入
   第三方插件通过 source/process runtime 接入。
 - 非目标: Linux/macOS 原生 shell 产品；rubash 可跨平台复用，但 niubash 产品目标是 Windows

@@ -4,7 +4,7 @@
 
 - Stabilize Niubash as a Windows-native Bash-compatible shell.
 - Keep shell semantics in rubash and host behavior in Niubash.
-- Make `oh-my-winuxsh` the maintained first-party plugin bundle.
+- Make `oh-my-niu` the maintained first-party plugin bundle.
 - Keep configuration understandable: user script in `~/.niubashrc`, managed
   state in the manifest-backed plugin registry.
 

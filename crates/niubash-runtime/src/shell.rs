@@ -28,7 +28,10 @@ use crate::config::{
 };
 use crate::git_status::GitPromptSymbols;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
-use crate::plugins::{PluginKind, PluginProcessSpec, PluginRuntimeState, OFFICIAL_BUNDLE_NAME};
+use crate::plugins::{
+    PluginKind, PluginProcessSpec, PluginRuntimeState, OFFICIAL_BUNDLE_LEGACY_NAMES,
+    OFFICIAL_BUNDLE_NAME,
+};
 use crate::prompt::{BashPrompt, GitPromptDecor, NiubashPrompt, PromptBackend, PromptIndicators};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
@@ -3613,30 +3616,36 @@ fn set_default_niubash_framework_env(executor: &mut Executor, home_dir: &Path) {
 
 fn app_bundled_niubash_framework_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let path = exe.parent()?.join("bundles").join(OFFICIAL_BUNDLE_NAME);
-    is_niubash_framework_dir(&path).then_some(path)
+    let parent = exe.parent()?;
+    [OFFICIAL_BUNDLE_NAME, OFFICIAL_BUNDLE_LEGACY_NAMES[0]]
+        .iter()
+        .map(|name| parent.join("bundles").join(name))
+        .find(|path| is_niubash_framework_dir(path))
 }
 
 fn first_valid_niubash_framework_dir(
     home_dir: &Path,
     app_bundle: Option<&Path>,
 ) -> Option<PathBuf> {
+    // New-name install locations first, then the pre-rename
+    // `oh-my-winuxsh` locations so existing setups keep working.
     let mut candidates = vec![
+        home_dir.join(".oh-my-niu"),
+        home_dir.join(".niubash").join("oh-my-niu"),
         home_dir.join(".oh-my-winuxsh"),
         home_dir.join(".niubash").join("oh-my-winuxsh"),
     ];
-    let version_root = home_dir
-        .join(".niubash")
-        .join("bundles")
-        .join(OFFICIAL_BUNDLE_NAME);
-    if let Ok(entries) = std::fs::read_dir(version_root) {
-        let mut versions = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .collect::<Vec<_>>();
-        versions.sort();
-        candidates.extend(versions);
+    for name in [OFFICIAL_BUNDLE_NAME, OFFICIAL_BUNDLE_LEGACY_NAMES[0]] {
+        let version_root = home_dir.join(".niubash").join("bundles").join(name);
+        if let Ok(entries) = std::fs::read_dir(&version_root) {
+            let mut versions = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            versions.sort();
+            candidates.extend(versions);
+        }
     }
     if let Some(path) = app_bundle {
         candidates.push(path.to_path_buf());
@@ -3647,7 +3656,7 @@ fn first_valid_niubash_framework_dir(
 }
 
 fn is_niubash_framework_dir(path: &Path) -> bool {
-    path.join("oh-my-winuxsh.winux").is_file()
+    path.join("oh-my-niu.winux").is_file() || path.join("oh-my-winuxsh.winux").is_file()
 }
 
 fn shell_pwd_to_existing_host_dir(pwd: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
@@ -4999,8 +5008,8 @@ niubash_run_chpwd_hooks() {
     fn niubash_framework_discovery_prefers_user_dirs_before_app_bundle() {
         let temp = unique_temp_dir("niubash-framework-discovery");
         let home = temp.join("home");
-        let home_dot = home.join(".oh-my-winuxsh");
-        let home_config = home.join(".niubash").join("oh-my-winuxsh");
+        let home_dot = home.join(".oh-my-niu");
+        let home_config = home.join(".niubash").join("oh-my-niu");
         let home_version = home
             .join(".niubash")
             .join("bundles")
@@ -5010,27 +5019,56 @@ niubash_run_chpwd_hooks() {
 
         for path in [&home_dot, &home_config, &home_version, &app_bundle] {
             std::fs::create_dir_all(path).unwrap();
-            std::fs::write(path.join("oh-my-winuxsh.winux"), "").unwrap();
+            std::fs::write(path.join("oh-my-niu.winux"), "").unwrap();
         }
 
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(home_dot.as_path())
         );
-        std::fs::remove_file(home_dot.join("oh-my-winuxsh.winux")).unwrap();
+        std::fs::remove_file(home_dot.join("oh-my-niu.winux")).unwrap();
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(home_config.as_path())
         );
-        std::fs::remove_file(home_config.join("oh-my-winuxsh.winux")).unwrap();
+        std::fs::remove_file(home_config.join("oh-my-niu.winux")).unwrap();
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(home_version.as_path())
         );
-        std::fs::remove_file(home_version.join("oh-my-winuxsh.winux")).unwrap();
+        std::fs::remove_file(home_version.join("oh-my-niu.winux")).unwrap();
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(app_bundle.as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn niubash_framework_discovery_falls_back_to_pre_rename_bundle_layout() {
+        let temp = unique_temp_dir("niubash-framework-discovery-legacy");
+        let home = temp.join("home");
+        let legacy_dot = home.join(".oh-my-winuxsh");
+        let legacy_version = home
+            .join(".niubash")
+            .join("bundles")
+            .join(OFFICIAL_BUNDLE_LEGACY_NAMES[0])
+            .join("1.0.0");
+
+        std::fs::create_dir_all(&legacy_dot).unwrap();
+        std::fs::write(legacy_dot.join("oh-my-winuxsh.winux"), "").unwrap();
+        assert_eq!(
+            first_valid_niubash_framework_dir(&home, None).as_deref(),
+            Some(legacy_dot.as_path())
+        );
+
+        std::fs::create_dir_all(&legacy_version).unwrap();
+        std::fs::write(legacy_version.join("oh-my-winuxsh.winux"), "").unwrap();
+        std::fs::remove_file(legacy_dot.join("oh-my-winuxsh.winux")).unwrap();
+        assert_eq!(
+            first_valid_niubash_framework_dir(&home, None).as_deref(),
+            Some(legacy_version.as_path())
         );
 
         let _ = std::fs::remove_dir_all(temp);

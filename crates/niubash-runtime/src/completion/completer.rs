@@ -84,7 +84,7 @@ impl CompletionState {
 
     /// Collect command names known to loaded completion plugins.
     ///
-    /// External TOML definitions (from oh-my-winuxsh, user overrides, etc.)
+    /// External TOML definitions (from oh-my-niu, user overrides, etc.)
     /// register command names that the syntax highlighter should treat as
     /// valid even when the binary is extensionless and not in the
     /// compiled-in command set.

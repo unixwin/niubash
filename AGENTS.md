@@ -17,7 +17,7 @@
 - Rubash is the shell language engine and is embedded as a library. Parser, executor, builtins, functions, redirects, pipelines, and job semantics belong upstream in `unixwin/rubash`.
 - Keep rubash on the latest `unixwin/rubash` `master`. We have Unixwin organization access, so fix rubash upstream instead of carrying long-term host-side semantic workarounds in niubash.
 - WinuxCmd stays integrated through PATH injection and command links. Do not reintroduce FFI/DLL command routing.
-- The plugin system is Niubash-native and built into niubash. `oh-my-winuxsh` is the official bundled plugin distribution.
+- The plugin system is Niubash-native and built into niubash. `oh-my-niu` is the official bundled plugin distribution.
 - Use `~/.niubashrc` as the primary interactive user entry point for plugin lists, theme selection, exports, aliases, functions, and shell startup logic. Fallback order: `~/.winuxshrc` (pre-rename compat; migrated once into `~/.niubashrc` on first startup, original file kept) then `~/.winshrc` (legacy fallback, read only when `~/.niubashrc` is absent).
 - Runtime environment variables use the `NIU_` prefix. During the transition, niubash also sets/reads the deprecated `WINUXSH_SHELL`, `WINUXSH_SHELL_PATH_STYLE`, and `WINUXSH_ROOT` names because current rubash upstream still reads them; these bridges are marked with comments and must be removed once rubash renames its readers.
 - Keep structured plugin and bundle assets in their manifest-backed TOML files; user startup configuration belongs in `~/.niubashrc`.

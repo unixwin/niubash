@@ -22,7 +22,7 @@ fn plugin_list_text_lists_official_packs() {
     assert_success(&output, "plugin list text");
     let stdout = stdout_text(&output);
     assert!(stdout.contains("Official Niubash plugins"), "{stdout}");
-    assert!(stdout.contains("Bundle: oh-my-winuxsh"), "{stdout}");
+    assert!(stdout.contains("Bundle: oh-my-niu"), "{stdout}");
     assert!(stdout.contains("Source: compiled_fallback"), "{stdout}");
     assert!(stdout.contains("Trust source: official_bundle"), "{stdout}");
     assert!(
@@ -60,7 +60,7 @@ fn plugin_list_json_lists_machine_readable_packs() {
     assert_success(&output, "plugin list json");
     let stdout = stdout_text(&output);
     assert!(stdout.contains(r#""name": "git""#), "{stdout}");
-    assert!(stdout.contains(r#""bundle": "oh-my-winuxsh""#), "{stdout}");
+    assert!(stdout.contains(r#""bundle": "oh-my-niu""#), "{stdout}");
     assert!(
         stdout.contains(r#""source": "compiled_fallback""#),
         "{stdout}"
@@ -214,7 +214,7 @@ fn plugin_themes_lists_user_and_bundle_sources_only() {
     assert!(!stdout.contains("builtin_fallback"), "{stdout}");
     assert!(
         stdout.contains(
-            "- testmarket source=bundle owner=oh-my-winuxsh@9.9.10 bundle=oh-my-winuxsh pack=themes"
+            "- testmarket source=bundle owner=oh-my-niu@9.9.10 bundle=oh-my-niu pack=themes"
         ),
         "{stdout}"
     );
@@ -282,7 +282,7 @@ fn plugin_info_text_describes_one_pack() {
     assert_success(&output, "plugin info text");
     let stdout = stdout_text(&output);
     assert!(stdout.contains("Plugin: git"), "{stdout}");
-    assert!(stdout.contains("Bundle: oh-my-winuxsh"), "{stdout}");
+    assert!(stdout.contains("Bundle: oh-my-niu"), "{stdout}");
     assert!(stdout.contains("Execution model: host_builtin"), "{stdout}");
     assert!(
         stdout.contains("Externalization class: mixed_declarative_native"),
@@ -410,7 +410,7 @@ fn plugin_bundle_status_text_reports_compiled_fallback() {
         "{stdout}"
     );
     assert!(stdout.contains("State: compiled_fallback"), "{stdout}");
-    assert!(stdout.contains("Bundle: oh-my-winuxsh"), "{stdout}");
+    assert!(stdout.contains("Bundle: oh-my-niu"), "{stdout}");
     assert!(stdout.contains("Source: compiled_fallback"), "{stdout}");
     assert!(stdout.contains("Trust source: official_bundle"), "{stdout}");
     let _ = fs::remove_dir_all(temp);
@@ -418,7 +418,7 @@ fn plugin_bundle_status_text_reports_compiled_fallback() {
 #[test]
 fn plugin_bundle_status_text_reports_app_bundled_baseline() {
     let temp = temp_dir("plugin-bundle-status-app-baseline");
-    let bundle = temp.join("app").join("bundles").join("oh-my-winuxsh");
+    let bundle = temp.join("app").join("bundles").join("oh-my-niu");
     write_minimal_test_bundle(&bundle, "9.9.8", "App-bundled Git aliases");
     let output = run_niu_with_env(
         &["plugin", "bundle", "status"],
@@ -427,7 +427,7 @@ fn plugin_bundle_status_text_reports_app_bundled_baseline() {
     assert_success(&output, "plugin bundle status app baseline");
     let stdout = stdout_text(&output);
     assert!(stdout.contains("State: installed"), "{stdout}");
-    assert!(stdout.contains("Bundle: oh-my-winuxsh"), "{stdout}");
+    assert!(stdout.contains("Bundle: oh-my-niu"), "{stdout}");
     assert!(stdout.contains("Source: app_bundle"), "{stdout}");
     assert!(stdout.contains("Trust source: official_bundle"), "{stdout}");
     assert!(stdout.contains("Active version: 9.9.8"), "{stdout}");
@@ -506,7 +506,7 @@ fn plugin_info_reads_installed_bundle_manifest() {
     assert_success(&status, "plugin bundle status json");
     let stdout = stdout_text(&status);
     assert!(stdout.contains(r#""state": "installed""#), "{stdout}");
-    assert!(stdout.contains(r#""bundle": "oh-my-winuxsh""#), "{stdout}");
+    assert!(stdout.contains(r#""bundle": "oh-my-niu""#), "{stdout}");
     assert!(stdout.contains(r#""source": "env_override""#), "{stdout}");
     assert!(
         stdout.contains(r#""trust_source": "local_override""#),
@@ -736,7 +736,7 @@ fn plugin_review_json_marks_external_bundle_trust_source() {
 fn plugin_review_json_uses_bundle_trust_source_over_pack_claim() {
     let temp = temp_dir("plugin-review-spoofed-bundle-json");
     let bundle = temp.join("bundle");
-    write_external_process_test_bundle_with_pack_bundle(&bundle, "9.9.7", "oh-my-winuxsh");
+    write_external_process_test_bundle_with_pack_bundle(&bundle, "9.9.7", "oh-my-niu");
     let output = run_niu_with_env(
         &["plugin", "review", "process-echo", "--json"],
         &[("NIU_PLUGIN_BUNDLE_PATH", bundle.clone())],
@@ -762,7 +762,7 @@ fn plugin_update_and_rollback_switch_active_bundle_from_cli() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle_v1.display().to_string(),
         ],
@@ -771,14 +771,14 @@ fn plugin_update_and_rollback_switch_active_bundle_from_cli() {
     assert_success(&update_v1, "plugin update v1");
     let stdout = stdout_text(&update_v1);
     assert!(
-        stdout.contains("Updated bundle 'oh-my-winuxsh' to 9.9.1"),
+        stdout.contains("Updated bundle 'oh-my-niu' to 9.9.1"),
         "{stdout}"
     );
     let update_v2 = run_niu_with_env_owned(
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle_v2.display().to_string(),
             "--json".to_string(),
@@ -789,11 +789,11 @@ fn plugin_update_and_rollback_switch_active_bundle_from_cli() {
     let stdout = stdout_text(&update_v2);
     assert!(stdout.contains(r#""version": "9.9.2""#), "{stdout}");
     assert!(stdout.contains(r#""previous_path""#), "{stdout}");
-    let rollback = run_niu_with_env(&["plugin", "rollback", "oh-my-winuxsh"], &envs);
+    let rollback = run_niu_with_env(&["plugin", "rollback", "oh-my-niu"], &envs);
     assert_success(&rollback, "plugin rollback");
     let stdout = stdout_text(&rollback);
     assert!(
-        stdout.contains("Rolled back bundle 'oh-my-winuxsh' to 9.9.1"),
+        stdout.contains("Rolled back bundle 'oh-my-niu' to 9.9.1"),
         "{stdout}"
     );
     let status = run_niu_with_env(&["plugin", "bundle", "status"], &envs);
@@ -812,7 +812,7 @@ fn plugin_update_accepts_source_bundle_with_winux_entry() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle.display().to_string(),
         ],
@@ -821,7 +821,7 @@ fn plugin_update_accepts_source_bundle_with_winux_entry() {
     assert_success(&update, "plugin update source bundle");
     let stdout = stdout_text(&update);
     assert!(
-        stdout.contains("Updated bundle 'oh-my-winuxsh' to 9.9.21"),
+        stdout.contains("Updated bundle 'oh-my-niu' to 9.9.21"),
         "{stdout}"
     );
     let info = run_niu_with_env(&["plugin", "info", "source-test"], &envs);
@@ -844,7 +844,7 @@ fn plugin_update_rejects_source_bundle_without_winux_entry() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle.display().to_string(),
         ],
@@ -868,7 +868,7 @@ fn plugin_update_rejects_source_bundle_without_winux_entry() {
 fn plugin_update_installs_zip_archive_from_cli() {
     let temp = temp_dir("plugin-update-zip-cli");
     let bundle = temp.join("bundle");
-    let archive = temp.join("oh-my-winuxsh-9.9.3.zip");
+    let archive = temp.join("oh-my-niu-9.9.3.zip");
     let envs = plugin_bundle_env(&temp);
     write_minimal_test_bundle(&bundle, "9.9.3", "Git aliases zipped");
     write_bundle_zip_from_dir(&bundle, &archive);
@@ -877,7 +877,7 @@ fn plugin_update_installs_zip_archive_from_cli() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             archive.display().to_string(),
             "--checksum".to_string(),
@@ -888,7 +888,7 @@ fn plugin_update_installs_zip_archive_from_cli() {
     assert_success(&update, "plugin update zip");
     let stdout = stdout_text(&update);
     assert!(
-        stdout.contains("Updated bundle 'oh-my-winuxsh' to 9.9.3"),
+        stdout.contains("Updated bundle 'oh-my-niu' to 9.9.3"),
         "{stdout}"
     );
     assert!(stdout.contains("SHA-256:"), "{stdout}");
@@ -910,7 +910,7 @@ fn plugin_update_installs_zip_archive_from_cli() {
 fn plugin_update_rejects_zip_without_required_checksum_from_index() {
     let temp = temp_dir("plugin-update-zip-requires-checksum");
     let bundle = temp.join("bundle");
-    let archive = temp.join("oh-my-winuxsh-9.9.31.zip");
+    let archive = temp.join("oh-my-niu-9.9.31.zip");
     let envs = plugin_bundle_env(&temp);
     write_minimal_test_bundle(&bundle, "9.9.31", "Git aliases checksum required");
     write_bundle_zip_from_dir(&bundle, &archive);
@@ -918,7 +918,7 @@ fn plugin_update_rejects_zip_without_required_checksum_from_index() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             archive.display().to_string(),
         ],
@@ -935,7 +935,7 @@ fn plugin_update_rejects_zip_without_required_checksum_from_index() {
         stderr.contains("requires checksum verification"),
         "stderr={stderr}"
     );
-    let leftovers = staging_dirs(&temp.join("root").join("oh-my-winuxsh"));
+    let leftovers = staging_dirs(&temp.join("root").join("oh-my-niu"));
     assert!(
         leftovers.is_empty(),
         "checksum rejection should clean staging dirs: {leftovers:?}"
@@ -962,7 +962,7 @@ fn plugin_update_rejects_index_manifest_drift() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle.display().to_string(),
         ],
@@ -1000,7 +1000,7 @@ fn plugin_update_rejects_bundle_requiring_newer_niubash_from_cli() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle.display().to_string(),
         ],
@@ -1035,7 +1035,7 @@ fn plugin_update_checksum_mismatch_leaves_active_bundle_from_cli() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle_v1.display().to_string(),
         ],
@@ -1046,7 +1046,7 @@ fn plugin_update_checksum_mismatch_leaves_active_bundle_from_cli() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             invalid_archive.display().to_string(),
             "--checksum".to_string(),
@@ -1089,7 +1089,7 @@ fn plugin_update_rejects_invalid_process_pack_contract() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle.display().to_string(),
         ],
@@ -1125,7 +1125,7 @@ fn plugin_update_rejects_unknown_provider_export() {
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle.display().to_string(),
         ],
@@ -1164,7 +1164,7 @@ fn plugin_update_rejects_process_provider_without_command_diagnose_permission() 
         &[
             "plugin".to_string(),
             "update".to_string(),
-            "oh-my-winuxsh".to_string(),
+            "oh-my-niu".to_string(),
             "--from".to_string(),
             bundle.display().to_string(),
         ],
@@ -1274,10 +1274,10 @@ fn write_test_bundle_index(
     permissions: &[&str],
     required_binaries: &[&str],
 ) {
-    let artifact = format!("oh-my-winuxsh-{version}.zip");
+    let artifact = format!("oh-my-niu-{version}.zip");
     let text = format!(
         r#"schema = "niubash:plugin-index@0.1.0"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = {version:?}
 bundle_api = "niubash:plugin-bundle@0.1.0"
 min_niubash = "0.8.3"
@@ -1316,7 +1316,7 @@ fn write_minimal_test_bundle(path: &Path, version: &str, summary: &str) {
     fs::write(
         path.join("bundle.toml"),
         format!(
-            r#"name = "oh-my-winuxsh"
+            r#"name = "oh-my-niu"
 version = {version:?}
 api = "niubash:plugin-bundle@0.1.0"
 min_niubash = "0.8.3"
@@ -1376,7 +1376,7 @@ git_prompt_format = "bundle:{git_branch}"
         path.join("packs").join("git").join("plugin.toml"),
         format!(
             r#"name = "git"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = {version:?}
 kind = "builtin"
 api = "niubash:plugin@0.1.0"
@@ -1540,7 +1540,7 @@ fn write_theme_test_bundle(path: &Path, version: &str) {
     fs::write(
         path.join("bundle.toml"),
         format!(
-            r#"name = "oh-my-winuxsh"
+            r#"name = "oh-my-niu"
 version = {version:?}
 api = "niubash:plugin-bundle@0.1.0"
 min_niubash = "0.8.3"
@@ -1558,7 +1558,7 @@ themes_dir = "themes"
         path.join("packs").join("themes").join("plugin.toml"),
         format!(
             r#"name = "themes"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = {version:?}
 kind = "builtin"
 api = "niubash:plugin@0.1.0"
@@ -1665,7 +1665,7 @@ fn write_keybindings_test_bundle(path: &Path, version: &str) {
     fs::write(
         path.join("bundle.toml"),
         format!(
-            r#"name = "oh-my-winuxsh"
+            r#"name = "oh-my-niu"
 version = {version:?}
 api = "niubash:plugin-bundle@0.1.0"
 min_niubash = "0.8.3"
@@ -1683,7 +1683,7 @@ keybindings_dir = "keybindings"
         path.join("packs").join("keybindings").join("plugin.toml"),
         format!(
             r#"name = "keybindings"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = {version:?}
 kind = "builtin"
 api = "niubash:plugin@0.1.0"
@@ -1759,7 +1759,7 @@ fn write_source_test_bundle(path: &Path, version: &str, source_file: &str) {
     fs::write(
         path.join("bundle.toml"),
         format!(
-            r#"name = "oh-my-winuxsh"
+            r#"name = "oh-my-niu"
 version = {version:?}
 api = "niubash:plugin-bundle@0.1.0"
 min_niubash = "0.8.3"
@@ -1776,7 +1776,7 @@ packs_dir = "packs"
         path.join("packs").join("source-test").join("plugin.toml"),
         format!(
             r#"name = "source-test"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = {version:?}
 kind = "source"
 api = "niubash:plugin@0.1.0"
@@ -1875,7 +1875,7 @@ fn write_process_test_bundle_with_timeout(path: &Path, version: &str, timeout_mi
     fs::write(
         path.join("bundle.toml"),
         format!(
-            r#"name = "oh-my-winuxsh"
+            r#"name = "oh-my-niu"
 version = {version:?}
 api = "niubash:plugin-bundle@0.1.0"
 min_niubash = "0.8.3"
@@ -1892,7 +1892,7 @@ packs_dir = "packs"
         path.join("packs").join("process-echo").join("plugin.toml"),
         format!(
             r#"name = "process-echo"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = {version:?}
 kind = "process"
 api = "niubash:plugin@0.1.0"

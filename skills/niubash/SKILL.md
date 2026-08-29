@@ -1,6 +1,6 @@
 ---
 name: niubash-native-codex
-description: Native Niubash execution guidance for Codex running as a first-class Niubash citizen in the unixwin/niubash environment. Use when Codex handles Niubash shell tasks, .niubashrc edits, oh-my-winuxsh bundles, .winux scripts, command installation, PATH/alias setup, shell debugging, GNU Bash-compatible shell behavior, or any Windows-host task where commands should run directly inside the current Niubash session instead of through PowerShell, pwsh, cmd.exe, WSL, Git Bash, -C/-c launch wrappers, or /c-style path assumptions.
+description: Native Niubash execution guidance for Codex running as a first-class Niubash citizen in the unixwin/niubash environment. Use when Codex handles Niubash shell tasks, .niubashrc edits, oh-my-niu bundles, .winux scripts, command installation, PATH/alias setup, shell debugging, GNU Bash-compatible shell behavior, or any Windows-host task where commands should run directly inside the current Niubash session instead of through PowerShell, pwsh, cmd.exe, WSL, Git Bash, -C/-c launch wrappers, or /c-style path assumptions.
 ---
 
 # Niubash Native Codex
@@ -65,7 +65,7 @@ description: Native Niubash execution guidance for Codex running as a first-clas
 - Add PATH entries idempotently with a helper that checks `[ -d "$dir" ]` and avoids duplicates before `PATH="$dir;$PATH"`.
 - Keep rc edits idempotent. Remove or avoid duplicate self-appending blocks such as `printf ... >> ~/.niubashrc` inside the rc file.
 - Place user customizations in `.niubashrc` or `$HOME/.niubash/custom` rather than editing bundled files under `AppData/Local/Programs/Niubash` unless the user is intentionally modifying the installed bundle.
-- For oh-my-winuxsh, source `oh-my-winuxsh.winux` and use `.winux` plugin files for shell-mutating behavior.
+- For oh-my-niu, source `oh-my-niu.winux` and use `.winux` plugin files for shell-mutating behavior.
 
 ## Codex Invocation
 

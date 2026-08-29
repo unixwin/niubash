@@ -342,7 +342,7 @@ fn write_minimal_completion_bundle(path: &Path) {
     std::fs::create_dir_all(path.join("completions")).unwrap();
     std::fs::write(
         path.join("bundle.toml"),
-        r#"name = "oh-my-winuxsh"
+        r#"name = "oh-my-niu"
 version = "9.9.9"
 api = "niubash:plugin-bundle@0.1.0"
 min_niubash = "0.8.3"
@@ -358,7 +358,7 @@ completions_dir = "completions"
     std::fs::write(
         path.join("packs").join("git").join("plugin.toml"),
         r#"name = "git"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = "9.9.9"
 kind = "builtin"
 api = "niubash:plugin@0.1.0"

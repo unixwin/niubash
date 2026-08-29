@@ -143,9 +143,9 @@ try {
         }
         else {
             $bundleCandidates = @(
-                (Join-Path $RepoRoot "..\oh-my-winuxsh")
-                (Join-Path $RepoRoot "bundles\oh-my-winuxsh")
-                (Join-Path $RepoRoot "vendor\oh-my-winuxsh")
+                (Join-Path $RepoRoot "..\oh-my-niu")
+                (Join-Path $RepoRoot "bundles\oh-my-niu")
+                (Join-Path $RepoRoot "vendor\oh-my-niu")
             )
         }
 
@@ -157,13 +157,13 @@ try {
         }
 
         if (-not $resolvedOhMyNiubashBundlePath) {
-            throw "oh-my-winuxsh bundle not found. Pass -OhMyNiubashBundlePath C:\path\to\oh-my-winuxsh or -SkipOhMyNiubashBundle."
+            throw "oh-my-niu bundle not found. Pass -OhMyNiubashBundlePath C:\path\to\oh-my-niu or -SkipOhMyNiubashBundle."
         }
 
         $bundleToml = Get-Content -LiteralPath (Join-Path $resolvedOhMyNiubashBundlePath "bundle.toml") -Raw
         $availableMatch = [regex]::Match($bundleToml, '(?ms)^\s*available\s*=\s*\[(.*?)\]')
         if (-not $availableMatch.Success) {
-            throw "oh-my-winuxsh bundle manifest has no [packs].available list: $resolvedOhMyNiubashBundlePath"
+            throw "oh-my-niu bundle manifest has no [packs].available list: $resolvedOhMyNiubashBundlePath"
         }
         $availablePacks = [regex]::Matches($availableMatch.Groups[1].Value, '"([^"]+)"') |
             ForEach-Object { $_.Groups[1].Value }
@@ -171,7 +171,7 @@ try {
             $packManifest = Join-Path $resolvedOhMyNiubashBundlePath (Join-Path "packs\$packName" "plugin.toml")
             $frameworkManifest = Join-Path $resolvedOhMyNiubashBundlePath (Join-Path "plugins\$packName" "plugin.toml")
             if (-not (Test-Path -LiteralPath $packManifest) -and -not (Test-Path -LiteralPath $frameworkManifest)) {
-                throw "oh-my-winuxsh bundle pack '$packName' is listed in bundle.toml but missing from packs/ and plugins/: $packManifest"
+                throw "oh-my-niu bundle pack '$packName' is listed in bundle.toml but missing from packs/ and plugins/: $packManifest"
             }
         }
     }
@@ -203,10 +203,10 @@ try {
         Copy-Item -LiteralPath $iconFile -Destination (Join-Path $stageDir "assets") -Force
     }
     if ($resolvedOhMyNiubashBundlePath) {
-        $bundleStageDir = Join-Path $stageDir "bundles\oh-my-winuxsh"
+        $bundleStageDir = Join-Path $stageDir "bundles\oh-my-niu"
         New-Item -ItemType Directory -Force -Path $bundleStageDir | Out-Null
         $requiredBundleEntries = @(
-            "oh-my-winuxsh.winux"
+            "oh-my-niu.winux"
             "bundle.toml"
             "index.toml"
             "lib"
@@ -215,7 +215,7 @@ try {
             "themes"
         )
         $bundleEntries = @(
-            "oh-my-winuxsh.winux"
+            "oh-my-niu.winux"
             "bundle.toml"
             "index.toml"
             "README.md"
@@ -239,7 +239,7 @@ try {
                 Copy-Item -LiteralPath $source -Destination $bundleStageDir -Recurse -Force
             }
             elseif ($requiredBundleEntries -contains $entry) {
-                throw "Required oh-my-winuxsh bundle entry missing: $source"
+                throw "Required oh-my-niu bundle entry missing: $source"
             }
         }
         Get-ChildItem -LiteralPath $bundleStageDir -Recurse -Directory -Filter "__pycache__" |
