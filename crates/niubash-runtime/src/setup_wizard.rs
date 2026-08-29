@@ -12,15 +12,15 @@ use crate::path_utils::shell_home_dir;
 use crate::theme;
 
 const PRIMARY_RC_FILE: &str = ".niubashrc";
-const LEGACY_RC_FILE: &str = ".winshrc";
+const COMPAT_RC_FILE: &str = ".winuxshrc";
 const SETUP_DONE_FILE: &str = ".setup-done";
 
 /// Returns `true` if the user has never run the setup wizard before
-/// (i.e. no primary/legacy rc file and no setup marker). Legacy/managed TOML
+/// (i.e. no primary/compat rc file and no setup marker). Legacy/managed TOML
 /// metadata no longer blocks first-run rc onboarding.
 pub fn is_first_run() -> bool {
     let home = setup_home_dir();
-    for name in [PRIMARY_RC_FILE, LEGACY_RC_FILE] {
+    for name in [PRIMARY_RC_FILE, COMPAT_RC_FILE] {
         if home.join(name).is_file() {
             return false;
         }
@@ -80,71 +80,77 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         // --- Theme ---
         let theme_list = theme::list_available_names();
         if theme_list.is_empty() {
-            anyhow::bail!(
-                "No Niubash themes found. The oh-my-niu bundle is required and should be preinstalled."
+            // Keep onboarding going: a missing/broken oh-my-niu bundle must
+            // not abort the wizard before an rc is written.
+            println!("  \u{26a0}\u{fe0f}  No oh-my-niu themes found \u{2014} skipping theme questions.");
+            println!("  \u{2502}  The bundle should be preinstalled; run `niu setup` again once it is available.");
+        } else {
+            let theme_refs: Vec<&str> = theme_list.iter().map(String::as_str).collect();
+            let default_theme = if theme_refs.contains(&"p10-classic") {
+                "p10-classic"
+            } else if theme_refs.contains(&"minimal") {
+                "minimal"
+            } else {
+                theme_refs.first().copied().unwrap_or("default")
+            };
+            print_theme_previews(&theme_refs, "\u{276f}");
+            theme = prompt_choice(
+                "  \u{1f3a8}  Colour theme",
+                default_theme,
+                &theme_refs,
+                "  \u{2502}  Choose the plugin-owned prompt colour scheme. Official themes come from oh-my-niu.",
             );
+
+            // --- Prompt symbol ---
+            symbol = prompt_choice(
+                "  \u{1f3b5}  Prompt symbol",
+                "\u{276f}",
+                &["\u{276f}", "\u{3bb}", "\u{25b6}", "\u{24}", "%"],
+                "  \u{2502}  Pick the character that ends your prompt line.\n  \u{2502}  \u{276f} heavy right-pointing angle (powerlevel10k style)\n  \u{2502}  \u{3bb} lambda (functional/minimal)\n  \u{2502}  \u{25b6} black right-pointing triangle\n  \u{2502}  $ dollar sign (classic bash)\n  \u{2502}  % percent sign (classic fish)",
+            );
+
+            // --- Prompt style ---
+            prompt_style = prompt_choice(
+                 "  \u{1f3b5}  Prompt style",
+                 "minimal",
+                &["minimal", "classic", "powerline", "multiline", "segments"],
+                "  \u{2502}  minimal   = cwd git prompt_char\n  \u{2502}  classic   = user@host cwd git prompt_char\n  \u{2502}  powerline = compact left prompt with right-side info\n  \u{2502}  multiline = first line context, second line cwd/git\n  \u{2502}  segments  = powerlevel10k-style segment-based prompt",
+             );
+
+            // --- Segment preset (only if prompt_style = "segments") ---
+            segment_preset = if prompt_style == "segments" {
+                Some(prompt_choice(
+                    "  \u{1f3a8}  Segment preset",
+                    "classic",
+                    &["classic", "lean", "rainbow", "pure", "robbyrussell"],
+                    "  \u{2502}  classic       = P10K classic layout\n  \u{2502}  lean          = P10K lean layout\n  \u{2502}  rainbow       = P10K rainbow colours\n  \u{2502}  pure          = P10K pure layout\n  \u{2502}  robbyrussell  = compact classic prompt feel",
+                ))
+            } else {
+                None
+            };
+
+            // --- Right prompt ---
+            right_prompt = prompt_choice(
+                 "  \u{23f1}\u{fe0f}  Right-side info",
+                "time",
+                &["off", "time", "full"],
+                "  \u{2502}  off  = no right prompt\n  \u{2502}  time = show current time (HH:MM)\n  \u{2502}  full = time + git branch",
+            );
+            print_theme_preview(&theme, &symbol);
         }
-        let theme_refs: Vec<&str> = theme_list.iter().map(String::as_str).collect();
-        let default_theme = if theme_refs.contains(&"p10-classic") {
-            "p10-classic"
-        } else if theme_refs.contains(&"minimal") {
-            "minimal"
-        } else {
-            theme_refs.first().copied().unwrap_or("default")
-        };
-        print_theme_previews(&theme_refs, "\u{276f}");
-        theme = prompt_choice(
-            "  \u{1f3a8}  Colour theme",
-            default_theme,
-            &theme_refs,
-            "  \u{2502}  Choose the plugin-owned prompt colour scheme. Official themes come from oh-my-niu.",
-        );
-
-        // --- Prompt symbol ---
-        symbol = prompt_choice(
-            "  \u{1f3b5}  Prompt symbol",
-            "\u{276f}",
-            &["\u{276f}", "\u{3bb}", "\u{25b6}", "\u{24}", "%"],
-            "  \u{2502}  Pick the character that ends your prompt line.\n  \u{2502}  \u{276f} heavy right-pointing angle (powerlevel10k style)\n  \u{2502}  \u{3bb} lambda (functional/minimal)\n  \u{2502}  \u{25b6} black right-pointing triangle\n  \u{2502}  $ dollar sign (classic bash)\n  \u{2502}  % percent sign (classic fish)",
-        );
-
-        // --- Prompt style ---
-        prompt_style = prompt_choice(
-             "  \u{1f3b5}  Prompt style",
-             "minimal",
-            &["minimal", "classic", "powerline", "multiline", "segments"],
-            "  \u{2502}  minimal   = cwd git prompt_char\n  \u{2502}  classic   = user@host cwd git prompt_char\n  \u{2502}  powerline = compact left prompt with right-side info\n  \u{2502}  multiline = first line context, second line cwd/git\n  \u{2502}  segments  = powerlevel10k-style segment-based prompt",
-         );
-
-        // --- Segment preset (only if prompt_style = "segments") ---
-        segment_preset = if prompt_style == "segments" {
-            Some(prompt_choice(
-                "  \u{1f3a8}  Segment preset",
-                "classic",
-                &["classic", "lean", "rainbow", "pure", "robbyrussell"],
-                "  \u{2502}  classic       = P10K classic layout\n  \u{2502}  lean          = P10K lean layout\n  \u{2502}  rainbow       = P10K rainbow colours\n  \u{2502}  pure          = P10K pure layout\n  \u{2502}  robbyrussell  = compact classic prompt feel",
-            ))
-        } else {
-            None
-        };
-
-        // --- Right prompt ---
-        right_prompt = prompt_choice(
-             "  \u{23f1}\u{fe0f}  Right-side info",
-            "time",
-            &["off", "time", "full"],
-            "  \u{2502}  off  = no right prompt\n  \u{2502}  time = show current time (HH:MM)\n  \u{2502}  full = time + git branch",
-        );
-        print_theme_preview(&theme, &symbol);
     }
 
+    // Without an enumerable theme list the generated rc cannot enable the
+    // prompt/theme plugin chain, so fall back to the plain-prompt onboarding.
+    let prompt_plugins_enabled = prompt_enabled && !theme.is_empty();
+
     // --- Git prompt ---
-    let git_enabled = if prompt_enabled {
+    let git_enabled = if prompt_plugins_enabled {
         prompt_yn("  \u{1f500}  Show git branch/status in the prompt", true)
     } else {
         prompt_yn("  \u{1f500}  Load Git helper aliases/functions", true)
     };
-    let starship_git_enabled = prompt_enabled
+    let starship_git_enabled = prompt_plugins_enabled
         && git_enabled
         && starship_available()
         && prompt_yn(
@@ -159,7 +165,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         &right_prompt,
         &symbol,
         &cwd_style,
-        prompt_enabled,
+        prompt_plugins_enabled,
         git_enabled,
         starship_git_enabled,
         segment_preset.as_deref(),
@@ -485,6 +491,9 @@ fn prompt_choice(label: &str, default: &str, options: &[&str], help: &str) -> St
     println!("{}", label);
     for line in help.lines() {
         println!("{}", line);
+    }
+    for (idx, option) in options.iter().enumerate() {
+        println!("  \u{2502}  {}) {}", idx + 1, option);
     }
 
     let default_idx = options.iter().position(|o| *o == default).unwrap_or(0);

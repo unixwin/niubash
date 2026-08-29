@@ -451,7 +451,7 @@ fn print_usage() {
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
-    println!("Configuration: ~/.niubashrc for interactive startup; ~/.winshrc remains a compatibility fallback");
+    println!("Configuration: ~/.niubashrc for interactive startup; a pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {

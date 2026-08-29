@@ -50,7 +50,6 @@ const COMMAND_NOT_FOUND_PROVIDER_MAX_LINES: usize = 32;
 const COMMAND_NOT_FOUND_PROVIDER_MAX_LINE_BYTES: usize = 512;
 const NIU_RC_FILE: &str = ".niubashrc";
 const NIU_COMPAT_RC_FILE: &str = ".winuxshrc";
-const NIU_LEGACY_RC_FILE: &str = ".winshrc";
 
 /// Top-level shell state.
 pub struct Shell {
@@ -607,8 +606,7 @@ impl Shell {
     /// `~/.niubashrc` is the primary interactive entry point. If it exists,
     /// source plugins are expected to be loaded from that file through the
     /// framework entry point. A pre-rename `~/.winuxshrc` is migrated once
-    /// into `~/.niubashrc` (original file kept), and `~/.winshrc` remains a
-    /// compatibility fallback.
+    /// into `~/.niubashrc` (original file kept).
     pub fn run_startup_rc(&mut self) {
         normalize_executor_home_env(&mut self.executor, &self.home_dir);
         ensure_windows_profile_env(&mut self.executor, &self.home_dir);
@@ -657,8 +655,7 @@ impl Shell {
         if compat.is_file() {
             return Some(compat);
         }
-        let legacy = self.home_dir.join(NIU_LEGACY_RC_FILE);
-        legacy.is_file().then_some(legacy)
+        None
     }
 
     fn uses_primary_startup_rc(&self) -> bool {
@@ -3710,6 +3707,10 @@ fn rewrite_legacy_rc_content(content: &str) -> String {
         .replace("Winuxsh", "Niubash")
         .replace("WINUXSH", "NIUBASH")
         .replace(BUNDLE_PROTECT, "oh-my-winuxsh")
+        // 1.0.0 ships the renamed entry point; migrated rc files keep their
+        // legacy directory candidates but must probe the new entry name to
+        // find the shipped bundle via NIU_APP_BUNDLE_PATH.
+        .replace("oh-my-winuxsh.winux", "oh-my-niu.winux")
 }
 
 fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
@@ -4358,7 +4359,7 @@ mod tests {
     }
 
     #[test]
-    fn source_plugin_scripts_load_before_legacy_user_startup_rc() {
+    fn compat_winuxshrc_is_migrated_and_sourced() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("niubash-source-plugin-startup");
@@ -4367,8 +4368,8 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         write_source_plugin_test_bundle(&bundle, "9.9.8");
         std::fs::write(
-            home.join(NIU_LEGACY_RC_FILE),
-            "export SOURCE_PLUGIN_USER_RC_SEES=\"$SOURCE_PLUGIN_VALUE\"\nalias source_alias='echo user-override'\n",
+            home.join(NIU_COMPAT_RC_FILE),
+            "export NIU_COMPAT_RC_LOADED=1\nalias source_alias='echo user-override'\n",
         )
         .unwrap();
 
@@ -4377,23 +4378,18 @@ mod tests {
         let _lock_guard = EnvVarGuard::set("NIU_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
 
         let mut shell = Shell::new().unwrap();
-        shell.home_dir = home;
+        shell.home_dir = home.clone();
         shell.run_startup_rc();
 
-        assert_eq!(
-            shell.executor.get_env("SOURCE_PLUGIN_VALUE"),
-            Some("source-test:1")
-        );
-        assert_eq!(
-            shell.executor.get_env("SOURCE_PLUGIN_USER_RC_SEES"),
-            Some("source-test:1")
-        );
+        // A pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc (original
+        // kept) and then sourced as the primary startup rc.
+        assert_eq!(shell.executor.get_env("NIU_COMPAT_RC_LOADED"), Some("1"));
         assert_eq!(
             shell.aliases.get("source_alias").map(String::as_str),
             Some("echo user-override")
         );
-        assert!(shell.executor.get_env("NIU_REPL_PLUGIN_STARTUP").is_none());
-        assert!(shell.executor.get_env("NIU_PLUGIN_NAME").is_none());
+        assert!(home.join(NIU_RC_FILE).is_file());
+        assert!(home.join(NIU_COMPAT_RC_FILE).is_file());
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -4584,17 +4580,12 @@ alias hello='echo from-alias'
     }
 
     #[test]
-    fn niubashrc_takes_precedence_over_legacy_winuxshrc_and_winshrc() {
+    fn niubashrc_takes_precedence_over_compat_winuxshrc() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("niubash-primary-rc-startup");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(NIU_LEGACY_RC_FILE),
-            "export NIU_RC_SOURCE=legacy\n",
-        )
-        .unwrap();
         std::fs::write(
             home.join(NIU_COMPAT_RC_FILE),
             "export NIU_RC_SOURCE=compat\n",
@@ -4612,17 +4603,12 @@ alias hello='echo from-alias'
     }
 
     #[test]
-    fn compat_winuxshrc_takes_precedence_over_legacy_winshrc() {
+    fn compat_winuxshrc_used_when_primary_absent() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("niubash-compat-rc-startup");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(NIU_LEGACY_RC_FILE),
-            "export NIU_RC_SOURCE=legacy\n",
-        )
-        .unwrap();
         std::fs::write(
             home.join(NIU_COMPAT_RC_FILE),
             "export NIU_RC_SOURCE=compat\n",
@@ -4651,6 +4637,7 @@ alias hello='echo from-alias'
 export NIU_THEME=sky
 export WINUXSH_OLD_PREFIX=kept-as-niu
 [ -f "$HOME/oh-my-winuxsh/theme" ] && . "$HOME/oh-my-winuxsh/theme"
+[ -f "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux" ] && . "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux"
 "#,
         )
         .unwrap();
@@ -4663,6 +4650,8 @@ export WINUXSH_OLD_PREFIX=kept-as-niu
         assert!(migrated.contains("export NIU_THEME=sky"));
         assert!(migrated.contains("export NIU_OLD_PREFIX=kept-as-niu"));
         assert!(migrated.contains("oh-my-winuxsh/theme"));
+        assert!(migrated.contains("oh-my-niu.winux"));
+        assert!(!migrated.contains("oh-my-winuxsh.winux"));
         assert!(!migrated.contains("WINUXSH"));
         assert_eq!(shell.executor.get_env("NIU_THEME"), Some("sky"));
         // The original file is kept untouched as a backup.

@@ -241,9 +241,11 @@ try {
                 throw "Required oh-my-niu bundle entry missing: $source"
             }
         }
-        Get-ChildItem -LiteralPath $bundleStageDir -Recurse -Directory -Filter "__pycache__" |
-            Remove-Item -Recurse -Force
-        Get-ChildItem -LiteralPath $bundleStageDir -Recurse -File -Include "*.pyc", "*.pyo" |
+        # NOTE: filter with Where-Object, not -Include. On Windows PowerShell
+        # 5.1, -Include is ignored for -LiteralPath -Recurse listings and this
+        # cleanup would delete every staged bundle file.
+        Get-ChildItem -LiteralPath $bundleStageDir -Recurse -File |
+            Where-Object { $_.Extension -in ".pyc", ".pyo" } |
             Remove-Item -Force
     }
 
