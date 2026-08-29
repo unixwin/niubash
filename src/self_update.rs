@@ -136,7 +136,7 @@ pub fn maybe_print_update_hint() {
             let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
             if release_is_newer(&release.tag_name, &current_tag) {
                 eprintln!(
-                    "niubash: update available: {} (run 'self-update' in the REPL, or 'niubash --self-update' outside it)",
+                    "niubash: update available: {} (run 'self-update' in the REPL, or 'niu --self-update' outside it)",
                     release.tag_name
                 );
             }

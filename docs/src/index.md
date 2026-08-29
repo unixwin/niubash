@@ -69,7 +69,7 @@ cargo build --release
 target\release\niu.exe
 ```
 
-Keep it current with `niubash --self-update` (or `self-update` inside the
+Keep it current with `niu --self-update` (or `self-update` inside the
 shell) and `wpm update winuxcmd` for the Unix command set. Questions and bug
 reports go to
 [github.com/unixwin/niubash/issues](https://github.com/unixwin/niubash/issues).

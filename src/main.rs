@@ -1,13 +1,13 @@
-//! niubash entry point
+//! niu entry point (the niubash shell)
 //!
 //! Usage:
-//!   niubash                  → interactive REPL
+//!   niu                  → interactive REPL
 //!   niu -c "command"     → execute one command, print exit code, exit
-//!   niubash -C "command"     → execute one REPL-style command, then exit
-//!   niubash script.sh        → execute a script file
-//!   niubash --help | -h      → usage
-//!   niubash --version        → version (niubash / rubash / winuxcmd)
-//!   niubash setup            → re-run the interactive prompt/plugin wizard
+//!   niu -C "command"     → execute one REPL-style command, then exit
+//!   niu script.sh        → execute a script file
+//!   niu --help | -h      → usage
+//!   niu --version        → version (niubash / rubash / winuxcmd)
+//!   niu setup            → re-run the interactive prompt/plugin wizard
 //!   niu plugin list [--json] → list official Niubash plugins
 //!   niu plugin info <name> [--json] → inspect one official plugin
 //!   niu plugin search [query] [--json] → discover official plugins
@@ -18,9 +18,9 @@
 //!   niu plugin update oh-my-niu --from <path> → install a bundle release
 //!   niu plugin update oh-my-niu --github-release latest → download/install bundle
 //!   niu plugin rollback oh-my-niu → roll back to the previous bundle
-//!   niubash --completion-probe "line" [cursor] → print REPL completions
-//!   niubash --install-wt-profile → add/update the Windows Terminal profile
-//!   niubash --self-update → download and run the latest installer
+//!   niu --completion-probe "line" [cursor] → print REPL completions
+//!   niu --install-wt-profile → add/update the Windows Terminal profile
+//!   niu --self-update → download and run the latest installer
 //!   self-update / update-niubash → REPL commands for Niubash self-update
 
 use std::io::{BufRead, Read, Write};
@@ -415,11 +415,11 @@ fn print_usage() {
         env!("CARGO_PKG_VERSION")
     );
     println!();
-    println!("Usage:  niubash [option]");
+    println!("Usage:  niu [option]");
     println!("        niu -c <cmd>         Run a command then exit");
-    println!("        niubash -C <cmd>         Run one REPL-style command then exit");
-    println!("        niubash setup           Re-run prompt/plugin setup");
-    println!("        niubash <script> [args]   Run a script file");
+    println!("        niu -C <cmd>         Run one REPL-style command then exit");
+    println!("        niu setup           Re-run prompt/plugin setup");
+    println!("        niu <script> [args]   Run a script file");
     println!();
     println!("Options:");
     println!("  -h, --help                Show this help");

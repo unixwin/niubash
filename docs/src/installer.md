@@ -22,14 +22,14 @@ It does not require administrator privileges. The default installer tasks:
 The Windows Terminal profile is installed by running:
 
 ```sh
-niubash --install-wt-profile --quiet
+niu --install-wt-profile --quiet
 ```
 
 Users can run this command again after moving an install. To also set Niubash as
 the Windows Terminal default profile, run:
 
 ```sh
-niubash --install-wt-profile --set-default
+niu --install-wt-profile --set-default
 ```
 
 Self-update uses Windows WinHTTP directly to follow the GitHub Release
@@ -37,7 +37,7 @@ Self-update uses Windows WinHTTP directly to follow the GitHub Release
 architecture, and start it silently. It does not depend on the GitHub REST API.
 
 ```sh
-niubash --self-update
+niu --self-update
 ```
 
 Inside an interactive Niubash REPL, use:
@@ -52,14 +52,14 @@ shell so the installer can replace `niu.exe`.
 Useful dry-run modes:
 
 ```sh
-niubash --self-update --check
-niubash --self-update --dry-run
+niu --self-update --check
+niu --self-update --dry-run
 ```
 
 Interactive shells check for updates at most once per day. The check is
 best-effort and silent on network failures; when a newer release exists, Niubash
 prints a short hint to run `self-update` in the REPL or
-`niubash --self-update` outside it. Set
+`niu --self-update` outside it. Set
 `NIU_UPDATE_CHECK=0` or `NIU_NO_UPDATE_CHECK=1` to disable the reminder.
 
 The installer invokes `winuxcmd.exe wpm links rebuild --root ... --force` after
@@ -87,7 +87,7 @@ rebuilt automatically. Run `wpm --help` for the full surface (`index`,
 So the update story has two parts:
 
 ```sh
-niubash --self-update        # the shell itself
+niu --self-update        # the shell itself
 wpm update winuxcmd          # the Unix commands it ships with
 ```
 

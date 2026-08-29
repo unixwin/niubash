@@ -13,7 +13,7 @@ Niubash has three intentionally different execution paths:
 ```pwsh
 niubash                         # interactive REPL
 niu -c 'pwd; echo "$SHELL"'  # quiet script/CI command mode
-niubash -C 'alias ll; pwd'       # one-shot REPL command
+niu -C 'alias ll; pwd'       # one-shot REPL command
 ```
 
 - Use the interactive REPL for normal shell work.
@@ -194,8 +194,8 @@ as `~/path`, but internal process paths remain native Windows paths. Treat
 Keep the three update planes separate:
 
 ```bash
-niubash --self-update --check
-niubash --self-update
+niu --self-update --check
+niu --self-update
 
 winuxcmd.exe wpm update winuxcmd
 
@@ -203,7 +203,7 @@ niu plugin update oh-my-niu --github-release latest
 niu plugin rollback oh-my-niu
 ```
 
-- `niubash --self-update` updates the shell.
+- `niu --self-update` updates the shell.
 - `wpm update winuxcmd` updates command packages and command links.
 - `plugin update oh-my-niu` updates the official plugin bundle.
 
@@ -212,12 +212,12 @@ niu plugin rollback oh-my-niu
 For shell issues, capture the active binary and execution path first:
 
 ```bash
-niubash --version
+niu --version
 command -v niubash
 command -v winuxcmd.exe
 echo "$SHELL"
 niu -c 'echo command-mode:$SHELL'
-niubash -C 'echo repl-command:$SHELL'
+niu -C 'echo repl-command:$SHELL'
 ```
 
 For repository changes, run focused tests before broad suites:

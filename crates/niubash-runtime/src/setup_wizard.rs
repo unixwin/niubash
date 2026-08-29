@@ -181,7 +181,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     }
     println!();
     println!("  \u{1f680}  You can tweak these settings any time by editing that file.");
-    println!("  \u{1f501}  Run `niubash setup` any time to repeat this guide.");
+    println!("  \u{1f501}  Run `niu setup` any time to repeat this guide.");
     println!("  \u{1f4a1}  See docs/src/getting-started.md for the full configuration reference.");
     println!();
 

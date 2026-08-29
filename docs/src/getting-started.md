@@ -22,7 +22,7 @@ If you are using the release zip, niubash automatically runs the activation
 script on first start when command links are missing:
 
 ```bash
-niubash winuxcmd/activate-winuxcmd.sh
+niu winuxcmd/activate-winuxcmd.sh
 ```
 
 That creates local command links inside `winuxcmd/`, so `ls`, `cat`, and
