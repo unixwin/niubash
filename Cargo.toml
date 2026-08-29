@@ -14,10 +14,6 @@ repository = "https://github.com/unixwin/niubash"
 name = "niu"
 path = "src/main.rs"
 
-[[bin]]
-name = "niubash"
-path = "src/main.rs"
-
 [workspace]
 members = [".", "crates/niubash-runtime"]
 resolver = "2"

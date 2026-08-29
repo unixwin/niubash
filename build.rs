@@ -80,7 +80,6 @@ fn embed_windows_icon() {
     }
 
     println!("cargo:rustc-link-arg-bin=niu={}", out_file.display());
-    println!("cargo:rustc-link-arg-bin=niubash={}", out_file.display());
 
     fn find_resource_compiler() -> Option<PathBuf> {
         find_in_path("rc.exe")
