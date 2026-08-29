@@ -70,7 +70,7 @@ niubash = rubash + winuxcmd + reedline + oh-my-niu
 
 ## Locked Decisions
 
-- License: GPL-3.0-or-later.
+- License: MIT.
 - `rubash` follows latest `unixwin/rubash` master.
 - WinuxCmd stays integrated through PATH injection and command links.
 - `~/.niubashrc` is the normal user-authored interactive config.

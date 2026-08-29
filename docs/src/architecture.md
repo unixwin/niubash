@@ -123,7 +123,7 @@ v3 插件系统是 Niubash 自己的插件系统。
 ```
 niubash/
 ├── Cargo.toml
-├── LICENSE                   # GPL-3.0-or-later
+├── LICENSE                   # MIT
 ├── README.md / README-zh.md
 ├── .niubashrc                 # primary interactive user entry
 ├── .winshrc                   # legacy fallback rc
