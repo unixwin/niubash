@@ -1,6 +1,6 @@
 # Plugin Externalization Readiness
 
-Use this matrix before moving a first-party capability out of Winuxsh core and
+Use this matrix before moving a first-party capability out of Niubash core and
 into the bundled plugin distribution.
 
 | Pack | Runtime | Readiness | Notes |

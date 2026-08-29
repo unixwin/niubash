@@ -6,8 +6,8 @@ param(
     [string]$Arch,
     [string]$BashShimPath,
     [string]$ShShimPath,
-    [string]$OhMyWinuxshBundlePath,
-    [switch]$SkipOhMyWinuxshBundle,
+    [string]$OhMyNiubashBundlePath,
+    [switch]$SkipOhMyNiubashBundle,
     [switch]$AllowPathWinuxCmd
 )
 
@@ -25,12 +25,12 @@ try {
     }
 
     if ($Target) {
-        $winuxshExe = Join-Path $RepoRoot "target\$Target\$Configuration\winuxsh.exe"
+        $niubashExe = Join-Path $RepoRoot "target\$Target\$Configuration\niu.exe"
     }
     else {
-        $winuxshExe = Join-Path $RepoRoot "target\$Configuration\winuxsh.exe"
+        $niubashExe = Join-Path $RepoRoot "target\$Configuration\niu.exe"
     }
-    if (-not (Test-Path -LiteralPath $winuxshExe)) {
+    if (-not (Test-Path -LiteralPath $niubashExe)) {
         $buildArgs = @("build", "--locked")
         if ($Configuration -eq "release") {
             $buildArgs += "--release"
@@ -40,8 +40,8 @@ try {
         }
         cargo @buildArgs
     }
-    if (-not (Test-Path -LiteralPath $winuxshExe)) {
-        throw "winuxsh.exe not found at $winuxshExe"
+    if (-not (Test-Path -LiteralPath $niubashExe)) {
+        throw "niu.exe not found at $niubashExe"
     }
 
     function Resolve-RubashShim {
@@ -124,11 +124,11 @@ try {
         throw "Activation script not found at $activationScript"
     }
     $iconFiles = @(
-        Join-Path $RepoRoot "assets\winuxsh-icon.ico"
-        Join-Path $RepoRoot "assets\winuxsh-icon-256.png"
-        Join-Path $RepoRoot "assets\winuxsh-icon-64.png"
-        Join-Path $RepoRoot "assets\winuxsh-icon.png"
-        Join-Path $RepoRoot "assets\winuxsh-icon.svg"
+        Join-Path $RepoRoot "assets\niubash-icon.ico"
+        Join-Path $RepoRoot "assets\niubash-icon-256.png"
+        Join-Path $RepoRoot "assets\niubash-icon-64.png"
+        Join-Path $RepoRoot "assets\niubash-icon.png"
+        Join-Path $RepoRoot "assets\niubash-icon.svg"
     )
     foreach ($iconFile in $iconFiles) {
         if (-not (Test-Path -LiteralPath $iconFile)) {
@@ -136,10 +136,10 @@ try {
         }
     }
 
-    $resolvedOhMyWinuxshBundlePath = $null
-    if (-not $SkipOhMyWinuxshBundle) {
-        if ($OhMyWinuxshBundlePath) {
-            $bundleCandidates = @($OhMyWinuxshBundlePath)
+    $resolvedOhMyNiubashBundlePath = $null
+    if (-not $SkipOhMyNiubashBundle) {
+        if ($OhMyNiubashBundlePath) {
+            $bundleCandidates = @($OhMyNiubashBundlePath)
         }
         else {
             $bundleCandidates = @(
@@ -151,25 +151,25 @@ try {
 
         foreach ($candidate in $bundleCandidates) {
             if ((Test-Path -LiteralPath $candidate) -and (Test-Path -LiteralPath (Join-Path $candidate "bundle.toml"))) {
-                $resolvedOhMyWinuxshBundlePath = (Resolve-Path -LiteralPath $candidate).Path
+                $resolvedOhMyNiubashBundlePath = (Resolve-Path -LiteralPath $candidate).Path
                 break
             }
         }
 
-        if (-not $resolvedOhMyWinuxshBundlePath) {
-            throw "oh-my-winuxsh bundle not found. Pass -OhMyWinuxshBundlePath C:\path\to\oh-my-winuxsh or -SkipOhMyWinuxshBundle."
+        if (-not $resolvedOhMyNiubashBundlePath) {
+            throw "oh-my-winuxsh bundle not found. Pass -OhMyNiubashBundlePath C:\path\to\oh-my-winuxsh or -SkipOhMyNiubashBundle."
         }
 
-        $bundleToml = Get-Content -LiteralPath (Join-Path $resolvedOhMyWinuxshBundlePath "bundle.toml") -Raw
+        $bundleToml = Get-Content -LiteralPath (Join-Path $resolvedOhMyNiubashBundlePath "bundle.toml") -Raw
         $availableMatch = [regex]::Match($bundleToml, '(?ms)^\s*available\s*=\s*\[(.*?)\]')
         if (-not $availableMatch.Success) {
-            throw "oh-my-winuxsh bundle manifest has no [packs].available list: $resolvedOhMyWinuxshBundlePath"
+            throw "oh-my-winuxsh bundle manifest has no [packs].available list: $resolvedOhMyNiubashBundlePath"
         }
         $availablePacks = [regex]::Matches($availableMatch.Groups[1].Value, '"([^"]+)"') |
             ForEach-Object { $_.Groups[1].Value }
         foreach ($packName in $availablePacks) {
-            $packManifest = Join-Path $resolvedOhMyWinuxshBundlePath (Join-Path "packs\$packName" "plugin.toml")
-            $frameworkManifest = Join-Path $resolvedOhMyWinuxshBundlePath (Join-Path "plugins\$packName" "plugin.toml")
+            $packManifest = Join-Path $resolvedOhMyNiubashBundlePath (Join-Path "packs\$packName" "plugin.toml")
+            $frameworkManifest = Join-Path $resolvedOhMyNiubashBundlePath (Join-Path "plugins\$packName" "plugin.toml")
             if (-not (Test-Path -LiteralPath $packManifest) -and -not (Test-Path -LiteralPath $frameworkManifest)) {
                 throw "oh-my-winuxsh bundle pack '$packName' is listed in bundle.toml but missing from packs/ and plugins/: $packManifest"
             }
@@ -178,10 +178,10 @@ try {
 
     $distDir = Join-Path $RepoRoot "dist"
     if ($Arch) {
-        $packageName = "winuxsh-v$Version-win-$Arch"
+        $packageName = "niubash-v$Version-win-$Arch"
     }
     else {
-        $packageName = "winuxsh-v$Version"
+        $packageName = "niubash-v$Version"
     }
     $stageDir = Join-Path $distDir $packageName
     $zipPath = Join-Path $distDir "$packageName.zip"
@@ -192,7 +192,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "winuxcmd\usr\bin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets") | Out-Null
 
-    Copy-Item -LiteralPath $winuxshExe -Destination (Join-Path $stageDir "winuxsh.exe") -Force
+    Copy-Item -LiteralPath $niubashExe -Destination (Join-Path $stageDir "niu.exe") -Force
     Copy-Item -LiteralPath $WinuxCmdPath -Destination (Join-Path $stageDir "winuxcmd\usr\bin\winuxcmd.exe") -Force
     Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\bash.exe") -Force
     Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\sh.exe") -Force
@@ -202,7 +202,7 @@ try {
     foreach ($iconFile in $iconFiles) {
         Copy-Item -LiteralPath $iconFile -Destination (Join-Path $stageDir "assets") -Force
     }
-    if ($resolvedOhMyWinuxshBundlePath) {
+    if ($resolvedOhMyNiubashBundlePath) {
         $bundleStageDir = Join-Path $stageDir "bundles\oh-my-winuxsh"
         New-Item -ItemType Directory -Force -Path $bundleStageDir | Out-Null
         $requiredBundleEntries = @(
@@ -234,7 +234,7 @@ try {
             "tools"
         )
         foreach ($entry in $bundleEntries) {
-            $source = Join-Path $resolvedOhMyWinuxshBundlePath $entry
+            $source = Join-Path $resolvedOhMyNiubashBundlePath $entry
             if (Test-Path -LiteralPath $source) {
                 Copy-Item -LiteralPath $source -Destination $bundleStageDir -Recurse -Force
             }

@@ -4,32 +4,28 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn winuxsh_binary() -> PathBuf {
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
+fn niu_binary() -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_niu"));
     if p.exists() {
         return p;
     }
     let mut fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     fallback.push("target");
     fallback.push("debug");
-    fallback.push(if cfg!(windows) {
-        "winuxsh.exe"
-    } else {
-        "winuxsh"
-    });
+    fallback.push(if cfg!(windows) { "niu.exe" } else { "niubash" });
     fallback
 }
 
 #[test]
 fn repl_command_loads_primary_rc_aliases_after_long_path_setup() {
-    let temp = unique_temp_dir("winuxsh-repl-command-primary-aliases");
+    let temp = unique_temp_dir("niubash-repl-command-primary-aliases");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(home.join("bin")).unwrap();
     std::fs::create_dir_all(&start).unwrap();
     std::fs::write(
-        home.join(".winuxshrc"),
+        home.join(".niubashrc"),
         r#"
 __test_path_prepend() {
   [ -n "$1" ] || return 0
@@ -49,10 +45,10 @@ export PATH
     .unwrap();
 
     let long_path = (0..1_200)
-        .map(|index| format!("C:/winuxsh-test/path{index:04}"))
+        .map(|index| format!("C:/niubash-test/path{index:04}"))
         .collect::<Vec<_>>()
         .join(";");
-    let output = Command::new(winuxsh_binary())
+    let output = Command::new(niu_binary())
         .args(["-C", "l; ll; alias l; alias ll"])
         .current_dir(&start)
         .env("HOME", &home)
@@ -84,21 +80,17 @@ export PATH
 
 #[test]
 fn command_mode_keeps_script_semantics_without_repl_startup() {
-    let temp = unique_temp_dir("winuxsh-command-mode");
+    let temp = unique_temp_dir("niubash-command-mode");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(
-        home.join(".winshrc"),
-        "export WINUXSH_REPL_COMMAND_RC=loaded\n",
-    )
-    .unwrap();
+    std::fs::write(home.join(".winshrc"), "export NIU_REPL_COMMAND_RC=loaded\n").unwrap();
 
-    let output = run_winuxsh(
+    let output = run_niu(
         &[
             "-c",
-            "echo rc:$WINUXSH_REPL_COMMAND_RC precmd:$WINUXSH_REPL_PRECMD_RAN preexec:$WINUXSH_REPL_PREEXEC_RAN",
+            "echo rc:$NIU_REPL_COMMAND_RC precmd:$NIU_REPL_PRECMD_RAN preexec:$NIU_REPL_PREEXEC_RAN",
         ],
         &start,
         &home,
@@ -115,22 +107,19 @@ fn command_mode_keeps_script_semantics_without_repl_startup() {
 
 #[test]
 fn command_mode_can_source_user_winshrc_explicitly() {
-    let temp = unique_temp_dir("winuxsh-command-mode-source-winshrc");
+    let temp = unique_temp_dir("niubash-command-mode-source-winshrc");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
     std::fs::write(
         home.join(".winshrc"),
-        "export WINUXSH_EXPLICIT_SOURCE_RC=loaded\n",
+        "export NIU_EXPLICIT_SOURCE_RC=loaded\n",
     )
     .unwrap();
 
-    let output = run_winuxsh(
-        &[
-            "-c",
-            "source ~/.winshrc; echo rc:$WINUXSH_EXPLICIT_SOURCE_RC",
-        ],
+    let output = run_niu(
+        &["-c", "source ~/.winshrc; echo rc:$NIU_EXPLICIT_SOURCE_RC"],
         &start,
         &home,
     );
@@ -142,23 +131,19 @@ fn command_mode_can_source_user_winshrc_explicitly() {
 
 #[test]
 fn repl_command_cat_expands_tilde_paths_through_normal_command_resolution() {
-    let temp = unique_temp_dir("winuxsh-repl-command-cat-tilde");
+    let temp = unique_temp_dir("niubash-repl-command-cat-tilde");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(
-        home.join(".winshrc"),
-        "export WINUXSH_TILDE_CAT_RC=loaded\n",
-    )
-    .unwrap();
+    std::fs::write(home.join(".winshrc"), "export NIU_TILDE_CAT_RC=loaded\n").unwrap();
 
-    let output = run_winuxsh(&["-C", "cat ~/.winshrc"], &start, &home);
+    let output = run_niu(&["-C", "cat ~/.winshrc"], &start, &home);
 
     assert_success(&output, "repl command cat tilde expansion");
     assert_eq!(
         stdout_text(&output).trim(),
-        "export WINUXSH_TILDE_CAT_RC=loaded"
+        "export NIU_TILDE_CAT_RC=loaded"
     );
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -169,14 +154,14 @@ fn command_mode_compound_commands_keep_home_paths_native() {
         return;
     }
 
-    let temp = unique_temp_dir("winuxsh-command-mode-native-home-paths");
+    let temp = unique_temp_dir("niubash-command-mode-native-home-paths");
     let home = temp.join("home");
     let start = temp.join("start");
     let bin = temp.join("bin");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(home.join(".winuxshrc"), "# primary marker\n").unwrap();
+    std::fs::write(home.join(".niubashrc"), "# primary marker\n").unwrap();
     std::fs::write(
         bin.join("cat.cmd"),
         "@echo off\r\nset \"arg=%~1\"\r\necho arg=%arg%\r\nif \"%arg:~0,3%\"==\"/c/\" exit /b 12\r\nset \"fsarg=%arg:/=\\%\"\r\ntype \"%fsarg%\"\r\n",
@@ -188,17 +173,17 @@ fn command_mode_compound_commands_keep_home_paths_native() {
     if let Some(old_path) = old_path {
         paths.extend(std::env::split_paths(&old_path));
     }
-    let output = Command::new(winuxsh_binary())
+    let output = Command::new(niu_binary())
         .args([
             "-c",
-            "cd ~; echo PWD=$PWD; pwd; cat ~/.winuxshrc >/dev/null && echo catrc:ok",
+            "cd ~; echo PWD=$PWD; pwd; cat ~/.niubashrc >/dev/null && echo catrc:ok",
         ])
         .current_dir(&start)
         .env("HOME", "")
         .env("USERPROFILE", &home)
         .env("PATH", std::env::join_paths(paths).unwrap())
         .output()
-        .unwrap_or_else(|err| panic!("failed to run winuxsh command mode native home test: {err}"));
+        .unwrap_or_else(|err| panic!("failed to run niubash command mode native home test: {err}"));
 
     assert_success(&output, "command mode compound native home paths");
     let stdout = stdout_text(&output);
@@ -213,14 +198,14 @@ fn command_mode_compound_commands_keep_home_paths_native() {
 
 #[test]
 fn repl_command_file_commands_expand_tilde_paths_through_normal_command_resolution() {
-    let temp = unique_temp_dir("winuxsh-repl-command-file-builtins-tilde");
+    let temp = unique_temp_dir("niubash-repl-command-file-builtins-tilde");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
-    std::fs::write(home.join(".winuxshrc"), "").unwrap();
+    std::fs::write(home.join(".niubashrc"), "").unwrap();
 
-    let output = run_winuxsh(
+    let output = run_niu(
         &[
             "-C",
             "mkdir -p ~/builtins/empty; touch ~/builtins/source.txt; cp ~/builtins/source.txt ~/builtins/copy.txt; rm ~/builtins/source.txt; rmdir ~/builtins/empty",
@@ -238,13 +223,13 @@ fn repl_command_file_commands_expand_tilde_paths_through_normal_command_resoluti
 
 #[test]
 fn command_mode_sets_shell_to_current_exe_when_missing() {
-    let temp = unique_temp_dir("winuxsh-command-mode-shell-env");
+    let temp = unique_temp_dir("niubash-command-mode-shell-env");
     let home = temp.join("home");
     let start = temp.join("start");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&start).unwrap();
 
-    let bin = winuxsh_binary();
+    let bin = niu_binary();
     let output = Command::new(&bin)
         .args(["-c", "printf '<%s>\\n' \"$SHELL\""])
         .current_dir(&start)
@@ -253,7 +238,7 @@ fn command_mode_sets_shell_to_current_exe_when_missing() {
         .env_remove("SHELL")
         .env_remove("BASH")
         .output()
-        .unwrap_or_else(|err| panic!("failed to run winuxsh shell env test: {err}"));
+        .unwrap_or_else(|err| panic!("failed to run niubash shell env test: {err}"));
 
     assert_success(&output, "command mode default SHELL");
     assert_eq!(
@@ -265,13 +250,13 @@ fn command_mode_sets_shell_to_current_exe_when_missing() {
 
 #[test]
 fn gitstatus_daemon_returns_repo_snapshot_over_persistent_stdio() {
-    let temp = unique_temp_dir("winuxsh-gitstatus-daemon");
+    let temp = unique_temp_dir("niubash-gitstatus-daemon");
     let repo = temp.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     for args in [
         &["init"][..],
-        &["config", "user.email", "test@winuxsh"],
-        &["config", "user.name", "Winuxsh Test"],
+        &["config", "user.email", "test@niubash"],
+        &["config", "user.name", "Niubash Test"],
     ] {
         let output = Command::new("git")
             .args(args)
@@ -284,7 +269,7 @@ fn gitstatus_daemon_returns_repo_snapshot_over_persistent_stdio() {
     }
     std::fs::write(repo.join("new.txt"), "daemon\n").unwrap();
 
-    let mut child = Command::new(winuxsh_binary())
+    let mut child = Command::new(niu_binary())
         .arg("--gitstatus-daemon")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -310,20 +295,20 @@ fn gitstatus_daemon_returns_repo_snapshot_over_persistent_stdio() {
     let _ = std::fs::remove_dir_all(temp);
 }
 
-fn run_winuxsh(args: &[&str], start: &Path, home: &Path) -> Output {
-    let mut command = Command::new(winuxsh_binary());
+fn run_niu(args: &[&str], start: &Path, home: &Path) -> Output {
+    let mut command = Command::new(niu_binary());
     command
         .args(args)
         .current_dir(start)
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env_remove("WINUXSH_REPL_COMMAND_RC")
-        .env_remove("WINUXSH_REPL_PRECMD_RAN")
-        .env_remove("WINUXSH_REPL_PREEXEC_RAN");
+        .env_remove("NIU_REPL_COMMAND_RC")
+        .env_remove("NIU_REPL_PRECMD_RAN")
+        .env_remove("NIU_REPL_PREEXEC_RAN");
 
     command
         .output()
-        .unwrap_or_else(|err| panic!("failed to run winuxsh {args:?}: {err}"))
+        .unwrap_or_else(|err| panic!("failed to run niubash {args:?}: {err}"))
 }
 
 fn assert_success(output: &Output, context: &str) {

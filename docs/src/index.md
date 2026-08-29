@@ -1,10 +1,10 @@
-# Winuxsh
+# Niubash
 
 > **Bash, native on Windows.** No WSL. No VM. No `/mnt/c`. No cmdlet dialect.
 > Just the shell your fingers already know — and the one your AI agent
 > actually speaks.
 
-This is the Winuxsh documentation. Start with the guides, or jump straight
+This is the Niubash documentation. Start with the guides, or jump straight
 into the shell:
 
 ```text
@@ -19,7 +19,7 @@ beta
 C:\Program Files
 ```
 
-## What Winuxsh is
+## What Niubash is
 
 - **Bash syntax.** `if`, `for`, `case`, `$(...)`, pipes, redirects, heredocs,
   functions, aliases — the whole grammar, powered by
@@ -32,7 +32,7 @@ C:\Program Files
 - **Unix commands included.** WinuxCmd ships `ls`, `cat`, `grep`, `find`,
   `test`, `printf`, and friends as Windows command links, with no separate
   installation.
-- **AI-native.** `winuxsh -c` is a contract: no banners, stable
+- **AI-native.** `niu -c` is a contract: no banners, stable
   stdout/stderr, exact exit-code propagation. What an agent writes is what
   the process receives — the quoting roulette of PowerShell and the path
   mangling of MSYS/Git Bash are both gone.
@@ -54,25 +54,25 @@ C:\Program Files
 | [Bash Compatibility Matrix](rubash-bash-compat-matrix.md) | What Bash surface is verified, layer by layer |
 | [Architecture](architecture.md) | rubash + WinuxCmd + reedline, path model, host contract |
 | [Windows Path Contract](windows-path-contract.md) | logical root, dispatcher selection, and layer ownership |
-| [Roadmap](winuxsh-roadmap.md) | What is done, what is next |
+| [Roadmap](niubash-roadmap.md) | What is done, what is next |
 
 ## Get it
 
 Download the installer from
-[GitHub Releases](https://github.com/unixwin/winuxsh/releases), or build
+[GitHub Releases](https://github.com/unixwin/niubash/releases), or build
 from source:
 
 ```sh
-git clone https://github.com/unixwin/winuxsh.git
-cd winuxsh
+git clone https://github.com/unixwin/niubash.git
+cd niubash
 cargo build --release
-target\release\winuxsh.exe
+target\release\niu.exe
 ```
 
-Keep it current with `winuxsh --self-update` (or `self-update` inside the
+Keep it current with `niubash --self-update` (or `self-update` inside the
 shell) and `wpm update winuxcmd` for the Unix command set. Questions and bug
 reports go to
-[github.com/unixwin/winuxsh/issues](https://github.com/unixwin/winuxsh/issues).
+[github.com/unixwin/niubash/issues](https://github.com/unixwin/niubash/issues).
 
 Shell semantics live upstream in
 [rubash](https://github.com/unixwin/rubash) — fix the engine, and every

@@ -570,6 +570,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "niubash"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "niubash-runtime",
+ "rubash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "windows-sys 0.59.0",
+ "zip",
+]
+
+[[package]]
+name = "niubash-runtime"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "colored",
+ "dirs",
+ "env_logger",
+ "fd-lock",
+ "filetime",
+ "glob",
+ "globset",
+ "log",
+ "nu-ansi-term",
+ "reedline",
+ "rubash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "windows-sys 0.59.0",
+ "zip",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -760,7 +802,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rubash"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "ctrlc",
  "libc",
@@ -1381,48 +1423,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "winuxsh"
-version = "0.10.13"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "rubash",
- "serde",
- "serde_json",
- "sha2",
- "windows-sys 0.59.0",
- "winuxsh-runtime",
- "zip",
-]
-
-[[package]]
-name = "winuxsh-runtime"
-version = "0.10.13"
-dependencies = [
- "anyhow",
- "colored",
- "dirs",
- "env_logger",
- "fd-lock",
- "filetime",
- "glob",
- "globset",
- "log",
- "nu-ansi-term",
- "reedline",
- "rubash",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "toml",
- "windows-sys 0.59.0",
- "zip",
 ]
 
 [[package]]

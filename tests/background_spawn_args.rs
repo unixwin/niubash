@@ -2,35 +2,31 @@
 //!
 //! Rubash spawns the host executable for background jobs and coprocs. The
 //! spawned argv must stick to the common `-c <script>` contract; a leading
-//! `--` is a rubash-CLI-only convention that the winuxsh launcher rejects as
+//! `--` is a rubash-CLI-only convention that the niubash launcher rejects as
 //! a script-file argument ("unknown argument '--' (not a script file)").
 
 use std::path::PathBuf;
 use std::process::Command;
 
-fn winuxsh_binary() -> PathBuf {
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
+fn niu_binary() -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_niu"));
     if p.exists() {
         return p;
     }
     let mut fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     fallback.push("target");
     fallback.push("debug");
-    fallback.push(if cfg!(windows) {
-        "winuxsh.exe"
-    } else {
-        "winuxsh"
-    });
+    fallback.push(if cfg!(windows) { "niu.exe" } else { "niubash" });
     fallback
 }
 
-fn run_winuxsh(script: &str) -> (String, String) {
-    let output = Command::new(winuxsh_binary())
+fn run_niu(script: &str) -> (String, String) {
+    let output = Command::new(niu_binary())
         .arg("-c")
         .arg(script)
-        .env("WINUXSH_SKIP_WINUXCMD_ACTIVATION", "1")
+        .env("NIU_SKIP_WINUXCMD_ACTIVATION", "1")
         .output()
-        .expect("spawn winuxsh");
+        .expect("spawn niubash");
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
@@ -39,7 +35,7 @@ fn run_winuxsh(script: &str) -> (String, String) {
 
 #[test]
 fn background_command_keeps_dash_dash_args_out_of_host_cli() {
-    let (stdout, stderr) = run_winuxsh("echo --connect-timeout 5 --max-time 10 & wait; echo done");
+    let (stdout, stderr) = run_niu("echo --connect-timeout 5 --max-time 10 & wait; echo done");
 
     assert!(
         !stderr.contains("unknown argument"),
@@ -55,7 +51,7 @@ fn background_command_keeps_dash_dash_args_out_of_host_cli() {
 #[test]
 fn coproc_command_keeps_dash_dash_args_out_of_host_cli() {
     let (stdout, stderr) =
-        run_winuxsh("coproc C { echo --marker; }; read line <&${C[0]}; echo got=$line");
+        run_niu("coproc C { echo --marker; }; read line <&${C[0]}; echo got=$line");
 
     assert!(
         !stderr.contains("unknown argument"),

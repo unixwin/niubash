@@ -1,19 +1,19 @@
 ---
-tags: [winuxsh, v2.2, reference, nushell, audit]
+tags: [niubash, v2.2, reference, nushell, audit]
 created: 2026-07-17
 status: active
 ---
 
-# Nushell Reference Audit for Winuxsh v2.2
+# Nushell Reference Audit for Niubash v2.2
 
 > Purpose: use Nushell as a modern shell/frontend reference, not as a dependency
-> or language model. Winuxsh remains: rubash shell semantics + winuxcmd.exe PATH
+> or language model. Niubash remains: rubash shell semantics + winuxcmd.exe PATH
 > injection + reedline REPL.
 
 ## Reference Snapshot
 
 - Reference repository: `https://github.com/nushell/nushell`
-- Local reference clone: `%TEMP%/winuxsh-reference/nushell`
+- Local reference clone: `%TEMP%/niubash-reference/nushell`
 - Observed commit: `c1675b7`
 - Read scope:
   - `crates/nu-cli/src/repl.rs`
@@ -27,24 +27,24 @@ status: active
 ### 1. REPL frontend should stay compositional
 
 Nushell builds the line editor by composing history, completer, hints, menus, and
-edit mode around reedline. This maps well to `winuxsh-runtime/src/repl.rs`,
-which already composes `FileBackedHistory`, `WinuxshCompleter`, and `ListMenu`.
+edit mode around reedline. This maps well to `niubash-runtime/src/repl.rs`,
+which already composes `FileBackedHistory`, `NiubashCompleter`, and `ListMenu`.
 
-For winuxsh v2.2, keep this small:
+For niubash v2.2, keep this small:
 
 - Add config-driven edit mode: `emacs` default, `vi` optional.
 - Add explicit history search menu / keybinding only if reedline defaults are not enough.
-- Keep history path as `~/.winuxsh_history` for compatibility.
+- Keep history path as `~/.niubash_history` for compatibility.
 - Do not change rubash execution semantics from the REPL layer.
 
 ### 2. Completion should use provider stages, not one giant completer
 
 Nushell separates command, flag, flag-value, path, variable, and custom
-completion. Winuxsh already has a compatible direction through
+completion. Niubash already has a compatible direction through
 `CompletionPlugin`, `CommandCompletionPlugin`, `ExternalCompletionPlugin`,
 `PathCompleter`, and `VariableCompleter`.
 
-For winuxsh v2.2, the right next feature is not a rewrite; it is to strengthen
+For niubash v2.2, the right next feature is not a rewrite; it is to strengthen
 the current provider model:
 
 - Fix the current completion integration test drift first.
@@ -56,7 +56,7 @@ the current provider model:
 ### 3. Config should grow by stable sections
 
 Nushell keeps separate config sections for completions, edit mode, history,
-keybindings, menus, and cursor shape. Winuxsh should not copy that full schema,
+keybindings, menus, and cursor shape. Niubash should not copy that full schema,
 but the separation is useful.
 
 Recommended v2.2 config direction:
@@ -71,7 +71,7 @@ Recommended v2.2 config direction:
 ### 4. Windows command discovery must avoid PowerShell semantics
 
 Nushell is Windows-aware when discovering external commands. That is useful for
-completion UX, but winuxsh must not become PowerShell-like. Command execution
+completion UX, but niubash must not become PowerShell-like. Command execution
 continues to flow through rubash PATH lookup and winuxcmd shims.
 
 Practical rule:
@@ -82,7 +82,7 @@ Practical rule:
 - Do not add `.ps1` behavior unless explicitly scoped as a completion-only
   convenience and reviewed separately.
 
-## What Maps to Winuxsh Now
+## What Maps to Niubash Now
 
 - Bundled default completion definitions for `ls`, `grep`, and `find`.
 - Config-driven reedline edit mode.
@@ -111,7 +111,7 @@ Practical rule:
 ## Immediate v2.2 Plan
 
 1. Fix completion integration test drift:
-   - `crates/winuxsh-runtime/tests/completion.rs` calls `load_completion_dir`.
+   - `crates/niubash-runtime/tests/completion.rs` calls `load_completion_dir`.
    - Current implementation exposes `load_completion_dirs`.
 2. Add a bundled default completion directory and first definitions:
    - `ls`
@@ -130,9 +130,9 @@ Practical rule:
 
 Pulling Nushell source is useful as temporary reference material because it
 shows a mature reedline shell frontend, configurable edit modes, history menus,
-and staged completion providers. It should stay outside the winuxsh repository
+and staged completion providers. It should stay outside the niubash repository
 under a temp/reference directory, and the audited commit should be recorded.
 
 It is not useful to vendor Nushell or add it as a dependency for v2.2. The source
-is a design reference only; the implementation should stay native to winuxsh's
+is a design reference only; the implementation should stay native to niubash's
 existing rubash + winuxcmd + reedline architecture.

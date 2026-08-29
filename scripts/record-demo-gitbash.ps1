@@ -3,7 +3,7 @@ param(
     [int]$Seconds = 16
 )
 # Record a Git Bash (MSYS) session showing the commands that FAIL there but
-# work in Winuxsh: backslash paths eaten, /c/ paths rejected, MSYS path
+# work in Niubash: backslash paths eaten, /c/ paths rejected, MSYS path
 # conversion silently breaking git grep. Output: assets/demo-gitbash.gif
 $ErrorActionPreference = "Stop"
 
@@ -122,7 +122,7 @@ $job = Start-Job -ArgumentList $Ffmpeg, $outMkv, $r.Left, $r.Top, $w, $h, $Secon
 }
 
 Start-Sleep -Seconds 3
-Send-Line 'node -e "console.log(JSON.stringify(process.argv.slice(3)))" "C:\Users\caomengxuan\repo\winuxsh"' 2000   # backslash path eaten
+Send-Line 'node -e "console.log(JSON.stringify(process.argv.slice(3)))" "C:\Users\caomengxuan\repo\niubash"' 2000   # backslash path eaten
 Send-Line 'cmd /c "dir /c/Windows/System32/drivers/etc"' 2000   # /c/ rejected
 Send-Line 'git grep "/fn main"' 2000   # MSYS path conversion breaks the pattern
 Send-Line 'git grep -n "fn main" | head -3' 2400   # same search, normal quoting: works

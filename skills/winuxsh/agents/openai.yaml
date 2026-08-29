@@ -1,7 +1,0 @@
-interface:
-  display_name: "Winuxsh Native Codex"
-  short_description: "Run Codex directly inside native Winuxsh."
-  default_prompt: "Use $winuxsh-native-codex for native Winuxsh shell tasks."
-
-policy:
-  allow_implicit_invocation: true

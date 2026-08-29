@@ -1,0 +1,51 @@
+# Niubash interactive rc - example.
+# Copy this file to ~/.niubashrc to adopt it. That file is Niubash's primary
+# interactive entry point for aliases, plugins, and shell startup.
+
+NIU_THEME=p10-classic
+NIU_THEME_PLUGIN=theme-p10-classic
+NIU_PROMPT_SYMBOL="❯"
+export NIU_THEME NIU_THEME_PLUGIN NIU_PROMPT_SYMBOL
+
+# Official bundled source plugins. Theme is selected separately above.
+NIU_PLUGINS=(prompt-core git common-aliases path-tools extract)
+
+# Normalize HOME when it was not inherited from the environment.
+if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
+  case "$USERPROFILE" in
+    /[A-Za-z]/*)
+      __niubash_home_drive="${USERPROFILE#/}"
+      __niubash_home_drive="${__niubash_home_drive%%/*}"
+      __niubash_home_rest="${USERPROFILE#/$__niubash_home_drive/}"
+      HOME="$__niubash_home_drive:/$__niubash_home_rest"
+      ;;
+    *)
+      HOME="${USERPROFILE//\\//}"
+      ;;
+  esac
+  export HOME
+fi
+
+# Locate the bundled oh-my-winuxsh framework if NIUBASH is not set.
+if [ -z "${NIUBASH:-}" ]; then
+  for __niubash_bundle in "$HOME/.oh-my-winuxsh" "$HOME/.niubash/oh-my-winuxsh" "$HOME/.niubash/bundles/oh-my-winuxsh"/*; do
+    if [ -f "$__niubash_bundle/oh-my-winuxsh.winux" ]; then
+      NIUBASH="$__niubash_bundle"
+      export NIUBASH
+      break
+    fi
+  done
+fi
+
+[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+
+# Personal aliases and environment.
+alias grep='grep --color=auto'
+alias ll='ls -la'
+alias la='ls -a'
+alias e='exit'
+
+export EDITOR='vim'
+export PAGER='less'
+
+unset __niubash_bundle

@@ -1,21 +1,25 @@
 [package]
-name = "winuxsh"
-version = "0.10.13"
+name = "niubash"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
 authors = ["unixwin team <arookieofc@gmail.com>"]
 description = "AI-native bash-compatible shell for Windows, built on rubash + winuxcmd"
 readme = "README.md"
-homepage = "https://github.com/unixwin/winuxsh"
-repository = "https://github.com/unixwin/winuxsh"
+homepage = "https://github.com/unixwin/niubash"
+repository = "https://github.com/unixwin/niubash"
+
+[[bin]]
+name = "niu"
+path = "src/main.rs"
 
 [workspace]
-members = [".", "crates/winuxsh-runtime"]
+members = [".", "crates/niubash-runtime"]
 resolver = "2"
 
 [dependencies]
-winuxsh-runtime = { path = "crates/winuxsh-runtime" }
+niubash-runtime = { path = "crates/niubash-runtime" }
 rubash = { path = "../rubash" }
 anyhow = "1.0"
 env_logger = "0.10"

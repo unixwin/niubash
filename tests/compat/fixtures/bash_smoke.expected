@@ -1,5 +1,5 @@
 [1] vars command-substitution
-hello:winuxsh sub:inner
+hello:niubash sub:inner
 [2] arithmetic
 sum:8 pow:1024
 [3] arrays

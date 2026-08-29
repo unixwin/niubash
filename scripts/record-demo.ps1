@@ -2,7 +2,7 @@ param(
     [string]$Ffmpeg = "",
     [int]$Seconds = 24
 )
-# Record the Winuxsh demo script running in a dedicated Windows Terminal
+# Record the Niubash demo script running in a dedicated Windows Terminal
 # window, then convert the capture to a GIF. Output lands in assets/.
 $ErrorActionPreference = "Stop"
 
@@ -37,23 +37,23 @@ public class CapWin32 {
 Remove-Item $outMkv, $outGif -ErrorAction SilentlyContinue
 
 # 1. Close any leftover demo window, then launch a fresh Windows Terminal
-#    window on the Winuxsh profile running the demo script.
+#    window on the Niubash profile running the demo script.
 Get-Process WindowsTerminal -ErrorAction SilentlyContinue |
-    Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -match "Winuxsh" } |
+    Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -match "Niubash" } |
     ForEach-Object { [void]$_.CloseMainWindow() }
 Start-Sleep -Seconds 1
-Start-Process wt.exe -ArgumentList "-p", "Winuxsh", "--", "winuxsh.exe", "`"$demo`""
+Start-Process wt.exe -ArgumentList "-p", "Niubash", "--", "niu.exe", "`"$demo`""
 
 # 2. Find the terminal window by title and bring it to front.
 $win = $null
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 500
     $win = Get-Process WindowsTerminal -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -match "Winuxsh" } |
+        Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -match "Niubash" } |
         Select-Object -First 1
     if ($win) { break }
 }
-if (-not $win) { throw "Windows Terminal window with title 'Winuxsh' not found" }
+if (-not $win) { throw "Windows Terminal window with title 'Niubash' not found" }
 Write-Host "capturing window: '$($win.MainWindowTitle)'"
 
 $r = New-Object CapWin32+RECT

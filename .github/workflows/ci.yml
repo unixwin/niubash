@@ -1,4 +1,4 @@
-name: Winuxsh CI
+name: Niubash CI
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
         run: cargo update -p rubash
 
       - name: cargo fmt --check (root package)
-        run: cargo fmt --check -p winuxsh
+        run: cargo fmt --check -p niubash
 
       - name: cargo build
         run: cargo build --locked

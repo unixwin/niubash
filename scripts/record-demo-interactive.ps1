@@ -3,7 +3,7 @@ param(
     [int]$Seconds = 22,
     [switch]$Probe
 )
-# Record an INTERACTIVE winuxsh session (real user config: theme + git prompt)
+# Record an INTERACTIVE niubash session (real user config: theme + git prompt)
 # in a dedicated Windows Terminal window. Uses the real HOME so themes and
 # plugin state load exactly like a normal interactive session.
 $ErrorActionPreference = "Stop"
@@ -45,7 +45,7 @@ public class CapWin32 {
 "@
 [void][CapWin32]::SetProcessDpiAwareness(2)
 
-function Find-WinuxshWindow {
+function Find-NiubashWindow {
     # WT hosts multiple windows inside one WindowsTerminal process, so
     # Get-Process/MainWindowHandle cannot see the extra windows. Enumerate all
     # top-level windows and match the exact title instead.
@@ -55,7 +55,7 @@ function Find-WinuxshWindow {
         if ([CapWin32]::IsWindowVisible($h)) {
             $sb = New-Object System.Text.StringBuilder 512
             [void][CapWin32]::GetWindowText($h, $sb, 512)
-            if ($sb.ToString().Trim() -eq "Winuxsh") { $script:found = $h }
+            if ($sb.ToString().Trim() -eq "Niubash") { $script:found = $h }
         }
         return $true
     }
@@ -63,8 +63,8 @@ function Find-WinuxshWindow {
     return $script:found
 }
 
-function Close-WinuxshWindow {
-    $h = Find-WinuxshWindow
+function Close-NiubashWindow {
+    $h = Find-NiubashWindow
     if ($h -ne [IntPtr]::Zero) {
         [void][CapWin32]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)  # WM_CLOSE
     }
@@ -73,19 +73,19 @@ function Close-WinuxshWindow {
 Remove-Item $outMkv, $outGif -ErrorAction SilentlyContinue
 
 # 1. Close any leftover demo window (exact title only; never touches other
-#    windows, e.g. the "OC | winuxsh ..." host window), then open a fresh one.
-Close-WinuxshWindow
+#    windows, e.g. the "OC | niubash ..." host window), then open a fresh one.
+Close-NiubashWindow
 Start-Sleep -Seconds 1
-Start-Process wt.exe -ArgumentList "-w", "new", "-p", "Winuxsh"
+Start-Process wt.exe -ArgumentList "-w", "new", "-p", "Niubash"
 
-# 2. Wait for the new window (title is exactly "Winuxsh").
+# 2. Wait for the new window (title is exactly "Niubash").
 $hwnd = [IntPtr]::Zero
 for ($i = 0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 500
-    $hwnd = Find-WinuxshWindow
+    $hwnd = Find-NiubashWindow
     if ($hwnd -ne [IntPtr]::Zero) { break }
 }
-if ($hwnd -eq [IntPtr]::Zero) { throw "Winuxsh window not found (enumerate failed)" }
+if ($hwnd -eq [IntPtr]::Zero) { throw "Niubash window not found (enumerate failed)" }
 Write-Host "window found: hwnd=$hwnd"
 
 $r = New-Object CapWin32+RECT
@@ -101,7 +101,7 @@ if ($Probe) {
     & $Ffmpeg -y -f gdigrab -framerate 5 -offset_x $r.Left -offset_y $r.Top `
         -video_size "${w}x${h}" -i desktop -frames:v 1 `
         (Join-Path $PSScriptRoot "..\assets\demo-probe.png") 2>$null
-    Close-WinuxshWindow
+    Close-NiubashWindow
     Write-Host "probe saved to assets\demo-probe.png"
     exit 0
 }
@@ -149,13 +149,13 @@ $job = Start-Job -ArgumentList $Ffmpeg, $outMkv, $r.Left, $r.Top, $w, $h, $Secon
 }
 
 Start-Sleep -Seconds 4          # let the prompt render
-$work = "C:/Users/caomengxuan/AppData/Local/Temp/opencode/winuxsh-demo-work"
-Send-Line "cd C:/Users/caomengxuan/repo/winuxsh" 1600   # git prompt appears
+$work = "C:/Users/caomengxuan/AppData/Local/Temp/opencode/niubash-demo-work"
+Send-Line "cd C:/Users/caomengxuan/repo/niubash" 1600   # git prompt appears
 Send-Line "git status --short" 1400
 Send-Line "cd $work" 1400
 Send-Line "cat heroes.txt" 1200
 Send-Line "grep -in hero heroes.txt" 1400               # colored git-prompt grep
-Send-Line 'sed -i "s/world/winuxsh/g; s/World/WINUXSH/g" heroes.txt' 1500  # in-place edit
+Send-Line 'sed -i "s/world/niubash/g; s/World/NIUBASH/g" heroes.txt' 1500  # in-place edit
 Send-Line "cat heroes.txt" 1200
 Send-Line 'awk "{print \$2}" access.log | sort | uniq -c | sort -rn' 1700  # log stats
 Send-Line "wc -l heroes.txt" 1100
@@ -168,7 +168,7 @@ Remove-Job $job
 if (-not (Test-Path $outMkv)) { throw "ffmpeg capture failed" }
 
 # Close only the window this script launched.
-Close-WinuxshWindow
+Close-NiubashWindow
 
 # 4. Convert to GIF with a palette pass.
 & $Ffmpeg -y -i $outMkv -vf "fps=12,scale=880:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=160:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3" -loop 0 $outGif

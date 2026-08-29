@@ -1,6 +1,6 @@
 # Plugin System Roadmap
 
-This is the active execution plan for the Winuxsh-native plugin system. The
+This is the active execution plan for the Niubash-native plugin system. The
 design direction is in [Plugin System Direction](plugin-system-direction.md).
 
 ## Current State
@@ -11,7 +11,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
 - First-party packs are being moved behind manifests so their aliases,
   completions, prompt segments, hooks, and optional `.winux` startup code are
   visible and reviewable.
-- `~/.winuxshrc` is the user-authored interactive entry point.
+- `~/.niubashrc` is the user-authored interactive entry point.
 - Manifest-backed registry files hold structured plugin state.
 
 ## Runtime Sequence
@@ -27,7 +27,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
 ## Near-Term Work
 
 - Normalize every first-party pack manifest around exports and permissions.
-- Ensure `winuxsh plugin list/info/search/review/doctor` reports the same
+- Ensure `niu plugin list/info/search/review/doctor` reports the same
   schema for builtin, source, bridge, and process packs.
 - Move bundled completion and alias assets out of compiled defaults where the
   bundle can own them cleanly.
@@ -44,7 +44,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
 | Prompt data providers | `builtin` or `bridge` when host-owned, `process` when delegated to an external binary. |
 | External command wrappers | `process` with explicit `process:run:<name>` permissions. |
 | Shell-mutating helpers | Reviewed `.winux` `source` pack. |
-| Core shell behavior | Winuxsh core, not a plugin. |
+| Core shell behavior | Niubash core, not a plugin. |
 
 ## Verification
 

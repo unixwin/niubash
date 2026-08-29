@@ -1,27 +1,27 @@
-//! winuxsh entry point
+//! niubash entry point
 //!
 //! Usage:
-//!   winuxsh                  → interactive REPL
-//!   winuxsh -c "command"     → execute one command, print exit code, exit
-//!   winuxsh -C "command"     → execute one REPL-style command, then exit
-//!   winuxsh script.sh        → execute a script file
-//!   winuxsh --help | -h      → usage
-//!   winuxsh --version        → version (winuxsh / rubash / winuxcmd)
-//!   winuxsh setup            → re-run the interactive prompt/plugin wizard
-//!   winuxsh plugin list [--json] → list official Winuxsh plugins
-//!   winuxsh plugin info <name> [--json] → inspect one official plugin
-//!   winuxsh plugin search [query] [--json] → discover official plugins
-//!   winuxsh plugin themes [--json] → list user and bundle themes
-//!   winuxsh plugin bundle status [--json] → inspect official bundle install state
-//!   winuxsh plugin doctor [--json] → diagnose plugin configuration health
-//!   winuxsh plugin review <name> [--json] → review plugin permissions
-//!   winuxsh plugin update oh-my-winuxsh --from <path> → install a bundle release
-//!   winuxsh plugin update oh-my-winuxsh --github-release latest → download/install bundle
-//!   winuxsh plugin rollback oh-my-winuxsh → roll back to the previous bundle
-//!   winuxsh --completion-probe "line" [cursor] → print REPL completions
-//!   winuxsh --install-wt-profile → add/update the Windows Terminal profile
-//!   winuxsh --self-update → download and run the latest installer
-//!   self-update / update-winuxsh → REPL commands for Winuxsh self-update
+//!   niubash                  → interactive REPL
+//!   niu -c "command"     → execute one command, print exit code, exit
+//!   niubash -C "command"     → execute one REPL-style command, then exit
+//!   niubash script.sh        → execute a script file
+//!   niubash --help | -h      → usage
+//!   niubash --version        → version (niubash / rubash / winuxcmd)
+//!   niubash setup            → re-run the interactive prompt/plugin wizard
+//!   niu plugin list [--json] → list official Niubash plugins
+//!   niu plugin info <name> [--json] → inspect one official plugin
+//!   niu plugin search [query] [--json] → discover official plugins
+//!   niu plugin themes [--json] → list user and bundle themes
+//!   niu plugin bundle status [--json] → inspect official bundle install state
+//!   niu plugin doctor [--json] → diagnose plugin configuration health
+//!   niu plugin review <name> [--json] → review plugin permissions
+//!   niu plugin update oh-my-winuxsh --from <path> → install a bundle release
+//!   niu plugin update oh-my-winuxsh --github-release latest → download/install bundle
+//!   niu plugin rollback oh-my-winuxsh → roll back to the previous bundle
+//!   niubash --completion-probe "line" [cursor] → print REPL completions
+//!   niubash --install-wt-profile → add/update the Windows Terminal profile
+//!   niubash --self-update → download and run the latest installer
+//!   self-update / update-niubash → REPL commands for Niubash self-update
 
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
@@ -31,15 +31,15 @@ use rubash::invocation::ShellInvocation;
 
 mod self_update;
 const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-winuxsh";
-const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "winuxsh-plugin-bundles";
-const WINUXSH_MAIN_STACK_SIZE: usize = 32 * 1024 * 1024;
+const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "niubash-plugin-bundles";
+const NIU_MAIN_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 fn main() -> ExitCode {
     std::thread::Builder::new()
-        .name("winuxsh-main".to_string())
-        .stack_size(WINUXSH_MAIN_STACK_SIZE)
+        .name("niu-main".to_string())
+        .stack_size(NIU_MAIN_STACK_SIZE)
         .spawn(run_main)
-        .expect("spawn winuxsh main thread")
+        .expect("spawn niubash main thread")
         .join()
         .unwrap_or_else(|_| ExitCode::from(1))
 }
@@ -52,7 +52,16 @@ fn run_main() -> ExitCode {
         .init();
 
     // Install Ctrl+C handler (best-effort)
-    winuxsh_runtime::ctrl_c::install();
+    niubash_runtime::ctrl_c::install();
+
+    // Expose the host binary path so rubash's bash shim can forward to niu.
+    // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(path) = exe.to_str() {
+            std::env::set_var("NIU_SHELL", path);
+            std::env::set_var("WINUXSH_SHELL", path);
+        }
+    }
 
     let args: Vec<String> = std::env::args().collect();
     if let Some(name) = args
@@ -67,7 +76,7 @@ fn run_main() -> ExitCode {
         if is_broken_pipe_error(&e) {
             return ExitCode::from(1);
         }
-        eprintln!("winuxsh: {}", e);
+        eprintln!("niu: {}", e);
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
@@ -75,7 +84,7 @@ fn run_main() -> ExitCode {
 
 fn run(args: &[String]) -> anyhow::Result<()> {
     if args.len() < 2 {
-        return if winuxsh_runtime::terminal::stdio_is_interactive() {
+        return if niubash_runtime::terminal::stdio_is_interactive() {
             run_repl()
         } else {
             run_stdin_script()
@@ -101,7 +110,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             print_version();
             Ok(())
         }
-        "--gitstatus-daemon" => winuxsh_runtime::git_status::run_daemon_stdio(),
+        "--gitstatus-daemon" => niubash_runtime::git_status::run_daemon_stdio(),
         "--completion-probe" => {
             print_completion_probe(args)?;
             Ok(())
@@ -111,14 +120,14 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(&args[2..]),
-        "setup" | "configure" => winuxsh_runtime::setup_wizard::rerun_wizard(),
+        "setup" | "configure" => niubash_runtime::setup_wizard::rerun_wizard(),
         "plugin" => run_plugin_command(args),
         "-C" | "--repl-command" => run_repl_command(args),
         "-c" => {
             if args.len() < 3 {
                 anyhow::bail!("-c requires an argument");
             }
-            let mut shell = winuxsh_runtime::Shell::new()?;
+            let mut shell = niubash_runtime::Shell::new()?;
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
             shell.executor.set_env("BASH_EXECUTION_STRING", &args[2]);
@@ -139,7 +148,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             if !script.exists() {
                 anyhow::bail!("unknown argument '{}' (not a script file)", first);
             }
-            let mut shell = winuxsh_runtime::Shell::new()?;
+            let mut shell = niubash_runtime::Shell::new()?;
             shell.executor.set_env("__RUBASH_SCRIPT_NAME", first);
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
@@ -157,15 +166,15 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 
 fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     let invocation =
-        ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
+        ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("niu: {}", error))?;
     let mut shell = if invocation.read_stdin {
-        winuxsh_runtime::Shell::new_for_stdin_script()?
+        niubash_runtime::Shell::new_for_stdin_script()?
     } else {
-        winuxsh_runtime::Shell::new()?
+        niubash_runtime::Shell::new()?
     };
     invocation
         .apply_to_executor(&mut shell.executor)
-        .map_err(|error| anyhow::anyhow!("winuxsh: {}", error))?;
+        .map_err(|error| anyhow::anyhow!("niu: {}", error))?;
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
 
@@ -222,20 +231,20 @@ fn script_arg_to_host_path(value: &str) -> PathBuf {
 
 fn run_repl() -> anyhow::Result<()> {
     self_update::maybe_print_update_hint();
-    let mut shell = winuxsh_runtime::Shell::new()?;
-    winuxsh_runtime::repl::run_repl(&mut shell)
+    let mut shell = niubash_runtime::Shell::new()?;
+    niubash_runtime::repl::run_repl(&mut shell)
 }
 
 fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
     if args.len() < 3 {
         anyhow::bail!("{} requires an argument", args[1]);
     }
-    if let Some(self_update_args) = winuxsh_runtime::repl::self_update_command_args(&args[2]) {
-        if let Some(code) = winuxsh_runtime::repl::spawn_self_update(&self_update_args) {
+    if let Some(self_update_args) = niubash_runtime::repl::self_update_command_args(&args[2]) {
+        if let Some(code) = niubash_runtime::repl::spawn_self_update(&self_update_args) {
             std::process::exit(code);
         }
     }
-    let mut shell = winuxsh_runtime::Shell::new()?;
+    let mut shell = niubash_runtime::Shell::new()?;
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
     if let Some(command_name) = args.get(3) {
@@ -252,7 +261,7 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_stdin_script() -> anyhow::Result<()> {
-    let mut shell = winuxsh_runtime::Shell::new_for_stdin_script()?;
+    let mut shell = niubash_runtime::Shell::new_for_stdin_script()?;
     shell.executor.inherit_process_stdin();
     let mut line = String::new();
     let mut pending = Vec::new();
@@ -279,7 +288,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
         }
         pending.push(line.to_string());
         let script = pending.join("\n");
-        if !winuxsh_runtime::repl::is_script_input_complete(&script) {
+        if !niubash_runtime::repl::is_script_input_complete(&script) {
             continue;
         }
 
@@ -402,15 +411,15 @@ fn internal_head_line_count(args: &[String]) -> Option<usize> {
 
 fn print_usage() {
     println!(
-        "Winuxsh {} \u{2014} a bash-compatible shell that feels at home on Windows.",
+        "Niubash {} \u{2014} a bash-compatible shell that feels at home on Windows.",
         env!("CARGO_PKG_VERSION")
     );
     println!();
-    println!("Usage:  winuxsh [option]");
-    println!("        winuxsh -c <cmd>         Run a command then exit");
-    println!("        winuxsh -C <cmd>         Run one REPL-style command then exit");
-    println!("        winuxsh setup           Re-run prompt/plugin setup");
-    println!("        winuxsh <script> [args]   Run a script file");
+    println!("Usage:  niubash [option]");
+    println!("        niu -c <cmd>         Run a command then exit");
+    println!("        niubash -C <cmd>         Run one REPL-style command then exit");
+    println!("        niubash setup           Re-run prompt/plugin setup");
+    println!("        niubash <script> [args]   Run a script file");
     println!();
     println!("Options:");
     println!("  -h, --help                Show this help");
@@ -419,16 +428,16 @@ fn print_usage() {
     println!("  -C, --repl-command <cmd>  Execute one non-interactive REPL command");
     println!();
     println!("  --install-wt-profile      Add/update the Windows Terminal profile");
-    println!("      --set-default         Also set Winuxsh as the WT default profile");
+    println!("      --set-default         Also set Niubash as the WT default profile");
     println!("      --quiet               Suppress non-error profile output");
     println!("  --self-update             Download and run the latest release installer");
     println!("      --check               Only report the latest release");
     println!("      --dry-run             Download installer without running it");
-    println!("  self-update               REPL command: update Winuxsh and exit this shell");
-    println!("  update-winuxsh            Alias for self-update");
+    println!("  self-update               REPL command: update Niubash and exit this shell");
+    println!("  update-niubash            Alias for self-update");
     println!();
-    println!("  plugin list [--json]      List official Winuxsh plugins");
-    println!("  plugin info <name> [--json]  Inspect one official Winuxsh plugin");
+    println!("  plugin list [--json]      List official Niubash plugins");
+    println!("  plugin info <name> [--json]  Inspect one official Niubash plugin");
     println!("  plugin search [query] [--json]  Discover official plugins");
     println!("  plugin themes [--json]    List user and bundle themes");
     println!("  plugin bundle status [--json]  Inspect official bundle install state");
@@ -442,7 +451,7 @@ fn print_usage() {
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
-    println!("Configuration: ~/.winuxshrc for interactive startup; ~/.winshrc remains a compatibility fallback");
+    println!("Configuration: ~/.niubashrc for interactive startup; ~/.winshrc remains a compatibility fallback");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
@@ -459,9 +468,9 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         "list" => {
             let json = parse_plugin_json_flag(&args[3..])?;
             if json {
-                println!("{}", winuxsh_runtime::plugins::plugin_packs_json()?);
+                println!("{}", niubash_runtime::plugins::plugin_packs_json()?);
             } else {
-                println!("{}", winuxsh_runtime::plugins::plugin_packs_text());
+                println!("{}", niubash_runtime::plugins::plugin_packs_text());
             }
             Ok(())
         }
@@ -473,12 +482,12 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
             };
             let json = parse_plugin_json_flag(&args[4..])?;
             if json {
-                match winuxsh_runtime::plugins::plugin_pack_json(name)? {
+                match niubash_runtime::plugins::plugin_pack_json(name)? {
                     Some(output) => println!("{}", output),
                     None => anyhow::bail!("unknown plugin '{}'", name),
                 }
             } else {
-                match winuxsh_runtime::plugins::plugin_pack_text(name) {
+                match niubash_runtime::plugins::plugin_pack_text(name) {
                     Some(output) => println!("{}", output),
                     None => anyhow::bail!("unknown plugin '{}'", name),
                 }
@@ -496,12 +505,12 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
 
 fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {
     let json = parse_plugin_json_flag(args)?;
-    let config = winuxsh_runtime::config::load();
-    let report = winuxsh_runtime::plugins::plugin_doctor_report(&config.plugins);
+    let config = niubash_runtime::config::load();
+    let report = niubash_runtime::plugins::plugin_doctor_report(&config.plugins);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("{}", winuxsh_runtime::plugins::plugin_doctor_text(&report));
+        println!("{}", niubash_runtime::plugins::plugin_doctor_text(&report));
     }
     Ok(())
 }
@@ -511,14 +520,14 @@ fn run_plugin_review_command(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("plugin review requires a plugin name");
     };
     let json = parse_plugin_json_flag(&args[1..])?;
-    let config = winuxsh_runtime::config::load();
-    let review = winuxsh_runtime::plugins::plugin_permission_review(name, &config.plugins)?;
+    let config = niubash_runtime::config::load();
+    let review = niubash_runtime::plugins::plugin_permission_review(name, &config.plugins)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&review)?);
     } else {
         println!(
             "{}",
-            winuxsh_runtime::plugins::plugin_permission_review_text(&review)
+            niubash_runtime::plugins::plugin_permission_review_text(&review)
         );
     }
     Ok(())
@@ -529,12 +538,12 @@ fn run_plugin_search_command(args: &[String]) -> anyhow::Result<()> {
     if json {
         println!(
             "{}",
-            winuxsh_runtime::plugins::plugin_search_json(query.as_deref())?
+            niubash_runtime::plugins::plugin_search_json(query.as_deref())?
         );
     } else {
         println!(
             "{}",
-            winuxsh_runtime::plugins::plugin_search_text(query.as_deref())
+            niubash_runtime::plugins::plugin_search_text(query.as_deref())
         );
     }
     Ok(())
@@ -543,9 +552,9 @@ fn run_plugin_search_command(args: &[String]) -> anyhow::Result<()> {
 fn run_plugin_themes_command(args: &[String]) -> anyhow::Result<()> {
     let json = parse_plugin_json_flag(args)?;
     if json {
-        println!("{}", winuxsh_runtime::plugins::plugin_theme_catalog_json()?);
+        println!("{}", niubash_runtime::plugins::plugin_theme_catalog_json()?);
     } else {
-        println!("{}", winuxsh_runtime::plugins::plugin_theme_catalog_text());
+        println!("{}", niubash_runtime::plugins::plugin_theme_catalog_text());
     }
     Ok(())
 }
@@ -559,9 +568,9 @@ fn run_plugin_bundle_command(args: &[String]) -> anyhow::Result<()> {
         "status" => {
             let json = parse_plugin_json_flag(&args[1..])?;
             if json {
-                println!("{}", winuxsh_runtime::plugins::plugin_bundle_status_json()?);
+                println!("{}", niubash_runtime::plugins::plugin_bundle_status_json()?);
             } else {
-                println!("{}", winuxsh_runtime::plugins::plugin_bundle_status_text());
+                println!("{}", niubash_runtime::plugins::plugin_bundle_status_text());
             }
             Ok(())
         }
@@ -599,7 +608,7 @@ fn run_plugin_update_command(args: &[String]) -> anyhow::Result<()> {
             "plugin update requires --from <bundle-dir-or-zip> or --github-release latest|vX.Y.Z"
         ),
     };
-    let summary = winuxsh_runtime::plugins::apply_plugin_bundle_update_from_path(
+    let summary = niubash_runtime::plugins::apply_plugin_bundle_update_from_path(
         bundle,
         &source_path,
         checksum.as_deref(),
@@ -635,7 +644,7 @@ fn run_plugin_rollback_command(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("plugin rollback requires a bundle name");
     };
     let json = parse_plugin_json_flag(&args[1..])?;
-    let summary = winuxsh_runtime::plugins::apply_plugin_bundle_rollback(bundle)?;
+    let summary = niubash_runtime::plugins::apply_plugin_bundle_rollback(bundle)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
@@ -710,10 +719,10 @@ fn download_plugin_bundle_github_release(
     bundle: &str,
     release: &str,
 ) -> anyhow::Result<DownloadedPluginBundle> {
-    if bundle != winuxsh_runtime::plugins::OFFICIAL_BUNDLE_NAME {
+    if bundle != niubash_runtime::plugins::OFFICIAL_BUNDLE_NAME {
         anyhow::bail!(
             "GitHub bundle updates are only supported for {}",
-            winuxsh_runtime::plugins::OFFICIAL_BUNDLE_NAME
+            niubash_runtime::plugins::OFFICIAL_BUNDLE_NAME
         );
     }
     let tag = resolve_plugin_bundle_release_tag(release)?;
@@ -805,11 +814,11 @@ fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, 
 }
 
 fn print_plugin_usage() {
-    println!("Usage:  winuxsh plugin <command>");
+    println!("Usage:  niu plugin <command>");
     println!();
     println!("Commands:");
-    println!("  list [--json]             List official Winuxsh plugins");
-    println!("  info <name> [--json]      Inspect one official Winuxsh plugin");
+    println!("  list [--json]             List official Niubash plugins");
+    println!("  info <name> [--json]      Inspect one official Niubash plugin");
     println!("  search [query] [--json]   Discover official plugins");
     println!("  themes [--json]           List user and bundle themes");
     println!("  bundle status [--json]    Inspect official bundle install state");
@@ -840,7 +849,7 @@ fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
 
     let commandline = std::env::current_exe()?;
     let icon = windows_terminal_icon_path(&commandline);
-    let summary = winuxsh_runtime::windows_terminal::install_winuxsh_profile(
+    let summary = niubash_runtime::windows_terminal::install_niubash_profile(
         &commandline,
         icon.as_deref(),
         set_default,
@@ -862,10 +871,10 @@ fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
 fn windows_terminal_icon_path(commandline: &std::path::Path) -> Option<PathBuf> {
     let app_dir = commandline.parent()?;
     [
-        app_dir.join("assets").join("winuxsh-icon-256.png"),
-        app_dir.join("assets").join("winuxsh-icon.png"),
-        app_dir.join("winuxsh-icon-256.png"),
-        app_dir.join("winuxsh-icon.png"),
+        app_dir.join("assets").join("niubash-icon-256.png"),
+        app_dir.join("assets").join("niubash-icon.png"),
+        app_dir.join("niubash-icon-256.png"),
+        app_dir.join("niubash-icon.png"),
     ]
     .into_iter()
     .find(|path| path.is_file())
@@ -882,7 +891,7 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
     } else {
         line.len()
     };
-    let mut shell = winuxsh_runtime::Shell::new()?;
+    let mut shell = niubash_runtime::Shell::new()?;
     shell.run_startup_rc();
     for suggestion in shell.completion_probe(line, cursor_pos) {
         println!("{}", suggestion);
@@ -892,17 +901,17 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
 
 fn print_version() {
     println!(
-        "Winuxsh {} \u{2014} bash-compatible shell for Windows",
+        "Niubash {} \u{2014} bash-compatible shell for Windows",
         env!("CARGO_PKG_VERSION")
     );
     println!("  rubash   git {}", rubash_revision());
-    if let Some(v) = winuxsh_runtime::winuxcmd::version() {
+    if let Some(v) = niubash_runtime::winuxcmd::version() {
         println!("  winuxcmd {}", v);
     }
 }
 
 fn rubash_revision() -> &'static str {
-    option_env!("WINUXSH_RUBASH_REV").unwrap_or("master")
+    option_env!("NIU_RUBASH_REV").unwrap_or("master")
 }
 
 fn is_broken_pipe_error(error: &anyhow::Error) -> bool {

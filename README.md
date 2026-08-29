@@ -1,25 +1,34 @@
-# Winuxsh
+# niubash
+
+<p align="center">
+  <img src="assets/niubash-icon-256.png" alt="niubash" width="120"/>
+</p>
 
 > **Bash, native on Windows.** No WSL. No VM. No `/mnt/c`. No cmdlet dialect.
-> Just the shell your fingers already know — and the one your AI agent actually speaks.
+> One `niu.exe`: the shell your fingers already know — and the one your AI
+> agent actually speaks.
 
 [English](README.md) · [中文](README-zh.md)
 
-[![Winuxsh CI](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml)
+[![niubash CI](https://github.com/unixwin/niubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/niubash/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/unixwin/niubash)](https://github.com/unixwin/niubash/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)](https://github.com/unixwin/niubash)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)](https://github.com/unixwin/niubash)
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/unixwin/winuxsh)](https://github.com/unixwin/winuxsh/stargazers)
+[![Stars](https://img.shields.io/github/stars/unixwin/niubash)](https://github.com/unixwin/niubash/stargazers)
 
-One native Windows binary. Bash syntax. Windows paths. Real Windows programs.
-Unix commands included. No emulation layer between your command and your
-tools — and nothing for your AI agent to trip over.
+One native Windows binary, now at v1.0.0. Bash syntax. Windows paths. Real
+Windows programs. Unix commands included. No emulation layer between your
+command and your tools — and nothing for your AI agent to trip over.
 
-<img src="assets/demo.gif" alt="Winuxsh interactive session: git prompt, grep, sed in-place editing, awk pipelines, tree" width="760"/>
+<img src="assets/demo.gif" alt="niubash interactive session: git prompt, grep, sed in-place editing, awk pipelines, tree" width="760"/>
 
 That's it. That's the whole pitch.
 
-## The pitch
+## Why not WSL
 
-**You don't need WSL. You need Winuxsh.**
+Booting a Linux VM to run `grep` is buying a whole ranch because you wanted
+a glass of milk. Nice cows, terrible logistics.
 
 Every Windows shell asks you to give something up. CMD is frozen in 1987.
 PowerShell isn't Bash — your `for` loops and quoting instincts die on
@@ -27,22 +36,105 @@ arrival. WSL is a whole Linux distro you adopt just to print a directory.
 Git Bash emulates Unix and *guesses* at your paths, and Windows-native tools
 refuse to speak its dialect.
 
-Winuxsh gives it all back:
+niubash gives it all back:
 
-- **Bash, for real** — `if`, `for`, `case`, `$(...)`, pipes, heredocs, functions, arrays. The engine is [rubash](https://github.com/unixwin/rubash), which passes GNU Bash's own test suite: **86/86**.
-- **Windows paths, native** — `C:\...` and `C:/...` work as-is, `/c/...` input is understood, and output is always native. Native tools get native paths, zero guessing.
-- **Unix commands included** — `ls`, `cat`, `grep`, `find`, `test`, `printf`, ... via WinuxCmd. Nothing to install.
+- **Bash, for real** — `if`, `for`, `case`, `$(...)`, pipes, heredocs, functions, arrays. The engine is [rubash](https://github.com/unixwin/rubash), which passes GNU Bash's own test suite: **86/86**. Compatibility isn't a claim — upstream already sat the exam for us.
+- **Windows paths, native in and native out** — `C:\...` and `C:/...` work as-is, `/c/...` input is understood, and output is always native. Native tools get native paths, zero guessing, zero path roulette.
+- **Unix commands included** — `ls`, `cat`, `grep`, `find`, `test`, `printf`, ... as real binaries from winuxcmd (not script shims), injected via PATH command links. Nothing to install.
 - **Real Windows programs, direct** — `git.exe`, `node.exe`, `python.exe`, `cargo.exe`. Your PATH is your PATH.
-- **A prompt you'll enjoy** — 27 themes (agnoster, spaceship, tokyonight, p10 family...), a git prompt that grows teeth, syntax highlighting, autosuggestions, vi/emacs modes.
-- **Plugins with a permission model** — 40+ packs (`git`, `docker`, `kubectl`, `npm`, `zoxide`, `fzf`, `thefuck`, ...); reviewed source packs and process adapters declare the host access they need.
 
-## AI-native
+## Up and running in 30 seconds
 
-Every AI coding agent speaks Bash. On Windows, most are stuck with PowerShell
-— the shell that famously *eats arguments*:
+Grab `niubash-v*-win-*-setup.exe` from
+[Releases](https://github.com/unixwin/niubash/releases) (currently v1.0.0)
+and run it — no admin rights; it wires up your PATH and a Windows Terminal
+profile. Prefer portable? Take the `.zip` (first launch self-activates the
+Unix commands). From source:
+
+```sh
+git clone https://github.com/unixwin/niubash.git && cd niubash
+cargo build --release && target\release\niu.exe
+```
+
+Then:
+
+```sh
+niu -c 'ls'                                   # exactly that simple
+niu -c 'for f in *.md; do wc -l "$f"; done'   # a real bash loop, quoting instincts intact
+niu -c 'git log --oneline -5'                 # your git.exe, called as-is
+niu deploy.sh                                 # script mode: quiet, deterministic, exact exit codes
+niu                                           # interactive REPL
+```
+
+One config file: `~/.niubashrc`, plain Bash syntax. Theme, prompt, plugins,
+exports, aliases, and functions all live there:
+
+```bash
+NIU_THEME=p10-classic
+NIU_THEME_PLUGIN=theme-p10-classic
+NIU_PLUGINS=(prompt-core git common-aliases)
+export NIU_THEME NIU_THEME_PLUGIN
+
+# the official plugin distribution, oh-my-winuxsh
+[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+
+alias ll='ls -la'
+alias gst='git status'
+hello() { echo "hello from niu"; }
+```
+
+Sharing history across shells? `NIU_HISTORY_MODE` offers `shared` (default),
+`session`, and `private`.
+
+Coming from winuxsh? On first launch your old `~/.winuxshrc` is
+**auto-migrated once** into `~/.niubashrc` (the `NIU_*` prefix is rewritten,
+the original file is left untouched, silent and idempotent). `~/.winshrc`
+remains a compatibility fallback, read only when `~/.niubashrc` is absent.
+
+Keep it current: `niu --self-update` (or `self-update` inside the shell).
+
+## Features
+
+- **Real Bash semantics** — the [rubash](https://github.com/unixwin/rubash) engine (also 1.0.0), 86/86 on GNU Bash's upstream test suite.
+- **Native path contract** — any dialect in, Windows-native out. MSYS-style path conversion roulette does not exist here.
+- **Unix commands as real binaries** — winuxcmd (1.0.0) injects PATH command links; `ls`/`grep` are real Windows processes, not emulation inside the shell.
+- **A prompt you'll enjoy** — 27 themes (agnoster, spaceship, tokyonight, the p10 family, ...), a git status prompt that grows teeth (staged / modified / untracked / ahead / behind / stashes / conflicts), syntax highlighting, autosuggestions, vi/emacs modes, Ctrl+R history search.
+- **Plugins with a permission model** — 40+ official packs (`git`, `docker`, `kubectl`, `npm`, `zoxide`, `direnv`, `fzf`, `thefuck`, ...), host access declared in manifests, reviewed source packs load only bundle-local declared scripts.
+- **Completions** — shell definitions + automatic bash completion import + `cmd -h` description sniffing + three-level caching.
+- **Three execution modes** — interactive REPL; `niu -c` (quiet and deterministic, loads no rc and no plugins); `niu -C` (one-shot REPL command with full startup state, then exits).
+- **Self-update** — the shell (`niu --self-update`), the command layer (`wpm update winuxcmd`), and plugin bundles each update on their own plane.
+
+## Architecture
+
+```
+niu.exe
+├── niubash host layer (Rust)     reedline line editing · themes · completions · plugins · Ctrl+C
+├── rubash engine (lib, Rust)     lexer / parser / executor / builtins
+└── winuxcmd.exe command layer (C++)  Unix coreutils as real binaries, PATH command links
+```
+
+- **rubash is the engine, and the single authority** — niubash does not
+  implement the shell language itself; rubash is linked directly as a Rust
+  crate. Parsing, execution, builtins, expansion, redirects, pipelines, and
+  job control all live upstream. Semantic bugs get fixed in
+  [rubash](https://github.com/unixwin/rubash), and every Bash user on
+  Windows wins together.
+- **winuxcmd is a command layer, not a DLL** — no FFI, no routing magic.
+  It is an ordinary Windows process; rubash finds `ls`, `grep` and friends
+  through the normal Windows PATH.
+- **oh-my-winuxsh is the official plugin distribution** — shipped with
+  niubash, manifest-declared permissions, in two shapes: reviewed source
+  packs and process adapters.
+- Non-goal: a native Linux/macOS shell product. rubash is portable, but
+  niubash targets Windows — one thing, done extremely well.
+
+## AI-agent friendly
+
+Every AI coding agent speaks Bash — models are trained on Bash. On Windows,
+most are stuck with PowerShell, the shell that famously *eats arguments*:
 
 ```text
-# PowerShell 5.1                                # Winuxsh
+# PowerShell 5.1                                # niubash
 > node -e "console.log(JSON.stringify(          ❯ node -e "console.log(JSON.stringify(
     process.argv.slice(1)))" "a b" "" "c\"d"      process.argv.slice(1)))" "a b" "" "c\"d"
     "e\f" "---"                                   "e\f" "---"
@@ -50,83 +142,77 @@ Every AI coding agent speaks Bash. On Windows, most are stuck with PowerShell
 ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 ```
 
-Five arguments in. PowerShell throws a parse error; Winuxsh delivers all five
-byte-for-byte. Even [Codex is locked to PowerShell on Windows](https://github.com/openai/codex/issues/31548) — users are literally voting to escape.
-[Why Winuxsh](docs/src/why-winuxsh.md) has the full receipts.
+Five arguments in. PowerShell throws a parse error; niubash delivers all five
+byte-for-byte. Even [Codex is locked to PowerShell on Windows](https://github.com/openai/codex/issues/31548)
+— users are literally voting to escape. The full receipts are in
+[Why niubash](docs/src/why-niubash.md).
+
+`niu -c` is a contract, not an afterthought:
+
+- **No banners**, stable stdout/stderr, **exact exit-code propagation** — what the agent writes is what the process receives.
+- `niu -c` loads **no rc, no plugins, no interactive hooks** — today's run and tomorrow's run are the same run.
+- **Zero path conversion** — Bash instincts work directly, with none of MSYS's argument-rewriting roulette.
+- A model trained on Bash finally doesn't have to learn the local dialect.
 
 This is what that feels like from the other side of the keyboard:
 
-<img src="assets/demo-drama.gif" alt="Animated story: a developer chats with codex, PowerShell eats the arguments, the user loses it, then winuxsh saves the day" width="520"/>
+<img src="assets/demo-drama.gif" alt="Animated story: a developer chats with codex, PowerShell eats the arguments, the user loses it, then niubash saves the day" width="520"/>
 
-`winuxsh -c` is a contract, not an afterthought: **no banners, stable
-stdout/stderr, exact exit-code propagation.** What the agent writes is what
-the process receives.
+## How it compares
 
-```sh
-winuxsh -c 'test -f Cargo.toml && echo build' && echo "exit=$?"
-winuxsh deploy.sh
-```
+| | niubash | WSL | Git Bash | PowerShell | CMD |
+|---|---|---|---|---|---|
+| Bash syntax | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Native Windows paths (no `/mnt/c`) | ✅ | ❌ | ⚠️ conversion quirks | ✅ | ✅ |
+| Calls `git.exe` / `node.exe` directly | ✅ | ⚠️ via `/mnt/c` | ⚠️ path translation | ✅ | ✅ |
+| Unix commands (`ls`, `grep`, `find`) | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Agent-written Bash just runs | ✅ | ✅ | ⚠️ arg rewriting | ❌ | ❌ |
+| Cold start to prompt | **~170 ms** | seconds | ~1 s | ~280 ms | — |
+| No extra OS, no VM | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Themes / git prompt / plugins | ✅ | — | ✅ | ⚠️ | ❌ |
 
-## Install
-
-Grab `winuxsh-v*-win-*-setup.exe` from [Releases](https://github.com/unixwin/winuxsh/releases) and run it — no admin rights; it wires up your PATH and a Windows Terminal profile. Or take the portable zip (first launch self-activates the Unix commands). From source:
-
-```sh
-git clone https://github.com/unixwin/winuxsh.git && cd winuxsh
-cargo build --release && target\release\winuxsh.exe
-```
-
-Keep it current: `winuxsh --self-update`.
-
-## Configuration
-
-`~/.winuxshrc` is the interactive entry point. Put your theme, prompt,
-plugins, exports, aliases, and functions there:
-
-```sh
-WINUXSH_THEME=spaceship
-WINUXSH_PLUGINS=(prompt-core git)
-[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
-```
-
-History sharing can be selected with `WINUXSH_HISTORY_MODE=shared`,
-`session`, or `private`. See [Advanced usage](docs/src/advanced-usage.md)
-for the behavior of each mode.
-
-## Terminal toys
-
-Winuxsh's terminal isn't just for commands — it prints pictures. The
-[terminal-flags](https://github.com/caomengxuan666/terminal-flags) project
-turns any image or GIF into a standalone ANSI printer script:
-
-```sh
-winuxsh flags/taffy.sh         # photos, right in the terminal
-winuxsh flags/qiu-dance.sh     # animated GIFs, frame timing preserved
-```
-
-Truecolor half-block pixels, no Python or Pillow needed at runtime:
-
-<img src="assets/demo-qiu-dance.gif" alt="An animated Qiubiaoqing sticker playing inside a Winuxsh terminal, printed from a generated shell script" width="560"/>
-
-## Documentation
-
-Full docs site: **[docs](https://unixwin.github.io/winuxsh/)** · [Getting started](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [Advanced usage](docs/src/advanced-usage.md) · [Architecture](docs/src/architecture.md)
-
-Under the hood: [rubash](https://github.com/unixwin/rubash) (Bash engine) · WinuxCmd (Unix commands) · [reedline](https://github.com/nushell/reedline) (line editor)
+One binary. One process. No distro to patch, no emulation layer to appease.
 
 ## FAQ
 
-- **Another Git Bash?** No — Git Bash emulates Unix on top of Windows. Winuxsh is a native Windows process: native paths, direct Windows binary execution, Bash compatibility in the language engine, not a fake filesystem.
-- **Still need WSL?** Sure — for real Linux kernels, Linux Docker, Linux-only toolchains. For the other 95% of your day: you don't need WSL. You need Winuxsh.
-- **Where's my config?** `~/.winuxshrc` — plain Bash. Winuxsh manages its own
-  machine state; users do not need to maintain a second configuration format.
+- **Another Git Bash?** No — Git Bash emulates Unix on top of Windows:
+  translating paths, guessing at arguments. niubash is a native Windows
+  process; Bash compatibility happens in the language engine (rubash), not
+  in a fake filesystem.
+- **Still need WSL?** Sure — for real Linux kernels, Linux Docker,
+  Linux-only toolchains, it's still the right tool. For the other 95% of
+  your day: you don't need WSL. You need niubash.
+- **Where's my config? What about my old winuxsh `~/.winuxshrc`?**
+  `~/.niubashrc`, plain Bash. First launch auto-migrates your old
+  `~/.winuxshrc` once (the original file is kept untouched); `~/.winshrc`
+  is read only as a fallback when `~/.niubashrc` is absent. niubash manages
+  its own machine state — you never maintain a second config format.
+- **Why the name `niu`?** Short, fast to type, zero finger travel. The
+  project is niubash, the binary is `niu`, the env prefix is `NIU_` — and
+  "niu" (牛) is what your shell should be on Windows.
+- **Is this a hit piece on PowerShell?** No. PowerShell is a genuinely
+  powerful automation language — it just isn't Bash. Models are trained on
+  Bash and then forced to speak cmdlet on Windows. The problem is the
+  mismatch, not the people.
+
+## Documentation
+
+Full docs site: **[docs](https://unixwin.github.io/niubash/)** · [Getting started](docs/src/getting-started.md) · [Why niubash](docs/src/why-niubash.md) · [Advanced usage](docs/src/advanced-usage.md) · [Architecture](docs/src/architecture.md)
 
 ---
 
-If Winuxsh just saved you from booting a Linux VM to run `grep`,
-[star the repo](https://github.com/unixwin/winuxsh) and tell a Windows
+If niubash just saved you from booting a Linux VM to run `grep`,
+[star the repo](https://github.com/unixwin/niubash) and tell a Windows
 developer. ★
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+<!--
+Slogan candidates (the body uses the primary):
+
+Primary: Bash, native on Windows. No WSL. No VM. No `/mnt/c`. No cmdlet dialect.
+Backup 1: One `niu.exe`. All of Bash. Zero emulation.
+Backup 2: The shell your fingers already know — and the one your agent actually speaks.
+-->

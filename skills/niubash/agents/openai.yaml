@@ -1,0 +1,7 @@
+interface:
+  display_name: "Niubash Native Codex"
+  short_description: "Run Codex directly inside native Niubash."
+  default_prompt: "Use $niubash-native-codex for native Niubash shell tasks."
+
+policy:
+  allow_implicit_invocation: true

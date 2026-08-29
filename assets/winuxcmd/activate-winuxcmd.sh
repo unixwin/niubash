@@ -41,7 +41,7 @@ case "$1" in
     echo "Usage: activate-winuxcmd.sh [--remove] [--symbolic]"
     echo
     echo "Creates command links in usr/bin so ls/cat/grep/etc"
-    echo "resolve through PATH when winuxsh starts."
+    echo "resolve through PATH when niubash starts."
     echo "Modern WinuxCmd builds use WPM for link discovery; older builds"
     echo "fall back to this script's bundled command list."
     echo

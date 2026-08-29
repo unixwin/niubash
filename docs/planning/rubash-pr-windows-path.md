@@ -7,7 +7,7 @@ Branch to propose: `fix/windows-path-casing`
 
 On Windows, `std::env::vars()` returns the `PATH` environment variable as `Path` (capital P, lowercase rest). But `rubash::executor::path::find_user_command` reads it via `env_vars.get("PATH")` (all caps), which is a case-sensitive `HashMap` lookup. As a result rubash never finds external commands on Windows unless the user explicitly sets an all-caps `PATH` themselves.
 
-This breaks every external command call (`ls`, `grep`, `cat`, ...) when rubash is embedded into a Windows shell host that doesn't itself inject the uppercase key (e.g., `winuxsh`).
+This breaks every external command call (`ls`, `grep`, `cat`, ...) when rubash is embedded into a Windows shell host that doesn't itself inject the uppercase key (e.g., `niubash`).
 
 ## Reproduction
 
@@ -150,4 +150,4 @@ mixed-case and explicit-uppercase PATH scenarios.
 >
 > ### Verification
 >
-> Reproduced the original failure with `winuxsh -c 'ls .'` (returns "command not found" with stock rubash). After the patch the same call works.
+> Reproduced the original failure with `niu -c 'ls .'` (returns "command not found" with stock rubash). After the patch the same call works.

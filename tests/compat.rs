@@ -1,7 +1,7 @@
 //! Compat test runner.
 //!
 //! Each `<name>.sh` in `tests/compat/fixtures/` is executed via the built
-//! `winuxsh` binary, and its stdout is compared against `<name>.expected`.
+//! `niubash` binary, and its stdout is compared against `<name>.expected`.
 //!
 //! Tests are marked `#[ignore]` because they require winuxcmd command links
 //! (for example `grep.exe` and `tr.exe`) to be discoverable in PATH. A bare
@@ -18,19 +18,15 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn winuxsh_binary() -> PathBuf {
-    // cargo test builds the bin to target/<profile>/winuxsh[.exe]
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
+fn niu_binary() -> PathBuf {
+    // cargo test builds the bin to target/<profile>/niubash[.exe]
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_niu"));
     if !p.exists() {
         // fall back to the known target dir layout
         let mut fallback = repo_root();
         fallback.push("target");
         fallback.push("debug");
-        fallback.push(if cfg!(windows) {
-            "winuxsh.exe"
-        } else {
-            "winuxsh"
-        });
+        fallback.push(if cfg!(windows) { "niu.exe" } else { "niubash" });
         if fallback.exists() {
             return fallback;
         }
@@ -70,13 +66,13 @@ fn run_case(name: &str) {
     let script_content =
         fs::read_to_string(&script).unwrap_or_else(|e| panic!("read {}: {e}", script.display()));
 
-    // Run via `winuxsh -c <script_content>` so we exercise the same path as
+    // Run via `niu -c <script_content>` so we exercise the same path as
     // interactive use without relying on the line-by-line script-file reader
     // (which still has heredoc/continuation gaps tracked as T-4).
-    let bin = winuxsh_binary();
+    let bin = niu_binary();
     assert!(
         bin.exists(),
-        "winuxsh binary not found at {}",
+        "niubash binary not found at {}",
         bin.display()
     );
 

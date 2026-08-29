@@ -1,28 +1,28 @@
-# Getting Started with Winuxsh
+# Getting Started with Niubash
 
 A short walkthrough from zero to a working prompt with git status.
 
 ## 1. Build or download
 
 ```sh
-git clone https://github.com/unixwin/winuxsh.git
-cd winuxsh
+git clone https://github.com/unixwin/niubash.git
+cd niubash
 cargo build --release
 ```
 
-After building, the binary is at `target\release\winuxsh.exe`. You can run it
+After building, the binary is at `target\release\niu.exe`. You can run it
 directly, or add `target\release` to your user `PATH` using your normal Windows
 environment settings:
 
 ```sh
-target/release/winuxsh.exe
+target/release/niu.exe
 ```
 
-If you are using the release zip, winuxsh automatically runs the activation
+If you are using the release zip, niubash automatically runs the activation
 script on first start when command links are missing:
 
 ```bash
-winuxsh winuxcmd/activate-winuxcmd.sh
+niubash winuxcmd/activate-winuxcmd.sh
 ```
 
 That creates local command links inside `winuxcmd/`, so `ls`, `cat`, and
@@ -31,7 +31,7 @@ friends resolve normally. Once the links exist, startup skips activation.
 ## 2. Start the shell
 
 ```sh
-winuxsh
+niubash
 ```
 
 You should see something like:
@@ -107,29 +107,29 @@ git branch -<Tab>           # shows -d, -D, -m, -v, -a, -r
 
 ## 6. Set up your config
 
-Create `~/.winuxshrc` for interactive shell code, plugin selection, and theme
+Create `~/.niubashrc` for interactive shell code, plugin selection, and theme
 selection:
 
 ```bash
-WINUXSH_THEME=minimal
-WINUXSH_THEME_PLUGIN=theme-minimal
-WINUXSH_PROMPT_SYMBOL="❯"
-export WINUXSH_THEME WINUXSH_THEME_PLUGIN WINUXSH_PROMPT_SYMBOL
+NIU_THEME=minimal
+NIU_THEME_PLUGIN=theme-minimal
+NIU_PROMPT_SYMBOL="❯"
+export NIU_THEME NIU_THEME_PLUGIN NIU_PROMPT_SYMBOL
 
-WINUXSH_PLUGINS=(prompt-core git)
+NIU_PLUGINS=(prompt-core git)
 
 if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
   HOME="$USERPROFILE"
   export HOME
 fi
 
-if [ -z "${WINUXSH:-}" ]; then
-  WINUXSH="$HOME/.oh-my-winuxsh"
-  export WINUXSH
+if [ -z "${NIUBASH:-}" ]; then
+  NIUBASH="$HOME/.oh-my-winuxsh"
+  export NIUBASH
 fi
 
-[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
-winuxsh_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{time} " 2>/dev/null || true
+[ -f "$NIUBASH/oh-my-winuxsh.winux" ] && . "$NIUBASH/oh-my-winuxsh.winux"
+niubash_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{time} " 2>/dev/null || true
 
 export EDITOR=vim
 alias ll='ls -la'
@@ -139,28 +139,28 @@ alias gco='git checkout'
 alias gl='git log --oneline --graph --decorate --all'
 
 hello() {
-  echo "hello from winuxsh"
+  echo "hello from niubash"
 }
 ```
 
-`~/.winuxshrc` is sourced only for the interactive REPL and the `-C`
-one-shot REPL command path. It does not run for `winuxsh -c ...`, script files,
+`~/.niubashrc` is sourced only for the interactive REPL and the `-C`
+one-shot REPL command path. It does not run for `niu -c ...`, script files,
 or stdin script execution, so agent and CI surfaces stay deterministic.
 
 `~/.winshrc` is a legacy compatibility fallback and is used only when
-`~/.winuxshrc` is absent. Plugin CLI enable/disable records, migration blocks,
+`~/.niubashrc` is absent. Plugin CLI enable/disable records, migration blocks,
 completion overrides, test isolation, and advanced machine state are managed
-internally. Prefer `~/.winuxshrc` for normal interactive customization.
+internally. Prefer `~/.niubashrc` for normal interactive customization.
 
 ## 6b. Prompt and theme plugins
 
 Themes are official plugins. To use a Powerlevel-style theme, switch the theme
-plugin in `~/.winuxshrc`:
+plugin in `~/.niubashrc`:
 
 ```bash
-WINUXSH_THEME=p10-lean
-WINUXSH_THEME_PLUGIN=theme-p10-lean
-WINUXSH_PLUGINS=(prompt-core git)
+NIU_THEME=p10-lean
+NIU_THEME_PLUGIN=theme-p10-lean
+NIU_PLUGINS=(prompt-core git)
 ```
 
 Useful bundled theme plugins include `theme-minimal`, `theme-classic`,
@@ -172,7 +172,7 @@ values plus bold, italic, underline, and dimmed flags.
 Prompt templates use the public prompt-core API:
 
 ```bash
-winuxsh_prompt_use_template "{cwd} {git}{prompt_char} " "{status}{time} "
+niubash_prompt_use_template "{cwd} {git}{prompt_char} " "{status}{time} "
 ```
 
 Available template tokens include `{cwd}`, `{cwd_base}`, `{user_host}`,
@@ -183,26 +183,26 @@ line the user is typing on.
 
 ## 7. Official plugin bundle
 
-Winuxsh has a built-in plugin system. `oh-my-winuxsh` is the
+Niubash has a built-in plugin system. `oh-my-winuxsh` is the
 official bundled plugin distribution. It ships first-party packs such as `git`, `docker`, `kubectl`,
 `npm`, `zoxide`, `direnv`, `dotenv`, `fzf`, prompt presets, and keybinding
 presets.
 
-The normal interactive shape is the `~/.winuxshrc` plugin list shown above.
-`winuxsh plugin enable/disable` and migration tooling update internal managed
+The normal interactive shape is the `~/.niubashrc` plugin list shown above.
+`niu plugin enable/disable` and migration tooling update internal managed
 state. Official shell helper packs can
-ship reviewed bundle-local `init.winux` source scripts. If `~/.winuxshrc`
+ship reviewed bundle-local `init.winux` source scripts. If `~/.niubashrc`
 exists, it is the source-plugin entry point and loads the framework directly.
-Without `~/.winuxshrc`, managed startup can still load enabled source packs
-before fallback `~/.winshrc`. Use `winuxsh plugin list`,
-`winuxsh plugin search`, `winuxsh plugin themes`, and
-`winuxsh plugin review` for current inventory, theme sources, and permission
+Without `~/.niubashrc`, managed startup can still load enabled source packs
+before fallback `~/.winshrc`. Use `niu plugin list`,
+`niu plugin search`, `niu plugin themes`, and
+`niu plugin review` for current inventory, theme sources, and permission
 checks.
 
 ## What next
 
 - [Plugin System Direction](../planning/plugin-system-direction.md) for the v3 plugin model
 - [Plugin System Roadmap](../planning/plugin-system-roadmap.md) for the execution sequence
-- [Oh My Winuxsh Bundle Plan](../planning/oh-my-winuxsh-bundle-plan.md) for the official bundle
-- [Roadmap](winuxsh-roadmap.md) to see what is planned
-- Source at [github.com/unixwin/winuxsh](https://github.com/unixwin/winuxsh)
+- [Oh My Niubash Bundle Plan](../planning/oh-my-winuxsh-bundle-plan.md) for the official bundle
+- [Roadmap](niubash-roadmap.md) to see what is planned
+- Source at [github.com/unixwin/niubash](https://github.com/unixwin/niubash)

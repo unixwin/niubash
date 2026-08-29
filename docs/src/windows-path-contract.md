@@ -1,6 +1,6 @@
 # Windows Path Contract
 
-Winuxsh uses a real Windows directory tree for its Unix-shaped shell paths.
+Niubash uses a real Windows directory tree for its Unix-shaped shell paths.
 This is path spelling support, not MSYS, WSL, Cygwin, a POSIX runtime, or a
 filesystem overlay.
 
@@ -8,7 +8,7 @@ filesystem overlay.
 
 | Layer | Responsibility |
 | --- | --- |
-| Winuxsh | Select one `winuxcmd.exe`, derive its installation root, create the real tree, and configure the shell session. |
+| Niubash | Select one `winuxcmd.exe`, derive its installation root, create the real tree, and configure the shell session. |
 | Rubash | Interpret `/`, `/bin`, `/usr/bin`, `/etc`, `/tmp`, `cd`, `source`, glob, redirects, tests, and command lookup. |
 | WinuxCmd | Implement external commands and native Windows filesystem, process, handle, and device operations. |
 | WPM | Install package payloads and command links inside the selected installation root. |
@@ -18,13 +18,13 @@ filesystem overlay.
 For an installed executable such as:
 
 ```text
-C:/Users/Administrator/AppData/Local/Programs/Winuxsh/winuxcmd/usr/bin/winuxcmd.exe
+C:/Users/Administrator/AppData/Local/Programs/Niubash/winuxcmd/usr/bin/winuxcmd.exe
 ```
 
 the shell root is:
 
 ```text
-C:/Users/Administrator/AppData/Local/Programs/Winuxsh/winuxcmd/
+C:/Users/Administrator/AppData/Local/Programs/Niubash/winuxcmd/
   usr/bin/
   bin/
   usr/local/bin/
@@ -40,7 +40,7 @@ These are ordinary Windows directories. `usr/bin` is canonical for
 Explicit WPM targets under `bin`, `usr/bin`, or `usr/local/bin` remain in that
 exact directory. `.wpm` is private package state and is never a command path.
 
-Winuxsh passes this exact root to Rubash as `WINUXSH_ROOT`. Rubash maps paths
+Niubash passes this exact root to Rubash as `NIU_ROOT`. Rubash maps paths
 lexically below it:
 
 ```text
@@ -53,14 +53,14 @@ lexically below it:
 
 Command lookup and native child `PATH` use these real directories directly.
 Rubash does not merge a second provider directory, and WinuxCmd coreutils do
-not inspect Winuxsh variables. Existing flat installations remain usable when
+not inspect Niubash variables. Existing flat installations remain usable when
 their directory is explicitly present on `PATH`; new installs use the tree
 above.
 
 ## Dispatcher Selection
 
 `WINUXCMD_PATH` selects one exact dispatcher executable for the session.
-Winuxsh resolves it, prepends that installation's `usr/local/bin`, `usr/bin`,
+Niubash resolves it, prepends that installation's `usr/local/bin`, `usr/bin`,
 and `bin` directories to the native `PATH`, and passes the exact executable to
 Rubash. Rubash does not discover another dispatcher from `PATH`.
 

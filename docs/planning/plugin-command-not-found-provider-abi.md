@@ -12,8 +12,8 @@ Process packs may use `exports.providers = ["command-not-found"]` with `command:
 guarded provider binding. The official bundle can still keep this pack builtin;
 that marker does not replace the host builtin.
 ## Current Native Behavior
-Today Winuxsh generates missing-command diagnostics inside the host:
-- base line: `winuxsh: <command>: command not found`;
+Today Niubash generates missing-command diagnostics inside the host:
+- base line: `niubash: <command>: command not found`;
 - optional WPM install hint for known command/package mappings;
 - optional package-manager search hints when `winget`, `scoop`, or `choco` are
   available.
@@ -43,7 +43,7 @@ Failure behavior:
   default.
 ## Current Host Binding
 Status: process-provider binding implemented.
-Winuxsh now has tested helpers for:
+Niubash now has tested helpers for:
 - building a provider request from the missing command, optional args, optional
   cwd, and available package-search helpers;
 - parsing provider output as bounded UTF-8 suggestion lines;

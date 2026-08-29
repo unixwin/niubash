@@ -1,4 +1,4 @@
-name: Winuxsh Release
+name: Niubash Release
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Winuxsh tag to release, for example v0.7.1"
+        description: "Niubash tag to release, for example v0.7.1"
         required: true
         type: string
       winuxcmd_tag:
@@ -69,8 +69,8 @@ jobs:
         run: |
           Copy-Item -LiteralPath scripts/package-release.ps1 -Destination (Join-Path $env:RUNNER_TEMP "package-release.ps1") -Force
           New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "installer") | Out-Null
-          Copy-Item -LiteralPath installer/winuxsh.iss -Destination (Join-Path $env:RUNNER_TEMP "installer\winuxsh.iss") -Force
-          Copy-Item -LiteralPath assets/winuxsh-icon.ico -Destination (Join-Path $env:RUNNER_TEMP "winuxsh-icon.ico") -Force
+          Copy-Item -LiteralPath installer/niubash.iss -Destination (Join-Path $env:RUNNER_TEMP "installer\niubash.iss") -Force
+          Copy-Item -LiteralPath assets/niubash-icon.ico -Destination (Join-Path $env:RUNNER_TEMP "niubash-icon.ico") -Force
 
       - name: Checkout release tag
         shell: pwsh
@@ -79,8 +79,8 @@ jobs:
           git checkout "${{ steps.release.outputs.tag }}"
           Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "package-release.ps1") -Destination scripts/package-release.ps1 -Force
           New-Item -ItemType Directory -Force -Path installer | Out-Null
-          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "installer\winuxsh.iss") -Destination installer/winuxsh.iss -Force
-          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "winuxsh-icon.ico") -Destination assets/winuxsh-icon.ico -Force
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "installer\niubash.iss") -Destination installer/niubash.iss -Force
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "niubash-icon.ico") -Destination assets/niubash-icon.ico -Force
 
       - name: Validate Cargo version matches release tag
         shell: pwsh
@@ -104,7 +104,7 @@ jobs:
       - name: Update rubash to latest master
         run: cargo update -p rubash
 
-      - name: Build winuxsh
+      - name: Build niubash
         env:
           RUSTFLAGS: ""
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
@@ -154,7 +154,7 @@ jobs:
           ./scripts/package-release.ps1 `
             -Version "${{ steps.release.outputs.version }}" `
             -WinuxCmdPath "${{ steps.winuxcmd.outputs.exe }}" `
-            -OhMyWinuxshBundlePath "..\oh-my-winuxsh" `
+            -OhMyNiubashBundlePath "..\oh-my-winuxsh" `
             -Configuration release `
             -Target "${{ matrix.rust_target }}" `
             -Arch "${{ matrix.arch }}"
@@ -174,9 +174,9 @@ jobs:
           if (-not $iscc) {
             throw "ISCC.exe not found after installing Inno Setup"
           }
-          $sourceDir = Join-Path (Resolve-Path dist) "winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}"
+          $sourceDir = Join-Path (Resolve-Path dist) "niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}"
           $outputDir = Resolve-Path dist
-          & $iscc installer\winuxsh.iss `
+          & $iscc installer\niubash.iss `
             "/DAppVersion=${{ steps.release.outputs.version }}" `
             "/DAppArch=${{ matrix.arch }}" `
             "/DSourceDir=$sourceDir" `
@@ -185,20 +185,20 @@ jobs:
       - name: Add latest-compatible asset aliases
         shell: pwsh
         run: |
-          $versionedZip = "dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip"
-          $versionedSetup = "dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe"
-          Copy-Item -LiteralPath $versionedZip -Destination "dist/winuxsh-win-${{ matrix.arch }}.zip" -Force
-          Copy-Item -LiteralPath $versionedSetup -Destination "dist/winuxsh-win-${{ matrix.arch }}-setup.exe" -Force
+          $versionedZip = "dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip"
+          $versionedSetup = "dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe"
+          Copy-Item -LiteralPath $versionedZip -Destination "dist/niubash-win-${{ matrix.arch }}.zip" -Force
+          Copy-Item -LiteralPath $versionedSetup -Destination "dist/niubash-win-${{ matrix.arch }}-setup.exe" -Force
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
-          name: winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}
+          name: niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}
           path: |
-            dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
-            dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
-            dist/winuxsh-win-${{ matrix.arch }}.zip
-            dist/winuxsh-win-${{ matrix.arch }}-setup.exe
+            dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
+            dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
+            dist/niubash-win-${{ matrix.arch }}.zip
+            dist/niubash-win-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -230,9 +230,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: Winuxsh ${{ steps.release.outputs.tag }}
+          name: Niubash ${{ steps.release.outputs.tag }}
           body: |
-            Winuxsh ${{ steps.release.outputs.tag }} Windows packages.
+            Niubash ${{ steps.release.outputs.tag }} Windows packages.
 
             Packages are built remotely for x64 and ARM64. Portable zip packages remain available, and installer packages add user PATH and Windows Terminal profile integration.
           files: |

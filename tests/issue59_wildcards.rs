@@ -1,29 +1,25 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn winuxsh_binary() -> PathBuf {
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
+fn niu_binary() -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_niu"));
     if p.exists() {
         return p;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("debug")
-        .join(if cfg!(windows) {
-            "winuxsh.exe"
-        } else {
-            "winuxsh"
-        })
+        .join(if cfg!(windows) { "niu.exe" } else { "niubash" })
 }
 
 #[test]
 fn native_command_arguments_preserve_quoted_wildcards() {
-    let output = Command::new(winuxsh_binary())
+    let output = Command::new(niu_binary())
         .arg("-c")
         .arg(r#"printf '<%s>\n' "a*b" "q?x" "/CN=test" --send-only"#)
-        .env("WINUXSH_SKIP_WINUXCMD_ACTIVATION", "1")
+        .env("NIU_SKIP_WINUXCMD_ACTIVATION", "1")
         .output()
-        .expect("spawn local winuxsh");
+        .expect("spawn local niubash");
 
     assert!(output.status.success());
     assert_eq!(

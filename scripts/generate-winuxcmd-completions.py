@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate Winuxsh completion TOML from WinuxCmd help output.
+Generate Niubash completion TOML from WinuxCmd help output.
 
 The generator has two layers:
   1. Core WinuxCmd commands discovered from `winuxcmd.exe --help`.

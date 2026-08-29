@@ -15,7 +15,7 @@ fn emit_rubash_revision() {
         .and_then(|lock| rubash_revision_from_lock(&lock))
         .unwrap_or_else(|| "master".to_string());
 
-    println!("cargo:rustc-env=WINUXSH_RUBASH_REV={revision}");
+    println!("cargo:rustc-env=NIU_RUBASH_REV={revision}");
 }
 
 fn rubash_revision_from_lock(lock: &str) -> Option<String> {
@@ -54,16 +54,16 @@ fn embed_windows_icon() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let assets_dir = manifest_dir.join("assets");
-    let rc_file = assets_dir.join("winuxsh.rc");
-    let icon_file = assets_dir.join("winuxsh-icon.ico");
-    let out_file = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("winuxsh.res");
+    let rc_file = assets_dir.join("niubash.rc");
+    let icon_file = assets_dir.join("niubash-icon.ico");
+    let out_file = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("niubash.res");
 
     println!("cargo:rerun-if-changed={}", rc_file.display());
     println!("cargo:rerun-if-changed={}", icon_file.display());
 
     let rc_exe = find_resource_compiler().unwrap_or_else(|| {
         panic!(
-            "could not find rc.exe or llvm-rc.exe; install the Windows SDK or LLVM resource compiler to embed winuxsh.exe icon"
+            "could not find rc.exe or llvm-rc.exe; install the Windows SDK or LLVM resource compiler to embed niu.exe icon"
         )
     });
 
@@ -79,7 +79,7 @@ fn embed_windows_icon() {
         panic!("{} failed with status {status}", rc_exe.display());
     }
 
-    println!("cargo:rustc-link-arg-bin=winuxsh={}", out_file.display());
+    println!("cargo:rustc-link-arg-bin=niu={}", out_file.display());
 
     fn find_resource_compiler() -> Option<PathBuf> {
         find_in_path("rc.exe")
