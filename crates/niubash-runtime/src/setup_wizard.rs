@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::interactive_menu::{self, Selection};
 use crate::path_utils::shell_home_dir;
 use crate::theme;
 
@@ -41,26 +42,88 @@ pub fn rerun_wizard() -> anyhow::Result<()> {
     run_wizard_inner(true)
 }
 
-fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
-    let home = setup_home_dir();
+/// Render the logo to lines and print it alongside welcome text.
+fn display_welcome_side_by_side(reconfigure: bool) {
+    let width = crate::interactive_menu::term_width();
+    let logo_cols = if width >= 100 { 48 } else { 32 };
+    let logo_str = crate::logo::render_logo_to_string(logo_cols);
+    let logo_lines: Vec<String> = logo_str.lines().map(String::from).collect();
 
-    println!();
-    println!(
+    let mut content = Vec::new();
+    content.push(String::new());
+    content.push(format!(
         " {}  Welcome to Niubash {}!",
         "\u{1f389}",
         env!("CARGO_PKG_VERSION")
-    );
-    println!(
+    ));
+    content.push(format!(
         " {}  A bash-compatible shell for Windows \u{2014} no WSL, no MSYS2 required.",
         "\u{2728}"
-    );
-    println!();
+    ));
+    content.push(String::new());
     if reconfigure {
-        println!("  Reconfigure your interactive prompt/plugins. Existing rc will be backed up.");
+        content.push(
+            "  Reconfigure your interactive prompt/plugins. Existing rc will be backed up."
+                .to_string(),
+        );
     } else {
-        println!("  Let\u{2019}s get you set up.  (Press Enter to accept defaults.)");
+        content.push("  Let\u{2019}s get you set up.".to_string());
     }
-    println!();
+    content.push(String::new());
+
+    crate::interactive_menu::print_side_by_side(&logo_lines, &content, 100);
+}
+
+fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
+    let home = setup_home_dir();
+
+    // Show logo + welcome: side-by-side on wide terminals, stacked on narrow
+    if !reconfigure {
+        display_welcome_side_by_side(false);
+    } else {
+        display_welcome_side_by_side(true);
+    }
+
+    // --- Software preset (first-run only) ---
+    let mut preset_packages: Vec<String> = Vec::new();
+    if !reconfigure {
+        let preset_idx = pick_choice(
+            "  \u{1f6e0}\u{fe0f}  Setup preset",
+            0,
+            &["minimal", "dev", "full"],
+            "  \u{2502}  minimal = prompt + git only\n  \u{2502}  dev     = + ripgrep, fd, fzf, bat, starship\n  \u{2502}  full    = + lua, python, node",
+        );
+        preset_packages = match preset_idx.as_str() {
+            "dev" => vec![
+                "starship".into(),
+                "ripgrep".into(),
+                "fd".into(),
+                "fzf".into(),
+                "bat".into(),
+            ],
+            "full" => vec![
+                "starship".into(),
+                "ripgrep".into(),
+                "fd".into(),
+                "fzf".into(),
+                "bat".into(),
+                "lua".into(),
+                "python".into(),
+                "node".into(),
+            ],
+            _ => vec![],
+        };
+        if !preset_packages.is_empty() {
+            println!();
+            println!("  \u{1f4e6}  Will install: {}", preset_packages.join(", "));
+            let confirm = prompt_yn("  \u{2753}  Proceed with installation", true);
+            if confirm {
+                install_wpm_packages(&preset_packages);
+            } else {
+                preset_packages.clear();
+            }
+        }
+    }
 
     let prompt_enabled = prompt_yn("  \u{1f3b5}  Enable bundled prompt/theme plugins", true);
 
@@ -69,9 +132,9 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     let mut right_prompt = "off".to_string();
     let mut symbol = ">".to_string();
     let mut segment_preset: Option<String> = None;
-    let cwd_style = prompt_choice(
+    let cwd_style = pick_choice(
         "  \u{1f4c1}  Prompt path display",
-        "home",
+        0,
         &["home", "full", "basename"],
         "  \u{2502}  home     = ~ and ~/repo below your profile\n  \u{2502}  full     = C:/Users/name/repo\n  \u{2502}  basename = only the current directory name",
     );
@@ -80,48 +143,46 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         // --- Theme ---
         let theme_list = theme::list_available_names();
         if theme_list.is_empty() {
-            // Keep onboarding going: a missing/broken oh-my-niu bundle must
-            // not abort the wizard before an rc is written.
-            println!("  \u{26a0}\u{fe0f}  No oh-my-niu themes found \u{2014} skipping theme questions.");
+            println!(
+                "  \u{26a0}\u{fe0f}  No oh-my-niu themes found \u{2014} skipping theme questions."
+            );
             println!("  \u{2502}  The bundle should be preinstalled; run `niu setup` again once it is available.");
         } else {
             let theme_refs: Vec<&str> = theme_list.iter().map(String::as_str).collect();
-            let default_theme = if theme_refs.contains(&"p10-classic") {
-                "p10-classic"
-            } else if theme_refs.contains(&"minimal") {
-                "minimal"
-            } else {
-                theme_refs.first().copied().unwrap_or("default")
-            };
+            let default_idx = theme_refs
+                .iter()
+                .position(|t| *t == "p10-classic")
+                .or_else(|| theme_refs.iter().position(|t| *t == "minimal"))
+                .unwrap_or(0);
             print_theme_previews(&theme_refs, "\u{276f}");
-            theme = prompt_choice(
+            theme = pick_choice(
                 "  \u{1f3a8}  Colour theme",
-                default_theme,
+                default_idx,
                 &theme_refs,
                 "  \u{2502}  Choose the plugin-owned prompt colour scheme. Official themes come from oh-my-niu.",
             );
 
             // --- Prompt symbol ---
-            symbol = prompt_choice(
+            symbol = pick_choice(
                 "  \u{1f3b5}  Prompt symbol",
-                "\u{276f}",
-                &["\u{276f}", "\u{3bb}", "\u{25b6}", "\u{24}", "%"],
-                "  \u{2502}  Pick the character that ends your prompt line.\n  \u{2502}  \u{276f} heavy right-pointing angle (powerlevel10k style)\n  \u{2502}  \u{3bb} lambda (functional/minimal)\n  \u{2502}  \u{25b6} black right-pointing triangle\n  \u{2502}  $ dollar sign (classic bash)\n  \u{2502}  % percent sign (classic fish)",
+                0,
+                &["\u{276f}", "\u{3bb}", "\u{25b6}", "$", "%"],
+                "  \u{2502}  \u{276f} heavy right-pointing angle (powerlevel10k style)\n  \u{2502}  \u{3bb} lambda (functional/minimal)\n  \u{2502}  \u{25b6} black right-pointing triangle\n  \u{2502}  $ dollar sign (classic bash)\n  \u{2502}  % percent sign (classic fish)",
             );
 
             // --- Prompt style ---
-            prompt_style = prompt_choice(
-                 "  \u{1f3b5}  Prompt style",
-                 "minimal",
+            prompt_style = pick_choice(
+                "  \u{1f3b5}  Prompt style",
+                0,
                 &["minimal", "classic", "powerline", "multiline", "segments"],
                 "  \u{2502}  minimal   = cwd git prompt_char\n  \u{2502}  classic   = user@host cwd git prompt_char\n  \u{2502}  powerline = compact left prompt with right-side info\n  \u{2502}  multiline = first line context, second line cwd/git\n  \u{2502}  segments  = powerlevel10k-style segment-based prompt",
-             );
+            );
 
             // --- Segment preset (only if prompt_style = "segments") ---
             segment_preset = if prompt_style == "segments" {
-                Some(prompt_choice(
+                Some(pick_choice(
                     "  \u{1f3a8}  Segment preset",
-                    "classic",
+                    0,
                     &["classic", "lean", "rainbow", "pure", "robbyrussell"],
                     "  \u{2502}  classic       = P10K classic layout\n  \u{2502}  lean          = P10K lean layout\n  \u{2502}  rainbow       = P10K rainbow colours\n  \u{2502}  pure          = P10K pure layout\n  \u{2502}  robbyrussell  = compact classic prompt feel",
                 ))
@@ -130,9 +191,9 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
             };
 
             // --- Right prompt ---
-            right_prompt = prompt_choice(
-                 "  \u{23f1}\u{fe0f}  Right-side info",
-                "time",
+            right_prompt = pick_choice(
+                "  \u{23f1}\u{fe0f}  Right-side info",
+                1,
                 &["off", "time", "full"],
                 "  \u{2502}  off  = no right prompt\n  \u{2502}  time = show current time (HH:MM)\n  \u{2502}  full = time + git branch",
             );
@@ -140,8 +201,6 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Without an enumerable theme list the generated rc cannot enable the
-    // prompt/theme plugin chain, so fall back to the plain-prompt onboarding.
     let prompt_plugins_enabled = prompt_enabled && !theme.is_empty();
 
     // --- Git prompt ---
@@ -185,6 +244,12 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     if let Some(path) = backup_path {
         println!("  \u{1f4e6}  Previous rc backed up to {}", path.display());
     }
+    if !preset_packages.is_empty() {
+        println!(
+            "  \u{1f4e6}  Installed packages: {}",
+            preset_packages.join(", ")
+        );
+    }
     println!();
     println!("  \u{1f680}  You can tweak these settings any time by editing that file.");
     println!("  \u{1f501}  Run `niu setup` any time to repeat this guide.");
@@ -195,6 +260,41 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Interactive choice wrapper: uses arrow-key menu when stdin is a terminal,
+/// falls back to the default value otherwise. Returns the selected option string.
+fn pick_choice(label: &str, default_idx: usize, options: &[&str], help: &str) -> String {
+    if crate::terminal::stdio_is_interactive() {
+        match interactive_menu::interactive_choice(label, options, default_idx, help) {
+            Selection::Confirmed(idx) => options[idx].to_string(),
+            Selection::UseDefault => options[default_idx].to_string(),
+        }
+    } else {
+        options[default_idx].to_string()
+    }
+}
+
+/// Install packages via wpm, printing progress for each.
+fn install_wpm_packages(packages: &[String]) {
+    println!();
+    for pkg in packages {
+        print!("  \u{1f527}  Installing {}... ", pkg);
+        io::stdout().flush().ok();
+        let status = Command::new("wpm")
+            .arg("install")
+            .arg(pkg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("\u{2705}"),
+            Ok(_) => println!("\u{26a0}\u{fe0f}  (not found or failed)"),
+            Err(_) => println!("\u{26a0}\u{fe0f}  (wpm not available)"),
+        }
+    }
+    println!();
+}
 
 fn setup_home_dir() -> PathBuf {
     shell_home_dir().unwrap_or_else(|| PathBuf::from("."))
@@ -487,51 +587,6 @@ fn nerd_font_theme(theme_name: &str) -> bool {
     )
 }
 
-fn prompt_choice(label: &str, default: &str, options: &[&str], help: &str) -> String {
-    println!("{}", label);
-    for line in help.lines() {
-        println!("{}", line);
-    }
-    for (idx, option) in options.iter().enumerate() {
-        println!("  \u{2502}  {}) {}", idx + 1, option);
-    }
-
-    let default_idx = options.iter().position(|o| *o == default).unwrap_or(0);
-    let default_display = default_idx + 1;
-
-    loop {
-        print!(
-            "  |  Enter choice [1-{} / Enter for {}]: ",
-            options.len(),
-            default_display
-        );
-        io::stdout().flush().ok();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).ok();
-        let input = input.trim().to_lowercase();
-
-        if input.is_empty() {
-            return default.to_string();
-        }
-
-        if let Ok(idx) = input.parse::<usize>() {
-            if idx >= 1 && idx <= options.len() {
-                return options[idx - 1].to_string();
-            }
-        }
-
-        if options.contains(&input.as_str()) {
-            return input;
-        }
-
-        println!(
-            "  |  Enter a number 1-{} (or Enter for {}).",
-            options.len(),
-            default_display
-        );
-    }
-}
-
 fn prompt_yn(label: &str, default: bool) -> bool {
     let default_str = if default { "Y/n" } else { "y/N" };
     print!("  {} [{}]: ", label, default_str);
@@ -551,6 +606,11 @@ fn prompt_yn(label: &str, default: bool) -> bool {
 mod tests {
     use super::*;
     use crate::test_support::PROCESS_STATE_LOCK;
+
+    #[test]
+    fn display_welcome_side_by_side_renders_without_panic() {
+        display_welcome_side_by_side(false);
+    }
 
     #[test]
     fn setup_home_dir_accepts_shell_style_home_env() {

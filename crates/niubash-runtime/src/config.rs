@@ -38,6 +38,11 @@ pub struct HookConfig {
     pub precmd: Vec<String>,
     pub preexec: Vec<String>,
     pub chpwd: Vec<String>,
+    pub postcmd: Vec<String>,
+    pub zshaddhistory: Vec<String>,
+    pub zshexit: Vec<String>,
+    pub greeting: Vec<String>,
+    pub title: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,11 +124,40 @@ impl HistoryConfig {
     }
 }
 
+/// Completion menu display style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionStyle {
+    /// Multi-column grid (like zsh `compinit`). Default.
+    Column,
+    /// Vertical list with descriptions (like fish).
+    List,
+    /// Insert first match directly, Tab cycles (like bash `menu-complete`).
+    Inline,
+}
+
+impl CompletionStyle {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "column" | "col" | "grid" => Some(Self::Column),
+            "list" | "vertical" => Some(Self::List),
+            "inline" | "cycle" | "menu" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+}
+
+impl Default for CompletionStyle {
+    fn default() -> Self {
+        Self::Column
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuConfig {
     pub completion_page_size: usize,
     pub history_page_size: usize,
     pub max_entry_lines: u16,
+    pub completion_style: CompletionStyle,
 }
 
 impl Default for MenuConfig {
@@ -132,7 +166,23 @@ impl Default for MenuConfig {
             completion_page_size: 10,
             history_page_size: 10,
             max_entry_lines: 5,
+            completion_style: CompletionStyle::default(),
         }
+    }
+}
+
+impl MenuConfig {
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(value) = std::env::var("NIU_COMPLETION_STYLE") {
+            if let Some(style) = CompletionStyle::parse(&value) {
+                self.completion_style = style;
+            } else {
+                eprintln!(
+                    "niubash: NIU_COMPLETION_STYLE must be one of: column, list, inline"
+                );
+            }
+        }
+        self
     }
 }
 

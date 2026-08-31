@@ -384,7 +384,7 @@ impl Shell {
             history_max_size: config.history.max_size,
             history_ignore_space_prefixed: config.history.ignore_space_prefixed,
             history_mode: config.history.mode,
-            menu_config: config.menus,
+            menu_config: config.menus.with_env_overrides(),
             editor_mode: config.editor.edit_mode,
             autosuggest: config.autosuggest.with_env_overrides(),
             syntax_highlighting: config.syntax_highlighting.with_env_overrides(),
@@ -479,6 +479,16 @@ impl Shell {
                 .is_some_and(|command| command == "lwd")
         {
             self.execute_native_last_working_dir()?
+        } else if ast.commands.len() == 1
+            && ast.commands[0].words.first().is_some_and(|cmd| {
+                crate::easter_eggs::dispatch(cmd)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+        {
+            let cmd = ast.commands[0].words.first().unwrap();
+            crate::easter_eggs::dispatch(cmd)?.unwrap_or(0)
         } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             code
         } else if let Some(execution) = self.execute_host_synced_simple_ast(&ast) {
@@ -548,6 +558,8 @@ impl Shell {
         let old_pwd = self.executor.get_env("PWD").map(str::to_owned);
         self.run_preexec_hooks(line);
         let code = self.execute_line_with_options(line, true)?;
+        self.run_postcmd_hooks(code);
+        self.run_zshaddhistory_hooks(line);
         self.sync_alias_mirror_from_line(line, code);
         self.remember_interactive_command(line, code);
         let new_pwd = self.executor.get_env("PWD").map(str::to_owned);
@@ -647,6 +659,7 @@ impl Shell {
         self.sync_process_path_from_executor_path();
         self.update_completion_state();
         self.sync_prompt_from_plugin_env();
+        self.run_greeting_hooks();
     }
 
     fn startup_rc_path(&self) -> Option<PathBuf> {
@@ -943,6 +956,25 @@ impl Shell {
         self.run_bash_prompt_command(last_exit_code);
         self.sync_bash_prompt_from_env();
         self.sync_prompt_from_plugin_env();
+        let title = self.resolve_title_value();
+        self.run_title_hooks(&title);
+    }
+
+    /// Compute the current title for `run_title_hooks`.
+    ///
+    /// Resolution order: `NIU_TITLE` env var (set by plugins or users) wins,
+    /// then the current `PWD` path, then a plain dot. Title hooks may use this
+    /// value to write a terminal title via OSC escape sequences.
+    fn resolve_title_value(&self) -> String {
+        if let Some(title) = self.executor.get_env("NIU_TITLE") {
+            if !title.is_empty() {
+                return title.to_string();
+            }
+        }
+        self.executor
+            .get_env("PWD")
+            .map(str::to_owned)
+            .unwrap_or_else(|| ".".to_string())
     }
 
     /// Run native hooks immediately before the user's interactive command.
@@ -986,6 +1018,133 @@ impl Shell {
         }
         self.run_process_plugin_hooks("chpwd", &context);
         self.run_hook_scripts(&hooks, &context);
+    }
+
+    /// Run postcmd hooks after command execution.
+    pub fn run_postcmd_hooks(&mut self, exit_code: i32) {
+        let hooks = self.hooks.postcmd.clone();
+        let exit_code_string = exit_code.to_string();
+        let context = [("NIU_LAST_EXIT_CODE", exit_code_string)];
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_postcmd_hooks", &context);
+        } else {
+            self.run_source_plugin_scripts_for_hook("postcmd", &context);
+        }
+        self.run_process_plugin_hooks("postcmd", &context);
+        self.run_hook_scripts(&hooks, &context);
+    }
+
+    /// Run zshaddhistory hooks after command is added to history.
+    pub fn run_zshaddhistory_hooks(&mut self, command: &str) {
+        let hooks = self.hooks.zshaddhistory.clone();
+        let context = [("NIU_HISTORY_COMMAND", command.to_string())];
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_zshaddhistory_hooks", &context);
+        } else {
+            self.run_source_plugin_scripts_for_hook("zshaddhistory", &context);
+        }
+        self.run_process_plugin_hooks("zshaddhistory", &context);
+        self.run_hook_scripts(&hooks, &context);
+    }
+
+    /// Run zshexit hooks when shell exits.
+    pub fn run_zshexit_hooks(&mut self) {
+        let hooks = self.hooks.zshexit.clone();
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_zshexit_hooks", &[]);
+        } else {
+            self.run_source_plugin_scripts_for_hook("zshexit", &[]);
+        }
+        self.run_process_plugin_hooks("zshexit", &[]);
+        self.run_hook_scripts(&hooks, &[]);
+    }
+
+    /// Run greeting hooks at startup.
+    pub fn run_greeting_hooks(&mut self) {
+        let hooks = self.hooks.greeting.clone();
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_greeting_hooks", &[]);
+        } else {
+            self.run_source_plugin_scripts_for_hook("greeting", &[]);
+        }
+        self.run_process_plugin_hooks("greeting", &[]);
+        self.run_hook_scripts(&hooks, &[]);
+    }
+
+    /// Run title hooks to set terminal title.
+    pub fn run_title_hooks(&mut self, title: &str) {
+        let hooks = self.hooks.title.clone();
+        let context = [("NIU_TITLE", title.to_string())];
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_title_hooks", &context);
+        } else {
+            self.run_source_plugin_scripts_for_hook("title", &context);
+        }
+        self.run_process_plugin_hooks("title", &context);
+        self.run_hook_scripts(&hooks, &context);
+    }
+
+    /// Run trapdebug hooks.
+    pub fn run_trapdebug_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trapdebug_hooks", &[]);
+        }
+    }
+
+    /// Run traperr hooks.
+    pub fn run_traperr_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_traperr_hooks", &[]);
+        }
+    }
+
+    /// Run trapint hooks.
+    pub fn run_trapint_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trapint_hooks", &[]);
+        }
+    }
+
+    /// Run trapwinch hooks.
+    pub fn run_trapwinch_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trapwinch_hooks", &[]);
+        }
+    }
+
+    /// Run trapusr1 hooks.
+    pub fn run_trapusr1_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trapusr1_hooks", &[]);
+        }
+    }
+
+    /// Run trapusr2 hooks.
+    pub fn run_trapusr2_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trapusr2_hooks", &[]);
+        }
+    }
+
+    /// Run trappipe hooks.
+    pub fn run_trappipe_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trappipe_hooks", &[]);
+        }
+    }
+
+    /// Run trapterm hooks.
+    pub fn run_trapterm_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trapterm_hooks", &[]);
+        }
+    }
+
+    /// Run trapchld hooks.
+    pub fn run_trapchld_hooks(&mut self) {
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("niubash_run_trapchld_hooks", &[]);
+        }
     }
 
     fn run_native_precmd_plugins(&mut self) {
@@ -1934,6 +2093,7 @@ impl Shell {
 
     /// Run shell process teardown semantics that live in rubash's binary entry.
     pub fn finish_with_exit_trap(&mut self, status: i32) -> anyhow::Result<i32> {
+        self.run_zshexit_hooks();
         match self.executor.run_exit_trap_with_status(status) {
             Ok(code) => Ok(code),
             Err(rubash::executor::ExecuteError::ExitCode(code)) => Ok(code),
@@ -1980,7 +2140,17 @@ impl Shell {
         rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
         self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
-        let execution = if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
+        let execution = if ast.commands.len() == 1
+            && ast.commands[0].words.first().is_some_and(|cmd| {
+                crate::easter_eggs::dispatch(cmd)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+        {
+            let cmd = ast.commands[0].words.first().unwrap();
+            Ok(crate::easter_eggs::dispatch(cmd)?.unwrap_or(0))
+        } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             Ok(code)
         } else {
             self.execute_host_synced_simple_ast(&ast)
@@ -3656,7 +3826,9 @@ fn first_valid_niubash_framework_dir(
 }
 
 fn is_niubash_framework_dir(path: &Path) -> bool {
-    path.join("oh-my-niu.winux").is_file() || path.join("oh-my-winuxsh.winux").is_file()
+    path.join("oh-my-niu.niu").is_file()
+        || path.join("oh-my-niu.winux").is_file()
+        || path.join("oh-my-winuxsh.winux").is_file()
 }
 
 fn shell_pwd_to_existing_host_dir(pwd: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
@@ -3713,7 +3885,8 @@ fn rewrite_legacy_rc_content(content: &str) -> String {
         // 1.0.0 ships the renamed entry point; migrated rc files keep their
         // legacy directory candidates but must probe the new entry name to
         // find the shipped bundle via NIU_APP_BUNDLE_PATH.
-        .replace("oh-my-winuxsh.winux", "oh-my-niu.winux")
+        .replace("oh-my-winuxsh.winux", "oh-my-niu.niu")
+        .replace("oh-my-niu.winux", "oh-my-niu.niu")
 }
 
 fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
@@ -4289,6 +4462,7 @@ mod tests {
             precmd: vec!["HOOK_PRECMD=\"precmd:$NIU_LAST_EXIT_CODE\"".to_string()],
             preexec: vec!["HOOK_PREEXEC=\"preexec:$NIU_PREEXEC_COMMAND\"".to_string()],
             chpwd: vec!["HOOK_CHPWD=\"chpwd:$NIU_OLDPWD->$NIU_PWD\"".to_string()],
+            ..Default::default()
         });
 
         shell.run_precmd_hooks();
@@ -4309,6 +4483,58 @@ mod tests {
         assert!(shell.executor.get_env("NIU_PWD").is_none());
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn precmd_invokes_title_hooks_with_env_title() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+
+        let mut shell = test_shell(HookConfig {
+            title: vec!["HOOK_TITLE=\"$NIU_TITLE\"".to_string()],
+            ..Default::default()
+        });
+        shell.executor.set_env("NIU_TITLE", "custom-title");
+
+        shell.run_precmd_hooks();
+
+        assert_eq!(
+            shell.executor.get_env("HOOK_TITLE"),
+            Some("custom-title"),
+            "title hook should observe NIU_TITLE from the executor env"
+        );
+        assert!(
+            shell.executor.get_env("NIU_TITLE").is_none(),
+            "hook context env should be cleaned up after the hook runs"
+        );
+    }
+
+    #[test]
+    fn precmd_invokes_title_hooks_with_pwd_fallback() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-title-pwd-fallback");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let mut shell = test_shell(HookConfig {
+            title: vec!["HOOK_TITLE=\"$NIU_TITLE\"".to_string()],
+            ..Default::default()
+        });
+        let target = shell_quote(&shell_display_path(&temp));
+        shell
+            .execute_interactive_line(&format!("cd {}", target))
+            .unwrap();
+        shell.execute_interactive_line("unset NIU_TITLE").unwrap();
+
+        shell.run_precmd_hooks();
+
+        let observed = shell.executor.get_env("HOOK_TITLE").unwrap_or_default();
+        assert!(
+            observed.contains("niubash-title-pwd-fallback"),
+            "title hook should observe PWD as fallback, got: {observed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
@@ -4669,7 +4895,7 @@ export WINUXSH_OLD_PREFIX=kept-as-niu
         assert!(migrated.contains("export NIU_THEME=sky"));
         assert!(migrated.contains("export NIU_OLD_PREFIX=kept-as-niu"));
         assert!(migrated.contains("oh-my-winuxsh/theme"));
-        assert!(migrated.contains("oh-my-niu.winux"));
+        assert!(migrated.contains("oh-my-niu.niu"));
         assert!(!migrated.contains("oh-my-winuxsh.winux"));
         assert!(!migrated.contains("WINUXSH"));
         assert_eq!(shell.executor.get_env("NIU_THEME"), Some("sky"));
@@ -5027,24 +5253,24 @@ niubash_run_chpwd_hooks() {
 
         for path in [&home_dot, &home_config, &home_version, &app_bundle] {
             std::fs::create_dir_all(path).unwrap();
-            std::fs::write(path.join("oh-my-niu.winux"), "").unwrap();
+            std::fs::write(path.join("oh-my-niu.niu"), "").unwrap();
         }
 
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(home_dot.as_path())
         );
-        std::fs::remove_file(home_dot.join("oh-my-niu.winux")).unwrap();
+        std::fs::remove_file(home_dot.join("oh-my-niu.niu")).unwrap();
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(home_config.as_path())
         );
-        std::fs::remove_file(home_config.join("oh-my-niu.winux")).unwrap();
+        std::fs::remove_file(home_config.join("oh-my-niu.niu")).unwrap();
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(home_version.as_path())
         );
-        std::fs::remove_file(home_version.join("oh-my-niu.winux")).unwrap();
+        std::fs::remove_file(home_version.join("oh-my-niu.niu")).unwrap();
         assert_eq!(
             first_valid_niubash_framework_dir(&home, Some(&app_bundle)).as_deref(),
             Some(app_bundle.as_path())

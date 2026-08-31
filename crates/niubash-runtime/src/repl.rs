@@ -779,6 +779,7 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
                     continue;
                 }
                 if pending.is_empty() && matches!(line.trim(), "exit" | "logout") {
+                    let _ = shell.finish_with_exit_trap(0);
                     break;
                 }
                 if pending.is_empty() {
@@ -809,15 +810,21 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
                     pending.clear();
                     continue;
                 }
+                let _ = shell.finish_with_exit_trap(0);
                 break;
             }
             Ok(Signal::CtrlC) => {
                 println!();
+                if crate::ctrl_c::consume_ctrl_c() {
+                    crate::ctrl_c::run_trap_hooks(shell, "trapint");
+                    flush_repl_output();
+                }
                 pending.clear();
                 continue;
             }
             Err(e) => {
                 eprintln!("niubash: line editor error: {}", e);
+                let _ = shell.finish_with_exit_trap(1);
                 break;
             }
         }
