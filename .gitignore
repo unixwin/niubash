@@ -53,6 +53,7 @@ mvp6-*/
 *.so
 *.dylib
 *.dll
+*.pyc
 
 # Backup files
 *.bak
