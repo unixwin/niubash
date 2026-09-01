@@ -21,7 +21,7 @@
 - Use `~/.niubashrc` as the primary interactive user entry point for plugin lists, theme selection, exports, aliases, functions, and shell startup logic. Fallback order: `~/.winuxshrc` (pre-rename compat; migrated once into `~/.niubashrc` on first startup, original file kept) then `~/.winshrc` (legacy fallback, read only when `~/.niubashrc` is absent).
 - Runtime environment variables use the `NIU_` prefix. During the transition, niubash also sets/reads the deprecated `WINUXSH_SHELL`, `WINUXSH_SHELL_PATH_STYLE`, and `WINUXSH_ROOT` names because current rubash upstream still reads them; these bridges are marked with comments and must be removed once rubash renames its readers.
 - Keep structured plugin and bundle assets in their manifest-backed TOML files; user startup configuration belongs in `~/.niubashrc`.
-- Use the manifest-backed registry as the control plane for every runtime. Use `source` packs with bundle-local `.winux` scripts for reviewed shell helpers, keep `builtin` for host-owned native behavior and fallback, and keep process plugins for external-tool adapters and debug bridges.
+- Use the manifest-backed registry as the control plane for every runtime. Use `source` packs with bundle-local `.niu` scripts for reviewed shell helpers, keep `builtin` for host-owned native behavior and fallback, and keep process plugins for external-tool adapters and debug bridges.
 
 ## Development Rules
 

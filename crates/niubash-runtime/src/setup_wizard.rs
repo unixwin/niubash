@@ -217,6 +217,14 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
             false,
         );
 
+    // --- Completion style ---
+    let completion_style = pick_choice(
+        "  \u{1f5b1}\u{fe0f}  Tab completion style",
+        0,
+        &["column", "list", "inline"],
+        "  \u{2502}  column = multi-column grid (zsh style)\n  \u{2502}  list   = vertical list with descriptions (fish style)\n  \u{2502}  inline = insert first match, Tab cycles (bash menu-complete)",
+    );
+
     // --- Generate shell rc ---
     let rc_content = generate_rc(
         &theme,
@@ -228,6 +236,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         git_enabled,
         starship_git_enabled,
         segment_preset.as_deref(),
+        &completion_style,
     );
 
     // Write ~/.niubashrc
@@ -310,6 +319,7 @@ fn generate_rc(
     git_enabled: bool,
     starship_git_enabled: bool,
     segment_preset: Option<&str>,
+    completion_style: &str,
 ) -> String {
     let theme = if prompt_enabled { theme } else { "" };
     let symbol = if prompt_enabled { symbol } else { ">" };
@@ -407,9 +417,10 @@ NIU_THEME={}
 NIU_THEME_PLUGIN={}
 NIU_PROMPT_SYMBOL={}
 NIU_PROMPT_CWD_STYLE={}
+NIU_COMPLETION_STYLE={}
 NIU_DISABLE_DEFAULT_PLUGINS=1
 export NIU_THEME NIU_THEME_PLUGIN NIU_PROMPT_SYMBOL
-export NIU_PROMPT_CWD_STYLE NIU_DISABLE_DEFAULT_PLUGINS
+export NIU_PROMPT_CWD_STYLE NIU_COMPLETION_STYLE NIU_DISABLE_DEFAULT_PLUGINS
 
 NIU_PLUGINS={}
 {}
@@ -450,6 +461,7 @@ unset __niubash_bundle __niubash_home_drive __niubash_home_rest
         shell_quote(&theme_plugin),
         shell_quote(symbol),
         shell_quote(cwd_style),
+        shell_quote(completion_style),
         plugins,
         starship_segment_setup,
         segment_note,
@@ -630,7 +642,7 @@ mod tests {
     #[test]
     fn generated_rc_uses_shell_entrypoint_not_toml_sections() {
         let rc = generate_rc(
-            "minimal", "minimal", "time", ">", "home", true, true, false, None,
+            "minimal", "minimal", "time", ">", "home", true, true, false, None, "column",
         );
 
         assert!(rc.contains("NIU_THEME_PLUGIN='theme-minimal'"));
@@ -648,7 +660,7 @@ mod tests {
     #[test]
     fn generated_rc_can_disable_git_prompt_tokens() {
         let rc = generate_rc(
-            "minimal", "classic", "full", "$", "full", true, false, false, None,
+            "minimal", "classic", "full", "$", "full", true, false, false, None, "column",
         );
 
         assert!(rc.contains("NIU_THEME_PLUGIN='theme-minimal'"));
@@ -661,7 +673,9 @@ mod tests {
 
     #[test]
     fn generated_rc_can_disable_prompt_theme_plugins() {
-        let rc = generate_rc("", "off", "off", ">", "basename", false, true, false, None);
+        let rc = generate_rc(
+            "", "off", "off", ">", "basename", false, true, false, None, "column",
+        );
 
         assert!(rc.contains("NIU_THEME=''"));
         assert!(rc.contains("NIU_THEME_PLUGIN=''"));
@@ -685,6 +699,7 @@ mod tests {
             true,
             true,
             None,
+            "column",
         );
 
         assert!(rc.contains("NIU_THEME_PLUGIN='theme-spaceship'"));
@@ -694,6 +709,20 @@ mod tests {
         assert!(rc.contains("{git}"));
         assert!(!rc.contains("NIU_PROMPT_BACKEND"));
         assert!(!rc.contains("STARSHIP_CONFIG"));
+    }
+
+    #[test]
+    fn generated_rc_includes_completion_style() {
+        let rc = generate_rc(
+            "minimal", "minimal", "off", ">", "home", true, true, false, None, "list",
+        );
+        assert!(rc.contains("NIU_COMPLETION_STYLE='list'"));
+        assert!(rc.contains("NIU_COMPLETION_STYLE"));
+
+        let rc = generate_rc(
+            "minimal", "minimal", "off", ">", "home", true, true, false, None, "inline",
+        );
+        assert!(rc.contains("NIU_COMPLETION_STYLE='inline'"));
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

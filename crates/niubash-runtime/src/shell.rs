@@ -480,12 +480,10 @@ impl Shell {
         {
             self.execute_native_last_working_dir()?
         } else if ast.commands.len() == 1
-            && ast.commands[0].words.first().is_some_and(|cmd| {
-                crate::easter_eggs::dispatch(cmd)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
+            && ast.commands[0]
+                .words
+                .first()
+                .is_some_and(|cmd| crate::easter_eggs::dispatch(cmd).ok().flatten().is_some())
         {
             let cmd = ast.commands[0].words.first().unwrap();
             crate::easter_eggs::dispatch(cmd)?.unwrap_or(0)
@@ -2141,12 +2139,10 @@ impl Shell {
         self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
         let execution = if ast.commands.len() == 1
-            && ast.commands[0].words.first().is_some_and(|cmd| {
-                crate::easter_eggs::dispatch(cmd)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
+            && ast.commands[0]
+                .words
+                .first()
+                .is_some_and(|cmd| crate::easter_eggs::dispatch(cmd).ok().flatten().is_some())
         {
             let cmd = ast.commands[0].words.first().unwrap();
             Ok(crate::easter_eggs::dispatch(cmd)?.unwrap_or(0))

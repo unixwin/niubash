@@ -177,9 +177,7 @@ impl MenuConfig {
             if let Some(style) = CompletionStyle::parse(&value) {
                 self.completion_style = style;
             } else {
-                eprintln!(
-                    "niubash: NIU_COMPLETION_STYLE must be one of: column, list, inline"
-                );
+                eprintln!("niubash: NIU_COMPLETION_STYLE must be one of: column, list, inline");
             }
         }
         self
@@ -527,4 +525,60 @@ impl Default for FullConfig {
 /// Return built-in defaults. User startup configuration belongs in `~/.niubashrc`.
 pub fn load() -> FullConfig {
     FullConfig::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_style_parse_accepts_valid_values() {
+        assert_eq!(
+            CompletionStyle::parse("column"),
+            Some(CompletionStyle::Column)
+        );
+        assert_eq!(CompletionStyle::parse("col"), Some(CompletionStyle::Column));
+        assert_eq!(
+            CompletionStyle::parse("grid"),
+            Some(CompletionStyle::Column)
+        );
+        assert_eq!(CompletionStyle::parse("list"), Some(CompletionStyle::List));
+        assert_eq!(
+            CompletionStyle::parse("vertical"),
+            Some(CompletionStyle::List)
+        );
+        assert_eq!(
+            CompletionStyle::parse("inline"),
+            Some(CompletionStyle::Inline)
+        );
+        assert_eq!(
+            CompletionStyle::parse("cycle"),
+            Some(CompletionStyle::Inline)
+        );
+        assert_eq!(
+            CompletionStyle::parse("menu"),
+            Some(CompletionStyle::Inline)
+        );
+    }
+
+    #[test]
+    fn completion_style_parse_rejects_invalid() {
+        assert_eq!(CompletionStyle::parse("invalid"), None);
+        assert_eq!(CompletionStyle::parse(""), None);
+        assert_eq!(
+            CompletionStyle::parse("COLUMN"),
+            Some(CompletionStyle::Column)
+        );
+    }
+
+    #[test]
+    fn completion_style_default_is_column() {
+        assert_eq!(CompletionStyle::default(), CompletionStyle::Column);
+    }
+
+    #[test]
+    fn menu_config_default_completion_style() {
+        let config = MenuConfig::default();
+        assert_eq!(config.completion_style, CompletionStyle::Column);
+    }
 }

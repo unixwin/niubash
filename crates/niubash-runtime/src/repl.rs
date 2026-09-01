@@ -4,14 +4,17 @@ use std::{borrow::Cow, io::Write};
 
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, ListMenu, MenuBuilder,
-    Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal, Vi,
+    ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, ListMenu,
+    MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
+    ReedlineMenu, Signal, Vi,
 };
 use rubash::TokenKind;
 
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::NiubashCompleter;
-use crate::config::{EditorMode, MenuConfig, NativeWidgetBinding, NativeWidgetConfig};
+use crate::config::{
+    CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding, NativeWidgetConfig,
+};
 use crate::history::LiveFileBackedHistory;
 use crate::shell::Shell;
 use crate::syntax_highlighting::NiubashSyntaxHighlighter;
@@ -61,11 +64,7 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
     let menu_config = shell.menu_config;
 
     let completion_menu = ReedlineMenu::WithCompleter {
-        menu: Box::new(configured_list_menu(
-            COMPLETION_MENU,
-            menu_config.completion_page_size,
-            menu_config,
-        )),
+        menu: configured_completion_menu(COMPLETION_MENU, menu_config),
         completer: Box::new(completer),
     };
     let history_menu = ReedlineMenu::HistoryMenu(Box::new(configured_list_menu(
@@ -115,6 +114,42 @@ fn configured_list_menu(name: &str, page_size: usize, config: MenuConfig) -> Lis
         .with_page_size(page_size)
         .with_max_entry_lines(config.max_entry_lines)
         .with_only_buffer_difference(false)
+}
+
+/// Build the completion menu according to the configured style.
+fn configured_completion_menu(name: &str, config: MenuConfig) -> Box<dyn reedline::Menu> {
+    match config.completion_style {
+        CompletionStyle::Column => {
+            let page_cols = if config.completion_page_size <= 4 {
+                2
+            } else if config.completion_page_size <= 9 {
+                3
+            } else {
+                4
+            };
+            Box::new(
+                ColumnarMenu::default()
+                    .with_name(name)
+                    .with_columns(page_cols)
+                    .with_only_buffer_difference(false),
+            )
+        }
+        CompletionStyle::List => Box::new(configured_list_menu(
+            name,
+            config.completion_page_size,
+            config,
+        )),
+        CompletionStyle::Inline => {
+            // Inline mode: use ListMenu with page_size 1 to highlight one at a time
+            Box::new(
+                ListMenu::default()
+                    .with_name(name)
+                    .with_page_size(1)
+                    .with_max_entry_lines(config.max_entry_lines)
+                    .with_only_buffer_difference(false),
+            )
+        }
+    }
 }
 
 fn history_exclusion_prefix(ignore_space_prefixed: bool) -> Option<String> {
@@ -872,6 +907,7 @@ mod tests {
                 completion_page_size: 12,
                 history_page_size: 7,
                 max_entry_lines: 3,
+                completion_style: CompletionStyle::default(),
             },
         );
 

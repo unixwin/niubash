@@ -26,7 +26,30 @@ const PLUGIN_INDEX_SCHEMA: &str = "niubash:plugin-index@0.1.0";
 const PLUGIN_INDEX_SIGNATURE_POLICY: &str = "unsupported";
 const PROCESS_PLUGIN_PROTOCOL: &str = "niubash:process-plugin@0.1.0";
 const COMMAND_NOT_FOUND_PROVIDER: &str = "command-not-found";
-const SOURCE_PLUGIN_HOOKS: &[&str] = &["startup", "precmd", "preexec", "chpwd"];
+const SOURCE_PLUGIN_HOOKS: &[&str] = &[
+    // Lifecycle hooks
+    "startup",
+    "precmd",
+    "preexec",
+    "postcmd",
+    "chpwd",
+    "period",
+    "zshaddhistory",
+    "zshexit",
+    "greeting",
+    "title",
+    // Trap hooks
+    "trapdebug",
+    "traperr",
+    "trapint",
+    "trapwinch",
+    "trapusr1",
+    "trapusr2",
+    "trappipe",
+    "trapterm",
+    "trapchld",
+    "trappzerr",
+];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
@@ -2324,9 +2347,10 @@ fn validate_source_pack_contract(pack: &PluginPackRecord, root: &Path) -> anyhow
             source.entry
         )
     })?;
-    if path.extension().and_then(|value| value.to_str()) != Some("winux") {
+    let ext = path.extension().and_then(|value| value.to_str());
+    if ext != Some("niu") && ext != Some("winux") {
         anyhow::bail!(
-            "source pack '{}' entry '{}' must end in .winux",
+            "source pack '{}' entry '{}' must end in .niu or .winux",
             pack.name,
             source.entry
         );
