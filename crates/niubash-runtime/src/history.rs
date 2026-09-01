@@ -1,7 +1,9 @@
 //! Live, file-backed history for the interactive Reedline session.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
+
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::SystemTime,
@@ -114,6 +116,70 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
         self.clear()?;
         for entry in entries {
             self.append(entry)?;
+        }
+        Ok(())
+    }
+
+    fn write_history(&mut self, path: &str) -> io::Result<()> {
+        ensure_history_file_accessible(std::path::Path::new(path));
+        let entries = self.entries()?;
+        if entries.is_empty() {
+            std::fs::write(path, "")?;
+        } else {
+            std::fs::write(path, entries.join("\n") + "\n")?;
+        }
+        Ok(())
+    }
+
+    fn read_history(&mut self, path: &str) -> io::Result<()> {
+        ensure_history_file_accessible(std::path::Path::new(path));
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let entries: Vec<String> = content
+            .lines()
+            .map(|l| l.to_string())
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        self.replace(entries)
+    }
+
+    fn append_history(&mut self, path: &str) -> io::Result<()> {
+        ensure_history_file_accessible(std::path::Path::new(path));
+        let entries = self.entries()?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        for entry in &entries {
+            writeln!(file, "{}", entry)?;
+        }
+        Ok(())
+    }
+
+    fn read_new_history(&mut self, path: &str) -> io::Result<()> {
+        ensure_history_file_accessible(std::path::Path::new(path));
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let existing = self.entries()?;
+        let existing_set: std::collections::HashSet<&str> =
+            existing.iter().map(|s| s.as_str()).collect();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !existing_set.contains(trimmed) {
+                self.append(trimmed.to_string())?;
+            }
         }
         Ok(())
     }
