@@ -412,7 +412,7 @@ impl ProbeEnv {
     }
 
     fn write_rc(&self, content: &str) {
-        std::fs::write(self.home.join(".winshrc"), content).unwrap();
+        std::fs::write(self.home.join(".winuxshrc"), content).unwrap();
     }
 }
 
