@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 W, H = 880, 480
 FPS = 12
 DURATION = 18.0
-BG = (13, 17, 23)          # 0x0d1117
+BG = (14, 18, 48)          # 0x0e1230 (brand navy)
 WHITE = (255, 255, 255)
 BLUE = (121, 192, 255)     # 0x79c0ff
 RED = (255, 85, 85)        # 0xff5555
