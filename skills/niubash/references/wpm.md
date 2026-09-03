@@ -10,6 +10,20 @@ management.
 - `wpm index status`: inspect package-index state.
 - `wpm update winuxcmd`: update WinuxCmd itself.
 
+Discover what the user actually has installed before assuming a tool is
+present — run these directly in the current Niubash session:
+
+```bash
+winuxcmd --version     # WinuxCmd command-link runtime version
+wpm installed          # packages present in this WinuxCmd root
+wpm list               # full catalog with install state
+```
+
+WPM is the package manager for GNU/POSIX command packages (`rg`, `fd`,
+`bat`, `jq`, `node`, ...); WinuxCmd owns the real `/usr/bin` tree that
+routes them. `niubash --self-update` updates Niubash and is separate from
+`wpm` updates.
+
 Check the active command before changing anything:
 
 ```bash

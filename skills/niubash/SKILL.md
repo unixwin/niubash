@@ -34,6 +34,10 @@ description: Native Niubash execution guidance for Codex running as a first-clas
 - POSIX-style paths such as `/usr/bin/tool`, `/etc/config`, and `/tmp/file`
   are supported by Niubash and Rubash. They are shell paths, not a request to
   launch WSL, MSYS, Cygwin, or another POSIX runtime.
+- WSL-style `/mnt/<drive>/...` paths (for example `/mnt/c/Users/me`) are
+  supported too and map to the corresponding Windows drive (`/mnt/c` →
+  `C:\`). Use them for shell-side convenience, but still pass native
+  `C:/...` paths to Windows executables, installers, and APIs.
 - Use native `C:/...` paths when passing a path to a Windows executable,
   installer, WPM artifact, or Windows API. POSIX-style paths are appropriate
   inside shell scripts and for shell-owned filesystem operations, but native
@@ -44,6 +48,55 @@ description: Native Niubash execution guidance for Codex running as a first-clas
 - `~` resolves to the Windows user home used by PowerShell (`USERPROFILE`,
   with `HOME` kept consistent). Do not replace it with a POSIX `/home/...`
   directory unless a test fixture explicitly provides one.
+
+## Environment Discovery
+
+- Before assuming a tool is installed, **discover what the user actually
+  has** by running quick commands directly in the current Niubash session —
+  do not guess or hardcode paths from a default install.
+- `winuxcmd --version` reveals the WinuxCmd command-link runtime version
+  and confirms the Unix command tree is live.
+- `wpm installed` lists the WPM packages present in this WinuxCmd root
+  (this is the fastest way to see which GNU/modern CLI tools the user has).
+- `wpm list` shows the full indexed catalog with per-package install
+  state; `wpm info <name>` shows one package's metadata and commands.
+- Mental model: **WPM is the package manager** (it downloads and links
+  GNU/POSIX command packages such as `rg`, `fd`, `bat`, `jq`, `node`),
+  while **WinuxCmd is the command-link runtime** that owns the real
+  `/usr/bin` tree and routes those commands. `niubash --self-update`
+  updates Niubash itself and is separate from `wpm` package updates.
+- For a specific tool, prefer `command -v name`, `which name`, or
+  `type name` to confirm it resolves before using it.
+
+## Bash Compatibility — Test Before Assuming Parity
+
+- Niubash aims for GNU Bash compatibility, but it is **not byte-identical
+  to bash**. Treat the `86/86` upstream gate as a strong floor, not a
+  guarantee that every bash-ism works.
+- Before relying on an advanced bash feature — `fc`, `coproc`, exotic
+  redirects, `mapfile`/`readarray` edge cases, `compgen`/`complete`, deep
+  parameter expansion, or `BASH_REMATCH` — test it with `niu -c "…"` first.
+  If it diverges, fall back to a simpler POSIX form, or invoke a real `bash`
+  if one is on PATH (`command -v bash`).
+- Known gap families observed in practice: `fc -l` self-exclusion, pipeline
+  stdin handoff edge cases (a `\x1e` record separator can leak into stdout
+  on some pipelines), and external-tool quoting artifacts from WinuxCmd
+  command links (e.g. `grep` may emit a stray leading quote). When a
+  command's output looks wrong, check for these before blaming user data.
+- If a bash script fails under Niubash, narrow it to the smallest failing
+  snippet, report the gap, and route the semantic fix upstream to
+  `unixwin/rubash` rather than carrying a host-side workaround.
+
+## Session Context
+
+- This skill applies when the active shell executor **is** Niubash — either
+  the host profile uses the Niubash sandbox executor, or you are invoking
+  `niu -c "…"` / an interactive `niu` directly.
+- If the host session runs another shell (for example a DSH web profile
+  whose shell executor is PowerShell), do **not** assume the current session
+  is Niubash. Invoke Niubash explicitly (`niu -c "…"` or a Niubash terminal)
+  for any Niubash-specific syntax, and keep Windows-native `C:/...` paths for
+  external executables.
 
 ## Command Execution
 
