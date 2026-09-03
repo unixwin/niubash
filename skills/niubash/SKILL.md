@@ -75,9 +75,7 @@ description: Native Niubash execution guidance for Codex running as a first-clas
   guarantee that every bash-ism works.
 - Before relying on an advanced bash feature — `fc`, `coproc`, exotic
   redirects, `mapfile`/`readarray` edge cases, `compgen`/`complete`, deep
-  parameter expansion, or `BASH_REMATCH` — test it with `niu -c "…"` first.
-  If it diverges, fall back to a simpler POSIX form, or invoke a real `bash`
-  if one is on PATH (`command -v bash`).
+  parameter expansion, or `BASH_REMATCH` — test it **directly in the current Niubash session** (not via `niu -c` nesting, which adds its own quoting layer). If it diverges, fall back to a simpler POSIX form, or invoke a real `bash` if one is on PATH (`command -v bash`).
 - Known gap families observed in practice: `fc -l` self-exclusion, pipeline
   stdin handoff edge cases (a `\x1e` record separator can leak into stdout
   on some pipelines), and external-tool quoting artifacts from WinuxCmd
