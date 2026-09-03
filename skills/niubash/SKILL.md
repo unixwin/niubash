@@ -75,14 +75,11 @@ description: Native Niubash execution guidance for Codex running as a first-clas
   guarantee that every bash-ism works.
 - Before relying on an advanced bash feature — `fc`, `coproc`, exotic
   redirects, `mapfile`/`readarray` edge cases, `compgen`/`complete`, deep
-  parameter expansion, or `BASH_REMATCH` — test it with `niu -c "…"` first.
-  If it diverges, fall back to a simpler POSIX form, or invoke a real `bash`
-  if one is on PATH (`command -v bash`).
+  parameter expansion, or `BASH_REMATCH` — test it **directly in the current Niubash session** (not via `niu -c` nesting, which adds its own quoting layer). If it diverges, fall back to a simpler POSIX form, or invoke a real `bash` if one is on PATH (`command -v bash`).
 - Known gap families observed in practice: `fc -l` self-exclusion, pipeline
   stdin handoff edge cases (a `\x1e` record separator can leak into stdout
-  on some pipelines), and external-tool quoting artifacts from WinuxCmd
-  command links (e.g. `grep` may emit a stray leading quote). When a
-  command's output looks wrong, check for these before blaming user data.
+  on some pipelines), external-tool quoting artifacts from WinuxCmd
+  command links (e.g. `grep` may emit a stray leading quote), `shopt -s nullglob` has no effect (unmatched globs stay literal — `echo *.nonexist` prints `*.nonexist`), `shopt -s extglob` is a no-op (`@(a|b)` stays literal), and rare double-quote escaping (`"c\"d"` drops the `"` → `cd`). When a command's output looks wrong, check for these before blaming user data.
 - If a bash script fails under Niubash, narrow it to the smallest failing
   snippet, report the gap, and route the semantic fix upstream to
   `unixwin/rubash` rather than carrying a host-side workaround.
