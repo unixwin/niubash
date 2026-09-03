@@ -1,6 +1,6 @@
 [package]
 name = "niubash"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.70"
 license = "MIT"
@@ -19,7 +19,7 @@ members = [".", "crates/niubash-runtime"]
 resolver = "2"
 
 [dependencies]
-niubash-runtime = { path = "crates/niubash-runtime", version = "1.0.0" }
+niubash-runtime = { path = "crates/niubash-runtime", version = "1.0.1" }
 rubash = { path = "../rubash" }
 anyhow = "1.0"
 env_logger = "0.10"

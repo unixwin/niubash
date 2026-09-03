@@ -63,7 +63,7 @@ See it in action:
 
 Grab the installer `niubash-v*-win-*-setup.exe` from the
 [Releases](https://github.com/unixwin/niubash/releases) page (currently
-v1.0.0) and run it — no admin rights. It wires up your PATH and a Windows
+v1.0.1) and run it — no admin rights. It wires up your PATH and a Windows
 Terminal profile. Prefer portable? Take the `.zip` — the first launch
 self-activates the Unix commands.
 

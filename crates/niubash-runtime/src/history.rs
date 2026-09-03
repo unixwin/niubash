@@ -3,7 +3,6 @@
 use std::{
     fs,
     io::{self, Write},
-
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::SystemTime,

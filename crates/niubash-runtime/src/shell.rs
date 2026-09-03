@@ -494,6 +494,8 @@ impl Shell {
                 Ok(code) => code,
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
+                Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
+                Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => code,
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                     if self.command_not_found_plugin_enabled() {
                         let args = command_not_found_args(&ast, &cmd);
@@ -517,6 +519,8 @@ impl Shell {
                 Ok(()) => self.executor.last_exit_code(),
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
+                Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
+                Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => code,
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                     if self.command_not_found_plugin_enabled() {
                         let args = command_not_found_args(&ast, &cmd);
@@ -2160,6 +2164,8 @@ impl Shell {
             Ok(code) => code,
             Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
             Err(rubash::executor::ExecuteError::Return(code)) => code,
+            Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
+            Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => code,
             Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                 if self.command_not_found_plugin_enabled() {
                     let args = command_not_found_args(&ast, &cmd);

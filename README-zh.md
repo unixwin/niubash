@@ -61,7 +61,7 @@
 ## 安装
 
 去 [Releases](https://github.com/unixwin/niubash/releases) 下载
-`niubash-v*-win-*-setup.exe`（当前 v1.0.0），双击，完事——不需要管理员
+`niubash-v*-win-*-setup.exe`（当前 v1.0.1），双击，完事——不需要管理员
 权限，它会配好你的 PATH 和 Windows Terminal 配置。嫌重？拿 `.zip` 便携版
 （首次启动自动激活 Unix 命令）。源码构建：
 
