@@ -16,9 +16,18 @@
 # The allowlist is applied with a POSIX case glob (lowercased line) instead of
 # grep -E/-F so the gate behaves identically under Git Bash grep and the
 # WinuxCmd grep.
-# Manifest fields are parsed with awk rather than sed and are never stored as
-# shell variables containing `"`: this shell drops double quotes from
-# assignment values, which silently broke the earlier sed/grep -A versions.
+#
+# Manifest fields are parsed with awk. Three quirks of this shell force the
+# exact forms below, so keep them as written:
+#   - `-F'\042'` carries a single backslash: awk resolves that octal escape to
+#     the quote field separator, so the script never spells `"` in a pattern.
+#     A doubled backslash turns the separator into a literal string and every
+#     field comparison silently stops matching.
+#   - `print` emits CRLF here, so a captured version keeps a trailing CR and
+#     must be trimmed with `${var%"$cr"}` before it is compared.
+#   - double quotes do not survive this shell in command substitution or in
+#     assignment values, so versions are never stored as quoted strings and no
+#     awk program may rely on an empty-string literal (`""` gets dropped).
 set -e
 cd "$(dirname "$0")/.."
 
@@ -72,28 +81,22 @@ check() {
     exit 1
 }
 
-# top_version <manifest>: first top-level `version = "..."` value.
+cr=$(printf '\r')
+
+# top_version <manifest>: first top-level `version = "..."` value, CR-free.
 top_version() {
-    awk -F'\\042' '/^version = / { gsub(/\r/, "", $0); print $2; exit }' "$1"
+    version=$(awk -F'\042' '/^version = /{print $2; exit}' "$1")
+    printf '%s' "${version%"$cr"}"
 }
 
 # lock_pins <package> <version>: true when Cargo.lock records
 # `name = "<pkg>"` immediately above `version = "<version>"`.
 lock_pins() {
-    awk -v want_name="$1" -v want_version="$2" '
-        {
-            gsub(/\r/, "", $0)
-            if (pending) {
-                value = $0
-                sub(/^version = "/, "", value)
-                sub(/".*/, "", value)
-                if (value == want_version) found = 1
-                exit
-            }
-            name = $0
-            sub(/^name = "/, "", name)
-            sub(/".*/, "", name)
-            if (name == want_name) pending = 1
+    awk -v want_name="$1" -v want_version="$2" -F'\042' '
+        $1 == "name = " && $2 == want_name {
+            getline
+            if ($1 == "version = " && $2 == want_version) found = 1
+            exit
         }
         END { exit found ? 0 : 1 }
     ' Cargo.lock
@@ -117,9 +120,8 @@ fi
 check 'root package is named niubash' grep -q '^name = "niubash"' Cargo.toml
 check 'binary is named niu' grep -q '^name = "niu"$' Cargo.toml
 check 'runtime crate is named niubash-runtime' grep -q '^name = "niubash-runtime"' crates/niubash-runtime/Cargo.toml
-
-check 'Cargo.lock records niubash' grep -q '^name = "niubash"' Cargo.lock
-check 'Cargo.lock records niubash-runtime' grep -q '^name = "niubash-runtime"' Cargo.lock
+check "Cargo.lock pins niubash $root_version" lock_pins niubash "$root_version"
+check "Cargo.lock pins niubash-runtime $runtime_version" lock_pins niubash-runtime "$runtime_version"
 
 rubash_pinned=no
 for version in 0.1.0 1.0.0 1.0.1 1.0.2 1.1.0 1.2.0 2.0.0; do
