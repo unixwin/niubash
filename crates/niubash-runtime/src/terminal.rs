@@ -9,6 +9,15 @@ pub fn stdio_is_interactive() -> bool {
         && platform::stdout_is_terminal()
         && platform::stderr_is_terminal()
 }
+
+/// Return true only when stdout is attached to a real terminal.
+///
+/// Full-screen easter eggs must refuse to draw when stdout is a pipe or a
+/// file: escape sequences in redirected output corrupt CI logs and break
+/// the deterministic non-interactive contract.
+pub fn stdout_is_terminal() -> bool {
+    platform::stdout_is_terminal()
+}
 #[cfg(windows)]
 mod platform {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;

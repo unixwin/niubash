@@ -167,11 +167,27 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     let invocation =
         ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("niu: {}", error))?;
+
+    if invocation.dump_strings {
+        let input = invocation_input(&invocation)?;
+        print_locale_strings(&input, invocation.dump_po);
+        return Ok(());
+    }
+    if invocation.pretty_print {
+        let input = invocation_input(&invocation)?;
+        pretty_print_script(&input);
+        return Ok(());
+    }
+
     let mut shell = if invocation.read_stdin {
         niubash_runtime::Shell::new_for_stdin_script()?
     } else {
         niubash_runtime::Shell::new()?
     };
+    shell.no_rc = invocation.no_rc;
+    shell.no_profile = invocation.no_profile;
+    shell.rc_file = invocation.rc_file.clone().map(PathBuf::from);
+    shell.no_editing = invocation.no_editing;
     invocation
         .apply_to_executor(&mut shell.executor)
         .map_err(|error| anyhow::anyhow!("niu: {}", error))?;
@@ -197,6 +213,12 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    // Bash -i forces an interactive shell even when stdin is not a terminal;
+    // with no command or script, a terminal (or -i) means the REPL.
+    if invocation.interactive || niubash_runtime::terminal::stdio_is_interactive() {
+        shell.enter_interactive();
+        return niubash_runtime::repl::run_repl(&mut shell);
+    }
     let mut content = String::new();
     std::io::stdin().read_to_string(&mut content)?;
     let code = shell.execute_script(&content)?;
@@ -205,6 +227,78 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         std::process::exit(code);
     }
     Ok(())
+}
+
+fn invocation_input(invocation: &ShellInvocation) -> anyhow::Result<String> {
+    if let Some(command) = &invocation.command {
+        return Ok(command.clone());
+    }
+    if let Some(script_name) = &invocation.script {
+        let path = script_arg_to_host_path(script_name);
+        return Ok(std::fs::read_to_string(&path)?);
+    }
+    let mut content = String::new();
+    std::io::stdin().read_to_string(&mut content)?;
+    Ok(content)
+}
+
+/// -D / --dump-strings: list every locale string ($"...") without executing,
+/// the way GNU bash's dump-strings option does. --dump-po-strings selects the
+/// GNU gettext PO output format.
+fn print_locale_strings(input: &str, po: bool) {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'$' && bytes[i + 1] == b'"' {
+            let mut j = i + 2;
+            let mut content = String::new();
+            while j < bytes.len() {
+                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    content.push(bytes[j + 1] as char);
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == b'"' {
+                    break;
+                }
+                content.push(bytes[j] as char);
+                j += 1;
+            }
+            if po {
+                println!("msgid \"{}\"", content);
+                println!("msgstr \"\"");
+            } else {
+                println!("\"{}\"", content);
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// --pretty-print: parse the input and print it back in normalized form.
+/// rubash has no AST-to-source serializer yet, so this validates the script
+/// and rebuilds the source from the token stream, preserving whitespace.
+fn pretty_print_script(input: &str) {
+    use rubash::TokenKind;
+    let tokens = rubash::lexer::tokenize(input);
+    if tokens.is_empty() {
+        return;
+    }
+    let _ast = rubash::parser::parse(&tokens);
+    let mut out = String::new();
+    for token in &tokens {
+        if token.kind == TokenKind::Eof {
+            continue;
+        }
+        out.push_str(&token.leading_ws);
+        out.push_str(&token.raw);
+    }
+    print!("{}", out);
+    if !out.ends_with('\n') {
+        println!();
+    }
 }
 
 fn script_arg_to_host_path(value: &str) -> PathBuf {
@@ -232,6 +326,7 @@ fn script_arg_to_host_path(value: &str) -> PathBuf {
 fn run_repl() -> anyhow::Result<()> {
     self_update::maybe_print_update_hint();
     let mut shell = niubash_runtime::Shell::new()?;
+    shell.enter_interactive();
     niubash_runtime::repl::run_repl(&mut shell)
 }
 
@@ -245,6 +340,7 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
         }
     }
     let mut shell = niubash_runtime::Shell::new()?;
+    shell.enter_interactive();
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
     if let Some(command_name) = args.get(3) {

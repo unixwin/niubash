@@ -2,14 +2,6 @@
 
 use std::{borrow::Cow, io::Write};
 
-use reedline::{
-    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, ListMenu,
-    MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, Vi,
-};
-use rubash::TokenKind;
-
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::NiubashCompleter;
 use crate::config::{
@@ -18,6 +10,12 @@ use crate::config::{
 use crate::history::LiveFileBackedHistory;
 use crate::shell::Shell;
 use crate::syntax_highlighting::NiubashSyntaxHighlighter;
+use reedline::{
+    default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
+    ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, ListMenu,
+    MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
+    ReedlineMenu, Signal, Vi,
+};
 
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";
@@ -641,7 +639,25 @@ fn heredoc_input_complete(input: &str) -> bool {
     }
     rubash::lexer::tokenize(input)
         .into_iter()
-        .all(|token| token.kind != TokenKind::HereDocBody || !token.value.starts_with('\x1f'))
+        .all(|token| !is_unterminated_heredoc_body_token(&token))
+}
+
+// Whether a token is a here-doc body that did not yet reach its delimiter.
+// rubash marks such bodies with a leading \x1f (and, for quoted here-docs,
+// the __RUBASH_HD1__ marker before it). This mirrors rubash's own
+// command_has_unterminated_heredoc check without depending on a private
+// lexer helper that is not part of the published API.
+fn is_unterminated_heredoc_body_token(token: &rubash::Token) -> bool {
+    use rubash::TokenKind;
+    if token.kind != TokenKind::HereDocBody {
+        return false;
+    }
+    const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
+    let body = token
+        .value
+        .strip_prefix(QUOTED_HEREDOC_MARKER)
+        .unwrap_or(&token.value);
+    body.starts_with('')
 }
 
 fn scan_repl_input(input: &str) -> ReplInputScan {
@@ -795,6 +811,9 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
 
     shell.restore_last_working_dir_for_repl();
     shell.run_startup_rc();
+    if shell.no_editing {
+        return run_repl_without_line_editor(shell);
+    }
     let mut line_editor = build_line_editor(shell)?;
     let mut pending = PendingReplInput::default();
 
@@ -865,6 +884,56 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// `--noediting` fallback: read plain input lines with no
+/// readline-style editing, matching GNU bash when invoked with --noediting.
+/// The prompt is rendered through the same PromptBackend so the visual style
+/// is preserved; control characters and completion are unavailable.
+fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    let mut pending = PendingReplInput::default();
+    loop {
+        shell.run_precmd_hooks();
+        let prompt = if pending.is_empty() {
+            shell.prompt.render_prompt_left().to_string()
+        } else {
+            "> ".to_string()
+        };
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+
+        let mut line = String::new();
+        let read = stdin.lock().read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if pending.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+        if pending.is_empty() && matches!(line.trim(), "exit" | "logout") {
+            let _ = shell.finish_with_exit_trap(0);
+            break;
+        }
+
+        pending.push(line);
+        if !pending.is_complete() {
+            continue;
+        }
+
+        let is_multiline = pending.is_multiline();
+        let script = pending.take();
+        if is_multiline {
+            let _ = shell.execute_interactive_script(&script);
+        } else {
+            let _ = shell.execute_interactive_line(script.trim());
+        }
+        flush_repl_output();
+    }
+    let _ = shell.finish_with_exit_trap(0);
     Ok(())
 }
 
@@ -984,6 +1053,23 @@ mod tests {
         assert!(is_repl_input_complete("echo one |\n  grep one"));
         assert!(!is_repl_input_complete("echo one \\"));
         assert!(is_repl_input_complete("echo one \\\n  two"));
+    }
+
+    #[test]
+    fn repl_input_complete_tracks_heredoc_delimiters() {
+        // The engine treats a lone << operator line as an unterminated
+        // here-doc body (bash parse.y gather_here_documents pulls the body
+        // from the input stream before executing), so the REPL must keep
+        // reading instead of submitting the line alone.
+        assert!(!is_repl_input_complete("cat > out.txt <<'EOF'"));
+        assert!(!is_repl_input_complete("cat > out.txt <<\"EOF\""));
+        assert!(!is_repl_input_complete("cat > out.txt <<EOF"));
+        assert!(!is_repl_input_complete("cat > out.txt <<-EOF"));
+        assert!(!is_repl_input_complete("cat <<A <<'B'\nA-body\nA"));
+        assert!(is_repl_input_complete("cat > out.txt <<'EOF'\nbody A\nEOF"));
+        assert!(is_repl_input_complete("cat > out.txt <<EOF\nbody A\nEOF"));
+        // A << inside quotes is not a here-doc operator.
+        assert!(is_repl_input_complete("echo \"<<EOF\""));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    terminal::{self, ClearType},
+    terminal,
 };
 
 const TICK_MS: u64 = 150;
@@ -75,7 +75,7 @@ impl Game {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .subsec_nanos() as usize;
+            .as_nanos() as usize;
         candidates[nanos % candidates.len()]
     }
 
@@ -85,17 +85,20 @@ impl Game {
         }
 
         let head = self.snake[0];
+        // All four edges wrap, so the playfield is a torus in every direction.
+        // (Down and Right already wrapped; Up and Left used `wrapping_sub`,
+        // which sent the head to `usize::MAX` and made the snake vanish.)
         let new_head = match self.dir {
             Dir::Up => Pos {
                 x: head.x,
-                y: head.y.wrapping_sub(1),
+                y: (head.y + HEIGHT - 1) % HEIGHT,
             },
             Dir::Down => Pos {
                 x: head.x,
                 y: (head.y + 1) % HEIGHT,
             },
             Dir::Left => Pos {
-                x: head.x.wrapping_sub(1),
+                x: (head.x + WIDTH - 1) % WIDTH,
                 y: head.y,
             },
             Dir::Right => Pos {
@@ -120,18 +123,17 @@ impl Game {
     }
 
     fn draw(&self, stdout: &mut io::Stdout) -> anyhow::Result<()> {
-        execute!(stdout, terminal::Clear(ClearType::All))?;
         execute!(stdout, cursor::MoveTo(0, 0))?;
 
         // Title
         write!(
             stdout,
-            "\x1b[1;96m~ niubash snake ~  \x1b[1;93mscore: {}\x1b[0m\n\n",
+            "\x1b[1;96m~ niubash snake ~  \x1b[1;93mscore: {:<5}\x1b[0m\x1b[K\n\x1b[K\n",
             self.score
         )?;
 
         for y in 0..HEIGHT {
-            stdout.write_all(b"  ")?; // indent
+            execute!(stdout, cursor::MoveTo(2, (y + 2) as u16))?;
             for x in 0..WIDTH {
                 let pos = Pos { x, y };
                 if pos == self.snake[0] {
@@ -144,13 +146,15 @@ impl Game {
                     stdout.write_all(b" ")?;
                 }
             }
-            stdout.write_all(b"\n")?;
+            stdout.write_all(b"\x1b[K")?;
         }
 
+        let status_y = (HEIGHT + 2) as u16;
+        execute!(stdout, cursor::MoveTo(0, status_y))?;
         if self.over {
-            stdout.write_all(b"\n\x1b[1;91m  GAME OVER! Press q to quit.\x1b[0m\n")?;
+            stdout.write_all(b"\x1b[K\n\x1b[1;91m  GAME OVER! Press q to quit.\x1b[0m\x1b[K\n\x1b[K")?;
         } else {
-            stdout.write_all(b"\n  \x1b[90mwasd/arrows to move, q to quit\x1b[0m\n")?;
+            stdout.write_all(b"\x1b[K\n  \x1b[90mwasd/arrows to move, q to quit\x1b[0m\x1b[K\n\x1b[K")?;
         }
 
         stdout.flush()?;
@@ -159,14 +163,18 @@ impl Game {
 }
 
 pub(crate) fn run() -> anyhow::Result<i32> {
+    if !crate::terminal::stdout_is_terminal() {
+        return Ok(0);
+    }
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, terminal::EnterAlternateScreen)?;
+    execute!(stdout, cursor::Hide)?;
 
     let mut game = Game::new();
     let mut last_tick = Instant::now();
 
-    loop {
+    let code = loop {
         game.draw(&mut stdout)?;
 
         // Poll input
@@ -176,7 +184,7 @@ pub(crate) fn run() -> anyhow::Result<i32> {
             }) = event::read()?
             {
                 match code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                    KeyCode::Char('q') | KeyCode::Char('Q') => break 0,
                     KeyCode::Char('w') | KeyCode::Char('W') | KeyCode::Up => {
                         if game.dir != Dir::Down {
                             game.dir = Dir::Up;
@@ -197,7 +205,7 @@ pub(crate) fn run() -> anyhow::Result<i32> {
                             game.dir = Dir::Right;
                         }
                     }
-                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => break 0,
                     _ => {}
                 }
             }
@@ -217,12 +225,13 @@ pub(crate) fn run() -> anyhow::Result<i32> {
                         }
                     }
                 }
-                break;
+                break 0;
             }
         }
-    }
+    };
 
+    execute!(stdout, cursor::Show)?;
     execute!(stdout, terminal::LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
-    Ok(0)
+    Ok(code)
 }

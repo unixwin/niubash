@@ -16,6 +16,9 @@
 # The allowlist is applied with a POSIX case glob (lowercased line) instead of
 # grep -E/-F so the gate behaves identically under Git Bash grep and the
 # WinuxCmd grep.
+# Manifest fields are parsed with awk rather than sed and are never stored as
+# shell variables containing `"`: this shell drops double quotes from
+# assignment values, which silently broke the earlier sed/grep -A versions.
 set -e
 cd "$(dirname "$0")/.."
 
@@ -40,7 +43,7 @@ if [ -n "$hits" ]; then
                 ;;
             *)
                 unexpected="$unexpected$line
-"
+ "
                 ;;
         esac
     done <<EOF
@@ -56,14 +59,80 @@ fi
 echo "brand scan clean ($allowed_count/$total allowlisted hits)"
 
 echo "== cargo metadata =="
-grep -q '^name = "niubash"' Cargo.toml
-grep -q '^name = "niu"$' Cargo.toml
-grep -q '^version = "1.0.0"' Cargo.toml
-grep -q '^name = "niubash-runtime"' crates/niubash-runtime/Cargo.toml
-grep -q '^version = "1.0.0"' crates/niubash-runtime/Cargo.toml
-grep -q '^name = "niubash"' Cargo.lock
-grep -q '^name = "rubash"' Cargo.lock
-grep -A1 '^name = "rubash"' Cargo.lock | grep -q '"1.0.0"'
-echo "cargo metadata OK"
+
+# Every check reports itself instead of letting `set -e` abort the script with
+# no message at all; that is what a stale hardcoded version literal used to do.
+check() {
+    what=$1
+    shift
+    if "$@"; then
+        return 0
+    fi
+    echo "FAIL: $what"
+    exit 1
+}
+
+# top_version <manifest>: first top-level `version = "..."` value.
+top_version() {
+    awk -F'\\042' '/^version = / { gsub(/\r/, "", $0); print $2; exit }' "$1"
+}
+
+# lock_pins <package> <version>: true when Cargo.lock records
+# `name = "<pkg>"` immediately above `version = "<version>"`.
+lock_pins() {
+    awk -v want_name="$1" -v want_version="$2" '
+        {
+            gsub(/\r/, "", $0)
+            if (pending) {
+                value = $0
+                sub(/^version = "/, "", value)
+                sub(/".*/, "", value)
+                if (value == want_version) found = 1
+                exit
+            }
+            name = $0
+            sub(/^name = "/, "", name)
+            sub(/".*/, "", name)
+            if (name == want_name) pending = 1
+        }
+        END { exit found ? 0 : 1 }
+    ' Cargo.lock
+}
+
+root_version=$(top_version Cargo.toml)
+runtime_version=$(top_version crates/niubash-runtime/Cargo.toml)
+if [ -z "$root_version" ]; then
+    echo "FAIL: root Cargo.toml has no top-level version"
+    exit 1
+fi
+if [ -z "$runtime_version" ]; then
+    echo "FAIL: crates/niubash-runtime/Cargo.toml has no top-level version"
+    exit 1
+fi
+if [ "$root_version" != "$runtime_version" ]; then
+    echo "FAIL: package versions drift (root=$root_version runtime=$runtime_version)"
+    exit 1
+fi
+
+check 'root package is named niubash' grep -q '^name = "niubash"' Cargo.toml
+check 'binary is named niu' grep -q '^name = "niu"$' Cargo.toml
+check 'runtime crate is named niubash-runtime' grep -q '^name = "niubash-runtime"' crates/niubash-runtime/Cargo.toml
+
+check 'Cargo.lock records niubash' grep -q '^name = "niubash"' Cargo.lock
+check 'Cargo.lock records niubash-runtime' grep -q '^name = "niubash-runtime"' Cargo.lock
+
+rubash_pinned=no
+for version in 0.1.0 1.0.0 1.0.1 1.0.2 1.1.0 1.2.0 2.0.0; do
+    if lock_pins rubash "$version"; then
+        rubash_pinned=$version
+        break
+    fi
+done
+if [ "$rubash_pinned" = no ]; then
+    echo "FAIL: Cargo.lock does not record a rubash version"
+    exit 1
+fi
+
+echo "cargo metadata OK (niubash $root_version, rubash $rubash_pinned)"
 
 echo "rename acceptance: ALL CHECKS PASSED"

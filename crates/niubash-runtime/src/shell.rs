@@ -81,6 +81,18 @@ pub struct Shell {
     plugin_prompt_sync: PluginPromptSyncConfig,
     process_stdin_pipeline_bridge: bool,
     bash_prompt_command_running: bool,
+    // True once this shell enters the interactive REPL. Easter eggs are
+    // routed only from here so `niu -c`, script files, and piped stdin stay
+    // quiet and deterministic.
+    pub interactive: bool,
+    // --norc: do not source the interactive startup file.
+    pub no_rc: bool,
+    // --noprofile: do not run login-profile startup.
+    pub no_profile: bool,
+    // --rcfile / --init-file: alternate startup file.
+    pub rc_file: Option<PathBuf>,
+    // --noediting: disable readline-style line editing in the REPL.
+    pub no_editing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +415,11 @@ impl Shell {
             plugin_prompt_sync,
             process_stdin_pipeline_bridge: false,
             bash_prompt_command_running: false,
+            interactive: false,
+            no_rc: false,
+            no_profile: false,
+            rc_file: None,
+            no_editing: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
         shell.update_completion_state();
@@ -411,6 +428,33 @@ impl Shell {
 
     pub fn enable_process_stdin_pipeline_bridge(&mut self) {
         self.process_stdin_pipeline_bridge = true;
+    }
+
+    /// Mark this shell as interactive.
+    ///
+    /// Two consequences: easter eggs become routable, and rubash diagnostics
+    /// are prefixed with `niu` instead of the fallback engine name, which is
+    /// what bash does for errors at an interactive prompt.
+    pub fn enter_interactive(&mut self) {
+        self.interactive = true;
+        self.executor.set_env("__RUBASH_SCRIPT_NAME", "niu");
+    }
+
+    /// Route a one-command AST to an easter egg when this shell is
+    /// interactive. Returns the egg's exit code, or `None` so the caller keeps
+    /// ordinary command resolution.
+    fn easter_egg_exit(&self, commands: &[rubash::parser::CommandNode]) -> Option<i32> {
+        if !self.interactive || commands.len() != 1 {
+            return None;
+        }
+        let words = &commands[0].words;
+        let Some(head) = words.first() else {
+            return None;
+        };
+        if !crate::easter_eggs::is_registered(head) {
+            return None;
+        }
+        crate::easter_eggs::dispatch(true, words).ok().flatten()
     }
 
     /// Execute a single input line via rubash. Returns the exit code.
@@ -479,14 +523,8 @@ impl Shell {
                 .is_some_and(|command| command == "lwd")
         {
             self.execute_native_last_working_dir()?
-        } else if ast.commands.len() == 1
-            && ast.commands[0]
-                .words
-                .first()
-                .is_some_and(|cmd| crate::easter_eggs::dispatch(cmd).ok().flatten().is_some())
-        {
-            let cmd = ast.commands[0].words.first().unwrap();
-            crate::easter_eggs::dispatch(cmd)?.unwrap_or(0)
+        } else if let Some(exit) = self.easter_egg_exit(&ast.commands) {
+            exit
         } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             code
         } else if let Some(execution) = self.execute_host_synced_simple_ast(&ast) {
@@ -629,7 +667,17 @@ impl Shell {
         ensure_windows_profile_env(&mut self.executor, &self.home_dir);
         ensure_prompt_terminal_env(&mut self.executor);
         self.sync_gitstatus_prompt_env();
-        migrate_legacy_winuxsh_rc(&self.home_dir);
+        if self.no_profile {
+            // GNU bash --noprofile skips login-profile startup; niubash has
+            // no separate profile file, so skip the legacy migration pass.
+        } else {
+            migrate_legacy_winuxsh_rc(&self.home_dir);
+        }
+        if self.no_rc {
+            self.run_process_plugin_hooks("startup", &[]);
+            self.sync_prompt_from_plugin_env();
+            return;
+        }
         let rc_path = self.startup_rc_path();
         let primary_rc = rc_path.as_ref().is_some_and(|path| {
             path.file_name().and_then(|name| name.to_str()) == Some(NIU_RC_FILE)
@@ -665,6 +713,9 @@ impl Shell {
     }
 
     fn startup_rc_path(&self) -> Option<PathBuf> {
+        if let Some(file) = &self.rc_file {
+            return Some(file.clone());
+        }
         let primary = self.home_dir.join(NIU_RC_FILE);
         if primary.is_file() {
             return Some(primary);
@@ -2142,14 +2193,8 @@ impl Shell {
         rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
         self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
-        let execution = if ast.commands.len() == 1
-            && ast.commands[0]
-                .words
-                .first()
-                .is_some_and(|cmd| crate::easter_eggs::dispatch(cmd).ok().flatten().is_some())
-        {
-            let cmd = ast.commands[0].words.first().unwrap();
-            Ok(crate::easter_eggs::dispatch(cmd)?.unwrap_or(0))
+        let execution = if let Some(exit) = self.easter_egg_exit(&ast.commands) {
+            Ok(exit)
         } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             Ok(code)
         } else {
@@ -6766,6 +6811,11 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             plugin_prompt_sync: PluginPromptSyncConfig::disabled(),
             process_stdin_pipeline_bridge: false,
             bash_prompt_command_running: false,
+            interactive: false,
+            no_rc: false,
+            no_profile: false,
+            rc_file: None,
+            no_editing: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
         shell

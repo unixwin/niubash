@@ -1,6 +1,11 @@
 use std::io::{self, Write};
 
+/// `about`: version banner, features, and the hidden-command index. Refuses to
+/// draw when stdout is not a terminal so piped output stays clean.
 pub(crate) fn run() -> anyhow::Result<i32> {
+    if !crate::terminal::stdout_is_terminal() {
+        return Ok(0);
+    }
     let mut stdout = io::stdout();
     stdout.write_all(b"\x1b[2J\x1b[H")?;
     stdout.flush()?;
@@ -49,10 +54,17 @@ fn print_info() -> anyhow::Result<i32> {
     stdout.write_all(b"    \x1b[92m*\x1b[0m Reedline-based interactive input\n")?;
 
     // Hidden commands
+    stdout.write_all(b"\n  \x1b[1;93mGames (type `game` for the list):\x1b[0m\n")?;
+    stdout.write_all(b"    \x1b[96mgame\x1b[0m    - Launcher for every game below\n")?;
+    stdout.write_all(b"    \x1b[96msnake\x1b[0m   - Eat the apples, do not eat yourself\n")?;
+    stdout.write_all(b"    \x1b[96mcow\x1b[0m     - The bull, animated\n")?;
+    stdout.write_all(b"    \x1b[96mtyping\x1b[0m  - Words per minute\n")?;
+    stdout.write_all(b"    \x1b[96mtic\x1b[0m     - Tic-tac-toe against the machine\n")?;
+
+    // Hidden one-shot toys
     stdout.write_all(b"\n  \x1b[1;93mHidden commands:\x1b[0m\n")?;
     stdout.write_all(b"    \x1b[96mmatrix\x1b[0m  - Take the red pill\n")?;
     stdout.write_all(b"    \x1b[96mparty\x1b[0m   - Dance time\n")?;
-    stdout.write_all(b"    \x1b[96mgame\x1b[0m    - Snake game\n")?;
     stdout.write_all(b"    \x1b[96mabout\x1b[0m   - This screen\n")?;
 
     // Footer
