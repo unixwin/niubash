@@ -33,3 +33,15 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Network
 [dev-dependencies]
 sha2 = "0.10"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+# Published-binary profile (measured on x64 MSVC against the default release
+# profile): thin LTO + one codegen unit enables cross-crate DCE/inlining
+# (11.9 MB -> 10.99 MB); panic=abort drops unwind tables and landing pads
+# (10.99 MB -> 7.78 MB total). The codebase has no catch_unwind and the
+# Ctrl+C handler is atomic-only, so no explicit recovery path relies on
+# unwinding. Release-mode test runs match dev-profile results; CI keeps
+# running the suite under the default dev profile.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
