@@ -91,7 +91,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
             "  \u{1f6e0}\u{fe0f}  Setup preset",
             0,
             &["minimal", "dev", "full"],
-            "  \u{2502}  minimal = prompt + git only\n  \u{2502}  dev     = + ripgrep, fd, fzf, bat, starship\n  \u{2502}  full    = + lua, python, node",
+            "  \u{2502}  minimal = prompt + git only\n  \u{2502}  dev     = + ripgrep, fd, fzf, bat, starship\n  \u{2502}  full    = + python, node",
         );
         preset_packages = match preset_idx.as_str() {
             "dev" => vec![
@@ -107,7 +107,6 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
                 "fd".into(),
                 "fzf".into(),
                 "bat".into(),
-                "lua".into(),
                 "python".into(),
                 "node".into(),
             ],
@@ -283,26 +282,48 @@ fn pick_choice(label: &str, default_idx: usize, options: &[&str], help: &str) ->
     }
 }
 
-/// Install packages via wpm, printing progress for each.
+/// Install packages via wpm, printing progress for each. Failures show the
+/// last meaningful wpm output line so a missing or broken package is
+/// diagnosable instead of a bare warning.
 fn install_wpm_packages(packages: &[String]) {
     println!();
     for pkg in packages {
         print!("  \u{1f527}  Installing {}... ", pkg);
         io::stdout().flush().ok();
-        let status = Command::new("wpm")
+        let outcome = Command::new("wpm")
             .arg("install")
             .arg(pkg)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => println!("\u{2705}"),
-            Ok(_) => println!("\u{26a0}\u{fe0f}  (not found or failed)"),
+            .output();
+        match outcome {
+            Ok(output) if output.status.success() => println!("\u{2705}"),
+            Ok(output) => {
+                println!("\u{26a0}\u{fe0f}  (failed)");
+                if let Some(reason) = wpm_failure_reason(&output) {
+                    println!("  \u{2502}  {}", reason);
+                }
+            }
             Err(_) => println!("\u{26a0}\u{fe0f}  (wpm not available)"),
         }
     }
     println!();
+}
+
+/// Pick a short single-line reason from captured wpm output, preferring
+/// stderr and falling back to stdout.
+fn wpm_failure_reason(output: &std::process::Output) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let text = if stderr.trim().is_empty() {
+        String::from_utf8_lossy(&output.stdout)
+    } else {
+        stderr
+    };
+    let line = text.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+    let mut reason: String = line.chars().take(120).collect();
+    if line.chars().count() > 120 {
+        reason.push('\u{2026}');
+    }
+    Some(reason)
 }
 
 fn setup_home_dir() -> PathBuf {

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub const OFFICIAL_BUNDLE_NAME: &str = "oh-my-niu";
 /// Pre-rename bundle identity. Bundles installed under this name keep
@@ -18,6 +19,54 @@ pub const OFFICIAL_BUNDLE_LEGACY_NAMES: &[&str] = &["oh-my-niu"];
 
 pub fn is_official_bundle_name(name: &str) -> bool {
     name == OFFICIAL_BUNDLE_NAME || OFFICIAL_BUNDLE_LEGACY_NAMES.contains(&name)
+}
+
+/// First pre-rename bundle location skipped this process, for a one-time
+/// interactive migration notice. Pre-rename `oh-my-winuxsh` bundles ship the
+/// retired oh-my-winuxsh plugin API and must never load silently.
+static LEGACY_BUNDLE_NOTICE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Record a skipped pre-rename bundle location (first one wins).
+pub fn record_legacy_bundle_notice(path: PathBuf) {
+    let mut notice = LEGACY_BUNDLE_NOTICE.lock().unwrap();
+    if notice.is_none() {
+        *notice = Some(path);
+    }
+}
+
+/// Take the recorded pre-rename bundle notice, if any, leaving it consumed so
+/// the interactive REPL prints it at most once per process.
+pub fn take_legacy_bundle_notice() -> Option<String> {
+    let path = LEGACY_BUNDLE_NOTICE.lock().unwrap().take()?;
+    Some(format!(
+        "niubash: found pre-rename 'oh-my-winuxsh' bundle at {}; it is not compatible with this version. Run `niu setup` to reconfigure with oh-my-niu, or remove the legacy Winuxsh installation.",
+        path.display()
+    ))
+}
+
+/// Whether the directory is a pre-rename bundle layout: it still carries the
+/// retired `oh-my-winuxsh.winux` entry point and no current-name entry. Such
+/// bundles ship the retired oh-my-winuxsh plugin API and must not load.
+fn is_pre_rename_bundle_dir(path: &Path) -> bool {
+    path.join("oh-my-winuxsh.winux").is_file()
+        && !path.join("oh-my-niu.niu").is_file()
+        && !path.join("oh-my-niu.winux").is_file()
+}
+
+/// Load a bundle inventory for a candidate path, refusing pre-rename bundle
+/// layouts by recording a legacy notice and returning `None` so resolution
+/// falls through to the next candidate.
+fn load_inventory_skipping_pre_rename(
+    path: &Path,
+    source: &str,
+) -> anyhow::Result<Option<PluginInventory>> {
+    if is_pre_rename_bundle_dir(path) {
+        record_legacy_bundle_notice(path.to_path_buf());
+        return Ok(None);
+    }
+    Ok(Some(load_official_bundle_inventory_from_path(
+        path, source,
+    )?))
 }
 const OFFICIAL_BUNDLE_VERSION: &str = "1.0.0";
 const PLUGIN_API_VERSION: &str = "niubash:plugin@0.1.0";
@@ -559,18 +608,28 @@ pub fn active_plugin_inventory() -> PluginInventory {
 fn active_plugin_inventory_result() -> anyhow::Result<PluginInventory> {
     if let Some(path) = env_path("NIU_PLUGIN_BUNDLE_PATH") {
         if path.exists() {
-            return load_official_bundle_inventory_from_path(&path, "env_override");
+            if let Some(inventory) =
+                load_inventory_skipping_pre_rename(&path, "env_override")?
+            {
+                return Ok(inventory);
+            }
         }
     }
     let lock_path = plugin_lock_path();
     if let Ok(lock) = read_plugin_lock(&lock_path) {
         if lock.active_path.exists() {
-            return load_official_bundle_inventory_from_path(&lock.active_path, "user_bundle");
+            if let Some(inventory) =
+                load_inventory_skipping_pre_rename(&lock.active_path, "user_bundle")?
+            {
+                return Ok(inventory);
+            }
         }
     }
     for path in app_bundled_bundle_candidates() {
         if path.exists() {
-            return load_official_bundle_inventory_from_path(&path, "app_bundle");
+            if let Some(inventory) = load_inventory_skipping_pre_rename(&path, "app_bundle")? {
+                return Ok(inventory);
+            }
         }
     }
     Ok(compiled_plugin_inventory())
@@ -2999,6 +3058,103 @@ fn safe_path_component(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod legacy_bundle_gate_tests {
+    use super::*;
+    use crate::test_support::PROCESS_STATE_LOCK;
+    use std::env;
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &Path) -> Self {
+            let previous = env::var_os(name);
+            env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => env::set_var(self.name, value),
+                None => env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "niubash-{}-{}-{}",
+            label,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_bundle_fixture(path: &Path, name: &str) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(
+            path.join("bundle.toml"),
+            format!(
+                "name = \"{name}\"\nversion = \"9.9.9\"\napi = \"niubash:plugin-bundle@0.1.0\"\nmin_niubash = \"0.8.3\"\n[packs]\ndefault = []\navailable = []\n[layout]\npacks_dir = \"packs\"\n"
+            ),
+        )
+        .unwrap();
+        if name == "oh-my-winuxsh" {
+            // Pre-rename bundles carry the retired entry point.
+            fs::write(path.join("oh-my-winuxsh.winux"), "").unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_named_bundle_override_is_skipped_with_notice() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let temp = unique_temp_dir("legacy-bundle-gate");
+        let bundle = temp.join("bundle");
+        write_bundle_fixture(&bundle, "oh-my-winuxsh");
+
+        let _bundle_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_PATH", &bundle);
+        let _lock_guard = EnvVarGuard::set("NIU_PLUGIN_LOCK", &temp.join("missing-lock.toml"));
+
+        let inventory = active_plugin_inventory();
+        assert_eq!(inventory.source, "compiled_fallback");
+
+        let notice = take_legacy_bundle_notice().expect("legacy notice recorded");
+        assert!(notice.contains("oh-my-winuxsh"), "{notice}");
+        assert!(notice.contains("niu setup"), "{notice}");
+        assert!(notice.contains(bundle.to_string_lossy().as_ref()), "{notice}");
+        assert!(take_legacy_bundle_notice().is_none(), "notice is one-shot");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn official_named_bundle_override_still_loads() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let temp = unique_temp_dir("official-bundle-gate");
+        let bundle = temp.join("bundle");
+        write_bundle_fixture(&bundle, OFFICIAL_BUNDLE_NAME);
+
+        let _bundle_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_PATH", &bundle);
+        let _lock_guard = EnvVarGuard::set("NIU_PLUGIN_LOCK", &temp.join("missing-lock.toml"));
+
+        let inventory = active_plugin_inventory();
+        assert_eq!(inventory.source, "env_override");
+        assert_eq!(inventory.bundle, OFFICIAL_BUNDLE_NAME);
+
+        let _ = fs::remove_dir_all(&temp);
+    }
 }
 fn semver_gt(left: &str, right: &str) -> bool {
     let left = parse_semver_core(left);
