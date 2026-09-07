@@ -13,6 +13,7 @@ pub mod git_status;
 pub(crate) mod history;
 pub mod interactive_menu;
 pub mod logo;
+pub mod panic_restore;
 pub(crate) mod path_utils;
 pub mod plugins;
 pub mod prompt;

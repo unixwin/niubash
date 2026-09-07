@@ -35,6 +35,10 @@ const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "niubash-plugin-bundles";
 const NIU_MAIN_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    // Restore the console (raw mode, cursor) on the panic path before the
+    // default hook reports; with `panic = "abort"` this is the last code
+    // that runs because no Drop guards execute.
+    niubash_runtime::panic_restore::install_panic_hook();
     std::thread::Builder::new()
         .name("niu-main".to_string())
         .stack_size(NIU_MAIN_STACK_SIZE)
