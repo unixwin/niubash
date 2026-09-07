@@ -660,6 +660,22 @@ fn is_unterminated_heredoc_body_token(token: &rubash::Token) -> bool {
     body.starts_with('')
 }
 
+/// Pending here-doc body skip state for the REPL input scanner.
+///
+/// GNU bash gathers here-doc bodies at line granularity while lexing: the
+/// body starts after the newline of the operator line and everything up to
+/// the delimiter line is opaque data. The completeness scanner must mirror
+/// that, otherwise body text poisons the quote and block tracking
+/// (`x; if y` inside a body would push a phantom `fi` block and the pasted
+/// script would never submit).
+struct ReplHeredocSkip {
+    delimiter: String,
+    strip_tabs: bool,
+    /// False while still scanning the operator line (delimiters, comments,
+    /// and quotes on that line are ordinary syntax); true inside the body.
+    in_body: bool,
+}
+
 fn scan_repl_input(input: &str) -> ReplInputScan {
     let chars: Vec<char> = input.chars().collect();
     let mut scan = ReplInputScan {
@@ -669,9 +685,41 @@ fn scan_repl_input(input: &str) -> ReplInputScan {
     let mut word = String::new();
     let mut quote = None;
     let mut index = 0;
+    let mut heredoc_skip: Option<ReplHeredocSkip> = None;
+    let mut heredoc_line = String::new();
 
     while index < chars.len() {
         let ch = chars[index];
+
+        if let Some(skip) = &mut heredoc_skip {
+            if skip.in_body {
+                if ch == '\n' {
+                    let candidate = heredoc_line.trim_end_matches('\r');
+                    let stripped = if skip.strip_tabs {
+                        candidate.trim_start_matches('\t')
+                    } else {
+                        candidate
+                    };
+                    if stripped == skip.delimiter {
+                        heredoc_skip = None;
+                    }
+                    heredoc_line.clear();
+                    index += 1;
+                    continue;
+                }
+                heredoc_line.push(ch);
+                index += 1;
+                continue;
+            }
+            // Still on the operator line: fall through to normal scanning.
+            // The first newline switches the state into the body.
+            if ch == '\n' {
+                skip.in_body = true;
+                heredoc_line.clear();
+                index += 1;
+                continue;
+            }
+        }
 
         if let Some(quote_char) = quote {
             word.push(ch);
@@ -692,6 +740,81 @@ fn scan_repl_input(input: &str) -> ReplInputScan {
         match ch {
             '#' if word.is_empty() => {
                 index = skip_repl_comment(&chars, index);
+            }
+            '<' => {
+                flush_repl_word(&mut scan.tokens, &mut word);
+                if chars.get(index + 1) == Some(&'<') {
+                    if chars.get(index + 2) == Some(&'<') {
+                        // Here-string: `<<< word` takes its payload from the
+                        // following word, not from subsequent lines.
+                        scan.tokens.push(ReplToken::Operator("<<<".to_string()));
+                        index += 3;
+                        continue;
+                    }
+                    let mut cursor = index + 2;
+                    let strip_tabs = chars.get(cursor) == Some(&'-');
+                    if strip_tabs {
+                        cursor += 1;
+                    }
+                    while matches!(chars.get(cursor), Some(c) if *c == ' ' || *c == '\t') {
+                        cursor += 1;
+                    }
+                    let mut delimiter = String::new();
+                    match chars.get(cursor) {
+                        Some(q @ ('"' | '\'')) => {
+                            let quote_char = *q;
+                            cursor += 1;
+                            while let Some(&c) = chars.get(cursor) {
+                                if c == quote_char {
+                                    cursor += 1;
+                                    break;
+                                }
+                                if c == '\\' && quote_char == '"' {
+                                    cursor += 1;
+                                    if let Some(&escaped) = chars.get(cursor) {
+                                        delimiter.push(escaped);
+                                        cursor += 1;
+                                    }
+                                    continue;
+                                }
+                                delimiter.push(c);
+                                cursor += 1;
+                            }
+                        }
+                        _ => {
+                            while let Some(&c) = chars.get(cursor) {
+                                if c.is_ascii_whitespace()
+                                    || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
+                                {
+                                    break;
+                                }
+                                if c == '\\' {
+                                    cursor += 1;
+                                    if let Some(&escaped) = chars.get(cursor) {
+                                        delimiter.push(escaped);
+                                        cursor += 1;
+                                    }
+                                    continue;
+                                }
+                                delimiter.push(c);
+                                cursor += 1;
+                            }
+                        }
+                    }
+                    // Sequential gathering, like bash's lexer: bodies of
+                    // multiple heredocs on one operator line are read in
+                    // operator order, so the last operator's delimiter ends
+                    // the combined skip.
+                    heredoc_skip = Some(ReplHeredocSkip {
+                        delimiter,
+                        strip_tabs,
+                        in_body: false,
+                    });
+                    index = cursor;
+                    continue;
+                }
+                word.push('<');
+                index += 1;
             }
             '\'' | '"' | '`' => {
                 quote = Some(ch);
@@ -811,6 +934,9 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
 
     shell.restore_last_working_dir_for_repl();
     shell.run_startup_rc();
+    if let Some(notice) = crate::plugins::take_legacy_bundle_notice() {
+        eprintln!("{}", notice);
+    }
     if shell.no_editing {
         return run_repl_without_line_editor(shell);
     }
@@ -1070,6 +1196,36 @@ mod tests {
         assert!(is_repl_input_complete("cat > out.txt <<EOF\nbody A\nEOF"));
         // A << inside quotes is not a here-doc operator.
         assert!(is_repl_input_complete("echo \"<<EOF\""));
+    }
+
+    #[test]
+    fn repl_input_complete_ignores_heredoc_body_syntax() {
+        // Block keywords inside a here-doc body are opaque data (git-summary's
+        // usage() body contains `... repos; if omitted, ...`, which used to
+        // push a phantom `fi` block and wedge the REPL in continuation mode).
+        assert!(is_repl_input_complete(
+            "f() {\ncat <<EOF\nx; if y\nEOF\n}"
+        ));
+        assert!(is_repl_input_complete("cat <<EOF\nx; if y\nEOF"));
+        assert!(is_repl_input_complete(
+            "cat <<'EOF'\nbody with \"quotes && (parens)\nEOF"
+        ));
+        // <<- strips leading tabs from the delimiter line only.
+        assert!(is_repl_input_complete(
+            "cat <<-EOF\n\tindented; if x\n\tEOF"
+        ));
+        // Sequential multi-heredoc gathering.
+        assert!(is_repl_input_complete(
+            "cat <<E1 <<E2\nA; if a\nB; fi b\nE1\nE2"
+        ));
+        // A here-string is not a heredoc; its payload stays code.
+        assert!(!is_repl_input_complete("cat <<< \"unterminated"));
+        // Unterminated bodies still keep the REPL reading.
+        assert!(!is_repl_input_complete("cat <<EOF\nnever closed"));
+        // A delimiter line with trailing text is body data, not a delimiter.
+        assert!(!is_repl_input_complete(
+            "cat <<EOF\nbody\nEOF trailing\nmore"
+        ));
     }
 
     #[test]

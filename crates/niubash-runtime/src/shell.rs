@@ -737,7 +737,17 @@ impl Shell {
         for (name, value) in context {
             self.executor.set_env(name, value);
         }
-        let _ = self.execute_script(&format!("{runner} 2>/dev/null || true"));
+        // The prompt machinery must survive hostile user options: a `set -eu`
+        // from .niubashrc or an interactive session used to make every hook
+        // runner print `NIU_*_HOOKS: unbound variable` spam and abort
+        // mid-runner (framework scripts such as oh-my-niu reference optional
+        // NIU_* hook lists unguarded; GNU bash's PROMPT_COMMAND has the same
+        // fragility, which is why starship and bash-preexec guard with
+        // ${VAR:-}). Snapshot the option state, force nounset/errexit off for
+        // host-owned hook execution, then restore exactly what the user had.
+        let _ = self.execute_script(&format!(
+            "__NIU_HOOK_OPTS_=\"$-\"\nset +eu\n{runner} 2>/dev/null || true\ncase \"$__NIU_HOOK_OPTS_\" in *e*) set -e ;; *) set +e ;; esac\ncase \"$__NIU_HOOK_OPTS_\" in *u*) set -u ;; *) set +u ;; esac\nunset __NIU_HOOK_OPTS_"
+        ));
         if !context.is_empty() {
             let names = context
                 .iter()
@@ -3826,6 +3836,11 @@ fn set_default_niubash_framework_env(executor: &mut Executor, home_dir: &Path) {
 
     if executor.get_env("NIUBASH").is_none() {
         if let Some(path) = first_valid_niubash_framework_dir(home_dir, app_bundle.as_deref()) {
+            if !framework_dir_has_new_entry(&path) {
+                // Resolved to a pre-rename bundle layout; surface a one-time
+                // migration notice in the interactive REPL.
+                crate::plugins::record_legacy_bundle_notice(path.clone());
+            }
             executor.set_env("NIUBASH", &host_path_to_shell_path(&path.to_string_lossy()));
         }
     }
@@ -3872,10 +3887,13 @@ fn first_valid_niubash_framework_dir(
         .find(|path| is_niubash_framework_dir(path))
 }
 
+/// Whether the directory carries a current-name bundle entry point.
+fn framework_dir_has_new_entry(path: &Path) -> bool {
+    path.join("oh-my-niu.niu").is_file() || path.join("oh-my-niu.winux").is_file()
+}
+
 fn is_niubash_framework_dir(path: &Path) -> bool {
-    path.join("oh-my-niu.niu").is_file()
-        || path.join("oh-my-niu.winux").is_file()
-        || path.join("oh-my-winuxsh.winux").is_file()
+    framework_dir_has_new_entry(path) || path.join("oh-my-winuxsh.winux").is_file()
 }
 
 fn shell_pwd_to_existing_host_dir(pwd: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
@@ -5031,6 +5049,50 @@ niubash_run_chpwd_hooks() {
         );
         assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
         assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn framework_hook_runner_survives_user_set_eu() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-hook-runner-set-eu");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.19");
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            r#"
+niubash_run_precmd_hooks() {
+  eval "$NIU_UNSET_HOOK_LIST"
+  export NIU_HOOK_RAN=ok
+}
+"#,
+        )
+        .unwrap();
+
+        let _bundle_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("NIU_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        // Hostile user options: the unguarded $NIU_UNSET_HOOK_LIST expansion
+        // in the runner used to abort the hook under `set -u` before the
+        // export, and every prompt cycle printed unbound-variable spam.
+        shell.execute_script("set -eu").unwrap();
+        shell.run_precmd_hooks();
+
+        assert_eq!(shell.executor.get_env("NIU_HOOK_RAN"), Some("ok"));
+        // The user's option state is restored after the hook runner.
+        shell.execute_script("NIU_SAVED_FLAGS_=$-").unwrap();
+        let flags = shell.executor.get_env("NIU_SAVED_FLAGS_").unwrap_or_default();
+        assert!(flags.contains('e'), "errexit restored: {flags}");
+        assert!(flags.contains('u'), "nounset restored: {flags}");
+        assert_eq!(shell.executor.get_env("__NIU_HOOK_OPTS_"), None);
 
         let _ = std::fs::remove_dir_all(temp);
     }
