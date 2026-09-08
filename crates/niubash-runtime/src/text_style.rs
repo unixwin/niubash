@@ -105,6 +105,27 @@ pub fn warn_symbol() -> String {
     yellow("!")
 }
 
+/// Terminal width for column layout, falling back to 100 columns when the
+/// size cannot be queried (piped output, CI).
+pub fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(100)
+}
+
+/// Truncate `text` to at most `max` chars, appending an ellipsis when cut.
+pub fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let mut out: String = text.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
 /// Dim "needs: a, b" note for packs whose required programs are absent.
 /// Empty when nothing is missing.
 pub fn warn_missing_note(required: &[String]) -> String {

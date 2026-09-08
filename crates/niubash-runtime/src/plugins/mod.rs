@@ -1496,39 +1496,69 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
         return out;
     }
 
-    if !enabled.is_empty() {
-        out.push_str(&format!(
-            "\n{} ({}):\n",
-            crate::text_style::cyan("Enabled"),
-            enabled.len()
-        ));
-        for pack in &enabled {
-            out.push_str(&pack_human_line(pack));
+    // Unified human view: one row per pack (default-on themes stay; the 26
+    // optional themes collapse into the footer), enabled on top, status
+    // symbol + dim category column + summary truncated to terminal width.
+    let mut rows: Vec<&PluginPackRecord> = inventory
+        .packs
+        .iter()
+        .filter(|pack| !themes.iter().any(|theme| std::ptr::eq(*theme, *pack)))
+        .collect();
+    rows.sort_by(|a, b| b.default.cmp(&a.default).then(a.name.cmp(&b.name)));
+    let name_w = rows
+        .iter()
+        .map(|pack| pack.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(10, 24);
+    let cat_w = rows
+        .iter()
+        .map(|pack| pack.category.as_str().chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(6, 12);
+    let width = crate::text_style::terminal_width();
+    let prefix_len = 2 + 1 + 1 + name_w + 1 + cat_w + 2;
+    let summary_max = width.saturating_sub(prefix_len).max(24);
+
+    for pack in &rows {
+        let missing = crate::plugins::missing_required_binaries(&pack.required_binaries);
+        let mut summary = pack.summary.clone();
+        if !missing.is_empty() {
+            summary = format!("{} ({})", summary, missing.join(", "));
         }
-    }
-    if !available.is_empty() {
+        let summary = crate::text_style::truncate(&summary, summary_max);
+        let symbol = if pack.default {
+            crate::text_style::on_symbol()
+        } else {
+            crate::text_style::off_symbol()
+        };
+        let category = crate::text_style::dim(pack.category.as_str());
+        let summary = if pack.default {
+            summary
+        } else {
+            crate::text_style::dim(&summary)
+        };
         out.push_str(&format!(
-            "\n{} ({}):\n",
-            crate::text_style::cyan("Available"),
-            available.len()
+            "  {symbol} {:<name_w$} {:<cat_w$} {}\n",
+            pack.name,
+            category,
+            summary
         ));
-        for pack in &available {
-            out.push_str(&pack_human_line(pack));
-        }
     }
-    if !themes.is_empty() {
-        out.push_str(&format!(
-            "\n{} ({}): switch with NIU_THEME in ~/.niubashrc; full list via `niu plugin themes`\n",
-            crate::text_style::cyan("Themes"),
-            themes.len()
-        ));
-        out.push_str("  ");
-        let names: Vec<&str> = themes.iter().map(|pack| pack.name.as_str()).collect();
-        out.push_str(&wrap_words(&names, 76, "  "));
-        out.push('\n');
-    }
+
+    let theme_count = themes.len();
+    out.push('\n');
+    let footer = format!(
+        "{} enabled · {} available · {} themes — set NIU_THEME=<name> to switch; list via `niu plugin themes`",
+        enabled.len(),
+        available.len(),
+        theme_count
+    );
+    out.push_str(&crate::text_style::dim(&footer));
+    out.push('\n');
     out.push_str(&crate::text_style::dim(
-        "\nDetails: niu plugin info <name>   Machine output: --json   Diagnostics: --verbose\n",
+        "Details: niu plugin info <name>   Machine output: --json   Diagnostics: --verbose\n",
     ));
     out
 }
@@ -1553,26 +1583,6 @@ fn pack_human_line(pack: &PluginPackRecord) -> String {
 }
 
 /// Word-wrap `words` to `width` columns with an indent on continuation lines.
-fn wrap_words(words: &[&str], width: usize, indent: &str) -> String {
-    let mut out = String::new();
-    let mut column = 0usize;
-    for word in words {
-        if column == 0 {
-            out.push_str(word);
-            column = word.len();
-        } else if column + 1 + word.len() <= width {
-            out.push(' ');
-            out.push_str(word);
-            column += 1 + word.len();
-        } else {
-            out.push('\n');
-            out.push_str(indent);
-            out.push_str(word);
-            column = indent.len() + word.len();
-        }
-    }
-    out
-}
 fn pack_list_line(pack: &PluginPackRecord) -> String {
     let readiness = plugin_readiness_profile(pack);
     format!(
