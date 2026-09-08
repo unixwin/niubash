@@ -145,9 +145,23 @@ host-owned.
 
 ## P2: execute the ecosystem openness roadmap
 
-`plugin-ecosystem-vs-zsh.md` already specifies P0 (`niu plugin add
-<git-url>[@ref]` + trust gate), P1 (federated indexes), P2 (classic
-directory packs), P3 (read-only omz shim). No redesign needed; land P0.
+**P0 of this roadmap is implemented** (2026-09-08):
+
+- `niu plugin add <git-url>[@ref] [name]` clones a third-party bundle into
+  `~/.niubash/external/<name>` and registers it **untrusted** in
+  `~/.niubash/external/registry.toml`.
+- `niu plugin trust <name>` flips the trust flag; the inventory resolver
+  (`skip_untrusted_external_bundle`) skips untrusted external bundles so none
+  of their packs can activate, falling through to the official bundle.
+- `niu plugin use <name>` activates a trusted external bundle through the
+  same plugin-lock channel as the official bundle, so `niu plugin rollback`
+  works for external bundles too. `niu plugin remove <name>` deletes the
+  clone (path-confined to the external root) and the registry entry.
+- Real-machine smoke verified: add → (untrusted skip) → trust → use →
+  external pack listed by `niu plugin doctor` as
+  `Source: user_bundle / Trust source: external_bundle`.
+- Still open on this roadmap: P1 federated indexes, P2 classic directory
+  packs, P3 read-only omz shim.
 
 ## P3: polish list
 

@@ -127,7 +127,9 @@ impl HistoryConfig {
 /// Completion menu display style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionStyle {
-    /// Multi-column grid (like zsh `compinit`). Default.
+    /// Multi-column popup with descriptions (VS Code style). Default.
+    Ide,
+    /// Multi-column grid (like zsh `compinit`).
     Column,
     /// Vertical list with descriptions (like fish).
     List,
@@ -138,6 +140,7 @@ pub enum CompletionStyle {
 impl CompletionStyle {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "ide" | "smart" | "popup" => Some(Self::Ide),
             "column" | "col" | "grid" => Some(Self::Column),
             "list" | "vertical" => Some(Self::List),
             "inline" | "cycle" | "menu" => Some(Self::Inline),
@@ -148,7 +151,7 @@ impl CompletionStyle {
 
 impl Default for CompletionStyle {
     fn default() -> Self {
-        Self::Column
+        Self::Ide
     }
 }
 
@@ -177,7 +180,7 @@ impl MenuConfig {
             if let Some(style) = CompletionStyle::parse(&value) {
                 self.completion_style = style;
             } else {
-                eprintln!("niubash: NIU_COMPLETION_STYLE must be one of: column, list, inline");
+                eprintln!("niubash: NIU_COMPLETION_STYLE must be one of: ide, column, list, inline");
             }
         }
         self
@@ -572,13 +575,13 @@ mod tests {
     }
 
     #[test]
-    fn completion_style_default_is_column() {
-        assert_eq!(CompletionStyle::default(), CompletionStyle::Column);
+    fn completion_style_default_is_ide() {
+        assert_eq!(CompletionStyle::default(), CompletionStyle::Ide);
     }
 
     #[test]
     fn menu_config_default_completion_style() {
         let config = MenuConfig::default();
-        assert_eq!(config.completion_style, CompletionStyle::Column);
+        assert_eq!(config.completion_style, CompletionStyle::Ide);
     }
 }

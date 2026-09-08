@@ -7,6 +7,7 @@
 pub mod autosuggest;
 pub mod completion;
 pub mod config;
+pub mod console_guard;
 pub mod ctrl_c;
 pub(crate) mod easter_eggs;
 pub mod git_status;

@@ -185,6 +185,19 @@ fn configured_list_menu(name: &str, page_size: usize, config: MenuConfig) -> Lis
 /// Build the completion menu according to the configured style.
 fn configured_completion_menu(name: &str, config: MenuConfig) -> Box<dyn reedline::Menu> {
     match config.completion_style {
+        CompletionStyle::Ide => {
+            // Multi-column popup with descriptions (VS Code style). Column
+            // count adapts to the terminal width; descriptions render to the
+            // right of (or under) the value column.
+            let menu = reedline::IdeMenu::default()
+                .with_name(name)
+                .with_min_completion_width(20)
+                .with_max_completion_width(48)
+                .with_max_completion_height(config.completion_page_size.min(20) as u16)
+                .with_padding(1)
+                .with_description_mode(reedline::DescriptionMode::PreferRight);
+            Box::new(menu)
+        }
         CompletionStyle::Column => {
             let page_cols = if config.completion_page_size <= 4 {
                 2
@@ -346,9 +359,9 @@ enum NativeKeymapTarget {
 
 fn add_native_widget_keybindings(
     keybindings: &mut Keybindings,
-    target: NativeKeymapTarget,
+    _target: NativeKeymapTarget,
     config: &NativeWidgetConfig,
-    bindings: &[NativeWidgetBinding],
+    _bindings: &[NativeWidgetBinding],
 ) {
     if !config.enabled {
         return;
@@ -1070,6 +1083,11 @@ fn has_unescaped_trailing_backslash(input: &str) -> bool {
 /// `read_line`: the prompt is cloned out each iteration.
 pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     let shell = Rc::new(RefCell::new(shell));
+    // Snapshot the console modes before anything (wizard, rc files, external
+    // commands) can change them. Restored before every prompt: a child that
+    // exits with a broken console (e.g. ssh.exe on a failed auth) must not
+    // leave the REPL drawing literal escape sequences with a hidden cursor.
+    let console_baseline = crate::console_guard::capture();
     // First-run setup wizard.
     if crate::setup_wizard::is_first_run() {
         let _ = crate::setup_wizard::run_wizard();
@@ -1100,6 +1118,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     let mut pending = PendingReplInput::default();
 
     loop {
+        crate::console_guard::restore(&console_baseline);
         let signal = if pending.is_empty() {
             shell.borrow_mut().run_precmd_hooks();
             let prompt = shell.borrow().prompt.clone();
@@ -1208,9 +1227,11 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
 /// is preserved; control characters and completion are unavailable.
 fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
     use std::io::BufRead;
+    let console_baseline = crate::console_guard::capture();
     let stdin = std::io::stdin();
     let mut pending = PendingReplInput::default();
     loop {
+        crate::console_guard::restore(&console_baseline);
         shell.run_precmd_hooks();
         let prompt = if pending.is_empty() {
             shell.prompt.render_prompt_left().to_string()

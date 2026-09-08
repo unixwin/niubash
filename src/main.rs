@@ -13,7 +13,7 @@
 //!   niu plugin search [query] [--json] → discover official plugins
 //!   niu plugin themes [--json] → list user and bundle themes
 //!   niu plugin bundle status [--json] → inspect official bundle install state
-//!   niu plugin doctor [--json] → diagnose plugin configuration health
+//!   niu plugin doctor [--json] [--verbose] → diagnose plugin configuration health
 //!   niu plugin review <name> [--json] → review plugin permissions
 //!   niu plugin update oh-my-niu --from <path> → install a bundle release
 //!   niu plugin update oh-my-niu --github-release latest → download/install bundle
@@ -540,11 +540,14 @@ fn print_usage() {
     println!("  self-update               REPL command: update Niubash and exit this shell");
     println!("  update-niubash            Alias for self-update");
     println!();
-    println!("  plugin list [--json]      List official Niubash plugins");
-    println!("  plugin info <name> [--json]  Inspect one official Niubash plugin");
+    println!("  plugin list [--json] [--verbose]");
+    println!("                            List plugins (human view; --verbose adds diagnostics)");
+    println!("  plugin info <name> [--json] [--verbose]");
+    println!("                            Inspect one official Niubash plugin");
     println!("  plugin search [query] [--json]  Discover official plugins");
     println!("  plugin themes [--json]    List user and bundle themes");
-    println!("  plugin bundle status [--json]  Inspect official bundle install state");
+    println!("  plugin bundle status [--json] [--verbose]");
+    println!("                            Inspect official bundle install state");
     println!("  plugin update oh-my-niu --from <path>");
     println!("      [--checksum <sha>|--checksum-file <path>] [--json]");
     println!("  plugin update oh-my-niu --github-release latest|vX.Y.Z [--json]");
@@ -574,11 +577,16 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "list" => {
-            let json = parse_plugin_json_flag(&args[3..])?;
+            let rest = &args[3..];
+            let json = rest.iter().any(|arg| arg == "--json");
+            let verbose = rest.iter().any(|arg| arg == "--verbose");
             if json {
                 println!("{}", niubash_runtime::plugins::plugin_packs_json()?);
             } else {
-                println!("{}", niubash_runtime::plugins::plugin_packs_text());
+                println!(
+                    "{}",
+                    niubash_runtime::plugins::plugin_packs_text_verbose(verbose)
+                );
             }
             Ok(())
         }
@@ -588,14 +596,16 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
             let Some(name) = args.get(3) else {
                 anyhow::bail!("plugin info requires a plugin name");
             };
-            let json = parse_plugin_json_flag(&args[4..])?;
+            let rest = &args[4..];
+            let json = rest.iter().any(|arg| arg == "--json");
+            let verbose = rest.iter().any(|arg| arg == "--verbose");
             if json {
                 match niubash_runtime::plugins::plugin_pack_json(name)? {
                     Some(output) => println!("{}", output),
                     None => anyhow::bail!("unknown plugin '{}'", name),
                 }
             } else {
-                match niubash_runtime::plugins::plugin_pack_text(name) {
+                match niubash_runtime::plugins::plugin_pack_text_verbose(name, verbose) {
                     Some(output) => println!("{}", output),
                     None => anyhow::bail!("unknown plugin '{}'", name),
                 }
@@ -658,13 +668,17 @@ fn run_plugin_remove_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {
-    let json = parse_plugin_json_flag(args)?;
+    let json = args.iter().any(|arg| arg == "--json");
+    let verbose = args.iter().any(|arg| arg == "--verbose");
     let config = niubash_runtime::config::load();
     let report = niubash_runtime::plugins::plugin_doctor_report(&config.plugins);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("{}", niubash_runtime::plugins::plugin_doctor_text(&report));
+        println!(
+            "{}",
+            niubash_runtime::plugins::plugin_doctor_text_verbose(&report, verbose)
+        );
     }
     Ok(())
 }
@@ -720,11 +734,16 @@ fn run_plugin_bundle_command(args: &[String]) -> anyhow::Result<()> {
 
     match subcommand.as_str() {
         "status" => {
-            let json = parse_plugin_json_flag(&args[1..])?;
+            let rest = &args[1..];
+            let json = rest.iter().any(|arg| arg == "--json");
+            let verbose = rest.iter().any(|arg| arg == "--verbose");
             if json {
                 println!("{}", niubash_runtime::plugins::plugin_bundle_status_json()?);
             } else {
-                println!("{}", niubash_runtime::plugins::plugin_bundle_status_text());
+                println!(
+                    "{}",
+                    niubash_runtime::plugins::plugin_bundle_status_text_verbose(verbose)
+                );
             }
             Ok(())
         }
@@ -976,7 +995,7 @@ fn print_plugin_usage() {
     println!("  search [query] [--json]   Discover official plugins");
     println!("  themes [--json]           List user and bundle themes");
     println!("  bundle status [--json]    Inspect official bundle install state");
-    println!("  doctor [--json]           Diagnose plugin configuration health");
+    println!("  doctor [--json] [--verbose]  Diagnose plugin configuration health");
     println!("  review <name> [--json]    Review plugin permissions before enabling");
     println!("  update oh-my-niu --from <path>");
     println!("      [--checksum <sha>|--checksum-file <path>] [--json]");

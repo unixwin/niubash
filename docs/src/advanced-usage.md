@@ -52,8 +52,24 @@ The legacy files still exist, but they should not be the primary user path:
 Do not put automation-critical behavior only in an interactive rc file. Pass
 needed environment variables directly to `niu -c` or the script process.
 
-## Prompt And Themes
+## Completion Menu Styles
 
+The completion popup adapts with `NIU_COMPLETION_STYLE` (set it in
+`~/.niubashrc` or the environment):
+
+- `ide` (default) — multi-column popup with descriptions, VS Code style.
+  Column count adapts to the terminal width; the description of the selected
+  candidate renders beside it.
+- `column` — plain multi-column grid (like zsh `compinit`).
+- `list` — vertical list with descriptions (like fish).
+- `inline` — first match inserted directly, Tab cycles (like bash
+  `menu-complete`).
+
+Flag completions (`ls --a<Tab>` → `--all` with its description) come from the
+bundle's generated completion assets and work in every style; `ide` and
+`list` show the descriptions inline.
+
+## Prompt And Themes
 Prompt behavior is plugin-owned. The core shell provides host APIs and
 lifecycle hooks; official theme and prompt behavior lives in bundled plugins.
 
@@ -181,6 +197,36 @@ NIU_THEME_PLUGIN=theme-p10-rainbow
 
 Use managed plugin CLI operations when you need a reviewable machine record,
 permissions, bundle update state, or rollback.
+
+## Third-Party Bundles
+
+Beyond the official oh-my-niu bundle, niubash can install any git repository
+that follows the bundle layout (a `bundle.toml` at the repo root). New
+external bundles are **untrusted by default**: none of their packs activate
+until you explicitly trust them.
+
+```sh
+niu plugin add https://github.com/someone/niu-community.git
+# review the cloned bundle under ~/.niubash/external/niu-community
+niu plugin trust niu-community
+niu plugin use niu-community
+niu plugin rollback niu-community   # go back to the previous bundle
+niu plugin remove niu-community
+```
+
+Notes:
+
+- Bundles are cloned to `~/.niubash/external/<name>` and registered in
+  `~/.niubash/external/registry.toml`; the registry records the URL, ref,
+  path, and trust state.
+- `niu plugin use` points the plugin lock (`~/.niubash/plugin-lock.toml`) at
+  the external bundle and keeps the previous location for rollback.
+- An untrusted external bundle never becomes the active inventory: startup
+  skips it and falls through to the official bundle. Only `niu plugin trust
+  <name>` flips that.
+- A git ref can be pinned at add time with `niu plugin add <url>@<ref>`.
+- `NIU_EXTERNAL_BUNDLE_ROOT` overrides the external bundle root (portable
+  setups and tests).
 
 ## Command Discovery And WPM
 
