@@ -51,6 +51,46 @@ const COMMAND_NOT_FOUND_PROVIDER_MAX_LINE_BYTES: usize = 512;
 const NIU_RC_FILE: &str = ".niubashrc";
 const NIU_COMPAT_RC_FILE: &str = ".winuxshrc";
 
+/// Editor outcome produced by a shell-function widget.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WidgetOutcome {
+    /// Replacement buffer text; `None` keeps the buffer unchanged. An empty
+    /// string is a valid replacement (it clears the line).
+    pub buffer: Option<String>,
+    /// Byte offset for the cursor inside the (possibly new) buffer; ignored
+    /// when absent.
+    pub cursor: Option<usize>,
+    /// Submit the buffer after applying the outcome.
+    pub accept: bool,
+}
+
+thread_local! {
+    /// Interactive-REPL bridge letting the completer run shell functions in
+    /// the engine during completion. reedline completers must be `Send`, so
+    /// the shell is reached through this main-thread registry instead of a
+    /// completer field. Installed by `build_line_editor`, main thread only.
+    static COMPLETION_BRIDGE: RefCell<Option<Rc<RefCell<Shell>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Install the interactive shell bridge for shell-function completions
+/// (`NIU_COMPDEFS`). Replaces any previous bridge for this thread.
+pub fn install_completion_bridge(shell: &Rc<RefCell<Shell>>) {
+    COMPLETION_BRIDGE.with(|cell| {
+        *cell.borrow_mut() = Some(shell.clone());
+    });
+}
+
+/// Run `f` with mutable access to the bridged shell, or `None` when no
+/// bridge is installed on this thread.
+pub(crate) fn with_completion_bridge<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
+    let rc = COMPLETION_BRIDGE.with(|cell| cell.borrow().as_ref().cloned())?;
+    let mut shell = rc.borrow_mut();
+    let result = f(&mut shell);
+    drop(shell);
+    Some(result)
+}
+
 /// Top-level shell state.
 pub struct Shell {
     pub executor: Executor,
@@ -68,6 +108,12 @@ pub struct Shell {
     pub syntax_highlighting: SyntaxHighlightConfig,
     pub native_widgets: NativeWidgetConfig,
     pub native_widget_bindings: Vec<NativeWidgetBinding>,
+    /// User-declared widget bindings parsed from `NIU_BINDKEYS` in the
+    /// startup rc. Applied regardless of the native-widget pack gate.
+    pub user_widget_bindings: Vec<NativeWidgetBinding>,
+    /// User-declared completion functions parsed from `NIU_COMPDEFS` in the
+    /// startup rc: `(command, function)` pairs.
+    pub compdefs: Vec<(String, String)>,
     pub plugins: PluginRuntimeState,
     pub native_plugins: NativePluginConfig,
     pub hooks: HookConfig,
@@ -384,7 +430,16 @@ impl Shell {
             native_widgets.enabled = false;
             native_widgets.presets.clear();
         }
-        let native_widget_bindings = Vec::new();
+        // Bundle-declared keybindings are gated by the `keybindings` pack
+        // decision (the manifest control plane), not by the native-widget
+        // feature flag: disabling the pack removes the bindings entirely.
+        let native_widget_bindings = if plugin_state.has_decision("keybindings")
+            && !plugin_state.is_enabled("keybindings")
+        {
+            Vec::new()
+        } else {
+            crate::plugins::plugin_native_widget_bindings(&plugin_state)
+        };
 
         let mut shell = Self {
             executor,
@@ -402,6 +457,8 @@ impl Shell {
             syntax_highlighting: config.syntax_highlighting.with_env_overrides(),
             native_widgets,
             native_widget_bindings,
+            user_widget_bindings: Vec::new(),
+            compdefs: Vec::new(),
             plugins: plugin_state,
             native_plugins: config.native_plugins,
             hooks: config.hooks,
@@ -1038,6 +1095,145 @@ impl Shell {
             .get_env("PWD")
             .map(str::to_owned)
             .unwrap_or_else(|| ".".to_string())
+    }
+
+    /// Load user widget bindings from the `NIU_BINDKEYS` variable declared in
+    /// the startup rc. Each line is `keyspec:widget`; unknown widget names
+    /// become shell-function widgets at trigger time. Called after the rc has
+    /// been sourced and before the line editor is built.
+    pub fn load_user_widget_bindings(&mut self) {
+        let value = self
+            .executor
+            .get_env("NIU_BINDKEYS")
+            .map(str::to_owned)
+            .unwrap_or_default();
+        self.user_widget_bindings = crate::repl::parse_user_bindkeys(&value);
+    }
+
+    /// True when the named widget function exists in the shell engine.
+    pub fn widget_function_available(&self, name: &str) -> bool {
+        self.executor.has_function(name)
+    }
+
+    /// Load user completion functions from the `NIU_COMPDEFS` variable
+    /// declared in the startup rc. Each line is `command:function`.
+    pub fn load_user_compdefs(&mut self) {
+        let value = self
+            .executor
+            .get_env("NIU_COMPDEFS")
+            .map(str::to_owned)
+            .unwrap_or_default();
+        self.compdefs = value
+            .lines()
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty() && !entry.starts_with('#'))
+            .filter_map(|entry| {
+                let (command, function) = entry.split_once(':')?;
+                let command = command.trim();
+                let function = function.trim();
+                if command.is_empty() || function.is_empty() {
+                    return None;
+                }
+                Some((command.to_string(), function.to_string()))
+            })
+            .collect();
+    }
+
+    /// Run a shell-function completion (`compdef`) and collect its
+    /// candidates.
+    ///
+    /// The function sees the command line through `NIU_COMP_WORDS` (space
+    /// joined) and `NIU_COMP_CWORD` (bash COMP_CWORD semantics). It writes
+    /// back `NIU_COMP_RESULT` with one candidate per line, shaped
+    /// `value` or `value<TAB>description`. Compdef functions must not print
+    /// to stdout: completion runs while the line editor owns the terminal.
+    /// Output variables are unset again before returning.
+    pub fn run_compdef_function(
+        &mut self,
+        function: &str,
+        words: &[String],
+        cword: usize,
+    ) -> Vec<(String, Option<String>)> {
+        let joined = words.join(" ");
+        if let Err(err) = self.executor.call_function_with_env(
+            function,
+            std::iter::empty::<String>(),
+            [
+                ("NIU_COMP_WORDS", joined.as_str()),
+                ("NIU_COMP_CWORD", cword.to_string().as_str()),
+            ],
+        ) {
+            log::warn!("completion function '{}' failed: {}", function, err);
+        }
+
+        let result = self
+            .executor
+            .get_env("NIU_COMP_RESULT")
+            .map(str::to_owned);
+        let _ = self.execute_script("unset NIU_COMP_WORDS NIU_COMP_CWORD NIU_COMP_RESULT");
+
+        result
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| match line.split_once('\t') {
+                Some((value, description)) => (
+                    value.trim().to_string(),
+                    Some(description.trim().to_string()),
+                ),
+                None => (line.to_string(), None),
+            })
+            .collect()
+    }
+
+    /// Run a shell-function widget and collect its editor outcome.
+    ///
+    /// The function sees the current editor state through `NIU_WIDGET_BUFFER`
+    /// and `NIU_WIDGET_CURSOR`. It may write back `NIU_WIDGET_RESULT` (a
+    /// replacement buffer; setting it to the empty string clears the line),
+    /// `NIU_WIDGET_CURSOR_RESULT` (byte offset in the new buffer), and
+    /// `NIU_WIDGET_ACCEPT=1` (submit the buffer afterwards). All widget
+    /// variables are unset again before returning.
+    pub fn run_widget_function(
+        &mut self,
+        function: &str,
+        buffer: &str,
+        cursor: usize,
+    ) -> WidgetOutcome {
+        if let Err(err) = self.executor.call_function_with_env(
+            function,
+            std::iter::empty::<String>(),
+            [
+                ("NIU_WIDGET_BUFFER", buffer),
+                ("NIU_WIDGET_CURSOR", cursor.to_string().as_str()),
+            ],
+        ) {
+            log::warn!("widget function '{}' failed: {}", function, err);
+        }
+
+        let result = self
+            .executor
+            .get_env("NIU_WIDGET_RESULT")
+            .map(str::to_owned);
+        let accept = self
+            .executor
+            .get_env("NIU_WIDGET_ACCEPT")
+            .map(str::to_owned);
+        let cursor_result = self
+            .executor
+            .get_env("NIU_WIDGET_CURSOR_RESULT")
+            .and_then(|value| value.trim().parse::<usize>().ok());
+
+        let _ = self.execute_script(
+            "unset NIU_WIDGET_RESULT NIU_WIDGET_ACCEPT NIU_WIDGET_CURSOR_RESULT",
+        );
+
+        WidgetOutcome {
+            buffer: result,
+            cursor: cursor_result,
+            accept: accept.as_deref() == Some("1"),
+        }
     }
 
     /// Run native hooks immediately before the user's interactive command.
@@ -5003,6 +5199,99 @@ export WINUXSH_OLD_PREFIX=kept-as-niu
     }
 
     #[test]
+    fn user_bindkeys_load_from_rc_and_widgets_round_trip() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-user-widget-bindkeys");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.19");
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            r#"
+NIU_BINDKEYS="Ctrl+X:niu_fzf_file
+Alt+G:niu_git_status"
+
+niu_fzf_file() {
+    NIU_WIDGET_RESULT="picked:${#NIU_WIDGET_BUFFER}"
+}
+"#,
+        )
+        .unwrap();
+
+        let _bundle_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("NIU_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.load_user_widget_bindings();
+
+        assert_eq!(shell.user_widget_bindings.len(), 2);
+        assert_eq!(shell.user_widget_bindings[0].key.as_deref(), Some("Ctrl+X"));
+        assert_eq!(shell.user_widget_bindings[0].widget, "niu_fzf_file");
+        assert_eq!(shell.user_widget_bindings[1].key.as_deref(), Some("Alt+G"));
+
+        assert!(shell.widget_function_available("niu_fzf_file"));
+
+        let outcome = shell.run_widget_function("niu_fzf_file", "hello", 5);
+        assert_eq!(outcome.buffer.as_deref(), Some("picked:5"));
+        assert!(!outcome.accept);
+        assert_eq!(outcome.cursor, None);
+        assert_eq!(shell.executor.get_env("NIU_WIDGET_RESULT"), None);
+        assert_eq!(shell.executor.get_env("NIU_WIDGET_BUFFER"), None);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn user_compdefs_load_from_rc_and_run_in_engine() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-user-compdefs");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.20");
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            r#"
+NIU_COMPDEFS="git:niu_git_comp"
+
+niu_git_comp() {
+    NIU_COMP_RESULT="w:${NIU_COMP_WORDS}|c:${NIU_COMP_CWORD}"
+}
+"#,
+        )
+        .unwrap();
+
+        let _bundle_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("NIU_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("NIU_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.load_user_compdefs();
+
+        assert_eq!(shell.compdefs.len(), 1);
+        assert_eq!(shell.compdefs[0].0, "git");
+        assert_eq!(shell.compdefs[0].1, "niu_git_comp");
+
+        let candidates =
+            shell.run_compdef_function("niu_git_comp", &["git".to_string(), "co".to_string()], 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, "w:git co|c:1");
+        assert_eq!(candidates[0].1, None);
+        assert_eq!(shell.executor.get_env("NIU_COMP_RESULT"), None);
+        assert_eq!(shell.executor.get_env("NIU_COMP_WORDS"), None);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn niubashrc_framework_hooks_replace_host_source_lifecycle_hooks() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
@@ -6860,6 +7149,8 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             syntax_highlighting: SyntaxHighlightConfig::default(),
             native_widgets: NativeWidgetConfig::default(),
             native_widget_bindings: Vec::new(),
+            user_widget_bindings: Vec::new(),
+            compdefs: Vec::new(),
             plugins: PluginRuntimeState::default(),
             native_plugins: NativePluginConfig::default(),
             hooks,

@@ -1,5 +1,7 @@
 //! Reedline REPL loop
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::{borrow::Cow, io::Write};
 
 use crate::autosuggest::HistoryAutosuggestHinter;
@@ -19,6 +21,62 @@ use reedline::{
 
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";
+
+/// `ExecuteHostCommand` payload prefix that identifies a shell-function
+/// widget trigger. The host intercepts this before treating the signal as
+/// submitted input.
+pub const WIDGET_HOST_COMMAND_PREFIX: &str = "__niu_widget ";
+
+/// A widget trigger parsed from a `WIDGET_HOST_COMMAND_PREFIX` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidgetInvocation {
+    pub function: String,
+}
+
+impl WidgetInvocation {
+    /// Parse a submitted line as a widget invocation. Lines that do not carry
+    /// the sentinel, have no name, or contain whitespace after the name are
+    /// not widget invocations and stay ordinary user input.
+    pub fn parse(line: &str) -> Option<Self> {
+        let name = line.strip_prefix(WIDGET_HOST_COMMAND_PREFIX)?.trim();
+        if name.is_empty() || name.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some(Self {
+            function: name.to_string(),
+        })
+    }
+}
+
+/// Parse a `NIU_BINDKEYS` value into widget bindings. Entries are separated
+/// by newlines and shaped `keyspec:widget`, e.g. `Ctrl+X f:niu_fzf_file`.
+/// Blank lines and `#` comments are skipped; malformed entries are dropped.
+/// Known native widget names map to editor events; any other name becomes a
+/// shell-function widget resolved at trigger time.
+pub fn parse_user_bindkeys(value: &str) -> Vec<NativeWidgetBinding> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty() && !entry.starts_with('#'))
+        .filter_map(|entry| {
+            let (key, widget) = entry.split_once(':')?;
+            let key = key.trim();
+            let widget = widget.trim();
+            if key.is_empty() || widget.is_empty() {
+                return None;
+            }
+            Some(NativeWidgetBinding {
+                widget: widget.to_string(),
+                function: None,
+                key: Some(key.to_string()),
+                keymap: None,
+                source_file: None,
+                line: None,
+                origin: "user".to_string(),
+            })
+        })
+        .collect()
+}
 
 /// Extract the arguments of a `self-update` / `update-niubash` REPL command,
 /// or `None` when the line is not one.
@@ -44,22 +102,29 @@ pub fn spawn_self_update(args: &[String]) -> Option<i32> {
 }
 
 /// Build a `Reedline` instance for the shell.
-pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
+///
+/// The shell is shared through the same `Rc<RefCell<Shell>>` bridge the REPL
+/// uses, so the completer can run shell-function completions in the engine.
+pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline> {
+    let shell_ref = shell.borrow();
     let history = LiveFileBackedHistory::with_mode(
-        shell.history_max_size,
-        shell.history_path.clone(),
-        shell.history_mode,
+        shell_ref.history_max_size,
+        shell_ref.history_path.clone(),
+        shell_ref.history_mode,
     )
     .map_err(|e| {
         anyhow::anyhow!(
             "failed to open history file {}: {}",
-            shell.history_path.display(),
+            shell_ref.history_path.display(),
             e
         )
     })?;
 
-    let completer = NiubashCompleter::new(shell.completion_state.clone());
-    let menu_config = shell.menu_config;
+    let completer = NiubashCompleter::new(shell_ref.completion_state.clone());
+    // Shell-function completions reach the engine through the main-thread
+    // bridge installed here; reedline completers must stay `Send`.
+    crate::shell::install_completion_bridge(shell);
+    let menu_config = shell_ref.menu_config;
 
     let completion_menu = ReedlineMenu::WithCompleter {
         menu: configured_completion_menu(COMPLETION_MENU, menu_config),
@@ -74,31 +139,34 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
     let mut editor = Reedline::create()
         .with_history(Box::new(history))
         .with_history_exclusion_prefix(history_exclusion_prefix(
-            shell.history_ignore_space_prefixed,
+            shell_ref.history_ignore_space_prefixed,
         ))
         .with_menu(completion_menu)
         .with_menu(history_menu)
         .with_edit_mode(build_edit_mode(
-            shell.editor_mode,
-            &shell.native_widgets,
-            &shell.native_widget_bindings,
+            shell_ref.editor_mode,
+            &shell_ref.native_widgets,
+            &shell_ref.native_widget_bindings,
+            &shell_ref.user_widget_bindings,
         ));
 
-    if shell.autosuggest.history_strategy_enabled() {
-        editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(&shell.autosuggest)));
+    if shell_ref.autosuggest.history_strategy_enabled() {
+        editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(
+            &shell_ref.autosuggest,
+        )));
     }
-    if shell.syntax_highlighting.main_highlighter_enabled() {
-        let functions = shell.executor.functions_snapshot();
-        let commands = shell
+    if shell_ref.syntax_highlighting.main_highlighter_enabled() {
+        let functions = shell_ref.executor.functions_snapshot();
+        let commands = shell_ref
             .aliases
             .keys()
             .map(String::as_str)
             .chain(functions.iter().map(String::as_str));
         editor = editor.with_highlighter(Box::new(
             NiubashSyntaxHighlighter::new_with_commands_and_state(
-                &shell.syntax_highlighting,
+                &shell_ref.syntax_highlighting,
                 commands,
-                shell.completion_state.clone(),
+                shell_ref.completion_state.clone(),
             ),
         ));
     }
@@ -154,10 +222,28 @@ fn history_exclusion_prefix(ignore_space_prefixed: bool) -> Option<String> {
     ignore_space_prefixed.then(|| " ".to_string())
 }
 
+/// Apply a shell-function widget's editor outcome to the suspended editor.
+/// The editor resumes with the new buffer on the next `read_line` call.
+fn apply_widget_outcome(line_editor: &mut Reedline, outcome: &crate::shell::WidgetOutcome) {
+    if let Some(buffer) = &outcome.buffer {
+        line_editor.run_edit_commands(&[
+            EditCommand::Clear,
+            EditCommand::InsertString(buffer.clone()),
+        ]);
+    }
+    if let Some(position) = outcome.cursor {
+        line_editor.run_edit_commands(&[EditCommand::MoveToPosition {
+            position,
+            select: false,
+        }]);
+    }
+}
+
 fn build_edit_mode(
     mode: EditorMode,
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
+    user_widget_bindings: &[NativeWidgetBinding],
 ) -> Box<dyn EditMode> {
     match mode {
         EditorMode::Emacs => {
@@ -169,6 +255,13 @@ fn build_edit_mode(
                 native_widgets,
                 native_widget_bindings,
             );
+            add_bundle_widget_keybindings(
+                &mut keybindings,
+                NativeKeymapTarget::Emacs,
+                native_widgets,
+                native_widget_bindings,
+            );
+            add_user_widget_keybindings(&mut keybindings, user_widget_bindings);
             Box::new(Emacs::new(keybindings))
         }
         EditorMode::Vi => {
@@ -188,8 +281,43 @@ fn build_edit_mode(
                 native_widgets,
                 native_widget_bindings,
             );
+            add_bundle_widget_keybindings(
+                &mut insert_keybindings,
+                NativeKeymapTarget::ViInsert,
+                native_widgets,
+                native_widget_bindings,
+            );
+            add_bundle_widget_keybindings(
+                &mut normal_keybindings,
+                NativeKeymapTarget::ViNormal,
+                native_widgets,
+                native_widget_bindings,
+            );
+            add_user_widget_keybindings(&mut insert_keybindings, user_widget_bindings);
+            add_user_widget_keybindings(&mut normal_keybindings, user_widget_bindings);
             Box::new(Vi::new(insert_keybindings, normal_keybindings))
         }
+    }
+}
+
+/// Apply user-declared widget bindings from `NIU_BINDKEYS`.
+///
+/// Unlike bundle bindkeys these bypass the native-widget pack gate: writing
+/// the variable is the explicit opt-in. Bindings apply to every keymap.
+fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[NativeWidgetBinding]) {
+    for binding in bindings {
+        let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
+            eprintln!(
+                "niubash: NIU_BINDKEYS: cannot parse key '{}' for widget '{}'",
+                binding.key.as_deref().unwrap_or_default(),
+                binding.widget
+            );
+            continue;
+        };
+        let Some(event) = native_widget_event(&binding.widget) else {
+            continue;
+        };
+        keybindings.add_binding(key.0, key.1, event);
     }
 }
 
@@ -227,7 +355,17 @@ fn add_native_widget_keybindings(
     }
 
     add_native_widget_preset_keybindings(keybindings, &config.presets);
+}
 
+/// Apply bundle-declared widget bindings (from pack `keybindings/*.toml`
+/// assets). Gated only by `import_bindkeys`; the pack-level decision gate
+/// happens when the bindings are loaded into the shell.
+fn add_bundle_widget_keybindings(
+    keybindings: &mut Keybindings,
+    target: NativeKeymapTarget,
+    config: &NativeWidgetConfig,
+    bindings: &[NativeWidgetBinding],
+) {
     if !config.import_bindkeys {
         return;
     }
@@ -264,7 +402,7 @@ fn native_widget_keymap_applies(keymap: Option<&str>, target: NativeKeymapTarget
         return true;
     };
     match (keymap, target) {
-        ("main", _) => true,
+        ("main" | "all", _) => true,
         ("emacs", NativeKeymapTarget::Emacs) => true,
         ("viins", NativeKeymapTarget::ViInsert) => true,
         ("vicmd", NativeKeymapTarget::ViNormal) => true,
@@ -314,7 +452,13 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
         "up-line-or-history" => Some(ReedlineEvent::Up),
         "down-line-or-history" => Some(ReedlineEvent::Down),
-        _ => None,
+        // Unknown widget names become shell-function widgets: the host
+        // intercepts the sentinel payload, runs the named function with the
+        // editor state, and applies its outcome before resuming the editor.
+        _ => Some(ReedlineEvent::ExecuteHostCommand(format!(
+            "{}{}",
+            WIDGET_HOST_COMMAND_PREFIX, widget
+        ))),
     }
 }
 
@@ -919,7 +1063,13 @@ fn has_unescaped_trailing_backslash(input: &str) -> bool {
 }
 
 /// Run the interactive REPL.
-pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
+///
+/// Takes ownership of the shell and shares it with the completer through an
+/// `Rc<RefCell<Shell>>` bridge so shell-function completions can execute in
+/// the engine while the line editor is active. No borrow is held across
+/// `read_line`: the prompt is cloned out each iteration.
+pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
+    let shell = Rc::new(RefCell::new(shell));
     // First-run setup wizard.
     if crate::setup_wizard::is_first_run() {
         let _ = crate::setup_wizard::run_wizard();
@@ -932,34 +1082,73 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
     println!("{}", welcome);
     println!();
 
-    shell.restore_last_working_dir_for_repl();
-    shell.run_startup_rc();
+    shell.borrow_mut().restore_last_working_dir_for_repl();
+    shell.borrow_mut().run_startup_rc();
     if let Some(notice) = crate::plugins::take_legacy_bundle_notice() {
         eprintln!("{}", notice);
     }
-    if shell.no_editing {
-        return run_repl_without_line_editor(shell);
+    let no_editing = shell.borrow().no_editing;
+    if no_editing {
+        return run_repl_without_line_editor(&mut shell.borrow_mut());
     }
-    let mut line_editor = build_line_editor(shell)?;
+    // User widget bindings and completion functions come from the rc
+    // (NIU_BINDKEYS / NIU_COMPDEFS); read them after sourcing and before the
+    // line editor is built.
+    shell.borrow_mut().load_user_widget_bindings();
+    shell.borrow_mut().load_user_compdefs();
+    let mut line_editor = build_line_editor(&shell)?;
     let mut pending = PendingReplInput::default();
 
     loop {
         let signal = if pending.is_empty() {
-            shell.run_precmd_hooks();
-            line_editor.read_line(&shell.prompt)
+            shell.borrow_mut().run_precmd_hooks();
+            let prompt = shell.borrow().prompt.clone();
+            line_editor.read_line(&prompt)
         } else {
-            let prompt = ContinuationPrompt::new(&shell.prompt);
+            let prompt = shell.borrow().prompt.clone();
+            let prompt = ContinuationPrompt::new(&prompt);
             line_editor.read_line(&prompt)
         };
 
         match signal {
             Ok(Signal::Success(buffer)) => {
-                let line = buffer.trim_end_matches(['\r', '\n']);
+                let mut line = buffer.trim_end_matches(['\r', '\n']).to_string();
+                let mut widget_resumed_editing = false;
+                if pending.is_empty() {
+                    if let Some(widget) = WidgetInvocation::parse(&line) {
+                        let available =
+                            shell.borrow().widget_function_available(&widget.function);
+                        if available {
+                            let editor_buffer = line_editor.current_buffer_contents().to_string();
+                            let editor_cursor = line_editor.current_insertion_point();
+                            let outcome = shell
+                                .borrow_mut()
+                                .run_widget_function(
+                                    &widget.function,
+                                    &editor_buffer,
+                                    editor_cursor,
+                                );
+                            if outcome.accept {
+                                // Submit the produced buffer (or the line as
+                                // it stood) as ordinary user input.
+                                line = outcome.buffer.unwrap_or(editor_buffer);
+                            } else {
+                                apply_widget_outcome(&mut line_editor, &outcome);
+                                widget_resumed_editing = true;
+                            }
+                        }
+                    }
+                }
+                if widget_resumed_editing {
+                    flush_repl_output();
+                    continue;
+                }
+                let line = line.as_str();
                 if pending.is_empty() && line.trim().is_empty() {
                     continue;
                 }
                 if pending.is_empty() && matches!(line.trim(), "exit" | "logout") {
-                    let _ = shell.finish_with_exit_trap(0);
+                    let _ = shell.borrow_mut().finish_with_exit_trap(0);
                     break;
                 }
                 if pending.is_empty() {
@@ -978,9 +1167,9 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
                 let is_multiline = pending.is_multiline();
                 let script = pending.take();
                 if is_multiline {
-                    let _ = shell.execute_interactive_script(&script);
+                    let _ = shell.borrow_mut().execute_interactive_script(&script);
                 } else {
-                    let _ = shell.execute_interactive_line(script.trim());
+                    let _ = shell.borrow_mut().execute_interactive_line(script.trim());
                 }
                 flush_repl_output();
             }
@@ -990,13 +1179,13 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
                     pending.clear();
                     continue;
                 }
-                let _ = shell.finish_with_exit_trap(0);
+                let _ = shell.borrow_mut().finish_with_exit_trap(0);
                 break;
             }
             Ok(Signal::CtrlC) => {
                 println!();
                 if crate::ctrl_c::consume_ctrl_c() {
-                    crate::ctrl_c::run_trap_hooks(shell, "trapint");
+                    crate::ctrl_c::run_trap_hooks(&mut shell.borrow_mut(), "trapint");
                     flush_repl_output();
                 }
                 pending.clear();
@@ -1004,7 +1193,7 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
             }
             Err(e) => {
                 eprintln!("niubash: line editor error: {}", e);
-                let _ = shell.finish_with_exit_trap(1);
+                let _ = shell.borrow_mut().finish_with_exit_trap(1);
                 break;
             }
         }
@@ -1291,7 +1480,7 @@ mod tests {
         };
         let bindings = vec![native_widget_binding("^ ", None, "autosuggest-accept")];
 
-        add_native_widget_keybindings(
+        add_bundle_widget_keybindings(
             &mut keybindings,
             NativeKeymapTarget::Emacs,
             &config,
@@ -1318,7 +1507,7 @@ mod tests {
             native_widget_binding("Shift+Tab", Some("emacs"), "menu-previous"),
         ];
 
-        add_native_widget_keybindings(
+        add_bundle_widget_keybindings(
             &mut keybindings,
             NativeKeymapTarget::Emacs,
             &config,
@@ -1354,13 +1543,13 @@ mod tests {
             "autosuggest-accept",
         )];
 
-        add_native_widget_keybindings(
+        add_bundle_widget_keybindings(
             &mut insert,
             NativeKeymapTarget::ViInsert,
             &config,
             &bindings,
         );
-        add_native_widget_keybindings(
+        add_bundle_widget_keybindings(
             &mut normal,
             NativeKeymapTarget::ViNormal,
             &config,
@@ -1390,7 +1579,7 @@ mod tests {
             native_widget_binding("^[[B", None, "history-substring-search-down"),
         ];
 
-        add_native_widget_keybindings(
+        add_bundle_widget_keybindings(
             &mut keybindings,
             NativeKeymapTarget::Emacs,
             &config,
@@ -1426,7 +1615,7 @@ mod tests {
             native_widget_binding("^I", None, "expand-or-complete"),
         ];
 
-        add_native_widget_keybindings(
+        add_bundle_widget_keybindings(
             &mut keybindings,
             NativeKeymapTarget::Emacs,
             &config,
@@ -1477,5 +1666,143 @@ mod tests {
             line: None,
             origin: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn native_widget_unknown_widget_becomes_host_command_sentinel() {
+        let mut keybindings = default_emacs_keybindings();
+        let config = NativeWidgetConfig {
+            enabled: true,
+            presets: Vec::new(),
+            import_bindkeys: true,
+        };
+        let bindings = vec![native_widget_binding("^X", None, "niu_fzf_file")];
+
+        add_bundle_widget_keybindings(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &config,
+            &bindings,
+        );
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('x')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}niu_fzf_file",
+                WIDGET_HOST_COMMAND_PREFIX
+            )))
+        );
+    }
+
+    #[test]
+    fn bundle_widget_bindings_apply_even_when_feature_flag_disabled() {
+        let mut keybindings = default_emacs_keybindings();
+        let config = NativeWidgetConfig {
+            enabled: false,
+            presets: Vec::new(),
+            import_bindkeys: true,
+        };
+        let bindings = vec![native_widget_binding("Ctrl+R", None, "history-incremental-search-backward")];
+
+        add_bundle_widget_keybindings(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &config,
+            &bindings,
+        );
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            Some(ReedlineEvent::SearchHistory)
+        );
+    }
+
+    #[test]
+    fn parse_user_bindkeys_parses_multiline_entries() {
+        let value = "# comment line\nCtrl+X:niu_fzf_file\n\n   Alt+G : niu_git_status \nmalformed-no-colon\n:missing-key\nmissing-widget:\n";
+        let bindings = parse_user_bindkeys(value);
+
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].key.as_deref(), Some("Ctrl+X"));
+        assert_eq!(bindings[0].widget, "niu_fzf_file");
+        assert_eq!(bindings[0].keymap, None);
+        assert_eq!(bindings[0].origin, "user");
+        assert_eq!(bindings[1].key.as_deref(), Some("Alt+G"));
+        assert_eq!(bindings[1].widget, "niu_git_status");
+    }
+
+    #[test]
+    fn parse_user_bindkeys_accepts_empty_value() {
+        assert!(parse_user_bindkeys("").is_empty());
+    }
+
+    #[test]
+    fn user_widget_bindings_apply_without_pack_gate() {
+        let mut keybindings = default_emacs_keybindings();
+        let bindings =
+            parse_user_bindkeys("Ctrl+G:niu_git_status\nCtrl+R:history-incremental-search-backward");
+
+        add_user_widget_keybindings(&mut keybindings, &bindings);
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}niu_git_status",
+                WIDGET_HOST_COMMAND_PREFIX
+            )))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            Some(ReedlineEvent::SearchHistory)
+        );
+    }
+
+    #[test]
+    fn user_widget_bindings_apply_to_both_vi_keymaps() {
+        let mut insert = default_vi_insert_keybindings();
+        let mut normal = default_vi_normal_keybindings();
+        let bindings = parse_user_bindkeys("Ctrl+G:niu_git_status");
+
+        add_user_widget_keybindings(&mut insert, &bindings);
+        add_user_widget_keybindings(&mut normal, &bindings);
+
+        let expected = Some(ReedlineEvent::ExecuteHostCommand(format!(
+            "{}niu_git_status",
+            WIDGET_HOST_COMMAND_PREFIX
+        )));
+        assert_eq!(
+            insert.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            expected
+        );
+        assert_eq!(
+            normal.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            expected
+        );
+    }
+
+    #[test]
+    fn widget_invocation_parse_accepts_only_sentinel_lines() {
+        assert_eq!(
+            WidgetInvocation::parse("__niu_widget niu_fzf_file"),
+            Some(WidgetInvocation {
+                function: "niu_fzf_file".to_string()
+            })
+        );
+        assert_eq!(WidgetInvocation::parse("__niu_widget "), None);
+        assert_eq!(WidgetInvocation::parse("__niu_widget  spaced name"), None);
+        assert_eq!(WidgetInvocation::parse("__niu_widget "), None);
+        assert_eq!(WidgetInvocation::parse("echo __niu_widget foo"), None);
+        assert_eq!(WidgetInvocation::parse("ls -la"), None);
+    }
+
+    #[test]
+    fn widget_invocation_parse_handles_multibyte_names() {
+        let name = "niu_中文widget";
+        assert_eq!(
+            WidgetInvocation::parse(&format!("{}{}", WIDGET_HOST_COMMAND_PREFIX, name)),
+            Some(WidgetInvocation {
+                function: name.to_string()
+            })
+        );
     }
 }

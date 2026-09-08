@@ -89,6 +89,63 @@ export NIU_HISTORY_MODE
 - `private` loads the complete history file at startup, then keeps later
   navigation changes local to the current shell while appending its own commands.
 
+## Custom Key Widgets
+
+A shell function can act as a line editor widget. Declare it in
+`~/.niubashrc` with `NIU_BINDKEYS` (one `key:widget` entry per line):
+
+```bash
+niu_fzf_file() {
+    local file
+    file="$(fd -t f | fzf)" || return 0
+    NIU_WIDGET_RESULT="ni $file"
+    NIU_WIDGET_ACCEPT=1
+}
+NIU_BINDKEYS="Ctrl+X:niu_fzf_file"
+```
+
+When the key fires, the function runs with the current editor state:
+
+- In: `NIU_WIDGET_BUFFER` (current buffer) and `NIU_WIDGET_CURSOR` (byte
+  offset). Both are temporary and restored afterwards.
+- Out: `NIU_WIDGET_RESULT` replaces the buffer (unset or absent keeps it;
+  an empty string clears the line), `NIU_WIDGET_CURSOR_RESULT` moves the
+  cursor to a byte offset, and `NIU_WIDGET_ACCEPT=1` submits the buffer as
+  if Enter had been pressed.
+
+Keys are single-key sequences such as `Ctrl+X`, `Alt+G`, a plain character,
+or escape forms like `^X`. The function runs as ordinary shell code: aliases,
+PATH, and your rc all apply. Unknown widget names in bundle bindkeys follow
+the same contract, so plugins can ship function widgets too.
+
+## Shell-Function Completions
+
+A shell function can provide completions for a command's arguments. Declare
+it in `~/.niubashrc` with `NIU_COMPDEFS` (one `command:function` entry per
+line):
+
+```bash
+niu_git_comp() {
+    local branches
+    branches="$(git branch --format='%(refname:short)')" || return 0
+    NIU_COMP_RESULT="$branches"
+}
+NIU_COMPDEFS="git:niu_git_comp"
+```
+
+When completing arguments for a registered command, the function runs with:
+
+- In: `NIU_COMP_WORDS` (space-joined words, matching bash `COMP_WORDS`) and
+  `NIU_COMP_CWORD` (bash `COMP_CWORD` semantics). Both are temporary.
+- Out: `NIU_COMP_RESULT`, one candidate per line, shaped `value` or
+  `value<TAB>description`.
+
+Compdef functions run synchronously during completion, while the line editor
+owns the terminal. They must not print to stdout: compute with command
+substitution and write `NIU_COMP_RESULT` instead. Bundle keybindings TOML and
+`NIU_BINDKEYS` share the same widget vocabulary, so plugins and users can
+compose the two contracts freely.
+
 ## Git Prompt Performance
 
 Git status should be consumed as a coherent prompt snapshot, not rendered by

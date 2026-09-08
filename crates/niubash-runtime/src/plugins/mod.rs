@@ -1,6 +1,7 @@
 //! Niubash-native plugin inventory, bundle assets, and plugin CLI helpers.
+pub mod external;
 use crate::completion::external::{CommandDef, FlagDef, SubcommandDef};
-use crate::config::PluginConfig;
+use crate::config::{NativeWidgetBinding, PluginConfig};
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::theme::Theme;
 use anyhow::{anyhow, Context};
@@ -608,7 +609,12 @@ pub fn active_plugin_inventory() -> PluginInventory {
 fn active_plugin_inventory_result() -> anyhow::Result<PluginInventory> {
     if let Some(path) = env_path("NIU_PLUGIN_BUNDLE_PATH") {
         if path.exists() {
-            if let Some(inventory) =
+            if skip_untrusted_external_bundle(&path) {
+                eprintln!(
+                    "niubash: external bundle at {} is not trusted; run niu plugin trust <name> to activate it",
+                    path.display()
+                );
+            } else if let Some(inventory) =
                 load_inventory_skipping_pre_rename(&path, "env_override")?
             {
                 return Ok(inventory);
@@ -618,7 +624,12 @@ fn active_plugin_inventory_result() -> anyhow::Result<PluginInventory> {
     let lock_path = plugin_lock_path();
     if let Ok(lock) = read_plugin_lock(&lock_path) {
         if lock.active_path.exists() {
-            if let Some(inventory) =
+            if skip_untrusted_external_bundle(&lock.active_path) {
+                eprintln!(
+                    "niubash: external bundle '{}' is not trusted; run niu plugin trust {} to activate it",
+                    lock.bundle, lock.bundle
+                );
+            } else if let Some(inventory) =
                 load_inventory_skipping_pre_rename(&lock.active_path, "user_bundle")?
             {
                 return Ok(inventory);
@@ -633,6 +644,54 @@ fn active_plugin_inventory_result() -> anyhow::Result<PluginInventory> {
         }
     }
     Ok(compiled_plugin_inventory())
+}
+
+/// True when the path is a registered external bundle that has not been
+/// trusted yet. Untrusted external bundles never provide the active
+/// inventory: the resolver falls through to the next candidate.
+fn skip_untrusted_external_bundle(path: &Path) -> bool {
+    external::is_external_bundle_path(path)
+        && external::external_bundle_trusted(path) != Some(true)
+}
+
+/// Point the plugin lock at a trusted external bundle so it becomes the
+/// active inventory. The previously active bundle stays on `previous_path`
+/// for `niu plugin rollback`.
+pub fn activate_external_bundle(name: &str) -> anyhow::Result<PathBuf> {
+    let record = external::read_registry()
+        .into_iter()
+        .find(|record| record.name == name)
+        .ok_or_else(|| anyhow!("unknown external bundle '{}'", name))?;
+    if !record.trusted {
+        anyhow::bail!(
+            "external bundle '{}' is not trusted; run niu plugin trust {} first",
+            name,
+            name
+        );
+    }
+
+    let lock_path = plugin_lock_path();
+    let previous_path = read_plugin_lock(&lock_path)
+        .ok()
+        .map(|lock| lock.active_path);
+    let bundle_text = fs::read_to_string(record.path.join("bundle.toml"))
+        .with_context(|| format!("failed to read bundle manifest for '{}'", name))?;
+    let bundle: BundleToml = toml::from_str(&bundle_text)
+        .with_context(|| format!("failed to parse bundle manifest for '{}'", name))?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_plugin_lock(
+        &lock_path,
+        &PluginLockToml {
+            bundle: bundle.name,
+            version: bundle.version,
+            active_path: record.path.clone(),
+            previous_path,
+            checksum_sha256: None,
+        },
+    )?;
+    Ok(record.path)
 }
 fn load_official_bundle_inventory_from_path(
     path: &Path,
@@ -2578,6 +2637,54 @@ fn load_bundle_aliases_from_path(
     let parsed: BundleAliasesToml = toml::from_str(&text).ok()?;
     Some(parsed.aliases.into_iter().collect())
 }
+/// Load widget bindings declared by enabled packs through their bundle
+/// `keybindings/*.toml` assets. Each `[[bindings]]` entry becomes a
+/// `NativeWidgetBinding`; known actions map to editor events and unknown
+/// actions resolve as shell-function widgets at trigger time. The keymap
+/// value `all` (or `main`) applies to every keymap.
+pub fn plugin_native_widget_bindings(state: &PluginRuntimeState) -> Vec<NativeWidgetBinding> {
+    let inventory = active_plugin_inventory();
+    let mut bindings = Vec::new();
+    let Some(root) = &inventory.path else {
+        return bindings;
+    };
+    for pack in inventory
+        .packs
+        .iter()
+        .filter(|pack| state.is_enabled(&pack.name))
+    {
+        for name in &pack.exports.keybindings {
+            let Some(metadata) = load_bundle_keybindings_from_path(root, name) else {
+                continue;
+            };
+            bindings.extend(bundle_keybindings_to_bindings(&metadata));
+        }
+    }
+    bindings
+}
+
+/// Convert one bundle keybindings asset into native widget bindings.
+/// `all`/`main` keymaps apply to every keymap (represented as `None`).
+fn bundle_keybindings_to_bindings(metadata: &BundleKeybindingsToml) -> Vec<NativeWidgetBinding> {
+    let keymap = match metadata.keymap.as_str() {
+        "all" | "main" => None,
+        other => Some(other.to_string()),
+    };
+    metadata
+        .bindings
+        .iter()
+        .map(|binding| NativeWidgetBinding {
+            widget: binding.action.clone(),
+            function: None,
+            key: Some(binding.key.clone()),
+            keymap: keymap.clone(),
+            source_file: None,
+            line: None,
+            origin: format!("bundle:{}", metadata.name),
+        })
+        .collect()
+}
+
 pub fn plugin_completion_defs(state: &PluginRuntimeState) -> Vec<CommandDef> {
     let inventory = active_plugin_inventory();
     let mut defs = Vec::new();
@@ -3065,6 +3172,55 @@ mod legacy_bundle_gate_tests {
     use super::*;
     use crate::test_support::PROCESS_STATE_LOCK;
     use std::env;
+
+    #[test]
+    fn bundle_keybindings_convert_to_widget_bindings() {
+        let metadata = BundleKeybindingsToml {
+            name: "common".to_string(),
+            summary: "Core keybindings".to_string(),
+            keymap: "all".to_string(),
+            bindings: vec![
+                BundleKeybindingToml {
+                    key: "Ctrl+R".to_string(),
+                    action: "history-incremental-search-backward".to_string(),
+                },
+                BundleKeybindingToml {
+                    key: "Ctrl+X".to_string(),
+                    action: "niu_fzf_file".to_string(),
+                },
+            ],
+        };
+
+        let bindings = bundle_keybindings_to_bindings(&metadata);
+
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].key.as_deref(), Some("Ctrl+R"));
+        assert_eq!(
+            bindings[0].widget,
+            "history-incremental-search-backward"
+        );
+        assert_eq!(bindings[0].keymap, None, "all keymap applies everywhere");
+        assert_eq!(bindings[0].origin, "bundle:common");
+        assert_eq!(bindings[1].widget, "niu_fzf_file");
+    }
+
+    #[test]
+    fn bundle_keybindings_preserve_explicit_keymap() {
+        let metadata = BundleKeybindingsToml {
+            name: "vi-extras".to_string(),
+            summary: "Vi extras".to_string(),
+            keymap: "viins".to_string(),
+            bindings: vec![BundleKeybindingToml {
+                key: "Ctrl+G".to_string(),
+                action: "niu_git_status".to_string(),
+            }],
+        };
+
+        let bindings = bundle_keybindings_to_bindings(&metadata);
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].keymap.as_deref(), Some("viins"));
+    }
 
     struct EnvVarGuard {
         name: &'static str,

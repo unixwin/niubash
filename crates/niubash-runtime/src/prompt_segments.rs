@@ -541,6 +541,7 @@ fn current_git_status() -> Option<GitRepoStatus> {
 // ---- reedline adapter ----
 
 /// Wraps `SegmentPrompt` into the `reedline::Prompt` trait.
+#[derive(Clone)]
 pub struct SegmentPromptAdapter {
     pub inner: SegmentPrompt,
     pub indicators: PromptIndicators,

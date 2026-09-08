@@ -18,6 +18,10 @@
 //!   niu plugin update oh-my-niu --from <path> → install a bundle release
 //!   niu plugin update oh-my-niu --github-release latest → download/install bundle
 //!   niu plugin rollback oh-my-niu → roll back to the previous bundle
+//!   niu plugin add <url>[@ref] [name] → clone a third-party bundle (untrusted)
+//!   niu plugin trust <name> → trust a third-party bundle
+//!   niu plugin use <name> → activate a trusted third-party bundle
+//!   niu plugin remove <name> → remove a third-party bundle
 //!   niu --completion-probe "line" [cursor] → print REPL completions
 //!   niu --install-wt-profile → add/update the Windows Terminal profile
 //!   niu --self-update → download and run the latest installer
@@ -221,7 +225,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     // with no command or script, a terminal (or -i) means the REPL.
     if invocation.interactive || niubash_runtime::terminal::stdio_is_interactive() {
         shell.enter_interactive();
-        return niubash_runtime::repl::run_repl(&mut shell);
+        return niubash_runtime::repl::run_repl(shell);
     }
     let mut content = String::new();
     std::io::stdin().read_to_string(&mut content)?;
@@ -331,7 +335,7 @@ fn run_repl() -> anyhow::Result<()> {
     self_update::maybe_print_update_hint();
     let mut shell = niubash_runtime::Shell::new()?;
     shell.enter_interactive();
-    niubash_runtime::repl::run_repl(&mut shell)
+    niubash_runtime::repl::run_repl(shell)
 }
 
 fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
@@ -546,6 +550,10 @@ fn print_usage() {
     println!("  plugin update oh-my-niu --github-release latest|vX.Y.Z [--json]");
     println!("                            Install bundle release");
     println!("  plugin rollback oh-my-niu [--json]  Roll back bundle release");
+    println!("  plugin add <url>[@ref] [name]  Clone a third-party bundle (untrusted)");
+    println!("  plugin trust <name>       Trust a third-party bundle");
+    println!("  plugin use <name>         Activate a trusted third-party bundle");
+    println!("  plugin remove <name>      Remove a third-party bundle");
     println!();
     println!();
     println!();
@@ -599,8 +607,54 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         "review" => run_plugin_review_command(&args[3..]),
         "update" => run_plugin_update_command(&args[3..]),
         "rollback" => run_plugin_rollback_command(&args[3..]),
+        "add" => run_plugin_add_command(&args[3..]),
+        "trust" => run_plugin_trust_command(&args[3..]),
+        "use" => run_plugin_use_command(&args[3..]),
+        "remove" => run_plugin_remove_command(&args[3..]),
         unknown => anyhow::bail!("unknown plugin subcommand '{}'", unknown),
     }
+}
+
+fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(url) = args.first() else {
+        anyhow::bail!("plugin add requires a git url: niu plugin add <url>[@ref] [name]");
+    };
+    let name = args.get(1).map(String::as_str);
+    let record = niubash_runtime::plugins::external::add_bundle(url, name)?;
+    println!("cloned '{}' into {}", record.name, record.path.display());
+    println!("the bundle is untrusted; review it, then run:");
+    println!("  niu plugin trust {}", record.name);
+    println!("  niu plugin use {}", record.name);
+    Ok(())
+}
+
+fn run_plugin_trust_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("plugin trust requires a bundle name");
+    };
+    let record = niubash_runtime::plugins::external::trust_bundle(name)?;
+    println!("external bundle '{}' is now trusted", record.name);
+    println!("activate it with: niu plugin use {}", record.name);
+    Ok(())
+}
+
+fn run_plugin_use_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("plugin use requires a bundle name");
+    };
+    let path = niubash_runtime::plugins::activate_external_bundle(name)?;
+    println!("active bundle is now '{}' at {}", name, path.display());
+    println!("restart niu to load it; go back with niu plugin rollback");
+    Ok(())
+}
+
+fn run_plugin_remove_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("plugin remove requires a bundle name");
+    };
+    let path = niubash_runtime::plugins::external::remove_bundle(name)?;
+    println!("removed external bundle '{}' ({})", name, path.display());
+    Ok(())
 }
 
 fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {

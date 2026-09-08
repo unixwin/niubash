@@ -38,7 +38,9 @@
 
 <div align="center">
 
-<img src="assets/demo.gif" alt="niubash 交互会话：原生路径、grep 管道、bash 循环、heredoc、git status、参数处理" width="720"/>
+<p><a href="https://dl.caomengxuan666.com"><strong>▶ 观看 41 秒宣传片</strong></a> —— 完整演示，带声音。</p>
+
+<img src="assets/demo.gif" alt="niubash 交互会话：starship 提示符、Tab 补全、grep 管道、heredoc、wpm 包管理、eza 图标" width="720"/>
 
 </div>
 

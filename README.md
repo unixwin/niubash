@@ -39,7 +39,9 @@ See it in action:
 
 <div align="center">
 
-<img src="assets/demo.gif" alt="niubash interactive session: native paths, grep pipes, bash loops, heredocs, git status, arg handling" width="720"/>
+<p><a href="https://dl.caomengxuan666.com"><strong>▶ Watch the 41-second film</strong></a> — the full pitch, with sound.</p>
+
+<img src="assets/demo.gif" alt="niubash interactive session: starship prompt, tab completion, grep pipes, heredocs, wpm packages, eza icons" width="720"/>
 
 </div>
 

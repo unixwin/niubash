@@ -44,6 +44,7 @@ impl Default for PromptIndicators {
 }
 
 /// A prompt that renders the configured template with theme-aware ANSI colours.
+#[derive(Clone)]
 pub struct NiubashPrompt {
     template: String,
     right_template: Option<String>,
@@ -584,6 +585,7 @@ impl Prompt for NiubashPrompt {
 
 /// Bash-compatible prompt values rendered from PS1/PS2 after the shell has run
 /// public Bash prompt hooks such as PROMPT_COMMAND.
+#[derive(Clone)]
 pub struct BashPrompt {
     left: String,
     multiline: String,
@@ -618,6 +620,7 @@ impl Prompt for BashPrompt {
 }
 
 /// Backend selector for the prompt: legacy template engine or new segment engine.
+#[derive(Clone)]
 pub enum PromptBackend {
     Template(NiubashPrompt),
     Segments(SegmentPromptAdapter),

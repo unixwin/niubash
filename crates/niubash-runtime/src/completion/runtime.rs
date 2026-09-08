@@ -179,7 +179,7 @@ fn run_runtime_completion(
     Ok(stdout)
 }
 
-fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String>> {
+pub(crate) fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String>> {
     let pos = context.cursor_pos.min(context.input.len());
     let pos = floor_char_boundary(&context.input, pos);
     let before_cursor = &context.input[..pos];
@@ -192,7 +192,7 @@ fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String
     (!words.is_empty()).then_some(words)
 }
 
-fn comp_cword(context: &CompletionContext) -> usize {
+pub(crate) fn comp_cword(context: &CompletionContext) -> usize {
     let Some(words) = command_words_before_cursor(context) else {
         return 0;
     };

@@ -3,6 +3,7 @@
 
 use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
 use crate::completion::path::PathCompleter;
+use crate::completion::runtime::{command_words_before_cursor, comp_cword};
 use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
@@ -139,6 +140,12 @@ impl NiubashCompleter {
         let context =
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
         let mut all_suggestions = Vec::new();
+
+        // Shell-function completions (`NIU_COMPDEFS`): only available while
+        // the interactive REPL has installed the shell bridge.
+        if let Some(result) = compdef_suggestions(&context) {
+            all_suggestions.extend(self.format_completions(result, input, cursor_pos));
+        }
 
         // At command position, also surface matching entries from the current
         // working directory ahead of PATH command matches. This mirrors the
@@ -388,6 +395,55 @@ fn should_append_completion_whitespace(completion: &str) -> bool {
     !(value.ends_with('/') || value.ends_with('\\'))
 }
 
+/// Run a registered shell-function completion through the installed shell
+/// bridge and shape its candidates. The function is resolved by the command
+/// word; its candidates are filtered by the current word prefix.
+fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> {
+    if context.is_command_position() {
+        return None;
+    }
+    let command_word = command_words_before_cursor(context)?.first()?.clone();
+    let cword = comp_cword(context);
+    let function = crate::shell::with_completion_bridge(|shell| {
+        let (_, function) = shell.compdefs.iter().find(|(cmd, _)| cmd == &command_word)?;
+        Some(function.clone())
+    })??;
+
+    // COMP_WORDS includes the word being completed, matching bash.
+    let mut words = command_words_before_cursor(context)?;
+    let current_word = context.get_current_word().unwrap_or_default();
+    let appending = context
+        .input
+        .get(..context.cursor_pos.min(context.input.len()))
+        .and_then(|input| input.chars().last())
+        .map_or(false, char::is_whitespace);
+    if !appending {
+        words.push(current_word.clone());
+    }
+
+    let entries =
+        crate::shell::with_completion_bridge(|shell| shell.run_compdef_function(&function, &words, cword))?;
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut completions = Vec::new();
+    let mut descriptions = Vec::new();
+    for (value, description) in entries {
+        if !current_word.is_empty() && !appending && !value.starts_with(current_word.as_str()) {
+            continue;
+        }
+        completions.push(value);
+        descriptions.push(description);
+    }
+    if completions.is_empty() {
+        return None;
+    }
+    Some(CompletionResult::with_descriptions(
+        completions, descriptions,
+    ))
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct CwdPathCandidate {
     is_dir: bool,
@@ -431,6 +487,39 @@ mod tests {
         ))));
         let completer = NiubashCompleter::new(state);
         assert!(completer.state.lock().is_ok());
+    }
+
+    #[test]
+    fn shell_bridge_compdef_produces_candidates() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(
+            shell
+                .execute_script(
+                    r#"
+niu_git_comp() {
+    NIU_COMP_RESULT="alpha	First"$'\n'"beta"
+}
+"#
+                )
+                .is_ok()
+        );
+        shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("git ", 4);
+
+        let alpha = suggestions
+            .iter()
+            .find(|s| s.value == "alpha")
+            .unwrap_or_else(|| panic!("missing compdef candidate, got {suggestions:?}"));
+        assert_eq!(alpha.description.as_deref(), Some("First"));
+        assert!(suggestions.iter().any(|s| s.value == "beta"));
     }
 
     #[test]
