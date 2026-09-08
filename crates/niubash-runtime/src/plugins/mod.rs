@@ -1450,7 +1450,11 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
     } else {
         "Niubash plugin inventory"
     };
-    out.push_str(&format!("{} (bundle {} v{})\n", title, inventory.bundle, inventory.version));
+    out.push_str(&crate::text_style::bold(&format!(
+        "{} (bundle {} v{})",
+        title, inventory.bundle, inventory.version
+    )));
+    out.push('\n');
     if verbose {
         out.push_str(&format!("Source: {}\n", inventory.source));
         out.push_str(&format!("Trust source: {}\n", inventory.trust_source));
@@ -1493,20 +1497,29 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
     }
 
     if !enabled.is_empty() {
-        out.push_str("\nEnabled:\n");
+        out.push_str(&format!(
+            "\n{} ({}):\n",
+            crate::text_style::cyan("Enabled"),
+            enabled.len()
+        ));
         for pack in &enabled {
             out.push_str(&pack_human_line(pack));
         }
     }
     if !available.is_empty() {
-        out.push_str("\nAvailable (off by default):\n");
+        out.push_str(&format!(
+            "\n{} ({}):\n",
+            crate::text_style::cyan("Available"),
+            available.len()
+        ));
         for pack in &available {
             out.push_str(&pack_human_line(pack));
         }
     }
     if !themes.is_empty() {
         out.push_str(&format!(
-            "\nThemes ({}): switch with NIU_THEME in ~/.niubashrc; full list via `niu plugin themes`\n",
+            "\n{} ({}): switch with NIU_THEME in ~/.niubashrc; full list via `niu plugin themes`\n",
+            crate::text_style::cyan("Themes"),
             themes.len()
         ));
         out.push_str("  ");
@@ -1514,17 +1527,26 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
         out.push_str(&wrap_words(&names, 76, "  "));
         out.push('\n');
     }
-    out.push_str("\nDetails per plugin: niu plugin info <name>  |  machine output: --json  |  diagnostics: --verbose\n");
+    out.push_str(&crate::text_style::dim(
+        "\nDetails: niu plugin info <name>   Machine output: --json   Diagnostics: --verbose\n",
+    ));
     out
 }
 
 fn pack_human_line(pack: &PluginPackRecord) -> String {
-    let mut line = format!("  {:<22} {}", pack.name, pack.summary);
+    let missing = crate::text_style::warn_missing_note(&pack.required_binaries);
+    let (symbol, name) = if pack.default {
+        (crate::text_style::on_symbol(), pack.name.clone())
+    } else {
+        (crate::text_style::off_symbol(), pack.name.clone())
+    };
+    let mut line = format!(
+        "  {symbol} {:<20} {}",
+        name,
+        pack.summary
+    );
     if !pack.required_binaries.is_empty() {
-        line.push_str(&format!(
-            " (needs: {})",
-            pack.required_binaries.join(", ")
-        ));
+        line.push_str(&format!("  {}", missing));
     }
     line.push('\n');
     line
@@ -1599,32 +1621,53 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
         .packs
         .iter()
         .find(|pack| pack.name.eq_ignore_ascii_case(name))?;
+    let kv = |key: &str, value: String| {
+        format!("  {} {}", crate::text_style::dim(&format!("{key:<12}")), value)
+    };
     let mut out = String::new();
-    out.push_str(&format!("{} — {}\n", pack.name, pack.summary));
     out.push_str(&format!(
-        "  version {} · category {} · {}\n",
-        pack.version,
-        pack.category.as_str(),
-        if pack.default {
-            "enabled by default"
-        } else {
-            "off by default"
-        }
+        "{} — {}\n",
+        crate::text_style::bold(&pack.name),
+        pack.summary
     ));
-    match pack.kind {
-        PluginKind::Source => out.push_str("  kind: source pack (startup code runs in your shell)\n"),
-        PluginKind::Bridge => out.push_str("  kind: host bridge (no startup code runs)\n"),
-        PluginKind::Builtin => out.push_str("  kind: built-in host behavior\n"),
-        PluginKind::Process => out.push_str("  kind: process adapter (external helper program)\n"),
-    }
+    out.push_str(&kv(
+        "state",
+        if pack.default {
+            crate::text_style::green("enabled by default".to_string().as_str())
+        } else {
+            crate::text_style::dim("off by default".to_string().as_str())
+        },
+    ));
+    out.push('\n');
+    out.push_str(&kv("version", pack.version.clone()));
+    out.push('\n');
+    out.push_str(&kv("category", pack.category.as_str().to_string()));
+    out.push('\n');
+    let kind_text = match pack.kind {
+        PluginKind::Source => "source pack (startup code runs in your shell)",
+        PluginKind::Bridge => "host bridge (no startup code runs)",
+        PluginKind::Builtin => "built-in host behavior",
+        PluginKind::Process => "process adapter (external helper program)",
+    };
+    out.push_str(&kv("kind", kind_text.to_string()));
+    out.push('\n');
     if !pack.required_binaries.is_empty() {
-        out.push_str(&format!(
-            "  needs on PATH: {}\n",
-            pack.required_binaries.join(", ")
+        let missing = crate::text_style::warn_missing_note(&pack.required_binaries);
+        out.push_str(&kv(
+            "needs",
+            if missing.is_empty() {
+                pack.required_binaries.join(", ")
+            } else {
+                missing
+                    .trim_matches(|c| c == '(' || c == ')')
+                    .to_string()
+            },
         ));
+        out.push('\n');
     }
     if !pack.permissions.is_empty() {
-        out.push_str(&format!("  permissions: {}\n", pack.permissions.join(", ")));
+        out.push_str(&kv("permissions", pack.permissions.join(", ")));
+        out.push('\n');
     }
     let mut exports: Vec<String> = Vec::new();
     if pack.exports.aliases {
@@ -1652,10 +1695,12 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
         exports.push(format!("providers ({})", pack.exports.providers.join(", ")));
     }
     if !exports.is_empty() {
-        out.push_str(&format!("  exports: {}\n", exports.join(", ")));
+        out.push_str(&kv("exports", exports.join(", ")));
+        out.push('\n');
     }
     if let Some(source) = &pack.source {
-        out.push_str(&format!("  entry: {}\n", source.entry));
+        out.push_str(&kv("entry", source.entry.clone()));
+        out.push('\n');
     }
     let keybinding_lines = plugin_keybinding_metadata_lines(&inventory, pack);
     if verbose && !keybinding_lines.is_empty() {
@@ -1666,25 +1711,39 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
             out.push('\n');
         }
     }
-    out.push_str("\nRuntime details:\n");
     out.push_str(&format!(
-        "  execution: {}\n  externalization: {}\n",
-        plugin_execution_model(pack),
-        plugin_externalization_class(pack)
+        "\n{}\n",
+        crate::text_style::dim("Runtime details (--verbose adds more; --json for machines):")
     ));
+    out.push_str(&kv(
+        "execution",
+        plugin_execution_model(pack).to_string(),
+    ));
+    out.push('\n');
+    out.push_str(&kv(
+        "externalization",
+        plugin_externalization_class(pack).to_string(),
+    ));
+    out.push('\n');
     if verbose {
         let readiness = plugin_readiness_profile(pack);
         push_readiness_text(&mut out, &readiness);
-        out.push_str(&format!("  source: {}\n", inventory.source));
-        out.push_str(&format!("  trust source: {}\n", inventory.trust_source));
+        out.push_str(&kv("source", inventory.source.clone()));
+        out.push('\n');
+        out.push_str(&kv("trust source", inventory.trust_source.clone()));
+        out.push('\n');
         if let Some(process) = &pack.process {
-            out.push_str(&format!(
-                "  process: protocol={} command={} args=({}) timeout={}ms\n",
-                process.protocol,
-                process.command,
-                list_or_none(&process.args),
-                process.timeout_millis
+            out.push_str(&kv(
+                "process",
+                format!(
+                    "protocol={} command={} args=({}) timeout={}ms",
+                    process.protocol,
+                    process.command,
+                    list_or_none(&process.args),
+                    process.timeout_millis
+                ),
             ));
+            out.push('\n');
         }
     }
     Some(out)
@@ -1804,18 +1863,26 @@ pub fn plugin_bundle_status_text_verbose(verbose: bool) -> String {
                 _ => "plugin bundle",
             };
             out.push_str(&format!(
-                "{} v{} — installed and active ({})\n",
-                status.bundle, version, how
+                "{} — {}\n",
+                crate::text_style::bold(&format!("{} v{}", status.bundle, version)),
+                crate::text_style::green(&format!("installed and active ({how})"))
             ));
             if let Some(path) = &status.active_path {
-                out.push_str(&format!("  path: {}\n", path.display()));
+                out.push_str(&format!(
+                    "  {} {}\n",
+                    crate::text_style::dim("path:"),
+                    path.display()
+                ));
             }
-            out.push_str(&format!("  {}\n", status.message));
+            out.push_str(&format!("  {}\n", crate::text_style::dim(&status.message)));
         }
         _ => {
             out.push_str(&format!(
-                "{} — not installed; using built-in compiled defaults (v{})\n",
-                status.bundle, version
+                "{} — {}\n",
+                crate::text_style::bold(&status.bundle),
+                crate::text_style::yellow(&format!(
+                    "not installed; using built-in compiled defaults (v{version})"
+                ))
             ));
         }
     }
@@ -1947,34 +2014,43 @@ pub fn plugin_doctor_text_verbose(report: &PluginDoctorReport, verbose: bool) ->
         .iter()
         .filter(|pack| pack.status != "ok")
         .count();
-    out.push_str("Niubash plugin doctor\n");
+    out.push_str(&crate::text_style::bold("Niubash plugin doctor\n"));
     if report.status == "ok" {
         out.push_str(&format!(
-            "Status: ok — {} pack(s) active, no problems found\n",
+            "{} — {} pack(s) active, no problems found\n",
+            crate::text_style::green("Status: ok"),
             report.packs.len()
         ));
     } else {
         out.push_str(&format!(
-            "Status: {} — {} of {} active pack(s) need attention\n",
-            report.status,
+            "{} — {} of {} active pack(s) need attention\n",
+            crate::text_style::yellow(&format!("Status: {}", report.status)),
             warnings,
             report.packs.len()
         ));
     }
     for pack in &report.packs {
-        out.push_str(&format!("  {:<22} {}", pack.name, pack.status));
-        if !pack.missing_required_binaries.is_empty() {
+        if pack.status == "ok" {
             out.push_str(&format!(
-                " — missing on PATH: {}",
-                pack.missing_required_binaries.join(", ")
+                "  {} {:<20} {}\n",
+                crate::text_style::on_symbol(),
+                pack.name,
+                crate::text_style::dim("ok")
+            ));
+        } else {
+            out.push_str(&format!(
+                "  {} {:<20} {} — missing on PATH: {}\n",
+                crate::text_style::warn_symbol(),
+                pack.name,
+                pack.status,
+                crate::text_style::yellow(&pack.missing_required_binaries.join(", "))
             ));
         }
-        out.push('\n');
     }
     if warnings > 0 {
-        out.push_str(
+        out.push_str(&crate::text_style::dim(
             "Fix: install the missing programs, or disable those packs in ~/.niubashrc\n",
-        );
+        ));
     }
     if verbose {
         out.push_str("\nDiagnostics:\n");
@@ -2081,7 +2157,13 @@ pub fn plugin_permission_review_text(review: &PluginPermissionReview) -> String 
     } else {
         out.push_str("  permissions:\n");
         for item in &review.permissions {
-            out.push_str(&format!("    [{}] {}\n", item.risk, item.description));
+            let tag = match item.risk.as_str() {
+                "high" => crate::text_style::red("[high]"),
+                "medium" => crate::text_style::yellow("[medium]"),
+                "low" => crate::text_style::green("[low]"),
+                _ => item.risk.clone(),
+            };
+            out.push_str(&format!("  {} {}\n", tag, item.description));
         }
     }
     if !review.missing_required_binaries.is_empty() {
@@ -3021,9 +3103,17 @@ pub fn plugin_theme_catalog_json() -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(&plugin_theme_catalog())?)
 }
 pub fn plugin_theme_catalog_text() -> String {
+    let current = std::env::var("NIU_THEME")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase());
     let mut out = String::new();
-    out.push_str("Niubash themes (user themes override bundle themes)\n");
-    out.push_str("Switch with NIU_THEME=<name> in ~/.niubashrc\n");
+    out.push_str(&crate::text_style::bold("Niubash themes"));
+    out.push_str(&crate::text_style::dim(
+        "  (user themes override bundle themes)\n",
+    ));
+    out.push_str(&crate::text_style::dim(
+        "Switch with NIU_THEME=<name> in ~/.niubashrc\n",
+    ));
     let mut user = Vec::new();
     let mut bundle = Vec::new();
     for entry in plugin_theme_catalog() {
@@ -3033,16 +3123,34 @@ pub fn plugin_theme_catalog_text() -> String {
             bundle.push((entry.name, entry.owner));
         }
     }
+    let is_current = |name: &str| {
+        current
+            .as_deref()
+            .is_some_and(|needle| name.eq_ignore_ascii_case(needle))
+    };
     if !user.is_empty() {
-        out.push_str("\nUser themes (~/.niubash/themes):\n");
+        out.push_str(&format!("\n{} (~/.niubash/themes):\n", crate::text_style::cyan("User themes")));
         for name in &user {
-            out.push_str(&format!("  {name}\n"));
+            if is_current(name) {
+                out.push_str(&format!("  {} {}\n", crate::text_style::green("★"), name));
+            } else {
+                out.push_str(&format!("    {name}\n"));
+            }
         }
     }
     if !bundle.is_empty() {
-        out.push_str("\nBundle themes:\n");
+        out.push_str(&format!("\n{}:\n", crate::text_style::cyan("Bundle themes")));
         for (name, owner) in &bundle {
-            out.push_str(&format!("  {:<22} {}\n", name, owner));
+            if is_current(name) {
+                out.push_str(&format!(
+                    "  {} {:<20} {}\n",
+                    crate::text_style::green("★"),
+                    name,
+                    owner
+                ));
+            } else {
+                out.push_str(&format!("    {:<20} {}\n", name, owner));
+            }
         }
     }
     if user.is_empty() && bundle.is_empty() {
@@ -3190,7 +3298,7 @@ fn safe_asset_name(name: &str) -> bool {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
-fn missing_required_binaries(required: &[String]) -> Vec<String> {
+pub(crate) fn missing_required_binaries(required: &[String]) -> Vec<String> {
     required
         .iter()
         .filter(|binary| resolve_binary(binary).is_none())
