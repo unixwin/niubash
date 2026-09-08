@@ -4,6 +4,7 @@
 - [Why Niubash](why-niubash.md)
 - [Getting Started](getting-started.md)
 - [Advanced Usage](advanced-usage.md)
+- [Hook Contract](hooks.md)
 - [Elevation With gsudo](advanced-usage.md#elevated-commands)
 - [Install & Self-Update](installer.md)
 - [Bash Compatibility Matrix](rubash-bash-compat-matrix.md)

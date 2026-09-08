@@ -631,7 +631,12 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
     };
     let name = args.get(1).map(String::as_str);
     let record = niubash_runtime::plugins::external::add_bundle(url, name)?;
-    println!("cloned '{}' into {}", record.name, record.path.display());
+    println!(
+        "{} '{}' into {}",
+        niubash_runtime::text_style::green("Cloned"),
+        record.name,
+        niubash_runtime::text_style::dim(&record.path.display().to_string())
+    );
     println!("the bundle is untrusted; review it, then run:");
     println!("  niu plugin trust {}", record.name);
     println!("  niu plugin use {}", record.name);
@@ -643,7 +648,11 @@ fn run_plugin_trust_command(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("plugin trust requires a bundle name");
     };
     let record = niubash_runtime::plugins::external::trust_bundle(name)?;
-    println!("external bundle '{}' is now trusted", record.name);
+    println!(
+        "{} external bundle '{}' is now trusted",
+        niubash_runtime::text_style::green("Trusted:"),
+        record.name
+    );
     println!("activate it with: niu plugin use {}", record.name);
     Ok(())
 }
@@ -653,7 +662,12 @@ fn run_plugin_use_command(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("plugin use requires a bundle name");
     };
     let path = niubash_runtime::plugins::activate_external_bundle(name)?;
-    println!("active bundle is now '{}' at {}", name, path.display());
+    println!(
+        "{} external bundle '{}' at {}",
+        niubash_runtime::text_style::green("Active bundle:"),
+        name,
+        niubash_runtime::text_style::dim(&path.display().to_string())
+    );
     println!("restart niu to load it; go back with niu plugin rollback");
     Ok(())
 }
@@ -663,7 +677,12 @@ fn run_plugin_remove_command(args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!("plugin remove requires a bundle name");
     };
     let path = niubash_runtime::plugins::external::remove_bundle(name)?;
-    println!("removed external bundle '{}' ({})", name, path.display());
+    println!(
+        "{} external bundle '{}' ({})",
+        niubash_runtime::text_style::green("Removed"),
+        name,
+        niubash_runtime::text_style::dim(&path.display().to_string())
+    );
     Ok(())
 }
 
@@ -800,8 +819,16 @@ fn run_plugin_update_command(args: &[String]) -> anyhow::Result<()> {
                 downloaded.checksum_path.display()
             );
         }
-        println!("Updated bundle '{}' to {}", summary.bundle, summary.version);
-        println!("Installed path: {}", summary.installed_path.display());
+        println!(
+            "{} bundle '{}' to {}",
+            niubash_runtime::text_style::green("Updated"),
+            summary.bundle,
+            summary.version
+        );
+        println!(
+            "Installed path: {}",
+            niubash_runtime::text_style::dim(&summary.installed_path.display().to_string())
+        );
         if let Some(previous_path) = summary.previous_path {
             println!("Previous path: {}", previous_path.display());
         }
@@ -822,10 +849,15 @@ fn run_plugin_rollback_command(args: &[String]) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
         println!(
-            "Rolled back bundle '{}' to {}",
-            summary.bundle, summary.version
+            "{} bundle '{}' to {}",
+            niubash_runtime::text_style::green("Rolled back"),
+            summary.bundle,
+            summary.version
         );
-        println!("Active path: {}", summary.active_path.display());
+        println!(
+            "Active path: {}",
+            niubash_runtime::text_style::dim(&summary.active_path.display().to_string())
+        );
         if let Some(previous_path) = summary.previous_path {
             println!("Previous path: {}", previous_path.display());
         }
