@@ -367,9 +367,6 @@ fn auto_activate_bundled_winuxcmd(exe: &Path) {
         return;
     }
 
-    let Some(script) = bundled_activation_script(exe) else {
-        return;
-    };
     let Some(dir) = exe.parent() else {
         return;
     };
@@ -377,6 +374,49 @@ fn auto_activate_bundled_winuxcmd(exe: &Path) {
     if has_required_command_links(dir) {
         return;
     }
+
+    // Preferred path: run the exact command the Inno Setup installer uses
+    // during [Run] (`wpm links rebuild --root <root> --force`). This keeps
+    // portable and installed layouts on one activation path and no longer
+    // depends on the bundled activation script sitting next to the
+    // executable. Output is captured so non-interactive `-c`/`-C` runs stay
+    // quiet and deterministic.
+    let root = installation_root(exe);
+    match Command::new(exe)
+        .args(["wpm", "links", "rebuild", "--root"])
+        .arg(&root)
+        .arg("--force")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            log::debug!(
+                "winuxcmd activation completed via wpm links rebuild (root {})",
+                root.display()
+            );
+            if has_required_command_links(dir) {
+                return;
+            }
+            log::debug!(
+                "wpm links rebuild reported success but expected links are still missing in {}",
+                dir.display()
+            );
+        }
+        Ok(output) => {
+            log::debug!(
+                "wpm links rebuild failed with status {}; falling back to activation script",
+                output.status
+            );
+        }
+        Err(err) => {
+            log::debug!("failed to launch wpm links rebuild: {err}; falling back to activation script");
+        }
+    }
+
+    // Fallback for older WinuxCmd builds without the `wpm` subcommand: run
+    // the bundled activation script through this shell.
+    let Some(script) = bundled_activation_script(exe) else {
+        return;
+    };
 
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,

@@ -2,11 +2,48 @@
 
 set -e
 
+# Resolve this script's absolute directory from $0. The naive
+# "$0 -> %/*" derivation used to break in real layouts: a bare-name launch
+# ("activate-winuxcmd.sh" from usr/bin, as the portable first-run
+# activation does) yields script_dir=".", whose basename is not "bin", so
+# the root was mis-set to the usr/bin directory itself and `wpm links
+# rebuild --root .` created every command link under usr/bin/usr/bin.
+# Canonicalizing to an absolute path first fixes that, and keeps paths
+# with spaces, non-ASCII characters, and UNC prefixes working because
+# every expansion below stays quoted.
 script_path="$0"
+# Normalize separators so parsing below works for native Windows paths.
+script_path=$(printf '%s' "$script_path" | tr '\\' '/')
+case "$script_path" in
+  /*|[A-Za-z]:/*)
+    # Already absolute (POSIX absolute, UNC, or drive-letter path).
+    ;;
+  */*)
+    # Relative with a separator: anchor it at the current directory.
+    script_path="$PWD/$script_path"
+    ;;
+  *)
+    # Bare name: resolve through PATH; fall back to the current directory.
+    resolved=""
+    old_ifs="$IFS"
+    IFS=":"
+    for dir in $PATH; do
+      IFS="$old_ifs"
+      [ -n "$dir" ] || dir="."
+      if [ -f "$dir/$script_path" ]; then
+        resolved="$dir/$script_path"
+        break
+      fi
+    done
+    IFS="$old_ifs"
+    if [ -n "$resolved" ]; then
+      script_path="$resolved"
+    else
+      script_path="$PWD/$script_path"
+    fi
+    ;;
+esac
 script_dir="${script_path%/*}"
-if [ "$script_dir" = "$script_path" ]; then
-  script_dir="."
-fi
 
 if [ -f "$script_dir/winuxcmd.exe" ] && [ "$(basename "$script_dir")" = "bin" ]; then
   winuxcmd_bin_dir="$script_dir"
