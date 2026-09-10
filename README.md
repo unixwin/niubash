@@ -39,7 +39,7 @@ See it in action:
 
 <div align="center">
 
-<p><a href="https://dl.caomengxuan666.com"><strong>▶ Watch the 41-second film</strong></a> — the full pitch, with sound.</p>
+<p><a href="https://dl.caomengxuan666.com"><strong>▶ Watch the 43-second film</strong></a> — the full pitch, with sound.</p>
 
 <img src="assets/demo.gif" alt="niubash interactive session: starship prompt, tab completion, grep pipes, heredocs, wpm packages, eza icons" width="720"/>
 
