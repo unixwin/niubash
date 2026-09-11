@@ -247,6 +247,12 @@ impl Shell {
                 executor.set_env("SHELL", &host_path_to_shell_path(&exe.to_string_lossy()));
             }
         }
+        // Bash sets $BASH to the full pathname used to execute the current
+        // instance (bash(1), BASH variable); scripts probe it to detect bash.
+        // Forward-slash spelling matches rubash's own standalone main.rs.
+        if let Ok(exe) = std::env::current_exe() {
+            executor.export_env("BASH", &exe.to_string_lossy().replace('\\', "/"));
+        }
         // Niubash always presents an interactive shell, so aliases loaded
         // from ~/.niubashrc must expand without requiring a user shopt line.
         executor.set_shopt_option("expand_aliases", true);
