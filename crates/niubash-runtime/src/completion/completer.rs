@@ -199,6 +199,38 @@ impl NiubashCompleter {
             }
         }
 
+        // GNU programmable completion (rubash engine): when the command has a
+        // compspec registered via the `complete` builtin, argument candidates
+        // come from `Executor::complete_line` through the shell bridge. The
+        // completion *engine* lives in rubash while niubash keeps its
+        // cwd-priority, common-command, and file overlays for everything else.
+        // The `has_compspec` gate keeps this free for commands without a
+        // compspec (the hook's fallback would rescan PATH uncached and emit
+        // raw-unquoted file names that duplicate the path completer above).
+        if !context.is_command_position() {
+            let first_word = input.split_whitespace().next().unwrap_or_default();
+            let has_compspec = !first_word.is_empty()
+                && crate::shell::with_completion_bridge(|shell| {
+                    shell.executor.has_compspec(first_word)
+                })
+                .unwrap_or(false);
+            if has_compspec {
+                if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
+                    shell.executor.complete_line(input, cursor_pos)
+                }) {
+                    if !cands.is_empty() {
+                        let result = CompletionResult::new(cands);
+                        all_suggestions.extend(self.format_completions(result, input, cursor_pos));
+                    }
+                }
+            }
+        }
+
+        // Deduplicate by value, keeping the first occurrence so the
+        // cwd-priority and compdef ordering above stays meaningful.
+        let mut seen = HashSet::new();
+        all_suggestions.retain(|s| seen.insert(s.value.clone()));
+
         all_suggestions
     }
 
@@ -520,6 +552,32 @@ niu_git_comp() {
             .unwrap_or_else(|| panic!("missing compdef candidate, got {suggestions:?}"));
         assert_eq!(alpha.description.as_deref(), Some("First"));
         assert!(suggestions.iter().any(|s| s.value == "beta"));
+    }
+
+    #[test]
+    fn compspec_candidates_flow_through_rubash_hook() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        // Register a GNU compspec on the rubash executor via the `complete`
+        // builtin, exactly as a user script would.
+        assert!(shell
+            .execute_script("complete -W 'alpha beta gamma' mycmd")
+            .is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+        // Completing the second word of `mycmd a`: the compspec wordlist
+        // filtered by the prefix `a` must yield `alpha` through the hook.
+        let suggestions = completer.complete("mycmd a", 7);
+
+        assert!(
+            suggestions.iter().any(|s| s.value == "alpha"),
+            "missing compspec candidate alpha, got {suggestions:?}"
+        );
     }
 
     #[test]

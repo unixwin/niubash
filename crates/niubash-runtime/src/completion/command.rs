@@ -25,75 +25,16 @@ impl CommandCompleter {
     }
 
     /// Get shell builtins owned by rubash.
+    ///
+    /// Reads the canonical builtin list straight from rubash
+    /// (`Executor::builtin_command_names`) instead of keeping a hardcoded copy
+    /// here, so the two never drift when builtins are added or removed
+    /// upstream.
     pub fn get_builtin_commands() -> Vec<String> {
-        [
-            ".",
-            ":",
-            "[",
-            "alias",
-            "bg",
-            "bind",
-            "break",
-            "builtin",
-            "caller",
-            "cd",
-            "command",
-            "compgen",
-            "complete",
-            "compopt",
-            "continue",
-            "declare",
-            "dirs",
-            "disown",
-            "echo",
-            "enable",
-            "eval",
-            "exec",
-            "exit",
-            "export",
-            "false",
-            "fc",
-            "fg",
-            "getopts",
-            "hash",
-            "help",
-            "history",
-            "jobs",
-            "kill",
-            "let",
-            "local",
-            "logout",
-            "mapfile",
-            "popd",
-            "printf",
-            "pushd",
-            "pwd",
-            "read",
-            "readarray",
-            "readonly",
-            "return",
-            "set",
-            "setopt",
-            "shift",
-            "shopt",
-            "source",
-            "suspend",
-            "test",
-            "times",
-            "trap",
-            "true",
-            "type",
-            "typeset",
-            "ulimit",
-            "umask",
-            "unalias",
-            "unset",
-            "unsetopt",
-            "wait",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+        rubash::executor::Executor::builtin_command_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     /// Get commonly-used commands (shown on empty Tab)
