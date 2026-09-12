@@ -901,8 +901,7 @@ impl Shell {
         // The probe must not leak into $?: the caller's last_exit_code feeds
         // NIU_LAST_EXIT_CODE for the hook that dispatched this probe.
         self.executor.set_last_exit_code(previous_exit_code);
-        self.framework_hook_probes
-            .insert(runner.to_string(), defined);
+        self.framework_hook_probes.insert(runner.to_string(), defined);
         defined
     }
 
