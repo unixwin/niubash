@@ -258,8 +258,9 @@ impl CompletionResult {
         let mut prefix_len = first.len();
 
         for completion in completions.iter().skip(1) {
-            while !completion.starts_with(&first[..prefix_len]) && prefix_len > 0 {
+            while prefix_len > 0 && !completion.starts_with(&first[..prefix_len]) {
                 prefix_len -= 1;
+                prefix_len = floor_char_boundary(first, prefix_len);
             }
             if prefix_len == 0 {
                 return None;

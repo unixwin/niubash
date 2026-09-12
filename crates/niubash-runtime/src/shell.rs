@@ -4768,6 +4768,7 @@ fn host_path_to_shell_path_with_root(value: &str, root: Option<&Path>) -> String
         return "/".to_string();
     }
     if normalized.len() > root.len()
+        && normalized.is_char_boundary(root.len())
         && normalized[..root.len()].eq_ignore_ascii_case(root)
         && normalized.as_bytes().get(root.len()) == Some(&b'/')
     {

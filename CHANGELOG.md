@@ -41,6 +41,12 @@ CTLESC `\x11` leak fix that resolves `NIU_BINDKEYS` parsing.
 - **Heredoc diagnostics** (upstream rubash v1.1.0): warning line numbers now
   use computed `warning_line` matching GNU `make_cmd.c:627` (`a313729b` in
   rubash; remaining gaps tracked in rubash issue #72)
+- **Chinese path crash** (#84): `host_path_to_shell_path_with_root` panicked
+  with `byte index is not a char boundary` when the shell root byte length
+  fell inside a multi-byte character in the current directory path. Added
+  `is_char_boundary` guard before slicing. Also fixed
+  `longest_common_prefix` in the completion module which had the same class
+  of bug when decrementing `prefix_len` through multi-byte characters.
 
 ### Build
 
