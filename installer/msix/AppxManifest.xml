@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Niubash MSIX manifest template.
+
+  Structure mirrors the PowerShell Store package manifest
+  (github.com/PowerShell/PowerShell assets/AppxManifest.xml), which is the
+  canonical example of a full-trust command-line shell shipped via MSIX:
+    - classic Desktop Bridge path: EntryPoint="Windows.FullTrustApplication"
+      on Application + rescap:runFullTrust (no uap10 TrustLevel/RuntimeBehavior)
+    - the appExecutionAlias extension carries EntryPoint/Executable attributes
+    - Extensions precede VisualElements inside Application
+
+  Placeholders are rendered by scripts/make_msix.py:
+    __IDENTITY_NAME__          Package/Identity Name from Partner Center
+    __PUBLISHER__              Publisher subject (CN=...) from Partner Center
+    __PUBLISHER_DISPLAY_NAME__ Publisher display name shown in the Store
+    __VERSION__                Cargo.toml version + ".0" (Store reserves the
+                               fourth version segment; it must be 0)
+
+  The niu.exe execution alias lets users run `niu` from any shell without
+  PATH modification (Store policy 10.2.8). Do not add PATH-rewriting logic
+  to the Store build.
+-->
+<Package IgnorableNamespaces="rescap"
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+    xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+
+  <Identity Name="__IDENTITY_NAME__"
+            Publisher="__PUBLISHER__"
+            Version="__VERSION__"
+            ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Niubash</DisplayName>
+    <PublisherDisplayName>__PUBLISHER_DISPLAY_NAME__</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop"
+                        MinVersion="10.0.17763.0"
+                        MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="Niubash"
+                 Executable="niu.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias"
+                        EntryPoint="Windows.FullTrustApplication"
+                        Executable="niu.exe">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="niu.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+      <uap:VisualElements
+          DisplayName="Niubash"
+          Description="Windows-native, bash-compatible command-line shell"
+          BackgroundColor="transparent"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
