@@ -272,6 +272,10 @@ jobs:
   publish-crates:
     name: publish to crates.io
     runs-on: windows-latest
+    # rubash is not yet published to crates.io, so cargo publish refuses the
+    # bare path dependency. This job will start succeeding once rubash is on
+    # crates.io; until then it is best-effort and must not block the release.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4.2.2
         with:
