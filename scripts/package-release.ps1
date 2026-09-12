@@ -205,7 +205,7 @@ try {
         $bundleStageDir = Join-Path $stageDir "bundles\oh-my-niu"
         New-Item -ItemType Directory -Force -Path $bundleStageDir | Out-Null
         $requiredBundleEntries = @(
-            "oh-my-niu.winux"
+            "oh-my-niu.niu"
             "bundle.toml"
             "index.toml"
             "lib"
@@ -214,7 +214,7 @@ try {
             "themes"
         )
         $bundleEntries = @(
-            "oh-my-niu.winux"
+            "oh-my-niu.niu"
             "bundle.toml"
             "index.toml"
             "README.md"
