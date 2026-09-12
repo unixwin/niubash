@@ -2,7 +2,10 @@ use std::io::{self, Write};
 use std::thread;
 use std::time::Duration;
 
-use crossterm::{cursor, execute, terminal::{self, ClearType}};
+use crossterm::{
+    cursor, execute,
+    terminal::{self, ClearType},
+};
 
 const RESET: &str = "\x1b[0m";
 
@@ -66,7 +69,11 @@ fn dance(stdout: &mut io::Stdout) -> anyhow::Result<i32> {
 fn draw_frame(stdout: &mut io::Stdout, frame: usize) -> anyhow::Result<()> {
     // A full clear (not just a home cursor) so a short frame cannot leave
     // the tail of a longer one on screen.
-    execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    execute!(
+        stdout,
+        terminal::Clear(ClearType::All),
+        cursor::MoveTo(0, 0)
+    )?;
     write!(stdout, "\x1b[1;95m  ~ niubash party mode ~{RESET}\n\n")?;
 
     let color = COLORS[frame % COLORS.len()];

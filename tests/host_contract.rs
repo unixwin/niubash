@@ -871,6 +871,46 @@ fn exported_env_reaches_windows_child_processes() {
 }
 
 #[test]
+#[ignore = "known rubash gap: on the case-insensitive Windows environment block \n`export a` and `export A` collide, so a Windows child sees one of the two \nvalues and the first export wins (`lower and lower`, not `upper and upper`). \nSee rubash varenv.tests varenv23.sub `global1:` family. Re-enable once rubash \ntransports case-colliding pairs instead of writing them into the OS block."]
+fn exported_env_case_insensitive_pair_reaches_windows_child() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    // Windows process environments are case-insensitive, so `a` and `A` share
+    // one slot. rubash keeps them as two in-memory variables and marks both
+    // exported, but the OS environment block it hands a child can hold only one
+    // value, and the first export is the one that survives (`lower` here, not
+    // `upper`). The assertion below pins the contract that both should reach the
+    // child; rubash cannot satisfy it today.
+    //
+    // The command string is quoted because an unquoted `|` is parsed by
+    // cmd.exe as a pipe before variable expansion, and its right-hand side
+    // would then be read as a command name (exit 127).
+    let temp = unique_temp_dir("niubash-host-env-case");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_niu(
+        "export a=lower; export A=upper; cmd.exe /C \"echo %a% and %A%\"",
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "env case-insensitive contract");
+    let stdout = normalize_text(&output.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["upper and upper"],
+        "stdout was {stdout:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn tilde_resolves_to_normal_windows_home() {
     if !cfg!(windows) {
         return;

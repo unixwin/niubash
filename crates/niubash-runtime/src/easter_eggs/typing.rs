@@ -13,12 +13,11 @@ const TARGET_WORDS: usize = 12;
 // Small, common vocabulary so a round finishes in about twenty seconds
 // of typing instead of hunting for obscure words.
 const WORDS: &[&str] = &[
-    "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
-    "shell", "prompt", "pipe", "alias", "script", "command", "output", "input",
-    "window", "native", "path", "drive", "folder", "line", "token", "parser",
-    "engine", "builtin", "function", "expand", "quote", "escape", "history", "theme",
-    "plugin", "bundle", "manifest", "cache", "search", "match", "status", "branch",
-    "commit", "merge", "build", "cargo", "crate", "error", "debug", "release",
+    "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "shell", "prompt", "pipe",
+    "alias", "script", "command", "output", "input", "window", "native", "path", "drive", "folder",
+    "line", "token", "parser", "engine", "builtin", "function", "expand", "quote", "escape",
+    "history", "theme", "plugin", "bundle", "manifest", "cache", "search", "match", "status",
+    "branch", "commit", "merge", "build", "cargo", "crate", "error", "debug", "release",
 ];
 
 // Deterministic 64-bit generator so a round is reproducible from its seed.
@@ -26,7 +25,9 @@ struct Rng(u64);
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Rng(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
+        Rng(seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407))
     }
 
     fn next_index(&mut self) -> usize {
@@ -142,35 +143,45 @@ fn round(stdout: &mut io::Stdout, game: &mut Game) -> anyhow::Result<RoundResult
             continue;
         }
         let event = event::read()?;
-        if let Event::Key(KeyEvent { code, modifiers, .. }) = event {
+        if let Event::Key(KeyEvent {
+            code, modifiers, ..
+        }) = event
+        {
             match (code, modifiers) {
-            (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => return Ok(RoundResult::Quit),
-            (KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
-                return Ok(RoundResult::Again);
-            }
-            (KeyCode::Enter, _) | (KeyCode::Char('n'), _) if game.done => {
-                return Ok(RoundResult::Again);
-            }
-            (KeyCode::Char(c), _) if !game.done => {
-                game.started.get_or_insert(Instant::now());
-                game.typed.push(c);
-                if game.typed.len() >= game.target.len() {
-                    game.done = true;
+                (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => return Ok(RoundResult::Quit),
+                (KeyCode::Char('r'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                    return Ok(RoundResult::Again);
                 }
-            }
-            (KeyCode::Backspace, _) if !game.done && !game.typed.is_empty() => {
-                game.typed.pop();
-            }
-            _ => {}
+                (KeyCode::Enter, _) | (KeyCode::Char('n'), _) if game.done => {
+                    return Ok(RoundResult::Again);
+                }
+                (KeyCode::Char(c), _) if !game.done => {
+                    game.started.get_or_insert(Instant::now());
+                    game.typed.push(c);
+                    if game.typed.len() >= game.target.len() {
+                        game.done = true;
+                    }
+                }
+                (KeyCode::Backspace, _) if !game.done && !game.typed.is_empty() => {
+                    game.typed.pop();
+                }
+                _ => {}
             }
         }
     }
 }
 
 fn draw(stdout: &mut io::Stdout, game: &Game) -> anyhow::Result<()> {
-    execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    execute!(
+        stdout,
+        terminal::Clear(ClearType::All),
+        cursor::MoveTo(0, 0)
+    )?;
     let secs = game.elapsed().as_secs_f64();
-    write!(stdout, "  \x1b[1;96m~ niubash typing ~\x1b[0m   \x1b[90m{secs:.1}s elapsed\x1b[0m\n\n")?;
+    write!(
+        stdout,
+        "  \x1b[1;96m~ niubash typing ~\x1b[0m   \x1b[90m{secs:.1}s elapsed\x1b[0m\n\n"
+    )?;
 
     // Target line: typed-correct bright, typed-wrong red, untyped dim,
     // and a block over the character being typed.
@@ -191,14 +202,33 @@ fn draw(stdout: &mut io::Stdout, game: &Game) -> anyhow::Result<()> {
     }
     write!(stdout, "\x1b[0m\n\n")?;
 
-    write!(stdout, "  \x1b[90mwords per minute  \x1b[0m\x1b[1;96m{:>4}\x1b[0m\n", game.wpm())?;
-    write!(stdout, "  \x1b[90mcharacters correct\x1b[0m \x1b[1;96m{:>4}%\x1b[0m\n", game.accuracy())?;
-    write!(stdout, "  \x1b[90mcharacters typed  \x1b[0m\x1b[1;96m{}/{}\x1b[0m\n", game.typed.len(), game.target.len())?;
+    write!(
+        stdout,
+        "  \x1b[90mwords per minute  \x1b[0m\x1b[1;96m{:>4}\x1b[0m\n",
+        game.wpm()
+    )?;
+    write!(
+        stdout,
+        "  \x1b[90mcharacters correct\x1b[0m \x1b[1;96m{:>4}%\x1b[0m\n",
+        game.accuracy()
+    )?;
+    write!(
+        stdout,
+        "  \x1b[90mcharacters typed  \x1b[0m\x1b[1;96m{}/{}\x1b[0m\n",
+        game.typed.len(),
+        game.target.len()
+    )?;
     write!(stdout, "\n")?;
     if game.done {
-        write!(stdout, "  \x1b[1;92mdone! enter or n for another round\x1b[0m\n")?;
+        write!(
+            stdout,
+            "  \x1b[1;92mdone! enter or n for another round\x1b[0m\n"
+        )?;
     } else {
-        write!(stdout, "  \x1b[90mbackspace undoes, ctrl+r restarts, q quits\x1b[0m\n")?;
+        write!(
+            stdout,
+            "  \x1b[90mbackspace undoes, ctrl+r restarts, q quits\x1b[0m\n"
+        )?;
     }
     stdout.flush()?;
     Ok(())

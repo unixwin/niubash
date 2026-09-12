@@ -82,7 +82,8 @@ mod platform {
     /// Output modes niubash relies on. Forced in addition to whatever the
     /// snapshot saw so a baseline taken after pollution still heals.
     fn ensure_vt_bits(mode: u32) -> u32 {
-        mode | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT
+        mode | ENABLE_PROCESSED_OUTPUT
+            | ENABLE_WRAP_AT_EOL_OUTPUT
             | ENABLE_VIRTUAL_TERMINAL_PROCESSING
     }
 

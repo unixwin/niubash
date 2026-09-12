@@ -50,6 +50,13 @@ const COMMAND_NOT_FOUND_PROVIDER_MAX_LINES: usize = 32;
 const COMMAND_NOT_FOUND_PROVIDER_MAX_LINE_BYTES: usize = 512;
 const NIU_RC_FILE: &str = ".niubashrc";
 const NIU_COMPAT_RC_FILE: &str = ".winuxshrc";
+/// Niubash-native non-interactive environment file variable. Takes precedence
+/// over `BASH_ENV` so an agent shell can point at a dedicated init file.
+const NIU_ENV_VAR: &str = "NIU_ENV";
+/// GNU bash non-interactive environment file variable. Sourced by default for
+/// non-interactive shells; kept for bash compatibility (OpenCode and other
+/// agents already use BASH_ENV).
+const BASH_ENV_VAR: &str = "BASH_ENV";
 
 /// Editor outcome produced by a shell-function widget.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -135,6 +142,13 @@ pub struct Shell {
     pub no_rc: bool,
     // --noprofile: do not run login-profile startup.
     pub no_profile: bool,
+    // Memoized per-runner answers to `declare -F <runner>`. The oh-my-niu
+    // framework defines the niubash_run_*_hooks entry points from the user rc;
+    // when the rc was never sourced (`niu -c`, scripts, piped stdin) or bundle
+    // discovery missed, dispatching them makes rubash pay for a full
+    // PATH/command-link scan for a name that cannot exist. Probed once per
+    // runner with a builtin, then cached.
+    framework_hook_probes: HashMap<String, bool>,
     // --rcfile / --init-file: alternate startup file.
     pub rc_file: Option<PathBuf>,
     // --noediting: disable readline-style line editing in the REPL.
@@ -184,6 +198,7 @@ impl Shell {
         // 1. Load runtime defaults and environment-backed state.
         let mut config = load_config();
         config.history = config.history.with_env_overrides();
+        crate::startup_trace::tick("config loaded");
 
         // 2. Select the WinuxCmd installation and use its real directory tree
         // before constructing the executor.
@@ -200,7 +215,9 @@ impl Shell {
             log::debug!("winuxcmd PATH injection disabled by config");
             None
         };
+        crate::startup_trace::tick("winuxcmd selected");
         let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
+        crate::startup_trace::tick("shell root prepared");
 
         // 3. Build rubash Executor after host path selection.
         let shell_was_missing = std::env::var_os("SHELL").is_none();
@@ -213,6 +230,7 @@ impl Shell {
             std::env::set_var("WINUXSH_SHELL_PATH_STYLE", "native");
         }
         let mut executor = Executor::new();
+        crate::startup_trace::tick("executor created");
         // Reedline is the interactive history owner. Keep Rubash's Bash
         // history machinery disabled in the host shell so HISTFILE cannot
         // create a second, competing history stream.
@@ -277,6 +295,8 @@ impl Shell {
             execute_niubash_host_external_command(words, env, &host_plugin_state)
         });
 
+        crate::startup_trace::tick("executor env + host handler");
+
         // 5. Apply managed aliases so explicit machine state remains
         // authoritative when names collide.
         let mut aliases = HashMap::new();
@@ -306,6 +326,8 @@ impl Shell {
                 }
             }
         }
+
+        crate::startup_trace::tick("aliases + builtin packs");
 
         // 6. Prompt + theme. Choose backend based on `prompt_style`:
         //    "segments"  -> new p10k-style segment engine
@@ -388,6 +410,8 @@ impl Shell {
             PromptBackend::Template(template_prompt)
         };
 
+        crate::startup_trace::tick("prompt backend");
+
         // 7. User-local state files.
         normalize_executor_home_env(&mut executor, &home_dir);
         ensure_windows_profile_env(&mut executor, &home_dir);
@@ -411,6 +435,7 @@ impl Shell {
             )
         })?;
         executor.set_history_provider(Rc::new(RefCell::new(history_provider)));
+        crate::startup_trace::tick("history provider");
         let last_working_dir_cache_path = default_last_working_dir_cache_path(&home_dir);
 
         // 8. Completion state.
@@ -420,6 +445,8 @@ impl Shell {
         initial_completion_state.behavior = config.completion_behavior;
         let completion_state = Arc::new(Mutex::new(initial_completion_state));
         let bundle_completion_defs = crate::plugins::plugin_completion_defs(&plugin_state);
+
+        crate::startup_trace::tick("completion state");
 
         // 9. Load completion dirs from config (inline, not in thread).
         {
@@ -481,11 +508,14 @@ impl Shell {
             interactive: false,
             no_rc: false,
             no_profile: false,
+            framework_hook_probes: HashMap::new(),
             rc_file: None,
             no_editing: false,
         };
+        crate::startup_trace::tick("bundle completion + keybindings");
         shell.sync_executor_pwd_from_process_cwd();
         shell.update_completion_state();
+        crate::startup_trace::tick("Shell::new done");
         Ok(shell)
     }
 
@@ -775,6 +805,65 @@ impl Shell {
         self.run_greeting_hooks();
     }
 
+    /// Source the non-interactive environment file if one is configured.
+    ///
+    /// Mirrors GNU bash's BASH_ENV behavior: a non-interactive shell
+    /// sources the file named by the environment variable before running its
+    /// command or script. Niubash adds a dedicated NIU_ENV variable that takes
+    /// precedence over BASH_ENV, so an agent shell can point at a dedicated
+    /// init file without touching the bash-compatible name.
+    ///
+    /// Neither variable set is a no-op, preserving the zero-load fast path
+    /// that keeps `niu -c` fast and deterministic. Only the user's single init
+    /// file is sourced: no plugins, prompts, or completion machinery is loaded,
+    /// so interactive-only content stays out of the one-shot execution path.
+    pub fn source_non_interactive_env(&mut self) {
+        let Some(raw) = std::env::var(NIU_ENV_VAR)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var(BASH_ENV_VAR)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+        else {
+            return;
+        };
+
+        normalize_executor_home_env(&mut self.executor, &self.home_dir);
+        let path = self.resolve_non_interactive_env_path(&raw);
+        if !path.is_file() {
+            eprintln!("niubash: {}: No such file or directory", path.display());
+            return;
+        }
+        match self.source_file_into_current_shell(&path) {
+            Ok(code) => {
+                if code != 0 {
+                    log::warn!("{} exited with status {}", path.display(), code);
+                }
+            }
+            Err(err) => log::warn!("{} failed: {}", path.display(), err),
+        }
+        self.sync_process_path_from_executor_path();
+        self.update_completion_state();
+    }
+
+    /// Resolve a non-interactive environment file path from the raw value of
+    /// NIU_ENV or BASH_ENV. A leading ~ expands against the shell home
+    /// directory; the remainder goes through the executor's path resolver so
+    /// /c/..., C:/..., and native backslash spellings all work.
+    fn resolve_non_interactive_env_path(&self, raw: &str) -> PathBuf {
+        let expanded = if raw == "~" {
+            self.home_dir.clone()
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            self.home_dir.join(rest)
+        } else {
+            PathBuf::from(shell_path_to_host_path(raw))
+        };
+        self.executor
+            .resolve_shell_path(&expanded.to_string_lossy())
+    }
+
     fn startup_rc_path(&self) -> Option<PathBuf> {
         if let Some(file) = &self.rc_file {
             return Some(file.clone());
@@ -796,7 +885,35 @@ impl Shell {
         })
     }
 
+    /// Whether the oh-my-niu framework runner is actually defined in this
+    /// shell. Probed once with the `declare -F` builtin and memoized per
+    /// runner so repeated hook invocations stay free.
+    fn framework_hook_defined(&mut self, runner: &str) -> bool {
+        if let Some(known) = self.framework_hook_probes.get(runner) {
+            return *known;
+        }
+        let script = format!("declare -F {runner} >/dev/null 2>&1");
+        let previous_exit_code = self.executor.last_exit_code();
+        let defined = self
+            .execute_script(&script)
+            .map(|code| code == 0)
+            .unwrap_or(false);
+        // The probe must not leak into $?: the caller's last_exit_code feeds
+        // NIU_LAST_EXIT_CODE for the hook that dispatched this probe.
+        self.executor.set_last_exit_code(previous_exit_code);
+        self.framework_hook_probes
+            .insert(runner.to_string(), defined);
+        defined
+    }
+
     fn run_framework_hook_runner(&mut self, runner: &str, context: &[(&str, String)]) {
+        // The framework entry points only exist once the user rc has been
+        // sourced. Dispatching them earlier makes rubash fall through to a
+        // full PATH/command-link scan for a name that cannot exist, which is
+        // the dominant fixed cost of `niu -c` and of any rc-less REPL start.
+        if !self.framework_hook_defined(runner) {
+            return;
+        }
         for (name, value) in context {
             self.executor.set_env(name, value);
         }
@@ -1172,10 +1289,7 @@ impl Shell {
             log::warn!("completion function '{}' failed: {}", function, err);
         }
 
-        let result = self
-            .executor
-            .get_env("NIU_COMP_RESULT")
-            .map(str::to_owned);
+        let result = self.executor.get_env("NIU_COMP_RESULT").map(str::to_owned);
         let _ = self.execute_script("unset NIU_COMP_WORDS NIU_COMP_CWORD NIU_COMP_RESULT");
 
         result
@@ -1231,9 +1345,8 @@ impl Shell {
             .get_env("NIU_WIDGET_CURSOR_RESULT")
             .and_then(|value| value.trim().parse::<usize>().ok());
 
-        let _ = self.execute_script(
-            "unset NIU_WIDGET_RESULT NIU_WIDGET_ACCEPT NIU_WIDGET_CURSOR_RESULT",
-        );
+        let _ = self
+            .execute_script("unset NIU_WIDGET_RESULT NIU_WIDGET_ACCEPT NIU_WIDGET_CURSOR_RESULT");
 
         WidgetOutcome {
             buffer: result,
@@ -5180,6 +5293,158 @@ export WINUXSH_OLD_PREFIX=kept-as-niu
     }
 
     #[test]
+    fn non_interactive_env_is_noop_when_unset() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let _niu_guard = EnvVarGuard::unset("NIU_ENV");
+        let _bash_guard = EnvVarGuard::unset("BASH_ENV");
+
+        let temp = unique_temp_dir("niubash-env-noop");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("agent.env"), "export NIU_AGENT_ENV=loaded\n").unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home.clone();
+        shell.source_non_interactive_env();
+
+        assert!(shell.executor.get_env("NIU_AGENT_ENV").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn niu_env_sources_agent_init_file() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let _bash_guard = EnvVarGuard::unset("BASH_ENV");
+
+        let temp = unique_temp_dir("niubash-env-niu");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env_file = home.join("agent.env");
+        std::fs::write(
+            &env_file,
+            "export NIU_AGENT_ENV=loaded\nalias ga='echo agent'\n",
+        )
+        .unwrap();
+
+        let _niu_guard = EnvVarGuard::set("NIU_ENV", &env_file);
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.source_non_interactive_env();
+
+        assert_eq!(shell.executor.get_env("NIU_AGENT_ENV"), Some("loaded"));
+        // Aliases defined in the env file work in subsequent commands.
+        assert_eq!(shell.execute_script("ga").unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn bash_env_sources_when_niu_env_unset() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let _niu_guard = EnvVarGuard::unset("NIU_ENV");
+
+        let temp = unique_temp_dir("niubash-env-bash");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env_file = home.join("agent.env");
+        std::fs::write(&env_file, "export NIU_AGENT_ENV=bash-loaded\n").unwrap();
+
+        let _bash_guard = EnvVarGuard::set("BASH_ENV", &env_file);
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.source_non_interactive_env();
+
+        assert_eq!(shell.executor.get_env("NIU_AGENT_ENV"), Some("bash-loaded"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn niu_env_takes_precedence_over_bash_env() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+
+        let temp = unique_temp_dir("niubash-env-precedence");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let niu_file = home.join("niu.env");
+        let bash_file = home.join("bash.env");
+        std::fs::write(&niu_file, "export NIU_AGENT_ENV=from-niu\n").unwrap();
+        std::fs::write(&bash_file, "export NIU_AGENT_ENV=from-bash\n").unwrap();
+
+        let _niu_guard = EnvVarGuard::set("NIU_ENV", &niu_file);
+        let _bash_guard = EnvVarGuard::set("BASH_ENV", &bash_file);
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.source_non_interactive_env();
+
+        assert_eq!(shell.executor.get_env("NIU_AGENT_ENV"), Some("from-niu"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn non_interactive_env_expands_tilde_in_path() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let _bash_guard = EnvVarGuard::unset("BASH_ENV");
+
+        let temp = unique_temp_dir("niubash-env-tilde");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("agent.env"),
+            "export NIU_AGENT_ENV=tilde-loaded\n",
+        )
+        .unwrap();
+
+        let _niu_guard = EnvVarGuard::set_value("NIU_ENV", "~/agent.env");
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.source_non_interactive_env();
+
+        assert_eq!(
+            shell.executor.get_env("NIU_AGENT_ENV"),
+            Some("tilde-loaded")
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn non_interactive_env_ignores_empty_value() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let _bash_guard = EnvVarGuard::unset("BASH_ENV");
+
+        let temp = unique_temp_dir("niubash-env-empty");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("agent.env"),
+            "export NIU_AGENT_ENV=should-not-load\n",
+        )
+        .unwrap();
+
+        let _niu_guard = EnvVarGuard::set_value("NIU_ENV", "");
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.source_non_interactive_env();
+
+        assert!(shell.executor.get_env("NIU_AGENT_ENV").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+    #[test]
     fn niubashrc_is_the_source_plugin_entrypoint_when_present() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
@@ -5384,7 +5649,10 @@ niubash_run_precmd_hooks() {
         assert_eq!(shell.executor.get_env("NIU_HOOK_RAN"), Some("ok"));
         // The user's option state is restored after the hook runner.
         shell.execute_script("NIU_SAVED_FLAGS_=$-").unwrap();
-        let flags = shell.executor.get_env("NIU_SAVED_FLAGS_").unwrap_or_default();
+        let flags = shell
+            .executor
+            .get_env("NIU_SAVED_FLAGS_")
+            .unwrap_or_default();
         assert!(flags.contains('e'), "errexit restored: {flags}");
         assert!(flags.contains('u'), "nounset restored: {flags}");
         assert_eq!(shell.executor.get_env("__NIU_HOOK_OPTS_"), None);
@@ -7173,6 +7441,7 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             interactive: false,
             no_rc: false,
             no_profile: false,
+            framework_hook_probes: HashMap::new(),
             rc_file: None,
             no_editing: false,
         };

@@ -26,6 +26,11 @@ jobs:
   build-windows:
     name: build-windows (${{ matrix.arch }})
     runs-on: windows-2025
+    outputs:
+      # Both matrix legs clone the same rubash master, so this resolves to the
+      # same value in both; the pin step fails the build if the checkout is
+      # not a committed revision.
+      rubash_revision: ${{ steps.rubash.outputs.revision }}
     strategy:
       fail-fast: false
       matrix:
@@ -101,8 +106,27 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.rust_target }}
 
-      - name: Update rubash to latest master
-        run: cargo update -p rubash
+      # rubash is a path dependency, so `cargo update -p rubash` cannot pin it:
+      # there is no registry entry to update, and the step silently did nothing.
+      # The revision the binary actually contains is resolved here and embedded
+      # at build time by build.rs, so `niu --version` reports it.
+      - name: Pin rubash revision
+        id: rubash
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath ..\rubash)) {
+            throw "rubash checkout missing at ..\rubash"
+          }
+          $revision = (git -C ..\rubash rev-parse --short=12 HEAD).Trim()
+          if ([string]::IsNullOrWhiteSpace($revision)) {
+            throw "could not resolve rubash revision"
+          }
+          $dirty = git -C ..\rubash status --porcelain
+          if (-not [string]::IsNullOrWhiteSpace($dirty)) {
+            throw "rubash checkout is dirty; a release must pin a committed revision`n$dirty"
+          }
+          Write-Host "rubash revision: $revision"
+          "revision=$revision" >> $env:GITHUB_OUTPUT
 
       - name: Build niubash
         env:
@@ -234,6 +258,9 @@ jobs:
           body: |
             Niubash ${{ steps.release.outputs.tag }} Windows packages.
 
+            Engine: rubash git ${{ needs.build-windows.outputs.rubash_revision }}
+            Verify locally with `niu --version`, which prints the same revision.
+
             Packages are built remotely for x64 and ARM64. Portable zip packages remain available, and installer packages add user PATH and Windows Terminal profile integration.
           files: |
             artifacts/**/*.zip
@@ -279,10 +306,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       # Publishing needs version-annotated path deps so cargo can swap the
-      # path for a registry dependency. The rubash deps carry no version yet
-      # because rubash master is still 0.3.0 and CI path builds would fail
-      # the ^1.0.0 check; re-add version = "1.0.0" once rubash 1.0.0 is on
-      # crates.io.
+      # path for a registry dependency. The rubash dep carries no version yet
+      # because rubash 1.0.0 is not on crates.io; `cargo publish` refuses a
+      # bare path dependency. Re-add version = "1.0.0" once rubash 1.0.0 is
+      # published.
       - name: Publish niubash-runtime to crates.io
         run: cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
 

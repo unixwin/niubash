@@ -168,9 +168,7 @@ fn round_play(stdout: &mut io::Stdout, game: &mut Game) -> anyhow::Result<RoundE
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => {
                     return Ok(RoundEnd::Again);
                 }
-                KeyCode::Char(digit)
-                    if digit.is_ascii_digit() && game.outcome.is_none() =>
-                {
+                KeyCode::Char(digit) if digit.is_ascii_digit() && game.outcome.is_none() => {
                     let index = (digit as usize) - ('1' as usize);
                     if index >= 9 || game.board[index].is_some() {
                         continue;
@@ -188,8 +186,15 @@ fn round_play(stdout: &mut io::Stdout, game: &mut Game) -> anyhow::Result<RoundE
 }
 
 fn draw(stdout: &mut io::Stdout, game: &Game) -> anyhow::Result<()> {
-    execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
-    write!(stdout, "  \x1b[1;96m~ niubash tic ~\x1b[0m   {DIM}tic-tac-toe{RESET}\n\n")?;
+    execute!(
+        stdout,
+        terminal::Clear(ClearType::All),
+        cursor::MoveTo(0, 0)
+    )?;
+    write!(
+        stdout,
+        "  \x1b[1;96m~ niubash tic ~\x1b[0m   {DIM}tic-tac-toe{RESET}\n\n"
+    )?;
     write!(stdout, "    {DIM}   1     2     3{RESET}\n")?;
     write!(stdout, "    \u{250c}\u{2500}\u{2500}\u{2500}\u{252c}\u{2500}\u{2500}\u{2500}\u{252c}\u{2500}\u{2500}\u{2500}\u{2510}\n")?;
     for row in 0..3usize {
@@ -211,10 +216,16 @@ fn draw(stdout: &mut io::Stdout, game: &Game) -> anyhow::Result<()> {
         }
     }
     write!(stdout, "    \u{2514}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2518}\n\n")?;
-    write!(stdout, "  {DIM}you{RESET} {YOU}X{RESET}   {DIM}machine{RESET} {CPU}O{RESET}\n\n")?;
+    write!(
+        stdout,
+        "  {DIM}you{RESET} {YOU}X{RESET}   {DIM}machine{RESET} {CPU}O{RESET}\n\n"
+    )?;
     match game.outcome {
         Some(Some(Mark::X)) => {
-            write!(stdout, "  \x1b[1;92myou win!{RESET} {DIM}enter or n for another round, q quits{RESET}\n")?;
+            write!(
+                stdout,
+                "  \x1b[1;92myou win!{RESET} {DIM}enter or n for another round, q quits{RESET}\n"
+            )?;
         }
         Some(Some(Mark::O)) => {
             write!(stdout, "  \x1b[1;91mmachine wins{RESET} {DIM}enter or n for another round, q quits{RESET}\n")?;

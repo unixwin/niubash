@@ -136,6 +136,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("-c requires an argument");
             }
             let mut shell = niubash_runtime::Shell::new()?;
+            niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
             shell.executor.set_env("BASH_EXECUTION_STRING", &args[2]);
@@ -144,7 +145,9 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 shell.executor.set_positional_params(args[4..].to_vec());
             }
             let code = shell.execute_script(&args[2])?;
+            niubash_runtime::startup_trace::tick("-c: execute_script");
             let code = shell.finish_with_exit_trap(code)?;
+            niubash_runtime::startup_trace::tick("-c: exit trap");
             if code != 0 {
                 std::process::exit(code);
             }
@@ -160,6 +163,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             shell.executor.set_env("__RUBASH_SCRIPT_NAME", first);
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
+            shell.source_non_interactive_env();
             shell.executor.set_positional_params(args[2..].to_vec());
             let content = std::fs::read_to_string(&script)?;
             let code = shell.execute_script(&content)?;
@@ -192,6 +196,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     } else {
         niubash_runtime::Shell::new()?
     };
+    niubash_runtime::startup_trace::tick("invocation: Shell::new");
     shell.no_rc = invocation.no_rc;
     shell.no_profile = invocation.no_profile;
     shell.rc_file = invocation.rc_file.clone().map(PathBuf::from);
@@ -203,15 +208,20 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     shell.enable_process_stdin_pipeline_bridge();
 
     if let Some(command) = invocation.command {
+        shell.source_non_interactive_env();
+        niubash_runtime::startup_trace::tick("invocation: setup done");
         shell.executor.set_env("BASH_EXECUTION_STRING", &command);
         let code = shell.execute_script(&command)?;
+        niubash_runtime::startup_trace::tick("invocation: execute_script");
         let code = shell.finish_with_exit_trap(code)?;
+        niubash_runtime::startup_trace::tick("invocation: exit trap");
         if code != 0 {
             std::process::exit(code);
         }
         return Ok(());
     }
     if let Some(script_name) = invocation.script {
+        shell.source_non_interactive_env();
         shell.executor.set_env("__RUBASH_SCRIPT_NAME", &script_name);
         let content = std::fs::read_to_string(script_arg_to_host_path(&script_name))?;
         let code = shell.execute_script(&content)?;
@@ -227,6 +237,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         shell.enter_interactive();
         return niubash_runtime::repl::run_repl(shell);
     }
+    shell.source_non_interactive_env();
     let mut content = String::new();
     std::io::stdin().read_to_string(&mut content)?;
     let code = shell.execute_script(&content)?;
@@ -348,6 +359,7 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
         }
     }
     let mut shell = niubash_runtime::Shell::new()?;
+    niubash_runtime::startup_trace::tick("-C: Shell::new");
     shell.enter_interactive();
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
@@ -356,8 +368,11 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
         shell.executor.set_positional_params(args[4..].to_vec());
     }
     shell.run_startup_rc();
+    niubash_runtime::startup_trace::tick("-C: startup rc");
     shell.run_precmd_hooks();
+    niubash_runtime::startup_trace::tick("-C: precmd hooks");
     let code = shell.execute_interactive_line(&args[2])?;
+    niubash_runtime::startup_trace::tick("-C: execute_interactive_line");
     if code != 0 {
         std::process::exit(code);
     }
@@ -367,6 +382,7 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
 fn run_stdin_script() -> anyhow::Result<()> {
     let mut shell = niubash_runtime::Shell::new_for_stdin_script()?;
     shell.executor.inherit_process_stdin();
+    shell.source_non_interactive_env();
     let mut line = String::new();
     let mut pending = Vec::new();
 
@@ -563,6 +579,18 @@ fn print_usage() {
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
     println!("Configuration: ~/.niubashrc for interactive startup; a pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc");
+    println!();
+    println!("Environment:");
+    println!(
+        "  NIU_ENV=<file>          Non-interactive init file sourced by -c, scripts, and stdin"
+    );
+    println!(
+        "                          before running the command (bash BASH_ENV is also honored,"
+    );
+    println!(
+        "                          NIU_ENV takes precedence). Unset by default, keeping -c fast."
+    );
+    println!("  BASH_ENV=<file>         GNU bash compatible: same as NIU_ENV, lower precedence.");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
@@ -1109,14 +1137,22 @@ fn print_version() {
         "Niubash {} \u{2014} bash-compatible shell for Windows",
         env!("CARGO_PKG_VERSION")
     );
-    println!("  rubash   git {}", rubash_revision());
+    println!("  rubash   {}", rubash_revision_label());
     if let Some(v) = niubash_runtime::winuxcmd::version() {
         println!("  winuxcmd {}", v);
     }
 }
 
-fn rubash_revision() -> &'static str {
-    option_env!("NIU_RUBASH_REV").unwrap_or("master")
+/// Format the embedded rubash revision. The `git ` prefix is only truthful
+/// when build.rs resolved a real commit; a build without git access resolves
+/// to "unknown" and must not be advertised as a branch name.
+fn rubash_revision_label() -> String {
+    let revision = option_env!("NIU_RUBASH_REV").unwrap_or("unknown");
+    if revision == "unknown" {
+        revision.to_string()
+    } else {
+        format!("git {revision}")
+    }
 }
 
 fn is_broken_pipe_error(error: &anyhow::Error) -> bool {

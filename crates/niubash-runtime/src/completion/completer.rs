@@ -437,7 +437,10 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
     let command_word = command_words_before_cursor(context)?.first()?.clone();
     let cword = comp_cword(context);
     let function = crate::shell::with_completion_bridge(|shell| {
-        let (_, function) = shell.compdefs.iter().find(|(cmd, _)| cmd == &command_word)?;
+        let (_, function) = shell
+            .compdefs
+            .iter()
+            .find(|(cmd, _)| cmd == &command_word)?;
         Some(function.clone())
     })??;
 
@@ -453,8 +456,9 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
         words.push(current_word.clone());
     }
 
-    let entries =
-        crate::shell::with_completion_bridge(|shell| shell.run_compdef_function(&function, &words, cword))?;
+    let entries = crate::shell::with_completion_bridge(|shell| {
+        shell.run_compdef_function(&function, &words, cword)
+    })?;
     if entries.is_empty() {
         return None;
     }
@@ -472,7 +476,8 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
         return None;
     }
     Some(CompletionResult::with_descriptions(
-        completions, descriptions,
+        completions,
+        descriptions,
     ))
 }
 
@@ -527,17 +532,15 @@ mod tests {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
 
         let mut shell = crate::shell::Shell::new().unwrap();
-        assert!(
-            shell
-                .execute_script(
-                    r#"
+        assert!(shell
+            .execute_script(
+                r#"
 niu_git_comp() {
     NIU_COMP_RESULT="alpha	First"$'\n'"beta"
 }
 "#
-                )
-                .is_ok()
-        );
+            )
+            .is_ok());
         shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
         crate::shell::install_completion_bridge(&shell);

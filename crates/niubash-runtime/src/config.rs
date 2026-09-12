@@ -180,7 +180,9 @@ impl MenuConfig {
             if let Some(style) = CompletionStyle::parse(&value) {
                 self.completion_style = style;
             } else {
-                eprintln!("niubash: NIU_COMPLETION_STYLE must be one of: ide, column, list, inline");
+                eprintln!(
+                    "niubash: NIU_COMPLETION_STYLE must be one of: ide, column, list, inline"
+                );
             }
         }
         self

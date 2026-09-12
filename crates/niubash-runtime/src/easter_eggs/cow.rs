@@ -72,7 +72,8 @@ fn play(stdout: &mut io::Stdout) -> anyhow::Result<i32> {
             if let Event::Key(key) = event::read()? {
                 if matches!(
                     key.code,
-                    KeyCode::Char('q') | KeyCode::Char('Q')
+                    KeyCode::Char('q')
+                        | KeyCode::Char('Q')
                         | KeyCode::Enter
                         | KeyCode::Char(' ')
                         | KeyCode::Esc
@@ -94,7 +95,11 @@ fn play(stdout: &mut io::Stdout) -> anyhow::Result<i32> {
 
 fn draw(stdout: &mut io::Stdout, frame: usize, done: bool) -> anyhow::Result<()> {
     let lines = FRAMES[frame % FRAMES.len()];
-    execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    execute!(
+        stdout,
+        terminal::Clear(ClearType::All),
+        cursor::MoveTo(0, 0)
+    )?;
     write!(stdout, "  {BRAND}~ niubash cow ~{RESET}\n\n")?;
     for (index, line) in lines.iter().enumerate() {
         let color = if index == 0 || index == 1 || index + 1 == lines.len() {

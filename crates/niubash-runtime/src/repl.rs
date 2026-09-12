@@ -1135,18 +1135,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 let mut widget_resumed_editing = false;
                 if pending.is_empty() {
                     if let Some(widget) = WidgetInvocation::parse(&line) {
-                        let available =
-                            shell.borrow().widget_function_available(&widget.function);
+                        let available = shell.borrow().widget_function_available(&widget.function);
                         if available {
                             let editor_buffer = line_editor.current_buffer_contents().to_string();
                             let editor_cursor = line_editor.current_insertion_point();
-                            let outcome = shell
-                                .borrow_mut()
-                                .run_widget_function(
-                                    &widget.function,
-                                    &editor_buffer,
-                                    editor_cursor,
-                                );
+                            let outcome = shell.borrow_mut().run_widget_function(
+                                &widget.function,
+                                &editor_buffer,
+                                editor_cursor,
+                            );
                             if outcome.accept {
                                 // Submit the produced buffer (or the line as
                                 // it stood) as ordinary user input.
@@ -1413,9 +1410,7 @@ mod tests {
         // Block keywords inside a here-doc body are opaque data (git-summary's
         // usage() body contains `... repos; if omitted, ...`, which used to
         // push a phantom `fi` block and wedge the REPL in continuation mode).
-        assert!(is_repl_input_complete(
-            "f() {\ncat <<EOF\nx; if y\nEOF\n}"
-        ));
+        assert!(is_repl_input_complete("f() {\ncat <<EOF\nx; if y\nEOF\n}"));
         assert!(is_repl_input_complete("cat <<EOF\nx; if y\nEOF"));
         assert!(is_repl_input_complete(
             "cat <<'EOF'\nbody with \"quotes && (parens)\nEOF"
@@ -1723,7 +1718,11 @@ mod tests {
             presets: Vec::new(),
             import_bindkeys: true,
         };
-        let bindings = vec![native_widget_binding("Ctrl+R", None, "history-incremental-search-backward")];
+        let bindings = vec![native_widget_binding(
+            "Ctrl+R",
+            None,
+            "history-incremental-search-backward",
+        )];
 
         add_bundle_widget_keybindings(
             &mut keybindings,
@@ -1760,8 +1759,9 @@ mod tests {
     #[test]
     fn user_widget_bindings_apply_without_pack_gate() {
         let mut keybindings = default_emacs_keybindings();
-        let bindings =
-            parse_user_bindkeys("Ctrl+G:niu_git_status\nCtrl+R:history-incremental-search-backward");
+        let bindings = parse_user_bindkeys(
+            "Ctrl+G:niu_git_status\nCtrl+R:history-incremental-search-backward",
+        );
 
         add_user_widget_keybindings(&mut keybindings, &bindings);
 

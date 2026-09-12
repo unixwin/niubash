@@ -1,4 +1,6 @@
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     emit_rubash_revision();
@@ -7,18 +9,111 @@ fn main() {
     embed_windows_icon();
 }
 
+/// Locate the `rubash` checkout that `Cargo.toml` pulls in as a path
+/// dependency.
+fn rubash_checkout_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?);
+    let sibling = manifest_dir.parent()?.join("rubash");
+    sibling.is_dir().then_some(sibling)
+}
+
+/// Embed the rubash revision that is actually compiled into this binary.
+///
+/// `rubash` is a path dependency, so `Cargo.lock` carries no `source =` line
+/// for it and the old lookup always fell through to the literal string
+/// "master" — every niubash build printed the same revision no matter which
+/// rubash commit was linked, and a release could not be traced back to its
+/// engine.
 fn emit_rubash_revision() {
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    let revision = fs::read_to_string("Cargo.lock")
-        .ok()
-        .and_then(|lock| rubash_revision_from_lock(&lock))
-        .unwrap_or_else(|| "master".to_string());
+    let revision = rubash_revision_from_checkout()
+        .or_else(rubash_revision_from_lock)
+        .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=NIU_RUBASH_REV={revision}");
 }
 
-fn rubash_revision_from_lock(lock: &str) -> Option<String> {
+/// Ask the sibling checkout for the commit being compiled, marking it dirty
+/// when the tree carries uncommitted changes. The dirty marker matters more
+/// than the hash here: a tree with uncommitted edits is not reproducible, and
+/// the version banner is the only place a user can see that.
+fn rubash_revision_from_checkout() -> Option<String> {
+    let Some(dir) = rubash_checkout_dir() else {
+        return None;
+    };
+    watch_rubash_refs(&dir);
+
+    let head = git(&dir, &["rev-parse", "--short=12", "HEAD"])?;
+    if !head.status.success() {
+        return None;
+    }
+    let mut revision = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if revision.is_empty() {
+        return None;
+    }
+
+    if let Some(status) = git(&dir, &["status", "--porcelain"]) {
+        if status.status.success() && !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
+            revision.push_str("-dirty");
+        }
+    }
+    Some(revision)
+}
+
+/// `git` may be absent on a build host, and a source tarball has no `.git`
+/// at all. Both are fine: the revision just stays "unknown".
+fn git(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C");
+    cmd.arg(dir);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.output().ok()
+}
+
+/// A path dependency does not make Cargo re-run this script when only the
+/// sibling checkout's refs move, so watch them by hand. `HEAD` alone is not
+/// enough — on a branch it stays `ref: refs/heads/<branch>` and only the
+/// pointed-at ref file changes.
+fn watch_rubash_refs(dir: &Path) {
+    let dot_git = git_common_dir(dir).unwrap_or_else(|| dir.join(".git"));
+    for rel in ["HEAD", "FETCH_HEAD", "refs/heads/master", "refs/heads/main"] {
+        let path = dot_git.join(rel);
+        if path.is_file() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
+
+/// A submodule worktree stores `.git` as a file pointing at the superproject's
+/// `modules/` directory; resolve it so the ref files can be watched.
+fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    let git_marker = dir.join(".git");
+    if !git_marker.is_file() {
+        return None;
+    }
+    let target = fs::read_to_string(&git_marker)
+        .ok()
+        .map(|text| text.trim().to_string())?;
+    let rest = target.strip_prefix("gitdir:").map(str::trim)?;
+    if rest.is_empty() {
+        return None;
+    }
+    let absolute = PathBuf::from(rest);
+    Some(if absolute.is_absolute() {
+        absolute
+    } else {
+        dir.join(absolute)
+    })
+}
+
+/// `git = "..."` dependencies record their revision in `Cargo.lock`; a path
+/// dependency does not. Kept so the value stays correct if rubash ever moves
+/// back to a git dependency.
+fn rubash_revision_from_lock() -> Option<String> {
+    let lock = fs::read_to_string("Cargo.lock").ok()?;
     let mut in_rubash = false;
 
     for line in lock.lines() {
@@ -38,7 +133,7 @@ fn rubash_revision_from_lock(lock: &str) -> Option<String> {
             return source
                 .rsplit_once('#')
                 .map(|(_, rev)| rev.to_string())
-                .or_else(|| Some("master".to_string()));
+                .or_else(|| Some("unknown".to_string()));
         }
     }
 
@@ -88,14 +183,14 @@ fn embed_windows_icon() {
     }
 
     fn find_in_path(exe: &str) -> Option<PathBuf> {
-        let path = env::var_os("PATH")?;
-        env::split_paths(&path)
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
             .map(|dir| dir.join(exe))
             .find(|candidate| candidate.is_file())
     }
 
     fn find_windows_sdk_rc() -> Option<PathBuf> {
-        let arch_dir = match env::var("TARGET").ok()?.as_str() {
+        let arch_dir = match std::env::var("TARGET").ok()?.as_str() {
             target if target.contains("aarch64") => "arm64",
             target if target.contains("i686") => "x86",
             _ => "x64",
@@ -103,11 +198,11 @@ fn embed_windows_icon() {
 
         let mut candidates = Vec::new();
         for root_var in ["ProgramFiles(x86)", "ProgramFiles"] {
-            let Some(root) = env::var_os(root_var) else {
+            let Some(root) = std::env::var_os(root_var) else {
                 continue;
             };
             let bin_dir = Path::new(&root).join("Windows Kits").join("10").join("bin");
-            let Ok(entries) = fs::read_dir(bin_dir) else {
+            let Ok(entries) = std::fs::read_dir(bin_dir) else {
                 continue;
             };
             for entry in entries.flatten() {

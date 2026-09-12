@@ -25,6 +25,33 @@ niu -C 'alias ll; pwd'       # one-shot REPL command
 This separation keeps automation deterministic while still allowing a rich
 interactive shell.
 
+### One-shot init file: `NIU_ENV` / `BASH_ENV`
+
+By default `-c` loads nothing — no rc, no plugins, no hooks. If your script,
+CI job, or coding agent needs shell aliases, exported variables, or PATH
+tweaks, point `NIU_ENV` (or bash-compatible `BASH_ENV`) at a dedicated init
+file. Only that one file is sourced, so the interactive-only content in
+`~/.niubashrc` stays out of the one-shot path.
+
+```bash
+# ~/.opencode.env — a minimal init file for agents
+export PATH="$HOME/tools:$PATH"
+alias ll='ls -la'
+export DOCKER_CONTEXT=my-cluster
+```
+
+```bash
+NIU_ENV=~/.opencode.env niu -c 'll | head'
+# or bash-compatible:
+BASH_ENV=~/.opencode.env niu -c 'echo "$DOCKER_CONTEXT"'
+```
+
+`NIU_ENV` takes precedence over `BASH_ENV` when both are set. A leading `~`
+expands to your home directory. If the file does not exist, niubash prints
+an error to stderr and continues — matching GNU bash's `BASH_ENV` behavior.
+
+With neither variable set, `-c` stays zero-load and fast.
+
 ## Startup And Config
 
 Use `~/.niubashrc` as the normal human-authored entry point:
@@ -50,7 +77,9 @@ The legacy files still exist, but they should not be the primary user path:
   overrides are internal managed state, not a user configuration file.
 
 Do not put automation-critical behavior only in an interactive rc file. Pass
-needed environment variables directly to `niu -c` or the script process.
+needed environment variables directly to `niu -c` or the script process, or
+use `NIU_ENV` / `BASH_ENV` to source a dedicated one-shot init file (see
+[One-shot init file](#one-shot-init-file-niu_env--bash_env)).
 
 ## Completion Menu Styles
 

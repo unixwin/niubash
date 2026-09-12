@@ -95,6 +95,7 @@ hello() { echo "hello from niu"; }
 ```
 
 - **Shared history across shells** — `NIU_HISTORY_MODE` offers `shared` (default), `session`, and `private`.
+- **One-shot init file** — `NIU_ENV=<file>` (or bash-compatible `BASH_ENV`) sources a single init file before `niu -c`, scripts, and piped stdin. Unset by default, keeping one-shot runs fast.
 - **Keep it current** — `niu --self-update` (or `self-update` inside the shell).
 
 ## Features
@@ -148,6 +149,21 @@ The one-shot form is a contract, not an afterthought:
 - It loads **no rc, no plugins, no interactive hooks** — today's run and tomorrow's run are the same run.
 - **Zero path conversion** — Bash instincts work directly, with none of MSYS's argument-rewriting roulette.
 - A model trained on Bash finally doesn't have to learn the local dialect.
+
+To give an agent shell aliases, env vars, or PATH tweaks without the full interactive rc, set `NIU_ENV` (or `BASH_ENV`) to a dedicated init file. Only that file is sourced — no plugins, prompts, or completion machinery:
+
+```bash
+# ~/.opencode.env — sourced by `niu -c` when NIU_ENV points here
+export PATH="$HOME/tools:$PATH"
+alias ll='ls -la'
+export DOCKER_CONTEXT=my-cluster
+```
+
+```bash
+NIU_ENV=~/.opencode.env niu -c 'll | head'
+```
+
+Unset `NIU_ENV` / `BASH_ENV` and `-c` stays zero-load and fast.
 
 This is what that feels like from the other side of the keyboard:
 

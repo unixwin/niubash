@@ -157,11 +157,7 @@ pub fn add_bundle(url: &str, name_override: Option<&str>) -> anyhow::Result<Exte
     }
 
     let mut command = Command::new("git");
-    command
-        .arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg(repo_url);
+    command.arg("clone").arg("--depth").arg("1").arg(repo_url);
     if ref_name != "HEAD" {
         command.arg("--branch").arg(&ref_name);
     }
@@ -171,7 +167,10 @@ pub fn add_bundle(url: &str, name_override: Option<&str>) -> anyhow::Result<Exte
         .with_context(|| "failed to run git; is git.exe on PATH?")?;
     if !status.success() {
         let _ = fs::remove_dir_all(&path);
-        anyhow::bail!("git clone exited with status {}", status.code().unwrap_or(1));
+        anyhow::bail!(
+            "git clone exited with status {}",
+            status.code().unwrap_or(1)
+        );
     }
 
     let bundle_toml = path.join("bundle.toml");
@@ -200,11 +199,11 @@ pub fn add_bundle(url: &str, name_override: Option<&str>) -> anyhow::Result<Exte
 /// Mark a registered external bundle as trusted.
 pub fn trust_bundle(name: &str) -> anyhow::Result<ExternalBundleRecord> {
     let mut registry = read_registry();
-    let Some(record) = registry
-        .iter_mut()
-        .find(|record| record.name == name)
-    else {
-        anyhow::bail!("unknown external bundle '{}'; run niu plugin add first", name);
+    let Some(record) = registry.iter_mut().find(|record| record.name == name) else {
+        anyhow::bail!(
+            "unknown external bundle '{}'; run niu plugin add first",
+            name
+        );
     };
     record.trusted = true;
     let trusted = record.clone();
@@ -248,7 +247,10 @@ mod tests {
 
     #[test]
     fn derive_name_strips_git_suffix() {
-        assert_eq!(derive_name_from_url("https://example.com/foo/bar.git"), "bar");
+        assert_eq!(
+            derive_name_from_url("https://example.com/foo/bar.git"),
+            "bar"
+        );
         assert_eq!(derive_name_from_url("https://example.com/foo/bar/"), "bar");
     }
 
@@ -297,7 +299,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!("niu-external-e2e-{}-{}", std::process::id(), nanos));
+        let base =
+            std::env::temp_dir().join(format!("niu-external-e2e-{}-{}", std::process::id(), nanos));
         let remote = base.join("remote-repo");
         let root = base.join("external");
         std::fs::create_dir_all(&remote).unwrap();

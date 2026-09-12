@@ -73,11 +73,23 @@ fn rain(stdout: &mut io::Stdout, cols: usize, rows: usize) -> anyhow::Result<i32
                 let x = i * 2;
                 if col.y > 0 && col.y <= rows {
                     let y = col.y - 1;
-                    write!(stdout, "\x1b[{};{}H\x1b[32;2m{}", y + 1, x + 1, MATRIX_CHARS[col.char_idx] as char)?;
+                    write!(
+                        stdout,
+                        "\x1b[{};{}H\x1b[32;2m{}",
+                        y + 1,
+                        x + 1,
+                        MATRIX_CHARS[col.char_idx] as char
+                    )?;
                 }
                 if col.y < rows {
                     let y = col.y;
-                    write!(stdout, "\x1b[{};{}H\x1b[1;97m{}", y + 1, x + 1, MATRIX_CHARS[col.char_idx] as char)?;
+                    write!(
+                        stdout,
+                        "\x1b[{};{}H\x1b[1;97m{}",
+                        y + 1,
+                        x + 1,
+                        MATRIX_CHARS[col.char_idx] as char
+                    )?;
                 }
                 col.char_idx = (col.char_idx + 1) % MATRIX_CHARS.len();
                 if col.y >= rows {

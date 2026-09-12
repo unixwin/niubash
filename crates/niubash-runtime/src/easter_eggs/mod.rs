@@ -17,14 +17,7 @@ mod typing;
 
 /// Every registered egg name. Keep sorted; used by docs and tests.
 const EGG_NAMES: &[&str] = &[
-    "about",
-    "cow",
-    "game",
-    "games",
-    "matrix",
-    "party",
-    "tic",
-    "typing",
+    "about", "cow", "game", "games", "matrix", "party", "tic", "typing",
 ];
 
 const DIM: &str = "\x1b[90m";
@@ -106,12 +99,21 @@ fn list_games() -> anyhow::Result<i32> {
     use std::io::Write;
     let mut out = stdout();
     write!(out, "\x1b[1;96m  niubash games\x1b[0m\n")?;
-    write!(out, "  {DIM}type `game` for this list, `game <name>` to play{RESET}\n\n")?;
+    write!(
+        out,
+        "  {DIM}type `game` for this list, `game <name>` to play{RESET}\n\n"
+    )?;
     for (_name, invocation, blurb) in GAMES {
-        write!(out, "  \x1b[1;96m{invocation:<14}\x1b[0m {DIM}{blurb}{RESET}\n")?;
+        write!(
+            out,
+            "  \x1b[1;96m{invocation:<14}\x1b[0m {DIM}{blurb}{RESET}\n"
+        )?;
     }
     write!(out, "\n  {DIM}each one also works as a top-level command: `snake`, `cow`, `typing`, `tic`{RESET}\n")?;
-    write!(out, "  {DIM}also hidden: `matrix`, `party`, `about`{RESET}\n")?;
+    write!(
+        out,
+        "  {DIM}also hidden: `matrix`, `party`, `about`{RESET}\n"
+    )?;
     out.flush()?;
     Ok(0)
 }
@@ -131,18 +133,28 @@ fn print_usage(name: &str) -> anyhow::Result<i32> {
         "game" | "games" => {
             write!(out, "\x1b[1;96m  niubash games\x1b[0m\n")?;
             write!(out, "  {DIM}usage: game [<name>] | game --help{RESET}\n")?;
-            write!(out, "  {DIM}names: {}", GAMES.iter().map(|g| g.0).collect::<Vec<_>>().join(", "))?;
+            write!(
+                out,
+                "  {DIM}names: {}",
+                GAMES.iter().map(|g| g.0).collect::<Vec<_>>().join(", ")
+            )?;
             write!(out, "{RESET}\n")?;
             out.flush()?;
             Ok(0)
         }
         "cow" => {
-            write!(out, "  {DIM}cow -- a short ASCII bull animation; q or ctrl+c leaves early{RESET}\n")?;
+            write!(
+                out,
+                "  {DIM}cow -- a short ASCII bull animation; q or ctrl+c leaves early{RESET}\n"
+            )?;
             out.flush()?;
             Ok(0)
         }
         "typing" => {
-            write!(out, "  {DIM}typing -- type the shown words; ctrl+r restarts, q quits{RESET}\n")?;
+            write!(
+                out,
+                "  {DIM}typing -- type the shown words; ctrl+r restarts, q quits{RESET}\n"
+            )?;
             out.flush()?;
             Ok(0)
         }
@@ -152,7 +164,10 @@ fn print_usage(name: &str) -> anyhow::Result<i32> {
             Ok(0)
         }
         _ => {
-            write!(out, "  {DIM}{name}: an interactive niubash easter egg{RESET}\n")?;
+            write!(
+                out,
+                "  {DIM}{name}: an interactive niubash easter egg{RESET}\n"
+            )?;
             out.flush()?;
             Ok(0)
         }

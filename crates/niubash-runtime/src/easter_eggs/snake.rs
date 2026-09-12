@@ -4,8 +4,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    execute,
-    terminal,
+    execute, terminal,
 };
 
 const TICK_MS: u64 = 150;
@@ -152,9 +151,13 @@ impl Game {
         let status_y = (HEIGHT + 2) as u16;
         execute!(stdout, cursor::MoveTo(0, status_y))?;
         if self.over {
-            stdout.write_all(b"\x1b[K\n\x1b[1;91m  GAME OVER! Press q to quit.\x1b[0m\x1b[K\n\x1b[K")?;
+            stdout.write_all(
+                b"\x1b[K\n\x1b[1;91m  GAME OVER! Press q to quit.\x1b[0m\x1b[K\n\x1b[K",
+            )?;
         } else {
-            stdout.write_all(b"\x1b[K\n  \x1b[90mwasd/arrows to move, q to quit\x1b[0m\x1b[K\n\x1b[K")?;
+            stdout.write_all(
+                b"\x1b[K\n  \x1b[90mwasd/arrows to move, q to quit\x1b[0m\x1b[K\n\x1b[K",
+            )?;
         }
 
         stdout.flush()?;

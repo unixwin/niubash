@@ -408,7 +408,9 @@ fn auto_activate_bundled_winuxcmd(exe: &Path) {
             );
         }
         Err(err) => {
-            log::debug!("failed to launch wpm links rebuild: {err}; falling back to activation script");
+            log::debug!(
+                "failed to launch wpm links rebuild: {err}; falling back to activation script"
+            );
         }
     }
 

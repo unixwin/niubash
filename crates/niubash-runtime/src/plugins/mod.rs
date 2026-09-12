@@ -650,8 +650,7 @@ fn active_plugin_inventory_result() -> anyhow::Result<PluginInventory> {
 /// trusted yet. Untrusted external bundles never provide the active
 /// inventory: the resolver falls through to the next candidate.
 fn skip_untrusted_external_bundle(path: &Path) -> bool {
-    external::is_external_bundle_path(path)
-        && external::external_bundle_trusted(path) != Some(true)
+    external::is_external_bundle_path(path) && external::external_bundle_trusted(path) != Some(true)
 }
 
 /// Point the plugin lock at a trusted external bundle so it becomes the
@@ -1541,9 +1540,7 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
         };
         out.push_str(&format!(
             "  {symbol} {:<name_w$} {:<cat_w$} {}\n",
-            pack.name,
-            category,
-            summary
+            pack.name, category, summary
         ));
     }
 
@@ -1570,11 +1567,7 @@ fn pack_human_line(pack: &PluginPackRecord) -> String {
     } else {
         (crate::text_style::off_symbol(), pack.name.clone())
     };
-    let mut line = format!(
-        "  {symbol} {:<20} {}",
-        name,
-        pack.summary
-    );
+    let mut line = format!("  {symbol} {:<20} {}", name, pack.summary);
     if !pack.required_binaries.is_empty() {
         line.push_str(&format!("  {}", missing));
     }
@@ -1632,7 +1625,11 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
         .iter()
         .find(|pack| pack.name.eq_ignore_ascii_case(name))?;
     let kv = |key: &str, value: String| {
-        format!("  {} {}", crate::text_style::dim(&format!("{key:<12}")), value)
+        format!(
+            "  {} {}",
+            crate::text_style::dim(&format!("{key:<12}")),
+            value
+        )
     };
     let mut out = String::new();
     out.push_str(&format!(
@@ -1668,9 +1665,7 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
             if missing.is_empty() {
                 pack.required_binaries.join(", ")
             } else {
-                missing
-                    .trim_matches(|c| c == '(' || c == ')')
-                    .to_string()
+                missing.trim_matches(|c| c == '(' || c == ')').to_string()
             },
         ));
         out.push('\n');
@@ -1725,10 +1720,7 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
         "\n{}\n",
         crate::text_style::dim("Runtime details (--verbose adds more; --json for machines):")
     ));
-    out.push_str(&kv(
-        "execution",
-        plugin_execution_model(pack).to_string(),
-    ));
+    out.push_str(&kv("execution", plugin_execution_model(pack).to_string()));
     out.push('\n');
     out.push_str(&kv(
         "externalization",
@@ -2151,7 +2143,11 @@ pub fn plugin_permission_review_text(review: &PluginPermissionReview) -> String 
     out.push_str(&format!("Permission review — {}\n", review.plugin));
     out.push_str(&format!(
         "  currently enabled: {}\n",
-        if review.currently_enabled { "yes" } else { "no" }
+        if review.currently_enabled {
+            "yes"
+        } else {
+            "no"
+        }
     ));
     out.push_str(&format!(
         "  kind: {}\n",
@@ -2182,10 +2178,7 @@ pub fn plugin_permission_review_text(review: &PluginPermissionReview) -> String 
             review.missing_required_binaries.join(", ")
         ));
     }
-    out.push_str(&format!(
-        "  install command: {}\n",
-        review.install_command
-    ));
+    out.push_str(&format!("  install command: {}\n", review.install_command));
     if !review.notes.is_empty() {
         out.push_str("Notes:\n");
         for note in &review.notes {
@@ -2198,8 +2191,16 @@ pub fn plugin_permission_review_text(review: &PluginPermissionReview) -> String 
         review.execution_model,
         review.externalization_class,
         review.readiness.target_runtime,
-        if review.readiness.shell_mutating { "yes" } else { "no" },
-        if review.readiness.fallback_needed { "yes" } else { "no" }
+        if review.readiness.shell_mutating {
+            "yes"
+        } else {
+            "no"
+        },
+        if review.readiness.fallback_needed {
+            "yes"
+        } else {
+            "no"
+        }
     ));
     out
 }
@@ -3139,7 +3140,10 @@ pub fn plugin_theme_catalog_text() -> String {
             .is_some_and(|needle| name.eq_ignore_ascii_case(needle))
     };
     if !user.is_empty() {
-        out.push_str(&format!("\n{} (~/.niubash/themes):\n", crate::text_style::cyan("User themes")));
+        out.push_str(&format!(
+            "\n{} (~/.niubash/themes):\n",
+            crate::text_style::cyan("User themes")
+        ));
         for name in &user {
             if is_current(name) {
                 out.push_str(&format!("  {} {}\n", crate::text_style::green("★"), name));
@@ -3149,7 +3153,10 @@ pub fn plugin_theme_catalog_text() -> String {
         }
     }
     if !bundle.is_empty() {
-        out.push_str(&format!("\n{}:\n", crate::text_style::cyan("Bundle themes")));
+        out.push_str(&format!(
+            "\n{}:\n",
+            crate::text_style::cyan("Bundle themes")
+        ));
         for (name, owner) in &bundle {
             if is_current(name) {
                 out.push_str(&format!(
@@ -3482,10 +3489,7 @@ mod legacy_bundle_gate_tests {
 
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0].key.as_deref(), Some("Ctrl+R"));
-        assert_eq!(
-            bindings[0].widget,
-            "history-incremental-search-backward"
-        );
+        assert_eq!(bindings[0].widget, "history-incremental-search-backward");
         assert_eq!(bindings[0].keymap, None, "all keymap applies everywhere");
         assert_eq!(bindings[0].origin, "bundle:common");
         assert_eq!(bindings[1].widget, "niu_fzf_file");
@@ -3576,7 +3580,10 @@ mod legacy_bundle_gate_tests {
         let notice = take_legacy_bundle_notice().expect("legacy notice recorded");
         assert!(notice.contains("oh-my-winuxsh"), "{notice}");
         assert!(notice.contains("niu setup"), "{notice}");
-        assert!(notice.contains(bundle.to_string_lossy().as_ref()), "{notice}");
+        assert!(
+            notice.contains(bundle.to_string_lossy().as_ref()),
+            "{notice}"
+        );
         assert!(take_legacy_bundle_notice().is_none(), "notice is one-shot");
 
         let _ = fs::remove_dir_all(&temp);
