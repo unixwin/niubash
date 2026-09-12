@@ -22,6 +22,7 @@ pub mod prompt;
 pub mod prompt_segments;
 pub mod repl;
 pub mod setup_wizard;
+pub mod startup_trace;
 pub mod shell;
 pub mod syntax_highlighting;
 pub mod terminal;

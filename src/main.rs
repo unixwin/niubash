@@ -136,6 +136,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("-c requires an argument");
             }
             let mut shell = niubash_runtime::Shell::new()?;
+            niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
             shell.executor.set_env("BASH_EXECUTION_STRING", &args[2]);
@@ -144,7 +145,9 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 shell.executor.set_positional_params(args[4..].to_vec());
             }
             let code = shell.execute_script(&args[2])?;
+            niubash_runtime::startup_trace::tick("-c: execute_script");
             let code = shell.finish_with_exit_trap(code)?;
+            niubash_runtime::startup_trace::tick("-c: exit trap");
             if code != 0 {
                 std::process::exit(code);
             }
@@ -192,6 +195,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     } else {
         niubash_runtime::Shell::new()?
     };
+    niubash_runtime::startup_trace::tick("invocation: Shell::new");
     shell.no_rc = invocation.no_rc;
     shell.no_profile = invocation.no_profile;
     shell.rc_file = invocation.rc_file.clone().map(PathBuf::from);
@@ -203,9 +207,12 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     shell.enable_process_stdin_pipeline_bridge();
 
     if let Some(command) = invocation.command {
+        niubash_runtime::startup_trace::tick("invocation: setup done");
         shell.executor.set_env("BASH_EXECUTION_STRING", &command);
         let code = shell.execute_script(&command)?;
+        niubash_runtime::startup_trace::tick("invocation: execute_script");
         let code = shell.finish_with_exit_trap(code)?;
+        niubash_runtime::startup_trace::tick("invocation: exit trap");
         if code != 0 {
             std::process::exit(code);
         }
@@ -348,6 +355,7 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
         }
     }
     let mut shell = niubash_runtime::Shell::new()?;
+    niubash_runtime::startup_trace::tick("-C: Shell::new");
     shell.enter_interactive();
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
@@ -356,8 +364,11 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
         shell.executor.set_positional_params(args[4..].to_vec());
     }
     shell.run_startup_rc();
+    niubash_runtime::startup_trace::tick("-C: startup rc");
     shell.run_precmd_hooks();
+    niubash_runtime::startup_trace::tick("-C: precmd hooks");
     let code = shell.execute_interactive_line(&args[2])?;
+    niubash_runtime::startup_trace::tick("-C: execute_interactive_line");
     if code != 0 {
         std::process::exit(code);
     }

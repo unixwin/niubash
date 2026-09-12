@@ -135,6 +135,13 @@ pub struct Shell {
     pub no_rc: bool,
     // --noprofile: do not run login-profile startup.
     pub no_profile: bool,
+    // Memoized per-runner answers to `declare -F <runner>`. The oh-my-niu
+    // framework defines the niubash_run_*_hooks entry points from the user rc;
+    // when the rc was never sourced (`niu -c`, scripts, piped stdin) or bundle
+    // discovery missed, dispatching them makes rubash pay for a full
+    // PATH/command-link scan for a name that cannot exist. Probed once per
+    // runner with a builtin, then cached.
+    framework_hook_probes: HashMap<String, bool>,
     // --rcfile / --init-file: alternate startup file.
     pub rc_file: Option<PathBuf>,
     // --noediting: disable readline-style line editing in the REPL.
@@ -184,6 +191,7 @@ impl Shell {
         // 1. Load runtime defaults and environment-backed state.
         let mut config = load_config();
         config.history = config.history.with_env_overrides();
+        crate::startup_trace::tick("config loaded");
 
         // 2. Select the WinuxCmd installation and use its real directory tree
         // before constructing the executor.
@@ -200,7 +208,9 @@ impl Shell {
             log::debug!("winuxcmd PATH injection disabled by config");
             None
         };
+        crate::startup_trace::tick("winuxcmd selected");
         let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
+        crate::startup_trace::tick("shell root prepared");
 
         // 3. Build rubash Executor after host path selection.
         let shell_was_missing = std::env::var_os("SHELL").is_none();
@@ -213,6 +223,7 @@ impl Shell {
             std::env::set_var("WINUXSH_SHELL_PATH_STYLE", "native");
         }
         let mut executor = Executor::new();
+        crate::startup_trace::tick("executor created");
         // Reedline is the interactive history owner. Keep Rubash's Bash
         // history machinery disabled in the host shell so HISTFILE cannot
         // create a second, competing history stream.
@@ -277,6 +288,8 @@ impl Shell {
             execute_niubash_host_external_command(words, env, &host_plugin_state)
         });
 
+        crate::startup_trace::tick("executor env + host handler");
+
         // 5. Apply managed aliases so explicit machine state remains
         // authoritative when names collide.
         let mut aliases = HashMap::new();
@@ -306,6 +319,8 @@ impl Shell {
                 }
             }
         }
+
+        crate::startup_trace::tick("aliases + builtin packs");
 
         // 6. Prompt + theme. Choose backend based on `prompt_style`:
         //    "segments"  -> new p10k-style segment engine
@@ -388,6 +403,8 @@ impl Shell {
             PromptBackend::Template(template_prompt)
         };
 
+        crate::startup_trace::tick("prompt backend");
+
         // 7. User-local state files.
         normalize_executor_home_env(&mut executor, &home_dir);
         ensure_windows_profile_env(&mut executor, &home_dir);
@@ -411,6 +428,7 @@ impl Shell {
             )
         })?;
         executor.set_history_provider(Rc::new(RefCell::new(history_provider)));
+        crate::startup_trace::tick("history provider");
         let last_working_dir_cache_path = default_last_working_dir_cache_path(&home_dir);
 
         // 8. Completion state.
@@ -420,6 +438,8 @@ impl Shell {
         initial_completion_state.behavior = config.completion_behavior;
         let completion_state = Arc::new(Mutex::new(initial_completion_state));
         let bundle_completion_defs = crate::plugins::plugin_completion_defs(&plugin_state);
+
+        crate::startup_trace::tick("completion state");
 
         // 9. Load completion dirs from config (inline, not in thread).
         {
@@ -481,11 +501,14 @@ impl Shell {
             interactive: false,
             no_rc: false,
             no_profile: false,
+            framework_hook_probes: HashMap::new(),
             rc_file: None,
             no_editing: false,
         };
+        crate::startup_trace::tick("bundle completion + keybindings");
         shell.sync_executor_pwd_from_process_cwd();
         shell.update_completion_state();
+        crate::startup_trace::tick("Shell::new done");
         Ok(shell)
     }
 
@@ -796,7 +819,34 @@ impl Shell {
         })
     }
 
+    /// Whether the oh-my-niu framework runner is actually defined in this
+    /// shell. Probed once with the `declare -F` builtin and memoized per
+    /// runner so repeated hook invocations stay free.
+    fn framework_hook_defined(&mut self, runner: &str) -> bool {
+        if let Some(known) = self.framework_hook_probes.get(runner) {
+            return *known;
+        }
+        let script = format!("declare -F {runner} >/dev/null 2>&1");
+        let previous_exit_code = self.executor.last_exit_code();
+        let defined = self
+            .execute_script(&script)
+            .map(|code| code == 0)
+            .unwrap_or(false);
+        // The probe must not leak into $?: the caller's last_exit_code feeds
+        // NIU_LAST_EXIT_CODE for the hook that dispatched this probe.
+        self.executor.set_last_exit_code(previous_exit_code);
+        self.framework_hook_probes.insert(runner.to_string(), defined);
+        defined
+    }
+
     fn run_framework_hook_runner(&mut self, runner: &str, context: &[(&str, String)]) {
+        // The framework entry points only exist once the user rc has been
+        // sourced. Dispatching them earlier makes rubash fall through to a
+        // full PATH/command-link scan for a name that cannot exist, which is
+        // the dominant fixed cost of `niu -c` and of any rc-less REPL start.
+        if !self.framework_hook_defined(runner) {
+            return;
+        }
         for (name, value) in context {
             self.executor.set_env(name, value);
         }
@@ -7173,6 +7223,7 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             interactive: false,
             no_rc: false,
             no_profile: false,
+            framework_hook_probes: HashMap::new(),
             rc_file: None,
             no_editing: false,
         };
