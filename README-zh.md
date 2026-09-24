@@ -196,12 +196,12 @@ ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 | | niubash | brush |
 |---|---|---|
 | 路线 | Rust 重写 bash，Windows 原生 | Rust 重写 bash，跨平台 |
-| 兼容性验证 | 直接跑 **GNU Bash 官方上游测试套件**——门禁 86/86 全绿，全量 57/83 套件零差（输出逐字节一致） | 根本不跑 GNU 套件；验证靠自建 1700+ 用例语料、以 bash 为 oracle，约 125 个已知失败（[其官方参考](https://github.com/reubeno/brush/blob/main/docs/reference/compatibility.md)） |
+| 兼容性验证 | 直接跑 **GNU Bash 官方上游测试套件**——门禁 86/86 全绿，全量 **83/83** 套件零差（输出逐字节一致） | 根本不跑 GNU 套件；验证靠自建 1700+ 用例语料、以 bash 为 oracle，约 125 个已知失败（[其官方参考](https://github.com/reubeno/brush/blob/main/docs/reference/compatibility.md)） |
 
 **同一张考卷、同一个考官——实测，不是口称。** 我们把 GNU Bash 的 83
 个上游测试套件用同一套桥接 harness（[`run-83.sh`](https://github.com/unixwin/rubash/blob/master/tests/gnu-compat/run-83.sh)、
 同样的 WSL GNU Bash 基线、同样的输出正规化、brush 用 release 构建）分别
-送考：**niubash 57/83 套件逐字节一致，brush 10/83**——另有 3 个套件
+送考：**niubash 83/83 套件逐字节一致，brush 10/83**——另有 3 个套件
 brush 在 150 秒上限内没能跑完（2026-09-21 实测，brush v0.4.0）。
 
 为什么差距这么大？两个测试数量量的是不同的仪器。自建的约 1700 个精选

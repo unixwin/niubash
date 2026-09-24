@@ -225,13 +225,13 @@ category. The head-to-head:
 | | niubash | brush |
 |---|---|---|
 | Approach | bash re-implemented in Rust, Windows-native | bash re-implemented in Rust, cross-platform |
-| Compatibility gate | GNU Bash's **own upstream test suite** — 86/86 gate green, 57/83 full suites byte-identical (zero-diff) | GNU's suite is not run at all; validation is a self-built 1700+ case corpus with bash as oracle, ~125 known failures ([their reference](https://github.com/reubeno/brush/blob/main/docs/reference/compatibility.md)) |
+| Compatibility gate | GNU Bash's **own upstream test suite** — 86/86 gate green, **83/83** full suites byte-identical (zero-diff) | GNU's suite is not run at all; validation is a self-built 1700+ case corpus with bash as oracle, ~125 known failures ([their reference](https://github.com/reubeno/brush/blob/main/docs/reference/compatibility.md)) |
 
 **Same exam, same proctor — measured, not claimed.** We ran GNU Bash's 83
 upstream test suites through the identical bridge harness
 ([`run-83.sh`](https://github.com/unixwin/rubash/blob/master/tests/gnu-compat/run-83.sh),
 same baselines from WSL GNU Bash, same output normalization, brush built in
-release mode): **niubash 57/83 byte-identical, brush 10/83** — with 3 suites
+release mode): **niubash 83/83 byte-identical, brush 10/83** — with 3 suites
 brush could not finish inside the 150-second bound
 (measured 2026-09-21, brush v0.4.0).
 
