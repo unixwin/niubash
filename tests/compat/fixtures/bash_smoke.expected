@@ -5,7 +5,7 @@ sum:8 pow:1024
 [3] arrays
 first:a all:a b c d e len:5
 [4] assoc arrays
-key1:value1 keys:key1 key2
+key1:value1 keys:key2 key1
 [5] logic
 eq-true
 neq-false
