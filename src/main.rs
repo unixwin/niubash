@@ -36,7 +36,11 @@ use rubash::invocation::ShellInvocation;
 mod self_update;
 const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-niu";
 const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "niubash-plugin-bundles";
-const NIU_MAIN_STACK_SIZE: usize = 32 * 1024 * 1024;
+// GNU variables.c FUNCNEST: 0/unset means no limit, so recursion depth is
+// bounded only by the real stack. Debug frames in the engine's call chain
+// run ~150KB each; 512MiB (reserved, not committed) covers func4.sub's
+// FUNCNEST=0 recursion to f=201 with headroom — mirrors rubash's main.rs.
+const NIU_MAIN_STACK_SIZE: usize = 512 * 1024 * 1024;
 
 fn main() -> ExitCode {
     // Restore the console (raw mode, cursor) on the panic path before the
@@ -102,7 +106,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     }
 
     let first = &args[1];
-    if first.starts_with('-')
+    // GNU shell.c parse_shell_options: every argv word starting with '-' or
+    // '+' is shell-option syntax (-c/-i/-o/-O/+B/+o ...), never a script
+    // name. Route all of them through the engine's ShellInvocation parser —
+    // a rejected option is a usage error, not "No such file or directory".
+    if (first.starts_with('-') || first.starts_with('+'))
         && !matches!(
             first.as_str(),
             "-h" | "--help"
@@ -116,7 +124,6 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 | "--self-update"
         )
         && !legacy_command_mode_has_post_c_login_flag(args)
-        && ShellInvocation::parse(&args[1..]).is_ok()
     {
         // P3 invocation alignment: a leading-dash argument the engine parser
         // rejects is a usage error with the GNU surface (shell.c:874-881):
@@ -188,20 +195,39 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
         _ => {
             // Treat as a script file to execute
-            let script = script_arg_to_host_path(first);
+            let mut shell = niubash_runtime::Shell::new()?;
+            // GNU shell.c:1572-1601 (open_shell_script): the script name is
+            // tried as given; when that fails and the name has no path
+            // separator it is searched in $PATH (findcmd.c find_path_file) —
+            // that is how `bash ls` finds and then refuses the binary
+            // /usr/bin/ls.
+            let mut script = script_arg_to_host_path(first);
+            if !script.exists() && !first.contains('/') && !first.contains('\\') {
+                if let Some(found) = shell.executor.find_script_on_path(first) {
+                    script = found;
+                }
+            }
             if !script.exists() {
                 // shell.c shell_execve on a name that is neither option,
                 // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
                 eprintln!("niu: {}: No such file or directory", first);
                 std::process::exit(127);
             }
-            let mut shell = niubash_runtime::Shell::new()?;
+            // general.c:718-741 check_binary_file: NUL in the first line(s)
+            // or an ELF image is refused with EX_BINARY_FILE (126).
+            let bytes = std::fs::read(&script)?;
+            if rubash::script_driver::check_binary_file(&bytes)
+                || std::str::from_utf8(&bytes).is_err()
+            {
+                eprintln!("cannot execute binary file");
+                std::process::exit(126);
+            }
+            let content = String::from_utf8(bytes).unwrap_or_default();
             shell.set_script_name(first);
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
             shell.source_non_interactive_env();
             shell.executor.set_positional_params(args[2..].to_vec());
-            let content = std::fs::read_to_string(&script)?;
             let code = shell.execute_script(&content)?;
             let code = shell.finish_with_exit_trap(code)?;
             if code != 0 {
@@ -313,6 +339,19 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             std::process::exit(code);
         }
         return Ok(());
+    }
+    // GNU bash -i with a non-tty stdin still drives readline
+    // (parse.y yy_readline_get -> bashline.c bash_readline): prompts and the
+    // input echo go to stderr, editing keys are honored, and every command
+    // is recorded to engine history. The reedline product REPL cannot run
+    // without a terminal, so delegate to the engine's interactive stdin
+    // driver instead of enter_interactive()/run_repl.
+    if invocation.interactive && !niubash_runtime::terminal::stdio_is_interactive() {
+        shell.executor.set_env("__RUBASH_INTERACTIVE", "1");
+        shell.executor.set_shopt_option("expand_aliases", true);
+        rubash::script_driver::prepare_interactive_history(&mut shell.executor);
+        let code = rubash::script_driver::run_interactive_stdin(&mut shell.executor);
+        std::process::exit(code);
     }
     // Bash -i forces an interactive shell even when stdin is not a terminal;
     // with no command or script, a terminal (or -i) means the REPL.
@@ -848,7 +887,17 @@ fn run_stdin_script() -> anyhow::Result<()> {
 
     loop {
         line.clear();
-        match read_unbuffered_line(&mut line)? {
+        // GNU input.c bash_input binds the script reader to fd 0: a
+        // permanent `exec 0<file` (redir.c do_redirections) moves the
+        // script source to the new input. read_unbuffered_line on the raw
+        // fd also avoids StdinLock prefetch stealing bytes from `&`
+        // children that inherit fd 0 (redir1.sub, redir.tests heredocs).
+        match shell
+            .executor
+            .script_fd0_line(&mut line)
+            .map(Ok)
+            .unwrap_or_else(|| read_unbuffered_line(&mut line))?
+        {
             0 => {
                 if !pending.is_empty() {
                     let code = shell.execute_script(&pending.join("\n"))?;

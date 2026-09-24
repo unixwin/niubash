@@ -301,9 +301,6 @@ impl Shell {
         if let Some(root) = &shell_root {
             executor.set_shell_root(root);
         }
-        if let Some(root) = &shell_root {
-            executor.set_shell_root(root);
-        }
         if let Some(winuxcmd_path) = &selected_winuxcmd_path {
             executor.set_winuxcmd_path(winuxcmd_path);
         }
@@ -2611,15 +2608,23 @@ impl Shell {
         // under rubash/GNU. The interactive path still disables it in
         // enter_interactive() (reedline owns REPL history).
         //
-        // SINKING LIST (engine PR required): scripts that turn history
-        // expansion on (histexp.tests `set -H`) additionally need the
-        // engine's GNU line-group reader (script_driver.rs
-        // run_script_with_history, per-group `!!`/`!str` expansion and
-        // recording). That module is not in rubash's public API at the
-        // pinned dependency (3aa37b3d); once published, this host must
-        // route scripts matching script_uses_history/script_uses_aliases
-        // through it exactly like rubash's main.rs:774.
+        // Scripts that turn history expansion or aliases on must run through
+        // the engine's GNU line-group reader (script_driver
+        // run_script_with_history: per-group `!!`/`!str` expansion and
+        // recording), the same routing as rubash's main.rs — tokenize+parse
+        // +execute_ast would lose pre_process_line semantics entirely.
         let script = normalize_native_windows_path_literals(script);
+        if !self.interactive
+            && (rubash::script_driver::script_uses_history(&script)
+                || rubash::script_driver::script_uses_aliases(&script))
+        {
+            let code =
+                rubash::script_driver::run_script_with_history(&mut self.executor, &script, None);
+            self.sync_process_cwd_from_executor_pwd();
+            self.sync_process_path_from_executor_path();
+            self.sync_alias_mirror_from_executor();
+            return Ok(code);
+        }
         let mut tokens = tokenize(&script);
         if tokens.is_empty() {
             return Ok(0);
@@ -4228,8 +4233,11 @@ fn is_forbidden_dotenv_key(key: &str) -> bool {
 fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
     let home = host_path_to_shell_path(&home_dir.to_string_lossy());
     let current = executor.get_env("HOME").unwrap_or_default();
-    let should_update = cfg!(windows)
-        || current.trim().is_empty()
+    // GNU shell.c/variables.c: HOME comes from the caller's environment.
+    // Normalize only when it is missing or Windows-shaped (backslashes,
+    // slash-drive); an explicitly exported POSIX HOME is the caller's
+    // choice and is honored verbatim (invocation.tests HOME=$TDIR).
+    let should_update = current.trim().is_empty()
         || current.contains('\\')
         || (cfg!(windows) && is_slash_drive_path(current));
     if should_update && !home.is_empty() {
