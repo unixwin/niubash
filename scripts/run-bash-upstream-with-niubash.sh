@@ -126,7 +126,7 @@ else
   fi
 
   TARGET_ROOT="$(real_path "${CARGO_TARGET_DIR:-$ROOT_DIR/target}")"
-  SHELL_BIN="$TARGET_ROOT/$PROFILE_DIR/niubash"
+  SHELL_BIN="$TARGET_ROOT/$PROFILE_DIR/niu"
   if [[ -x "$SHELL_BIN.exe" ]]; then
     SHELL_BIN="$SHELL_BIN.exe"
   fi
@@ -180,6 +180,10 @@ for runner in "${RUNNERS[@]}"; do
   cp -R "$BASH_TEST_DIR" "$test_workdir"
   cp "$BASH_TEST_DIR"/*.right "$expected_dir"/
   find "$test_workdir" "$expected_dir" -maxdepth 1 -type f -name '*.right' -exec sed -i 's/\r$//' {} +
+  # The checked-out upstream tree may carry CRLF endings on Windows; the
+  # reference .right files were generated from LF input, so normalize the
+  # scripts too or `\r` leaks into words and history entries.
+  find "$test_workdir" -maxdepth 1 -type f ! -name '*.right' ! -name 'recho' -exec sed -i 's/\r$//' {} +
   refuse_unsafe_dir "$test_workdir"
   workdir_real="$(real_path "$workdir")"
   expected_dir_real="$(real_path "$expected_dir")"
@@ -275,6 +279,19 @@ exec "$SHELL_BIN" "\$@"
 EOF
   chmod +x "$shell_wrapper"
 
+  # THIS_SH is invoked directly by the test scripts and its basename leaks
+  # into expected output (type.tests: `hash -p /tmp/$SHBASE $SHBASE`
+  # expects `/tmp/bash`). Point it at a thin `bash`-named launcher so the
+  # suite sees the same name GNU produced the fixtures with.
+  this_sh="$workdir/bash"
+  cat >"$this_sh" <<EOF
+#!/usr/bin/env bash
+export HOME="$test_home"
+export TMPDIR="$tmpdir"
+exec "$SHELL_BIN" "\$@"
+EOF
+  chmod +x "$this_sh"
+
   set +e
   (
     cd "$test_workdir"
@@ -282,7 +299,7 @@ EOF
     env \
       HOME="$test_home" \
       USERPROFILE="$test_home" \
-      THIS_SH="$SHELL_BIN" \
+      THIS_SH="$this_sh" \
       BUILD_DIR="$BASH_UPSTREAM_DIR" \
       BASH_TSTOUT="$tmpdir/bashtst.out" \
       TMPDIR="$tmpdir" \
