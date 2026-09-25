@@ -2,6 +2,19 @@
 
 All notable changes to Niubash are documented in this file.
 
+## [1.1.5] - 2026-09-25
+
+### Fixes
+
+- **Drive-letter colons are preserved when niu splits the shell `PATH`**
+  (`3c7b4b1`); PATH entries like `C:/tools/bin` no longer get mangled into
+  `C` + `/tools/bin` during PATH processing
+- GNU-aligned invocation surface for stdin scripts: fd0 handling and `-i`
+  history flag match GNU bash behavior (`746b74d`, rubash-side fixes)
+- Engine bump: niu 1.1.5 builds against rubash 1.2.0 (published to crates.io),
+  which carries the `/dev/stdout` `/dev/stdin` `/dev/null` redirect semantics
+  fixes (`8c0dded3`..`a38268f6`) and the gate suite now runs 86/86 green
+
 ## [1.1.3] - 2026-09-16
 
 ### Fixes

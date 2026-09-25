@@ -1,6 +1,6 @@
 [package]
 name = "niubash"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2021"
 rust-version = "1.70"
 license = "MIT"
@@ -19,7 +19,7 @@ members = [".", "crates/niubash-runtime"]
 resolver = "2"
 
 [dependencies]
-niubash-runtime = { path = "crates/niubash-runtime", version = "1.1.4" }
+niubash-runtime = { path = "crates/niubash-runtime", version = "1.1.5" }
 rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 anyhow = "1.0"
 env_logger = "0.10"
@@ -45,3 +45,8 @@ zip = { version = "0.6", default-features = false, features = ["deflate"] }
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Local override for cross-repo compat runs: build niu against the local
+# rubash worktree (master + unpushed fixes) instead of the pinned git rev.
+[patch."https://github.com/unixwin/rubash.git"]
+rubash = { path = "../rubash" }
