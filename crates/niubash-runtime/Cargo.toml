@@ -7,7 +7,7 @@ license = "MIT"
 description = "Runtime crate for niubash: rubash-backed shell REPL on Windows"
 
 [dependencies]
-rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
+rubash = { version = "1.2.0", git = "https://github.com/unixwin/rubash.git", branch = "master" }
 reedline = { version = "0.50", features = ["system_clipboard"] }
 fd-lock = "4.0"
 anyhow = "1.0"
