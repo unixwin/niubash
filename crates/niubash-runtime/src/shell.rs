@@ -4879,23 +4879,35 @@ fn process_path_from_shell_path_list(value: &str, env: Option<&HashMap<String, S
 }
 
 fn split_shell_path_list(value: &str) -> Vec<String> {
-    if value.contains(';') {
-        return value
-            .split(';')
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_string)
-            .collect();
+    let bytes = value.as_bytes();
+    let mut entries = Vec::new();
+    let mut entry_start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        let is_separator = match byte {
+            b';' => true,
+            b':' => !is_windows_drive_colon(bytes, entry_start, index),
+            _ => false,
+        };
+        if is_separator {
+            if entry_start < index {
+                entries.push(value[entry_start..index].to_string());
+            }
+            entry_start = index + 1;
+        }
     }
-
-    if cfg!(windows) && is_windows_drive_path(value) {
-        return vec![value.to_string()];
+    if entry_start < value.len() {
+        entries.push(value[entry_start..].to_string());
     }
+    entries
+}
 
-    value
-        .split(':')
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect()
+fn is_windows_drive_colon(bytes: &[u8], entry_start: usize, colon: usize) -> bool {
+    cfg!(windows)
+        && colon == entry_start + 1
+        && bytes[entry_start].is_ascii_alphabetic()
+        && bytes
+            .get(colon + 1)
+            .is_some_and(|next| matches!(next, b'\\' | b'/'))
 }
 
 fn shell_path_entry_to_process_paths(
@@ -6311,6 +6323,32 @@ niubash_run_precmd_hooks() {
             assert_eq!(
                 process_path_from_shell_path_list("/home/me/bin:/usr/bin", None),
                 "/home/me/bin:/usr/bin"
+            );
+        }
+    }
+
+    #[test]
+    fn split_shell_path_list_preserves_windows_drive_colons() {
+        assert_eq!(
+            split_shell_path_list("D:/repo/bin:D:/sdk/tools:/usr/bin"),
+            vec![
+                "D:/repo/bin".to_string(),
+                "D:/sdk/tools".to_string(),
+                "/usr/bin".to_string(),
+            ]
+        );
+        assert_eq!(
+            split_shell_path_list("C:/Windows;D:\\Tools:/c/bin"),
+            vec![
+                "C:/Windows".to_string(),
+                "D:\\Tools".to_string(),
+                "/c/bin".to_string(),
+            ]
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                split_shell_path_list("D:/repo/bin"),
+                vec!["D:/repo/bin".to_string()]
             );
         }
     }
