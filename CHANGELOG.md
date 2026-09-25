@@ -2,7 +2,7 @@
 
 All notable changes to Niubash are documented in this file.
 
-## [1.1.5] - 2026-09-25
+## [1.2.0] - 2026-09-25
 
 ### Fixes
 
