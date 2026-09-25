@@ -29,6 +29,22 @@ normalize_real_path() {
   printf '%s\n' "$path"
 }
 
+# PATH entries that cross the MSYS->native exec boundary (env -> sh ->
+# this_sh -> niu.exe) must be in MSYS form: MSYS splits a POSIX PATH on
+# ':' blindly, so a `D:/x` entry would lose its drive colon and arrive at
+# the native child mangled to `D;C:\Git\repo\...`. `/d/x` converts back
+# to `D:\x` correctly on the native spawn.
+msys_path() {
+  local path="${1//\\//}"
+  if [[ "$path" =~ ^([a-zA-Z]):(/.*)?$ ]]; then
+    local drive="${BASH_REMATCH[1],,}"
+    local rest="${BASH_REMATCH[2]:-/}"
+    printf '/%s%s\n' "$drive" "$rest"
+    return
+  fi
+  printf '%s\n' "$path"
+}
+
 die() {
   echo "$*" >&2
   exit 2
@@ -252,7 +268,7 @@ EOF
   cat >"$shell_wrapper" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-PATH="$guard_bin:/usr/bin:/bin:\$PATH"
+PATH="$(msys_path "$guard_bin"):/usr/bin:/bin:\$PATH"
 normalize_real_path() {
   local path="\${1//\\\\//}"
   if [[ "\$path" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
@@ -303,8 +319,8 @@ EOF
       BUILD_DIR="$BASH_UPSTREAM_DIR" \
       BASH_TSTOUT="$tmpdir/bashtst.out" \
       TMPDIR="$tmpdir" \
-      PATH="$guard_bin:$BASH_TEST_DIR:/usr/bin:/bin" \
-      sh "./$runner"
+      PATH="$(msys_path "$guard_bin"):$(msys_path "$BASH_TEST_DIR"):/usr/bin:/bin" \
+      bash "./$runner"
   ) >"$log" 2>&1
   status=$?
   set -e
