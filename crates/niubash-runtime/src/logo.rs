@@ -8,7 +8,7 @@ use std::io::{self, Write};
 /// automatically to preserve aspect ratio (each character row = 2 pixel rows).
 /// Pass 0 for automatic sizing based on terminal width.
 pub fn render_logo(target_cols: u16) {
-    let logo_bytes = include_bytes!("../../../assets/niubash-icon-256.png");
+    let logo_bytes = include_bytes!("../assets/niubash-icon-256.png");
 
     let mut decoder = png::Decoder::new(std::io::Cursor::new(logo_bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -90,7 +90,7 @@ pub fn render_logo(target_cols: u16) {
 
 /// Render the logo to a string and return it (for side-by-side layout use).
 pub fn render_logo_to_string(target_cols: u16) -> String {
-    let logo_bytes = include_bytes!("../../../assets/niubash-icon-256.png");
+    let logo_bytes = include_bytes!("../assets/niubash-icon-256.png");
 
     let mut decoder = png::Decoder::new(std::io::Cursor::new(logo_bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -164,7 +164,7 @@ pub fn render_logo_to_string(target_cols: u16) -> String {
 
 /// Return the number of terminal rows the logo occupies at the given column width.
 pub fn logo_height(target_cols: u16) -> u16 {
-    let logo_bytes = include_bytes!("../../../assets/niubash-icon-256.png");
+    let logo_bytes = include_bytes!("../assets/niubash-icon-256.png");
     let mut decoder = png::Decoder::new(std::io::Cursor::new(logo_bytes));
     let _ = decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = match decoder.read_info() {
