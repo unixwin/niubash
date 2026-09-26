@@ -37,7 +37,8 @@ impl CommandCompleter {
             .collect()
     }
 
-    /// Get commonly-used commands (shown on empty Tab)
+    /// Get commonly-used commands (shown on empty Tab). Windows edition.
+    #[cfg(not(unix))]
     pub fn get_common_commands() -> Vec<String> {
         vec![
             "ls".to_string(),
@@ -136,6 +137,127 @@ impl CommandCompleter {
         ]
     }
 
+    /// Get commonly-used commands (shown on empty Tab). Unix edition: real
+    /// cross-platform CLI staples instead of the Windows-only management
+    /// tools (scoop/winget/reg/tasklist/...). PATH executables are picked up
+    /// separately by `get_path_commands`.
+    #[cfg(unix)]
+    pub fn get_common_commands() -> Vec<String> {
+        vec![
+            // Shell basics
+            "ls".to_string(),
+            "cd".to_string(),
+            "pwd".to_string(),
+            "echo".to_string(),
+            "exit".to_string(),
+            "clear".to_string(),
+            "cat".to_string(),
+            "grep".to_string(),
+            "find".to_string(),
+            "cp".to_string(),
+            "mv".to_string(),
+            "rm".to_string(),
+            "mkdir".to_string(),
+            "ln".to_string(),
+            "jobs".to_string(),
+            "fg".to_string(),
+            "bg".to_string(),
+            "set".to_string(),
+            "setopt".to_string(),
+            "unset".to_string(),
+            "unsetopt".to_string(),
+            "export".to_string(),
+            "env".to_string(),
+            "help".to_string(),
+            "history".to_string(),
+            "alias".to_string(),
+            "unalias".to_string(),
+            "source".to_string(),
+            // Niubash UI
+            "array".to_string(),
+            "plugin".to_string(),
+            "theme".to_string(),
+            "oh-my-niu".to_string(),
+            // Text and file tools
+            "sed".to_string(),
+            "awk".to_string(),
+            "touch".to_string(),
+            "head".to_string(),
+            "tail".to_string(),
+            "sort".to_string(),
+            "uniq".to_string(),
+            "wc".to_string(),
+            "tee".to_string(),
+            "diff".to_string(),
+            "less".to_string(),
+            "more".to_string(),
+            "xargs".to_string(),
+            "basename".to_string(),
+            "dirname".to_string(),
+            "realpath".to_string(),
+            "stat".to_string(),
+            "file".to_string(),
+            "date".to_string(),
+            "man".to_string(),
+            "which".to_string(),
+            // Archives
+            "tar".to_string(),
+            "gzip".to_string(),
+            "gunzip".to_string(),
+            "zip".to_string(),
+            "unzip".to_string(),
+            // Process and system
+            "ps".to_string(),
+            "top".to_string(),
+            "htop".to_string(),
+            "kill".to_string(),
+            "killall".to_string(),
+            "df".to_string(),
+            "du".to_string(),
+            "free".to_string(),
+            "uname".to_string(),
+            "chmod".to_string(),
+            "chown".to_string(),
+            "sleep".to_string(),
+            "timeout".to_string(),
+            "watch".to_string(),
+            // Editors
+            "nano".to_string(),
+            "vim".to_string(),
+            "nvim".to_string(),
+            // Network
+            "ssh".to_string(),
+            "scp".to_string(),
+            "ssh-keygen".to_string(),
+            "curl".to_string(),
+            "wget".to_string(),
+            "ping".to_string(),
+            "dig".to_string(),
+            // Dev tools
+            "git".to_string(),
+            "code".to_string(),
+            "code-insiders".to_string(),
+            "codex".to_string(),
+            "node".to_string(),
+            "npm".to_string(),
+            "npx".to_string(),
+            "python".to_string(),
+            "python3".to_string(),
+            "pip".to_string(),
+            "pip3".to_string(),
+            "cargo".to_string(),
+            "rustc".to_string(),
+            "rustup".to_string(),
+            "go".to_string(),
+            "gh".to_string(),
+            "docker".to_string(),
+            "docker-compose".to_string(),
+            "make".to_string(),
+            "cmake".to_string(),
+            "ninja".to_string(),
+        ]
+    }
+
     /// Get cached PATH commands (scans once, caches forever)
     fn get_path_commands_cached() -> Vec<String> {
         if let Ok(cache) = PATH_CMD_CACHE.lock() {
@@ -158,34 +280,8 @@ impl CommandCompleter {
             for path in env::split_paths(&path_env) {
                 if let Ok(entries) = std::fs::read_dir(path) {
                     for entry in entries.flatten() {
-                        if let Ok(file_type) = entry.file_type() {
-                            if file_type.is_file() {
-                                let file_name = entry.file_name().to_string_lossy().to_string();
-
-                                // Recognise Windows executables and shell scripts.
-                                // Extensionless files in PATH are skipped because
-                                // Windows PATH dirs commonly contain LICENSE, README,
-                                // etc. Extensionless tools like dsh are covered by
-                                // oh-my-niu or the common-commands list.
-                                let is_executable = file_name.ends_with(".exe")
-                                    || file_name.ends_with(".bat")
-                                    || file_name.ends_with(".cmd")
-                                    || file_name.ends_with(".ps1")
-                                    || file_name.ends_with(".sh")
-                                    || file_name.ends_with(".bash")
-                                    || file_name.ends_with(".zsh")
-                                    || file_name.ends_with(".niubash");
-
-                                if is_executable {
-                                    // Remove extension for cleaner completion
-                                    let name_without_ext = if let Some(pos) = file_name.rfind('.') {
-                                        file_name[..pos].to_string()
-                                    } else {
-                                        file_name.clone()
-                                    };
-                                    commands.push(name_without_ext);
-                                }
-                            }
+                        if let Some(name) = executable_command_name(&entry) {
+                            commands.push(name);
                         }
                     }
                 }
@@ -242,6 +338,64 @@ impl CommandCompleter {
         Self::get_builtin_commands().contains(&command.to_string())
             || Self::get_path_commands().contains(&command.to_string())
     }
+}
+
+/// Completion name for one PATH directory entry, or `None` when the entry is
+/// not an executable command on this platform. Windows edition.
+#[cfg(not(unix))]
+fn executable_command_name(entry: &std::fs::DirEntry) -> Option<String> {
+    let file_type = entry.file_type().ok()?;
+    if !file_type.is_file() {
+        return None;
+    }
+
+    let file_name = entry.file_name().to_string_lossy().to_string();
+
+    // Recognise Windows executables and shell scripts.
+    // Extensionless files in PATH are skipped because
+    // Windows PATH dirs commonly contain LICENSE, README,
+    // etc. Extensionless tools like dsh are covered by
+    // oh-my-niu or the common-commands list.
+    let is_executable = file_name.ends_with(".exe")
+        || file_name.ends_with(".bat")
+        || file_name.ends_with(".cmd")
+        || file_name.ends_with(".ps1")
+        || file_name.ends_with(".sh")
+        || file_name.ends_with(".bash")
+        || file_name.ends_with(".zsh")
+        || file_name.ends_with(".niubash");
+
+    if !is_executable {
+        return None;
+    }
+
+    // Remove extension for cleaner completion
+    let name_without_ext = if let Some(pos) = file_name.rfind('.') {
+        file_name[..pos].to_string()
+    } else {
+        file_name
+    };
+    Some(name_without_ext)
+}
+
+/// Completion name for one PATH directory entry, or `None` when the entry is
+/// not an executable command on this platform. Unix edition: executables are
+/// extensionless, so admit regular files carrying any executable bit
+/// (`mode & 0o111`), following symlinks the way a shell PATH search does,
+/// and keep the file name as-is — no extension stripping.
+#[cfg(unix)]
+fn executable_command_name(entry: &std::fs::DirEntry) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(entry.path()).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return None;
+    }
+
+    Some(entry.file_name().to_string_lossy().to_string())
 }
 
 #[cfg(test)]

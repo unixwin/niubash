@@ -133,19 +133,37 @@ pub fn run_font_command() -> Result<()> {
         installed.dir.display()
     );
     if std::env::var_os("WT_SESSION").is_some() {
-        match crate::windows_terminal::set_niubash_profile_font(installed.face) {
-            Ok(summary) if !summary.updated.is_empty() => {
-                println!("Windows Terminal Niubash profile now uses '{}'.", installed.face);
-            }
-            _ => println!(
+        if wt_profile_font_set(installed.face) {
+            println!(
+                "Windows Terminal Niubash profile now uses '{}'.",
+                installed.face
+            );
+        } else {
+            println!(
                 "Set your terminal font to '{}' (Windows Terminal: profile → Appearance → Font face).",
                 installed.face
-            ),
+            );
         }
     } else {
         println!("Now set your terminal font to '{}'.", installed.face);
     }
     Ok(())
+}
+
+/// True when the Windows Terminal Niubash profile was pointed at `face`.
+/// Windows Terminal is Windows-only; elsewhere this is always false so the
+/// caller prints the manual "set your font" hint instead.
+#[cfg(windows)]
+fn wt_profile_font_set(face: &str) -> bool {
+    matches!(
+        crate::windows_terminal::set_niubash_profile_font(face),
+        Ok(summary) if !summary.updated.is_empty()
+    )
+}
+
+#[cfg(not(windows))]
+fn wt_profile_font_set(_face: &str) -> bool {
+    false
 }
 
 // ── Download & extract ───────────────────────────────────────────────────────

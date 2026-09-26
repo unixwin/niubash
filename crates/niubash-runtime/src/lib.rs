@@ -29,6 +29,7 @@ pub mod syntax_highlighting;
 pub mod terminal;
 pub mod text_style;
 pub mod theme;
+#[cfg(windows)]
 pub mod windows_terminal;
 pub mod winuxcmd;
 

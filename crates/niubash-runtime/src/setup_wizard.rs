@@ -572,7 +572,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
                         )
                     );
                     if probe.windows_terminal {
-                        let _ = crate::windows_terminal::set_niubash_profile_font(installed.face);
+                        try_set_wt_profile_font(installed.face);
                         println!(
                             "  \u{2502}  {}",
                             fill(
@@ -1200,6 +1200,7 @@ fn write_rc_and_mark_done(
     Ok(backup_path)
 }
 
+#[cfg(windows)]
 fn register_wt_profile(font_face: Option<&str>) {
     let lang = Lang::detect();
     let Ok(exe) = std::env::current_exe() else {
@@ -1221,6 +1222,21 @@ fn register_wt_profile(font_face: Option<&str>) {
     }
 }
 
+/// Windows Terminal only exists on Windows; the wizard only reaches this
+/// through `WT_SESSION`, which is never set elsewhere.
+#[cfg(not(windows))]
+fn register_wt_profile(_font_face: Option<&str>) {}
+
+/// Point the Windows Terminal Niubash profile at `face` (best-effort).
+#[cfg(windows)]
+fn try_set_wt_profile_font(face: &str) {
+    let _ = crate::windows_terminal::set_niubash_profile_font(face);
+}
+
+#[cfg(not(windows))]
+fn try_set_wt_profile_font(_face: &str) {}
+
+#[cfg(windows)]
 fn wt_icon_path(commandline: &std::path::Path) -> Option<PathBuf> {
     let app_dir = commandline.parent()?;
     [

@@ -1723,6 +1723,7 @@ fn setup_preset_arg(args: &[String]) -> Option<String> {
     None
 }
 
+#[cfg(windows)]
 fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
     let mut set_default = false;
     let mut quiet = false;
@@ -1757,6 +1758,14 @@ fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Windows Terminal profile management is Windows-only; fail explicitly
+/// instead of silently succeeding on Unix.
+#[cfg(not(windows))]
+fn install_windows_terminal_profile(_args: &[String]) -> anyhow::Result<()> {
+    anyhow::bail!("--install-wt-profile is only supported on Windows")
+}
+
+#[cfg(windows)]
 fn windows_terminal_icon_path(commandline: &std::path::Path) -> Option<PathBuf> {
     let app_dir = commandline.parent()?;
     [
