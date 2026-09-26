@@ -29,8 +29,14 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
 
-      - name: Update rubash to latest master
-        run: cargo update -p rubash
+      # No `cargo update -p rubash` here on purpose: under the [patch] path
+      # override the sibling clone above IS latest master (the lock's git rev
+      # never participates in compilation), and a re-resolution of the rubash
+      # subtree rewires transitive windows-sys refs (0.61.2 -> 0.59/0.48) in
+      # a way that drops the patched crate's target-specific windows-sys
+      # features at build time -- a clean-machine repro of the E0432
+      # CreateFileW failure. Build with the committed lock; bump it by hand
+      # when the engine moves.
 
       - name: cargo fmt --check (root package)
         run: cargo fmt --check -p niubash
@@ -66,8 +72,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Update rubash to latest master
-        run: cargo update -p rubash
+      # Same as build-and-test: no `cargo update -p rubash` under the
+      # [patch] override -- the sibling clone is already latest master and
+      # the subtree re-resolution breaks windows-sys feature resolution.
 
       - name: cargo check (unix acceptance line)
         run: cargo check --workspace --locked
