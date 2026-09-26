@@ -181,7 +181,7 @@ mod platform {
     // processes are expected to leave the tty alone. Keep this a no-op until
     // there is evidence of the same pollution class on Unix.
     pub fn capture() -> ConsoleBaseline {
-        ConsoleBaseline
+        ConsoleBaseline::default()
     }
 
     pub fn prefer_utf8_code_page() {}

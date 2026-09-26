@@ -41,4 +41,35 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace --locked
 
+  # Cross-platform gating gate (ledger N9): the host layer must compile
+  # clean off Windows. `cargo check` is the hard acceptance line for the
+  # cfg-gating work; the lib test suite is informational until the unix
+  # runtime semantics land (wave-2).
+  cross-check:
+    name: cross-check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Update rubash to latest master
+        run: cargo update -p rubash
+
+      - name: cargo check (unix acceptance line)
+        run: cargo check --workspace --locked
+
+      # TODO(wave-2): unix lib tests are expected to have failures until the
+      # unix runtime work (spawn delegation, signal handling, terminal glue)
+      # lands. Track the first green run here, then drop continue-on-error.
+      - name: cargo test --lib (informational)
+        continue-on-error: true
+        run: cargo test --workspace --lib --locked
 
