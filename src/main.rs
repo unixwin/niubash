@@ -171,7 +171,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         "-C" | "--repl-command" => run_repl_command(args),
         "-c" => {
             let command_mode = parse_legacy_command_mode(args)?;
-            let mut shell = niubash_runtime::Shell::new()?;
+            let mut shell = niubash_runtime::Shell::new_slim()?;
             niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
@@ -195,7 +195,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
         _ => {
             // Treat as a script file to execute
-            let mut shell = niubash_runtime::Shell::new()?;
+            let mut shell = niubash_runtime::Shell::new_slim()?;
             // GNU shell.c:1572-1601 (open_shell_script): the script name is
             // tried as given; when that fails and the name has no path
             // separator it is searched in $PATH (findcmd.c find_path_file) —
@@ -285,10 +285,22 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Interactive outcomes from this path (`-i`, or a bare `-s`/no-command
+    // run on a TTY) need the full REPL setup; pure non-interactive runs
+    // take the slim constructor and skip the REPL-only machinery (prompt
+    // backend, completion/plugin scans, widget bindings).
+    let becomes_repl = invocation.interactive
+        || (invocation.command.is_none() && niubash_runtime::terminal::stdio_is_interactive());
     let mut shell = if invocation.read_stdin {
-        niubash_runtime::Shell::new_for_stdin_script()?
-    } else {
+        if becomes_repl {
+            niubash_runtime::Shell::new_for_stdin_script()?
+        } else {
+            niubash_runtime::Shell::new_for_stdin_script_slim()?
+        }
+    } else if becomes_repl {
         niubash_runtime::Shell::new()?
+    } else {
+        niubash_runtime::Shell::new_slim()?
     };
     niubash_runtime::startup_trace::tick("invocation: Shell::new");
     shell.no_rc = invocation.no_rc;
@@ -879,7 +891,7 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_stdin_script() -> anyhow::Result<()> {
-    let mut shell = niubash_runtime::Shell::new_for_stdin_script()?;
+    let mut shell = niubash_runtime::Shell::new_for_stdin_script_slim()?;
     shell.executor.inherit_process_stdin();
     shell.source_non_interactive_env();
     let mut line = String::new();

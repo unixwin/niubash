@@ -193,15 +193,35 @@ impl Shell {
         // `niu` is the sole public executable. Keep `$0` aligned with the
         // user-facing command; explicit script and `-c` names still override
         // this value at their call sites.
-        Self::new_with_script_name(Some("niu"))
+        Self::new_with_script_name(Some("niu"), false)
     }
 
     /// Construct a shell for scripts arriving on process stdin.
     pub fn new_for_stdin_script() -> anyhow::Result<Self> {
-        Self::new_with_script_name(None)
+        Self::new_with_script_name(None, false)
     }
 
-    fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
+    /// Non-interactive constructor for `-c`/script-file/stdin-script runs.
+    ///
+    /// Identical observable behavior for script execution, minus the
+    /// REPL-only machinery the script can never observe: the prompt backend
+    /// is replaced by a cheap inert template, and the completion/plugin
+    /// directory scans (completion state, bundle completion defs, native
+    /// widget bindings) are skipped. `complete`/`compgen` builtins read the
+    /// engine's own `completion_specs` registry, not this state, so script
+    /// results are unaffected. Never hand a slim shell to
+    /// `enter_interactive`/`repl::run_repl` — those need the full
+    /// `Shell::new()` setup.
+    pub fn new_slim() -> anyhow::Result<Self> {
+        Self::new_with_script_name(Some("niu"), true)
+    }
+
+    /// Stdin-script counterpart of [`Shell::new_slim`].
+    pub fn new_for_stdin_script_slim() -> anyhow::Result<Self> {
+        Self::new_with_script_name(None, true)
+    }
+
+    fn new_with_script_name(script_name: Option<&str>, slim: bool) -> anyhow::Result<Self> {
         // 1. Load runtime defaults and environment-backed state.
         let mut config = load_config();
         config.history = config.history.with_env_overrides();
@@ -384,7 +404,11 @@ impl Shell {
             git_prompt_symbols: git_prompt_symbols.clone(),
             git_prompt_format: template_git_prompt_format.clone(),
         };
-        let prompt: PromptBackend = if prompt_style == "segments" {
+        let prompt: PromptBackend = if slim {
+            // REPL-only: a non-interactive run never renders a prompt, so
+            // skip the segment/template engine and theme work entirely.
+            PromptBackend::Template(NiubashPrompt::new(None, None, None, "default"))
+        } else if prompt_style == "segments" {
             let preset_name = config.shell.segment_preset.as_deref().unwrap_or("classic");
             let preset = SegmentPreset::from_name(preset_name).unwrap_or(SegmentPreset::Classic);
             let mut seg_config = SegmentPromptConfig::from_preset(
@@ -466,18 +490,23 @@ impl Shell {
         crate::startup_trace::tick("history provider");
         let last_working_dir_cache_path = default_last_working_dir_cache_path(&home_dir);
 
-        // 8. Completion state.
+        // 8. Completion state. The state object itself is cheap; the plugin
+        // completion-def scan is REPL-only disk I/O, so slim runs skip it.
         let mut initial_completion_state = CompletionState::new(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         );
         initial_completion_state.behavior = config.completion_behavior;
         let completion_state = Arc::new(Mutex::new(initial_completion_state));
-        let bundle_completion_defs = crate::plugins::plugin_completion_defs(&plugin_state);
+        let bundle_completion_defs = if slim {
+            Vec::new()
+        } else {
+            crate::plugins::plugin_completion_defs(&plugin_state)
+        };
 
         crate::startup_trace::tick("completion state");
 
         // 9. Load completion dirs from config (inline, not in thread).
-        {
+        if !slim {
             let mut s = completion_state.lock().unwrap();
             s.load_completion_dirs_with_bundle_and_definitions(
                 &config.completion_dirs,
@@ -494,7 +523,11 @@ impl Shell {
         // Bundle-declared keybindings are gated by the `keybindings` pack
         // decision (the manifest control plane), not by the native-widget
         // feature flag: disabling the pack removes the bindings entirely.
-        let native_widget_bindings = if plugin_state.has_decision("keybindings")
+        // Slim runs skip the scan: bindings are consumed only by the REPL
+        // line editor, never by script execution.
+        let native_widget_bindings = if slim {
+            Vec::new()
+        } else if plugin_state.has_decision("keybindings")
             && !plugin_state.is_enabled("keybindings")
         {
             Vec::new()
@@ -3054,19 +3087,17 @@ fn executable_extension_candidates(env: &HashMap<String, String>) -> Vec<String>
         .map(|value| {
             value
                 .split(';')
-                .filter_map(|ext| {
-                    ext.trim()
-                        .trim_start_matches('.')
-                        .split_whitespace()
-                        .next()
-                })
+                .filter_map(|ext| ext.trim().trim_start_matches('.').split_whitespace().next())
                 .filter(|ext| !ext.is_empty())
                 .map(|ext| format!(".{}", ext.to_ascii_lowercase()))
                 .collect()
         })
         .unwrap_or_default();
     for ext in [".exe", ".com", ".bat", ".cmd", ".ps1"] {
-        if !exts.iter().any(|candidate| candidate.eq_ignore_ascii_case(ext)) {
+        if !exts
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+        {
             exts.push(ext.to_string());
         }
     }
@@ -3078,7 +3109,6 @@ fn winuxcmd_dispatcher_commands() -> &'static Vec<String> {
     static COMMANDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     COMMANDS.get_or_init(crate::winuxcmd::list_commands)
 }
-
 
 fn command_not_found_host_external_output(
     command: &str,
@@ -6648,10 +6678,7 @@ niubash_run_precmd_hooks() {
             pipeline.stages[1].words,
             vec!["grep.exe", "-E", "a.\u{11}+c"]
         );
-        assert_eq!(
-            decode_to_visible_text(&pipeline.stages[1].words[2]),
-            "a.+c"
-        );
+        assert_eq!(decode_to_visible_text(&pipeline.stages[1].words[2]), "a.+c");
     }
 
     #[test]
