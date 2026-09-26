@@ -1798,13 +1798,20 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn print_version() {
-    println!(
+    // niubash#140: println! panics when stdout is a pipe the reader already
+    // closed (os error 232), so `niu --version | true` aborted the launcher.
+    // Write through an explicit handle and swallow the error, matching the
+    // engine-side #125 policy (is_broken_pipe_error below).
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(
+        out,
         "Niubash {} \u{2014} bash-compatible shell for Windows",
         env!("CARGO_PKG_VERSION")
     );
-    println!("  rubash   {}", rubash_revision_label());
+    let _ = writeln!(out, "  rubash   {}", rubash_revision_label());
     if let Some(v) = niubash_runtime::winuxcmd::version() {
-        println!("  winuxcmd {}", v);
+        let _ = writeln!(out, "  winuxcmd {}", v);
     }
 }
 
