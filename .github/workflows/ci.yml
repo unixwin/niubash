@@ -55,6 +55,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
 
+      # The [patch."https://github.com/unixwin/rubash.git"] path override in
+      # Cargo.toml resolves rubash to a sibling checkout -- same step the
+      # build-and-test job uses.
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
+
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1.11
         with:
