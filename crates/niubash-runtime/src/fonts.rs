@@ -3,7 +3,9 @@
 //! Fonts install to `%LOCALAPPDATA%\Microsoft\Windows\Fonts` and register
 //! under `HKCU\...\Fonts`, so no administrator rights are needed on
 //! Windows 10 1809+. Downloads come from the nerd-fonts GitHub release
-//! assets via the system `curl.exe`.
+//! assets via the system `curl.exe`. On Unix, TTFs are extracted into
+//! `~/.fonts` (fontconfig scans it without any registration step) and
+//! downloads use the system `curl` from PATH.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -131,14 +133,16 @@ pub fn run_font_command() -> Result<()> {
         installed.dir.display()
     );
     if std::env::var_os("WT_SESSION").is_some() {
-        match crate::windows_terminal::set_niubash_profile_font(installed.face) {
-            Ok(summary) if !summary.updated.is_empty() => {
-                println!("Windows Terminal Niubash profile now uses '{}'.", installed.face);
-            }
-            _ => println!(
+        if wt_profile_font_set(installed.face) {
+            println!(
+                "Windows Terminal Niubash profile now uses '{}'.",
+                installed.face
+            );
+        } else {
+            println!(
                 "Set your terminal font to '{}' (Windows Terminal: profile → Appearance → Font face).",
                 installed.face
-            ),
+            );
         }
     } else {
         println!("Now set your terminal font to '{}'.", installed.face);
@@ -146,9 +150,27 @@ pub fn run_font_command() -> Result<()> {
     Ok(())
 }
 
+/// True when the Windows Terminal Niubash profile was pointed at `face`.
+/// Windows Terminal is Windows-only; elsewhere this is always false so the
+/// caller prints the manual "set your font" hint instead.
+#[cfg(windows)]
+fn wt_profile_font_set(face: &str) -> bool {
+    matches!(
+        crate::windows_terminal::set_niubash_profile_font(face),
+        Ok(summary) if !summary.updated.is_empty()
+    )
+}
+
+#[cfg(not(windows))]
+fn wt_profile_font_set(_face: &str) -> bool {
+    false
+}
+
 // ── Download & extract ───────────────────────────────────────────────────────
 
-/// Locate `curl.exe` — System32 on Windows 10 1803+, else PATH.
+/// Locate the download helper: `curl.exe` — System32 on Windows 10 1803+,
+/// else PATH. On Unix, the system `curl` from PATH.
+#[cfg(windows)]
 fn curl_command() -> Command {
     let sys32 = std::env::var_os("WINDIR")
         .map(PathBuf::from)
@@ -157,6 +179,11 @@ fn curl_command() -> Command {
         Some(path) if path.is_file() => Command::new(path),
         _ => Command::new("curl.exe"),
     }
+}
+
+#[cfg(not(windows))]
+fn curl_command() -> Command {
+    Command::new("curl")
 }
 
 fn download(url: &str, dest: &Path) -> Result<()> {
@@ -223,8 +250,16 @@ fn font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(windows)]
 fn user_fonts_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("Microsoft").join("Windows").join("Fonts"))
+}
+
+/// Per-user font directory on Unix: the classic fontconfig `~/.fonts`,
+/// which desktop environments scan without any registration step.
+#[cfg(not(windows))]
+fn user_fonts_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".fonts"))
 }
 
 fn dir_has_nerd_font(dir: &Path) -> bool {

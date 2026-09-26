@@ -24,10 +24,12 @@ use windows_sys::Win32::UI::Shell::ShellExecuteW;
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 const DEFAULT_REPO: &str = "unixwin/niubash";
+#[cfg(windows)]
 const USER_AGENT: &str = concat!("niubash/", env!("CARGO_PKG_VERSION"));
 const HTTP_TIMEOUT_MS: i32 = 30_000;
 const UPDATE_CHECK_TIMEOUT_MS: i32 = 2_500;
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+#[cfg(windows)]
 const INSTALLER_ARGS: [&str; 5] = [
     "/VERYSILENT",
     "/SUPPRESSMSGBOXES",
@@ -77,6 +79,9 @@ pub fn run(args: &[String]) -> Result<()> {
     }
 
     let options = parse_options(args)?;
+    if !self_update_supported() {
+        anyhow::bail!("self-update is not supported on this platform yet");
+    }
     let release = resolve_latest_release(&options.repo, HTTP_TIMEOUT_MS)?;
     let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
 
@@ -123,8 +128,22 @@ pub fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Self-update ships as a Windows Inno Setup installer over WinHTTP; there
+/// is no Unix install channel yet (cross-platform ledger N5).
+#[cfg(not(windows))]
+fn self_update_supported() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn self_update_supported() -> bool {
+    true
+}
+
 pub fn maybe_print_update_hint() {
-    if update_check_disabled() || !update_check_due() {
+    // No self-update channel exists off Windows yet (ledger N5): skip the
+    // background check instead of spawning a thread that can only fail.
+    if !self_update_supported() || update_check_disabled() || !update_check_due() {
         return;
     }
 
@@ -662,10 +681,12 @@ fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(windows)]
 fn request_headers() -> String {
     request_headers_for_token(github_token().as_deref())
 }
 
+#[cfg(windows)]
 fn request_headers_for_token(token: Option<&str>) -> String {
     let mut headers = format!(
         "User-Agent: {USER_AGENT}\r\nAccept: application/octet-stream, text/html;q=0.9, */*;q=0.8\r\n"
@@ -782,6 +803,7 @@ fn update_check_stamp_path() -> PathBuf {
         .join("update-check.stamp")
 }
 
+#[cfg(windows)]
 fn github_token() -> Option<String> {
     ["GH_TOKEN", "GITHUB_TOKEN"]
         .into_iter()
@@ -789,6 +811,7 @@ fn github_token() -> Option<String> {
         .find(|value| clean_header_value(value).is_some())
 }
 
+#[cfg(windows)]
 fn clean_header_value(value: &str) -> Option<&str> {
     let value = value.trim();
     if value.is_empty() || value.contains(['\r', '\n']) {
@@ -798,6 +821,7 @@ fn clean_header_value(value: &str) -> Option<&str> {
     }
 }
 
+#[cfg(windows)]
 fn response_error_detail(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(body);
     text.lines()
@@ -944,6 +968,7 @@ mod tests {
         assert_eq!(safe_asset_name("../bad setup.exe"), ".._bad_setup.exe");
     }
 
+    #[cfg(windows)]
     #[test]
     fn installer_args_keep_silent_forced_close_contract() {
         assert!(INSTALLER_ARGS.contains(&"/VERYSILENT"));
@@ -972,6 +997,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[cfg(windows)]
     #[test]
     fn request_headers_include_generic_download_defaults() {
         let headers = request_headers_for_token(None);
@@ -981,6 +1007,7 @@ mod tests {
         assert!(!headers.contains("Authorization:"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn request_headers_can_include_clean_github_token() {
         let headers = request_headers_for_token(Some("  ghp_test  "));
@@ -988,6 +1015,7 @@ mod tests {
         assert!(headers.contains("Authorization: Bearer ghp_test\r\n"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn request_headers_skip_header_injection_tokens() {
         let headers = request_headers_for_token(Some("good\r\nX-Bad: yes"));
@@ -995,6 +1023,7 @@ mod tests {
         assert!(!headers.contains("Authorization:"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn response_error_detail_trims_and_limits_output() {
         let detail = response_error_detail(b"\n first line \nsecond line\nthird line\nfourth line");

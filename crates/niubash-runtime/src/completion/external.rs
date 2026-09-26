@@ -986,17 +986,45 @@ fn same_flag(left: &FlagDef, right: &FlagDef) -> bool {
 
 /// Locate a tool binary in PATH, returning its full path (for mtime checks).
 fn which_tool(name: &str) -> Option<PathBuf> {
+    // Probe PATHEXT-style suffixes on Windows only, mirroring
+    // `resolve_command_path` in runtime.rs. On Unix the bare name is the
+    // only candidate — a literal `name.exe` in an earlier PATH directory
+    // must not shadow the real extensionless `name` — and it must carry an
+    // executable bit.
+    let extensions: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".bat", ".cmd"]
+    } else {
+        &[""]
+    };
+
     if let Ok(path_env) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_env) {
-            for ext in &["", ".exe", ".bat", ".cmd"] {
+            for ext in extensions {
                 let candidate = dir.join(format!("{}{}", name, ext));
-                if candidate.is_file() {
+                if is_executable_file(&candidate) {
                     return Some(candidate);
                 }
             }
         }
     }
     None
+}
+
+/// True when `path` names a file we may execute: a regular file, plus — on
+/// Unix — any executable bit set.
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
