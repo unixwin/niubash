@@ -2,6 +2,21 @@
 
 All notable changes to Niubash are documented in this file.
 
+## [1.2.1] - 2026-10-01
+
+### Fixes
+
+- **WinGet portable install could not start `niu`**: the manifest shipped the
+  release zip with `InstallerType: zip` + `NestedInstallerType: portable`, and
+  WinGet's portable shim only copies the single declared `niu.exe` into
+  `%LOCALAPPDATA%\Microsoft\WinGet\Links`. The bundled `winuxcmd/usr/bin`
+  tree next to the executable is left behind, so `niu.exe` started from the
+  Links directory found no WinuxCmd and aborted during startup validation
+  (winget-pkgs PR #437563, exit code 0xC0000135). The manifest now installs
+  the Inno Setup `-setup.exe`, which lays down the full directory tree and
+  registers the PATH entry.
+- Engine bump: niu 1.2.1 builds against rubash 1.2.1.
+
 ## [1.2.0] - 2026-09-25
 
 ### Fixes
