@@ -27,6 +27,13 @@ const HISTORY_MENU: &str = "history_menu";
 /// submitted input.
 pub const WIDGET_HOST_COMMAND_PREFIX: &str = "__niu_widget ";
 
+/// `ExecuteHostCommand` payload prefix that identifies an engine `bind -x`
+/// trigger (niubash#185). The payload is the index into
+/// `Shell::engine_bindings`; the host runs the command through
+/// [`Shell::run_bind_x_command`] with the current edit buffer and applies
+/// the READLINE_* read-back to the editor.
+pub const BINDX_HOST_COMMAND_PREFIX: &str = "__niu_bindx ";
+
 /// A widget trigger parsed from a `WIDGET_HOST_COMMAND_PREFIX` payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidgetInvocation {
@@ -45,6 +52,22 @@ impl WidgetInvocation {
         Some(Self {
             function: name.to_string(),
         })
+    }
+}
+
+/// A bind -x trigger parsed from a `BINDX_HOST_COMMAND_PREFIX` payload:
+/// the index into the shell's engine-binding snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindXInvocation {
+    pub index: usize,
+}
+
+impl BindXInvocation {
+    /// Only exact `__niu_bindx <number>` lines are bind -x triggers;
+    /// anything else stays ordinary user input.
+    pub fn parse(line: &str) -> Option<Self> {
+        let payload = line.strip_prefix(BINDX_HOST_COMMAND_PREFIX)?.trim();
+        payload.parse::<usize>().ok().map(|index| Self { index })
     }
 }
 
@@ -145,6 +168,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             &shell_ref.native_widgets,
             &shell_ref.native_widget_bindings,
             &shell_ref.user_widget_bindings,
+            &shell_ref.engine_bindings,
         ));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
@@ -249,11 +273,62 @@ fn apply_widget_outcome(line_editor: &mut Reedline, outcome: &crate::shell::Widg
     }
 }
 
+/// What a host-command sentinel (`__niu_widget` / `__niu_bindx`) wants
+/// from the REPL after running in the engine.
+enum SentinelOutcome {
+    /// Payload was not one of ours: fall through to ordinary handling.
+    NotSentinel,
+    /// The widget ran and resumed editing (bind -x always lands here —
+    /// GNU returns to the edit line, bashline.c:4701-4706).
+    Resumed,
+    /// The widget produced a buffer to submit (`NIU_WIDGET_ACCEPT=1`);
+    /// `None` keeps the buffer as it stood.
+    Accept(Option<String>),
+}
+
+/// Run a widget or engine bind -x sentinel payload against the engine,
+/// applying the editor outcome to the suspended line editor.
+fn run_host_sentinel(
+    shell: &Rc<RefCell<Shell>>,
+    line_editor: &mut Reedline,
+    payload: &str,
+) -> SentinelOutcome {
+    if let Some(bindx) = BindXInvocation::parse(payload) {
+        let editor_buffer = line_editor.current_buffer_contents().to_string();
+        let editor_cursor = line_editor.current_insertion_point();
+        let outcome =
+            shell
+                .borrow_mut()
+                .run_bind_x_command(bindx.index, &editor_buffer, editor_cursor);
+        apply_widget_outcome(line_editor, &outcome);
+        return SentinelOutcome::Resumed;
+    }
+    let Some(widget) = WidgetInvocation::parse(payload) else {
+        return SentinelOutcome::NotSentinel;
+    };
+    if !shell.borrow().widget_function_available(&widget.function) {
+        return SentinelOutcome::NotSentinel;
+    }
+    let editor_buffer = line_editor.current_buffer_contents().to_string();
+    let editor_cursor = line_editor.current_insertion_point();
+    let outcome =
+        shell
+            .borrow_mut()
+            .run_widget_function(&widget.function, &editor_buffer, editor_cursor);
+    if outcome.accept {
+        SentinelOutcome::Accept(outcome.buffer)
+    } else {
+        apply_widget_outcome(line_editor, &outcome);
+        SentinelOutcome::Resumed
+    }
+}
+
 fn build_edit_mode(
     mode: EditorMode,
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
+    engine_bindings: &[rubash::shell::bind_registry::BindEntry],
 ) -> Box<dyn EditMode> {
     match mode {
         EditorMode::Emacs => {
@@ -273,6 +348,11 @@ fn build_edit_mode(
                 native_widget_bindings,
             );
             add_user_widget_keybindings(&mut keybindings, user_widget_bindings);
+            warn_unusable_engine_bindings(add_engine_bind_keybindings(
+                &mut keybindings,
+                NativeKeymapTarget::Emacs,
+                engine_bindings,
+            ));
             Box::new(Emacs::new(keybindings))
         }
         EditorMode::Vi => {
@@ -308,8 +388,29 @@ fn build_edit_mode(
             );
             add_user_widget_keybindings(&mut insert_keybindings, user_widget_bindings);
             add_user_widget_keybindings(&mut normal_keybindings, user_widget_bindings);
+            warn_unusable_engine_bindings(add_engine_bind_keybindings(
+                &mut insert_keybindings,
+                NativeKeymapTarget::ViInsert,
+                engine_bindings,
+            ));
+            warn_unusable_engine_bindings(add_engine_bind_keybindings(
+                &mut normal_keybindings,
+                NativeKeymapTarget::ViNormal,
+                engine_bindings,
+            ));
             Box::new(Vi::new(insert_keybindings, normal_keybindings))
         }
+    }
+}
+
+/// One warning per sequence the editor cannot mirror (multi-key
+/// sequences are a reedline limitation — see the wt100/i185 matrix).
+fn warn_unusable_engine_bindings(unusable: Vec<String>) {
+    for keyseq in unusable {
+        eprintln!(
+            "niubash: bind: key sequence '{}' cannot be mirrored to the line editor",
+            keyseq
+        );
     }
 }
 
@@ -332,6 +433,92 @@ fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[Native
         };
         keybindings.add_binding(key.0, key.1, event);
     }
+}
+
+/// Mirror engine-registered `bind` entries (niubash#185) into a reedline
+/// keymap. `bind -x` entries become `__niu_bindx <index>` host-command
+/// triggers; function entries map through the native-widget table
+/// (unknown readline function names are skipped — GNU's
+/// rl_parse_and_bind silently drops them, wt100 probe); macro entries
+/// insert their translated text. Sequences reedline cannot represent
+/// (multi-key `\C-x\C-f`, unrecognized escapes) are reported back for a
+/// one-time warning.
+fn add_engine_bind_keybindings(
+    keybindings: &mut Keybindings,
+    target: NativeKeymapTarget,
+    entries: &[rubash::shell::bind_registry::BindEntry],
+) -> Vec<String> {
+    let mut unusable = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+            continue;
+        }
+        let Some((modifiers, key_code)) = parse_key_sequence(&entry.keyseq) else {
+            unusable.push(entry.keyseq.clone());
+            continue;
+        };
+        let event = match &entry.kind {
+            rubash::shell::bind_registry::BindKind::Execute { .. } => {
+                ReedlineEvent::ExecuteHostCommand(format!("{BINDX_HOST_COMMAND_PREFIX}{index}"))
+            }
+            rubash::shell::bind_registry::BindKind::Macro { text } => {
+                edit_event(EditCommand::InsertString(text.clone()))
+            }
+            // A readline function name the editor cannot deliver is
+            // skipped; the sentinel fallthrough of native_widget_event is
+            // for zsh-style shell-function widgets, which `bind` to a
+            // readline function position has no meaning for.
+            rubash::shell::bind_registry::BindKind::Function { name } => {
+                match native_widget_event(name) {
+                    // native_widget_event's sentinel fallthrough means
+                    // "unknown readline function": skipped, like GNU's
+                    // silent rl_parse_and_bind drop (wt100 probe).
+                    Some(ReedlineEvent::ExecuteHostCommand(payload))
+                        if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                    {
+                        unusable.push(entry.keyseq.clone());
+                        continue;
+                    }
+                    Some(event) => event,
+                    None => {
+                        unusable.push(entry.keyseq.clone());
+                        continue;
+                    }
+                }
+            }
+        };
+        keybindings.add_binding(modifiers, key_code, event);
+    }
+    unusable
+}
+
+/// Keymap targeting for engine bind entries: GNU's emacs maps land on the
+/// single emacs keymap (the sequence text carries any \e or \C-x prefix);
+/// GNU's vi-movement aliases land on vi normal, vi-insert on vi insert
+/// (bashline.c:4771 get_cmd_xmap_from_keymap).
+fn engine_keymap_applies(keymap: Option<&str>, target: NativeKeymapTarget) -> bool {
+    let Some(keymap) = keymap else {
+        return target == NativeKeymapTarget::Emacs;
+    };
+    match keymap {
+        "emacs" | "emacs-standard" | "emacs-meta" | "emacs-ctlx" => {
+            target == NativeKeymapTarget::Emacs
+        }
+        "vi" | "vi-move" | "vi-command" | "vi-movement" => target == NativeKeymapTarget::ViNormal,
+        "vi-insert" => target == NativeKeymapTarget::ViInsert,
+        _ => false,
+    }
+}
+
+/// Convert a CHARACTER offset (GNU READLINE_POINT unit,
+/// bashline.c:4540 readline_get_char_offset MB_STRLEN) into a reedline
+/// insertion point (byte offset), clamped to the buffer.
+pub(crate) fn char_offset_to_byte(buffer: &str, chars: usize) -> usize {
+    buffer
+        .char_indices()
+        .nth(chars)
+        .map(|(offset, _)| offset)
+        .unwrap_or(buffer.len())
 }
 
 fn add_menu_keybindings(keybindings: &mut Keybindings) {
@@ -505,9 +692,32 @@ fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
         "^[[D" | "\\e[D" | "\\eOD" => Some((KeyModifiers::NONE, KeyCode::Left)),
         "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
         _ => parse_alt_key_sequence(value)
+            .or_else(|| parse_meta_key_sequence(value))
             .or_else(|| parse_control_key_sequence(value))
             .or_else(|| parse_plain_key_sequence(value)),
     }
+}
+
+/// GNU bind/inputrc `\C-x` / `\M-x` forms (readline rl_translate_keyseq).
+/// Multi-key tails (`\C-x\C-f`) are not representable as a single
+/// reedline binding and return None (the bridge warns once).
+fn parse_meta_control_sequence(
+    value: &str,
+    prefix: &str,
+    base: KeyModifiers,
+) -> Option<(KeyModifiers, KeyCode)> {
+    let rest = value.strip_prefix(prefix)?;
+    let mut chars = rest.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((base, KeyCode::Char(ch.to_ascii_lowercase())))
+}
+
+fn parse_meta_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+    parse_meta_control_sequence(value, "\\C-", KeyModifiers::CONTROL)
+        .or_else(|| parse_meta_control_sequence(value, "\\M-", KeyModifiers::ALT))
 }
 
 fn parse_named_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
@@ -1199,10 +1409,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         return run_repl_without_line_editor(&mut shell.borrow_mut());
     }
     // User widget bindings and completion functions come from the rc
-    // (NIU_BINDKEYS / NIU_COMPDEFS); read them after sourcing and before the
-    // line editor is built.
+    // (NIU_BINDKEYS / NIU_COMPDEFS); read them after sourcing and before
+    // the line editor is built. Engine `bind` registrations (bind -x,
+    // macros, function bindings) come from the same rc and snapshot at
+    // the same point (niubash#185).
     shell.borrow_mut().load_user_widget_bindings();
     shell.borrow_mut().load_user_compdefs();
+    shell.borrow_mut().load_engine_bindings();
     // niubash#184: the rc's `set -o vi` (the standard bashrc line) must land
     // in the editor built below. GNU bash resolves the editing mode the same
     // way after startup files: `set -o vi` runs set_edit_mode
@@ -1212,11 +1425,24 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // the field.
     shell.borrow_mut().refresh_edit_mode();
     let mut line_editor = build_line_editor(&shell)?;
+    let mut engine_bind_generation = shell.borrow().engine_bind_generation;
     let mut pending = PendingReplInput::default();
 
     loop {
         crate::console_guard::restore(&console_baseline);
         typeahead.arm();
+        // A command (rc script, PROMPT_COMMAND, or user command) may have
+        // registered or removed bindings at runtime. GNU mutates the live
+        // readline keymap immediately; reedline keymaps are baked at
+        // editor build time, so a moved registry generation rebuilds the
+        // editor before the next prompt. The buffer is empty at this
+        // boundary (the previous line was submitted or interrupted) and
+        // history writes through to the file, so the rebuild is lossless.
+        if shell.borrow().executor.bind_registry_generation() != engine_bind_generation {
+            shell.borrow_mut().load_engine_bindings();
+            line_editor = build_line_editor(&shell)?;
+            engine_bind_generation = shell.borrow().engine_bind_generation;
+        }
         let signal = if pending.is_empty() {
             drain_pending_notices();
             // niubash#180: a finished `niu setup` run (a child process)
@@ -1270,34 +1496,47 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         typeahead.disarm_and_reinject();
 
         match signal {
+            Ok(Signal::HostCommand(payload)) => {
+                // reedline 0.50 delivers ReedlineEvent::ExecuteHostCommand
+                // as Signal::HostCommand (enums.rs:38-42 "passthrough
+                // value... up to the caller to define the protocol"). The
+                // widget (`__niu_widget`) and engine bind -x
+                // (`__niu_bindx`) sentinels ride on it; an unknown payload
+                // is ignored. The editor buffer is untouched by the
+                // signal, so a pending multi-line continuation stays
+                // intact around the widget run.
+                match run_host_sentinel(&shell, &mut line_editor, &payload) {
+                    SentinelOutcome::Resumed => flush_repl_output(),
+                    SentinelOutcome::Accept(Some(buffer)) => {
+                        // A widget that accepts from a host-command
+                        // keypress submits its buffer as ordinary input.
+                        flush_repl_output();
+                        let _ = shell.borrow_mut().execute_interactive_line(buffer.trim());
+                        flush_repl_output();
+                    }
+                    SentinelOutcome::Accept(None) => {}
+                    SentinelOutcome::NotSentinel => {}
+                }
+            }
             Ok(Signal::Success(buffer)) => {
                 let mut line = buffer.trim_end_matches(['\r', '\n']).to_string();
-                let mut widget_resumed_editing = false;
                 if pending.is_empty() {
-                    if let Some(widget) = WidgetInvocation::parse(&line) {
-                        let available = shell.borrow().widget_function_available(&widget.function);
-                        if available {
-                            let editor_buffer = line_editor.current_buffer_contents().to_string();
-                            let editor_cursor = line_editor.current_insertion_point();
-                            let outcome = shell.borrow_mut().run_widget_function(
-                                &widget.function,
-                                &editor_buffer,
-                                editor_cursor,
-                            );
-                            if outcome.accept {
-                                // Submit the produced buffer (or the line as
-                                // it stood) as ordinary user input.
-                                line = outcome.buffer.unwrap_or(editor_buffer);
-                            } else {
-                                apply_widget_outcome(&mut line_editor, &outcome);
-                                widget_resumed_editing = true;
-                            }
+                    // Older reedline releases delivered ExecuteHostCommand
+                    // as Success; keep the sentinel check on the submitted
+                    // line for hosts pinned that way. Under 0.50 the
+                    // sentinels arrive through Signal::HostCommand above.
+                    match run_host_sentinel(&shell, &mut line_editor, &line) {
+                        SentinelOutcome::Resumed => {
+                            flush_repl_output();
+                            continue;
                         }
+                        SentinelOutcome::Accept(widget_buffer) => {
+                            line = widget_buffer.unwrap_or_else(|| {
+                                line_editor.current_buffer_contents().to_string()
+                            });
+                        }
+                        SentinelOutcome::NotSentinel => {}
                     }
-                }
-                if widget_resumed_editing {
-                    flush_repl_output();
-                    continue;
                 }
                 let line = line.as_str();
                 if pending.is_empty() && line.trim().is_empty() {
@@ -1993,6 +2232,169 @@ mod tests {
             normal.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
             expected
         );
+    }
+
+    #[test]
+    fn bindx_invocation_parses_indexed_sentinels() {
+        assert_eq!(
+            BindXInvocation::parse("__niu_bindx 0"),
+            Some(BindXInvocation { index: 0 })
+        );
+        assert_eq!(
+            BindXInvocation::parse("__niu_bindx 12"),
+            Some(BindXInvocation { index: 12 })
+        );
+        assert_eq!(BindXInvocation::parse("__niu_bindx "), None);
+        assert_eq!(BindXInvocation::parse("__niu_bindx x"), None);
+        assert_eq!(BindXInvocation::parse("__niu_bindx 1 2"), None);
+        assert_eq!(BindXInvocation::parse("echo __niu_bindx 1"), None);
+        assert_eq!(BindXInvocation::parse("__niu_widget niu_fzf_file"), None);
+    }
+
+    #[test]
+    fn parse_key_sequence_reads_gnu_bind_forms() {
+        // The GNU bind/inputrc forms plugins actually write
+        // (fzf key-bindings.bash: '\C-r', '\C-s', '\e[200~' family).
+        assert_eq!(
+            parse_key_sequence(r#"\C-r"#),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('r')))
+        );
+        assert_eq!(
+            parse_key_sequence(r#"\C-o"#),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('o')))
+        );
+        assert_eq!(
+            parse_key_sequence(r#"\M-b"#),
+            Some((KeyModifiers::ALT, KeyCode::Char('b')))
+        );
+        // Multi-key sequences are not representable as a single reedline
+        // binding: the bridge warns and skips them.
+        assert_eq!(parse_key_sequence(r#"\C-x\C-f"#), None);
+        assert_eq!(
+            parse_key_sequence(r#"\e[A"#),
+            Some((KeyModifiers::NONE, KeyCode::Up))
+        );
+    }
+
+    #[test]
+    fn char_offset_to_byte_walks_multibyte_boundaries() {
+        assert_eq!(char_offset_to_byte("", 0), 0);
+        assert_eq!(char_offset_to_byte("abc", 1), 1);
+        assert_eq!(char_offset_to_byte("abc", 9), 3, "clamps past end");
+        // READLINE_POINT is a CHARACTER offset (bashline.c:4540
+        // readline_get_char_offset): two CJK chars in, byte 6 out.
+        assert_eq!(char_offset_to_byte("中文x", 2), 6);
+        assert_eq!(char_offset_to_byte("中文x", 3), 7);
+    }
+
+    #[test]
+    fn engine_bind_entries_mirror_into_reedline_keybindings() {
+        let mut keybindings = default_emacs_keybindings();
+        let entries = vec![
+            rubash::shell::bind_registry::BindEntry {
+                keyseq: r#"\C-r"#.to_string(),
+                kind: rubash::shell::bind_registry::BindKind::Execute {
+                    command: "__fzf_history__".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            rubash::shell::bind_registry::BindEntry {
+                keyseq: r#"\C-t"#.to_string(),
+                kind: rubash::shell::bind_registry::BindKind::Macro {
+                    text: "ins-macro".to_string(),
+                },
+                keymap: None,
+            },
+            rubash::shell::bind_registry::BindEntry {
+                keyseq: r#"\C-o"#.to_string(),
+                kind: rubash::shell::bind_registry::BindKind::Function {
+                    name: "accept-line".to_string(),
+                },
+                keymap: None,
+            },
+            // Unknown readline function name: GNU silently drops it
+            // (wt100 probe), so the bridge reports it unusable.
+            rubash::shell::bind_registry::BindEntry {
+                keyseq: r#"\C-g"#.to_string(),
+                kind: rubash::shell::bind_registry::BindKind::Function {
+                    name: "no-such-fn".to_string(),
+                },
+                keymap: None,
+            },
+            // Multi-key sequence: reedline cannot represent it.
+            rubash::shell::bind_registry::BindEntry {
+                keyseq: r#"\C-x\C-f"#.to_string(),
+                kind: rubash::shell::bind_registry::BindKind::Execute {
+                    command: "multi".to_string(),
+                },
+                keymap: None,
+            },
+            // vi-insert keymap entry must not land on the emacs keymap
+            // (\C-6 is unbound in the emacs defaults, so a hit would be
+            // ours and ours alone).
+            rubash::shell::bind_registry::BindEntry {
+                keyseq: r#"\C-6"#.to_string(),
+                kind: rubash::shell::bind_registry::BindKind::Execute {
+                    command: "vi-only".to_string(),
+                },
+                keymap: Some("vi-insert".to_string()),
+            },
+        ];
+
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 0".to_string()
+            ))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
+            Some(edit_event(EditCommand::InsertString(
+                "ins-macro".to_string()
+            )))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('o')),
+            Some(ReedlineEvent::Enter)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('6')),
+            None,
+            "vi-insert entry must not bind on the emacs keymap"
+        );
+        assert_eq!(
+            unusable,
+            vec![r#"\C-g"#.to_string(), r#"\C-x\C-f"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn engine_keymap_targets_split_vi_insert_and_normal() {
+        assert!(engine_keymap_applies(None, NativeKeymapTarget::Emacs));
+        assert!(!engine_keymap_applies(None, NativeKeymapTarget::ViInsert));
+        assert!(engine_keymap_applies(
+            Some("vi-insert"),
+            NativeKeymapTarget::ViInsert
+        ));
+        assert!(engine_keymap_applies(
+            Some("vi"),
+            NativeKeymapTarget::ViNormal
+        ));
+        assert!(engine_keymap_applies(
+            Some("vi-command"),
+            NativeKeymapTarget::ViNormal
+        ));
+        assert!(!engine_keymap_applies(
+            Some("vi-insert"),
+            NativeKeymapTarget::ViNormal
+        ));
+        assert!(engine_keymap_applies(
+            Some("emacs-meta"),
+            NativeKeymapTarget::Emacs
+        ));
     }
 
     #[test]
