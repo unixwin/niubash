@@ -113,6 +113,16 @@ pub struct Shell {
     /// User-declared widget bindings parsed from `NIU_BINDKEYS` in the
     /// startup rc. Applied regardless of the native-widget pack gate.
     pub user_widget_bindings: Vec<NativeWidgetBinding>,
+    /// Engine-registered `bind` bindings (registry snapshot taken after
+    /// rc sourcing / at the last keymap rebuild). The reedline keymaps
+    /// mirror these; `bind -x` entries trigger through the `__niu_bindx`
+    /// sentinel and run via [`Shell::run_bind_x_command`].
+    pub engine_bindings: Vec<rubash::shell::bind_registry::BindEntry>,
+    /// Registry generation at snapshot time; compared against
+    /// `executor.bind_registry_generation()` between prompts so a runtime
+    /// `bind` call rebuilds the mirrored keymaps (GNU takes effect
+    /// immediately; reedline keymaps are baked at editor build time).
+    pub engine_bind_generation: u64,
     /// User-declared completion functions parsed from `NIU_COMPDEFS` in the
     /// startup rc: `(command, function)` pairs.
     pub compdefs: Vec<(String, String)>,
@@ -380,6 +390,8 @@ impl Shell {
             native_widgets,
             native_widget_bindings: Vec::new(),
             user_widget_bindings: Vec::new(),
+            engine_bindings: Vec::new(),
+            engine_bind_generation: 0,
             compdefs: Vec::new(),
             hooks: config.hooks,
             aliases,
@@ -1193,6 +1205,74 @@ impl Shell {
             .map(str::to_owned)
             .unwrap_or_default();
         self.user_widget_bindings = crate::repl::parse_user_bindkeys(&value);
+    }
+
+    /// Snapshot the engine's `bind` registry for the line editor
+    /// (niubash#185). Called after the rc has been sourced and before the
+    /// line editor is built, and again whenever the registry generation
+    /// moved so a runtime `bind` call mirrors into the next prompt.
+    pub fn load_engine_bindings(&mut self) {
+        self.engine_bindings = self.executor.bind_registry_snapshot();
+        self.engine_bind_generation = self.executor.bind_registry_generation();
+    }
+
+    /// Run an engine `bind -x` command for a keypress and produce the
+    /// editor outcome (niubash#185).
+    ///
+    /// The engine implements GNU's protocol (bashline.c:4593
+    /// bash_execute_unix_command): the command runs with
+    /// READLINE_LINE/READLINE_POINT/READLINE_MARK set (read back and
+    /// unbound afterwards); a changed READLINE_LINE replaces the buffer
+    /// (maybe_make_readline_line, bashline.c:2808) and READLINE_POINT —
+    /// a CHARACTER offset, possibly the pre-change one when the command
+    /// did not set it — lands the cursor, clamped to the buffer.
+    ///
+    /// `cursor_byte` is the reedline insertion point (byte offset) in
+    /// `buffer`; read-back offsets convert back to byte offsets. A
+    /// `bind -x` keypress never submits the line (GNU returns to
+    /// editing), so `accept` is always false.
+    pub fn run_bind_x_command(
+        &mut self,
+        index: usize,
+        buffer: &str,
+        cursor_byte: usize,
+    ) -> WidgetOutcome {
+        let Some(entry) = self.engine_bindings.get(index) else {
+            return WidgetOutcome::default();
+        };
+        let rubash::shell::bind_registry::BindKind::Execute { command } = &entry.kind else {
+            return WidgetOutcome::default();
+        };
+        let command = command.clone();
+        let safe_cursor = buffer
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .filter(|offset| *offset <= cursor_byte)
+            .max()
+            .unwrap_or(0);
+        let old_point = buffer[..safe_cursor].chars().count();
+        let outcome = self
+            .executor
+            .run_bind_x_command(&command, buffer, old_point, old_point);
+
+        // Read-back semantics (bashline.c:4692-4703).
+        let Some(new_line) = outcome.line else {
+            // Command unset READLINE_LINE: keep the editor as it stood.
+            return WidgetOutcome::default();
+        };
+        let line_changed = new_line != buffer;
+        let base = if line_changed { &new_line } else { buffer };
+        // An unchanged READLINE_POINT holds the point we set before the
+        // command ran, which is exactly GNU's final cursor after
+        // maybe_make_readline_line + the point override.
+        let point_chars = outcome.point.unwrap_or(old_point);
+        let clamped = point_chars.min(base.chars().count());
+        let cursor_byte = crate::repl::char_offset_to_byte(base, clamped);
+        WidgetOutcome {
+            buffer: line_changed.then_some(new_line),
+            cursor: Some(cursor_byte),
+            accept: false,
+        }
     }
 
     /// True when the named widget function exists in the shell engine.
@@ -3606,6 +3686,68 @@ niu_fzf_file() {
     }
 
     #[test]
+    fn engine_bind_x_registered_via_rc_runs_with_readline_protocol() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-engine-bind-x");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            r#"
+bind -x '"\C-r": __fzf_history_stub'
+__fzf_history_stub() {
+    if [ -n "$READLINE_LINE" ]; then
+        READLINE_LINE="picked:$READLINE_LINE"
+    else
+        READLINE_LINE="picked-empty"
+    fi
+    READLINE_POINT=${#READLINE_LINE}
+}
+"#,
+        )
+        .unwrap();
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.load_engine_bindings();
+
+        // The bind -x registration survived rc sourcing into the
+        // registry snapshot the editor mirrors.
+        assert_eq!(shell.engine_bindings.len(), 1);
+        assert_eq!(shell.engine_bindings[0].keyseq, r#"\C-r"#);
+        assert!(matches!(
+            &shell.engine_bindings[0].kind,
+            rubash::shell::bind_registry::BindKind::Execute { command }
+                if command == "__fzf_history_stub"
+        ));
+
+        // fzf CTRL-R shape: the command reads READLINE_LINE and writes
+        // the selection back; the outcome replaces the edit buffer.
+        let outcome = shell.run_bind_x_command(0, "typed", 5);
+        assert_eq!(outcome.buffer.as_deref(), Some("picked:typed"));
+        assert_eq!(outcome.cursor, Some("picked:typed".len()));
+        assert!(!outcome.accept, "bind -x never submits the line");
+
+        // Empty-buffer press, cursor clamped to the new line's end.
+        let outcome = shell.run_bind_x_command(0, "", 0);
+        assert_eq!(outcome.buffer.as_deref(), Some("picked-empty"));
+        assert_eq!(outcome.cursor, Some("picked-empty".len()));
+
+        // GNU unbinds the READLINE_* variables after the command
+        // (bashline.c:4573 unbind_readline_variables).
+        assert_eq!(shell.executor.get_env("READLINE_LINE"), None);
+        assert_eq!(shell.executor.get_env("READLINE_POINT"), None);
+
+        // Registry generation moved by the rc `bind` call: the REPL uses
+        // it to rebuild the mirrored keymaps before the next prompt.
+        assert!(shell.engine_bind_generation > 0);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn user_compdefs_load_from_rc_and_run_in_engine() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
@@ -4860,6 +5002,8 @@ niu_git_comp() {
             native_widgets: NativeWidgetConfig::default(),
             native_widget_bindings: Vec::new(),
             user_widget_bindings: Vec::new(),
+            engine_bindings: Vec::new(),
+            engine_bind_generation: 0,
             compdefs: Vec::new(),
             hooks,
             aliases: HashMap::new(),
