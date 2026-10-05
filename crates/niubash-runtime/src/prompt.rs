@@ -337,6 +337,33 @@ pub struct BashPrompt {
 
 impl BashPrompt {
     pub fn new(left: String, multiline: String) -> Self {
+        // GNU readline display.c:437-463 (expand_prompt): the \x01/\x02
+        // prompt-ignore markers (RL_PROMPT_START/END_IGNORE, emitted by
+        // decode_prompt_string parse.y:6609-6622 for `\[`/`\]` when line
+        // editing is active) are width-accounting delimiters only — the
+        // DISPLAYED prompt is assembled without them, so the terminal never
+        // receives those bytes (byte-verified WSL GNU bash 5.3.0 piped-`-i`).
+        // Reedline has no marker concept: it prints render_prompt_* output
+        // verbatim, so a `set -o emacs`/`set -o vi` session (themes set
+        // both) leaked the raw bytes to ConPTY and broke strict VT parsers
+        // (niubash#431, the wt91-allthemes F9 family). Strip them once here
+        // — the channel boundary every editor-rendered surface (left,
+        // right-align tail, multiline/PS2 indicator) is built from — instead
+        // of per render site. Width accounting is unchanged: the markers are
+        // zero-width (unicode-width control chars) and the SGR content they
+        // wrap was already escape-excluded by the editor's own strip_ansi
+        // math. PS0 is a DIFFERENT channel and keeps its markers: GNU writes
+        // the decoded string straight to stderr without a readline pass
+        // (eval.c:164-176 fprintf; byte-verified: PS0='\[\e[31mPRE\]' puts
+        // literal \x01 \x1b [31m PRE \x01 \x1b [0m \x02 on stderr).
+        let strip_markers = |value: String| -> String {
+            value
+                .chars()
+                .filter(|ch| *ch != '\x01' && *ch != '\x02')
+                .collect()
+        };
+        let left = strip_markers(left);
+        let multiline = strip_markers(multiline);
         let columns = crate::terminal::terminal_columns();
         let split = crate::prompt_right_align::split_right_align(&left, columns);
         Self {
@@ -475,6 +502,66 @@ mod tests {
         let prompt = NiubashPrompt::new(Some("left> ".to_string()), Some("right".to_string()));
 
         assert_eq!(prompt.render_prompt_right(), "right");
+    }
+
+    // niubash#431 (wt91-allthemes F9 family): the engine's decode_prompt_string
+    // emits the readline prompt-ignore markers \x01/\x02 (RL_PROMPT_START/
+    // END_IGNORE) for `\[`/`\]` whenever line editing is active — a `set -o
+    // emacs`/`set -o vi` theme or user rc flips it on. GNU's readline strips
+    // them before display (display.c:437-463 expand_prompt, width accounting
+    // kept); reedline has no marker concept and prints render_prompt_* output
+    // verbatim, so BashPrompt — the channel every editor-rendered surface is
+    // built from — must strip them itself. Byte-verified WSL GNU 5.3.0: the
+    // terminal-bound prompt carries no \x01/\x02; PS0 is a DIFFERENT channel
+    // and keeps them (eval.c:164-176 writes the decoded string straight to
+    // stderr — verified `\x1b[31m` arrives wrapped in the raw marker bytes).
+
+    #[test]
+    fn bash_prompt_strips_ignore_markers_from_left_right_and_multiline() {
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // bash-it colors.bash shape: purple="\[\e[0;35m\]" -> marker-wrapped
+        // SGR in the rendered PS1, plus a marker-wrapped right-align tail and
+        // a marker-wrapped PS2 continuation indicator.
+        let left =
+            "\x01\x1b[0;35m\x02user@h \x01\x1b[31m\x02\x1b[500C\x1b[6D\x01\x1b[0m\x02RIGHT\n$ ";
+        let multiline = "> \x01\x1b[32m\x02cont\x01\x1b[0m\x02 ";
+        let prompt = BashPrompt::new(left.to_string(), multiline.to_string());
+        let rendered_left = prompt.render_prompt_left();
+        let rendered_right = prompt.render_prompt_right();
+        let rendered_multiline = prompt.render_prompt_multiline_indicator();
+        for (channel, text) in [
+            ("left", &rendered_left),
+            ("right", &rendered_right),
+            ("multiline", &rendered_multiline),
+        ] {
+            assert!(
+                !text.contains('\x01') && !text.contains('\x02'),
+                "{channel} channel leaks ignore markers: {text:?}"
+            );
+        }
+        // The printable text and SGR colouring survive the strip.
+        assert!(rendered_left.contains("user@h"), "{rendered_left:?}");
+        assert!(
+            rendered_left.contains('\x1b'),
+            "SGR lost: {rendered_left:?}"
+        );
+        assert!(
+            rendered_multiline.contains("cont"),
+            "{rendered_multiline:?}"
+        );
+    }
+
+    #[test]
+    fn bash_prompt_marker_strip_keeps_right_align_split_working() {
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The oh-my-bash powerline-multiline shape (niubash#169): the surgery
+        // jump must still split off a right prompt after the markers are
+        // dropped — the strip may not reintroduce the linear-text-run
+        // accounting disconnect the split exists to fix.
+        let left = "left\x1b[500C\x1b[6DRIGHT $ ";
+        let prompt = BashPrompt::new(left.to_string(), "> ".to_string());
+        assert_eq!(prompt.render_prompt_right(), "RIGHT $ ");
+        assert_eq!(prompt.render_prompt_left(), "left");
     }
 
     #[test]
