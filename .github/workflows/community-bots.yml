@@ -1,0 +1,40 @@
+name: community-bots
+
+on:
+  schedule:
+    - cron: "30 20 * * *" # daily 20:30 UTC — stale sweep, off busy hours
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # P0/P1 priorities are exempt from both operations
+          exempt-issue-labels: "P0-critical,P1-high"
+          exempt-pr-labels: "P0-critical,P1-high"
+          days-before-stale: 60
+          days-before-close: 14
+          stale-issue-message: "此 ISSUE 60 天无活动。若仍复现/仍需要，请回复以保持打开；14 天后无活动将自动关闭。"
+          stale-pr-message: "此 PR 60 天无活动，14 天后将自动关闭；如继续请 rebase 或评论。"
+          stale-issue-label: "stale"
+          stale-pr-label: "stale"
+          operations-per-run: 200
+  greet:
+    if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/first-interaction@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: "欢迎！这是你在本仓库的第一个 ISSUE 🎉 维护者会尽快跟进；报 bug 请附 `niu --version`、系统平台与最小复现脚本。"
+          pr-message: "欢迎！这是你的第一个 PR 🎉 请确认已跑过本地测试套件；CI 通过后维护者会 review。"
