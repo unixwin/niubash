@@ -1376,3 +1376,84 @@ fn vi_default_emacs_keeps_k_typing() {
         s.transcript()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Matrix 7: PROMPT_COMMAND exit-jump consumption (niubash#191)
+// ---------------------------------------------------------------------------
+//
+// `PROMPT_COMMAND='exit'` must end the session: the engine re-arms the
+// top-level jump (rubash#433), and the REPL consumes it instead of
+// re-arming the prompt. GNU: jump_to_top_level unwinds reader_loop
+// (evalstring.c:618-619) — no further prompt, no further read, the jump's
+// status becomes the session status.
+
+/// A PC `exit 5` submitted mid-session kills the shell with rc 5 before the
+/// next prompt renders and before the next input line is read.
+#[test]
+fn prompt_command_exit_ends_repl_session_with_status() {
+    if !require_pty_or_skip("prompt_command_exit_ends_repl_session_with_status") {
+        return;
+    }
+    let mut s = NiuSession::spawn("pc-exit-jump");
+    s.wait_ready();
+    s.send_line("PROMPT_COMMAND='exit 5'");
+    s.expect_prompt();
+    // The NEXT pre-prompt pass runs the PC; the jump unwinds the REPL, so
+    // the queued line is never read or run. (Reedline repaints the prompt
+    // per keystroke and ConPTY echoes those paints asynchronously, so the
+    // transcript cannot pin "exactly N prompts" — the load-bearing pins are
+    // the jump's status and the follow-up line never executing.)
+    s.send_line("echo AFTER-PC-JUMP");
+    let code = s.wait_exit();
+    assert_eq!(code, 5, "the jump's status is the session status");
+    s.expect_absent("AFTER-PC-JUMP", ABSENT_WINDOW);
+}
+
+/// Control: a PC that merely fails (no `exit`, no errexit) leaves the shell
+/// alive — the follow-up prompt renders and input still runs.
+#[test]
+fn prompt_command_plain_failure_keeps_session_alive() {
+    if !require_pty_or_skip("prompt_command_plain_failure_keeps_session_alive") {
+        return;
+    }
+    let mut s = NiuSession::spawn("pc-fail-survive");
+    s.wait_ready();
+    s.send_line("PROMPT_COMMAND='false'");
+    s.expect_prompt();
+    s.send_line("echo AFTER-FAIL");
+    s.expect("AFTER-FAIL");
+    s.expect_prompt();
+}
+
+/// The same consumption in the `--noediting` REPL loop: a PC `exit` from the
+/// rc kills the session at the FIRST pre-prompt pass — no prompt at all is
+/// printed and the status is carried out.
+#[test]
+fn prompt_command_exit_ends_noediting_repl_session() {
+    if !require_pty_or_skip("prompt_command_exit_ends_noediting_repl_session") {
+        return;
+    }
+    let rc = concat!(
+        "PS1='P1> '\n",
+        "PS2='P2> '\n",
+        "NIU_DISABLE_DEFAULT_PLUGINS=1\n",
+        "PROMPT_COMMAND='exit 7'\n",
+    );
+    let mut s = NiuSession::spawn_custom_with_args(
+        "pc-exit-noedit",
+        rc,
+        &["--noediting"],
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.expect("Niubash");
+    let code = s.wait_exit();
+    assert_eq!(code, 7, "the jump's status is the session status");
+    let transcript = s.transcript();
+    assert_eq!(
+        transcript.matches(driver::PROMPT1).count(),
+        0,
+        "no prompt may render after a PC exit jump: {transcript}"
+    );
+}

@@ -1450,7 +1450,27 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // the precmd hooks render the prompt, so the very next prompt
             // already shows the new theme.
             shell.borrow_mut().apply_setup_config_if_pending();
-            shell.borrow_mut().run_precmd_hooks();
+            // niubash#191: consume the engine's re-armed exit jump (a PC
+            // that ran `exit`/an errexit unwind, rubash#433) and end the
+            // session — no prompt is rendered and no further line is read,
+            // like GNU's jump_to_top_level unwinding reader_loop. The
+            // jump's status (last_exit_code, e.g. `exit 5`) is carried out
+            // through the EXIT trap.
+            if shell.borrow_mut().run_precmd_hooks() {
+                let status = shell.borrow().executor.last_exit_code();
+                let code = shell
+                    .borrow_mut()
+                    .finish_with_exit_trap(status)
+                    .unwrap_or(status);
+                // The jump's status IS the session status (GNU's
+                // jump_to_top_level unwinds reader_loop and exit_shell
+                // carries it); the REPL's Ok(()) return otherwise always
+                // maps to rc 0 in main, so carry the status out directly —
+                // the same shape as the engine's piped `-i` route
+                // (src/main.rs run_interactive_stdin).
+                flush_repl_output();
+                std::process::exit(code);
+            }
             // GNU readline starts every fresh line in insert mode, even in
             // vi editing mode (lib/readline/readline.c:1243-1249: "Each
             // line starts in insert mode (the default)" —
@@ -1610,7 +1630,14 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         crate::console_guard::restore(&console_baseline);
         // niubash#180: same live-session apply as the line-editor loop.
         shell.apply_setup_config_if_pending();
-        shell.run_precmd_hooks();
+        // niubash#191: same exit-jump consumption as the line-editor loop —
+        // a PC `exit` ends the session before the next prompt is printed.
+        if shell.run_precmd_hooks() {
+            let status = shell.executor.last_exit_code();
+            let code = shell.finish_with_exit_trap(status).unwrap_or(status);
+            flush_repl_output();
+            std::process::exit(code);
+        }
         let prompt = if pending.is_empty() {
             shell.prompt.render_prompt_left().to_string()
         } else {

@@ -1068,9 +1068,21 @@ impl Shell {
             .is_some_and(|value| !value.is_empty())
     }
 
-    fn run_bash_prompt_command(&mut self, last_exit_code: i32) {
+    /// Execute `PROMPT_COMMAND` through the engine and report whether the
+    /// run ended in a TOP-LEVEL EXIT JUMP (niubash#191): the engine re-arms
+    /// `exit_jump_pending` when the PC text raised one (rubash#433,
+    /// evalstring.c:396-403 + :618-619 — parse_and_execute catches
+    /// EXITPROG/ERREXIT at its own setjmp and RE-RAISES after the `out:`
+    /// cleanup), exactly like GNU's jump unwinding execute_variable_command
+    /// into reader_loop. The caller (the REPL's pre-prompt hook) must consume
+    /// the jump and end the session instead of rendering another prompt. The
+    /// returned status lives in `last_exit_code`: parse.y:7313/:7315's
+    /// normal-return restore is skipped when the jump unwinds, so `exit 5`
+    /// keeps rc 5. A plain failing PC or a parse error re-arms nothing: the
+    /// caller restores the pre-PC `$?` and prompts again.
+    fn run_bash_prompt_command(&mut self, last_exit_code: i32) -> bool {
         if self.bash_prompt_command_running {
-            return;
+            return false;
         }
 
         self.bash_prompt_command_running = true;
@@ -1083,8 +1095,17 @@ impl Shell {
         // array under bash >= 5.1 (oh-my-bash installs one), which the
         // engine dispatches without the host re-implementing it.
         self.executor.execute_prompt_command();
-        self.executor.set_last_exit_code(last_exit_code);
+        let exit_jump = self.executor.take_exit_jump_pending();
+        if !exit_jump {
+            // Normal return: the pre-PC `$?` is restored (the engine already
+            // rolled its own snapshot back; this keeps the host view in
+            // sync). On the jump path the restore is skipped — the jump's
+            // status IS the session status (parse.y:3021's restore line is
+            // longjmped past in GNU).
+            self.executor.set_last_exit_code(last_exit_code);
+        }
         self.bash_prompt_command_running = false;
+        exit_jump
     }
 
     fn sync_bash_prompt_from_env(&mut self) {
@@ -1170,7 +1191,14 @@ impl Shell {
     }
 
     /// Run native hooks before rendering the next prompt.
-    pub fn run_precmd_hooks(&mut self) {
+    ///
+    /// Returns whether the run ended in a top-level EXIT JUMP (niubash#191):
+    /// `PROMPT_COMMAND` raised `exit`/an errexit unwind, the engine re-armed
+    /// the jump (rubash#433), and the driving REPL must end the session with
+    /// `last_exit_code` instead of rendering another prompt — GNU's
+    /// jump_to_top_level unwinds reader_loop directly (evalstring.c:618-619).
+    /// `false` (the common case) means the session continues.
+    pub fn run_precmd_hooks(&mut self) -> bool {
         let last_exit_code = self.executor.last_exit_code();
         let hooks = self.hooks.precmd.clone();
         let last_exit_code_string = last_exit_code.to_string();
@@ -1178,10 +1206,17 @@ impl Shell {
         std::env::set_var("NIU_LAST_EXIT_CODE", &last_exit_code_string);
         let context = [("NIU_LAST_EXIT_CODE", last_exit_code_string)];
         self.run_hook_scripts(&hooks, &context);
-        self.run_bash_prompt_command(last_exit_code);
+        let pc_exit_jump = self.run_bash_prompt_command(last_exit_code);
+        if pc_exit_jump {
+            // The unwind skips everything a normal pre-prompt pass would
+            // still do (prompt re-sync, title hooks): GNU longjmps out of
+            // execute_variable_command into the reader's top level.
+            return true;
+        }
         self.sync_bash_prompt_from_env();
         let title = self.resolve_title_value();
         self.run_title_hooks(&title);
+        false
     }
 
     /// Compute the current title for `run_title_hooks`.
