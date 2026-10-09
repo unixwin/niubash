@@ -37,6 +37,8 @@ jobs:
           mkdir -p eco/state eco/manifest
           if [ -d eco-restore/state ]; then cp -r eco-restore/state/. eco/state/; fi
       - name: harvest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/harvest/eco-harvest.py \
             --tier "${{ github.event.inputs.tier || 't1' }}" \
