@@ -1,0 +1,104 @@
+name: eco-harvest-ci
+
+# 采集安全化（#213）：不可信资产测试在一次性 ephemeral runner 上执行，
+# 宿主机零暴露。harvest（纯 API 索引）在 ubuntu 上跑，test 需要真实
+# ConPTY + WSL GNU 对照，跑在 windows-latest 上。
+
+on:
+  schedule:
+    - cron: "30 21 * * *" # nightly 21:30 UTC，错开 perfbudget 的 03:23
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "harvest 层级: t1|t2|t3|t4|t5|all"
+        default: "t1"
+      test_tiers:
+        description: "test 层级（windows runner）"
+        default: "t1"
+
+permissions:
+  contents: write # 推 state 回 data 分支
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: restore state from data branch
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: eco-harvest-state
+          path: eco-restore
+      - name: seed state
+        run: |
+          mkdir -p eco/state eco/manifest
+          if [ -d eco-restore/state ]; then cp -r eco-restore/state/. eco/state/; fi
+      - name: harvest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/harvest/eco-harvest.py \
+            --tier "${{ github.event.inputs.tier || 't1' }}" \
+            --manifest-dir eco/manifest --state-dir eco/state
+      - name: upload manifest + state
+        uses: actions/upload-artifact@v4
+        with:
+          name: eco-manifest
+          path: |
+            eco/manifest
+            eco/state
+      - name: persist state to data branch
+        run: |
+          cd eco
+          git init -q -b eco-harvest-state .
+          git config user.name "eco-bot"
+          git config user.email "actions@github.com"
+          git add state
+          git commit -qm "state: ${{ github.event.inputs.tier || 't1' }} @ $(date -u +%FT%TZ)"
+          git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" eco-harvest-state:eco-harvest-state
+
+  test:
+    needs: harvest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4 # niubash：eco 脚本（引擎源码不在此树内签出）
+      - name: clone rubash outside the workspace tree
+        run: git clone --depth 1 https://github.com/${{ github.repository_owner }}/rubash.git "${{ runner.temp }}/rubash"
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: install test deps
+        run: pip install pyte pywinpty # pywinpty 提供的模块名就是 winpty
+      - name: build engine
+        run: cargo build --release --manifest-path "${{ runner.temp }}/rubash/Cargo.toml"
+      - name: locate binaries
+        id: bins
+        shell: pwsh
+        run: |
+          $dir = "${{ runner.temp }}/rubash/target/release"
+          $bash = Get-ChildItem $dir -Filter 'bash.exe' | Select-Object -First 1
+          $rubash = Get-ChildItem $dir -Filter 'rubash.exe' | Select-Object -First 1
+          "bash=$($bash.FullName)" >> $env:GITHUB_OUTPUT
+          if ($rubash) { "rubash=$($rubash.FullName)" >> $env:GITHUB_OUTPUT }
+          else { "rubash=$($bash.FullName)" >> $env:GITHUB_OUTPUT }
+      - name: download manifest
+        uses: actions/download-artifact@v4
+        with: { name: eco-manifest, path: eco }
+      - name: run tester (untrusted assets, ephemeral runner)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/harvest/eco-test.py `
+            --tiers "${{ github.event.inputs.test_tiers || 't1' }}" `
+            --niu "${{ steps.bins.outputs.bash }}" `
+            --rubash "${{ steps.bins.outputs.rubash }}" `
+            --manifest-dir eco/manifest `
+            --results-dir eco/results `
+            --tmp-root eco/tmp
+      - name: upload verdicts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eco-results-${{ github.run_id }}
+          path: eco/results

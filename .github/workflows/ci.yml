@@ -102,6 +102,137 @@ jobs:
         continue-on-error: true
         run: cargo test --workspace --lib --locked
 
+  # Cross-target gating gate: the two `runs-on` platforms above only ever
+  # exercise x86_64 glibc. Neither the musl libc (Alpine / static builds) nor
+  # the OpenHarmony target (`aarch64-unknown-linux-ohos`, HarmonyOS PC) is
+  # covered, and both diverge from glibc in ways a host-only check cannot
+  # see -- e.g. rubash's `ulimit` used `libc::__rlimit_resource_t`, a typedef
+  # glibc alone defines, so musl and ohos failed to compile while the host
+  # stayed green. `cargo check` on an explicit target is the acceptance line.
+  #
+  # `aarch64-unknown-linux-ohos` is Tier 2 with host tools, so no external
+  # OpenHarmony SDK / clang wrapper is needed for a check-only build.
+  cross-target-check:
+    name: cross-target-check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-ohos
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ matrix.target }}
+
+      # Same as the other jobs: no `cargo update -p rubash` under the
+      # [patch] override -- the sibling clone is already latest master.
+
+      - name: cargo check --target ${{ matrix.target }}
+        run: cargo check --workspace --locked --target ${{ matrix.target }}
+
+
+  # musl smoke gate: the point above only proves musl *compiles*. A static
+  # musl binary is a shipped artifact shape (Alpine, scratch containers,
+  # `-static` redistributions), and docs/release.md held the musl leg back
+  # until it could "carry the same smoke gate green" as the glibc legs --
+  # a compile check is not that gate. Unlike the ohos target, a static musl
+  # x86_64 binary runs natively on the glibc runner, so the gate can run in
+  # full here: build --release, then run the exact four checks the release
+  # pipeline runs (docs/release.md "The smoke gate"): --version banner,
+  # one-shot `-c`, a pipeline through native coreutils, and the offline
+  # plugin stack. No `musl-tools` package is needed -- rustc links against
+  # the toolchain's own self-contained musl crt/libc via the host `cc`.
+  cross-target-smoke:
+    name: cross-target-smoke (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: x86_64-unknown-linux-musl
+
+      # No `cargo update -p rubash` under the [patch] override, same as the
+      # other jobs: the sibling clone is already latest master.
+
+      - name: Pin rubash revision
+        id: rubash
+        run: |
+          if [ ! -d ../rubash ]; then
+            echo "rubash checkout missing at ../rubash" >&2
+            exit 1
+          fi
+          revision="$(git -C ../rubash rev-parse --short=12 HEAD)"
+          if [ -z "$revision" ]; then
+            echo "could not resolve rubash revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Build niubash (musl, release)
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
+
+      # Same four checks as build-linux in release.yml, against the binary
+      # this job just built. The --version check reads the version from
+      # Cargo.toml rather than a release tag -- there is no tag in CI.
+      - name: "Smoke-test the musl binary (gate: no smoke, no trust)"
+        run: |
+          set -euo pipefail
+          bin="target/x86_64-unknown-linux-musl/release/niu"
+          test -x "$bin"
+
+          # The whole point: prove it is actually static, not silently
+          # linked against the runner's glibc.
+          if ldd "$bin" 2>&1 | grep -qi 'not a dynamic executable\|statically linked'; then
+            ldd "$bin" 2>&1 | head -1
+          else
+            echo "musl binary is dynamically linked:" >&2
+            ldd "$bin" >&2
+            exit 1
+          fi
+
+          # 1) --version names this crate version and the pinned engine rev.
+          version="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/')"
+          out="$("$bin" --version)"
+          printf '%s\n' "$out"
+          grep -qF "Niubash $version " <<<"$out"
+          grep -qF "rubash   git ${{ steps.rubash.outputs.revision }}" <<<"$out"
+
+          # 2) one-shot engine execution
+          out="$("$bin" -c 'echo ok')"
+          [ "$out" = "ok" ]
+
+          # 3) external commands + pipeline through native coreutils
+          out="$(printf 'a\nb\n' | "$bin" -c 'sort | head -1')"
+          [ "$out" = "a" ]
+
+          # 4) plugin stack offline check: empty spec, isolated HOME --
+          #    must exit 0 with zero output and touch no network.
+          mkdir -p "$RUNNER_TEMP/smoke-home"
+          : > "$RUNNER_TEMP/smoke-plugins.toml"
+          out="$(HOME="$RUNNER_TEMP/smoke-home" \
+            NIU_PLUGIN_SPEC="$RUNNER_TEMP/smoke-plugins.toml" \
+            "$bin" plugin sync --bootstrap 2>&1)"
+          if [ -n "$out" ]; then
+            echo "plugin sync --bootstrap was not quiet on empty spec:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          fi
+
 
   # Per-asset timing budget trend (owner directive 2026-10-04): nightly run
   # of the same gate the release enforces (scripts/perf/asset-timing.py over

@@ -11,4 +11,5 @@
 - [Built-ins & Fast Paths](builtins.md)
 - [Architecture](architecture.md)
 - [Windows Path Contract](windows-path-contract.md)
+- [Platform Support](platform-support.md)
 - [Roadmap](niubash-roadmap.md)

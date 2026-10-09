@@ -1,0 +1,309 @@
+[
+  {
+    "signature": "hang:source:ECO> source '<path>'",
+    "count": 12,
+    "examples": [
+      {
+        "repo": "bats-core/bats-core",
+        "path": "libexec/bats-core/bats-format-cat",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/bats-core/bats-core/52439ebfac39987dd43e26502aa4aa19f2753d4a/libexec/bats-core/bats-format-cat"
+      },
+      {
+        "repo": "zaventh/lintorama",
+        "path": ".claude/hooks/lintorama-stop.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/zaventh/lintorama/11793888d67e440e8038efa95cc64ac268b924d5/.claude/hooks/lintorama-stop.sh"
+      },
+      {
+        "repo": "Kohei-Wada/dotfiles",
+        "path": ".claude/statusline.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/Kohei-Wada/dotfiles/264319e28481e274f5f487c3054f74b0d5c23654/.claude/statusline.sh"
+      },
+      {
+        "repo": "scop/bash-completion",
+        "path": "completions-fallback/nox.bash",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/scop/bash-completion/00c34614e3a683421a4d1b10f3e72ddf4530af49/completions-fallback/nox.bash"
+      },
+      {
+        "repo": "bivlked/amneziawg-installer",
+        "path": "awg_common.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/bivlked/amneziawg-installer/1b6ddac1f6bed38c4d147b0a9a79628b134fc408/awg_common.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "bats-core/bats-core",
+        "path": "libexec/bats-core/bats-format-cat",
+        "hash": "a6f8abc9dde15440bdd982ae82c597a32175f87c"
+      },
+      {
+        "repo": "zaventh/lintorama",
+        "path": ".claude/hooks/lintorama-stop.sh",
+        "hash": "b53a4090938079886e7a23d3be046071f2ff1d71"
+      },
+      {
+        "repo": "Kohei-Wada/dotfiles",
+        "path": ".claude/statusline.sh",
+        "hash": "7fbb402c5db7679e13c9e244ef3caee567cbbeea"
+      },
+      {
+        "repo": "scop/bash-completion",
+        "path": "completions-fallback/nox.bash",
+        "hash": "626d591ddb74c57d58cd22d6eb422107c4958480"
+      },
+      {
+        "repo": "bivlked/amneziawg-installer",
+        "path": "awg_common.sh",
+        "hash": "f10440d5a5cc3b982faf5032ca155eea5ef5bbda"
+      },
+      {
+        "repo": "bivlked/amneziawg-installer",
+        "path": "awg_common_en.sh",
+        "hash": "279ba8e790c9a0684879182624309efcc935c3f3"
+      },
+      {
+        "repo": "freekmurze/dotfiles",
+        "path": "config/claude/statusline.sh",
+        "hash": "a740316324c55554610d38aece718eae2374b40b"
+      },
+      {
+        "repo": "shellspec/shellspec",
+        "path": "contrib/pretty.sh",
+        "hash": "89a95f76abd91bfb18f2b9865e3518cc49e0538e"
+      },
+      {
+        "repo": "binpash/pash",
+        "path": "evaluation/tests/bigrams.sh",
+        "hash": "a3990e1a3653180af37d6a30a9d5a4473765d15f"
+      },
+      {
+        "repo": "binpash/pash",
+        "path": "evaluation/tests/grep.sh",
+        "hash": "5699e84d08e6a40c92fd037694a1a9b0c4374129"
+      },
+      {
+        "repo": "binpash/pash",
+        "path": "evaluation/tests/sort.sh",
+        "hash": "017b1c7363d4b7222c25d3d7af0df32b01d666a0"
+      },
+      {
+        "repo": "binpash/pash",
+        "path": "evaluation/tests/topn.sh",
+        "hash": "6825938acf4da7ed0b9a6cf8cd76b7cefa856805"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:niu: line N: syntax error near unexpected token `&&'",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "ohmybash/oh-my-bash",
+        "path": "themes/vscode/vscode.theme.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/ohmybash/oh-my-bash/abf846186ab0a8a41ec5888e827ece6277dfe446/themes/vscode/vscode.theme.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "ohmybash/oh-my-bash",
+        "path": "themes/vscode/vscode.theme.sh",
+        "hash": "128f3dd500e23b57ffb27fd8c41fcd89cc7d6227"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u222a\u2015\u2015\u2015\u2015\u222a\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "GuidoFe/bash-cat-with-cat",
+        "path": "cat.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/GuidoFe/bash-cat-with-cat/b97e8bf9e997fa51915580555edb7d5aabec7777/cat.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "GuidoFe/bash-cat-with-cat",
+        "path": "cat.sh",
+        "hash": "b9bde77bddd4deb9af214737d889d509be430f56"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:>>>",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "sloria/doitlive",
+        "path": "examples/walkthrough.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/sloria/doitlive/168333b454bc4bf95c1a9f0e4c3aa3f07c1768d1/examples/walkthrough.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "sloria/doitlive",
+        "path": "examples/walkthrough.sh",
+        "hash": "13940489fef708f0bc3b0ac295ed3de199702f06"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:niu: : No such file or directory",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "pipeseroni/pipes.sh",
+        "path": "scripts/gen-man-html.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/pipeseroni/pipes.sh/581792d4e0ea51e15889ba14a85db1bc9727b83d/scripts/gen-man-html.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "pipeseroni/pipes.sh",
+        "path": "scripts/gen-man-html.sh",
+        "hash": "0b4b655df7261bb1e96e4776365a1be825014ca4"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:niu: translate: command not found",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "MacRimi/ProxMenux",
+        "path": "scripts/menus/share_menu.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/MacRimi/ProxMenux/346d9b15f66807d3f161cc470a95e7136c9d258b/scripts/menus/share_menu.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "MacRimi/ProxMenux",
+        "path": "scripts/menus/share_menu.sh",
+        "hash": "8c22d02cf223cefa7a08d22bf6e9316ab875074b"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:/usr/bin/tee: /var/log/jamf_account_rename.log: No such file or directory",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "ducksrfr/mac_admin",
+        "path": "scripts/rename_user.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/ducksrfr/mac_admin/ed87379e312c8c860096aa286d5aa4cbc3f11af5/scripts/rename_user.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "ducksrfr/mac_admin",
+        "path": "scripts/rename_user.sh",
+        "hash": "16c2211044bbedb11d4043210f81c9f0ce35a49c"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:Let's set up your plugin!",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "ZenterFlow/claude-code-plugin-template",
+        "path": "scripts/setup.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/ZenterFlow/claude-code-plugin-template/1e616f9b29b7e7ba244bbbbefe9bbd2cc7ddcc29/scripts/setup.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "ZenterFlow/claude-code-plugin-template",
+        "path": "scripts/setup.sh",
+        "hash": "68ba2902020d47e94a7daa7ebf3d472eefdaf984"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:niu: bc: command not found",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "konethegreat/github-final-project",
+        "path": "simple-interest.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/konethegreat/github-final-project/3648019097341d00ad6c6ac07ae5261a823d89d3/simple-interest.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "konethegreat/github-final-project",
+        "path": "simple-interest.sh",
+        "hash": "5fcf0660ae13b111a77be34b2eaebab2296c66a9"
+      }
+    ]
+  },
+  {
+    "signature": "hang:source:/usr/bin/bash: simple-interest.sh: No such file or directory",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "konethegreat/github-final-project",
+        "path": "tests/test-simple-interest.sh",
+        "verdict": "HANG",
+        "url": "https://raw.githubusercontent.com/konethegreat/github-final-project/3648019097341d00ad6c6ac07ae5261a823d89d3/tests/test-simple-interest.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "konethegreat/github-final-project",
+        "path": "tests/test-simple-interest.sh",
+        "hash": "fcb1ccd8f79a8bbd50bf96c51129039dea32de38"
+      }
+    ]
+  },
+  {
+    "signature": "<path> line N: syntax error near unexpected token `,' @ `((${#rematch2}>=2&&(_ble_syntax_attr[i+1]=CTX_CMDXC),`",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "akinomyoga/ble.sh",
+        "path": "lib/core-syntax.sh",
+        "verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+        "url": "https://raw.githubusercontent.com/akinomyoga/ble.sh/d81fd54feb0d996fdff20dca27eaf0201f7015cc/lib/core-syntax.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "akinomyoga/ble.sh",
+        "path": "lib/core-syntax.sh",
+        "hash": "bb7c22c797c8e73771502542f718adb8e9c6978c"
+      }
+    ]
+  },
+  {
+    "signature": "<path> line N: syntax error near unexpected EOF while looking for matching `)' @ `((j1=(i1==3?6:`",
+    "count": 1,
+    "examples": [
+      {
+        "repo": "akinomyoga/ble.sh",
+        "path": "lib/init-term.sh",
+        "verdict": "SYNTAX-REJECT-RUBASH-ONLY",
+        "url": "https://raw.githubusercontent.com/akinomyoga/ble.sh/d81fd54feb0d996fdff20dca27eaf0201f7015cc/lib/init-term.sh"
+      }
+    ],
+    "assets": [
+      {
+        "repo": "akinomyoga/ble.sh",
+        "path": "lib/init-term.sh",
+        "hash": "8b99971a606523ddd4c7ad28ee27677b81459b3f"
+      }
+    ]
+  }
+]
