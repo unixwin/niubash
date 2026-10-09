@@ -131,6 +131,24 @@ hello() { echo "hello from niu"; }
 - **一次性 init 文件** — `NIU_ENV=<file>`（或 bash 兼容的 `BASH_ENV`）在 `niu -c`、脚本、管道 stdin 之前只 source 这一个文件。默认不设，保证一次性执行足够快。
 - **保持最新** — `niu --self-update`（shell 内也可用 `self-update`）。
 
+### 正确设置主题
+
+主题请通过声明式 spec 设置，不要手写 rc：在 `~/.niubash/plugins.toml`
+的 source 条目里写 `theme = "..."` —
+
+```toml
+[[sources]]
+target = "oh-my-bash"
+enable = ["git"]
+theme  = "agnoster"
+```
+
+不要在 `~/.niubashrc` 里手写 `export OSH_THEME=agnoster`：托管块由
+`niu plugin sync` 按 spec 重写，写在外面的行会被重建的主题块覆盖，写在
+块内的行会被直接清除——下次 sync 后主题会悄悄回退到默认。sync 检测到
+托管块外的手写主题行时会在 stderr 打印一次警告并指向 spec。shell 内
+也可以用 `niu plugin enable <theme>` 或 `niu setup` 向导来写 spec。
+
 ## 特性
 
 - **真·Bash 语义** — [rubash](https://github.com/unixwin/rubash) 引擎以 GNU Bash 官方上游测试套件作门禁；带日期的实测记录见[对比](#对比)。

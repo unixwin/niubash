@@ -62,6 +62,14 @@ Fields:
 | `enable` | Enabled assets in the manager's own vocabulary: OMB rc arrays, bash-it `enabled/` entries, per-file source lines for wild/bpkg. |
 | `theme` | Theme pick. Absent means "unmanaged": a hand-set theme variable survives syncs. `theme = ''` explicitly clears it. |
 
+**Do not hand-write the theme variable in the rc** (niubash#196).
+`export OSH_THEME=...` typed directly into `~/.niubashrc` is not the
+supported channel: sync materializes the managed theme block from this
+`theme` field, and the hand-written line is dropped or overridden on the
+next sync — the theme silently falls back. `niu plugin sync` detects a
+stray hand-written theme assignment outside the managed blocks and prints
+a one-time stderr warning pointing at the spec.
+
 **Theme ownership is exclusive.** The same theme name can ship in several
 frameworks (powerbash10k exists in oh-my-bash AND bash-it), so a theme pick
 made through the setup wizard/gallery or `niu plugin enable <theme>` claims

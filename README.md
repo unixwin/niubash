@@ -142,6 +142,26 @@ hello() { echo "hello from niu"; }
 - **One-shot init file** — `NIU_ENV=<file>` (or bash-compatible `BASH_ENV`) sources a single init file before `niu -c`, scripts, and piped stdin. Unset by default, keeping one-shot runs fast.
 - **Keep it current** — `niu --self-update` (or `self-update` inside the shell).
 
+### Setting the theme correctly
+
+Pick the theme through the declarative spec, not by hand-editing the rc:
+in `~/.niubash/plugins.toml`, set `theme = "..."` on the source entry —
+
+```toml
+[[sources]]
+target = "oh-my-bash"
+enable = ["git"]
+theme  = "agnoster"
+```
+
+Do **not** hand-write `export OSH_THEME=agnoster` in `~/.niubashrc`: that
+line lives outside (or inside) the marker-delimited managed blocks that
+`niu plugin sync` rewrites from the spec, so the next sync drops or
+overrides it and the theme silently falls back to the default. If sync
+detects such a hand-written line it prints a one-time warning on stderr
+pointing at the spec. Inside the shell, `niu plugin enable <theme>` or the
+`niu setup` wizard writes the spec for you.
+
 ## Features
 
 - **Real Bash semantics** — the [rubash](https://github.com/unixwin/rubash) engine is gated on GNU Bash's own upstream test suite; the dated, measured record lives in [How it compares](#how-it-compares).

@@ -74,6 +74,42 @@ pub fn rc_file() -> PathBuf {
         .join(".niubashrc")
 }
 
+/// Theme assignments (`OSH_THEME=`/`BASH_IT_THEME=`, with or without
+/// `export`) hand-written OUTSIDE any managed block (niubash#196). The
+/// supported channel is the `theme` field of a `[[sources]]` entry in
+/// `~/.niubash/plugins.toml`; a hand-written rc line is rewritten away
+/// when the managed block materializes, so callers can warn about it.
+pub fn stray_theme_assignment_lines() -> Vec<String> {
+    const THEME_VARS: [&str; 2] = ["OSH_THEME", "BASH_IT_THEME"];
+    let Ok(text) = fs::read_to_string(rc_file()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut in_managed = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("# >>> niu source ") {
+            in_managed = true;
+            continue;
+        }
+        if trimmed.starts_with("# <<< niu source ") {
+            in_managed = false;
+            continue;
+        }
+        if in_managed {
+            continue;
+        }
+        let bare = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        if THEME_VARS
+            .iter()
+            .any(|var| bare.starts_with(var) && bare.as_bytes().get(var.len()) == Some(&b'='))
+        {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
 /// One asset row in the overview, with its activation state.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AssetRow {
@@ -1599,6 +1635,28 @@ mod tests {
 
     fn spec_text() -> String {
         fs::read_to_string(spec::spec_path()).unwrap_or_default()
+    }
+
+    #[test]
+    fn stray_theme_scan_sees_only_lines_outside_managed_blocks() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _sandbox = sandbox("stray-theme-scan");
+        fs::write(
+            rc_file(),
+            format!(
+                "export OSH_THEME=agnoster\n\
+                 # >>> niu source oh-my-bash >>>\n\
+                 OSH_THEME='robbyrussell'\n\
+                 # <<< niu source oh-my-bash <<<\n\
+                 BASH_IT_THEME='bobby'\n\
+                 export NOSH_THEME='nope'\n"
+            ),
+        )
+        .unwrap();
+        let stray = super::stray_theme_assignment_lines();
+        assert_eq!(stray.len(), 2, "{stray:?}");
+        assert!(stray[0].contains("OSH_THEME=agnoster"), "{stray:?}");
+        assert!(stray[1].contains("BASH_IT_THEME='bobby'"), "{stray:?}");
     }
 
     #[test]
