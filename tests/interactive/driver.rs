@@ -513,6 +513,30 @@ impl NiuSession {
         )
     }
 
+    /// Spawn the interactive shell with extra CLI arguments (e.g.
+    /// `--noediting`) under a pseudo terminal, with `rc` staged as the
+    /// session's startup rc (like [`spawn_custom`]). Used by niubash#191 to
+    /// drive the `--noediting` REPL loop, which the plain-spawn target
+    /// cannot reach.
+    pub fn spawn_custom_with_args(
+        prefix: &str,
+        rc: &str,
+        args: &[&str],
+        extra_env: &[(String, String)],
+        size: (u16, u16),
+        timeout: Duration,
+    ) -> NiuSession {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        try_spawn_inner(prefix, Some(rc), &args, extra_env, &[], size, timeout).unwrap_or_else(
+            || {
+                panic!(
+                    "niu session {prefix:?} with {args:?} could not be spawned under a \
+                     pseudo terminal after a successful probe"
+                )
+            },
+        )
+    }
+
     /// Spawn the interactive shell over a home the test staged beforehand
     /// (niubash#180 journey: the `niu setup` child the session spawns must
     /// share that exact HOME, so the driver must not mint its own sandbox).
