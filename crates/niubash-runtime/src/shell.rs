@@ -1120,9 +1120,11 @@ impl Shell {
         let last_exit_code = self.executor.last_exit_code();
         self.executor.set_env("PS0", &ps0);
         let rendered = self.executor.expand_prompt_string_mut(&ps0);
+        // GNU writes the decoded PS0 to stderr (eval.c:164-176 fprintf),
+        // never stdout: `2>/dev/null` drops the bytes, `2>&1` captures them,
+        // and redirected stdout stays clean (unixwin/niubash#190).
         if !rendered.is_empty() {
-            let _ = std::io::stdout().write_all(rendered.as_bytes());
-            let _ = std::io::stdout().flush();
+            shell_channel_write(ShellChannel::Stderr, rendered.as_bytes());
         }
         self.executor.set_last_exit_code(last_exit_code);
     }
@@ -3355,6 +3357,53 @@ fn normalize_shell_visible_path(value: &str) -> String {
     }
 }
 
+/// Process-standard stream targets for shell emission channels. PS0 is the
+/// first user: it emits on [`ShellChannel::Stderr`] (GNU eval.c:164-176), so
+/// redirected pipelines observe GNU's stream shape (unixwin/niubash#190).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellChannel {
+    Stdout,
+    Stderr,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam for [`shell_channel_write`]: when armed with `Some`, channel
+    /// writes are recorded here as (channel, payload) instead of reaching the
+    /// real process handles, letting tests assert the stream separation.
+    static CHANNEL_CAPTURE:
+        std::cell::RefCell<Option<Vec<(ShellChannel, Vec<u8>)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Write bytes to the named process-standard stream. Under `cfg(test)` an
+/// armed [`CHANNEL_CAPTURE`] records the write instead of touching the real
+/// handles (the built-in test harness may own/echo those, and PS0's stream
+/// choice — not the handle identity — is the behavior under regression).
+fn shell_channel_write(channel: ShellChannel, bytes: &[u8]) {
+    #[cfg(test)]
+    if CHANNEL_CAPTURE.with(|slot| slot.borrow().is_some()) {
+        CHANNEL_CAPTURE.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("capture armed")
+                .push((channel, bytes.to_vec()));
+        });
+        return;
+    }
+    use std::io::Write as _;
+    match channel {
+        ShellChannel::Stdout => {
+            let _ = std::io::stdout().write_all(bytes);
+            let _ = std::io::stdout().flush();
+        }
+        ShellChannel::Stderr => {
+            let _ = std::io::stderr().write_all(bytes);
+            let _ = std::io::stderr().flush();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5194,6 +5243,41 @@ niu_git_comp() {
         assert_eq!(shell.execute_interactive_line(":").unwrap(), 0);
 
         assert_eq!(shell.executor.get_env("STARSHIP_START_TIME"), Some("12345"));
+    }
+
+    /// unixwin/niubash#190: PS0's decoded output must go to the stderr
+    /// channel (GNU eval.c:176 writes stderr), with stdout left untouched —
+    /// `cmd 2>/dev/null` drops the PS0 bytes while `cmd > file` stays clean.
+    #[test]
+    fn bash_ps0_expansion_targets_stderr_and_stdout_stays_clean() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.executor.set_env("PS0", "PS0-EXPANDED ");
+
+        // Arm the capture, run one interactive line, then disarm — on panic
+        // too, so the thread-local never leaks into a later test.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            CHANNEL_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            shell.execute_interactive_line(":").unwrap();
+        }));
+        let captured = CHANNEL_CAPTURE.with(|slot| slot.borrow_mut().take());
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+        let captured = captured.expect("capture disarmed");
+
+        assert!(
+            captured
+                .iter()
+                .all(|(channel, _)| *channel == ShellChannel::Stderr),
+            "PS0 expansion must never write the stdout channel: {captured:?}"
+        );
+        assert_eq!(
+            captured,
+            vec![(ShellChannel::Stderr, b"PS0-EXPANDED ".to_vec())],
+            "decoded PS0 bytes land on stderr exactly once"
+        );
     }
 
     fn test_shell(hooks: HookConfig) -> Shell {
