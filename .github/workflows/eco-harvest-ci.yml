@@ -64,29 +64,29 @@ jobs:
     needs: harvest
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4 # niubash：eco 脚本 + niu 源码
-      - uses: actions/checkout@v4
-        with: { repository: unixwin/rubash, path: rubash }
+      - uses: actions/checkout@v4 # niubash：eco 脚本（引擎源码不在此树内签出）
+      - name: checkout rubash outside the workspace tree
+        uses: actions/checkout@v4
+        with:
+          repository: unixwin/rubash
+          path: ${{ runner.temp }}/rubash # 防止 cargo 向上撞进 niubash 工作区
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: install test deps
-        run: pip install pyte winpty
-      - name: build niu (rubash engine)
-        working-directory: rubash
-        run: cargo build --release --bin bash --bin rubash
-        continue-on-error: true # bin 名两仓库有别名，失败再试默认
-      - name: build niu fallback
-        if: failure()
-        working-directory: rubash
+        run: pip install pyte pywinpty # pywinpty 提供的模块名就是 winpty
+      - name: build engine
+        working-directory: ${{ runner.temp }}/rubash
         run: cargo build --release
       - name: locate binaries
         id: bins
-        run: |
-          $b = Get-ChildItem rubash/target/release -Filter 'bash.exe' | Select-Object -First 1
-          $n = Get-ChildItem rubash/target/release -Filter 'rubash.exe' | Select-Object -First 1
-          "bash=$($b.FullName)" >> $env:GITHUB_OUTPUT
-          "rubash=$(if ($n) { $n.FullName } else { $b.FullName })" >> $env:GITHUB_OUTPUT
         shell: pwsh
+        run: |
+          $dir = "${{ runner.temp }}/rubash/target/release"
+          $bash = Get-ChildItem $dir -Filter 'bash.exe' | Select-Object -First 1
+          $rubash = Get-ChildItem $dir -Filter 'rubash.exe' | Select-Object -First 1
+          "bash=$($bash.FullName)" >> $env:GITHUB_OUTPUT
+          if ($rubash) { "rubash=$($rubash.FullName)" >> $env:GITHUB_OUTPUT }
+          else { "rubash=$($bash.FullName)" >> $env:GITHUB_OUTPUT }
       - name: download manifest
         uses: actions/download-artifact@v4
         with: { name: eco-manifest, path: eco }
@@ -94,8 +94,8 @@ jobs:
         run: |
           python scripts/harvest/eco-test.py `
             --tiers "${{ github.event.inputs.test_tiers || 't1' }}" `
-            --niu rubash/target/release/bash.exe `
-            --rubash rubash/target/release/rubash.exe `
+            --niu "${{ steps.bins.outputs.bash }}" `
+            --rubash "${{ steps.bins.outputs.rubash }}" `
             --manifest-dir eco/manifest `
             --results-dir eco/results `
             --tmp-root eco/tmp
