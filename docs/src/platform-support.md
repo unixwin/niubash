@@ -99,8 +99,68 @@ management**, not text processing:
 | `snap` / `flatpak` | unsupported |
 | `ifconfig` / `netstat` | present but partly restricted (`ip`, `ss` preferred) |
 
-**The OpenHarmony dev boards are the limited case.** There the userland is
-`toybox`, and Huawei's own documentation says it is trimmed per device:
+### The HarmonyOS bash is stock GNU bash
+
+It is worth pinning down *what* that bash is, because "it has bash" could
+mean a reimplementation. It is not. It is upstream GNU bash, cross-compiled
+against musl:
+
+- `bash --version` on a HarmonyOS PC prints
+  `GNU bash, version 5.1.16(1)-release` — the GPL banner is GNU's own.
+- The public HNP build (Termony, `build-hnp/bash/Makefile`) pulls
+  `$(GNU_MIRROR)/gnu/bash/bash-5.3.tar.gz` and configures it with
+  `--host aarch64-unknown-linux-musl --without-bash-malloc --disable-nls`.
+  `--without-bash-malloc` matters: it drops bash's bundled allocator so the
+  musl allocator is used instead.
+- The build emits `libsh.a`, `libhistory.a` and the `loadables`
+  (`recho`, `printf`, `basename`, …) — artifacts unique to the GNU bash
+  source tree.
+
+**No Huawei-specific shell patches.** It is an ordinary musl-linked GNU
+bash, which is a useful data point for us: the userland under HarmonyOS is
+a musl + Linux-ABI stack, not a bespoke one. That is *why* Niubash's
+`target_os = "linux"` cfgs all hit and why the port was two lines.
+
+Note the version split when quoting numbers: the measured machine ran
+**5.1.16**, while the public build recipe fetches **5.3**. These are
+different devices at different times — do not present either as "the"
+HarmonyOS bash version.
+
+### Two userland caveats the existing ports hit
+
+Both are worth knowing before a first device run, because neither is a
+documentation problem — they are things that actually broke people.
+
+**1. A third-party port still needed to *bundle* a shell toolset.**
+Termony (a "Termux for HarmonyOS PC") ships 42 packages, and its list is
+`aria2 bash binutils *busybox* ... gcc gdb gettext git ...` — **bash yes,
+coreutils no, busybox instead**. So even with 454 commands present system-
+wide, an independent porter concluded the stock surface was not enough and
+vendored `busybox` to fill it. That is not proof the 93% number is wrong;
+it is evidence that "the tools exist" and "the tools are dependable" are
+different claims — the same distinction the argument below turns on.
+
+**2. Prefix mismatch inside the built-in Terminal.**
+Termony's README warns:
+
+> you can use these utilities in the builtin Terminal app under
+> `/data/service/hnp`: **Although some paths might get wrong due to prefix
+> set to `/data/app/base.org/base_1.0`** … You can override them like:
+> `LD_LIBRARY_PATH=/data/service/hnp/base.org/base_1.0/lib
+> TERMINFO=/data/service/hnp/base.org/base_1.0/share/terminfo fish`
+
+This does not contradict the PATH finding below — `PATH` resolution and
+runtime prefix resolution are separate mechanisms. It does mean that a
+first device run should check more than "is it on PATH": also confirm that
+a resolved binary can actually find its own `lib` and data dirs. On
+HarmonyOS 6.0+ the README adds that **`sudo` is available and system
+environment variables are editable**, which is how the overrides are meant
+to be persisted.
+
+### The OpenHarmony dev boards are the limited case
+
+There the userland is `toybox`, and Huawei's own documentation says it is
+trimmed per device:
 
 > In the current version, different devices support different toybox
 > commands. You can run the `toybox` command to obtain the full list.
