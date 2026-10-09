@@ -99,6 +99,22 @@ fn manifest_schema_is_complete() {
     );
 }
 
+/// niubash#209 acceptance, pinned in CI policy: the must-install bundle is
+/// gawk (niubash#189) plus niugit / ripgrep / fd. Dropping any of them from
+/// the manifest silently re-breaks `niu setup` full distro on a gitless
+/// machine, so their presence is a contract, not a preference.
+#[test]
+fn must_install_bundle_is_present() {
+    let manifest = load_manifest();
+    let package_names = string_list_of(&manifest, "packages");
+    for required in ["gawk", "niugit", "ripgrep", "fd"] {
+        assert!(
+            package_names.iter().any(|name| name == required),
+            "must-install package {required:?} is missing from the manifest (niubash#189/#209)"
+        );
+    }
+}
+
 #[test]
 fn shims_target_installed_packages_and_do_not_collide() {
     let manifest = load_manifest();
