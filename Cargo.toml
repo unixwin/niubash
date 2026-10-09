@@ -52,6 +52,14 @@ portable-pty = "0.9"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+# niubash#193: release artifacts shipped as "not stripped" (~12 MB ELF with
+# full symbols; strip saves ~1 MB on disk and in self-update downloads).
+# "symbols" (stable since Rust 1.59) strips the symbol table on every
+# target the release pipeline builds (GNU/Linux, macOS, MSVC), so no
+# per-platform strip step is needed in release.yml. On MSVC the exe itself
+# is largely unaffected (debug info lives in the side-by-side .pdb); the
+# win comes from the ELF/Mach-O Unix artifacts the release pipeline ships.
+strip = "symbols"
 
 # Local override for cross-repo compat runs: build niu against the local
 # rubash worktree (master + unpushed fixes) instead of the pinned git rev.
