@@ -207,10 +207,18 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         return dispatch_launcher_word(args, 1);
     }
     match first.as_str() {
-        "setup" | "configure" => match setup_preset_arg(&args[2..]) {
-            Some(name) => niubash_runtime::setup_wizard::apply_preset(&name),
-            None => niubash_runtime::setup_wizard::rerun_wizard(),
-        },
+        "setup" | "configure" => {
+            // niubash#195: `--help`/`-h` is a usage request, never a wizard
+            // run — always answer in plain text so piped output stays clean.
+            if args[2..].iter().any(|arg| arg == "-h" || arg == "--help") {
+                show_setup_usage();
+                return Ok(());
+            }
+            match setup_preset_arg(&args[2..]) {
+                Some(name) => niubash_runtime::setup_wizard::apply_preset(&name),
+                None => niubash_runtime::setup_wizard::rerun_wizard(),
+            }
+        }
         "font" => niubash_runtime::fonts::run_font_command(),
         "doctor" => niubash_runtime::doctor::run_doctor(skill::SKILL_FILES),
         "plugin" => run_plugin_command(args),
@@ -2936,6 +2944,21 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
             startup: bootstrap,
             checksum_pin: None,
         })?;
+    // niubash#196: a hand-written theme variable outside the managed blocks
+    // is not the supported channel — `niu plugin sync` rewrites the managed
+    // blocks from the spec, so the rc line is ignored/dropped. Point at the
+    // spec once (startup form stays silent; the stderr nag must not pollute
+    // every shell boot).
+    let stray = niubash_runtime::plugins::assets::stray_theme_assignment_lines();
+    if !stray.is_empty() {
+        eprintln!(
+            "niu plugin sync: found hand-written theme assignment(s) outside the managed \
+             blocks: {}. The theme belongs in {} as `theme = \"...\"` on the source entry — \
+             hand-written OSH_THEME lines are overwritten by sync.",
+            stray.join("; "),
+            niubash_runtime::plugins::spec::spec_path().display()
+        );
+    }
     if bootstrap {
         // Startup form: silent when clean; install notices only otherwise
         // (iron law 2 keeps degraded state visible). In imperative mode
@@ -3127,6 +3150,25 @@ fn setup_preset_arg(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// Plain-text usage for `niu setup` (niubash#195): `--help` must render
+/// readably everywhere — pipes, redirects, and CI logs included — so it
+/// never emits the ANSI logo art, on a tty or off one.
+fn show_setup_usage() {
+    println!(
+        "niu {} — run the interactive setup wizard",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!();
+    println!("Usage:");
+    println!("  niu setup                       Re-run the interactive setup wizard");
+    println!("  niu setup --preset <name>       Apply a preset non-interactively");
+    println!("                                  (e.g. recommended, minimal)");
+    println!("  niu setup --help                Show this help (plain text)");
+    println!();
+    println!("The wizard writes ~/.niubashrc and the plugin spec");
+    println!("(~/.niubash/plugins.toml). Existing rc files are backed up.");
 }
 
 #[cfg(windows)]

@@ -878,8 +878,17 @@ pub fn rerun_wizard() -> anyhow::Result<()> {
 fn display_welcome_side_by_side(reconfigure: bool, lang: Lang) {
     let width = crate::interactive_menu::term_width();
     let logo_cols = if width >= 100 { 48 } else { 32 };
-    let logo_str = crate::logo::render_logo_to_string(logo_cols);
-    let logo_lines: Vec<String> = logo_str.lines().map(String::from).collect();
+    // niubash#195: when stdout is not a terminal (pipe, redirect, CI) the
+    // ANSI pixel-art logo degrades to plain text — same content, no escapes.
+    let plain = !crate::terminal::stdout_is_terminal();
+    let logo_lines: Vec<String> = if plain {
+        Vec::new()
+    } else {
+        crate::logo::render_logo_to_string(logo_cols)
+            .lines()
+            .map(String::from)
+            .collect()
+    };
 
     let mut content = Vec::new();
     content.push(String::new());
