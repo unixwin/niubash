@@ -156,6 +156,14 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
         )?;
     }
 
+    // ── Advisory: release-bundled tools (niubash#230 follow-up) ───────────
+    // The release ships gawk/niugit/ripgrep/fd inside the winuxcmd opt/ tree
+    // (preinstall manifest). The doctor reports them with their true source
+    // so a bundled component is never mistaken for a system install — and
+    // never reported as missing.
+    let bundled = crate::setup_wizard::bundled_components();
+    writeln!(out, "  {info}{}", bundled_tools_row(&bundled))?;
+
     let terminal = if std::env::var_os("WT_SESSION").is_some() {
         "Windows Terminal"
     } else {
@@ -352,6 +360,20 @@ fn display(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// The `bundled tools` advisory row (without the leading two-space indent;
+/// the caller prepends the info marker). Honest either way: the names of
+/// what the release actually ships, or an explicit "none".
+fn bundled_tools_row(bundled: &[&str]) -> String {
+    if bundled.is_empty() {
+        " bundled tools       none — this install ships no pre-installed packages".to_string()
+    } else {
+        format!(
+            " bundled tools       {} (shipped with the release, not system installs)",
+            bundled.join(" ")
+        )
+    }
+}
+
 /// What `command -v niu` resolves to on this machine: the first PATH entry
 /// that carries an executable `niu` (`.exe`/`.bat`/`.cmd`/`.com`, plus the
 /// extension-less form some POSIX-side PATHs expose). `None` = nothing on
@@ -376,4 +398,26 @@ fn same_executable(a: &PathBuf, b: &PathBuf) -> bool {
     let (a, b) = (canon(a), canon(b));
     a.to_string_lossy()
         .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// niubash#230 follow-up: the bundled-tools row names exactly what the
+    /// release ships and labels it as bundled, never as a system install.
+    #[test]
+    fn bundled_tools_row_labels_the_release_source() {
+        let row = bundled_tools_row(&["gawk", "niugit", "ripgrep", "fd"]);
+        assert!(row.contains("gawk niugit ripgrep fd"), "{row}");
+        assert!(row.contains("shipped with the release"), "{row}");
+        assert!(row.contains("not system installs"), "{row}");
+    }
+
+    #[test]
+    fn bundled_tools_row_is_honest_when_empty() {
+        let row = bundled_tools_row(&[]);
+        assert!(row.contains("none"), "{row}");
+        assert!(!row.contains("shipped"), "{row}");
+    }
 }

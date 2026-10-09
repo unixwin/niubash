@@ -216,6 +216,92 @@ const PLATFORM_PROBED_TOOLS: &[&str] = &["wpm"];
 #[cfg(not(windows))]
 const PLATFORM_PROBED_TOOLS: &[&str] = &[];
 
+/// One release-bundle component (niubash#230 preinstall manifest,
+/// `scripts/release/preinstall.json`): the release CI installs it into the
+/// staged WinuxCmd root as `<root>\opt\<opt_dir>\<exe>` plus a winuxcmd.exe
+/// hardlink shim in `<root>\usr\bin`. Detection treats an existing payload or
+/// shim as "already present" so the wizard never reports a bundled component
+/// as missing and never re-recommends installing it.
+struct BundledComponent {
+    /// The wpm package name (as in the manifest) — used for labeling.
+    package: &'static str,
+    /// Subdirectory under `<root>\opt` carrying the payload.
+    opt_dir: &'static str,
+    /// Executable file names inside the opt payload directory.
+    exes: &'static [&'static str],
+    /// Shim names (hardlinks) under `<root>\usr\bin`.
+    shims: &'static [&'static str],
+    /// `PROBED_TOOLS` names this component satisfies when present.
+    tools: &'static [&'static str],
+}
+
+/// The components the release bundle ships (#230). Keep in sync with
+/// `scripts/release/preinstall.json`; detection is fail-open — a component
+/// the release leg skipped (arm64: niugit/gawk) simply stays undetected.
+const BUNDLED_COMPONENTS: &[BundledComponent] = &[
+    BundledComponent {
+        package: "gawk",
+        opt_dir: "gawk",
+        exes: &["gawk.exe", "awk.exe"],
+        shims: &["gawk.exe", "awk.exe"],
+        tools: &["gawk", "awk"],
+    },
+    BundledComponent {
+        package: "niugit",
+        opt_dir: "niugit",
+        exes: &["git.exe"],
+        shims: &["git.exe"],
+        tools: &["git"],
+    },
+    BundledComponent {
+        package: "ripgrep",
+        opt_dir: "ripgrep",
+        exes: &["rg.exe"],
+        shims: &["rg.exe"],
+        tools: &["rg"],
+    },
+    BundledComponent {
+        package: "fd",
+        opt_dir: "fd",
+        exes: &["fd.exe"],
+        shims: &["fd.exe"],
+        tools: &["fd"],
+    },
+];
+
+/// Which bundled components are present under a WinuxCmd installation root:
+/// a component counts as present when its opt payload *or* any usr\bin shim
+/// exists (the shim alone already forwards into the payload through the
+/// winuxcmd dispatcher). Pure over its inputs so tests can stage a fake
+/// root; `None` root (no winuxcmd found) means nothing is bundled.
+fn bundled_components_at(root: Option<&std::path::Path>) -> Vec<&'static str> {
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let usr_bin = root.join("usr").join("bin");
+    BUNDLED_COMPONENTS
+        .iter()
+        .filter(|c| {
+            let opt = root.join("opt").join(c.opt_dir);
+            c.exes.iter().any(|exe| opt.join(exe).is_file())
+                || c.shims.iter().any(|shim| usr_bin.join(shim).is_file())
+        })
+        .map(|c| c.package)
+        .collect()
+}
+
+/// The bundled components of the *running* installation: the opt/ tree of
+/// the discovered winuxcmd root. Shared with `niu doctor` so both surfaces
+/// report the same truth.
+pub(crate) fn bundled_components() -> Vec<&'static str> {
+    bundled_components_at(
+        crate::winuxcmd::find_winuxcmd()
+            .as_deref()
+            .map(crate::winuxcmd::installation_root)
+            .as_deref(),
+    )
+}
+
 // ── Wizard language ─────────────────────────────────────────────────────────
 //
 // The wizard is the one niubash surface every new user reads, so it carries a
@@ -627,11 +713,21 @@ struct EnvProbe {
     command_links: bool,
     /// Names from `PROBED_TOOLS` that resolved on PATH.
     tools: BTreeSet<String>,
+    /// Release-bundle components found under the winuxcmd opt/ tree (#230):
+    /// `BUNDLED_COMPONENTS` package names. Their tool names count as present
+    /// even when nothing resolves on PATH yet, so the wizard neither
+    /// recommends re-installing them nor skips aliases conditioned on them.
+    bundled: Vec<&'static str>,
 }
 
 impl EnvProbe {
+    /// Probed for the running installation; testable form below.
     fn collect() -> Self {
-        #[cfg_attr(not(windows), allow(unused_mut))]
+        Self::from_parts(Self::probe_tools(), bundled_components())
+    }
+
+    /// The tools that resolve on PATH right now.
+    fn probe_tools() -> BTreeSet<String> {
         let mut tools: BTreeSet<String> = PROBED_TOOLS
             .iter()
             .chain(PLATFORM_PROBED_TOOLS.iter())
@@ -644,6 +740,12 @@ impl EnvProbe {
         if wpm_available() {
             tools.insert("wpm".to_string());
         }
+        tools
+    }
+
+    /// Test seam: build a probe from explicit facts instead of probing the
+    /// live machine.
+    fn from_parts(tools: BTreeSet<String>, bundled: Vec<&'static str>) -> Self {
         EnvProbe {
             windows_terminal: std::env::var_os("WT_SESSION").is_some(),
             mintty_hint: std::env::var_os("MSYSTEM").is_some()
@@ -653,11 +755,18 @@ impl EnvProbe {
             nerd_font: crate::fonts::nerd_font_installed(),
             command_links: crate::winuxcmd::command_links_ready(),
             tools,
+            bundled,
         }
     }
 
     fn on_path(&self, tool: &str) -> bool {
         self.tools.contains(tool)
+            || self.bundled.iter().any(|pkg| {
+                BUNDLED_COMPONENTS
+                    .iter()
+                    .find(|c| c.package == *pkg)
+                    .is_some_and(|c| c.tools.contains(&tool))
+            })
     }
 
     fn print_summary(&self, lang: Lang) {
@@ -666,10 +775,36 @@ impl EnvProbe {
         } else {
             lang.tr("classic console")
         };
-        let tools = if self.tools.is_empty() {
+        // Source annotation: a tool satisfied by the release bundle is
+        // labeled "bundled" so the summary never passes a shipped component
+        // off as a system install (#230 follow-up). A name that also
+        // resolves on PATH prints unannotated — PATH is what actually runs.
+        let bundled_names = self.bundled_tool_names();
+        let tools = if self.tools.is_empty() && bundled_names.is_empty() {
             lang.tr("none detected").to_string()
         } else {
-            self.tools.iter().cloned().collect::<Vec<_>>().join(" ")
+            let mut names: Vec<String> = self
+                .tools
+                .union(&bundled_names)
+                .map(|tool| {
+                    if bundled_names.contains(tool) {
+                        format!("{tool} (bundled)")
+                    } else {
+                        tool.clone()
+                    }
+                })
+                .collect();
+            names.sort();
+            names.join(" ")
+        };
+        let bundle = if self.bundled.is_empty() {
+            lang.tr("none").to_string()
+        } else {
+            format!(
+                "{} ({})",
+                self.bundled.join(" "),
+                lang.tr("shipped with the release")
+            )
         };
         let label = |en: &str| pad_display(lang.tr(en), 14);
         println!();
@@ -694,6 +829,19 @@ impl EnvProbe {
             }
         );
         println!("  \u{2502}  {} {}", label("tools"), tools);
+        println!("  \u{2502}  {} {}", label("bundle"), bundle);
+    }
+
+    /// The `PROBED_TOOLS` names covered by the detected bundle, excluding the
+    /// ones already resolved on PATH (those print unannotated as system).
+    fn bundled_tool_names(&self) -> BTreeSet<String> {
+        self.bundled
+            .iter()
+            .filter_map(|pkg| BUNDLED_COMPONENTS.iter().find(|c| c.package == *pkg))
+            .flat_map(|c| c.tools.iter())
+            .filter(|tool| !self.tools.contains(**tool))
+            .map(|tool| tool.to_string())
+            .collect()
     }
 }
 
@@ -1480,6 +1628,13 @@ fn ask_niu_git(
 ) -> Option<NiuGitChoice> {
     let mut niu_git = NiuGitChoice::Skip;
     if read_niu_git_answer(home).is_none() {
+        // niubash#230 follow-up: the release bundle may already carry
+        // niu-git (opt\niugit). Never re-offer installing what is already
+        // there — record the fact so the question stays silent on re-runs.
+        if probe.bundled.iter().any(|pkg| *pkg == "niugit") {
+            write_niu_git_answer(home, "installed");
+            return Some(NiuGitChoice::Skip);
+        }
         let options = [
             format!(
                 "{}  {}",
@@ -1586,7 +1741,8 @@ fn ask_plugin_collection(io: &mut WizardIo, t: &Lang) -> Option<Option<String>> 
 }
 
 /// The recorded niu-git answer, when the user gave a lasting one ("never",
-/// or "installed" after a successful pick). While `None` the wizard may
+/// "recommended" after a pick, or "installed" when the release bundle
+/// already ships niu-git). While `None` the wizard may
 /// offer the choice again on the next explicit `niu setup` run — a wizard
 /// re-run is user-initiated, never a nag.
 fn read_niu_git_answer(home: &std::path::Path) -> Option<String> {
@@ -2302,6 +2458,117 @@ mod tests {
     use super::*;
     use crate::test_support::PROCESS_STATE_LOCK;
 
+    // ── Release-bundle detection (niubash#230 follow-up) ───────────────────
+
+    /// Stage a fake winuxcmd root: `opt/<pkg>/<exe>` payloads plus optional
+    /// `usr/bin` shims (winuxcmd.exe hardlinks in the real layout).
+    fn stage_bundle_root(temp: &std::path::Path, pkg: &str, exe: &str, shim: Option<&str>) {
+        let opt = temp.join("opt").join(pkg);
+        std::fs::create_dir_all(&opt).unwrap();
+        std::fs::write(opt.join(exe), b"payload").unwrap();
+        if let Some(shim) = shim {
+            let usr_bin = temp.join("usr").join("bin");
+            std::fs::create_dir_all(&usr_bin).unwrap();
+            std::fs::write(usr_bin.join(shim), b"shim").unwrap();
+        }
+    }
+
+    #[test]
+    fn bundled_payload_under_opt_counts_as_present() {
+        let temp = unique_temp_dir("wizard-bundle-opt");
+        stage_bundle_root(&temp, "ripgrep", "rg.exe", None);
+        assert_eq!(bundled_components_at(Some(&temp)), vec!["ripgrep"]);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn bundled_shim_without_payload_counts_as_present() {
+        // wpm's layout ships the payload in opt\ but a stripped install may
+        // keep only the usr\bin hardlink shim — either alone means the
+        // component is usable through the dispatcher.
+        let temp = unique_temp_dir("wizard-bundle-shim");
+        let usr_bin = temp.join("usr").join("bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::write(usr_bin.join("git.exe"), b"shim").unwrap();
+        assert_eq!(bundled_components_at(Some(&temp)), vec!["niugit"]);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn missing_bundle_and_missing_root_detect_nothing() {
+        let temp = unique_temp_dir("wizard-bundle-empty");
+        assert!(bundled_components_at(Some(&temp)).is_empty(), "empty root");
+        assert!(bundled_components_at(None).is_empty(), "no root at all");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn bundled_tools_satisfy_probes_with_bundled_source() {
+        let probe = EnvProbe::from_parts(BTreeSet::new(), vec!["niugit", "fd"]);
+        assert!(
+            probe.on_path("git"),
+            "bundled niugit satisfies the git probe"
+        );
+        assert!(probe.on_path("fd"));
+        assert!(!probe.on_path("rg"), "rg is not in this fake bundle");
+        let names = probe.bundled_tool_names();
+        assert!(names.contains("git") && names.contains("fd"));
+        assert!(!names.contains("rg"));
+    }
+
+    #[test]
+    fn system_tools_are_not_shadowed_by_bundle_labels() {
+        let mut tools = BTreeSet::new();
+        tools.insert("rg".to_string());
+        let probe = EnvProbe::from_parts(tools, vec!["ripgrep"]);
+        // rg resolves on PATH (system): the bundled label must not duplicate
+        // or reannotate it in the summary's tool list.
+        assert!(probe.bundled_tool_names().is_empty());
+        assert!(probe.on_path("rg"));
+    }
+
+    /// The niu-git question is skipped entirely when the release bundle
+    /// already ships niu-git — and the fact is recorded so re-runs stay
+    /// silent. No install recommendation may surface.
+    #[cfg(windows)]
+    #[test]
+    fn niu_git_question_skipped_when_niugit_is_bundled() {
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("wizard-niugit-bundled");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let probe = EnvProbe::from_parts(BTreeSet::new(), vec!["niugit"]);
+        let mut io = WizardIo::new(false);
+        let choice = ask_niu_git(&mut io, &Lang::En, &home, &probe);
+        assert_eq!(choice, Some(NiuGitChoice::Skip));
+        assert_eq!(read_niu_git_answer(&home).as_deref(), Some("installed"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Without the bundle the question stays offerable: no lasting answer is
+    /// written on a plain skip, so a later explicit `niu setup` can still
+    /// surface the (never auto-installed) choice.
+    #[cfg(windows)]
+    #[test]
+    fn niu_git_question_still_offered_without_the_bundle() {
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("wizard-niugit-absent");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let probe = EnvProbe::from_parts(BTreeSet::new(), Vec::new());
+        let mut io = WizardIo::new(false);
+        let choice = ask_niu_git(&mut io, &Lang::En, &home, &probe);
+        assert_eq!(choice, Some(NiuGitChoice::Skip));
+        assert_eq!(
+            read_niu_git_answer(&home),
+            None,
+            "a bundle-less skip must not write a lasting answer"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     #[test]
     fn display_welcome_side_by_side_renders_without_panic() {
         display_welcome_side_by_side(false, Lang::En);
@@ -2427,6 +2694,7 @@ mod tests {
             nerd_font: false,
             command_links: true,
             tools: BTreeSet::new(),
+            bundled: Vec::new(),
         };
         let presets = builtin_presets();
         assert!(presets.len() >= 3);
