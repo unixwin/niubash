@@ -102,6 +102,43 @@ jobs:
         continue-on-error: true
         run: cargo test --workspace --lib --locked
 
+  # Cross-target gating gate: the two `runs-on` platforms above only ever
+  # exercise x86_64 glibc. Neither the musl libc (Alpine / static builds) nor
+  # the OpenHarmony target (`aarch64-unknown-linux-ohos`, HarmonyOS PC) is
+  # covered, and both diverge from glibc in ways a host-only check cannot
+  # see -- e.g. rubash's `ulimit` used `libc::__rlimit_resource_t`, a typedef
+  # glibc alone defines, so musl and ohos failed to compile while the host
+  # stayed green. `cargo check` on an explicit target is the acceptance line.
+  #
+  # `aarch64-unknown-linux-ohos` is Tier 2 with host tools, so no external
+  # OpenHarmony SDK / clang wrapper is needed for a check-only build.
+  cross-target-check:
+    name: cross-target-check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-ohos
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ matrix.target }}
+
+      # Same as the other jobs: no `cargo update -p rubash` under the
+      # [patch] override -- the sibling clone is already latest master.
+
+      - name: cargo check --target ${{ matrix.target }}
+        run: cargo check --workspace --locked --target ${{ matrix.target }}
+
 
   # Per-asset timing budget trend (owner directive 2026-10-04): nightly run
   # of the same gate the release enforces (scripts/perf/asset-timing.py over
