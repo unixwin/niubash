@@ -1,0 +1,257 @@
+
+
+
+
+set -euo pipefail
+
+
+cd ~/echo-archive
+
+
+echo '=== ENV ==='
+pwd
+java -version
+javac -version
+
+
+echo
+echo '=== CLEAN ==='
+rm -rf \
+  java-capsule/build \
+  java-capsule/dist \
+  java-capsule/dist-obfuscated \
+  java-capsule/test-runtime
+
+
+mkdir -p \
+  java-capsule/build \
+  java-capsule/dist \
+  java-capsule/dist-obfuscated \
+  java-capsule/test-runtime
+
+
+echo
+echo '=== COMPILE ==='
+
+
+find java-capsule/src -name '*.java' -print
+
+
+javac \
+  --release 21 \
+  -encoding UTF-8 \
+  -d java-capsule/build \
+  $(find java-capsule/src -name '*.java' -print)
+
+
+echo
+echo '=== CLASSES ==='
+
+
+find java-capsule/build -type f -name '*.class' -print
+
+
+echo
+echo '=== BUILD PLAIN JAR ==='
+
+
+jar \
+  --create \
+  --file java-capsule/dist/capsule-plain.jar \
+  -C java-capsule/build .
+
+
+ls -lh java-capsule/dist/capsule-plain.jar
+
+
+echo
+echo '=== CHECK PUBLIC API BEFORE OBFUSCATION ==='
+
+
+javap \
+  -classpath java-capsule/dist/capsule-plain.jar \
+  -public \
+  archive.aether.capsule.CapsuleApi
+
+
+echo
+echo '=== ZELIX ==='
+
+
+test -f /g/P/zkm.jar
+test -f java-capsule/capsule.zks
+
+
+java \
+  -jar /g/P/zkm.jar \
+  java-capsule/capsule.zks
+
+
+echo
+echo '=== FIND OBFUSCATED JAR ==='
+
+
+find java-capsule -maxdepth 3 \
+  -type f \
+  -name '*.jar' \
+  -print
+
+
+OBF='java-capsule/dist-obfuscated/capsule.jar'
+
+
+if [ ! -f "$OBF" ]; then
+  echo "ERROR: expected obfuscated jar missing: $OBF"
+  exit 1
+fi
+
+
+echo
+echo '=== CHECK PUBLIC API AFTER OBFUSCATION ==='
+
+
+javap \
+  -classpath "$OBF" \
+  -public \
+  archive.aether.capsule.CapsuleApi
+
+
+echo
+echo '=== SHA256 ==='
+
+
+sha256sum "$OBF"
+
+
+echo
+echo '=== BUILD TEST HARNESS ==='
+
+
+cat > java-capsule/test-runtime/TestCapsule.java <<'JAVA'
+import archive.aether.capsule.CapsuleApi;
+
+
+public final class TestCapsule {
+    static byte[] hex(String s) {
+        if ((s.length() & 1) != 0) {
+            throw new IllegalArgumentException("odd hex");
+        }
+
+
+        byte[] out = new byte[s.length() / 2];
+
+
+        for (int i = 0; i < out.length; i++) {
+            int hi = Character.digit(s.charAt(i * 2), 16);
+            int lo = Character.digit(s.charAt(i * 2 + 1), 16);
+
+
+            if (hi < 0 || lo < 0) {
+                throw new IllegalArgumentException("invalid hex");
+            }
+
+
+            out[i] = (byte)((hi << 4) | lo);
+        }
+
+
+        return out;
+    }
+
+
+    public static void main(String[] args) {
+        byte[] input = hex(
+            "000102030405060708090a0b0c0d0e0f" +
+            "101112131415161718191a1b1c1d1e1f"
+        );
+
+
+        byte[] proof = hex(
+            "af56ba971739374537b3243f57fbda9a" +
+            "cd4005d29e8c96ff202a3789446b6693"
+        );
+
+
+        byte[] packet = new byte[64];
+
+
+        System.arraycopy(input, 0, packet, 0, 32);
+        System.arraycopy(proof, 0, packet, 32, 32);
+
+
+        int result = CapsuleApi.verify(packet);
+
+
+        System.out.println("VERIFY=" + result);
+
+
+        if (result != 0x254) {
+            throw new AssertionError(
+                "expected 596 / 0x254, got " + result
+            );
+        }
+    }
+}
+JAVA
+
+
+javac \
+  --release 21 \
+  -encoding UTF-8 \
+  -cp "$OBF" \
+  -d java-capsule/test-runtime \
+  java-capsule/test-runtime/TestCapsule.java
+
+
+echo
+echo '=== OBFUSCATED SELF TEST ==='
+
+
+java \
+  -cp "$OBF:java-capsule/test-runtime" \
+  TestCapsule
+
+
+echo
+echo '=== COPY FINAL ARTIFACT ==='
+
+
+cp "$OBF" java-capsule/dist/capsule.jar
+
+
+FINAL_SHA="$(
+  sha256sum java-capsule/dist/capsule.jar |
+  awk '{print $1}'
+)"
+
+
+echo "FINAL_SHA256=$FINAL_SHA"
+
+
+echo
+echo '=== EXPECTED KNOWN SHA ==='
+
+
+EXPECTED='fb0a2782a10b3c4e1d948eaf6df87a4f78ed4eaae37f669d64e743a1622d49c5'
+
+
+if [ "$FINAL_SHA" = "$EXPECTED" ]; then
+  echo 'CAPSULE_SHA256=MATCH'
+else
+  echo 'CAPSULE_SHA256=CHANGED'
+  echo "expected=$EXPECTED"
+  echo "actual=$FINAL_SHA"
+fi
+
+
+echo
+echo '============================'
+echo 'LOCAL CAPSULE BUILD = OK'
+echo 'PUBLIC API          = OK'
+echo 'OBFUSCATION         = OK'
+echo 'VERIFY(known)       = 596'
+echo '============================'
+
+
+
+

@@ -736,16 +736,62 @@ fn rapid_input_burst_all_lines_execute() {
     s.expect_prompt();
 }
 
-/// Pasting a multiline block (raw newline paste; niubash does not enable
-/// reedline's bracketed-paste mode — documented gap) executes each line and
-/// keeps incomplete constructs editable until they close.
+/// niubash#202: a bracketed multiline paste must land in the edit buffer as
+/// ONE unit (GNU bash paste semantics) — nothing executes until the user
+/// submits the buffer, no matter how many newlines the chunk carries.
+///
+/// The output markers only appear when a line EXECUTES (`echo $V1` renders
+/// as literal `echo $V1` inside the edit buffer, so the echoed buffer text
+/// cannot satisfy the assertion — only the executed output can).
+///
+/// Non-Windows only: crossterm has no ANSI input parser on Windows, so
+/// ConPTY consumes the ESC[200~/ESC[201~ markers before they reach the
+/// shell (see the builder comment in `build_line_editor`); there a
+/// terminal paste degrades to the per-line behavior asserted by
+/// [`multiline_raw_paste_per_line_windows`].
 #[test]
-fn multiline_block_paste_executes() {
-    if !require_pty_or_skip("multiline_block_paste_executes") {
+fn multiline_bracketed_paste_buffers_whole_chunk() {
+    if cfg!(windows) {
+        // Platform limitation, not a regression: markers never reach the
+        // parser (crossterm-rs/crossterm#737).
+        return;
+    }
+    if !require_pty_or_skip("multiline_bracketed_paste_buffers_whole_chunk") {
+        return;
+    }
+    let rc = format!("{}\nV1=PX1_DONE\nV2=PX2_DONE\n", driver::default_rc());
+    let mut s = NiuSession::spawn_custom("paste-bracketed", &rc, &[], (120, 30), HEAVY_TIMEOUT);
+    s.wait_ready();
+    // One bracketed paste chunk, two commands, internal newlines, no
+    // trailing Enter inside the markers.
+    s.send("\u{1b}[200~echo $V1\r\necho $V2\u{1b}[201~");
+    // While the chunk sits in the edit buffer nothing may have executed.
+    s.expect_absent("PX1_DONE", ABSENT_WINDOW);
+    s.expect_absent("PX2_DONE", ABSENT_WINDOW);
+    // Submitting the buffered chunk runs it as one multiline script.
+    s.send("\r");
+    s.expect("PX1_DONE");
+    s.expect("PX2_DONE");
+    s.expect_prompt();
+}
+
+/// Windows fallback semantics (documented in `build_line_editor`): ConPTY
+/// hands a terminal paste to crossterm as per-line key events, so each line
+/// executes as it arrives — the same behavior as pasting into cmd.exe. The
+/// one-shot alternative on Windows is Ctrl+V (PasteSystem), covered by
+/// [`ctrl_v_clipboard_paste_single_buffer_execution`]. This test pins the
+/// fallback so a future crossterm parser cannot silently change it without
+/// notice.
+#[test]
+fn multiline_raw_paste_per_line_windows() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("multiline_raw_paste_per_line_windows") {
         return;
     }
     let mut s = NiuSession::spawn_custom(
-        "paste",
+        "paste-raw-win",
         &driver::default_rc(),
         &[],
         (120, 30),
@@ -758,6 +804,55 @@ fn multiline_block_paste_executes() {
     s.expect_prompt();
     s.send("if true; then\recho paste-branch\rfi\r");
     s.expect("paste-branch");
+    s.expect_prompt();
+}
+
+/// niubash#202 (Windows path): Ctrl+V (EditCommand::PasteSystem) inserts the
+/// whole clipboard into the edit buffer as one unit — no line executes
+/// until Enter — restoring GNU bash paste semantics on Windows where
+/// bracketed paste cannot reach the shell.
+///
+/// Per-line execution would print each line's output (and a fresh prompt)
+/// while the paste is still being typed; the expect_absent assertions below
+/// pin the buffered, single-submission behavior.
+#[test]
+fn ctrl_v_clipboard_paste_single_buffer_execution() {
+    if !cfg!(windows) {
+        // CI clipboards on headless unix runners are not addressable; the
+        // bracketed-paste test above covers the unix semantics.
+        return;
+    }
+    if !require_pty_or_skip("ctrl_v_clipboard_paste_single_buffer_execution") {
+        return;
+    }
+    const PS: &str = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+    // Output markers come from rc variables so the echoed edit buffer
+    // (`echo $V1`) can never satisfy the "not executed" assertions — only
+    // the executed output text can.
+    let rc = format!("{}\nV1=CBX1_DONE\nV2=CBX2_DONE\n", driver::default_rc());
+    let mut s = NiuSession::spawn_custom("paste-ctrlv", &rc, &[], (120, 30), HEAVY_TIMEOUT);
+    s.wait_ready();
+    let mut set = std::process::Command::new(PS);
+    set.args([
+        "-NoProfile",
+        "-Command",
+        "Set-Clipboard -Value 'echo $V1\r\necho $V2'",
+    ]);
+    let st = set.output().expect("spawn powershell");
+    if !st.status.success() {
+        // No clipboard on this host: the test cannot be exercised.
+        return;
+    }
+    // Let the clipboard settle.
+    std::thread::sleep(Duration::from_millis(300));
+    s.send("\u{16}"); // Ctrl+V
+    std::thread::sleep(Duration::from_millis(500));
+    // Both lines buffered as one unit; nothing executed yet.
+    s.expect_absent("CBX1_DONE", ABSENT_WINDOW);
+    s.expect_absent("CBX2_DONE", ABSENT_WINDOW);
+    s.send("\r");
+    s.expect("CBX1_DONE");
+    s.expect("CBX2_DONE");
     s.expect_prompt();
 }
 
