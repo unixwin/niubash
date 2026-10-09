@@ -87,6 +87,8 @@ jobs:
         uses: actions/download-artifact@v4
         with: { name: eco-manifest, path: eco }
       - name: run tester (untrusted assets, ephemeral runner)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/harvest/eco-test.py `
             --tiers "${{ github.event.inputs.test_tiers || 't1' }}" `
