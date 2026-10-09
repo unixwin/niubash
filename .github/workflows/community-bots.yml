@@ -33,8 +33,15 @@ jobs:
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
+      # Inputs are snake_case in first-interaction@v3 (action.yml:
+      # issue_message / pr_message / repo_token). This job shipped with the
+      # hyphenated spellings, which the action does not declare, so it warned
+      # "Unexpected input(s) 'repo-token', 'issue-message', 'pr-message'"
+      # and every first-time contribution went ungreeted. repo_token has a
+      # default (${{ github.token }}) but is required, so the explicit pass
+      # stays -- just spelled correctly.
       - uses: actions/first-interaction@v3
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          issue-message: "欢迎！这是你在本仓库的第一个 ISSUE 🎉 维护者会尽快跟进；报 bug 请附 `niu --version`、系统平台与最小复现脚本。"
-          pr-message: "欢迎！这是你的第一个 PR 🎉 请确认已跑过本地测试套件；CI 通过后维护者会 review。"
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          issue_message: "欢迎！这是你在本仓库的第一个 ISSUE 🎉 维护者会尽快跟进；报 bug 请附 `niu --version`、系统平台与最小复现脚本。"
+          pr_message: "欢迎！这是你的第一个 PR 🎉 请确认已跑过本地测试套件；CI 通过后维护者会 review。"
