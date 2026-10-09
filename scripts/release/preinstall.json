@@ -1,11 +1,23 @@
 {
   "schema": 1,
   "name": "niubash-release-preinstall",
-  "description": "Release CI pre-install manifest (niubash#189). The release workflow installs every entry of `packages` into the staged WinuxCmd root with `winuxcmd wpm install <name> --root <staged-root> --yes`, then materializes every entry of `shims` as a winuxcmd.exe hardlink in usr\\bin. The package index lives in unixwin/wpm-source (index.json); wpm itself ships inside winuxcmd.exe (`winuxcmd wpm ...`), so no separate wpm.exe is needed.",
+  "description": "Release CI pre-install manifest (niubash#189, extended by niubash#209). The release workflow installs every entry of `packages` into the staged WinuxCmd root with `winuxcmd wpm install <name> --root <staged-root> --yes`, then materializes every entry of `shims` as a winuxcmd.exe hardlink in usr\\bin. The package index lives in unixwin/wpm-source (index.json); wpm itself ships inside winuxcmd.exe (`winuxcmd wpm ...`), so no separate wpm.exe is needed.",
   "packages": [
     {
       "name": "gawk",
       "purpose": "GNU Awk 5.4.1. bash-it plugins and completions hard-depend on awk (the gradle completion pipes through `awk '{print $1}'` on every use); gawk IS the GNU implementation, so plugin scripts written against GNU awk keep their dialect. The wpm `gawk` package is layout=shim: the payload (gawk.exe, awk.exe, and its five DLLs) lands in <root>\\opt\\gawk and usr\\bin\\gawk.exe is a winuxcmd.exe hardlink shim that forwards there."
+    },
+    {
+      "name": "niugit",
+      "purpose": "Niu-git 2.55.0.3 (native Windows git without MSYS). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. The payload is the whole niu-git tree (git.exe at the package root plus the mingw64/ directory carrying its minimal dependency DLLs and etc/) landing in <root>\\opt\\niugit; wpm registers command `git`, so usr\\bin\\git.exe forwards into the package. It is schannel-only TLS with no bundled shell/perl and accepts POSIX-shaped (/d/...) path args."
+    },
+    {
+      "name": "ripgrep",
+      "purpose": "Ripgrep 15.2.0 (`rg`). A common interactive/search tool users expect right after first setup; shipped so the out-of-the-box shell has modern search without a network fetch (niubash#209). Single static rg.exe payload in <root>\\opt\\ripgrep with command `rg` registered. Unlike niugit/gawk, the wpm index carries a windows-arm64 artifact too, so this one pre-installs on BOTH Windows legs."
+    },
+    {
+      "name": "fd",
+      "purpose": "fd 10.4.2. The find counterpart to ripgrep; same rationale (niubash#209): bundled at CI time so users never need a network install for the basics. Single static fd.exe payload in <root>\\opt\\fd with command `fd` registered, with a windows-arm64 artifact in the index as well."
     }
   ],
   "shims": [
@@ -16,8 +28,9 @@
     }
   ],
   "notes": [
-    "Fail-open contract: a failed install is a loud warning (GITHUB_STEP_SUMMARY + ::warning), never a release blocker. Pre-installing is an enhancement, not a promise; users can always run `winuxcmd wpm install gawk` against an installed package.",
-    "Architecture: the wpm index currently carries windows-x64 artifacts only for these packages. On the arm64 release leg the install fails by design and the leg ships without awk/gawk; the post-package verify step asserts only on legs where the binaries exist.",
+    "Fail-open contract: a failed install is a loud warning (GITHUB_STEP_SUMMARY + ::warning), never a release blocker. Pre-installing is an enhancement, not a promise; users can always run `winuxcmd wpm install <name>` against an installed package.",
+    "Architecture: niugit and gawk exist as windows-x64 artifacts only in the wpm index; on the arm64 release leg those installs fail by design and the leg ships without them. ripgrep and fd carry windows-arm64 artifacts and pre-install on both legs. The post-package verify step asserts only on legs where the binaries exist.",
+    "No symlinks, ever: shims are winuxcmd.exe hardlinks (copies on file systems without hardlink support). The issue red lines stand - no archive formats are added, no symbolic links are created, and the runtime never downloads binaries (the assembly happens here, in CI).",
     "The staged package ships <root>\\usr\\bin shims and the <root>\\opt payload tree only - never the .wpm state directory (cache/staging/index)."
   ],
   "excluded": [

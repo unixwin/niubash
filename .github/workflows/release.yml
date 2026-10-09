@@ -169,13 +169,16 @@ jobs:
           "asset=$($asset.name)" >> $env:GITHUB_OUTPUT
           "exe=$($winuxcmdExe.FullName)" >> $env:GITHUB_OUTPUT
 
-      # niubash#189 — release pre-install, manifest-driven. wpm ships INSIDE
-      # winuxcmd.exe (`winuxcmd wpm ...`), so the binary the step above
-      # extracted is all the package manager this needs. The manifest
-      # (scripts/release/preinstall.json) names the packages, the extra
-      # command shims, and the owner-ordered exclusions (no compression
-      # tools; goawk forbidden; `link` forbidden forever — MSVC collision);
-      # tests/preinstall_manifest.rs pins that policy. The staged root mirrors
+      # niubash#189, extended to the #209 must-install bundle — release
+      # pre-install, manifest-driven. wpm ships INSIDE winuxcmd.exe
+      # (`winuxcmd wpm ...`), so the binary the step above extracted is all
+      # the package manager this needs. The manifest
+      # (scripts/release/preinstall.json) names the packages (gawk; plus
+      # niugit / ripgrep / fd per #209 so `niu setup` full distro works on a
+      # gitless machine), the extra command shims, and the owner-ordered
+      # exclusions (no compression tools; goawk forbidden; `link` forbidden
+      # forever — MSVC collision); tests/preinstall_manifest.rs pins that
+      # policy. The staged root mirrors
       # the shipped layout exactly (<root>\usr\bin\<cmd>.exe hardlink shims
       # forwarding to <root>\opt\<pkg>\ payloads), and package-release.ps1
       # copies both into the package.
@@ -1076,7 +1079,7 @@ jobs:
 
             Windows (x64, ARM64): Inno Setup installers (`*-setup.exe`) add user PATH and Windows Terminal profile integration; portable zips bundle `niu` with WinuxCmd and bash/sh shims.
 
-            Windows packages come with GNU awk pre-installed (niubash#189): gawk 5.4.1 lands in the bundled WinuxCmd root, and plain `awk` works too (a shim forwards to it), so bash-it plugins and completions that hard-depend on awk run out of the box. Pre-install is best-effort, not a promise: on legs where the package index has no matching artifact (currently the ARM64 builds) the package ships WITHOUT awk — run `winuxcmd wpm install gawk` once after installing to add it. The pre-install list and its recorded exclusions live in `scripts/release/preinstall.json`.
+            Windows packages come with the must-install bundle pre-installed (niubash#189, niubash#209): niugit (native Windows git — the full plugin distro's five entries install through git, so a fresh machine without git.exe no longer fails `niu setup`), gawk 5.4.1 with plain `awk` working too, plus ripgrep (`rg`) and fd — all landing in the bundled WinuxCmd root as wpm JSON-package payloads, assembled at CI time with no runtime downloads, no archive formats beyond the release zip itself, and no symlinks. Pre-install is best-effort, not a promise: on legs where the package index has no matching artifact (currently niugit and gawk on the ARM64 builds; ripgrep and fd have ARM64 artifacts) the package ships WITHOUT that entry — run `winuxcmd wpm install <name>` once after installing to add it. The pre-install list and its recorded exclusions live in `scripts/release/preinstall.json`.
 
             `niubash-skill-v<version>.zip` is the AI agent skill bundle (SKILL.md + references, WinuxCmd-skill layout): unpack it into an agent skills directory, or let the shell do it — `niu skill install` embeds the same content.
 
