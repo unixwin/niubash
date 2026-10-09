@@ -65,18 +65,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4 # niubash：eco 脚本（引擎源码不在此树内签出）
-      - name: checkout rubash outside the workspace tree
-        uses: actions/checkout@v4
-        with:
-          repository: unixwin/rubash
-          path: ${{ runner.temp }}/rubash # 防止 cargo 向上撞进 niubash 工作区
+      - name: clone rubash outside the workspace tree
+        run: git clone --depth 1 https://github.com/${{ github.repository_owner }}/rubash.git "${{ runner.temp }}/rubash"
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: install test deps
         run: pip install pyte pywinpty # pywinpty 提供的模块名就是 winpty
       - name: build engine
-        working-directory: ${{ runner.temp }}/rubash
-        run: cargo build --release
+        run: cargo build --release --manifest-path "${{ runner.temp }}/rubash/Cargo.toml"
       - name: locate binaries
         id: bins
         shell: pwsh
