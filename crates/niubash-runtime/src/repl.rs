@@ -163,6 +163,29 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         ))
         .with_menu(completion_menu)
         .with_menu(history_menu)
+        // niubash#202: bracketed paste (mode ?2004). Without it a terminal
+        // paste of multiline text behaves as if the user typed each line
+        // followed by Enter: every line runs its own prompt cycle (each
+        // with a syntax-highlighted repaint, pre-prompt hooks and a
+        // history flush — measured at ~130 ms/line for a 200-line paste)
+        // and each line EXECUTES as it arrives, so a pasted heredoc or
+        // multi-line construct never survives the paste. With bracketed
+        // paste the terminal wraps the whole chunk in ESC[200~...ESC[201~,
+        // crossterm delivers it as one Event::Paste, and reedline inserts
+        // it into the edit buffer as a single unit (GNU bash paste
+        // semantics: nothing executes until the user submits the buffer;
+        // one repaint for the whole paste).
+        //
+        // Windows stays off: stock crossterm reads console input through
+        // the Win32 console API and has no ANSI input parser, so ESC[200~
+        // can never surface as crossterm's Event::Paste there (upstream:
+        // crossterm-rs/crossterm#737; ConPTY consumes the mode markers
+        // before any parser would see them — verified empirically while
+        // triaging this issue). On Windows a terminal paste still arrives
+        // as per-line key events; Ctrl+V (PasteSystem, bound below) is the
+        // one-shot clipboard path until crossterm grows a Windows input
+        // parser.
+        .use_bracketed_paste(cfg!(not(target_os = "windows")))
         .with_edit_mode(build_edit_mode(
             shell_ref.editor_mode,
             &shell_ref.native_widgets,
