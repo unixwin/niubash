@@ -36,12 +36,29 @@ Each tarball unpacks to a single `niubash-v{ver}-{os}-{arch}/` directory;
 
 ## Unix decisions (recorded)
 
-- **gnu, not musl** — the first Unix release ships `*-linux-gnu`. The CI
-  cross-check line (`.github/workflows/ci.yml` `cross-check`) and the
-  engine's Linux port (rubash#225–#240) are validated against glibc; musl
-  has never been compiled in this repo, so a musl leg would ship an
-  untested libc surface (DNS, threading, locale behavior all differ). Add
-  musl legs only after they carry the same smoke gate green.
+- **gnu, not musl (released); musl now smoke-gated** — the Unix release
+  still ships `*-linux-gnu`, for the glibc floor below. The original hold
+  was that "musl has never been compiled in this repo, so a musl leg would
+  ship an untested libc surface; add musl legs only after they carry the
+  same smoke gate green." Both halves are now discharged:
+  - `cross-target-check` compiles the workspace for
+    `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-ohos` (the
+    OpenHarmony target, HarmonyOS PC) — this caught rubash's glibc-only
+    `__rlimit_resource_t` typedef, which broke both targets while the
+    glibc-only `cross-check` stayed green (rubash#449).
+  - `cross-target-smoke` builds the musl binary `--release` and runs the
+    **same four checks as the glibc legs** (see "The smoke gate" below)
+    against it, natively — a static musl x86_64 binary runs on the glibc
+    runner, so unlike the ohos target it can carry the real gate, not just
+    a compile check. It first asserts the binary is actually static (`ldd`
+    must report `statically linked`), so a silent re-link against the
+    runner's glibc cannot pass.
+
+  So musl is compiled *and* smoked on every CI run; the released tarballs
+  remain gnu because the artifact matrix below is unchanged. A musl
+  *release* artifact (Alpine / static redistribution) is now a delivery
+  decision, not a test-coverage gap — flip it on by adding a leg to the
+  `build-linux` matrix when a consumer needs it.
 - **glibc floor: 2.35** (the ubuntu-22.04 build image). Covers Ubuntu 22.04+,
   Debian 12+. When the ubuntu-22.04 image retires, move BOTH Linux legs
   forward together and update this floor — never leave the two legs on

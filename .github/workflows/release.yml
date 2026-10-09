@@ -398,11 +398,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # gnu, not musl (first Unix release, recorded in docs/release.md):
-          # the CI cross-check line and the engine's unix port are validated
-          # against glibc, and musl has never been compiled in this repo —
-          # a musl leg would ship an untested libc surface. The glibc floor
-          # is the build image's (2.35 on ubuntu-22.04): Ubuntu 22.04+,
+          # gnu, not musl (released shape, recorded in docs/release.md):
+          # musl is now compiled AND smoke-gated by `cross-target-smoke` in
+          # ci.yml, so a musl leg no longer ships an untested libc surface —
+          # but the released tarballs stay gnu until a consumer needs a
+          # static build. Adding one is a delivery decision: add
+          # rust_target: x86_64-unknown-linux-musl here. The glibc floor is
+          # the build image's (2.35 on ubuntu-22.04): Ubuntu 22.04+,
           # Debian 12+. Move both legs forward together when the image
           # retires.
           - arch: x86_64
