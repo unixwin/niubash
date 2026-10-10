@@ -6,13 +6,36 @@ All notable changes to Niubash are documented in this file.
 
 ### Added
 
-- Doctor timing advice (niubash#201): `niu doctor` now carries an advisory
+- carapace-bin completion source for third-party commands (niubash#187
+  "completion descriptions", spike on `feat/carapace-completions`): when a
+  carapace-bin binary is available (`NIU_CARAPACE` path, `PATH`, or
+  `<install>\opt\carapace\carapace.exe`; `NIU_CARAPACE=off` disables), Tab
+  completion for commands *without* a local completion definition (git,
+  curl, gh, docker, … — ~1200 specs upstream, MIT) now offers candidates
+  with descriptions, feeding the #187 description menu. Contract (verified
+  against v1.8.0): `carapace <command> fish <words...>` emits
+  `value<TAB>Description` lines, already prefix-filtered; `ERR`/`_` meta
+  lines are skipped. Winuxcmd applet TOMLs, bundle definitions and user
+  completion files always win — the carapace source stands down for every
+  covered command. Failures are invisible: a 300 ms hard timeout, silent
+  spawn/parse errors, and cache invalidation on `cd` (dynamic specs like
+  git branch lists are cwd-sensitive). Measured v1.8.0 invocation cost is
+  104-146 ms warm, above the interactive budget, so results are cached per
+  session keyed by (command, preceding words, word shape, cwd) with a
+  5-minute TTL; ordinary words fetch the full list once and are filtered
+  locally, so typing further characters hits the same cache entry. Bundle
+  decision deliberately deferred: carapace.exe is 87 MB (17 MB packed) —
+  adding it to `scripts/release/preinstall.json` needs a separate owner
+  call. Git's own spec does not resolve nested context through the CLI
+  bridge (`git commit <TAB>` falls back to top-level candidates; flag
+  completion works for static specs like cargo), noted as follow-up.
   row pointing timing/performance-sensitive scripts at the bash 5 builtin
   `$EPOCHREALTIME` / `$EPOCHSECONDS` instead of looping on the external
   `$(date +%s%N)` — each `date` call pays Windows process creation
   (~10-30ms) while the builtin expands in microseconds with the GNU format
   `1699999999.123456`. Regression tests pin the format, second-level
   agreement with `date +%s`, live monotonic updates, and the speed gap.
+>>>>>>> origin/master
 
 - Vi editing mode wired end-to-end (niubash#184): `set -o vi` / `set -o
   emacs` now switch the LIVE line editor mid-session, like GNU bash — both
