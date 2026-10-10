@@ -45,6 +45,11 @@ const SETUP_JOURNAL_SCHEMA: &str = "niubash:setup-journal@0.1.0";
 struct SetupJournal {
     /// Backup of the previous rc (when one existed).
     rc_backup: Option<PathBuf>,
+    /// `true` when this run *created* the rc (fresh install: no previous
+    /// rc existed, so there is no backup to restore). The undo receipt
+    /// must then cover the write itself — remove the generated rc and the
+    /// setup-done marker (niubash#179 L02-1).
+    rc_created: bool,
     /// Theme picked from an external source: (name, source id).
     theme: Option<(String, String)>,
     /// Preset name when `niu setup --preset` produced this rc.
@@ -93,6 +98,9 @@ fn write_setup_journal(home: &std::path::Path, journal: &SetupJournal) {
             shell_quote(&backup.to_string_lossy())
         ));
     }
+    if journal.rc_created {
+        body.push_str("rc_created = true\n");
+    }
     if let Some((theme, source)) = &journal.theme {
         body.push_str(&format!(
             "theme = {}\ntheme_source = {}\n",
@@ -131,7 +139,11 @@ fn write_setup_journal(home: &std::path::Path, journal: &SetupJournal) {
     }
 }
 
-/// One undo command per journal entry (§6.3).
+/// One undo command per journal entry (§6.3). A fresh install (niubash#179
+/// L02-1) has no previous rc to restore, so its receipt covers the write
+/// itself: remove the generated rc (guard block included) and the setup
+/// marker. Source ids are deduplicated (L02-2): when the theme and the
+/// collection name the same source, the removal line prints once.
 fn setup_undo_lines(home: &std::path::Path, journal: &SetupJournal) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(backup) = &journal.rc_backup {
@@ -141,20 +153,37 @@ fn setup_undo_lines(home: &std::path::Path, journal: &SetupJournal) -> Vec<Strin
             home.join(PRIMARY_RC_FILE).display()
         ));
     }
+    if journal.rc_created {
+        lines.push(format!(
+            "rm {}                  # fresh install: remove the generated rc",
+            home.join(PRIMARY_RC_FILE).display()
+        ));
+        lines.push(format!(
+            "rm {}                  # and the setup-done marker",
+            home.join(".niubash").join(SETUP_DONE_FILE).display()
+        ));
+    }
+    let mut named_sources: BTreeSet<&str> = BTreeSet::new();
     if let Some((theme, source)) = &journal.theme {
         lines.push(format!(
             "niu plugin disable {theme}          # drop the theme pick"
         ));
-        lines.push(format!(
-            "niu plugin source remove {source}   # optional: also delete the tree"
-        ));
+        if named_sources.insert(source.as_str()) {
+            lines.push(format!(
+                "niu plugin source remove {source:<12}  # optional: also delete the tree"
+            ));
+        }
     }
     if let Some(collection) = &journal.collection {
         for id in &collection.sources {
-            lines.push(format!(
-                "niu plugin source remove {id:<12}  # collection '{}': drop the source",
-                collection.name
-            ));
+            // Deduplicated (niubash#179 L02-2): the theme and the collection
+            // may name the same source; the removal receipt prints once.
+            if named_sources.insert(id.as_str()) {
+                lines.push(format!(
+                    "niu plugin source remove {id:<12}  # collection '{}': drop the source",
+                    collection.name
+                ));
+            }
         }
     }
     lines
@@ -1119,10 +1148,12 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         let preset = Preset::builtin("minimal");
         let cfg = preset.to_config(&probe, &mut Vec::new(), lang);
         let backup_path = write_rc_and_mark_done(&home, &cfg, lang)?;
+        let rc_created = backup_path.is_none();
         write_setup_journal(
             &home,
             &SetupJournal {
                 rc_backup: backup_path,
+                rc_created,
                 preset: Some(preset.name.clone()),
                 ..SetupJournal::default()
             },
@@ -1163,7 +1194,12 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // 2026-10-03), then the upstream releases page.
     let niu_git = match ask_niu_git(&mut io, &t, &home, &probe) {
         Some(choice) => choice,
-        None => return Ok(()), // cancelled at the niu-git question
+        // niubash#179 L02-3: Ctrl-C here must print the same cancelled
+        // note every other question prints — silent exit is a dead end.
+        None => {
+            print_cancelled_note();
+            return Ok(());
+        }
     };
 
     // --- Summary + explicit Apply gate ---
@@ -1246,6 +1282,9 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // picked either at Q1 or post-install lands in the same field.
     let journal = SetupJournal {
         rc_backup: backup_path.clone(),
+        // Fresh install (no previous rc): the receipt must cover the write
+        // itself (niubash#179 L02-1).
+        rc_created: backup_path.is_none(),
         theme: match &theme_pick {
             ThemePick::External { name, source_id } => Some((name.clone(), source_id.clone())),
             ThemePick::Keep => None,
@@ -1904,6 +1943,7 @@ pub fn apply_preset(name: &str) -> anyhow::Result<()> {
     let backup_path = write_rc_and_mark_done(&home, &cfg, lang)?;
     let journal = SetupJournal {
         rc_backup: backup_path.clone(),
+        rc_created: backup_path.is_none(),
         preset: Some(preset.name.clone()),
         ..SetupJournal::default()
     };
@@ -2293,15 +2333,18 @@ fn zh(en: &str) -> Option<&'static str> {
             "无法使用，请重启 niu 或运行 `wpm links rebuild`。",
 
         // Theme gallery step
-        "Skip — keep my current theme" => "跳过 —— 保留当前主题",
+        // niubash#179 L05-2: keys must match the runtime literals exactly
+        // (the gallery Skip row uses a plain hyphen, and the empty-gallery
+        // note names the external layer).
+        "Skip - keep my current theme" => "跳过 —— 保留当前主题",
         "  · built-in fallback" => "  · 内置保底",
         "  \u{1f3a8}  Pick a theme" => "  \u{1f3a8}  选择主题",
         "  │  external themes come first; entries marked 'built-in fallback' are the safe built-ins\n  \u{2502}  Skip changes nothing" =>
             "  \u{2502}  外部主题排在前面；标注“内置保底”的是安全内置项\n  \u{2502}  跳过则不做任何改动",
         "  │  external themes from your trusted plugin sources; Skip changes nothing" =>
             "  \u{2502}  来自你已信任插件源的外部主题；跳过则不做任何改动",
-        "No themes installed yet — keeping the built-in default look." =>
-            "尚未安装任何主题 —— 保持内置默认外观。",
+        "No external themes installed yet - keeping the default look." =>
+            "尚未安装外部主题 —— 保持默认外观。",
         "Browse the ecosystem any time with `niu plugin discover` (read-only)." =>
             "随时用 `niu plugin discover` 浏览生态（只读，不安装）。",
 
@@ -2373,6 +2416,8 @@ fn zh(en: &str) -> Option<&'static str> {
         "niu-git installed" => "niu-git 已安装",
         "niu-git install failed — no other changes were made" =>
             "niu-git 安装失败 —— 其他内容未做任何改动",
+        "niu installs nothing itself — run one of the commands above, then restart niu" =>
+            "niu 本身不安装任何东西 —— 运行上面的命令之一，然后重启 niu",
 
         // Summary (labels shared with the environment summary above)
         "Summary" => "配置摘要",
@@ -2718,7 +2763,13 @@ mod tests {
         for key in [
             "Welcome to Niubash",
             "  \u{1f3a8}  Pick a theme",
-            "Skip — keep my current theme",
+            // niubash#179 L05-2: the test guards the *runtime* literals —
+            // the gallery Skip row uses a plain hyphen, and the
+            // empty-gallery note names the external layer.
+            "Skip - keep my current theme",
+            "No external themes installed yet - keeping the default look.",
+            "Browse the ecosystem any time with `niu plugin discover` (read-only).",
+            "niu installs nothing itself — run one of the commands above, then restart niu",
             "  \u{1f9f0}  Plugin collection?",
             "default — browse later with `niu plugin recipe list`",
             "plugin collection",
@@ -3267,6 +3318,7 @@ mod tests {
         // One journal + undo lines for both the collection and the pick.
         let journal = SetupJournal {
             rc_backup: None,
+            rc_created: true,
             theme: picked.map(|(name, source)| (name, source)),
             preset: None,
             niu_git: None,
@@ -3454,6 +3506,7 @@ mod tests {
         let backup = temp.join("backups/.niubashrc.1-2.bak");
         let journal = SetupJournal {
             rc_backup: Some(backup.clone()),
+            rc_created: false,
             theme: Some(("robbyrussell".to_string(), "oh-my-bash".to_string())),
             preset: None,
             niu_git: None,
@@ -3475,11 +3528,12 @@ mod tests {
             "{text}"
         );
 
-        // One undo command per entry: rc restore, theme disable, the
-        // optional source removal hint, and one line per collection source
-        // (executable-tool entries install nothing, so they have no undo).
+        // One undo command per entry: rc restore, theme disable, and the
+        // source-removal hint (deduplicated: the theme and the collection
+        // name the same source, so it prints ONCE — niubash#179 L02-2;
+        // executable-tool entries install nothing, so they have no undo).
         let undo = setup_undo_lines(&temp, &journal);
-        assert!(undo.len() == 4, "{undo:?}");
+        assert!(undo.len() == 3, "{undo:?}");
         assert!(undo[0].starts_with("cp "), "{undo:?}");
         assert!(undo[0].contains(".niubashrc"), "{undo:?}");
         assert!(
@@ -3491,8 +3545,11 @@ mod tests {
             "{undo:?}"
         );
         assert!(
-            undo[3].contains("niu plugin source remove oh-my-bash"),
-            "{undo:?}"
+            undo.iter()
+                .filter(|line| line.contains("niu plugin source remove oh-my-bash"))
+                .count()
+                == 1,
+            "duplicate source-removal receipt (L02-2): {undo:?}"
         );
         assert!(
             !undo.iter().any(|line| line.contains("niu plugin tool")),
@@ -3502,6 +3559,39 @@ mod tests {
         // A skip run (no theme, no backup) undoes nothing.
         let empty = SetupJournal::default();
         assert!(setup_undo_lines(&temp, &empty).is_empty());
+
+        // Fresh install (niubash#179 L02-1): no previous rc existed, so the
+        // receipt covers the write itself — remove the generated rc and the
+        // setup-done marker; the theme's undo lines still apply.
+        let fresh = SetupJournal {
+            rc_backup: None,
+            rc_created: true,
+            theme: Some(("robbyrussell".to_string(), "oh-my-bash".to_string())),
+            preset: None,
+            niu_git: None,
+            collection: None,
+        };
+        let undo = setup_undo_lines(&temp, &fresh);
+        assert!(undo.len() == 4, "{undo:?}");
+        assert!(
+            undo[0].starts_with("rm ") && undo[0].contains(".niubashrc"),
+            "{undo:?}"
+        );
+        assert!(
+            undo[1].starts_with("rm ") && undo[1].contains(".setup-done"),
+            "{undo:?}"
+        );
+        assert!(
+            undo[2].contains("niu plugin disable robbyrussell"),
+            "{undo:?}"
+        );
+        assert!(
+            undo[3].contains("niu plugin source remove oh-my-bash"),
+            "{undo:?}"
+        );
+        write_setup_journal(&temp, &fresh);
+        let text = std::fs::read_to_string(setup_journal_path(&temp)).unwrap();
+        assert!(text.contains("rc_created = true"), "{text}");
         let _ = std::fs::remove_dir_all(&temp);
     }
 
