@@ -205,7 +205,7 @@ ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 
 Five arguments in. PowerShell throws a parse error; niubash delivers all five
 byte-for-byte. Even [Codex is locked to PowerShell on Windows](https://github.com/openai/codex/issues/31548)
-— users are literally voting to escape. The full receipts are in
+— users are voting to escape. The full receipts are in
 [Why niubash](docs/src/why-niubash.md).
 
 The one-shot form is a contract, not an afterthought:
@@ -289,8 +289,8 @@ output is piped into the next command.
 | Interactive surface | IDE-style completion menu, 27 themes, plugin ecosystem (oh-my-niu) | syntax highlighting, autosuggestions, starship |
 
 Same idea, different depth. Brush proves the approach works; niubash ships
-its Windows-native completion — engine, commands, path contract, and
-ecosystem together.
+it complete on Windows — engine, commands, path contract, and ecosystem
+together.
 
 ## Architecture
 
@@ -321,7 +321,7 @@ niu.exe
 - **Another Git Bash?** No — Git Bash emulates Unix on top of Windows: translating paths, guessing at arguments. niubash is a native Windows process; Bash compatibility happens in the language engine (rubash), not in a fake filesystem.
 - **Still need WSL?** Sure — for real Linux kernels, Linux Docker, Linux-only toolchains, it's still the right tool. For the other 95% of your day: you don't need WSL. You need niubash.
 - **Why the name `niu`?** Short, fast to type, zero finger travel. The project is niubash, the binary is `niu`, the env prefix is `NIU_` — and "niu" (牛) is what your shell should be on Windows.
-- **Is this a hit piece on PowerShell?** No. PowerShell is a genuinely powerful automation language — it just isn't Bash. Models are trained on Bash and then forced to speak cmdlet on Windows. The problem is the mismatch, not the people.
+- **Is this a hit piece on PowerShell?** No. PowerShell is a powerful automation language — it just isn't Bash. Models are trained on Bash and then forced to speak cmdlet on Windows. The problem is the mismatch, not the people.
 
 ## Documentation
 

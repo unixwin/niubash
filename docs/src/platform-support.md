@@ -431,6 +431,71 @@ One line of orientation: **Git Bash = MSYS2 runtime + GNU bash; niu =
 native engine + compatibility persona.** The labels match so ecosystem
 scripts run; the runtime they name is not present.
 
+## Calling PowerShell from niu
+
+niu is a full bash, so every command string it runs (through
+`niu -c '...'`, a script file, or piped stdin) goes through expansion
+first, and bash expands `$` in double-quoted and unquoted text.
+PowerShell uses `$` for the same slot: `$var`, `$args`, `$env:TEMP`. Call
+PowerShell without quoting discipline and niu expands PowerShell's
+variables before PowerShell starts. An undefined niu variable expands to
+the empty string, so this:
+
+```bash
+niu -c 'powershell -NoProfile -Command "$x=1; Write-Output x=$x"'
+```
+
+hands PowerShell `=1; Write-Output x=`, which fails with
+`=1 : The term '=1' is not recognized`. `$x` was never a niu variable, so
+bash replaced both occurrences with nothing.
+
+This is standard bash semantics, not a quoting bug; the ruling and the
+reproduction cases are in
+[niubash#203](https://github.com/unixwin/niubash/issues/203). The fix
+belongs to the calling side:
+
+**1. Escape the `$`.** Inside double quotes, `\$` survives expansion as a
+literal dollar sign:
+
+```bash
+niu -c 'powershell -NoProfile -Command "\$x=1; Write-Output x=\$x"'
+# prints x=1
+```
+
+It works, but every PowerShell `$` now owes a backslash, and the one you
+miss turns into an empty string; the error you get names the mangled
+command, not the missing backslash.
+
+**2. Keep the `$` inside bash single quotes.** Bash never expands inside
+single quotes. From an interactive niu prompt, one pair does the whole
+job:
+
+```bash
+powershell -NoProfile -Command '$x=1; Write-Output x=$x'
+```
+
+Through `niu -c` the quoting doubles, because the `-c` payload is itself
+a shell string to whatever shell launches niu. Once you are counting
+backslashes at two levels, use the file route instead.
+
+**3. Write a `.ps1` file and run it with `-File` (recommended).** The
+script's text never passes through bash, so nothing needs escaping. The
+`$t`, `$o`, `$env:TEMP` case from #203's real-world report runs as
+written:
+
+```bash
+niu -c 'powershell -NoProfile -ExecutionPolicy Bypass -File C:/scripts/scan.ps1'
+```
+
+`-ExecutionPolicy Bypass` is not optional polish. Windows clients ship
+with the script execution policy set to `Restricted`, which refuses
+`.ps1` scripts with "running scripts is disabled on this system"; the
+flag lifts that check for the one process and changes nothing outside
+it.
+
+The rule itself is bash's, not PowerShell's: any target that puts `$` in
+double-quoted or unquoted command text is subject to it.
+
 ## What is Windows-only
 
 By compile-time cfg, the following never appear on non-Windows paths and
