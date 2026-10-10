@@ -1,6 +1,7 @@
 // Custom completer for WinSH
 // Integrates command, path, and variable completion
 
+use crate::completion::carapace::{CarapaceCompletionPlugin, CarapaceCoverage};
 use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
 use crate::completion::path::PathCompleter;
 use crate::completion::runtime::{command_words_before_cursor, comp_cword};
@@ -26,6 +27,10 @@ pub struct CompletionState {
     /// kept so the external plugin can be rebuilt when bundle definitions
     /// change without losing user overrides.
     completion_dirs: Vec<PathBuf>,
+    /// Shared coverage set for the carapace completion source (commands that
+    /// already have a local definition). `None` while carapace-bin is absent
+    /// or disabled — the source is never registered in that case.
+    carapace_coverage: Option<Arc<CarapaceCoverage>>,
 }
 
 impl CompletionState {
@@ -38,6 +43,7 @@ impl CompletionState {
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
             completion_dirs: Vec::new(),
+            carapace_coverage: None,
         }
     }
 
@@ -86,7 +92,36 @@ impl CompletionState {
             external.load_dir(dir);
         }
         self.completion_dirs = dirs.to_vec();
+        let covered: Vec<String> = external
+            .definition_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         self.add_plugin(Arc::new(external));
+        self.register_or_refresh_carapace(covered);
+    }
+
+    /// Register the carapace-bin completion source when its binary is
+    /// available (see [`CarapaceCompletionPlugin::discover_binary`]); otherwise
+    /// this is a no-op and completion behaves exactly as before.  The coverage
+    /// set (commands with a local definition) is refreshed on every rebuild so
+    /// winuxcmd applet TOMLs, bundle definitions and user files always win
+    /// over carapace candidates.
+    fn register_or_refresh_carapace(&mut self, covered: Vec<String>) {
+        if let Some(coverage) = &self.carapace_coverage {
+            coverage.set_covered(covered);
+            return;
+        }
+        let Some(binary) = CarapaceCompletionPlugin::discover_binary() else {
+            return;
+        };
+        let coverage = Arc::new(CarapaceCoverage::default());
+        coverage.set_covered(covered);
+        self.add_plugin(Arc::new(CarapaceCompletionPlugin::new(
+            binary,
+            coverage.clone(),
+        )));
+        self.carapace_coverage = Some(coverage);
     }
 
     /// Replace the bundle-provided definitions inside the external
@@ -113,9 +148,21 @@ impl CompletionState {
                 .downcast_ref::<ExternalCompletionPlugin>()
                 .is_some()
         }) {
+            let covered: Vec<String> = external
+                .definition_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
             *slot = Arc::new(external);
+            self.register_or_refresh_carapace(covered);
         } else {
+            let covered: Vec<String> = external
+                .definition_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
             self.add_plugin(Arc::new(external));
+            self.register_or_refresh_carapace(covered);
         }
     }
 
@@ -629,6 +676,40 @@ niu_git_comp() {
         assert!(
             suggestions.iter().any(|s| s.value == "alpha"),
             "missing compspec candidate alpha, got {suggestions:?}"
+        );
+    }
+
+    /// End-to-end: with carapace-bin discoverable, `git ch<TAB>` gains
+    /// description-carrying candidates through the normal plugin chain.
+    /// Skipped when no carapace binary is available (CI without the spike).
+    #[test]
+    fn carapace_source_serves_uncovered_commands_when_available() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(binary) = crate::completion::carapace::CarapaceCompletionPlugin::discover_binary()
+        else {
+            eprintln!("carapace not installed; skipping live registration test");
+            return;
+        };
+        let previous = std::env::var_os("NIU_CARAPACE");
+        std::env::set_var("NIU_CARAPACE", &binary);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state.lock().unwrap().load_completion_dirs(&[]);
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("git ch", 6);
+
+        match previous {
+            Some(value) => std::env::set_var("NIU_CARAPACE", value),
+            None => std::env::remove_var("NIU_CARAPACE"),
+        }
+
+        let checkout = suggestions.iter().find(|s| s.value == "checkout");
+        let checkout = checkout
+            .unwrap_or_else(|| panic!("carapace candidates missing for git, got {suggestions:?}"));
+        assert!(
+            checkout.description.is_some(),
+            "carapace candidates should carry descriptions"
         );
     }
 
