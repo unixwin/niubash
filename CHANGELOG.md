@@ -4,6 +4,22 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- command-not-found no longer advertises package managers by default
+  (niubash#249): a typo like `win` prints only the GNU one-liner — the
+  unsolicited "package search hints" block naming winget/scoop/choco is
+  removed, and third-party managers are never recommended again. The
+  recipe/wpm install hints for exact, known tool names (`rg`, `awk`, …)
+  stay. An opt-in channel returns a wpm-only suggestion:
+  `niu config set command-not-found-hint wpm` (persisted in the new
+  `~/.niubash/config.toml`; `NIU_COMMAND_NOT_FOUND_HINT` overrides) — it
+  suggests one `wpm search --name '<word>'` line only for
+  high-confidence near-misses (dropping the word's last character hits an
+  installed command or a known package name), so pure typos stay quiet
+  even with the switch on. New `niu config get/list/set` subcommand surface
+  manages the file.
+
 ### Added
 
 - carapace-bin completion source for third-party commands (niubash#187

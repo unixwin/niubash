@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::completion::CompletionBehavior;
+use crate::path_utils::shell_home_dir;
 
 use crate::prompt::PromptIndicators;
 
@@ -380,6 +381,126 @@ fn parse_style_map_value(value: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Policy for the command-not-found package-search hint (niubash#249): a
+/// typo must never trigger an unsolicited package-manager advertisement,
+/// so the hint is off by default (GNU bash prints only the
+/// "command not found" line). The only opt-in channel names niu's own
+/// bundled manager (wpm); third-party managers are never recommended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommandNotFoundHint {
+    /// No package hint at all (the default).
+    #[default]
+    Off,
+    /// Suggest one `wpm search --name '<word>'` line for high-confidence
+    /// near-misses (Windows builds only — wpm does not exist elsewhere).
+    Wpm,
+}
+
+impl CommandNotFoundHint {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Some(Self::Off),
+            "wpm" => Some(Self::Wpm),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Wpm => "wpm",
+        }
+    }
+}
+
+/// Schema marker for the persisted user settings file
+/// (`~/.niubash/config.toml`), written by `niu config set`.
+pub const USER_CONFIG_SCHEMA: &str = "niubash:config@0.1.0";
+
+/// The one persisted setting today: the command-not-found hint policy.
+pub const COMMAND_NOT_FOUND_HINT_KEY: &str = "command-not-found-hint";
+
+/// Where the persisted user settings live: `$NIU_CONFIG` overrides (tests,
+/// portable setups); default `~/.niubash/config.toml` (the mirrors.toml
+/// convention).
+pub fn user_config_path() -> PathBuf {
+    if let Some(value) = std::env::var_os("NIU_CONFIG") {
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    shell_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".niubash")
+        .join("config.toml")
+}
+
+/// The parsed config.toml. Unknown keys a future version (or a hand edit)
+/// added parse compatibly and are ignored.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct UserConfigFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schema: Option<String>,
+    #[serde(
+        rename = "command-not-found-hint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    command_not_found_hint: Option<String>,
+}
+
+/// Resolve the effective hint policy: the persisted user setting
+/// (`niu config set command-not-found-hint`), overridden by
+/// `NIU_COMMAND_NOT_FOUND_HINT` (the env-over-file precedence every
+/// `NIU_` override uses). Any problem — missing file, unreadable TOML,
+/// unknown value — degrades to the default (off): a config issue must
+/// never break the command-not-found path.
+pub fn resolve_command_not_found_hint() -> CommandNotFoundHint {
+    let path = user_config_path();
+    let mut hint = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| toml::from_str::<UserConfigFile>(&text).ok())
+        .and_then(|config| config.command_not_found_hint)
+        .and_then(|value| CommandNotFoundHint::parse(&value))
+        .unwrap_or_default();
+    if let Ok(value) = std::env::var("NIU_COMMAND_NOT_FOUND_HINT") {
+        match CommandNotFoundHint::parse(&value) {
+            Some(parsed) => hint = parsed,
+            None => eprintln!("niubash: NIU_COMMAND_NOT_FOUND_HINT must be one of: off, wpm"),
+        }
+    }
+    hint
+}
+
+/// Persist `command-not-found-hint` (the `niu config set` writer). The
+/// file renders fresh — hand-added unknown keys or comments are not
+/// preserved, matching the mirrors.toml writer convention.
+pub fn set_command_not_found_hint(hint: CommandNotFoundHint) -> anyhow::Result<PathBuf> {
+    let path = user_config_path();
+    let mut text = String::new();
+    text.push_str(&format!("schema = \"{USER_CONFIG_SCHEMA}\"\n"));
+    text.push_str(&format!(
+        "{COMMAND_NOT_FOUND_HINT_KEY} = \"{}\"\n",
+        hint.as_str()
+    ));
+    text.push_str(
+        "\n\
+        # ── notes ──────────────────────────────────────────────────────────\n\
+        # `niu config set command-not-found-hint wpm` rewrites this file;\n\
+        # `niu config set command-not-found-hint off` restores the default.\n\
+        # command-not-found-hint: package-search suggestion printed after\n\
+        #   \"command not found\". off (default) | wpm — wpm suggests one\n\
+        #   `wpm search --name` line for high-confidence near-misses only;\n\
+        #   third-party managers are never recommended (niubash#249).\n",
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
 #[derive(Debug, Clone)]
 pub struct FullConfig {
     pub shell: ShellConfig,
@@ -428,6 +549,7 @@ pub fn load() -> FullConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn completion_style_parse_accepts_valid_values() {
@@ -478,5 +600,118 @@ mod tests {
     fn menu_config_default_completion_style() {
         let config = MenuConfig::default();
         assert_eq!(config.completion_style, CompletionStyle::Ide);
+    }
+
+    #[test]
+    fn command_not_found_hint_parse_accepts_known_values() {
+        assert_eq!(
+            CommandNotFoundHint::parse("wpm"),
+            Some(CommandNotFoundHint::Wpm)
+        );
+        assert_eq!(
+            CommandNotFoundHint::parse("off"),
+            Some(CommandNotFoundHint::Off)
+        );
+        assert_eq!(
+            CommandNotFoundHint::parse("none"),
+            Some(CommandNotFoundHint::Off)
+        );
+        assert_eq!(
+            CommandNotFoundHint::parse(" WPM "),
+            Some(CommandNotFoundHint::Wpm)
+        );
+    }
+
+    #[test]
+    fn command_not_found_hint_parse_rejects_third_party_managers() {
+        // niubash#249: third-party managers are not valid opt-ins — the
+        // only enabled channel is niu's own wpm.
+        assert_eq!(CommandNotFoundHint::parse("winget"), None);
+        assert_eq!(CommandNotFoundHint::parse("scoop"), None);
+        assert_eq!(CommandNotFoundHint::parse("choco"), None);
+        assert_eq!(CommandNotFoundHint::parse(""), None);
+    }
+
+    #[test]
+    fn command_not_found_hint_default_is_off() {
+        assert_eq!(CommandNotFoundHint::default(), CommandNotFoundHint::Off);
+    }
+
+    #[test]
+    fn user_config_file_round_trips_command_not_found_hint() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join(format!(
+            "niu-config-roundtrip-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous = std::env::var_os("NIU_CONFIG");
+        std::env::set_var("NIU_CONFIG", &temp);
+        let result = (|| {
+            // Unset (no file yet): the default stands.
+            std::fs::remove_file(&temp).ok();
+            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
+
+            set_command_not_found_hint(CommandNotFoundHint::Wpm)?;
+            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Wpm);
+            // The written file parses as the documented schema.
+            let text = std::fs::read_to_string(&temp)?;
+            let parsed: UserConfigFile = toml::from_str(&text)?;
+            assert_eq!(parsed.schema.as_deref(), Some(USER_CONFIG_SCHEMA));
+            assert_eq!(parsed.command_not_found_hint.as_deref(), Some("wpm"));
+
+            set_command_not_found_hint(CommandNotFoundHint::Off)?;
+            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
+            Ok::<(), anyhow::Error>(())
+        })();
+        match previous {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        let _ = std::fs::remove_dir_all(
+            temp.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        );
+        let _ = std::fs::remove_file(&temp);
+        result.unwrap();
+    }
+
+    #[test]
+    fn user_config_unknown_and_invalid_values_degrade_to_off() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join(format!(
+            "niu-config-degrade-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+        let previous = std::env::var_os("NIU_CONFIG");
+        std::env::set_var("NIU_CONFIG", &temp);
+        let result = (|| {
+            // An unknown value degrades to the default, never to a hint.
+            std::fs::write(&temp, "command-not-found-hint = \"winget\"").unwrap();
+            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
+            // Malformed TOML degrades too.
+            std::fs::write(&temp, "[broken").unwrap();
+            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
+            Ok::<(), anyhow::Error>(())
+        })();
+        match previous {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        let _ = std::fs::remove_file(&temp);
+        result.unwrap();
     }
 }
