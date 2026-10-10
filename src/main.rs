@@ -1477,9 +1477,22 @@ fn run_plugin_discover_command(args: &[String]) -> anyhow::Result<()> {
             .asset_count
             .map(|count| format!(" ({count} assets)"))
             .unwrap_or_default();
+        let gutted_hint = if status.state == "ready" && status.asset_count == Some(0) {
+            niubash_runtime::text_style::dim(&format!(
+                "\n     no assets found in the tree — verify with `niu plugin source verify {}`",
+                status.record.id
+            ))
+        } else {
+            String::new()
+        };
         println!(
-            "  {} {:<12} {:<12} {}{}",
-            marker, status.record.id, status.record.version, status.record.license, assets
+            "  {} {:<12} {:<12} {}{}{}",
+            marker,
+            status.record.id,
+            status.record.version,
+            status.record.license,
+            assets,
+            gutted_hint
         );
     }
     println!();
@@ -1522,6 +1535,33 @@ fn run_plugin_discover_command(args: &[String]) -> anyhow::Result<()> {
         println!(
             "  {}",
             niubash_runtime::text_style::dim("(every known manager is already installed)")
+        );
+    }
+    println!();
+    // niubash#179 L05-1: the wizard's empty-gallery note and the finish
+    // screen both promise that `niu plugin discover` browses sources &
+    // themes — so discover must actually enumerate the theme layer.
+    println!(
+        "{}",
+        niubash_runtime::text_style::cyan("Themes (from trusted sources)")
+    );
+    let themes = niubash_runtime::plugins::sources::source_theme_entries();
+    if themes.is_empty() {
+        println!(
+            "  {}",
+            niubash_runtime::text_style::dim(
+                "(none yet — install a source with `niu plugin add`, then `niu plugin trust <id>`)"
+            )
+        );
+    }
+    for theme in &themes {
+        println!(
+            "  {:<28} {}",
+            theme.name,
+            niubash_runtime::text_style::dim(&format!(
+                "{} ({})  enable: `niu plugin enable {}`",
+                theme.adapter_display, theme.source_id, theme.name
+            ))
         );
     }
     println!();
@@ -2812,6 +2852,18 @@ fn run_plugin_list_command(args: &[String]) -> anyhow::Result<()> {
             if lines.len() >= 40 {
                 break;
             }
+        }
+        // niubash#179 L05-3: a *gutted* tree (directory present, contents
+        // emptied) still reads "ready" here — the checksum state is the
+        // only remaining truth, so name the verb that reports it.
+        if lines.is_empty() {
+            println!(
+                "     {}",
+                niubash_runtime::text_style::dim(&format!(
+                    "no assets found in the tree — verify with `niu plugin source verify {}`",
+                    status.record.id
+                ))
+            );
         }
         if !lines.is_empty() {
             println!(
