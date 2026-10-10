@@ -171,6 +171,18 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     };
     writeln!(out, "  {info} terminal            {terminal}")?;
 
+    // ── Advisory: timing scripts (niubash#201) ────────────────────────────
+    // `date` is an external program: each `$(date +%s%N)` pays Windows
+    // process creation (~10-30ms). The bash 5 builtin `$EPOCHREALTIME`
+    // expands in microseconds and drives millisecond-timeline scripts
+    // (frame schedulers, benchmarks) three orders of magnitude faster.
+    writeln!(
+        out,
+        "  {info} timing              use $EPOCHREALTIME for timing scripts — \
+         `$(date +%s%N)` spawns date.exe (~30ms/call), `$EPOCHREALTIME` is a \
+         builtin (~µs, microsecond format like 1699999999.123456)"
+    )?;
+
     // ── Advisory: external plugin sources (iron law 2: fallback explicit) ──
     // Degraded sources must be *visible*: the guarded loaders fell back to
     // the niubash defaults at startup and the user deserves to know.

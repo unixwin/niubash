@@ -6,6 +6,14 @@ All notable changes to Niubash are documented in this file.
 
 ### Added
 
+- Doctor timing advice (niubash#201): `niu doctor` now carries an advisory
+  row pointing timing/performance-sensitive scripts at the bash 5 builtin
+  `$EPOCHREALTIME` / `$EPOCHSECONDS` instead of looping on the external
+  `$(date +%s%N)` — each `date` call pays Windows process creation
+  (~10-30ms) while the builtin expands in microseconds with the GNU format
+  `1699999999.123456`. Regression tests pin the format, second-level
+  agreement with `date +%s`, live monotonic updates, and the speed gap.
+
 - Vi editing mode wired end-to-end (niubash#184): `set -o vi` / `set -o
   emacs` now switch the LIVE line editor mid-session, like GNU bash — both
   options route to one readline editing-mode state (bash
