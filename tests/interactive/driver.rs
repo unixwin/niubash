@@ -30,6 +30,11 @@
 //! terminal). With `NIU_INTERACTIVE_TESTS=1` (the CI setting) the failure is
 //! hard, so a broken environment cannot silently pass.
 
+// Each integration test target compiles this module into its own binary and
+// consumes a subset of the harness surface, so the unused remainder is a
+// per-binary false positive, not dead code.
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

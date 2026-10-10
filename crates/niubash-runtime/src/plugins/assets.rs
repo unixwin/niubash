@@ -800,7 +800,7 @@ fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
     let managed = record_for_marker(begin, &registry);
     let foreign = match &managed {
         Some((record, model)) => {
-            let rendered = adapter_for(&record.adapter).map(|adapter| {
+            let rendered = adapter_for(&record.adapter).map(|_adapter| {
                 let state = managed_state(&record.id, model, &record.id);
                 render_block(record, model, &state)
             });

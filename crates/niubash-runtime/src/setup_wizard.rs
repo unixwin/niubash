@@ -757,7 +757,7 @@ impl EnvProbe {
 
     /// The tools that resolve on PATH right now.
     fn probe_tools() -> BTreeSet<String> {
-        let mut tools: BTreeSet<String> = PROBED_TOOLS
+        let tools: BTreeSet<String> = PROBED_TOOLS
             .iter()
             .chain(PLATFORM_PROBED_TOOLS.iter())
             .filter(|tool| on_path(tool))
@@ -765,6 +765,8 @@ impl EnvProbe {
             .collect();
         // Windows-only: wpm is also usable through `winuxcmd.exe wpm`
         // without a command link. The name must never surface elsewhere.
+        #[cfg(windows)]
+        let mut tools = tools;
         #[cfg(windows)]
         if wpm_available() {
             tools.insert("wpm".to_string());

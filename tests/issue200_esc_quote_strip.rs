@@ -137,7 +137,7 @@ fn assignment_roundtrip_preserves_word_initial_esc() {
     script.extend_from_slice(&[ESC, b'[', b'3', b'1', b'm', b'V', b'\'', b'\n']);
     script.extend_from_slice(b"printf '%s\\n' \"$v\"\n");
     let out = run_script_bytes(&script);
-    let mut expected = vec![ESC, b'[', b'3', b'1', b'm', b'V', b'\n'];
+    let expected = vec![ESC, b'[', b'3', b'1', b'm', b'V', b'\n'];
     assert_eq!(out, expected);
 }
 
@@ -151,6 +151,6 @@ fn piped_stdin_entry_preserves_word_initial_esc_too() {
         ESC, b'[', b'3', b'1', b'm', b'S', b'\'', b'\n', b'e', b'x', b'i', b't', b'\n',
     ]);
     let out = run_stdin_bytes(&script);
-    let mut expected = vec![ESC, b'[', b'3', b'1', b'm', b'S'];
+    let expected = vec![ESC, b'[', b'3', b'1', b'm', b'S'];
     assert_eq!(out, expected);
 }
