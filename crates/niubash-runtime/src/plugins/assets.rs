@@ -435,21 +435,292 @@ fn managed_state(id: &str, model: &SelectionModel, record_id: &str) -> BlockStat
     merged_block_state(&bodies, model, record_id)
 }
 
+/// The rc's line ending: a CRLF rc stays CRLF (niubash#176 — the whole-file
+/// rewrite used to flatten every line to LF, corrupting a mixed/rc-editors'
+/// file). `str::lines()` strips the `\r`, so rejoining with the detected
+/// terminator restores the file's own convention.
+fn detect_eol(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// Backups live where the setup wizard already puts them, so one retention
+/// policy covers both writers.
+fn rc_backup_dir() -> Option<PathBuf> {
+    Some(shell_home_dir()?.join(".niubash").join("backups"))
+}
+
+const RC_BACKUP_KEEP: usize = 10;
+
+/// Back the rc up before a plugin verb rewrites it (niubash#176: every verb
+/// that writes the rc backs up, not only the setup wizard) and prune the
+/// backup set to the most recent [`RC_BACKUP_KEEP`] files — the wizard's
+/// era never cleaned them, so `~/.niubash/backups` grew without bound.
+fn backup_rc() {
+    let Some(dir) = rc_backup_dir() else {
+        return;
+    };
+    let Ok(raw) = fs::read(rc_file()) else {
+        return; // nothing on disk yet; the first write creates the rc
+    };
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let _ = fs::write(dir.join(format!(".niubashrc.{nanos}.bak")), raw);
+    prune_rc_backups(RC_BACKUP_KEEP);
+}
+
+/// Keep the newest `keep` `.niubashrc.*.bak` files (mtime, name as the
+/// tiebreak); older ones are deleted.
+fn prune_rc_backups(keep: usize) {
+    let Some(dir) = rc_backup_dir() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    let mut backups: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".niubashrc.") && name.ends_with(".bak"))
+        })
+        .map(|path| {
+            let modified = fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (modified, path)
+        })
+        .collect();
+    if backups.len() <= keep {
+        return;
+    }
+    backups.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, path) in backups.into_iter().skip(keep) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// The id token of a marker-ish comment line (`# >>> niu source <id> …`):
+/// the whitespace word right after `niu source`, whatever the bracket
+/// decorations around it look like.
+fn marker_id(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let index = trimmed.find("niu source")? + "niu source".len();
+    trimmed[index..]
+        .split_whitespace()
+        .next()
+        .filter(|token| !token.is_empty())
+}
+
+/// A begin-marker-shaped comment whose text drifted from the exact managed
+/// form (a hand edit, an older wording): `#` comment, `>>` decoration, the
+/// right id — but not the exact marker (exact pairs are the normal path).
+fn is_near_begin_marker(line: &str, id: &str, begin: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed != begin
+        && trimmed.starts_with('#')
+        && trimmed
+            .trim_start_matches('#')
+            .trim_start()
+            .starts_with(">>")
+        && marker_id(trimmed) == Some(id)
+}
+
+/// Same for end markers (`<<<` decoration).
+fn is_near_end_marker(line: &str, id: &str, end: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed != end
+        && trimmed.starts_with('#')
+        && trimmed
+            .trim_start_matches('#')
+            .trim_start()
+            .starts_with("<<<")
+        && marker_id(trimmed) == Some(id)
+}
+
+/// Marker pairs whose text is *near* the managed form (niubash#176): a
+/// begin marker missing its `>>>` tail or a stray indentation-aware edit.
+/// Bash still sees the block's loader line (comments and all), so the stale
+/// block EXECUTES — and a fresh exact block appended beside it made a
+/// second, unmanaged, same-id activation. Near pairs are therefore spans
+/// like any other (the write path repairs them); a near begin with no near
+/// end is an error, the same policy as an exact begin with no end.
+fn near_marker_spans(
+    lines: &[String],
+    id: &str,
+    begin: &str,
+    end: &str,
+) -> anyhow::Result<Vec<(usize, usize)>> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if is_near_begin_marker(&lines[index], id, begin) {
+            let stop = lines[index + 1..]
+                .iter()
+                .position(|line| line.trim() == end || is_near_end_marker(line, id, end))
+                .map(|offset| index + 1 + offset)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "a hand-edited managed marker for '{id}' has no end marker — fix it to \
+                         '{begin}' / '{end}' or remove the stale block"
+                    )
+                })?;
+            spans.push((index, stop));
+            index = stop + 1;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(spans)
+}
+
+/// The record (and its adapter's selection model) a marker pair belongs to,
+/// for the managed-line classification below.
+fn record_for_marker(
+    marker: &str,
+    registry: &[SourceRecord],
+) -> Option<(SourceRecord, SelectionModel)> {
+    let id = marker_id(marker)?;
+    let record = registry.iter().find(|record| record.id == id)?;
+    let model = adapter_for(&record.adapter)?.selection_model();
+    Some((record.clone(), model))
+}
+
+/// Lines inside existing managed block(s) that the canonical rendering does
+/// not carry AND that are not managed syntax: comments and blanks are
+/// skipped, theme/array/loader lines are niu's to add or drop with the
+/// spec (a dropped `plugins=('git')` line must NOT migrate out — the spec
+/// dropped it), and anything else is a USER line that the naive replace
+/// would silently drop (niubash#176).
+fn foreign_body_lines(
+    lines: &[String],
+    spans: &[(usize, usize)],
+    new_block: &str,
+    managed: Option<&(SourceRecord, SelectionModel)>,
+) -> Vec<String> {
+    let canonical: std::collections::BTreeSet<String> = new_block
+        .lines()
+        .map(|line| line.trim().to_string())
+        .collect();
+    let (loader_lines, managed_prefixes): (std::collections::BTreeSet<String>, Vec<String>) =
+        match managed {
+            Some((record, model)) => {
+                let adapter = adapter_for(&record.adapter);
+                let loader = adapter
+                    .map(|adapter| adapter.loader_snippet(record))
+                    .unwrap_or_default();
+                let loader_lines: std::collections::BTreeSet<String> =
+                    loader.lines().map(|line| line.trim().to_string()).collect();
+                let theme_var = match model {
+                    SelectionModel::LoaderArrays { theme_var, .. }
+                    | SelectionModel::EnabledDir { theme_var } => Some(*theme_var),
+                    SelectionModel::WholeSource | SelectionModel::DirectFiles => None,
+                };
+                let mut prefixes = Vec::new();
+                if let Some(var) = theme_var {
+                    prefixes.push(format!("{var}="));
+                }
+                if let SelectionModel::LoaderArrays { arrays, .. } = model {
+                    for (var, _) in arrays.iter() {
+                        prefixes.push(format!("{var}="));
+                    }
+                }
+                (loader_lines, prefixes)
+            }
+            None => (std::collections::BTreeSet::new(), Vec::new()),
+        };
+    let mut out = Vec::new();
+    for (start, stop) in spans {
+        for line in &lines[start + 1..*stop] {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if canonical.contains(trimmed) || loader_lines.contains(trimmed) {
+                continue;
+            }
+            if managed_prefixes
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix.as_str()))
+            {
+                continue;
+            }
+            if let Some((_, SelectionModel::DirectFiles)) = managed {
+                // The guarded per-file source lines are rendered structure:
+                // `if [ -r "…" ]; then` / `  . "…"` / `fi`.
+                if trimmed == "fi"
+                    || trimmed.starts_with(". \"")
+                    || trimmed.starts_with("if [ -r \"")
+                {
+                    continue;
+                }
+            }
+            out.push(line.clone());
+        }
+    }
+    out
+}
+
+const MIGRATED_USER_LINES_HEADER: &str =
+    "# user lines moved out of a managed block by `niu plugin` (niu #176) — review and keep";
+
 /// Insert or replace a managed block in the rc file, creating the rc when
 /// absent. Returns the rc path (for the outcome message) plus how many
-/// existing marker pairs were consumed: 0 = fresh append, 1 = in-place
+/// existing marker pairs (exact or near-marker, see
+/// [`near_marker_spans`]) were consumed: 0 = fresh append, 1 = in-place
 /// replace, >1 = duplicate blocks collapsed into the one canonical block
 /// (wt83 #175 — duplicates are an error state, and write repairs them).
+///
+/// niubash#176 guards on every rewrite: the rc is backed up first
+/// ([`backup_rc`]), the file's own line endings are preserved, user lines
+/// found inside the replaced block(s) are migrated out (with a stderr
+/// warning) instead of silently dropped, and hand-edited near-marker blocks
+/// are repaired rather than duplicated.
 fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(PathBuf, usize)> {
     let path = rc_file();
-    let mut lines: Vec<String> = fs::read_to_string(&path)
+    let raw = fs::read_to_string(&path).ok();
+    let eol = raw.as_deref().map(detect_eol).unwrap_or("\n");
+    let mut lines: Vec<String> = raw
+        .as_deref()
         .map(|text| text.lines().map(str::to_string).collect())
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|| {
             vec!["# Niubash interactive rc - edited by you and `niu plugin`.".to_string()]
         });
     let block_lines: Vec<String> = block.lines().map(str::to_string).collect();
-    let spans = managed_block_spans(&lines, begin, end)?;
+    let id = marker_id(begin).unwrap_or_default().to_string();
+    let mut spans = managed_block_spans(&lines, begin, end)?;
+    let near = near_marker_spans(&lines, &id, begin, end)?;
+    let mut repaired_near = false;
+    for span in near {
+        if !spans.contains(&span) {
+            spans.push(span);
+            repaired_near = true;
+        }
+    }
+    spans.sort_unstable();
+    if repaired_near {
+        eprintln!(
+            "warning: repaired a hand-edited managed marker block for '{id}' (its marker text \
+             was not the exact managed form)"
+        );
+    }
+    let managed = record_for_marker(begin, &read_source_registry());
+    let foreign = foreign_body_lines(&lines, &spans, block, managed.as_ref());
     let consumed = spans.len();
+    let mut insert_after_block = lines.len();
     match spans.as_slice() {
         [] => {
             if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
@@ -458,6 +729,7 @@ fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(P
             lines.extend(block_lines);
         }
         [(start, stop)] => {
+            insert_after_block = start + block_lines.len();
             lines.splice(*start..=*stop, block_lines);
         }
         many => {
@@ -468,11 +740,26 @@ fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(P
                 lines.drain(*start..=*stop);
             }
             let (first_start, first_stop) = many[0];
+            insert_after_block = first_start + block_lines.len();
             lines.splice(first_start..=first_stop, block_lines);
         }
     }
-    let mut text = lines.join("\n");
-    text.push('\n');
+    if !foreign.is_empty() {
+        eprintln!(
+            "warning: moved {} user line(s) out of the managed '{id}' block — they are now \
+             right below it; review and keep what you need",
+            foreign.len()
+        );
+        let mut migrated = vec![MIGRATED_USER_LINES_HEADER.to_string()];
+        migrated.extend(foreign);
+        let at = insert_after_block.min(lines.len());
+        lines.splice(at..at, migrated);
+    }
+    let mut text = lines.join(eol);
+    text.push_str(eol);
+    if Some(text.as_str()) != raw.as_deref() {
+        backup_rc();
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -480,32 +767,76 @@ fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(P
     Ok((path, consumed))
 }
 
-/// Remove EVERY managed marker pair for (begin, end); returns how many
-/// pairs were removed (wt83 #175 — disable must leave zero residue, not
-/// drop the first block and strand the duplicates).
+/// Remove EVERY managed marker pair (exact or near-marker, see
+/// [`near_marker_spans`]) for (begin, end); returns how many pairs were
+/// removed (wt83 #175 — disable must leave zero residue, not drop the
+/// first block and strand the duplicates). User lines inside the removed
+/// block(s) are migrated out with a warning, never silently dropped
+/// (niubash#176); the rc is backed up before the rewrite.
 fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
     let path = rc_file();
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(0);
     };
+    let eol = detect_eol(&text);
     let lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let spans = managed_block_spans(&lines, begin, end)?;
+    let id = marker_id(begin).unwrap_or_default().to_string();
+    let mut spans = managed_block_spans(&lines, begin, end)?;
+    for span in near_marker_spans(&lines, &id, begin, end)? {
+        if !spans.contains(&span) {
+            spans.push(span);
+        }
+    }
+    spans.sort_unstable();
     if spans.is_empty() {
         return Ok(0);
     }
-    let kept: Vec<&str> = lines
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| {
-            !spans
-                .iter()
-                .any(|(start, stop)| index >= start && index <= stop)
-        })
-        .map(|(_, line)| line.as_str())
-        .collect();
-    let mut rewritten = kept.join("\n");
-    rewritten.push('\n');
-    fs::write(&path, rewritten)?;
+    // Recognized managed lines for the removal path: the canonical
+    // rendering of the block's own parsed state, plus managed-syntax
+    // classification. Without it, every body line (loader lines included)
+    // would look "foreign" — removal must migrate USER lines only, and an
+    // unresolvable record conservatively migrates nothing.
+    let registry = read_source_registry();
+    let managed = record_for_marker(begin, &registry);
+    let foreign = match &managed {
+        Some((record, model)) => {
+            let rendered = adapter_for(&record.adapter).map(|adapter| {
+                let state = managed_state(&record.id, model, &record.id);
+                render_block(record, model, &state)
+            });
+            match &rendered {
+                Some(rendered) => {
+                    foreign_body_lines(&lines, &spans, rendered, Some(managed.as_ref().unwrap()))
+                }
+                None => Vec::new(),
+            }
+        }
+        None => Vec::new(),
+    };
+    let first_start = spans[0].0;
+    let mut rewritten: Vec<String> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if spans
+            .iter()
+            .any(|(start, stop)| index >= *start && index <= *stop)
+        {
+            continue;
+        }
+        if index == first_start && !foreign.is_empty() {
+            eprintln!(
+                "warning: moved {} user line(s) out of the managed '{id}' block being removed — \
+                 they are kept above this spot; review and delete what you no longer need",
+                foreign.len()
+            );
+            rewritten.push(MIGRATED_USER_LINES_HEADER.to_string());
+            rewritten.extend(foreign.iter().cloned());
+        }
+        rewritten.push(line.clone());
+    }
+    let mut joined = rewritten.join(eol);
+    joined.push_str(eol);
+    backup_rc();
+    fs::write(&path, joined)?;
     Ok(spans.len())
 }
 
@@ -2116,6 +2447,217 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&origin);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// niubash#176 (CRLF): a rc the user maintains with CRLF endings stays
+    /// CRLF through a managed-block rewrite — no whole-file flattening to
+    /// LF, and byte-identical rewrites do not churn the file at all.
+    #[test]
+    fn crlf_rc_keeps_its_line_endings_through_block_writes() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = unique_temp_dir("crlf-holder");
+        let origin = holder.join("oh-my-fixture");
+        fs::create_dir_all(&origin).unwrap();
+        write_omb_fixture(&origin);
+        let box_ = sandbox("crlf");
+        fs::write(rc_file(), "alias ll='ls -l'\r\nset -o vi\r\n").unwrap();
+
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("enable writes the managed block");
+
+        let text = rc_text();
+        assert!(text.contains("alias ll='ls -l'"), "{text:?}");
+        assert!(text.contains("plugins=('git')"), "{text:?}");
+        let stray_lf = text.replace("\r\n", "").contains('\n');
+        assert!(!stray_lf, "every line stays CRLF: {text:?}");
+
+        // An unchanged second materialization is a byte-stable no-op.
+        let before = fs::read(rc_file()).unwrap();
+        enable("git").expect("second enable");
+        assert_eq!(fs::read(rc_file()).unwrap(), before, "no churn");
+
+        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// niubash#176 (silent drop): a user line hand-written INSIDE a managed
+    /// block is migrated out (right below it, under a marker comment) when
+    /// the block is rewritten — never silently discarded.
+    #[test]
+    fn user_lines_inside_a_managed_block_migrate_out() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = unique_temp_dir("migrate-holder");
+        let origin = holder.join("oh-my-fixture");
+        fs::create_dir_all(&origin).unwrap();
+        write_omb_fixture(&origin);
+        let box_ = sandbox("migrate");
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("clean enable first");
+
+        // The user hand-writes a line inside the managed block.
+        let hijacked = rc_text().replacen(
+            "# <<< niu source oh-my-bash <<<",
+            "alias hh='history'\n# <<< niu source oh-my-bash <<<",
+            1,
+        );
+        fs::write(rc_file(), &hijacked).unwrap();
+
+        // A selection change rewrites the block; the alias survives outside
+        // while the spec-dropped plugins line is dropped, not migrated.
+        enable("cargo").expect("enable rewrites the block");
+        let text = rc_text();
+        assert!(text.contains("alias hh='history'"), "kept: {text}");
+        assert!(text.contains(MIGRATED_USER_LINES_HEADER), "{text}");
+        let begin = text.find(">>> niu source oh-my-bash").unwrap();
+        let end = text.find("<<< niu source oh-my-bash").unwrap();
+        let alias = text.find("alias hh='history'").unwrap();
+        assert!(
+            alias > end && alias > begin,
+            "the alias moved OUT of the managed block: {text}"
+        );
+        assert!(text.contains("aliases=('cargo')"), "{text}");
+        assert!(
+            text.contains("plugins=('git')"),
+            "the enable is additive; the managed line stays managed: {text}"
+        );
+
+        // The healed rc is stable: another rewrite does not re-migrate.
+        let before = rc_text();
+        enable("cargo").expect("second enable");
+        assert_eq!(rc_text(), before, "byte-stable after migration");
+
+        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// niubash#176 (near markers): a hand-edited marker block (missing a
+    /// `>` / `<`) is repaired into the exact managed form — a fresh exact
+    /// block is appended BESIDE it, never duplicating the loader.
+    #[test]
+    fn near_marker_block_is_repaired_not_duplicated() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = unique_temp_dir("near-holder");
+        let origin = holder.join("oh-my-fixture");
+        fs::create_dir_all(&origin).unwrap();
+        write_omb_fixture(&origin);
+        let box_ = sandbox("near");
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("clean enable first");
+
+        // Mangle the begin marker (drop one bracket); the end stays exact.
+        let mangled =
+            rc_text().replace("# >>> niu source oh-my-bash", "# >> niu source oh-my-bash");
+        fs::write(rc_file(), &mangled).unwrap();
+        let count = |needle: &str| rc_text().matches(needle).count();
+        assert_eq!(
+            count("# >>> niu source oh-my-bash"),
+            0,
+            "mangled: {}",
+            rc_text()
+        );
+        assert_eq!(count("# >> niu source oh-my-bash"), 1);
+
+        // A rewrite consumes the near-marker span; exactly one block remains.
+        enable("cargo").expect("enable after the hand edit");
+        let text = rc_text();
+        assert_eq!(
+            count("# >>> niu source oh-my-bash"),
+            1,
+            "one exact begin: {text}"
+        );
+        assert_eq!(
+            count("# >> niu source oh-my-bash"),
+            0,
+            "the near-marker form is gone: {text}"
+        );
+        assert!(
+            text.contains("# >>> niu source oh-my-bash (managed"),
+            "exact markers restored: {text}"
+        );
+        assert!(text.contains("aliases=('cargo')"), "{text}");
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.trim() == "# >> niu source oh-my-bash >>>"),
+            "near marker gone: {text}"
+        );
+
+        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// niubash#176 (backups): every plugin-verb rc rewrite backs the rc up
+    /// into the wizard's backups dir, and the backup set is pruned to the
+    /// most recent RC_BACKUP_KEEP files (the wizard era never cleaned up).
+    #[test]
+    fn plugin_verbs_backup_the_rc_and_prune_old_backups() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = unique_temp_dir("backup-holder");
+        let origin = holder.join("oh-my-fixture");
+        fs::create_dir_all(&origin).unwrap();
+        write_omb_fixture(&origin);
+        let box_ = sandbox("backup");
+        fs::write(rc_file(), "alias ll='ls -l'\n").unwrap();
+        let backup_dir = rc_backup_dir().unwrap();
+
+        let backup_count = || {
+            fs::read_dir(&backup_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .filter(|entry| {
+                            entry
+                                .file_name()
+                                .to_str()
+                                .is_some_and(|name| name.ends_with(".bak"))
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(backup_count(), 0, "no backup before the first write");
+
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("first write");
+        assert_eq!(backup_count(), 1, "the rewrite backed the rc up");
+        let first_backup = fs::read_dir(&backup_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".bak"))
+            })
+            .unwrap();
+        let backed_up = fs::read_to_string(first_backup.path()).unwrap();
+        assert!(
+            backed_up.contains("alias ll='ls -l'") && !backed_up.contains("niu source"),
+            "the backup is the PRE-write rc: {backed_up}"
+        );
+
+        // Age 12 fake backups in, then rewrite again: the set is pruned to
+        // RC_BACKUP_KEEP (the fresh backup displaces the stale ones).
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for index in 0..12 {
+            let path = backup_dir.join(format!(".niubashrc.stale-{index}.bak"));
+            fs::write(&path, "stale\n").unwrap();
+            let file = fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(stale).unwrap();
+        }
+        enable("cargo").expect("second write");
+        assert!(
+            backup_count() <= RC_BACKUP_KEEP,
+            "pruned to {RC_BACKUP_KEEP}: {}",
+            backup_count()
+        );
+
+        let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(&box_.temp);
     }
 }
