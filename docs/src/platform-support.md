@@ -22,7 +22,8 @@ a bug.
 | macOS aarch64 | ✅ `macos-latest` | ✅ release gate | ✅ | |
 | macOS x86_64 | ✅ `macos-latest` | ✅ (Rosetta 2) | ✅ | Apple cross-compile |
 | Linux x86_64 (musl) | ✅ `ubuntu-latest` | ✅ `cross-target-smoke` | ⬜ | static; see below |
-| HarmonyOS PC (`aarch64-linux-ohos`) | ✅ `ubuntu-latest` | ⬜ | ⬜ | see below |
+| Android (`aarch64-linux-android`, `armv7-linux-androideabi`) | ✅ release `build-android` | ⬜ | ⬜ | incubating: NDK-linked zip, no runtime smoke; see below |
+| HarmonyOS PC (`aarch64-linux-ohos`) | ✅ `ubuntu-latest` check | ⬜ | ⬜ | see below |
 
 "Smoke-gated" means the artifact is built, then run on its own OS, against
 the four checks in [release.md](../release.md) before it is published —
@@ -42,6 +43,17 @@ self-contained musl crt/libc through the host `cc`.
 No musl **release** artifact ships yet. That is a delivery decision, not a
 coverage gap — flip it on by adding `x86_64-unknown-linux-musl` to the
 `build-linux` matrix in `release.yml`.
+
+### Android
+
+The `build-android` legs in `release.yml` build `aarch64-linux-android` and
+`armv7-linux-androideabi` with a real bionic link through the NDK
+(`nttld/setup-ndk`, API 24 clang drivers). The bionic cfg surface was fixed
+upstream in rubash#456 (`AT_EACCESS`, `confstr`, `sa_restorer`, 32-bit
+`off_t`/`S_IFMT` widths). The legs are incubating: `continue-on-error`, not
+in the release `needs`, artifacts go to the workflow run only. The runner
+cannot execute bionic binaries, so the four-check smoke gate has not run
+for these — a zip from this leg is build-verified, not smoke-verified.
 
 ## HarmonyOS
 

@@ -721,6 +721,208 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Experimental mobile/embedded legs (roadmap niubash#207): Android (bionic)
+  # and OpenHarmony (aarch64-unknown-linux-ohos). They are deliberately NOT in
+  # the `release` job's needs and carry `continue-on-error` -- the same
+  # incubation pattern the musl leg followed before #221 tightened it into a
+  # real gate (check-only first, then build, then smoke, then release).
+  # Nothing either job uploads reaches the GitHub Release; artifacts go to the
+  # workflow run only. Tighten (drop continue-on-error, add to needs, then
+  # extend the smoke gate) only after these run green for a while.
+  build-android:
+    name: build-android (${{ matrix.arch }})
+    runs-on: ubuntu-22.04
+    # Incubation: failures here surface as yellow on the run, they never
+    # block a release. Remove once the leg has been green for a cycle.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            rust_target: aarch64-linux-android
+            ndk_triple: aarch64-linux-android
+          # rubash#456 fixed the armv7 bionic cfg surface (u16 S_IFMT,
+          # i32 off_t), so this leg compiles; keep it optional alongside.
+          - arch: armv7
+            rust_target: armv7-linux-androideabi
+            ndk_triple: armv7-linux-androideabi
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Resolve release inputs
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag '$tag'" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        run: |
+          git fetch --tags --force
+          git checkout "${{ steps.release.outputs.tag }}"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ matrix.rust_target }}
+
+      - name: Pin rubash revision
+        id: rubash
+        run: |
+          if [ ! -d ../rubash ]; then
+            echo "rubash checkout missing at ../rubash" >&2
+            exit 1
+          fi
+          revision="$(git -C ../rubash rev-parse --short=12 HEAD)"
+          if [ -z "$revision" ]; then
+            echo "could not resolve rubash revision" >&2
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      # Real link, not check-only: the NDK provides the bionic clang driver
+      # (rubash#456 fixed the cfg surface, this job proves it actually
+      # links). API 24 is the floor the rust android targets document.
+      - name: Install Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Build niubash (bionic, release)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi24-clang
+        run: cargo build --locked --release --target ${{ matrix.rust_target }}
+
+      # The runner cannot execute bionic binaries, so the four-check smoke
+      # gate is impossible here. This step is the honest substitute for
+      # THIS leg: prove a real ELF for the right ABI exists and say, on the
+      # artifact itself, that no smoke ran. It must never be read as a pass
+      # of the release smoke gate.
+      - name: Verify ELF shape (no runtime smoke on this leg)
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.rust_target }}/release/niu"
+          test -f "$bin"
+          file "$bin"
+          case "$(file -b "$bin")" in
+            *aarch64*|*ARM*) : ;;
+            *) echo "unexpected ELF arch for ${{ matrix.rust_target }}" >&2; exit 1 ;;
+          esac
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          Android leg: build + link verified, binary NOT smoke-run (no Android runtime on the runner).
+          EOF
+
+      - name: Package portable zip
+        run: |
+          set -euo pipefail
+          name="niubash-v${{ steps.release.outputs.version }}-android-${{ matrix.arch }}"
+          stage="dist/$name"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.rust_target }}/release/niu" "$stage/niu"
+          cp README.md LICENSE "$stage/"
+          (cd dist && zip -r "$name.zip" "$name")
+          unzip -l "dist/$name.zip"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: niubash-v${{ steps.release.outputs.version }}-android-${{ matrix.arch }}
+          path: dist/niubash-v${{ steps.release.outputs.version }}-android-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # OpenHarmony leg (roadmap niubash#207). First version is CHECK-ONLY, on
+  # purpose and out loud: `aarch64-unknown-linux-ohos` is Tier 2 with host
+  # tools (same target cross-target-check in ci.yml gates), so `cargo check`
+  # needs no OpenHarmony SDK -- but real LINKING needs the OHOS SDK's clang
+  # wrapper, and there is no runner preinstall and no version-pinned,
+  # reproducibly-fetchable SDK source this workflow can responsibly pin yet
+  # (docs/src/platform-support.md "Packaging" documents what a real ship
+  # looks like: an HNP payload inside a signed HAP, an app-store release).
+  # Uploading a raw binary from a leg that cannot even link would violate
+  # the repo's "no untested artifact" line harder than uploading nothing.
+  # Follow the musl precedent: check now, add a pinned SDK + real link in a
+  # later PR, smoke/ship last. The artifact this uploads is the check log.
+  build-openharmony:
+    name: build-openharmony (aarch64, check-only)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Resolve release inputs
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag '$tag'" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        run: |
+          git fetch --tags --force
+          git checkout "${{ steps.release.outputs.tag }}"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: aarch64-unknown-linux-ohos
+
+      - name: cargo check (aarch64-unknown-linux-ohos, no binary produced)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          {
+            echo "niubash ${{ steps.release.outputs.tag }} — aarch64-unknown-linux-ohos"
+            echo "check-only leg: no binary is produced or shipped from this leg."
+            echo "rustc $(rustc --version); target is Tier 2 with host tools."
+            echo "---"
+            cargo check --workspace --locked --target aarch64-unknown-linux-ohos 2>&1
+          } | tee "dist/ohos-check-log.txt"
+
+      - name: Upload check log artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: niubash-v${{ steps.release.outputs.version }}-ohos-check-log
+          path: dist/ohos-check-log.txt
+          if-no-files-found: error
+          retention-days: 7
+
   journey:
     name: golden user journey (release gate)
     runs-on: windows-2025
