@@ -29,6 +29,13 @@ All notable changes to Niubash are documented in this file.
   call. Git's own spec does not resolve nested context through the CLI
   bridge (`git commit <TAB>` falls back to top-level candidates; flag
   completion works for static specs like cargo), noted as follow-up.
+  row pointing timing/performance-sensitive scripts at the bash 5 builtin
+  `$EPOCHREALTIME` / `$EPOCHSECONDS` instead of looping on the external
+  `$(date +%s%N)` — each `date` call pays Windows process creation
+  (~10-30ms) while the builtin expands in microseconds with the GNU format
+  `1699999999.123456`. Regression tests pin the format, second-level
+  agreement with `date +%s`, live monotonic updates, and the speed gap.
+>>>>>>> origin/master
 
 - Vi editing mode wired end-to-end (niubash#184): `set -o vi` / `set -o
   emacs` now switch the LIVE line editor mid-session, like GNU bash — both
@@ -105,6 +112,24 @@ All notable changes to Niubash are documented in this file.
   `scripts/test-winuxcmd-completions.py` (corpus replay must be
   byte-identical).
 
+### Changed
+
+- Release binaries are stripped (niubash#228): the release profile strips
+  symbols, shrinking the shipped niu.exe.
+- The pre-install manifest bundles niugit, ripgrep and fd alongside gawk
+  (niubash#230), and the setup wizard detects release-bundled components as
+  already-present instead of re-offering them (niubash#231).
+
+### Fixed
+
+- Plain-text `--help` and a non-tty-safe banner (niubash#229), plus a warning
+  when a hand-written rc would clobber the wizard theme.
+- PROMPT_COMMAND exit jump now ends the session instead of returning to the
+  prompt (niubash#232).
+- PS0 expansion writes to stderr, matching GNU bash (eval.c:176) (niubash#233).
+- Bracketed paste enabled with GNU bash multiline-paste semantics: pasted
+  newlines no longer execute mid-paste (niubash#234).
+
 ## [1.3.4] - 2026-10-05
 
 ### Fixed (engine rubash 1.3.4)
@@ -127,6 +152,19 @@ All notable changes to Niubash are documented in this file.
 
 ### Fixed (product, found by the audit lanes and the golden journey)
 
+- add/rc audit P2 batch (niubash#176): `niu plugin add -h` is a usage
+  request (was an unknown-option error); the plugin usage and the add usage
+  document `--url`; a local directory named like a catalog id
+  (`oh-my-bash/`) is adopted as a local tree instead of being hijacked to
+  the catalog's GitHub origin; cwd-relative path targets are stored
+  cwd-independent (normalized absolute, forward slashes) in the spec; the
+  already-declared refusal points stranded declarations at
+  `niu plugin sync --prune` instead of a remove that would fail; user lines
+  hand-written inside a managed rc block are migrated out with a warning
+  instead of being silently dropped; a CRLF rc keeps its line endings
+  through block rewrites; hand-edited near-marker blocks are repaired
+  instead of duplicated; every plugin verb that rewrites the rc backs it up
+  first and the backup set is pruned to the 10 newest.
 - `plugin add --checksum` is honored through add and adopt; failed adds
   roll back their spec entry and legacy strands are pruned; enable/disable
   surface rc-write failures and collapse duplicate managed blocks.

@@ -143,12 +143,19 @@ fn oh_my_bash_source_add_trust_load_and_fallback_lifecycle() {
 
     // Trusted sources expose their theme assets through the wizard gallery
     // and the loader snippet; the retired catalog surface is gone.
+    // niubash#179 L05-1: discover must enumerate the theme layer, not just
+    // the sources — the wizard's notes promise "sources & themes".
     let discover = run_niu_with_env(&["plugin", "discover"], &envs);
     assert_success(&discover, "plugin discover after trust");
+    let discover_out = stdout_text(&discover);
+    assert!(discover_out.contains("oh-my-bash"), "{discover_out}");
     assert!(
-        stdout_text(&discover).contains("oh-my-bash"),
-        "{}",
-        stdout_text(&discover)
+        discover_out.contains("Themes (from trusted sources)"),
+        "discover must list the theme layer: {discover_out}"
+    );
+    assert!(
+        discover_out.contains("robbyrussell"),
+        "discover must name trusted-source themes: {discover_out}"
     );
 
     // Load the vendored theme through the adapter-installed tree under the
@@ -280,6 +287,12 @@ fn plugin_discover_is_read_only_and_lists_available_managers() {
     let text = stdout_text(&out);
     assert!(text.contains("read-only"), "{text}");
     assert!(text.contains("(none installed)"), "{text}");
+    // niubash#179 L05-1: the theme layer is enumerated (empty note here)
+    // so the wizard's "browse sources & themes" promise stays true.
+    assert!(
+        text.contains("Themes (from trusted sources)") && text.contains("(none yet"),
+        "{text}"
+    );
     // oh-my-bash is a known manager that is not installed yet: the hint
     // shows the add command the user could run — nothing runs on its own.
     assert!(text.contains("oh-my-bash"), "{text}");
@@ -346,5 +359,60 @@ fn setup_noninteractive_stays_deterministic_and_records_no_answers() {
         !home.join(".niubash").join("wizard-answers.toml").is_file(),
         "wizard answers must not be written without an explicit pick"
     );
+    let _ = fs::remove_dir_all(&temp);
+}
+
+/// niubash#179 L05-3: a *gutted* trusted source (directory present,
+/// contents emptied) still lists as "ready" — the checksum state is the
+/// only remaining truth — but `niu plugin list` and `niu plugin discover`
+/// must name the verb that reports it instead of silently showing zero
+/// assets.
+#[test]
+fn gutted_trusted_source_names_the_verify_verb() {
+    let temp = temp_dir("plugin-gutted");
+    let root = temp.join("sources");
+    let envs = [("NIU_PLUGIN_SOURCES_ROOT", root.clone())];
+    let fixture = omb_fixture();
+
+    let add = run_niu_with_env(
+        &["plugin", "source", "add", &fixture.to_string_lossy()],
+        &envs,
+    );
+    assert_success(&add, "plugin source add");
+    let trust = run_niu_with_env(&["plugin", "source", "trust", "oh-my-bash"], &envs);
+    assert_success(&trust, "plugin source trust");
+
+    // Gut the tree: the directory survives, its contents do not.
+    let tree = root.join("oh-my-bash");
+    assert!(tree.is_dir(), "installed tree must exist");
+    for entry in fs::read_dir(&tree).expect("tree readable") {
+        let entry = entry.expect("tree entry readable");
+        if entry.file_type().expect("entry type").is_dir() {
+            fs::remove_dir_all(entry.path()).expect("remove subtree");
+        } else {
+            fs::remove_file(entry.path()).expect("remove file");
+        }
+    }
+
+    let list = run_niu_with_env(&["plugin", "list"], &envs);
+    assert_success(&list, "plugin list gutted");
+    let list_text = stdout_text(&list);
+    assert!(
+        list_text.contains("ready"),
+        "gutted tree still registers as ready: {list_text}"
+    );
+    assert!(
+        list_text.contains("niu plugin source verify oh-my-bash"),
+        "plugin list must name the verify verb for a gutted tree: {list_text}"
+    );
+
+    let discover = run_niu_with_env(&["plugin", "discover"], &envs);
+    assert_success(&discover, "plugin discover gutted");
+    assert!(
+        stdout_text(&discover).contains("niu plugin source verify oh-my-bash"),
+        "discover must name the verify verb for a gutted tree: {}",
+        stdout_text(&discover)
+    );
+
     let _ = fs::remove_dir_all(&temp);
 }

@@ -41,7 +41,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/harvest/eco-harvest.py \
-            --tier "${{ github.event.inputs.tier || 't1' }}" \
+            --tier "${{ github.event.inputs.tier || 'all' }}" \
             --manifest-dir eco/manifest --state-dir eco/state
       - name: upload manifest + state
         uses: actions/upload-artifact@v4
