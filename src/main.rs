@@ -221,6 +221,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
         "font" => niubash_runtime::fonts::run_font_command(),
         "doctor" => niubash_runtime::doctor::run_doctor(skill::SKILL_FILES),
+        "config" => run_config_command(&args[2..]),
         "plugin" => run_plugin_command(args),
         "skill" => skill::run_skill_command(args),
         _ => {
@@ -2783,6 +2784,106 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
         }
         unknown => anyhow::bail!("unknown plugin mirror subcommand '{unknown}'"),
     }
+}
+
+/// `niu config` — persisted user settings (`~/.niubash/config.toml`, the
+/// mirrors.toml convention). Deliberately tiny: one flat file, one setting
+/// today (the niubash#249 command-not-found hint policy). Any read problem
+/// degrades to the default in the runtime; `get`/`list` surface values as
+/// resolved (file, overridden by `NIU_COMMAND_NOT_FOUND_HINT`).
+fn run_config_command(args: &[String]) -> anyhow::Result<()> {
+    use niubash_runtime::config::{
+        resolve_command_not_found_hint, set_command_not_found_hint, user_config_path,
+        CommandNotFoundHint, COMMAND_NOT_FOUND_HINT_KEY,
+    };
+    match args.first().map(String::as_str) {
+        None | Some("-h" | "--help" | "help") => {
+            print_config_usage();
+            Ok(())
+        }
+        Some("list" | "show") => {
+            println!("Settings (persisted in {}):", user_config_path().display());
+            println!(
+                "  {COMMAND_NOT_FOUND_HINT_KEY} = {}",
+                resolve_command_not_found_hint().as_str()
+            );
+            Ok(())
+        }
+        Some("get") => {
+            let Some(key) = args.get(1) else {
+                anyhow::bail!("config get requires a key (`niu config list` shows them)")
+            };
+            match key.as_str() {
+                COMMAND_NOT_FOUND_HINT_KEY => {
+                    println!("{}", resolve_command_not_found_hint().as_str());
+                    Ok(())
+                }
+                unknown => anyhow::bail!(
+                    "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
+                ),
+            }
+        }
+        Some("set") => {
+            let Some(key) = args.get(1) else {
+                anyhow::bail!(
+                    "config set requires a key and a value (`niu config list` shows them)"
+                )
+            };
+            let Some(value) = args.get(2) else {
+                anyhow::bail!("config set {key} requires a value")
+            };
+            match key.as_str() {
+                COMMAND_NOT_FOUND_HINT_KEY => {
+                    let Some(hint) = CommandNotFoundHint::parse(value) else {
+                        anyhow::bail!(
+                            "invalid value '{value}' for {COMMAND_NOT_FOUND_HINT_KEY}: expected off or wpm"
+                        )
+                    };
+                    set_command_not_found_hint(hint)?;
+                    println!(
+                        "{} {COMMAND_NOT_FOUND_HINT_KEY} = {}",
+                        niubash_runtime::text_style::green("Set:"),
+                        hint.as_str()
+                    );
+                    if hint == CommandNotFoundHint::Wpm {
+                        println!("  new niu sessions suggest one `wpm search --name` line after a");
+                        println!(
+                            "  high-confidence near-miss (wpm only — never winget/scoop/choco)."
+                        );
+                    } else {
+                        println!("  command not found prints only the GNU one-liner (default).");
+                    }
+                    Ok(())
+                }
+                unknown => anyhow::bail!(
+                    "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
+                ),
+            }
+        }
+        Some(unknown) => {
+            anyhow::bail!("unknown config subcommand '{unknown}' (try: niu config help)")
+        }
+    }
+}
+
+fn print_config_usage() {
+    println!("Usage:  niu config <command>");
+    println!();
+    println!("Persisted user settings (~/.niubash/config.toml).");
+    println!();
+    println!("  get <key>          Print a setting's effective value");
+    println!("  set <key> <value>  Persist a setting");
+    println!("  list               Show every setting and its current value");
+    println!();
+    println!("Settings:");
+    println!(
+        "  {k}",
+        k = niubash_runtime::config::COMMAND_NOT_FOUND_HINT_KEY
+    );
+    println!("      Package-search suggestion printed after \"command not found\".");
+    println!("      off (default) | wpm — wpm suggests one `wpm search --name`");
+    println!("      line for high-confidence near-misses; third-party managers are");
+    println!("      never recommended (niubash#249).");
 }
 
 fn print_plugin_mirror_usage() {

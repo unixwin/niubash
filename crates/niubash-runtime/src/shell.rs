@@ -19,8 +19,8 @@ use rubash::{
 
 use crate::completion::{CompletionState, NiubashCompleter};
 use crate::config::{
-    load as load_config, AutosuggestConfig, EditorMode, HookConfig, MenuConfig,
-    NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
+    load as load_config, AutosuggestConfig, CommandNotFoundHint, EditorMode, HookConfig,
+    MenuConfig, NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
 };
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::prompt::{BashPrompt, NiubashPrompt, PromptBackend};
@@ -106,6 +106,11 @@ pub struct Shell {
     pub history_mode: crate::config::HistoryMode,
     pub menu_config: MenuConfig,
     pub editor_mode: EditorMode,
+    /// Command-not-found package-search hint policy (niubash#249): off by
+    /// default — a typo prints only the GNU one-liner;
+    /// `niu config set command-not-found-hint wpm` opts in to a wpm-only
+    /// near-miss suggestion.
+    pub command_not_found_hint: CommandNotFoundHint,
     /// Last observed engine `set -o emacs` / `set -o vi` flag pair, used by
     /// [`Shell::refresh_edit_mode`] to recover which of the two the user
     /// flipped last (GNU's editing-mode is one shared state; the engine
@@ -178,6 +183,9 @@ impl Shell {
         // 1. Load runtime defaults and environment-backed state.
         let mut config = load_config();
         config.history = config.history.with_env_overrides();
+        // niubash#249: resolve the opt-in hint policy once at startup
+        // (config.toml, overridden by NIU_COMMAND_NOT_FOUND_HINT).
+        let command_not_found_hint = crate::config::resolve_command_not_found_hint();
         crate::startup_trace::tick("config loaded");
 
         // 2. Select the WinuxCmd installation and use its real directory tree
@@ -391,6 +399,7 @@ impl Shell {
             history_mode: config.history.mode,
             menu_config: config.menus.with_env_overrides(),
             editor_mode: config.editor.edit_mode,
+            command_not_found_hint,
             edit_flags_seen: None,
             autosuggest: config.autosuggest.with_env_overrides(),
             syntax_highlighting: config.syntax_highlighting.with_env_overrides(),
@@ -1614,10 +1623,14 @@ impl Shell {
     }
 
     fn print_command_not_found_hints(&self, command: &str) {
-        for line in native_command_not_found_hint_lines(command, |candidate| {
-            resolve_native_command_path(candidate).is_some()
-        }) {
-            eprintln!("{}", line);
+        for line in native_command_not_found_hint_lines_with_policy(
+            command,
+            |candidate| resolve_native_command_path(candidate).is_some(),
+            self.command_not_found_hint,
+        ) {
+            // Routed through the shell channel (not a bare eprintln!) so
+            // the cfg(test) capture seam observes hint emission.
+            shell_channel_write(ShellChannel::Stderr, format!("{line}\n").as_bytes());
         }
     }
 
@@ -2901,7 +2914,31 @@ enum CommandNotFoundProviderOutput {
     Empty,
     Failed(String),
 }
-fn native_command_not_found_hint_lines<F>(command: &str, mut command_exists: F) -> Vec<String>
+/// Test-facing default-policy shape of the hint builder: production always
+/// resolves the policy from `Shell::command_not_found_hint`.
+#[cfg(test)]
+fn native_command_not_found_hint_lines<F>(command: &str, command_exists: F) -> Vec<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    native_command_not_found_hint_lines_with_policy(
+        command,
+        command_exists,
+        crate::config::CommandNotFoundHint::default(),
+    )
+}
+
+/// niubash#249: the unsolicited "package search hints" block is gone. The
+/// recipe/wpm install hints stay (they fire only for exact, known tool
+/// names — targeted advice, not a typo-triggered advertisement). The
+/// search suggestion itself is opt-in (`niu config set
+/// command-not-found-hint wpm`) and names only niu's own wpm — never
+/// winget/scoop/choco.
+fn native_command_not_found_hint_lines_with_policy<F>(
+    command: &str,
+    mut command_exists: F,
+    hint: crate::config::CommandNotFoundHint,
+) -> Vec<String>
 where
     F: FnMut(&str) -> bool,
 {
@@ -2936,23 +2973,47 @@ where
         ));
     }
 
-    let mut hints = Vec::new();
-    if command_exists("winget") {
-        hints.push(format!("  winget search --name {}", search));
-    }
-    if command_exists("scoop") {
-        hints.push(format!("  scoop search {}", search));
-    }
-    if command_exists("choco") {
-        hints.push(format!("  choco search {}", search));
-    }
-
-    if !hints.is_empty() {
+    // niubash#249: the package search suggestion is opt-in, wpm-only, and
+    // fires only for high-confidence near-misses (see
+    // `is_high_confidence_package_near_miss`). Off by default — GNU bash
+    // parity for the common typo.
+    #[cfg(windows)]
+    if hint == crate::config::CommandNotFoundHint::Wpm
+        && is_high_confidence_package_near_miss(command, &mut command_exists)
+    {
         lines.push("niubash: package search hints:".to_string());
-        lines.extend(hints);
+        lines.push(format!("  wpm search --name {}", search));
     }
+    #[cfg(not(windows))]
+    // wpm does not exist on this platform, so the opt-in channel has
+    // nothing to name: the policy parameter and the existence probe stay
+    // intentionally unused here.
+    let _ = (command_exists, hint, search);
 
     lines
+}
+
+/// niubash#249 trigger tightening (opt-in channel only): the typed word is
+/// a high-confidence package near-miss only when dropping its final
+/// character — edit distance ≤ 1 by truncation, the typo shape the issue
+/// names — hits an installed command or a known package command name.
+/// Arbitrary one-off typos ("win") stay hint-less even with the channel
+/// enabled.
+#[cfg(windows)]
+fn is_high_confidence_package_near_miss<F>(command: &str, command_exists: &mut F) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    let Some((last_char_index, _)) = command.char_indices().last() else {
+        return false;
+    };
+    let prefix = &command[..last_char_index];
+    if prefix.is_empty() {
+        return false;
+    }
+    command_exists(prefix)
+        || wpm_package_for_command(prefix).is_some()
+        || plugin_recipe_for_command(prefix).is_some()
 }
 
 /// Application tools that own a compiled-in plugin executable-tool recipe:
@@ -4119,14 +4180,13 @@ niu_git_comp() {
     }
 
     #[test]
-    fn native_command_not_found_lines_include_available_windows_package_managers() {
-        // rg is an application tool with a compiled-in executable-tool
-        // recipe: the install hint names the platform's package manager
-        // directly (wpm first on Windows — owner correction 2026-10-03;
-        // native managers elsewhere), plus the recipe verb for the fuller
-        // recommendation.
+    fn native_command_not_found_lines_drop_package_search_hints_by_default() {
+        // niubash#249: rg owns a compiled-in executable-tool recipe, so the
+        // targeted install hint stays; the winget/scoop/choco search block
+        // is gone under the default (off) policy — even when every
+        // third-party manager is installed.
         let lines = native_command_not_found_hint_lines("rg", |command| {
-            matches!(command, "winget" | "scoop")
+            matches!(command, "winget" | "scoop" | "choco")
         });
 
         #[cfg(windows)]
@@ -4147,10 +4207,130 @@ niu_git_comp() {
             !lines.iter().any(|line| line.contains("wpm install awk")),
             "command-layer and application-tool channels must not cross: {lines:?}"
         );
-        assert!(lines.contains(&"niubash: package search hints:".to_string()));
-        assert!(lines.contains(&"  winget search --name 'rg'".to_string()));
-        assert!(lines.contains(&"  scoop search 'rg'".to_string()));
-        assert!(!lines.iter().any(|line| line.contains("choco search")));
+        assert!(
+            !lines.iter().any(|line| line.contains("search hints")),
+            "package search hints are opt-in (niubash#249): {lines:?}"
+        );
+        for manager in ["winget", "scoop", "choco"] {
+            assert!(
+                !lines.iter().any(|line| line.contains(manager)),
+                "third-party managers are never recommended: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typo_gets_no_package_hint_by_default_issue_249_repro() {
+        // owner repro (niubash#249): `% win` printed the command-not-found
+        // line and then a winget search advertisement. Under the default
+        // policy the hint channel contributes zero lines — the executor's
+        // GNU one-liner is the whole output.
+        let lines = native_command_not_found_hint_lines("win", |command| {
+            matches!(command, "winget" | "scoop" | "choco")
+        });
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn command_not_found_hint_wpm_opt_in_suggests_only_wpm_for_near_misses() {
+        // Opt-in channel (`niu config set command-not-found-hint wpm`):
+        // only wpm is ever named, and only when the word is a
+        // high-confidence near-miss — dropping the last character hits a
+        // known package command name (jq) or an installed command (rg).
+        #[cfg(windows)]
+        {
+            let lines = native_command_not_found_hint_lines_with_policy(
+                "jqq",
+                |_| false,
+                CommandNotFoundHint::Wpm,
+            );
+            assert_eq!(
+                lines,
+                vec![
+                    "niubash: package search hints:".to_string(),
+                    "  wpm search --name 'jqq'".to_string(),
+                ]
+            );
+
+            let lines = native_command_not_found_hint_lines_with_policy(
+                "rgt",
+                |command| command == "rg",
+                CommandNotFoundHint::Wpm,
+            );
+            assert_eq!(
+                lines,
+                vec![
+                    "niubash: package search hints:".to_string(),
+                    "  wpm search --name 'rgt'".to_string(),
+                ]
+            );
+        }
+        // wpm does not exist off Windows: the string must never surface
+        // there, even with the switch set.
+        #[cfg(not(windows))]
+        {
+            let lines = native_command_not_found_hint_lines_with_policy(
+                "jqq",
+                |_| true,
+                CommandNotFoundHint::Wpm,
+            );
+            assert!(lines.is_empty(), "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn command_not_found_hint_wpm_opt_in_stays_silent_for_arbitrary_typos() {
+        // Trigger tightening (niubash#249): "win" minus its last character
+        // ("wi") hits neither an installed command nor a known package
+        // command name — a pure typo gets no hint even with the channel on.
+        let lines = native_command_not_found_hint_lines_with_policy(
+            "win",
+            |command| matches!(command, "winget" | "scoop" | "choco"),
+            CommandNotFoundHint::Wpm,
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn shell_field_gates_command_not_found_hint_emission() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Default (off): a miss contributes no hint lines at all.
+        {
+            let mut shell = test_shell(HookConfig::default());
+            assert_eq!(shell.command_not_found_hint, CommandNotFoundHint::Off);
+            CHANNEL_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            shell.print_command_not_found_hints("win");
+            let captured = CHANNEL_CAPTURE.with(|slot| slot.borrow_mut().take());
+            assert!(
+                captured.unwrap_or_default().is_empty(),
+                "default policy must stay silent (niubash#249)"
+            );
+        }
+        // Opt-in (wpm): the near-miss suggestion lands on stderr, wpm only.
+        #[cfg(windows)]
+        {
+            let mut shell = test_shell(HookConfig::default());
+            shell.command_not_found_hint = CommandNotFoundHint::Wpm;
+            CHANNEL_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+            shell.print_command_not_found_hints("jqq");
+            let captured = CHANNEL_CAPTURE.with(|slot| slot.borrow_mut().take());
+            let captured = captured.expect("capture disarmed");
+            assert!(
+                captured
+                    .iter()
+                    .all(|(channel, _)| *channel == ShellChannel::Stderr),
+                "hints are stderr-only: {captured:?}"
+            );
+            let text: String = captured
+                .into_iter()
+                .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+                .collect();
+            assert_eq!(
+                text,
+                "niubash: package search hints:\n  wpm search --name 'jqq'\n"
+            );
+            assert!(!text.contains("winget"));
+        }
     }
 
     #[test]
@@ -5331,6 +5511,7 @@ niu_git_comp() {
             history_mode: crate::config::HistoryMode::default(),
             menu_config: MenuConfig::default(),
             editor_mode: EditorMode::Emacs,
+            command_not_found_hint: CommandNotFoundHint::Off,
             edit_flags_seen: None,
             autosuggest: AutosuggestConfig::default(),
             syntax_highlighting: SyntaxHighlightConfig::default(),

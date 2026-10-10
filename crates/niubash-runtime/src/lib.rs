@@ -99,8 +99,8 @@ pub(crate) mod test_support {
 
 pub use completion::{CompletionBehavior, CompletionMatchMode, CompletionState, NiubashCompleter};
 pub use config::{
-    AutosuggestConfig, EditorConfig, EditorMode, HistoryConfig, MenuConfig, ShellConfig,
-    SyntaxHighlightConfig,
+    AutosuggestConfig, CommandNotFoundHint, EditorConfig, EditorMode, HistoryConfig, MenuConfig,
+    ShellConfig, SyntaxHighlightConfig,
 };
 pub use prompt::PromptBackend;
 pub use prompt::PromptIndicators;
