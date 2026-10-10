@@ -82,6 +82,7 @@ macro_rules! eprintln {
     };
 }
 
+mod piped_stdout;
 mod self_update;
 mod skill;
 // GNU variables.c FUNCNEST: 0/unset means no limit, so recursion depth is
@@ -95,16 +96,30 @@ fn main() -> ExitCode {
     // default hook reports; with `panic = "abort"` this is the last code
     // that runs because no Drop guards execute.
     niubash_runtime::panic_restore::install_panic_hook();
-    std::thread::Builder::new()
+    let code = std::thread::Builder::new()
         .name("niu-main".to_string())
         .stack_size(NIU_MAIN_STACK_SIZE)
         .spawn(run_main)
         .expect("spawn niubash main thread")
         .join()
-        .unwrap_or_else(|_| ExitCode::from(1))
+        .unwrap_or_else(|_| ExitCode::from(1));
+    // niubash#245: before the process tears down its threads, let the
+    // piped-stdout pump (when installed) forward everything still in
+    // flight — the main-return path of every non-interactive run drains
+    // here so normal runs never lose buffered output.
+    piped_stdout::finish();
+    code
 }
 
 fn run_main() -> ExitCode {
+    // niubash#245: guard a piped stdout for non-interactive executions
+    // BEFORE anything can write (Rust caches the stdio handle on first
+    // use, so the interposition must land first). A reader that closes
+    // the pipe must terminate niu — one diagnostic, status 1 — instead
+    // of letting an unbounded producer loop on per-write failures.
+    let args: Vec<String> = std::env::args().collect();
+    piped_stdout::install_for_argv(&args);
+
     // Initialize logging (only error level by default)
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Error)
@@ -125,7 +140,6 @@ fn run_main() -> ExitCode {
         }
     }
 
-    let args: Vec<String> = std::env::args().collect();
     if let Some(name) = args
         .get(1)
         .and_then(|arg| arg.strip_prefix("--internal-"))
@@ -198,7 +212,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                     if message.contains("invalid option") {
                         show_shell_usage();
                     }
-                    std::process::exit(2);
+                    piped_stdout::finish_and_exit(2);
                 }
             };
         }
@@ -242,7 +256,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 // shell.c shell_execve on a name that is neither option,
                 // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
                 eprintln!("niu: {}: No such file or directory", first);
-                std::process::exit(127);
+                piped_stdout::finish_and_exit(127);
             }
             // general.c:718-741 check_binary_file: NUL in the first line(s)
             // or an ELF image is refused with EX_BINARY_FILE (126).
@@ -251,7 +265,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 || std::str::from_utf8(&bytes).is_err()
             {
                 eprintln!("cannot execute binary file");
-                std::process::exit(126);
+                piped_stdout::finish_and_exit(126);
             }
             let content = String::from_utf8(bytes).unwrap_or_default();
             shell.set_script_name(first);
@@ -262,7 +276,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             let code = shell.execute_script(&content)?;
             let code = shell.finish_with_exit_trap(code)?;
             if code != 0 {
-                std::process::exit(code);
+                piped_stdout::finish_and_exit(code);
             }
             Ok(())
         }
@@ -358,7 +372,7 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             let code = shell.finish_with_exit_trap(code)?;
             niubash_runtime::startup_trace::tick("-c: exit trap");
             if code != 0 {
-                std::process::exit(code);
+                piped_stdout::finish_and_exit(code);
             }
             Ok(())
         }
@@ -432,7 +446,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             // diagnostic ("bash: line 0: badopt: invalid shell option name").
             if error.contains("invalid shell option name") {
                 eprintln!("bash: line 0: {error}");
-                std::process::exit(2);
+                piped_stdout::finish_and_exit(2);
             }
             anyhow::anyhow!("niu: {error}")
         })?;
@@ -492,7 +506,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         let code = shell.finish_with_exit_trap(code)?;
         niubash_runtime::startup_trace::tick("invocation: exit trap");
         if code != 0 {
-            std::process::exit(code);
+            piped_stdout::finish_and_exit(code);
         }
         return Ok(());
     }
@@ -510,7 +524,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         let code = shell.execute_script(&content)?;
         let code = shell.finish_with_exit_trap(code)?;
         if code != 0 {
-            std::process::exit(code);
+            piped_stdout::finish_and_exit(code);
         }
         return Ok(());
     }
@@ -538,7 +552,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         shell.run_startup_rc();
         rubash::script_driver::prepare_interactive_history(&mut shell.executor);
         let code = rubash::script_driver::run_interactive_stdin(&mut shell.executor);
-        std::process::exit(code);
+        piped_stdout::finish_and_exit(code);
     }
     // Bash -i forces an interactive shell even when stdin is not a terminal;
     // with no command or script, a terminal (or -i) means the REPL.
@@ -552,7 +566,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     let code = shell.execute_script(&content)?;
     let code = shell.finish_with_exit_trap(code)?;
     if code != 0 {
-        std::process::exit(code);
+        piped_stdout::finish_and_exit(code);
     }
     Ok(())
 }
