@@ -102,3 +102,32 @@ jobs:
         with:
           name: eco-results-${{ github.run_id }}
           path: eco/results
+
+  file-failure-issue:
+    needs: [harvest, test]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: file or update failure issue (deduped by label)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="eco-harvest-ci 运行失败（自动开单）"
+          BODY="自动化运行失败，请查看：$RUN_URL
+
+- 触发：${{ github.event_name }}
+- 失败 job：harvest / test（详见 run 页面日志与 artifact eco-manifest / eco-results）
+
+> 本单由 workflow 失败自动创建；修复后关闭，下次失败会重新自动开单。"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label eco-harvest-failure --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "再次失败：$RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --label eco-harvest-failure --title "$TITLE" --body "$BODY"
+          fi
