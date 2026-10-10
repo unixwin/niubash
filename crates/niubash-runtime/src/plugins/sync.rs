@@ -152,18 +152,48 @@ pub fn declared_entry(
     id: Option<&str>,
     origin: &str,
 ) -> Option<String> {
+    declared_entry_state(spec, target, id, origin).map(|(label, _)| label)
+}
+
+/// The duplicate check plus the existing entry's install state (niubash#176):
+/// the label for the message, and whether a matching source is actually
+/// installed. `false` marks a stranded declaration — the spec carries it but
+/// no install ever landed, so `niu plugin source remove <label>` fails and
+/// `niu plugin sync --prune` is the honest way out.
+pub fn declared_entry_state(
+    spec: &PluginSpec,
+    target: &str,
+    id: Option<&str>,
+    origin: &str,
+) -> Option<(String, bool)> {
+    find_declared_entry(spec, target, id, origin).map(|entry| {
+        let label = entry.id.clone().unwrap_or_else(|| entry.target.clone());
+        let installed = record_for_entry(entry, &read_source_registry()).is_some();
+        (label, installed)
+    })
+}
+
+/// The spec entry a duplicate (target, id, origin) would collide with,
+/// matching [`declared_entry`]'s semantics: explicit id first, then the
+/// target spelling, then the resolved origin.
+fn find_declared_entry<'a>(
+    spec: &'a PluginSpec,
+    target: &str,
+    id: Option<&str>,
+    origin: &str,
+) -> Option<&'a SpecSource> {
     if let Some(id) = id {
         if let Some(entry) = spec.entry_for_id(id) {
-            return Some(entry.id.clone().unwrap_or_else(|| entry.target.clone()));
+            return Some(entry);
         }
     }
     for entry in &spec.sources {
         if entry.target == target {
-            return Some(entry.id.clone().unwrap_or_else(|| entry.target.clone()));
+            return Some(entry);
         }
         if let Ok((_, entry_origin)) = resolve_spec_origin(&entry.target) {
             if entry_origin == origin || entry_origin == target {
-                return Some(entry.id.clone().unwrap_or_else(|| entry.target.clone()));
+                return Some(entry);
             }
         }
     }

@@ -103,6 +103,19 @@ All notable changes to Niubash are documented in this file.
 
 ### Fixed (product, found by the audit lanes and the golden journey)
 
+- add/rc audit P2 batch (niubash#176): `niu plugin add -h` is a usage
+  request (was an unknown-option error); the plugin usage and the add usage
+  document `--url`; a local directory named like a catalog id
+  (`oh-my-bash/`) is adopted as a local tree instead of being hijacked to
+  the catalog's GitHub origin; cwd-relative path targets are stored
+  cwd-independent (normalized absolute, forward slashes) in the spec; the
+  already-declared refusal points stranded declarations at
+  `niu plugin sync --prune` instead of a remove that would fail; user lines
+  hand-written inside a managed rc block are migrated out with a warning
+  instead of being silently dropped; a CRLF rc keeps its line endings
+  through block rewrites; hand-edited near-marker blocks are repaired
+  instead of duplicated; every plugin verb that rewrites the rc backs it up
+  first and the backup set is pruned to the 10 newest.
 - `plugin add --checksum` is honored through add and adopt; failed adds
   roll back their spec entry and legacy strands are pruned; enable/disable
   surface rc-write failures and collapse duplicate managed blocks.

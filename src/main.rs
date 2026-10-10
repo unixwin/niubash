@@ -2031,6 +2031,12 @@ fn run_plugin_source_verify_command(args: &[String]) -> anyhow::Result<()> {
 /// their official origin, `owner/repo` expands to GitHub; wild repos and
 /// bpkg trees come in the same way (auto-detected layout, per-plugin id).
 fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
+    // `add -h` is a help request, not an unknown-option error (niubash#176):
+    // the verb-level flags render here, the plugin-level usage one level up.
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        print_plugin_add_usage();
+        return Ok(());
+    }
     let parsed = parse_plugin_source_args(args)?;
     // Recipe routing (lazy-study merge): a bare word that is NOT a catalog
     // id but names a recipe routes through the recipe's driver (generic
@@ -2046,8 +2052,17 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
         }
     }
     let mut request = resolve_source_install_request(parsed.clone())?;
-    // Catalog shorthand first: `niu plugin add oh-my-bash` knows the origin.
-    if request.adapter.is_none() {
+    // A local directory wins over the catalog (niubash#176): a cwd that
+    // happens to contain an `oh-my-bash/` tree must not be silently
+    // re-resolved to the official GitHub origin — the user spelled a local
+    // path, and the path is stabilized below so later syncs (run from any
+    // directory) resolve the same tree instead of a cwd-relative strand.
+    if std::path::Path::new(&request.origin).exists() {
+        request.origin = stable_local_target(&request.origin);
+    }
+    // Catalog shorthand first: `niu plugin add oh-my-bash` knows the origin
+    // — but only for spellings that are NOT a local path (guarded above).
+    if request.adapter.is_none() && !std::path::Path::new(&request.origin).exists() {
         if let Some(entry) = niubash_runtime::plugins::catalog::catalog_entry(&request.origin) {
             request.adapter = Some(entry.id.to_string());
             request.origin = entry.origin.to_string();
@@ -2071,6 +2086,14 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
             .filter(|target| !target.is_empty())
             .unwrap_or_else(|| request.origin.clone())
     });
+    // A local path target is stored cwd-independent (niubash#176): the raw
+    // relative spelling (`./omb`, a bare dir name) would strand the spec
+    // entry the moment sync runs from another directory.
+    let entry_target = if std::path::Path::new(&entry_target).exists() {
+        stable_local_target(&entry_target)
+    } else {
+        entry_target
+    };
     // The entry id: the user's `--id` when given; else the manager id for
     // one-per-machine managers. Per-install shapes (wild file sources,
     // adopted bpkg trees) leave the id unset — sync derives it from the
@@ -2089,19 +2112,29 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
         .adapter
         .clone()
         .filter(|kind| !kind.is_empty() && entry_id.as_deref() != Some(kind.as_str()));
-    if let Some(existing) = niubash_runtime::plugins::sync::declared_entry(
+    if let Some((existing, installed)) = niubash_runtime::plugins::sync::declared_entry_state(
         &spec,
         &entry_target,
         entry_id.as_deref(),
         &request.origin,
     ) {
+        // The removal hint must work for the state it names (niubash#176):
+        // a stranded declaration (declared, never installed) has no source
+        // to remove — `niu plugin source remove` would just fail, and
+        // `niu plugin sync --prune` is the way out (wt83 #174).
+        let removal_hint = if installed {
+            format!("`niu plugin source remove {existing}` uninstalls")
+        } else {
+            "the entry is declared but not installed (a stranded declaration) — \
+             `niu plugin sync --prune` removes it"
+                .to_string()
+        };
         anyhow::bail!(
             "'{}' is already declared in {} (entry target '{}'); \
-             enable/disable manage it, `niu plugin source remove {}` uninstalls",
+             enable/disable manage it, {removal_hint}",
             existing,
             niubash_runtime::plugins::spec::spec_path().display(),
             entry_target,
-            existing
         );
     }
     spec.sources
@@ -3069,6 +3102,56 @@ fn run_plugin_clean_command(_args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Normalize a local path target into a cwd-independent absolute form
+/// (niubash#176): the spec is reconciled from any directory later, so a
+/// relative spelling (`./omb`, a bare dir name in the cwd) is stored as a
+/// lexically normalized absolute path instead of raw. `std::fs::canonicalize`
+/// is avoided on purpose — on Windows it emits `\\?\`-prefixed paths that
+/// would leak into the spec and every comparison against it.
+fn stable_local_target(target: &str) -> String {
+    let path = std::path::Path::new(target);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => return target.to_string(),
+        }
+    };
+    let mut normalized = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => {
+                normalized.push(other.as_os_str());
+            }
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
+}
+
+fn print_plugin_add_usage() {
+    println!("Usage:  niu plugin add <id|owner/repo|url|path> [options]");
+    println!();
+    println!("Declare a source in the spec (~/.niubash/plugins.toml) and install it");
+    println!("(fetch gate only; everything lands untrusted until you trust it).");
+    println!();
+    println!("Options:");
+    println!("  --id <name>            Pin the source id (else derived/bound at sync)");
+    println!("  --ref <ref>            Fetch this ref (first fetch only)");
+    println!("  --checksum <sha256>    Refuse the fetch on a tree-checksum mismatch");
+    println!("  --path <dir>           Pin the origin to a local directory");
+    println!("  --url <git-url>        Pin the origin to a git url");
+    println!();
+    println!("After adding:");
+    println!("  niu plugin trust <id>      Review and activate the source");
+    println!("  niu plugin enable <target> Pick assets (or the whole source)");
+    println!("  niu plugin sync --prune    Remove a stranded declaration");
+}
+
 fn print_plugin_usage() {
     println!("Usage:  niu plugin <command>");
     println!();
@@ -3083,6 +3166,7 @@ fn print_plugin_usage() {
     println!("Commands:");
     println!("  add <id|owner/repo|url|path> [--id <name>] [--ref <ref>]");
     println!("                           [--checksum <sha256>] [--path <dir>]");
+    println!("                           [--url <git-url>]");
     println!("                           Declare + install a source (catalog id,");
     println!("                           GitHub shorthand, url, or local path; the");
     println!("                           entry lands in the spec, untrusted; recipe");
