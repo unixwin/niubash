@@ -12,6 +12,48 @@ const OK: &str = "\x1b[1;92m✅\x1b[0m";
 const WARN: &str = "\x1b[1;93m⚠️\x1b[0m";
 const INFO: &str = "\x1b[1;96mℹ️\x1b[0m";
 
+/// Text of the n/a row for a Windows-only component skipped on another
+/// platform (niubash#194). A shared constant so the tests assert the very
+/// string the report prints.
+const WINDOWS_COMPONENT_NA: &str = "n/a on this platform — Windows component, skipped";
+
+/// Which platform family the doctor is running on (niubash#194).
+///
+/// The Windows command layer (winuxcmd core, command links, bash/sh shims)
+/// does not exist on Linux/macOS; probing it there always reports `not
+/// found` and drags the critical tally down falsely. `current()` resolves
+/// at compile time via `cfg!(windows)`, but the checks branch on the enum
+/// value so the skip logic is unit-testable on any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Platform {
+    Windows,
+    Unix,
+}
+
+impl Platform {
+    pub(crate) fn current() -> Self {
+        if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Unix
+        }
+    }
+
+    /// Label shown in the doctor header so the report names its platform.
+    fn label(self) -> &'static str {
+        match self {
+            Platform::Windows => "windows",
+            Platform::Unix => "unix",
+        }
+    }
+
+    /// Whether the Windows-only command layer (winuxcmd core, command
+    /// links, bash/sh shims) applies on this platform and must be probed.
+    fn checks_windows_command_layer(self) -> bool {
+        matches!(self, Platform::Windows)
+    }
+}
+
 /// Run all checks and print the report. Colors are dropped when stdout is
 /// not a terminal so piped output stays plain.
 ///
@@ -29,73 +71,91 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     let mut out = io::stdout();
     let mut critical_passed = 0usize;
     let mut critical_total = 0usize;
+    let platform = Platform::current();
 
     if color {
         writeln!(
             out,
-            "\x1b[1mniubash doctor\x1b[0m — {}",
-            env!("CARGO_PKG_VERSION")
+            "\x1b[1mniubash doctor\x1b[0m — {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            platform.label()
         )?;
     } else {
-        writeln!(out, "niubash doctor — {}", env!("CARGO_PKG_VERSION"))?;
+        writeln!(
+            out,
+            "niubash doctor — {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            platform.label()
+        )?;
     }
     writeln!(out)?;
 
-    // ── Critical: the Unix command core ────────────────────────────────────
-    critical_total += 1;
-    match crate::winuxcmd::find_winuxcmd() {
-        Some(exe) => {
-            let version = crate::winuxcmd::version()
-                .map(|v| format!(" (winuxcmd {v})"))
-                .unwrap_or_default();
-            writeln!(out, "  {ok} winuxcmd core       {}{version}", display(&exe))?;
-            critical_passed += 1;
+    // ── Critical: the Unix command core (Windows-only layer, #194) ────────
+    // winuxcmd is the native-Windows Unix command layer; on Linux/macOS it
+    // can never be found, so the row is reported as n/a and stays out of
+    // the critical tally instead of failing the run.
+    if platform.checks_windows_command_layer() {
+        critical_total += 1;
+        match crate::winuxcmd::find_winuxcmd() {
+            Some(exe) => {
+                let version = crate::winuxcmd::version()
+                    .map(|v| format!(" (winuxcmd {v})"))
+                    .unwrap_or_default();
+                writeln!(out, "  {ok} winuxcmd core       {}{version}", display(&exe))?;
+                critical_passed += 1;
 
-            // The bash/sh forwarder shims ship beside the winuxcmd tree.
-            let shim = exe
-                .parent()
-                .map(|dir| dir.join("bash.exe"))
-                .filter(|p| p.is_file());
-            match shim {
-                Some(_) => writeln!(
-                    out,
-                    "  {info} bash/sh shims       present — `bash` and `sh` forward to niu"
-                )?,
-                None => writeln!(
-                    out,
-                    "  {info} bash/sh shims       not beside winuxcmd (optional)"
-                )?,
+                // The bash/sh forwarder shims ship beside the winuxcmd tree.
+                let shim = exe
+                    .parent()
+                    .map(|dir| dir.join("bash.exe"))
+                    .filter(|p| p.is_file());
+                match shim {
+                    Some(_) => writeln!(
+                        out,
+                        "  {info} bash/sh shims       present — `bash` and `sh` forward to niu"
+                    )?,
+                    None => writeln!(
+                        out,
+                        "  {info} bash/sh shims       not beside winuxcmd (optional)"
+                    )?,
+                }
             }
+            None => writeln!(
+                out,
+                "  {warn} winuxcmd core       not found — reinstall Niubash or check PATH"
+            )?,
         }
-        None => writeln!(
-            out,
-            "  {warn} winuxcmd core       not found — reinstall Niubash or check PATH"
-        )?,
+    } else {
+        writeln!(out, "  {info} winuxcmd core       {WINDOWS_COMPONENT_NA}")?;
     }
 
-    // ── Critical: command links on PATH ────────────────────────────────────
-    critical_total += 1;
-    if crate::winuxcmd::command_links_ready() {
-        let count = crate::winuxcmd::list_commands().len();
-        writeln!(
-            out,
-            "  {ok} command links       {count} commands (ls, cat, grep, …)"
-        )?;
-        critical_passed += 1;
+    // ── Critical: command links on PATH (Windows-only layer, #194) ────────
+    if platform.checks_windows_command_layer() {
+        critical_total += 1;
+        if crate::winuxcmd::command_links_ready() {
+            let count = crate::winuxcmd::list_commands().len();
+            writeln!(
+                out,
+                "  {ok} command links       {count} commands (ls, cat, grep, …)"
+            )?;
+            critical_passed += 1;
+        } else {
+            // Windows-only recovery text: the wpm command-layer verb exists
+            // only there, and the `wpm` string must not surface in
+            // non-Windows builds — compile-time gate, not a runtime check.
+            #[cfg(windows)]
+            writeln!(
+                out,
+                "  {warn} command links       missing (ls/cat/grep) — restart niu or run `wpm links rebuild`"
+            )?;
+            #[cfg(not(windows))]
+            writeln!(
+                out,
+                "  {warn} command links       missing (ls/cat/grep) — restart niu"
+            )?;
+        }
     } else {
-        // Windows-only recovery text: the wpm command-layer verb exists only
-        // there, and the `wpm` string must not surface in non-Windows
-        // builds — compile-time gate, not a runtime check.
-        #[cfg(windows)]
-        writeln!(
-            out,
-            "  {warn} command links       missing (ls/cat/grep) — restart niu or run `wpm links rebuild`"
-        )?;
-        #[cfg(not(windows))]
-        writeln!(
-            out,
-            "  {warn} command links       missing (ls/cat/grep) — restart niu"
-        )?;
+        writeln!(out, "  {info} command links       {WINDOWS_COMPONENT_NA}")?;
     }
 
     // ── Critical: interactive startup rc ───────────────────────────────────
@@ -160,14 +220,25 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     // The release ships gawk/niugit/ripgrep/fd inside the winuxcmd opt/ tree
     // (preinstall manifest). The doctor reports them with their true source
     // so a bundled component is never mistaken for a system install — and
-    // never reported as missing.
+    // never reported as missing. The bundled layout is a Windows-release
+    // concept (#194): on other platforms the winuxcmd tree is absent, so
+    // the row is labeled n/a rather than reading as "nothing installed".
     let bundled = crate::setup_wizard::bundled_components();
-    writeln!(out, "  {info}{}", bundled_tools_row(&bundled))?;
+    writeln!(out, "  {info}{}", bundled_tools_row(&bundled, platform))?;
 
-    let terminal = if std::env::var_os("WT_SESSION").is_some() {
-        "Windows Terminal"
-    } else {
-        "console host"
+    let terminal = match platform {
+        Platform::Windows => {
+            if std::env::var_os("WT_SESSION").is_some() {
+                "Windows Terminal".to_string()
+            } else {
+                "console host".to_string()
+            }
+        }
+        // WT_SESSION is a Windows Terminal variable; on unix fall back to
+        // TERM so the row stays informative instead of always "console host".
+        Platform::Unix => std::env::var("TERM")
+            .map(|term| format!("unix terminal ({term})"))
+            .unwrap_or_else(|_| "unix terminal".to_string()),
     };
     writeln!(out, "  {info} terminal            {terminal}")?;
 
@@ -362,15 +433,19 @@ fn display(path: &std::path::Path) -> String {
 
 /// The `bundled tools` advisory row (without the leading two-space indent;
 /// the caller prepends the info marker). Honest either way: the names of
-/// what the release actually ships, or an explicit "none".
-fn bundled_tools_row(bundled: &[&str]) -> String {
-    if bundled.is_empty() {
-        " bundled tools       none — this install ships no pre-installed packages".to_string()
-    } else {
+/// what the release actually ships, or an explicit "none". On non-Windows
+/// platforms (#194) the winuxcmd opt/ layout the bundle lives in does not
+/// exist, so an empty bundle reads as n/a, not as an empty install.
+fn bundled_tools_row(bundled: &[&str], platform: Platform) -> String {
+    if !bundled.is_empty() {
         format!(
             " bundled tools       {} (shipped with the release, not system installs)",
             bundled.join(" ")
         )
+    } else if platform.checks_windows_command_layer() {
+        " bundled tools       none — this install ships no pre-installed packages".to_string()
+    } else {
+        " bundled tools       n/a — bundled tools ship in the Windows release layout".to_string()
     }
 }
 
@@ -408,16 +483,58 @@ mod tests {
     /// release ships and labels it as bundled, never as a system install.
     #[test]
     fn bundled_tools_row_labels_the_release_source() {
-        let row = bundled_tools_row(&["gawk", "niugit", "ripgrep", "fd"]);
+        let row = bundled_tools_row(&["gawk", "niugit", "ripgrep", "fd"], Platform::Windows);
         assert!(row.contains("gawk niugit ripgrep fd"), "{row}");
         assert!(row.contains("shipped with the release"), "{row}");
         assert!(row.contains("not system installs"), "{row}");
     }
 
     #[test]
-    fn bundled_tools_row_is_honest_when_empty() {
-        let row = bundled_tools_row(&[]);
+    fn bundled_tools_row_is_honest_when_empty_on_windows() {
+        let row = bundled_tools_row(&[], Platform::Windows);
         assert!(row.contains("none"), "{row}");
         assert!(!row.contains("shipped"), "{row}");
+    }
+
+    // ── niubash#194: platform gating of the Windows command layer ──────────
+
+    /// The Windows command layer (winuxcmd core, command links, shims) must
+    /// be probed on Windows and skipped on unix — the skip decision is the
+    /// same code path `run_doctor` branches on, exercised here with an
+    /// injected platform so it holds regardless of the host OS.
+    #[test]
+    fn windows_command_layer_is_checked_only_on_windows() {
+        assert!(Platform::Windows.checks_windows_command_layer());
+        assert!(!Platform::Unix.checks_windows_command_layer());
+        // The runtime default must agree with the compile-time target.
+        assert_eq!(
+            Platform::current().checks_windows_command_layer(),
+            cfg!(windows)
+        );
+    }
+
+    /// On unix the skipped rows must read as n/a (not as a broken install),
+    /// and the bundled-tools row must not imply an empty install. Asserts
+    /// the exact shared constant the report prints.
+    #[test]
+    fn unix_skipped_rows_read_as_na_not_failure() {
+        assert!(WINDOWS_COMPONENT_NA.contains("n/a"));
+        assert!(WINDOWS_COMPONENT_NA.contains("Windows component"));
+        assert!(!WINDOWS_COMPONENT_NA.contains("reinstall"));
+        assert!(!WINDOWS_COMPONENT_NA.contains("not found"));
+
+        // And the bundled row on unix is explicitly n/a about the layout.
+        let bundled = bundled_tools_row(&[], Platform::Unix);
+        assert!(bundled.contains("n/a"), "{bundled}");
+        assert!(bundled.contains("Windows release layout"), "{bundled}");
+        assert!(!bundled.contains("reinstall"), "{bundled}");
+    }
+
+    /// The header names the platform so users can tell which checks apply.
+    #[test]
+    fn platform_labels_are_distinct() {
+        assert_ne!(Platform::Windows.label(), Platform::Unix.label());
+        assert_eq!(Platform::Windows.label(), "windows");
+        assert_eq!(Platform::Unix.label(), "unix");
     }
 }
