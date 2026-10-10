@@ -147,7 +147,11 @@ documentation of that fact.
 The correct architecture is not a better emulator. It is no emulator: a
 native implementation where the Windows path is the only representation
 that exists, where Bash is implemented as a language — and proven against
-GNU Bash's own test suite, 86/86 — and where native programs are called as
+GNU Bash's own 83-suite upstream test corpus (82 suites byte-identical as
+of the 2026-09-25 ledger re-run, with the single nameref residual
+individually audited — see the [rubash compatibility
+ledger](https://github.com/unixwin/rubash#compatibility-at-a-glance)) — and
+where native programs are called as
 what they are: native. That is what niubash ships, and it is why the
 emulation stack's failure modes are not "reduced" here. They are
 categorically absent.

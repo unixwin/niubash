@@ -9,9 +9,11 @@ description: Run Windows tasks in Niubash, the GNU Bash-compatible Windows-nativ
 
 Niubash is bash implemented natively in Rust for Windows: the language
 engine ([rubash](https://github.com/unixwin/rubash)) is a from-scratch Bash
-interpreter gated on GNU Bash's own upstream test suite — **83/83 full
-suites byte-identical to GNU output** (measured 2026-09-21, ledger in
-rubash's `docs/COMPATIBILITY-STATUS.md`). What it is not matters as much:
+interpreter gated on GNU Bash's own upstream test suite — **82 of 83 full
+suites byte-identical to GNU output** (2026-09-25 ledger re-run; the one
+residual, nameref, is individually audited — ledger in rubash's
+[README, "Compatibility at a
+Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it is not matters as much:
 
 - **No POSIX emulation layer.** No `cygwin1.dll`/`msys-2.0.dll`, no fork,
   no POSIX signal delivery, **no PTY emulation** — job control and terminal
