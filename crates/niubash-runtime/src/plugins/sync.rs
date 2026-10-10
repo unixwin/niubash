@@ -1545,6 +1545,111 @@ mod tests {
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
+    /// niubash#178: a registry that fails to parse (one bad line among good
+    /// pinned records) must never be silently rewritten by sync — the read
+    /// gives an empty view, and a rewrite from that view would drop every
+    /// persisted pin/trust record. Sync's registry write is refused (a
+    /// `failed` row, no data loss), the corrupt file survives byte-for-byte,
+    /// and a human repair re-enables the normal sync.
+    #[test]
+    fn sync_never_rewrites_a_corrupt_registry() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = unique_temp_dir("corrupt-holder");
+        let origin = holder.join("wildy");
+        fs::create_dir_all(&origin).unwrap();
+        write_wild_fixture(&origin);
+        let box_ = sandbox("corrupt-registry");
+        let root = box_.temp.join("sources");
+
+        // A registry with one healthy pinned record plus one unparsable
+        // entry (the issue's shape).
+        let mut corrupt_text = format!(
+            concat!(
+                "schema = \"niubash:plugin-source-registry@0.3.0\"\n",
+                "\n[[sources]]\n",
+                "id = \"wildy\"\n",
+                "adapter = \"file\"\n",
+                "url = \"{}\"\n",
+                "ref = \"local\"\n",
+                "version = \"git-abc123\"\n",
+                "path = \"{}\"\n",
+                "trusted = true\n",
+                "license = \"MIT\"\n",
+                "checksum_sha256 = \"cafe1234\"\n",
+                "installed_at = \"1700000000\"\n",
+                "commit_sha = \"abc123def456\"\n",
+            ),
+            origin.to_string_lossy().replace('\\', "/"),
+            root.join("wildy").to_string_lossy().replace('\\', "/"),
+        );
+        corrupt_text.push_str("\n[[sources]]\nid = \"broken-entry\"\nthis line is not toml =\n");
+        fs::create_dir_all(&root).unwrap();
+        let registry_path = root.join("registry.toml");
+        fs::write(&registry_path, &corrupt_text).unwrap();
+
+        // The spec declares the pinned source; sync cannot see it (the
+        // parse fails) and tries to install — the registry write on that
+        // path must be refused, not silently rewritten.
+        spec::save_spec(&PluginSpec {
+            schema: None,
+            sources: vec![SpecSource {
+                target: origin.to_string_lossy().into_owned(),
+                id: None,
+                kind: None,
+                ref_name: None,
+                theme: None,
+                enable: vec!["pre.sh".to_string()],
+            }],
+        })
+        .unwrap();
+        let report = sync_spec(SyncOptions::default()).unwrap();
+        assert!(
+            report
+                .rows
+                .iter()
+                .any(|row| row.action == "failed" && row.detail.contains("fails to parse")),
+            "sync must refuse loudly, never rewrite: {:?}",
+            report.rows
+        );
+        assert_eq!(
+            fs::read_to_string(&registry_path).unwrap(),
+            corrupt_text,
+            "the corrupt registry (bad line + commit pin) must survive sync"
+        );
+        assert!(
+            root.join("registry.toml.corrupt").is_file(),
+            "sidecar snapshot"
+        );
+
+        // Consent = a human repairs the file. The next sync proceeds
+        // normally (installs, lands untrusted) and the registry parses.
+        let repaired = corrupt_text
+            .split_once("\n[[sources]]\nid = \"broken-entry\"")
+            .expect("the corrupt entry is present")
+            .0
+            .to_string();
+        assert!(repaired.contains("commit_sha"), "{repaired}");
+        fs::write(&registry_path, &repaired).unwrap();
+        // The pinned record points at a tree that was never fetched (the
+        // first sync refused before promotion), so restore it where the pin
+        // says it lives — then the repaired sync can adopt and activate it.
+        fs::create_dir_all(root.join("wildy")).unwrap();
+        write_wild_fixture(&root.join("wildy"));
+        let report = sync_spec(SyncOptions::default()).unwrap();
+        assert!(
+            report
+                .rows
+                .iter()
+                .any(|row| row.id == "wildy" && row.action == "activated"),
+            "post-repair sync adopts the pinned record and activates normally: {:?}",
+            report.rows
+        );
+        assert!(sources::registry_corruption().is_none());
+
+        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
     /// niubash#168 (P0): the theme pick moved to oh-my-bash — the wizard's
     /// rc write (G2-routed) — but the spec still carries bash-it's era-1
     /// claim on the SAME shared name, so every sync re-materialized the

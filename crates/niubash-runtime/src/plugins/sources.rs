@@ -425,21 +425,130 @@ struct SourceRegistryToml {
     sources: Vec<SourceRecord>,
 }
 
-/// Read all registered sources.
-pub fn read_source_registry() -> Vec<SourceRecord> {
+/// The registry file exists but does not parse (niubash#178). The raw bytes
+/// carry persisted pin/trust records the parse cannot see, so they are
+/// never rewritten away: reads surface this state, writes refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryCorruption {
+    /// The file's text, byte-for-byte as found on disk.
+    pub raw_text: String,
+    /// The TOML parse error.
+    pub error: String,
+}
+
+/// Read the registry plus its corruption state, if any. A missing file is
+/// `(empty, None)` — only an existing, unparsable file is corruption.
+fn read_registry_state() -> (Vec<SourceRecord>, Option<RegistryCorruption>) {
     let Ok(text) = fs::read_to_string(registry_path()) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    toml::from_str::<SourceRegistryToml>(&text)
-        .map(|registry| registry.sources)
-        .unwrap_or_else(|err| {
-            log::warn!("failed to parse plugin source registry: {}", err);
-            Vec::new()
-        })
+    match toml::from_str::<SourceRegistryToml>(&text) {
+        Ok(registry) => (registry.sources, None),
+        Err(err) => (
+            Vec::new(),
+            Some(RegistryCorruption {
+                raw_text: text,
+                error: err.to_string(),
+            }),
+        ),
+    }
+}
+
+/// The corruption state of the on-disk registry, when it fails to parse.
+pub fn registry_corruption() -> Option<RegistryCorruption> {
+    read_registry_state().1
+}
+
+/// Sidecar holding the byte-for-byte snapshot of an unparsable registry
+/// (`registry.toml.corrupt`, next to the registry).
+pub(crate) fn corrupt_registry_sidecar_path() -> PathBuf {
+    corrupt_registry_backup_path()
+}
+
+fn corrupt_registry_backup_path() -> PathBuf {
+    registry_path().with_extension("toml.corrupt")
+}
+
+/// Warn-once ledger for corrupt-registry content: one warning per distinct
+/// raw file text per process, so repeated reads within one run (and the
+/// write path's refusal) never spam the same diagnosis.
+fn corrupt_registry_warned_keys() -> &'static std::sync::Mutex<std::collections::HashSet<u64>> {
+    static KEYS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    KEYS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn corruption_key(corruption: &RegistryCorruption) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    corruption.raw_text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Preserve unparsable registry content and warn exactly once per distinct
+/// content: the raw text is snapshotted byte-for-byte to the `.corrupt`
+/// sidecar (so the pins/trust records inside it survive any later repair),
+/// and one visible warning names the file and the sidecar. Returns true
+/// when THIS call was the one that warned.
+fn preserve_and_warn_corrupt_registry(corruption: &RegistryCorruption) -> bool {
+    let warned_fresh = corrupt_registry_warned_keys()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(corruption_key(corruption));
+    let backup = corrupt_registry_backup_path();
+    let needs_snapshot = fs::read_to_string(&backup)
+        .map(|previous| previous != corruption.raw_text)
+        .unwrap_or(true);
+    if needs_snapshot {
+        if let Some(parent) = backup.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&backup, &corruption.raw_text);
+    }
+    if warned_fresh {
+        let message = format!(
+            "plugin source registry {} failed to parse ({}); the original file is \
+             preserved byte-for-byte at {} — fix or remove the file; its pin/trust \
+             records are NOT loaded until then",
+            registry_path().display(),
+            corruption.error,
+            backup.display()
+        );
+        log::warn!("{message}");
+        eprintln!("warning: {message}");
+    }
+    warned_fresh
+}
+
+/// Read all registered sources. An unparsable registry yields an empty list
+/// plus a one-time warning and a byte-for-byte `.corrupt` sidecar — never a
+/// silent rewrite (niubash#178).
+pub fn read_source_registry() -> Vec<SourceRecord> {
+    let (sources, corruption) = read_registry_state();
+    if let Some(corruption) = corruption {
+        preserve_and_warn_corrupt_registry(&corruption);
+    }
+    sources
 }
 
 pub(crate) fn write_source_registry(sources: &[SourceRecord]) -> anyhow::Result<()> {
     let path = registry_path();
+    // niubash#178 consent gate: an unparsable registry carries persisted
+    // pin/trust records this process's parse cannot see. Rewriting it from
+    // the parsed view would drop those records silently, so the write is
+    // REFUSED until a human fixes (or explicitly removes) the file — the
+    // corrupt bytes stay on disk untouched, snapshotted to the sidecar.
+    if let Some(corruption) = read_registry_state().1 {
+        preserve_and_warn_corrupt_registry(&corruption);
+        anyhow::bail!(
+            "refusing to rewrite {}: the current file fails to parse ({}) and a \
+             rewrite would drop its persisted pin/trust records; fix or remove the \
+             file (original preserved at {}) and retry",
+            path.display(),
+            corruption.error,
+            corrupt_registry_backup_path().display()
+        );
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -982,6 +1091,20 @@ fn verify_pin_on_adopt(
 /// promoting. Returns the record plus `true` when an existing install was
 /// adopted (nothing fetched into place, nothing written).
 pub fn install_or_adopt(request: SourceInstallRequest) -> anyhow::Result<(SourceRecord, bool)> {
+    // niubash#178: refuse BEFORE any fetch/promotion — an install whose
+    // registry write would be refused must not leave a half-installed tree
+    // (or a misleading "directory already exists" on the later retry).
+    if let Some(corruption) = registry_corruption() {
+        preserve_and_warn_corrupt_registry(&corruption);
+        anyhow::bail!(
+            "cannot install: plugin source registry {} fails to parse ({}) and the \
+             install would not be registrable; fix or remove the file (original \
+             preserved at {}) and retry",
+            registry_path().display(),
+            corruption.error,
+            corrupt_registry_backup_path().display()
+        );
+    }
     // Cheap pre-checks (no fetch): derived id, then recorded origin.
     if let Some(kind) = request.adapter.as_deref() {
         if let Some(adapter) = super::descriptors::adapter_for(kind) {
@@ -2735,6 +2858,116 @@ mod tests {
             root.join("my-notes/keep.txt").is_file(),
             "foreign dirs stay"
         );
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// A hand-written registry carrying one healthy pinned record plus one
+    /// line that fails to parse (niubash#178's shape: a hand edit or a
+    /// crashed write left garbage in `registry.toml`).
+    fn corrupt_registry_text(pinned: &SourceRecord) -> String {
+        let mut registry = SourceRegistryToml {
+            schema: Some(SOURCE_REGISTRY_SCHEMA.to_string()),
+            sources: vec![pinned.clone()],
+        };
+        let mut text =
+            toml::to_string_pretty(&mut registry).expect("healthy records must serialize");
+        text.push_str("\n[[sources]]\nid = \"broken-entry\"\nthis line is not toml =\n");
+        text
+    }
+
+    /// niubash#178: one unparsable line in `registry.toml` must never cost
+    /// the user their persisted pins. The corrupt file is warned about
+    /// exactly once, snapshotted byte-for-byte to a `.corrupt` sidecar, and
+    /// NEVER rewritten by a registry write — only a human repair (fixing or
+    /// removing the file) re-enables writes.
+    #[test]
+    fn corrupt_registry_is_preserved_and_never_silently_rewritten() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("corrupt-registry");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+
+        let pinned = SourceRecord {
+            id: "oh-my-bash".to_string(),
+            adapter: "oh-my-bash".to_string(),
+            url: "https://github.com/ohmybash/oh-my-bash.git".to_string(),
+            ref_name: "HEAD".to_string(),
+            version: "git-abc123".to_string(),
+            path: root.join("oh-my-bash"),
+            trusted: true,
+            license: "MIT".to_string(),
+            checksum_sha256: "cafe1234".to_string(),
+            installed_at: "1700000000".to_string(),
+            commit_sha: Some("abc123def456".to_string()),
+            trust_policy: TrustPolicy::Checksum,
+            signature: None,
+            previous: None,
+            spec_enabled: Some(vec!["git".to_string()]),
+            spec_theme: Some("agnoster".to_string()),
+        };
+        let path = root.join("registry.toml");
+        fs::create_dir_all(&root).unwrap();
+        let corrupt_text = corrupt_registry_text(&pinned);
+        fs::write(&path, &corrupt_text).unwrap();
+
+        // The corruption is surfaced, not swallowed.
+        let corruption = registry_corruption().expect("the corrupt file must be reported");
+        assert!(
+            corruption.raw_text.contains("broken-entry"),
+            "{:?}",
+            corruption
+        );
+        assert!(
+            corruption.raw_text.contains("abc123def456"),
+            "the pin rides along"
+        );
+
+        // Exactly one warning per distinct content: the first read/preserve
+        // warns, the second is silent (same process, same bytes).
+        assert!(
+            preserve_and_warn_corrupt_registry(&corruption),
+            "first warn"
+        );
+        assert!(
+            !preserve_and_warn_corrupt_registry(&corruption),
+            "the same content never warns twice"
+        );
+
+        // The sidecar snapshot carries the original bytes verbatim —
+        // the pin and trust state survive any later repair.
+        let sidecar = root.join("registry.toml.corrupt");
+        assert_eq!(
+            fs::read_to_string(&sidecar).unwrap(),
+            corrupt_text,
+            "sidecar must be byte-for-byte"
+        );
+
+        // THE regression: a successful sync path's registry write must be
+        // refused — the file, corrupt line and pin included, survives
+        // byte-for-byte.
+        let err = write_source_registry(&[pinned.clone()])
+            .expect_err("rewriting a corrupt registry must be refused");
+        assert!(err.to_string().contains("refusing to rewrite"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            corrupt_text,
+            "the corrupt file (broken line + pin) must survive untouched"
+        );
+
+        // Consent = a human repairs the file. Writes resume on a parseable
+        // registry, and the healthy record round-trips.
+        let mut registry = SourceRegistryToml {
+            schema: Some(SOURCE_REGISTRY_SCHEMA.to_string()),
+            sources: vec![pinned.clone()],
+        };
+        fs::write(&path, toml::to_string_pretty(&mut registry).unwrap()).unwrap();
+        assert!(registry_corruption().is_none(), "repaired file parses");
+        write_source_registry(&[pinned.clone()]).expect("post-repair write must succeed");
+        let records = read_source_registry();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].commit_sha.as_deref(), Some("abc123def456"));
+        assert!(records[0].trusted, "the pin/trust state round-trips");
+
         let _ = fs::remove_dir_all(&temp);
     }
 }

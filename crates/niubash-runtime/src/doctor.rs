@@ -175,6 +175,20 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     // Degraded sources must be *visible*: the guarded loaders fell back to
     // the niubash defaults at startup and the user deserves to know.
     let sources = crate::plugins::sources::list_sources();
+    // niubash#178: an unparsable registry silently reads as "none installed"
+    // everywhere, so the doctor must call it out explicitly — naming the bad
+    // line (via the parse error) and the fix — instead of letting the empty
+    // view stand.
+    if let Some(corruption) = crate::plugins::sources::registry_corruption() {
+        writeln!(
+            out,
+            "  {warn} plugin registry     UNPARSABLE ({}) — every pin/trust \
+             record in it is UNLOADED and sync/install are refused until you \
+             fix or remove the file; the original is preserved at {}",
+            corruption.error.lines().next().unwrap_or("parse error"),
+            crate::plugins::sources::corrupt_registry_sidecar_path().display(),
+        )?;
+    }
     if sources.is_empty() {
         writeln!(
             out,
