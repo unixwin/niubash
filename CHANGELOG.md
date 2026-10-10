@@ -81,6 +81,24 @@ All notable changes to Niubash are documented in this file.
   `scripts/test-winuxcmd-completions.py` (corpus replay must be
   byte-identical).
 
+### Changed
+
+- Release binaries are stripped (niubash#228): the release profile strips
+  symbols, shrinking the shipped niu.exe.
+- The pre-install manifest bundles niugit, ripgrep and fd alongside gawk
+  (niubash#230), and the setup wizard detects release-bundled components as
+  already-present instead of re-offering them (niubash#231).
+
+### Fixed
+
+- Plain-text `--help` and a non-tty-safe banner (niubash#229), plus a warning
+  when a hand-written rc would clobber the wizard theme.
+- PROMPT_COMMAND exit jump now ends the session instead of returning to the
+  prompt (niubash#232).
+- PS0 expansion writes to stderr, matching GNU bash (eval.c:176) (niubash#233).
+- Bracketed paste enabled with GNU bash multiline-paste semantics: pasted
+  newlines no longer execute mid-paste (niubash#234).
+
 ## [1.3.4] - 2026-10-05
 
 ### Fixed (engine rubash 1.3.4)
