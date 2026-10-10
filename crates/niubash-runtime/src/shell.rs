@@ -2934,6 +2934,7 @@ where
 /// search suggestion itself is opt-in (`niu config set
 /// command-not-found-hint wpm`) and names only niu's own wpm — never
 /// winget/scoop/choco.
+#[cfg_attr(not(windows), allow(unused_mut))]
 fn native_command_not_found_hint_lines_with_policy<F>(
     command: &str,
     mut command_exists: F,
@@ -3458,6 +3459,11 @@ fn normalize_shell_visible_path(value: &str) -> String {
 /// redirected pipelines observe GNU's stream shape (unixwin/niubash#190).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellChannel {
+    /// Reserved stdout-side half of the GNU stream-shape contract; every
+    /// live shell emitter is stderr-only today (PS0, eval.c:164-176), so
+    /// no constructor exists yet. The channel-capture tests assert that
+    /// stderr-only shape against this two-variant enum.
+    #[allow(dead_code)]
     Stdout,
     Stderr,
 }
