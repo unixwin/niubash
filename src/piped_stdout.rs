@@ -44,12 +44,14 @@
 
 /// Exit status used when the process stdout dies: rubash#455 semantics — a
 /// failed write is an ordinary command failure (status 1), reported once.
+#[cfg(windows)]
 const BROKEN_STDOUT_EXIT_CODE: i32 = 1;
 
 /// Diagnosed once, by the pump, when the downstream reader is gone. The
 /// wording deliberately avoids the raw OS surfaces ("Broken pipe",
 /// "os error 232", "管道正在被关闭") that host_contract treats as scary
 /// spam markers — the condition is described, not the errno.
+#[cfg(windows)]
 const BROKEN_STDOUT_DIAGNOSTIC: &str =
     "niu: stdout: write error: pipe closed by downstream reader\n";
 

@@ -4302,7 +4302,7 @@ niu_git_comp() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Default (off): a miss contributes no hint lines at all.
         {
-            let mut shell = test_shell(HookConfig::default());
+            let shell = test_shell(HookConfig::default());
             assert_eq!(shell.command_not_found_hint, CommandNotFoundHint::Off);
             CHANNEL_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
             shell.print_command_not_found_hints("win");
