@@ -796,6 +796,7 @@ dependencies = [
  "anyhow",
  "colored",
  "crossterm 0.27.0",
+ "crossterm 0.29.0",
  "dirs",
  "ed25519-dalek",
  "env_logger",
