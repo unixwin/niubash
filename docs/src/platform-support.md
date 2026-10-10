@@ -389,6 +389,48 @@ is the accurate one.
 shared, but the phone form factor adds a per-process declaration and review
 gate that PC does not — and that gate is not something Niubash controls.
 
+## What niu is not: no MSYS runtime
+
+On Windows niu prints MSYS labels: `uname -s` reports `MSYS_NT-…`,
+`$OSTYPE` is `msys`, `$MACHTYPE` is `x86_64-pc-msys`. Those labels are a
+**compatibility persona** ([rubash#154](https://github.com/unixwin/rubash/issues/154)),
+not a runtime. Ecosystem scripts routinely gate on `uname -s` matching
+`MINGW*|MSYS*|CYGWIN*` or on `OSTYPE = msys` before they run; the persona
+exists so those gates open. It is a default, not a fact —
+`RUBASH_IDENTITY=native` switches the builtins to the native face
+(`uname -s` → `Windows_NT`, `$MACHTYPE` → `x86_64-pc-windows`).
+
+Under the labels there is **no MSYS2 runtime**: no `msys-2.0.dll`, no
+`cygwin1.dll`, and no POSIX→Windows argument-conversion layer. niu is a
+pure native Windows build; every process it starts is an ordinary Win32
+process. So the `uname` story on this page splits by platform: on unix
+the builtin reports the kernel verbatim (see
+[`uname` on HarmonyOS](#uname-on-harmonyos)); on Windows it reports
+persona labels that name a runtime which is not there.
+
+### The behavioral boundary (measured)
+
+| A script written for real MSYS assumes | niu does |
+| --- | --- |
+| The runtime rewrites POSIX-form argv before a native child sees it. | Arguments arrive **verbatim** — `niu -c 'cmd /c echo /d/repo'` prints `/d/repo`. |
+| `/d/...` reaches the child as `D:\...`. | `git -C /d/repo rev-parse --show-toplevel` fails with `cannot change to '/d/repo'` (exit 128). Pass `D:/repo`. |
+| An MSYS2 root: `/etc/fstab`, `/etc/profile`, MSYS2's `/usr`. | `/` is the current drive's root (`ls /` lists `C:\`); the Unix-shaped `/etc` resolves to a real Windows directory holding only winuxcmd's `mtab` shim. |
+| MSYS2's bundled perl/awk runtimes. | No perl at all; `awk` is winuxcmd's own native build, not MSYS2's. |
+
+The first two rows are the ones that bite. The shell itself accepts
+POSIX-drive spellings as input dialects — `cd /d/repo && pwd` prints
+`D:/repo` — but that is niu's own path parsing (the
+[Windows Path Contract](windows-path-contract.md)), not a conversion
+layer in front of child processes. Scripts that depend on **argv being
+rewritten on the way to a native program** therefore behave differently
+under niu than under Git Bash, and there is deliberately no
+`MSYS_NO_PATHCONV`-style escape hatch: nothing converts, so nothing
+needs switching off.
+
+One line of orientation: **Git Bash = MSYS2 runtime + GNU bash; niu =
+native engine + compatibility persona.** The labels match so ecosystem
+scripts run; the runtime they name is not present.
+
 ## What is Windows-only
 
 By compile-time cfg, the following never appear on non-Windows paths and
