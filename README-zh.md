@@ -1,10 +1,11 @@
 <p align="center">
-  <img src="assets/niubash-banner.svg" alt="niubash — Bash, native on Windows." />
+  <img src="assets/niubash-banner.svg" alt="niubash — real Bash, native on Windows, Linux, and macOS." />
 </p>
 
-> **Bash 原生登陆 Windows——牛来了。**
-> 不用 WSL，不开虚拟机，没有 `/mnt/c`，没有 cmdlet 方言。
-> 一个 `niu.exe`：你手指肌肉记得的那个 shell，也是你 AI agent 天生会说的那个 shell。
+> **真·Bash，Windows、Linux、macOS 原生构建。**"只能跑 Windows"是旧印象：
+> 现在有五个平台从这条树里构建，Windows 依旧是旗舰——不用 WSL，不开虚拟机，
+> 没有 `/mnt/c`，没有 cmdlet 方言。一个二进制：你手指肌肉记得的那个 shell，
+> 也是你 AI agent 天生会说的那个 shell。
 
 <div align="center">
 
@@ -19,286 +20,96 @@
 
 </div>
 
-**niubash** 是一个原生 Windows shell，跑的是真·Bash——没有 Linux 虚拟机，
-没有模拟层，没有路径轮盘赌。一个 `niu.exe` 打包了：
-[rubash](https://github.com/unixwin/rubash) 语言引擎、来自
-[winuxcmd](https://github.com/unixwin/winuxcmd) 的
-真 Unix 命令、带 git 状态的 prompt，以及带权限模型的插件系统。
+**niubash** 是用 Rust 原生实现的 Bash 兼容 shell。在旗舰平台 Windows 上，
+一个 `niu.exe` 打包全部：[rubash](https://github.com/unixwin/rubash) 语言引擎、
+来自 [winuxcmd](https://github.com/unixwin/winuxcmd) 的真 Unix 命令、
+带 git 状态的 prompt，以及带权限模型的插件系统。Linux 与 macOS 构建是
+便携 `niu` 二进制，直接用系统自带的工具。niu 不是 MSYS2、Cygwin、Git Bash，
+也不是 WSL——没有 POSIX 模拟层，也没有路径转换机器。每个平台的完整契约
+（包括每个目标的诚实状态）见
+[platform-support.md](docs/src/platform-support.md)。
 
-**它是什么——不是什么。** niubash 是用 Rust 在 Windows 上原生实现的
-bash 兼容 shell：语言引擎（[rubash](https://github.com/unixwin/rubash)）是
-从零写的 Bash 解释器，随附的 Unix 命令都是原生 Windows 可执行文件。
-它**不是 MSYS2、不是 Cygwin、不是 Git Bash、也不是 WSL**——整个技术栈里
-没有 POSIX 模拟层，没有 `cygwin1.dll` / `msys-2.0.dll`，也没有任何路径
-转换机器。niubash 启动的每个进程都是普通的 Win32 进程；niubash 本体
-**不依赖 Python、Node.js 或任何语言运行时**，也没有内置下载器：插件源
-只经 git clone 到位，可选的字体和 CLI 工具只是给你的包管理器的建议，
-绝不在后台偷偷下载。
+## 平台支持
 
-**没有路径转换层——这是设计，不是优化。** MSYS 系 shell 活在一个
-Unix 外观的世界里，必须靠启发式规则翻译成 Windows 路径；而永远猜对的
-启发式不存在，所以它们都自带逃生舱（`MSYS_NO_PATHCONV`、
-`MSYS2_ARG_CONV_EXCL`），专供转换猜错时救场——**关闭开关本身就是
-"这层会出错"的自供状**。niubash 没有可关的开关：**Windows 原生路径就是
-shell 的第一等内部表示**。`/c/...`、`/mnt/c/...`、`C:\...` 都只是这一个
-事实的不同输入拼法；任何进程拿到的一定是 Windows 原生路径。原生
-Windows 程序不可能因为 shell 遇到路径问题——因为根本不存在那个
-"可能出错的翻译步骤"。
+| 平台 | 状态 | 发布形态 |
+|---|---|---|
+| Windows x64 / ARM64 | 已发布；每次发布过烟测门禁 | 安装器 `.exe` + `.zip`，Unix 命令随包 |
+| Linux x86_64 / aarch64（glibc 2.35+） | 已发布；每次发布过烟测门禁 | 便携 `.tar.gz`，用系统自带工具 |
+| macOS aarch64 / x86_64 | 已发布；每次发布过烟测门禁 | 便携 `.tar.gz`，用系统自带工具 |
+| Android aarch64 / armv7 | 仅 CI 构建，未发布 | NDK 链接 zip，只进 workflow 产物，未过烟测 |
+| OpenHarmony（`aarch64-unknown-linux-ohos`） | 仅 CI check，未发布 | CI 保持可编译，未在真机运行 |
 
-**亮点**
+"烟测门禁"指产物构建完成后、上传之前，在它自己的 OS 上跑四项检查
+（`--version`、`-c` 执行、一条穿过原生 coreutils 的管道、离线插件栈）。
+Android 和 OpenHarmony 还没过这道门：Android 产物只做了构建验证，
+OpenHarmony 只做了编译检查，两者都不宣称可日常使用。各平台完整契约与
+全量状态矩阵见 [platform-support.md](docs/src/platform-support.md)。
 
-- **真·Bash** — `if`、`for`、`case`、`$(...)`、管道、heredoc、函数、数组，全都在。引擎是 [rubash](https://github.com/unixwin/rubash)，以 GNU Bash 官方上游测试套件作门禁——实测记录见[对比](#对比)。
-- **Windows 路径，原生进原生出** — 任何方言进，Windows 原生出。没有 `/mnt/c`，没有 MSYS 式路径转换抽风。
-- **Unix 命令随包附赠** — `ls`、`cat`、`grep`、`find`、`sed`、`printf`…… 来自 winuxcmd 的真二进制，就在你的 PATH 上。什么都不用装。
-- **真 Windows 程序，直接调** — `git.exe`、`node.exe`、`python.exe`、`cargo.exe`。你的 PATH 就是你的 PATH。
-- **为 AI agent 而生** — 模型是在 Bash 语料上训练的；niubash 让它们在 Windows 上拿到确定性的 Bash 契约。
-- **一个愿意天天看的 prompt** — 27 款主题、会"长牙"的 git 状态提示、语法高亮、自动建议、vi/emacs 双模式。
+快答：
 
-现场演示：
+- **niu 需要 WSL 吗？** 不需要。niu 在所有发布平台上都是原生构建：Windows 上没有 Linux 虚拟机、没有模拟层、没有 `/mnt/c`。
+- **niu 能跑在哪些平台？** 已发布：Windows（x64、ARM64）、Linux（x86_64、aarch64；glibc 2.35+）、macOS（aarch64、x86_64）。Android（aarch64、armv7）与 OpenHarmony（aarch64）在 CI 里构建，尚无发布。
+- **niu 跑得了真 Bash 脚本吗？** 跑得了。rubash 引擎以 GNU Bash 官方上游测试套件作门禁，记录在[兼容性矩阵](docs/src/rubash-bash-compat-matrix.md)。
+- **现在能在 Android 或鸿蒙上装 niu 吗？** 还不能。两个目标都能在 CI 里编译，但都没跑过运行时烟测，没有可安装的产物。
 
-<div align="center">
+## 实证
 
-<p><a href="https://dl.caomengxuan666.com"><strong>▶ 观看 41 秒宣传片</strong></a> —— 完整演示，带声音。</p>
+下面每条 claim 都链到产出它的工件：入仓日志、基线文件、CI 门禁。
 
-<img src="assets/demo.gif" alt="niubash 交互会话：starship 提示符、Tab 补全、grep 管道、heredoc、wpm 包管理、eza 图标" width="720"/>
+**6,336 个真实生态资产，逐个收割、逐个回放。** 管线从 GitHub 抓取 shell
+脚本、框架、主题、dotfiles，逐个在 niu 下 source 并记录裁决：4,891 个
+OK，350 个慢，224 个 GNU Bash 也过不了，101 个挂起，698 个拉取失败。
+全量日志入仓（[eco-harvest.py](scripts/harvest/eco-harvest.py)、
+[eco-test.py](scripts/harvest/eco-test.py)、快照
+[wt92-local-20261005](scripts/harvest/snapshots/wt92-local-20261005/)）。
 
-</div>
+**生态框架是被 source、被计时的，不是一句"支持了"。** 逐资产计时基线
+加载 437 个真实 oh-my-bash / bash-it 资产（166 款主题加上 plugins、
+completions、aliases），每资产测三个阶段（source、首帧 prompt、重渲染），
+取三次运行的中位数。两个框架自带的 nvm 资产就在这份基线里；真实用户
+dotfiles 里加载 nvm.sh 的链路也走同一套 harness，分相计时在案
+（[基线](scripts/perf/baselines/asset-timing-baseline.json)、
+[快照](scripts/harvest/snapshots/wt92-local-20261005/)）。
 
-## 目录
+**慢的发布发不出去。** [budgets.toml](scripts/perf/budgets.toml) 里每个
+资产都带实测预算（健康主题重渲染 11-35 ms；预算线 120 ms；超预算 5 倍
+硬失败）。[发布流水线](.github/workflows/release.yml)跑 `perfbudget`
+门禁，超限即 fail 本次发布；另有每夜趋势跑盯漂移。
 
-- [安装](#安装)
-- [配置](#配置)
-- [特性](#特性)
-- [为什么不用 WSL](#为什么不用-wsl)
-- [对 AI agent 友好](#对-ai-agent-友好)
-- [对比](#对比)
-- [架构](#架构)
-- [常见问题](#常见问题)
-- [文档](#文档)
-- [参与贡献](#参与贡献)
-- [许可证](#许可证)
+GNU Bash 上游 golden 套件的实测记录也属于这里；等手上的修复落地，它就回来。
 
-## 安装
+## 快速开始
 
-去 [Releases](https://github.com/unixwin/niubash/releases) 下载
-`niubash-v*-win-*-setup.exe`，双击，完事——不需要管理员
-权限，它会配好你的 PATH 和 Windows Terminal 配置。嫌重？拿 `.zip` 便携版
-（首次启动自动激活 Unix 命令）。
+Windows：去 [Releases](https://github.com/unixwin/niubash/releases) 下载
+`niubash-v*-win-*-setup.exe` 双击——不要管理员权限，PATH 和 Windows
+Terminal 配置自动配好。要便携版就拿 `.zip`。
 
-Linux（x86_64、aarch64；glibc 2.35+）和 macOS（aarch64、x86_64）用户，
-去 [Releases](https://github.com/unixwin/niubash/releases) 页面拿便携
-tarball——`niubash-v*-linux-x86_64.tar.gz`、`niubash-v*-linux-aarch64.tar.gz`、
-`niubash-v*-macos-aarch64.tar.gz` 或 `niubash-v*-macos-x86_64.tar.gz`——
-解包后直接跑 `./niu`（使用系统原生命令，不捆绑任何东西）：
+Linux（x86_64、aarch64；glibc 2.35+）与 macOS（aarch64、x86_64）：拿
+便携 tarball，解包即跑：
 
 ```sh
 tar -xzf niubash-v*-linux-x86_64.tar.gz && niubash-v*-linux-x86_64/niu
 ```
 
-每个发布产物在上传前都在其构建 OS 上过了烟测（[发布流水线](docs/release.md)）。
+源码构建（Rust 1.70+）：
+`git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
 
-源码构建：
-
-```sh
-git clone https://github.com/unixwin/niubash.git && cd niubash
-cargo build --release && target\release\niu.exe
-```
-
-要求：**Windows 10/11 x64 或 ARM64**、**Linux x86_64/aarch64（glibc
-2.35+）** 或 **macOS aarch64/x86_64**；源码构建需 Rust 1.70+。
-
-## 配置
-
-配置只有一份：`~/.niubashrc`，纯 Bash 语法。export、alias、函数都放
-这里；主题和插件来自外部生态（`niu plugin`）：
-
-```bash
-# 可选的"地板层"旋钮——只影响内置默认 prompt 和补全菜单；
-# 一旦启用外部主题，外部主题认领 PS1 并胜出。
-# NIU_PROMPT_CWD_STYLE='home'    # home | full | basename
-# NIU_COMPLETION_STYLE='column'  # ide | column | list | inline
-
-alias ll='ls -la'
-alias gst='git status'
-hello() { echo "hello from niu"; }
-
-# 主题/插件，由 rc 末尾的标记块管理：
-#   niu plugin add oh-my-bash && niu plugin trust oh-my-bash
-#   niu plugin enable oh-my-bash && niu plugin enable agnoster
-```
-
-- **多 shell 共享历史** — `NIU_HISTORY_MODE` 三档可选：`shared`（默认）、`session`、`private`。
-- **一次性 init 文件** — `NIU_ENV=<file>`（或 bash 兼容的 `BASH_ENV`）在 `niu -c`、脚本、管道 stdin 之前只 source 这一个文件。默认不设，保证一次性执行足够快。
-- **保持最新** — `niu --self-update`（shell 内也可用 `self-update`）。
-
-### 正确设置主题
-
-主题请通过声明式 spec 设置，不要手写 rc：在 `~/.niubash/plugins.toml`
-的 source 条目里写 `theme = "..."` —
-
-```toml
-[[sources]]
-target = "oh-my-bash"
-enable = ["git"]
-theme  = "agnoster"
-```
-
-不要在 `~/.niubashrc` 里手写 `export OSH_THEME=agnoster`：托管块由
-`niu plugin sync` 按 spec 重写，写在外面的行会被重建的主题块覆盖，写在
-块内的行会被直接清除——下次 sync 后主题会悄悄回退到默认。sync 检测到
-托管块外的手写主题行时会在 stderr 打印一次警告并指向 spec。shell 内
-也可以用 `niu plugin enable <theme>` 或 `niu setup` 向导来写 spec。
-
-## 特性
-
-- **真·Bash 语义** — [rubash](https://github.com/unixwin/rubash) 引擎以 GNU Bash 官方上游测试套件作门禁；带日期的实测记录见[对比](#对比)。
-- **原生路径契约** — 任何方言进，Windows 原生出。MSYS 式的路径转换抽风，这里不存在。
-- **Unix 命令真二进制** — winuxcmd 通过 PATH 命令链接注入，`ls`/`grep` 是真 Windows 进程，不是嵌在 shell 里的模拟。
-- **一个愿意天天看的 prompt** — 27 款主题（agnoster、spaceship、tokyonight、p10 家族……）、会"长牙"的 git 状态提示（staged / modified / untracked / ↑↓ / stash / 冲突）、语法高亮、自动建议、vi/emacs 双模式、Ctrl+R 历史搜索。
-- **bash 插件生态，托管式** — oh-my-bash、bash-it、bash-completion 通过它们自己的原生 loader 运行（无垫片），由声明式 spec（`~/.niubash/plugins.toml`）+ `niu plugin sync` 对账、commit 锁定的 lockfile 驱动。任意 git URL 或本地路径也可以；每个源都要过显式信任门——`niu plugin enable` 会在你的 rc 里为每个源写入一个带守卫的标记块。
-- **零下载设计** — shell 本体除了 git clone 之外不下载任何东西：内置下载器已移除，可选字体和 CLI 工具只是给你的包管理器的建议，绝不在后台偷偷下载。
-- **补全系统** — shell 定义 + bash 补全脚本自动导入 + `cmd -h` 描述抓取 + 三级缓存。
-- **三种执行模式** — 交互 REPL；一次性命令执行（安静确定性，不加载 rc 和插件）；一次性 REPL 命令，加载完整启动状态后退出。
-- **自更新** — shell（`niu --self-update`）、命令层（`wpm update winuxcmd`）、插件源（`niu plugin update`）三条更新线各自独立。
-
-## 为什么不用 WSL
-
-为了跑个 `grep` 先开一台 Linux 虚拟机，等于为了喝牛奶买下一整座牧场。
-牛确实是好牛，但日子不必这么过。
-
-每个 Windows shell 都要你交出点什么。CMD 冻结在 1987 年。PowerShell
-不是 Bash——你的 `for`、`grep`、引号直觉，落地即碎。WSL 是你要领养一整个
-Linux 发行版才能打印个目录。Git Bash 模拟 Unix 并*猜*你的路径，而 Windows
-原生工具根本不说它的方言。
-
-niubash 把 Bash 还给你，却不必背负那些开销：没有发行版要打补丁，没有模拟层要哄。
-完整能力与逐项对比都在下面——[特性](#特性) 与 [对比](#对比)。
-
-## 对 AI agent 友好
-
-每个 AI 编程 agent 都会说 Bash——模型是在 Bash 语料上训练的。在 Windows
-上，它们大多被锁在 PowerShell 里，就是那个著名的*吃参数*的 shell：
-
-```text
-# PowerShell 5.1                              # niubash
-> node -e "console.log(JSON.stringify(        ❯ node -e "console.log(JSON.stringify(
-    process.argv.slice(1)))" "a b" "" "c\"d"    process.argv.slice(1)))" "a b" "" "c\"d"
-    "e\f" "---"                                 "e\f" "---"
-
-ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
-```
-
-写了 5 个参数：PowerShell 直接语法报错，niubash 五个全到、一个字节不少。
-连 [Codex 在 Windows 上都被锁死 PowerShell](https://github.com/openai/codex/issues/31548)，
-用户正在公开投票要求逃生。完整案卷见 [Why niubash](docs/src/why-niubash.md)。
-
-一次性调用是一份契约，不是边角料：
-
-- **无 banner**、stdout/stderr 稳定、**退出码精确传递**——agent 写什么，进程就收到什么。
-- **不加载 rc、不加载插件、不跑交互钩子**，今天跑和明天跑一个样。
-- **路径零转换**：Bash 语感直接可用，没有 MSYS 式的参数改写轮盘赌。
-- Bash 训练出来的模型，在 niubash 里第一次不用"入乡随俗"。
-
-这就是键盘另一头的人经历的日常：
-
-<div align="center">
-
-<img src="assets/demo-drama.gif" alt="动画剧情：用户和 codex 对话，PowerShell 吃掉参数，用户崩溃，niubash 救场" width="560"/>
-
-</div>
-
-## 对比
-
-| | niubash | WSL | Git Bash | PowerShell | CMD |
-|---|---|---|---|---|---|
-| 实现方式 | 原生 Rust 引擎 + 原生命令 | VM 里的完整 Linux 发行版 | POSIX 模拟（`msys-2.0.dll`） | 原生 | 原生 |
-| Bash 语法 | ✅ | ✅ | ✅ | ❌ | ❌ |
-| 原生 Windows 路径（无 `/mnt/c`） | ✅ | ❌ | ⚠️ 启发式转换，会改坏参数 | ✅ | ✅ |
-| 直接调用 `git.exe` / `node.exe` | ✅ | ⚠️ 经 `/mnt/c` | ⚠️ 路径翻译弄脏参数 | ✅ | ✅ |
-| 自带 Unix 命令（`ls`、`grep`、`find`） | ✅ | ✅ | ✅ | ❌ | ❌ |
-| agent 写的 Bash 直接能跑 | ✅ | ✅ | ⚠️ 参数改写 | ❌ | ❌ |
-| 冷启动到提示符 | **~170 ms** | 秒级 | ~1 s | ~280 ms | — |
-| 不装额外 OS、不开 VM | ✅ | ❌ | ✅ | ✅ | ✅ |
-| 主题 / git 提示 / 插件 | ✅ | — | ✅ | ⚠️ | ❌ |
-
-一个二进制。一个进程。没有发行版要打补丁，没有模拟层要哄。模拟层是
-上个世纪对正确架构的近似——正确架构是原生实现，Windows 路径是唯一
-存在的路径。这个架构，就在这里交付。
-
-### 最接近的同类：[brush](https://github.com/reubeno/brush)
-
-先给对手记一功：brush 开创了"用 Rust 重写 bash"这条路，而且走得比
-任何人都远——它是这个类别里诚实的参照系。正面交锋：
-
-| | niubash | brush |
-|---|---|---|
-| 路线 | Rust 重写 bash，Windows 原生 | Rust 重写 bash，跨平台 |
-| 兼容性验证 | 直接跑 **GNU Bash 官方上游测试套件**——门禁 86/86 全绿，全量 **83/83** 套件零差（输出逐字节一致，2026-09-21 实测，见下文） | 根本不跑 GNU 套件；验证靠自建 1700+ 用例语料、以 bash 为 oracle，约 125 个已知失败（[其官方参考](https://github.com/reubeno/brush/blob/main/docs/reference/compatibility.md)） |
-
-**同一张考卷、同一个考官——实测，不是口称。** 我们把 GNU Bash 的 83
-个上游测试套件用同一套桥接 harness（[`run-83.sh`](https://github.com/unixwin/rubash/blob/master/tests/gnu-compat/run-83.sh)、
-同样的 WSL GNU Bash 基线、同样的输出正规化、brush 用 release 构建）分别
-送考：**niubash 83/83 套件逐字节一致，brush 10/83**——另有 3 个套件
-brush 在 150 秒上限内没能跑完（2026-09-21 实测，brush v0.4.0）。
-
-为什么差距这么大？两个测试数量量的是不同的仪器。自建的约 1700 个精选
-单例检查回答的是"这个语法大概能不能跑"；GNU 的 83 个整行为套件重放的
-是 bash 自己的酷刑测试——trap、历史展开、POSIX 模式、奇异重定向——并且
-要求**逐字节一致**的输出。上面这座桥，就是"~1700 个测试"在官方仪器下
-买到的分数。而对脚本和 agent 来说，逐字节一致才是及格线："差不多"在
-输出接进下一条管道的那一刻就会碎掉。
-| Windows 上的 Unix 命令 | 自带：`ls`、`cat`、`grep`、`find`、`sed`……（[winuxcmd](https://github.com/unixwin/winuxcmd)） | 不附带——想用 `ls` 仍需另配外部工具 |
-| 路径模型 | Windows 原生路径第一等；`/c/…`、`/mnt/c/…` 是输入方言；不存在转换层 | 通用跨平台路径处理 |
-| 交互面 | IDE 式补全菜单、27 款主题、插件生态（oh-my-niu） | 语法高亮、自动建议、starship |
-
-同一个想法，不同的完成度。Brush 证明了这条路走得通；niubash 交付的是
-它的 Windows 原生完全体——引擎、命令、路径契约、生态，缺一不可。
-
-## 架构
-
-```
-niu.exe
-├── niubash 宿主层（Rust）       reedline 行编辑 · 主题 · 补全 · 插件 · Ctrl+C
-├── rubash 语言引擎（lib，Rust）  lexer / parser / executor / builtins
-└── winuxcmd.exe 命令层（C++）   Unix coreutils 真二进制，PATH 命令链接注入
-```
-
-- **rubash 是引擎，也是唯一权威** — niubash 不自己实现 shell 语言，rubash 作为 Rust crate 直接链接。解析、执行、内建命令、变量展开、重定向、管道、作业控制，全部在上游。修语义 bug 去 [rubash](https://github.com/unixwin/rubash) 上游修，Windows 上每一个 bash 用户一起受益。
-- **winuxcmd 是命令层，不是 DLL** — 没有 FFI、没有路由表魔法。它就是普通 Windows 进程，rubash 通过正常 PATH 找到 `ls`、`grep` 这些命令链接。
-- **oh-my-niu 是官方插件发行版** — 随 niubash 发行，manifest 声明权限，审阅过的 source pack + process 适配器两种形态。
-- 非目标：Linux/macOS 原生 shell 产品。rubash 可跨平台复用，但 niubash 的目标就是 Windows——把一件事做牛。
-
-## 常见问题
-
-- **"niubash 是基于 MSYS2 / Cygwin 的吧？"** 不是。MSYS2 和 Cygwin 是 POSIX
-  模拟层：一个 Unix 风格的 DLL 运行时、一个假根文件系统、一套在最坏时机
-  改写你参数的启发式路径转换。niubash 一样都没有——Bash 兼容由语言引擎
-  （[rubash](https://github.com/unixwin/rubash)）实现，命令是原生 Windows
-  可执行文件，`C:\` / `C:/` 路径原样直出不翻译。这也解释了为什么 MSYS 世界
-  需要 `MSYS_NO_PATHCONV` 来关掉它的转换器，而 niubash 没有对应的开关——
-  没有转换器，自然无可关闭。（安装目录里的 `bash.exe` / `sh.exe` 只是把
-  启动转发给 `niu.exe` 的小垫片，不是 MSYS bash。）
-- **"这不就是又一个 Git Bash？"** 不是。Git Bash 在 Windows 上模拟 Unix：翻译路径、猜参数。niubash 是原生 Windows 进程，Bash 兼容发生在语言引擎（rubash）里，不在假文件系统里。
-- **"那我还要 WSL 干嘛？"** 各有各的用：真 Linux 内核、Linux Docker、Linux 专用工具链，它依然是把好手。至于剩下的 95%——你需要的不是 WSL，是 niubash。
-- **"为什么叫 niu？"** niu = 牛。短、好打、不粘键盘油。项目叫 niubash，二进制叫 `niu`，环境变量前缀 `NIU_`。Windows 上最"牛"的 bash，名字得对得起产品。
-- **"是在黑 PowerShell 吗？"** 不是。PowerShell 是强大的自动化语言，只是它不是 Bash。模型在 Bash 语料上训练，在 Windows 上却被迫说 cmdlet 方言——问题出在错配，不在于谁写得烂。
+配置只有一个文件：`~/.niubashrc`，纯 Bash 语法——从
+[快速上手](docs/src/getting-started.md)开始。
 
 ## 文档
 
-完整文档站：**[docs](https://unixwin.github.io/niubash/)** · [快速上手](docs/src/getting-started.md) · [Why niubash](docs/src/why-niubash.md) · [高级用法](docs/src/advanced-usage.md) · [架构](docs/src/architecture.md)
-
-## 参与贡献
-
-欢迎提 bug、feature request 和 PR——开一个
-[issue](https://github.com/unixwin/niubash/issues) 或直接提 PR。文档在
-[`docs/`](docs/)，源码在 [`src/`](src/)。提交前请确保验证循环通过：
-`cargo fmt --check`、`cargo build --locked`、`cargo test --workspace --locked`。
+[文档站](https://unixwin.github.io/niubash/) ·
+[Why niubash](docs/src/why-niubash.md)（长版论据 + agent 受害者案卷） ·
+[平台支持](docs/src/platform-support.md) ·
+[Bash 兼容性矩阵](docs/src/rubash-bash-compat-matrix.md) ·
+[Roadmap](docs/src/niubash-roadmap.md)
 
 ---
 
-如果 niubash 帮你省下了"为跑 grep 先开虚拟机"的仪式感，
-[给仓库点个 Star](https://github.com/unixwin/niubash)，把牛市分享给下一个
-还在 CMD 里挣扎的朋友。★
+如果 niu 帮你省掉了一台虚拟机、一段被改坏的引号、一个被 PowerShell 吃掉
+的参数，[给仓库点个 Star](https://github.com/unixwin/niubash)，转告下一位
+开发者。★
 
 ## 许可证
 

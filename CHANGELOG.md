@@ -4,21 +4,7 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
-### Changed
-
-- command-not-found no longer advertises package managers by default
-  (niubash#249): a typo like `win` prints only the GNU one-liner — the
-  unsolicited "package search hints" block naming winget/scoop/choco is
-  removed, and third-party managers are never recommended again. The
-  recipe/wpm install hints for exact, known tool names (`rg`, `awk`, …)
-  stay. An opt-in channel returns a wpm-only suggestion:
-  `niu config set command-not-found-hint wpm` (persisted in the new
-  `~/.niubash/config.toml`; `NIU_COMMAND_NOT_FOUND_HINT` overrides) — it
-  suggests one `wpm search --name '<word>'` line only for
-  high-confidence near-misses (dropping the word's last character hits an
-  installed command or a known package name), so pure typos stay quiet
-  even with the switch on. New `niu config get/list/set` subcommand surface
-  manages the file.
+## [1.4.0] - 2026-10-10
 
 ### Added
 
@@ -45,13 +31,26 @@ All notable changes to Niubash are documented in this file.
   call. Git's own spec does not resolve nested context through the CLI
   bridge (`git commit <TAB>` falls back to top-level candidates; flag
   completion works for static specs like cargo), noted as follow-up.
+
+- Doctor timing advice (niubash#201): `niu doctor` now carries an advisory
   row pointing timing/performance-sensitive scripts at the bash 5 builtin
   `$EPOCHREALTIME` / `$EPOCHSECONDS` instead of looping on the external
   `$(date +%s%N)` — each `date` call pays Windows process creation
   (~10-30ms) while the builtin expands in microseconds with the GNU format
   `1699999999.123456`. Regression tests pin the format, second-level
   agreement with `date +%s`, live monotonic updates, and the speed gap.
->>>>>>> origin/master
+
+- Android and OpenHarmony release-CI legs incubating (roadmap niubash#207,
+  niubash#247): `build-android` links aarch64-linux-android and
+  armv7-linux-androideabi against bionic (NDK r27, API 24) and ships a zip
+  per leg with ELF-arch verification in place of an on-runner runtime
+  smoke; `build-openharmony` is check-only for now
+  (aarch64-unknown-linux-ohos is Tier 2 with host tools — real linking
+  needs the OHOS SDK clang wrapper, which has no version-pinned runner
+  fetch path yet, so no binary ships from that leg). Both jobs run
+  continue-on-error and stay out of the release needs, the same incubation
+  shape the musl leg had before it was tightened; the platform-support
+  matrix documents both targets.
 
 - Vi editing mode wired end-to-end (niubash#184): `set -o vi` / `set -o
   emacs` now switch the LIVE line editor mid-session, like GNU bash — both
@@ -130,11 +129,31 @@ All notable changes to Niubash are documented in this file.
 
 ### Changed
 
+- command-not-found no longer advertises package managers by default
+  (niubash#249): a typo like `win` prints only the GNU one-liner — the
+  unsolicited "package search hints" block naming winget/scoop/choco is
+  removed, and third-party managers are never recommended again. The
+  recipe/wpm install hints for exact, known tool names (`rg`, `awk`, …)
+  stay. An opt-in channel returns a wpm-only suggestion:
+  `niu config set command-not-found-hint wpm` (persisted in the new
+  `~/.niubash/config.toml`; `NIU_COMMAND_NOT_FOUND_HINT` overrides) — it
+  suggests one `wpm search --name '<word>'` line only for
+  high-confidence near-misses (dropping the word's last character hits an
+  installed command or a known package name), so pure typos stay quiet
+  even with the switch on. New `niu config get/list/set` subcommand surface
+  manages the file.
 - Release binaries are stripped (niubash#228): the release profile strips
   symbols, shrinking the shipped niu.exe.
 - The pre-install manifest bundles niugit, ripgrep and fd alongside gawk
   (niubash#230), and the setup wizard detects release-bundled components as
   already-present instead of re-offering them (niubash#231).
+- Documentation passes: a "Calling PowerShell from niu" page joins the
+  platform docs (when to reach for powershell.exe from niu, and how) with
+  a README style pass (niubash#203, niubash#253), and the MSYS labels
+  (`uname` -> `MSYS_NT`, `OSTYPE=msys`, `MACHTYPE` `x86_64-pc-msys`) are
+  documented as what they are — a compatibility persona of a pure native
+  Windows build with no msys-2.0.dll/cygwin1.dll, with the measured
+  behavioral boundary (niubash#248).
 
 ### Fixed
 
@@ -145,6 +164,92 @@ All notable changes to Niubash are documented in this file.
 - PS0 expansion writes to stderr, matching GNU bash (eval.c:176) (niubash#233).
 - Bracketed paste enabled with GNU bash multiline-paste semantics: pasted
   newlines no longer execute mid-paste (niubash#234).
+- The bash-it theme history interlock (niubash#182) is closed: themes
+  running `history -a && history -c && history -r` from PROMPT_COMMAND
+  doubled the history file every prompt and wedged the session. `history
+  -a` appends only what the file lacks (bashhist.c), `history -r` rebuilds
+  the reader from disk without re-appending reedline's unsynced buffer,
+  and `history -c` clears the in-memory list only — the backing file is
+  snapshotted and restored instead of deleted
+  (builtins/history.def:185). A ConPTY regression drives 12 prompt cycles
+  of the exact theme pattern and asserts every command lands in the file
+  exactly once (niubash#250).
+- An unparsable plugin source registry is never silently rewritten
+  (niubash#178): registry.toml bytes that fail to parse are snapshotted to
+  `registry.toml.corrupt` and warned on stderr, and every registry write
+  is refused — sync/install fail loudly instead of dropping the persisted
+  pin commit, checksum and trust state riding in the file; install refuses
+  before any fetch, and `niu doctor` names the parse error's line and the
+  sidecar instead of "none installed" (niubash#246).
+- Multiline paste on the Windows console no longer executes line-by-line
+  (niubash#202): Windows gets no bracketed paste (ConPTY swallows the
+  ?2004 markers), so a terminal paste arrived as per-line key events that
+  executed as they came — a 200-line paste self-executed 186 times
+  (176 KB of output, 15-17 s). A PSReadLine-style arrival-burst heuristic
+  (`PasteChunkEditMode`, 50 ms inter-key gap, cfg(windows) only — Unix
+  keeps the real bracketed paste above) buffers the burst, including bare
+  Enters and the console's CRLF Enter pairing, and commits it as one
+  insertion; the script executes exactly once on the user's Enter
+  (paste-phase executions 186 -> 0; the issue's 257-line payload drops
+  from >300 s timeout to ~4.6 s) (niubash#252).
+- The setup wizard audit P2 batch (niubash#179): a fresh install journals
+  rc_created so the finish screen's undo receipt covers the generated rc
+  itself; duplicate undo receipts for one source dedupe; Ctrl-C at the
+  niu-git question prints the same cancelled note as every other question;
+  `niu plugin discover` enumerates the theme layer of trusted sources; zh
+  translation keys realign with the runtime literals (now guarded by the
+  vocab test); a gutted trusted source makes `niu plugin list`/`discover`
+  name the repair verb (`niu plugin source verify <id>`) instead of
+  silently showing no assets (niubash#239).
+- `niu doctor` on Linux/macOS reports the Windows-only checks (winuxcmd
+  core, command links, bash/sh shims) as n/a rows outside the critical
+  tally instead of "1/3 critical checks passed"; the header names the
+  platform and the terminal row falls back to `TERM` (niubash#194)
+  (niubash#242).
+- A raw ESC byte as the first character inside single quotes in a script
+  file is preserved (niubash#200): the word-initial data ESC was claimed
+  by the lexer's QUOTED_WORD_PREFIX marker and silently dropped; the
+  engine lexer now raw-byte tags it (rubash#474) and integration tests
+  pin the byte at the niu boundary across single/double-quoted, unquoted,
+  ANSI-C and piped-stdin spellings (niubash#235).
+
+### Engine (rubash 1.4.0)
+
+- Login shells: `-l`/`--login` (and an argv[0] starting with `-`) run the
+  GNU startup chain on Unix — `/etc/profile`, then the first of
+  `~/.bash_profile` | `~/.bash_login` | `~/.profile`; non-login
+  interactive shells source `/etc/bash.bashrc` + `~/.bashrc`;
+  `--noprofile`/`--norc` suppress the corresponding branch. Windows
+  accepts the flags with unchanged behavior (no login concept).
+- A bare-console `rubash` gets real readline line editing: a raw-mode
+  console reader translates keystrokes through the engine's editor
+  dispatcher — history recall (arrows, C-p/C-n), in-line cursor motion,
+  C-r reverse search, per-keystroke redraw — and restores cooked mode for
+  child processes.
+- Command-substitution exit status is published to `$?` during expansion,
+  like GNU: `echo "$(cd nope && pwd)" $?` reports 1,
+  `false; echo "$(true) $?"` reports 0 (rubash#485).
+- Compatibility families zeroed against the GNU 5.3.0 true-baseline
+  suites: dbg-support (635→0), restricted rbash (194→0), invocation
+  (BASH_ARGV0, login argv0, long-option table — 14→0), trap, function
+  definition (POSIX funcname rules, AST printer), multi-operand
+  `complete`; the 83-suite diff drops 3427 → 2072 lines (−40%), 32
+  suites now byte-equal.
+- History: `history -d start-end` range deletion (a GNU 5.3 feature), fc
+  -s re-execution semantics; globstar `**` fixes (non-adjacent patterns,
+  zero-depth trailing slashes); array/assoc compound-assignment quoting
+  fixes; same-line `#` comments after `f() {`; unquoted variable command
+  words split by IFS in pipelines; `eval` inside command substitution
+  re-parses like GNU; `set -u` arithmetic no longer flags assigned
+  variables as unbound.
+- Signal numbers unified on the Linux table (USR1=10, CHLD=17, RTMIN=34)
+  so `kill -l`/`trap -l` match GNU 5.3.0; aarch64/armv7 Android compile
+  against bionic; SIGPIPE no longer aborts the interpreter (`yes | head`
+  streams like GNU).
+- Utilities: GNU cp port (-r/-n/-i/-v/-p/-u/-t with buffered stderr),
+  /bin/echo and /usr/bin/echo route to the buffered builtin channel;
+  printf/ANSI-C `\u` partial-read and hex-width rules; locale subsystem
+  (setlocale warnings, MB_STRLEN).
 
 ## [1.3.4] - 2026-10-05
 
