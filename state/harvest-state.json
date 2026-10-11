@@ -1,0 +1,64 @@
+{
+ "search_cursor": {
+  "t3:topic:bash-plugin": {
+   "page": 2,
+   "done": true
+  },
+  "t3:topic:bash-script": {
+   "page": 10
+  },
+  "t3:topic:bats": {
+   "page": 3,
+   "done": true
+  },
+  "t3:topic:shellcheck": {
+   "page": 3,
+   "done": true
+  },
+  "t3:topic:bash-library": {
+   "page": 2,
+   "done": true
+  },
+  "t3:bash prompt theme in:name,description": {
+   "page": 2,
+   "done": true
+  },
+  "t3:shell framework in:name,description": {
+   "page": 11
+  },
+  "t3:bash key bindings in:name,description": {
+   "page": 10,
+   "done": true
+  },
+  "t3:topic:bash": {
+   "page": 11
+  },
+  "t4:PROMPT_COMMAND language:Shell": {
+   "page": 11
+  },
+  "t4:PS1= filename:.bashrc": {
+   "page": 11
+  },
+  "t5:topic:dotfiles": {
+   "page": 11
+  },
+  "t4:PS1= filename:.bash_profile": {
+   "page": 11
+  }
+ },
+ "search_got": {
+  "t3:topic:bash-plugin": 0,
+  "t3:topic:bash-script": 0,
+  "t3:topic:bats": 0,
+  "t3:topic:shellcheck": 0,
+  "t3:topic:bash-library": 0,
+  "t3:bash prompt theme in:name,description": 0,
+  "t3:shell framework in:name,description": 0,
+  "t3:bash key bindings in:name,description": 0,
+  "t3:topic:bash": 0,
+  "t4:PROMPT_COMMAND language:Shell": 0,
+  "t4:PS1= filename:.bashrc": 0,
+  "t5:topic:dotfiles": 0,
+  "t4:PS1= filename:.bash_profile": 0
+ }
+}
