@@ -351,7 +351,7 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
         // leading -c routes to the engine parser above.
         "-c" => {
             let command_mode = parse_legacy_command_mode(rest)?;
-            let mut shell = niubash_runtime::Shell::new()?;
+            let mut shell = niubash_runtime::Shell::new_one_shot()?;
             niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
@@ -429,8 +429,15 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Single-command non-interactive invocation (unless -i forces the
+    // interactive startup files): skip REPL-only initialization — the prompt
+    // backend, the completion directory scan, and the completion snapshot.
+    // Script files and piped stdin keep the full constructor: their rc
+    // semantics are the plain ones and their startup is amortized.
     let mut shell = if invocation.read_stdin {
         niubash_runtime::Shell::new_for_stdin_script()?
+    } else if invocation.command.is_some() && !invocation.interactive {
+        niubash_runtime::Shell::new_one_shot()?
     } else {
         niubash_runtime::Shell::new()?
     };
