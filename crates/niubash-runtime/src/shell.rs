@@ -1740,6 +1740,18 @@ impl Shell {
             .collect()
     }
 
+    /// The directory this shell considers current: the engine `PWD` when it
+    /// resolves to an existing host directory, else the process cwd.
+    ///
+    /// `execute_script` syncs the process cwd to the shell's final `PWD`
+    /// before returning, and an EXIT trap's `cd` only updates `PWD`, so
+    /// `PWD` is the truth for "where did this invocation end" — the value
+    /// the `--cwd-state` host contract records.
+    pub fn current_host_cwd(&self) -> PathBuf {
+        self.executor_pwd_host_path()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
     fn executor_pwd_host_path(&self) -> Option<PathBuf> {
         let pwd = self.executor.get_env("PWD")?;
         let host_path = self.executor.resolve_shell_path(pwd);
