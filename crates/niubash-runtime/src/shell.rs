@@ -164,14 +164,53 @@ pub struct StdinCurrentShellChild {
     positional_params: Vec<String>,
 }
 
+/// The `$0` a fresh shell starts with. GNU shell.c set_shell_name uses the
+/// invocation name: when the process was reached through the sh.exe shim the
+/// shim forwards its argv[0] stem in NIU_INVOKED_AS, so `sh -c 'echo $0'`
+/// prints `sh` (or `-sh` for a login-marked name), not niu. Any other
+/// invocation — plain niu, the bash shim (which deliberately forwards no
+/// name) — keeps the historical `niu` default byte-for-byte.
+fn default_script_name() -> String {
+    default_script_name_from(std::env::var("NIU_INVOKED_AS").ok())
+}
+
+/// Consume the shim-forwarded invocation name out of the process
+/// environment, removing it in the same breath: it describes how THIS
+/// process was invoked, not a setting children should inherit. Without the
+/// removal a nested `sh -c 'niu ...'` would hand the plain-niu child the
+/// `sh` contract (POSIX mode, `$0` = sh) that GNU keys off argv[0] alone.
+fn invoked_as_from_env() -> Option<String> {
+    let invoked_as = std::env::var("NIU_INVOKED_AS").ok()?;
+    std::env::remove_var("NIU_INVOKED_AS");
+    Some(invoked_as)
+}
+
+fn default_script_name_from(raw: Option<String>) -> String {
+    let Some(raw) = raw else {
+        return "niu".to_string();
+    };
+    let basename = raw.rsplit(['/', '\\']).next().unwrap_or(&raw);
+    let lowered = basename.to_ascii_lowercase();
+    let stem = lowered.strip_suffix(".exe").unwrap_or(&lowered);
+    let unmarked = stem.strip_prefix('-').unwrap_or(stem);
+    if matches!(unmarked, "sh" | "ash") {
+        stem.to_string()
+    } else {
+        "niu".to_string()
+    }
+}
+
 impl Shell {
     /// Construct a fresh shell: load config, install Ctrl+C handler, inject
     /// winuxcmd onto PATH, set up completion state and history.
     pub fn new() -> anyhow::Result<Self> {
         // `niu` is the sole public executable. Keep `$0` aligned with the
         // user-facing command; explicit script and `-c` names still override
-        // this value at their call sites.
-        Self::new_with_script_name(Some("niu"))
+        // this value at their call sites. When the process was reached
+        // through the sh.exe shim (the shim forwards its argv[0] stem via
+        // NIU_INVOKED_AS), GNU shell.c set_shell_name shows the invocation
+        // name instead: `sh -c 'echo $0'` prints `sh`, never niu.
+        Self::new_with_script_name(Some(default_script_name().as_str()))
     }
 
     /// Construct a shell for scripts arriving on process stdin.
@@ -180,6 +219,12 @@ impl Shell {
     }
 
     fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
+        // Consume the shim-forwarded invocation name before anything else
+        // reads it: it must not leak into child processes. Shell::new
+        // peeked at the same value for the `$0` default above (removal
+        // happens after that peek), and the shell-name block below reuses
+        // `invoked_as` rather than re-reading the now-cleared environment.
+        let invoked_as = invoked_as_from_env();
         // 1. Load runtime defaults and environment-backed state.
         let mut config = load_config();
         config.history = config.history.with_env_overrides();
@@ -240,9 +285,7 @@ impl Shell {
         if std::env::var("NIU_ENABLE_RUBASH_SUDO").as_deref() != Ok("1") {
             executor.set_builtin_disabled("sudo", true);
         }
-        let shell_name = std::env::var("NIU_INVOKED_AS")
-            .ok()
-            .or_else(|| std::env::args().next());
+        let shell_name = invoked_as.or_else(|| std::env::args().next());
         if let Some(shell_name) = shell_name {
             let invoked_name = shell_name
                 .rsplit(['/', '\\'])
@@ -251,7 +294,14 @@ impl Shell {
                 .trim_end_matches(".exe")
                 .to_ascii_lowercase();
             executor.set_env("__RUBASH_SHELL_NAME", &invoked_name);
-            if matches!(invoked_name.as_str(), "sh" | "ash") {
+            // GNU shell.c set_shell_name: a leading `-' on argv[0] marks a
+            // login shell independent of --login/-l; the stripped name drives
+            // the POSIX-mode contract below.
+            let unmarked_name = invoked_name.strip_prefix('-').unwrap_or(&invoked_name);
+            if unmarked_name.len() < invoked_name.len() {
+                executor.set_env("__RUBASH_LOGIN_SHELL", "1");
+            }
+            if matches!(unmarked_name, "sh" | "ash") {
                 executor.set_env("__RUBASH_POSIX_MODE", "1");
                 executor.set_shell_option("posix", true);
             }
@@ -5633,5 +5683,66 @@ niu_git_comp() {
     fn write_fake_cwd_probe(bin: &std::path::Path, log_path: &str) {
         let script = format!("@echo off\r\n>\"{}\" echo %CD%\r\nexit /b 0\r\n", log_path);
         std::fs::write(bin.join("cwdprobe.cmd"), script).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod invocation_name_tests {
+    use super::default_script_name_from;
+    use crate::test_support::PROCESS_STATE_LOCK;
+
+    #[test]
+    fn sh_shim_forward_yields_sh_as_dollar_zero() {
+        // The sh.exe shim forwards its argv[0] stem verbatim.
+        assert_eq!(default_script_name_from(Some("sh".to_string())), "sh");
+        assert_eq!(
+            default_script_name_from(Some("C:/x/winuxcmd/bin/sh.exe".to_string())),
+            "sh"
+        );
+        assert_eq!(
+            default_script_name_from(Some("\\usr\\bin\\ASH.EXE".to_string())),
+            "ash"
+        );
+    }
+
+    #[test]
+    fn login_marker_survives_into_dollar_zero() {
+        // GNU shell.c set_shell_name keeps the leading `-': a login `sh'
+        // shows $0 = -sh.
+        assert_eq!(default_script_name_from(Some("-sh".to_string())), "-sh");
+        assert_eq!(default_script_name_from(Some("-SH.exe".to_string())), "-sh");
+    }
+
+    #[test]
+    fn plain_niu_and_bash_shim_keep_the_niu_default() {
+        // bash.exe forwards no NIU_INVOKED_AS (byte-identical forward), and a
+        // direct niu.exe run carries no sh/ash stem either way.
+        assert_eq!(default_script_name_from(None), "niu");
+        assert_eq!(default_script_name_from(Some("bash".to_string())), "niu");
+        assert_eq!(
+            default_script_name_from(Some("C:/x/bin/bash.exe".to_string())),
+            "niu"
+        );
+        assert_eq!(default_script_name_from(Some("niu".to_string())), "niu");
+    }
+
+    #[test]
+    fn invoked_as_is_consumed_from_the_process_environment() {
+        // The variable describes how THIS process was invoked, nothing a
+        // child should inherit: reading it removes it, so a `niu` or `bash`
+        // spawned later under `sh -c` starts clean and keeps its own
+        // argv[0]-keyed GNU contract.
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("NIU_INVOKED_AS");
+        std::env::set_var("NIU_INVOKED_AS", "sh");
+        assert_eq!(super::invoked_as_from_env(), Some("sh".to_string()));
+        assert_eq!(std::env::var_os("NIU_INVOKED_AS"), None);
+        // A consumed variable stays consumed; reading again yields None
+        // without touching the environment a second time.
+        assert_eq!(super::invoked_as_from_env(), None);
+        match previous {
+            Some(value) => std::env::set_var("NIU_INVOKED_AS", value),
+            None => std::env::remove_var("NIU_INVOKED_AS"),
+        }
     }
 }

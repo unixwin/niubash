@@ -110,8 +110,11 @@ try {
         $shShimExe = Resolve-RubashShim -Name "sh" -ExplicitPath $ShShimPath
     }
     else {
-        # TODO(posix-mode): replace with a dedicated sh.exe shim if we decide
-        # to make /bin/sh enter POSIX mode instead of matching bash behavior.
+        # The shim binary self-identifies through its own argv[0]: copied as
+        # sh.exe it forwards the invocation name (NIU_INVOKED_AS) to niu, which
+        # then enters POSIX mode and shows $0 = sh (GNU shell.c:733-737, the
+        # sh-posix contract). The same bytes as bash.exe forward no name and
+        # stay in the default bash-compatible mode.
         $shShimExe = $bashShimExe
     }
 
