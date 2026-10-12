@@ -215,7 +215,10 @@ fn rubash_revision_from_lock() -> Option<String> {
     None
 }
 
-#[cfg(windows)]
+// Compiled on every host: the only call site is runtime-gated on
+// CARGO_CFG_TARGET_OS == "windows" (see main), and gating the definition on
+// the host triple instead would break non-Windows hosts that cross-check a
+// Windows target (E0425: the call site compiles, the definition does not).
 fn embed_windows_icon() {
     use std::env;
     use std::path::{Path, PathBuf};
