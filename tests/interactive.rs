@@ -714,24 +714,41 @@ fn typeahead_survives_prompt_rebuild_window() {
     }
 }
 
-/// A rapid burst of input lines is executed completely and in order.
+/// A rapid burst of input lines lands as ONE quiet paste chunk and executes
+/// completely, in order, on the user's single submit Enter.
+///
+/// The burst arrives as one ConPTY write with CRLF line breaks, so every
+/// break carries its LF partner (`Enter + CONTROL`) — the structural paste
+/// signature (niubash#252/#284). The chunk must not repaint or execute per
+/// line (the pre-#252 Windows behavior executed 186 of 200 pasted lines
+/// mid-paste, niubash#202); nothing runs until the submitting Enter, then
+/// every line runs in order.
+///
+/// The markers are rc variables on purpose: the echoed edit buffer shows
+/// literal `echo $RB01` text after the chunk flush, so only the EXECUTED
+/// output (`burst-01-OUT`) can satisfy the assertions — mid-paste
+/// execution and lost submissions both fail the test.
 #[test]
 fn rapid_input_burst_all_lines_execute() {
     if !require_pty_or_skip("rapid_input_burst_all_lines_execute") {
         return;
     }
-    let mut s = NiuSession::spawn_custom(
-        "burst",
-        &driver::default_rc(),
-        &[],
-        (120, 30),
-        HEAVY_TIMEOUT,
-    );
+    let vars: String = (1..=12)
+        .map(|i| format!("RB{i:02}=burst-{i:02}-OUT\n"))
+        .collect();
+    let rc = format!("{}\n{}", driver::default_rc(), vars);
+    let mut s = NiuSession::spawn_custom("burst", &rc, &[], (120, 30), HEAVY_TIMEOUT);
     s.wait_ready();
-    let burst: String = (1..=12).map(|i| format!("echo burst-{i:02}\r\n")).collect();
+    let burst: String = (1..=12).map(|i| format!("echo $RB{i:02}\r\n")).collect();
     s.send(&burst);
+    // The whole burst buffers as one paste chunk: no line executes while
+    // it is absorbed.
+    s.expect_absent("burst-01-OUT", ABSENT_WINDOW);
+    // The user's own Enter submits the buffered script: every line runs,
+    // in order.
+    s.send("\r");
     for i in 1..=12 {
-        s.expect(&format!("burst-{i:02}"));
+        s.expect(&format!("burst-{i:02}-OUT"));
     }
     s.expect_prompt();
 }
@@ -747,8 +764,8 @@ fn rapid_input_burst_all_lines_execute() {
 /// Non-Windows only: crossterm has no ANSI input parser on Windows, so
 /// ConPTY consumes the ESC[200~/ESC[201~ markers before they reach the
 /// shell (see the builder comment in `build_line_editor`); there a
-/// terminal paste degrades to the per-line behavior asserted by
-/// [`multiline_raw_paste_per_line_windows`].
+/// terminal paste is carried by its CRLF signature instead, as pinned by
+/// [`multiline_raw_paste_windows_crlf_buffers_and_cr_executes_per_line`].
 #[test]
 fn multiline_bracketed_paste_buffers_whole_chunk() {
     if cfg!(windows) {
@@ -775,35 +792,137 @@ fn multiline_bracketed_paste_buffers_whole_chunk() {
     s.expect_prompt();
 }
 
-/// Windows fallback semantics (documented in `build_line_editor`): ConPTY
-/// hands a terminal paste to crossterm as per-line key events, so each line
-/// executes as it arrives — the same behavior as pasting into cmd.exe. The
-/// one-shot alternative on Windows is Ctrl+V (PasteSystem), covered by
-/// [`ctrl_v_clipboard_paste_single_buffer_execution`]. This test pins the
-/// fallback so a future crossterm parser cannot silently change it without
-/// notice.
+/// Windows raw-input semantics after niubash#252/#284: ConPTY strips the
+/// bracketed-paste markers, so a feed's intent is carried by its line
+/// breaks. A CRLF-separated feed (what a terminal paste from clipboard
+/// text looks like) carries the LF partner of every break — the structural
+/// paste signature — and buffers as ONE quiet chunk; nothing executes
+/// until the user's Enter, then the whole buffer runs. A bare-CR-separated
+/// feed (typeahead: expect scripts, send-keys, a driver's per-line
+/// send_line) has no LF partners behind its Enters, so every line submits
+/// as it arrives — GNU typeahead semantics, the same as typing each line.
+///
+/// The CRLF markers are rc variables on purpose: only EXECUTED output can
+/// produce them, never the echoed edit buffer. The bare-CR half pins the
+/// degraded per-line behavior so a future crossterm input parser cannot
+/// silently change it without notice.
 #[test]
-fn multiline_raw_paste_per_line_windows() {
+fn multiline_raw_paste_windows_crlf_buffers_and_cr_executes_per_line() {
     if !cfg!(windows) {
         return;
     }
-    if !require_pty_or_skip("multiline_raw_paste_per_line_windows") {
+    if !require_pty_or_skip("multiline_raw_paste_windows_crlf_buffers_and_cr_executes_per_line") {
         return;
     }
-    let mut s = NiuSession::spawn_custom(
-        "paste-raw-win",
-        &driver::default_rc(),
-        &[],
-        (120, 30),
-        HEAVY_TIMEOUT,
+    let rc = format!(
+        "{}\nPF1=RAWPASTE-ONE-DONE\nPF2=RAWPASTE-TWO-DONE\n",
+        driver::default_rc()
     );
+    let mut s = NiuSession::spawn_custom("paste-raw-win", &rc, &[], (120, 30), HEAVY_TIMEOUT);
     s.wait_ready();
-    s.send("echo paste-first\r\necho paste-second\r\n");
-    s.expect("paste-first");
-    s.expect("paste-second");
+    // CRLF-separated: the paste shape. Nothing executes while the chunk
+    // buffers; one Enter runs the whole buffered script.
+    s.send("echo $PF1\r\necho $PF2\r\n");
+    s.expect_absent("RAWPASTE-ONE-DONE", ABSENT_WINDOW);
+    s.expect_absent("RAWPASTE-TWO-DONE", ABSENT_WINDOW);
+    s.send("\r");
+    s.expect("RAWPASTE-ONE-DONE");
+    s.expect("RAWPASTE-TWO-DONE");
     s.expect_prompt();
-    s.send("if true; then\recho paste-branch\rfi\r");
-    s.expect("paste-branch");
+    // Bare-CR-separated: the typeahead shape. Each line submits as it
+    // arrives, like the pre-#252 per-line fallback.
+    s.send("if true; then\recho rawpaste-branch\rfi\r");
+    s.expect("rawpaste-branch");
+    s.expect_prompt();
+}
+
+/// niubash#284, the regression itself: the first Enter of every
+/// `send_line` — the "text + Enter within one burst" shape every ConPTY
+/// driver, expect script, `send-keys` automation and fast human typist
+/// feeds — must submit with no second Enter. The back-to-back half is the
+/// typeahead matrix: three lines written with no prompt waits in between;
+/// each is one bare-CR write, so none carries a paste signature and each
+/// submits and executes completely, in order.
+#[test]
+fn send_line_first_enter_submits_and_typeahead_executes() {
+    if !require_pty_or_skip("send_line_first_enter_submits_and_typeahead_executes") {
+        return;
+    }
+    let mut s = NiuSession::spawn("paste-enter-284");
+    s.wait_ready();
+    s.send_line("echo probe284-first");
+    s.expect("probe284-first");
+    s.expect_prompt();
+    // Back-to-back lines: classic typeahead, each a separate pty write of
+    // text + bare CR. The Enter of line N is followed in the queue by
+    // line N+1's TEXT (not an LF partner), so it must submit.
+    s.send_line("echo typeahead-one");
+    s.send_line("echo typeahead-two");
+    s.send_line("echo typeahead-three");
+    s.expect("typeahead-one");
+    s.expect("typeahead-two");
+    s.expect("typeahead-three");
+    s.expect_prompt();
+}
+
+/// niubash#202/#252/#284 Windows paste contract at issue scale: a long
+/// CRLF paste (the issue author pasted 257 lines) must not execute a
+/// single line mid-paste and must run the whole buffered script on the
+/// user's one Enter. The in-suite load is 60 lines of rc-variable echoes;
+/// the executed-output markers can only come from execution, never from
+/// the echoed edit buffer.
+#[test]
+fn multiline_crlf_paste_buffers_whole_chunk_and_executes_once() {
+    if !cfg!(windows) {
+        // On Unix the bracketed-paste test above covers the buffering
+        // semantics through the real Event::Paste path.
+        return;
+    }
+    if !require_pty_or_skip("multiline_crlf_paste_buffers_whole_chunk_and_executes_once") {
+        return;
+    }
+    let vars: String = (1..=60)
+        .map(|i| format!("PB{i:02}=ISSUESCALE-{i:02}-DONE\n"))
+        .collect();
+    let rc = format!("{}\n{}", driver::default_rc(), vars);
+    let mut s = NiuSession::spawn_custom("paste-scale", &rc, &[], (120, 30), HEAVY_TIMEOUT);
+    s.wait_ready();
+    let paste: String = (1..=60).map(|i| format!("echo $PB{i:02}\r\n")).collect();
+    s.send(&paste);
+    // Not one line may execute while the paste is absorbed.
+    s.expect_absent("ISSUESCALE-01-DONE", ABSENT_WINDOW);
+    s.expect_absent("ISSUESCALE-30-DONE", ABSENT_WINDOW);
+    s.expect_absent("ISSUESCALE-60-DONE", ABSENT_WINDOW);
+    // The user's single submit runs everything, in paste order.
+    s.send("\r");
+    for i in 1..=60 {
+        s.expect(&format!("ISSUESCALE-{i:02}-DONE"));
+    }
+    s.expect_prompt();
+}
+
+/// niubash#277/#280 adjacency: ESC-sequenced arrow keys (ConPTY synthesizes
+/// them into arrow KEY_EVENTs from the pty's ESC[A..D stream) ride the
+/// input path untouched by paste-chunk detection — no chunk opens, no
+/// keystroke or the final Enter is absorbed, and the edits land.
+#[test]
+fn esc_sequenced_arrow_keys_edit_without_absorption() {
+    if !require_pty_or_skip("esc_sequenced_arrow_keys_edit_without_absorption") {
+        return;
+    }
+    let mut s = NiuSession::spawn("arrow-277");
+    s.wait_ready();
+    // A hot burst into the buffer, then cursor motion, then an insert.
+    s.send("echo abc");
+    s.send("\u{1b}[D\u{1b}[D"); // Left Left: park before the 'b'
+    s.send("X");
+    s.send("\r");
+    // The executed output `aXbc` proves the buffer was `echo aXbc` at
+    // submit — the arrows moved the cursor and no keystroke was absorbed.
+    // (The buffer echo also renders `aXbc`, so the fresh prompt below is
+    // the real discriminator: a swallowed Enter would leave the line
+    // unexecuted with no new prompt, and this expect would time out.)
+    s.expect("aXbc");
     s.expect_prompt();
 }
 

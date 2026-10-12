@@ -4,6 +4,23 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows paste-chunk detection no longer swallows the first Enter of
+  every line (niubash#284, a niubash#252 regression): whether a bare Enter
+  submits or opens a paste chunk is now decided structurally — by the LF
+  partner (`Enter + CONTROL`) queued right behind it, the console's shape
+  for a machine-fed CRLF line break — not by the 50 ms arrival-burst
+  heuristic. "Text + Enter" in one burst (fast human typing, ConPTY test
+  drivers, expect scripts, `send-keys`) submits on the first Enter again;
+  multi-line pastes keep buffering quietly until the user's own Enter
+  (0 mid-paste executions, niubash#202 contract unchanged). A typeahead
+  line queued behind a submitting Enter is pushed back and lands, in
+  order, at the next prompt. The TypeaheadGuard no longer double-injects
+  swept console input records: the sweeper's self-heal path drains the
+  buffer before writing it back, so a record can no longer be reinjected
+  twice (once by the self-heal, once by disarm; niubash#287).
+
 ## [1.4.0] - 2026-10-10
 
 ### Changed

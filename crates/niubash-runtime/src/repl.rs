@@ -1,6 +1,7 @@
 //! Reedline REPL loop
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::{borrow::Cow, io::Write};
@@ -29,14 +30,18 @@ const HISTORY_MENU: &str = "history_menu";
 /// feed: winpty/ConPTY delivers a paste in ~10 ms slices, and each repaint
 /// reedline would perform for a partially-inserted chunk takes tens of ms
 /// once the buffer grows — a small threshold here feeds back into those
-/// very repaints (flush → repaint → gap → flush). 50 ms sits below the
-/// floor of sustained human typing (~15 keys/s ≈ 66 ms between keys, and a
-/// deliberate two-key chord is ≥50 ms apart) while riding out the driver's
-/// slice jitter, so machine-fed bursts (a terminal paste through ConPTY)
-/// stay absorbed quietly instead of degenerating into per-line repaints.
-/// Tuning knob: raise it if a slower terminal driver is ever detected
-/// mid-paste; lower it only with benchmark evidence
-/// (scripts/perf/paste_multiline_bench.py).
+/// very repaints (flush → repaint → gap → flush). 50 ms rides out the
+/// driver's slice jitter, so a pasted chunk buffers through the slices and
+/// is committed as ONE insert on the gap instead of degenerating into
+/// per-line repaints.
+///
+/// Since niubash#284 the gap NO LONGER decides submits: whether a bare
+/// Enter is paste data is structural (its queued LF partner — see
+/// [`PASTE_LF_PROBE`]), so a fast typist's "text + Enter" burst submits
+/// however hot the burst is. The gap's only job is marking the burst
+/// boundary where a pending chunk flushes. Tuning knob: raise it if a
+/// slower terminal driver is ever detected mid-paste; lower it only with
+/// benchmark evidence (scripts/perf/paste_multiline_bench.py).
 const PASTE_CHUNK_GAP: Duration = Duration::from_millis(50);
 
 /// Paste-chunk detection is a Windows-console-path replacement for bracketed
@@ -44,6 +49,20 @@ const PASTE_CHUNK_GAP: Duration = Duration::from_millis(50);
 /// crossterm delivers one `Event::Paste` per chunk (niubash#234), so no
 /// heuristic is wanted there.
 const PASTE_CHUNK_DETECTION: bool = cfg!(windows);
+
+/// Budget for the paste-signature lookahead at a bare Enter (see
+/// [`PasteChunkEditMode`]). A machine-fed paste delivers every line break as
+/// a CRLF pair in ONE console write, so the pair's LF (`Enter + CONTROL`) is
+/// already in the input queue when the CR is dispatched — reedline's read
+/// loop itself stops every batch at a bare Enter (`engine.rs`
+/// `read_line_helper`), so the LF cannot have been consumed ahead of it.
+/// The lookahead therefore only has to cover the console driver's synthesis
+/// jitter, not any human decision gap: 10 ms is an order of magnitude above
+/// observed ConPTY handoff latency and an order of magnitude below a
+/// perceptible submit delay. Tuning knob: a larger budget trades submit
+/// latency for slow-driver paste robustness; lower it only with driver
+/// traces showing the pair split wider than the budget.
+const PASTE_LF_PROBE: Duration = Duration::from_millis(10);
 
 /// `ExecuteHostCommand` payload prefix that identifies a shell-function
 /// widget trigger. The host intercepts this before treating the signal as
@@ -228,11 +247,13 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         // before any parser would see them — verified empirically while
         // triaging this issue). Instead the Windows path gets PSReadLine-
         // style paste-chunk detection ([`PasteChunkEditMode`] below): a
-        // terminal paste arrives as per-line key-event bursts and each
-        // burst is folded into the edit buffer without executing, the same
-        // buffered-until-Enter semantics the bracketed-paste path gives
-        // Unix. Ctrl+V (PasteSystem, bound below) remains the one-shot
-        // clipboard path.
+        // paste is recognized by its CRLF line-break signature (the queued
+        // LF partner of every fed break) and folded into the edit buffer
+        // without executing, the same buffered-until-Enter semantics the
+        // bracketed-paste path gives Unix, while typed lines — a human's
+        // Enter however fast, a driver's bare-CR send_line — submit
+        // normally (niubash#284). Ctrl+V (PasteSystem, bound below)
+        // remains the one-shot clipboard path.
         .use_bracketed_paste(cfg!(not(target_os = "windows")))
         .with_edit_mode(Box::new(PasteChunkEditMode::new(build_edit_mode(
             shell_ref.editor_mode,
@@ -511,25 +532,48 @@ fn build_edit_mode(
 /// human types — especially with newlines among them — are PASTE DATA, and
 /// only a newline that arrives on its own submits. This wrapper reproduces
 /// that at the `EditMode::parse_event` seam, the one place reedline hands
-/// every raw crossterm event to host code before dispatch:
+/// every raw crossterm event to host code before dispatch — with one
+/// decisive refinement (niubash#284): the submit-versus-paste decision at a
+/// bare `Enter` is STRUCTURAL, not timing-based.
 ///
-/// * events of one arrival burst are parsed microseconds apart, while two
-///   human keystrokes are ≥66 ms apart — so a gap of [`PASTE_CHUNK_GAP`]
-///   marks a burst boundary;
-/// * a bare `Enter` inside a burst (plain characters parsed in the same
-///   burst before it, or any key event arriving within
-///   [`PASTE_CHUNK_GAP`] — which also covers the second Enter of a CR/LF
-///   pair) is DATA: it opens or extends a pending chunk buffer instead of
-///   submitting;
-/// * while a chunk is pending the paste is quiet: further text keys and
+/// * A machine-fed paste delivers every line break as a CRLF pair: the CR
+///   arrives as a bare `Enter`, its LF as `Enter + CONTROL` (the console
+///   reports Ctrl+J for LF). A typed submit — human, ConPTY driver
+///   `send_line`, expect script, `send-keys` — is a lone bare CR with
+///   NOTHING behind it. So when a bare Enter that would OPEN a chunk is
+///   dispatched, the wrapper looks ahead into the input queue
+///   ([`PASTE_LF_PROBE`] budget): an `Enter + CONTROL` queued behind the CR
+///   proves paste data — the pair is folded into the pending chunk and the
+///   Enter never reaches reedline. Any other queued key (typeahead text, a
+///   second Enter) or silence proves a typed submit: the Enter passes
+///   through and the lookahead's read is pushed back, so reedline sees it,
+///   in order, on the next dispatch. The LF of a CRLF is decisive by
+///   itself, too: a bare `Enter + CONTROL` with no chunk pending opens one
+///   directly (humans do not submit with Ctrl+J; a slow paste whose CR
+///   already slipped through still gets absorbed from its first LF on).
+///   This is what rescues the fast typist the pure 50 ms heuristic
+///   swallowed: "last character, then Enter" within one burst is the
+///   canonical TYPING shape, and its queue is empty — it submits, every
+///   time.
+/// * While a chunk is pending the paste is quiet: further text keys and
 ///   Enters of the burst are appended to the pending buffer and translated
 ///   to `ReedlineEvent::None`, so reedline does not repaint (or execute)
-///   per pasted line — PSReadLine's paste-silence behavior;
-/// * when a gap marks the end of the burst, the whole buffer is emitted as
-///   ONE `EditCommand::InsertString` (one repaint for the entire paste),
-///   and a bare `Enter` arriving after that gap passes through untouched,
-///   submitting the buffered chunk exactly once — the paste tail newline
-///   never executes by itself.
+///   per pasted line — PSReadLine's paste-silence behavior.
+/// * When a gap of [`PASTE_CHUNK_GAP`] marks the end of the burst, the
+///   whole buffer is emitted as ONE `EditCommand::InsertString` (one
+///   repaint for the entire paste), and a subsequent bare Enter submits the
+///   buffered chunk exactly once — the paste's trailing newline never
+///   executes by itself.
+/// * Non-key events (the focus flicker ConPTY emits between pasted lines,
+///   mouse, ...) translate to `None` upstream; the lookahead skips over
+///   them while hunting for the LF partner and drops them (they dispatch
+///   to nothing), and they neither break a pending burst nor flush it.
+///
+/// The 50 ms gap keeps one job: marking burst boundaries for the
+/// flush-on-gap commit. It no longer decides submits — a decision that
+/// misfired on every "text + Enter" burst (niubash#284: the first Enter of
+/// every machine-fed line, script, and fast human line was silently
+/// absorbed and the command needed a second Enter).
 ///
 /// Every other event is delegated unchanged to the wrapped
 /// [`EditMode`](Emacs)/[`EditMode`](Vi), so keybindings, widgets and the
@@ -544,25 +588,71 @@ struct PasteChunkEditMode {
     /// Text buffered for the paste burst in flight. `Some(_)` means a
     /// burst was detected and its events are being absorbed quietly.
     pending: Option<String>,
-    /// Plain-text characters parsed since the last burst boundary; a bare
-    /// `Enter` with a nonzero count is paste data, not a submit.
-    burst_chars: usize,
     /// When the previous key event was parsed; the burst clock. `None`
     /// means "no burst in progress".
     last_event: Option<Instant>,
     /// The previous newline key was a bare Enter (a CR): its LF partner
     /// (`Enter + CONTROL`) must not add a second line break.
     last_bare_cr: bool,
+    /// Events the Enter lookahead read but did not consume (typeahead keys
+    /// that proved the Enter a typed submit). Dispatched FIFO before the
+    /// next raw event, so reedline never loses or reorders them. They
+    /// cannot ride along on the Enter's own `Multiple`: reedline drops
+    /// `Multiple` sub-events after the first `Exits` (engine.rs
+    /// `handle_editor_event`), and an Enter exits.
+    pushback: VecDeque<crossterm29::event::Event>,
+    /// Where the lookahead reads the next queued event: the live console
+    /// queue (`crossterm::event::poll` + `read`) in production, a scripted
+    /// queue in tests. Same thread as reedline's own read loop — on the
+    /// Windows console path crossterm has no reader thread, so the probe
+    /// cannot race a producer inside the process.
+    lookahead: Lookahead,
+}
+
+/// The lookahead source of [`PasteChunkEditMode`]: yield the next queued
+/// input event within `budget`, or `None` on silence.
+type Lookahead = Box<dyn FnMut(Duration) -> Option<crossterm29::event::Event> + Send>;
+
+/// The production lookahead: wait up to `budget` for the next console input
+/// event and read it. A non-console stdin (pipes, tests) makes `poll` fail —
+/// that is "no paste partner" for every caller here, so map it to silence.
+fn live_lookahead(budget: Duration) -> Option<crossterm29::event::Event> {
+    if crossterm29::event::poll(budget).unwrap_or(false) {
+        crossterm29::event::read().ok()
+    } else {
+        None
+    }
 }
 
 impl PasteChunkEditMode {
     fn new(inner: Box<dyn EditMode>) -> Self {
+        Self::with_lookahead(inner, Box::new(live_lookahead))
+    }
+
+    /// The test constructor: a scripted lookahead queue in place of the
+    /// live console queue.
+    #[cfg(test)]
+    fn with_scripted_queue(
+        inner: Box<dyn EditMode>,
+        queue: std::sync::Arc<std::sync::Mutex<VecDeque<crossterm29::event::Event>>>,
+    ) -> Self {
+        Self::with_lookahead(
+            inner,
+            Box::new(move |budget| {
+                let _ = budget;
+                queue.lock().expect("test queue").pop_front()
+            }),
+        )
+    }
+
+    fn with_lookahead(inner: Box<dyn EditMode>, lookahead: Lookahead) -> Self {
         Self {
             inner,
             pending: None,
-            burst_chars: 0,
             last_event: None,
             last_bare_cr: false,
+            pushback: VecDeque::new(),
+            lookahead,
         }
     }
 
@@ -572,6 +662,72 @@ impl PasteChunkEditMode {
         self.pending
             .take()
             .map(|chunk| edit_event(EditCommand::InsertString(chunk)))
+    }
+
+    /// The next queued input event, drained from the pushback first so a
+    /// lookahead never reads past what it already holds.
+    fn next_queued(&mut self, budget: Duration) -> Option<crossterm29::event::Event> {
+        if let Some(event) = self.pushback.pop_front() {
+            return Some(event);
+        }
+        (self.lookahead)(budget)
+    }
+
+    /// Decide a bare Enter that would OPEN a paste chunk: does it carry the
+    /// paste signature? Returns `true` when the Enter is paste data (the
+    /// chunk is opened with its line break; for a CR the queued LF partner
+    /// is consumed with it), `false` when it is a typed submit.
+    fn enter_opens_chunk(&mut self, enter: &crossterm29::event::KeyEvent) -> bool {
+        // A bare LF (Enter + CONTROL) with no chunk pending is a paste
+        // newline by itself: humans submit with Enter, never Ctrl+J, while
+        // every machine-fed line break is a CR, an LF, or the pair — and
+        // the LF also catches the slow paste whose CR already slipped
+        // through as a (correct) submit.
+        if matches!(enter.modifiers, crossterm29::event::KeyModifiers::CONTROL) {
+            self.pending = Some(String::from("\n"));
+            self.last_bare_cr = false;
+            return true;
+        }
+        // A bare CR: paste only when its LF partner is queued right behind
+        // it. Skip inert non-key events while hunting (they dispatch to
+        // nothing upstream); any other key event — typeahead text, a second
+        // Enter, a chord — proves a typed submit, and that key is pushed
+        // back for the next dispatch so nothing is lost or reordered.
+        let deadline = Instant::now() + PASTE_LF_PROBE;
+        loop {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            let Some(event) = self.next_queued(budget) else {
+                return false;
+            };
+            match event {
+                crossterm29::event::Event::Key(key)
+                    if key.kind == crossterm29::event::KeyEventKind::Press =>
+                {
+                    let is_lf_partner = matches!(
+                        key,
+                        crossterm29::event::KeyEvent {
+                            code: crossterm29::event::KeyCode::Enter,
+                            modifiers: crossterm29::event::KeyModifiers::CONTROL,
+                            kind: crossterm29::event::KeyEventKind::Press,
+                            ..
+                        }
+                    );
+                    if is_lf_partner {
+                        self.pending = Some(String::from("\n"));
+                        self.last_bare_cr = false;
+                        return true;
+                    }
+                    self.pushback.push_back(crossterm29::event::Event::Key(key));
+                    return false;
+                }
+                // Non-key events are inert upstream; dropping them here is
+                // observably identical to dispatching them.
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+        }
     }
 }
 
@@ -611,6 +767,44 @@ fn is_bare_enter(key: &crossterm29::event::KeyEvent) -> bool {
 impl EditMode for PasteChunkEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let raw = crossterm29::event::Event::from(event);
+        // Events the Enter lookahead read but did not consume entered the
+        // queue before this one, so they are dispatched first — reedline
+        // sees the original order, nothing is lost. (A pushed-back key can
+        // itself be a bare Enter; its own lookahead then runs when it is
+        // translated here, with the pushback and scripted queue consulted
+        // first.) The drain stops at a TERMINAL translation (an Enter,
+        // Ctrl+C, ...): reedline drops `Multiple` sub-events after the
+        // first exiting one (engine.rs `handle_editor_event`), so whatever
+        // trails stays queued here and dispatches on the next parse_event
+        // call instead of being dropped.
+        self.pushback.push_back(raw);
+        let mut events = Vec::new();
+        while let Some(pushed) = self.pushback.pop_front() {
+            let translated = self.translate_event(pushed);
+            let terminal = !matches!(
+                translated,
+                ReedlineEvent::None | ReedlineEvent::Edit(_) | ReedlineEvent::Resize(..)
+            );
+            events.push(translated);
+            if terminal {
+                break;
+            }
+        }
+        if events.len() == 1 {
+            events.pop().expect("len checked")
+        } else {
+            ReedlineEvent::Multiple(events)
+        }
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+}
+
+impl PasteChunkEditMode {
+    /// Translate one raw event through the paste-chunk state machine.
+    fn translate_event(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
         if !PASTE_CHUNK_DETECTION {
             // Unix: bracketed paste (niubash#234) delivers `Event::Paste`
             // chunks; the arrival heuristic is a Windows-console fallback
@@ -636,18 +830,16 @@ impl EditMode for PasteChunkEditMode {
             .last_event
             .is_none_or(|t| now.duration_since(t) >= PASTE_CHUNK_GAP);
         self.last_event = Some(now);
-        if new_burst {
-            // A gap ≥ PASTE_CHUNK_GAP ends any burst: the streak count is
-            // stale (a leftover count must never swallow the user's own
-            // Enter as paste data), and whatever the burst buffered
-            // quietly is committed to the edit buffer now — one insert,
-            // one repaint for the whole chunk.
-            self.burst_chars = 0;
-        }
         // Events to dispatch for this raw key: a pending-chunk flush
         // (burst end) first, then the translation of the key itself.
         let mut events = Vec::new();
         if new_burst {
+            // A gap ≥ PASTE_CHUNK_GAP ends any burst: whatever the burst
+            // buffered quietly is committed to the edit buffer now — one
+            // insert, one repaint for the whole chunk. A gap does NOT by
+            // itself decide submits anymore (niubash#284): the Enter
+            // decision below is structural (queued LF partner), not
+            // timing-based, so a stale burst can never swallow one.
             if let Some(flushed) = self.take_pending_event() {
                 events.push(flushed);
             }
@@ -664,47 +856,42 @@ impl EditMode for PasteChunkEditMode {
                 }
                 // Typed character (no burst in flight): normal editing.
                 None => {
-                    self.burst_chars += 1;
                     self.last_bare_cr = false;
                     self.delegate(raw)
                 }
             }
         } else if is_bare_enter(key) {
-            // `hot` = a key event arrived within this burst (chars parsed
-            // in it, or any event closer than PASTE_CHUNK_GAP): an Enter
-            // in that company is paste data, not a submit.
-            let hot = self.burst_chars > 0 || !new_burst;
-            // A pasted CRLF arrives as TWO newline keys — the CR as a bare
-            // Enter, its LF as `Enter + CONTROL`. The pair is ONE line
-            // break in the source text, so the LF is dropped when it
-            // directly follows its CR; a lone Ctrl+J (or an LF whose CR
-            // was flushed in an earlier chunk) is a real newline.
-            let is_lf = matches!(key.modifiers, crossterm29::event::KeyModifiers::CONTROL);
-            let paired_crlf = is_lf && self.last_bare_cr;
-            self.last_bare_cr = !is_lf;
             if let Some(chunk) = &mut self.pending {
-                // Burst continues across the line break.
+                // Burst continues across the line break. A pasted CRLF
+                // arrives as TWO newline keys — the CR as a bare Enter, its
+                // LF as `Enter + CONTROL`. The pair is ONE line break in
+                // the source text, so the LF is dropped when it directly
+                // follows its CR; a lone Ctrl+J (or an LF whose CR was
+                // flushed in an earlier chunk) is a real newline.
+                let is_lf = matches!(key.modifiers, crossterm29::event::KeyModifiers::CONTROL);
+                let paired_crlf = is_lf && self.last_bare_cr;
+                self.last_bare_cr = !is_lf;
                 if !paired_crlf {
                     chunk.push('\n');
                 }
                 ReedlineEvent::None
-            } else if hot {
-                // First newline of a machine-fed burst: start absorbing
-                // the chunk quietly instead of submitting the line.
-                self.burst_chars = 0;
-                self.pending = Some(String::from("\n"));
+            } else if self.enter_opens_chunk(key) {
+                // Paste signature confirmed (queued LF partner, or the LF
+                // itself): start absorbing the chunk quietly instead of
+                // submitting the line. The Enter never reaches reedline.
                 ReedlineEvent::None
             } else {
-                // A lone Enter after the paste settled: the user's own
-                // submit. It lands after the chunk flush above, so the
-                // buffered paste is inserted and submitted in one batch.
-                self.burst_chars = 0;
+                // No paste signature: the user's own submit — a human's
+                // Enter however fast the burst before it, a ConPTY driver's
+                // send_line, an expect script, a `send-keys` (niubash#284).
+                // It lands after any chunk flush above, so a settled paste
+                // is inserted and submitted in one batch.
+                self.last_bare_cr = false;
                 self.delegate(raw)
             }
         } else {
             // Any chord or navigation key breaks the burst and must not
             // sit behind an unflushed chunk.
-            self.burst_chars = 0;
             self.last_bare_cr = false;
             if let Some(flushed) = self.take_pending_event() {
                 events.push(flushed);
@@ -719,12 +906,6 @@ impl EditMode for PasteChunkEditMode {
         }
     }
 
-    fn edit_mode(&self) -> PromptEditMode {
-        self.inner.edit_mode()
-    }
-}
-
-impl PasteChunkEditMode {
     /// Hand the raw event to the wrapped edit mode unchanged.
     fn delegate(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
         // Release events are rejected upstream too; the conversion can
@@ -2803,7 +2984,7 @@ mod tests {
         );
     }
 
-    // ---- PasteChunkEditMode (Windows paste-chunk detection, niubash#202) ----
+    // ---- PasteChunkEditMode (Windows paste-chunk detection, niubash#202/#284) ----
 
     fn paste_key(
         code: crossterm29::event::KeyCode,
@@ -2815,8 +2996,35 @@ mod tests {
         .expect("press key events convert")
     }
 
+    /// A detector whose Enter lookahead reads a scripted queue instead of
+    /// the live console. `events` model what the console input queue holds
+    /// at the moment the detector decides a bare Enter.
+    fn paste_detector_with_queue(events: Vec<crossterm29::event::Event>) -> PasteChunkEditMode {
+        use std::sync::{Arc, Mutex};
+        PasteChunkEditMode::with_scripted_queue(
+            Box::new(Emacs::new(default_emacs_keybindings())),
+            Arc::new(Mutex::new(VecDeque::from(events))),
+        )
+    }
+
+    /// The common case: the queue behind the Enter is empty (a human's
+    /// submit, a ConPTY driver's `send_line`, an expect script).
     fn paste_detector() -> PasteChunkEditMode {
-        PasteChunkEditMode::new(Box::new(Emacs::new(default_emacs_keybindings())))
+        paste_detector_with_queue(Vec::new())
+    }
+
+    fn cr() -> ReedlineRawEvent {
+        paste_key(
+            crossterm29::event::KeyCode::Enter,
+            crossterm29::event::KeyModifiers::NONE,
+        )
+    }
+
+    fn lf() -> ReedlineRawEvent {
+        paste_key(
+            crossterm29::event::KeyCode::Enter,
+            crossterm29::event::KeyModifiers::CONTROL,
+        )
     }
 
     /// Age the burst clock so the next parsed event starts a new burst.
@@ -2825,9 +3033,9 @@ mod tests {
     }
 
     #[test]
-    fn paste_chunk_detector_absorbs_burst_newlines_and_flushes_on_gap() {
+    fn paste_chunk_detector_absorbs_crlf_paste_and_flushes_on_gap() {
+        // Typing before the paste is delegated normally.
         let mut detector = paste_detector();
-        // Typing before any burst is delegated normally.
         for ch in "abc".chars() {
             let event = detector.parse_event(paste_key(
                 crossterm29::event::KeyCode::Char(ch),
@@ -2840,15 +3048,26 @@ mod tests {
         }
         assert!(detector.pending.is_none());
 
-        // A hot Enter inside the burst becomes pending chunk data, and
-        // further burst text is absorbed quietly.
-        assert!(matches!(
-            detector.parse_event(paste_key(
+        // The paste's first line break arrives as the CRLF pair: the CR is
+        // dispatched while its LF partner is still queued (reedline's batch
+        // stops at the bare CR, so the LF is always behind it). The CR with
+        // its partner queued is paste data: the chunk opens with the pair's
+        // one line break, the LF is consumed with it, and reedline never
+        // sees the Enter.
+        detector = paste_detector_with_queue(vec![crossterm29::event::Event::Key(
+            crossterm29::event::KeyEvent::new(
                 crossterm29::event::KeyCode::Enter,
-                crossterm29::event::KeyModifiers::NONE
-            )),
-            ReedlineEvent::None
-        ));
+                crossterm29::event::KeyModifiers::CONTROL,
+            ),
+        )]);
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\n"));
+        assert!(
+            detector.pushback.is_empty(),
+            "the LF partner is consumed, not pushed back"
+        );
+
+        // Further burst text is absorbed quietly.
         for ch in "de".chars() {
             assert!(matches!(
                 detector.parse_event(paste_key(
@@ -2860,24 +3079,22 @@ mod tests {
         }
         assert_eq!(detector.pending.as_deref(), Some("\nde"));
 
-        // The LF of the pasted CRLF arrives as Enter + CONTROL right after
-        // its CR; the pair is one line break, so nothing more is pushed.
-        assert!(matches!(
-            detector.parse_event(paste_key(
-                crossterm29::event::KeyCode::Enter,
-                crossterm29::event::KeyModifiers::CONTROL
-            )),
-            ReedlineEvent::None
-        ));
-        assert_eq!(detector.pending.as_deref(), Some("\nde"));
+        // The next pasted CRLF: its CR pushes the newline, its LF is folded
+        // by the pairing rule (nothing more pushed).
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\nde\n"));
+        assert!(matches!(detector.parse_event(lf()), ReedlineEvent::None));
+        assert_eq!(
+            detector.pending.as_deref(),
+            Some("\nde\n"),
+            "the CRLF pair is one line break"
+        );
 
         // After the burst settles, the chunk is flushed as ONE insert and
-        // the user's own Enter still submits the buffer.
+        // the user's own Enter (empty queue behind it) still submits the
+        // buffer.
         expire_burst(&mut detector);
-        let event = detector.parse_event(paste_key(
-            crossterm29::event::KeyCode::Enter,
-            crossterm29::event::KeyModifiers::NONE,
-        ));
+        let event = detector.parse_event(cr());
         match event {
             ReedlineEvent::Multiple(events) => {
                 assert_eq!(events.len(), 2, "flush insert followed by the submit");
@@ -2887,6 +3104,34 @@ mod tests {
             other => panic!("expected flush + submit, got {other:?}"),
         }
         assert!(detector.pending.is_none());
+    }
+
+    /// niubash#284, the regression itself: a fast "text + Enter" burst with
+    /// NOTHING queued behind the Enter is a typed submit, not a paste —
+    /// whatever the burst clock says. ConPTY drivers, expect scripts and
+    /// fast human typists all feed exactly this shape.
+    #[test]
+    fn paste_chunk_detector_lets_a_fast_typed_enter_submit() {
+        let mut detector = paste_detector();
+        // Characters parsed microseconds apart (one burst, no gap), Enter
+        // right behind the last one.
+        for ch in "echo hi".chars() {
+            if ch == ' ' {
+                continue;
+            }
+            let event = detector.parse_event(paste_key(
+                crossterm29::event::KeyCode::Char(ch),
+                crossterm29::event::KeyModifiers::NONE,
+            ));
+            assert!(matches!(event, ReedlineEvent::Edit(_)));
+        }
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "the first Enter of a typed line must submit, not be absorbed"
+        );
+        assert!(detector.pending.is_none());
+        assert!(detector.pushback.is_empty());
     }
 
     #[test]
@@ -2912,15 +3157,141 @@ mod tests {
                 crossterm29::event::KeyModifiers::NONE,
             ));
         }
-        // The burst fully settles before the user presses Enter: the stale
-        // character count must not mark the submit as paste data.
+        // The burst fully settles before the user presses Enter. Timing no
+        // longer decides submits at all (niubash#284) — the structural rule
+        // covers this shape too — but the shape stays pinned: silence
+        // behind the Enter is a submit.
         expire_burst(&mut detector);
-        let event = detector.parse_event(paste_key(
-            crossterm29::event::KeyCode::Enter,
-            crossterm29::event::KeyModifiers::NONE,
-        ));
+        let event = detector.parse_event(cr());
         assert!(matches!(event, ReedlineEvent::Enter));
         assert!(detector.pending.is_none());
+    }
+
+    /// Typeahead behind a typed Enter (a driver's next send_line, a
+    /// script's next line): the Enter submits, and the queued text is
+    /// pushed back so it lands, in order, in the NEXT line's buffer — GNU
+    /// typeahead semantics, never absorption into a paste chunk.
+    #[test]
+    fn paste_chunk_detector_submits_enter_with_typeahead_behind_it() {
+        let mut detector = paste_detector_with_queue(vec![crossterm29::event::Event::Key(
+            crossterm29::event::KeyEvent::new(
+                crossterm29::event::KeyCode::Char('c'),
+                crossterm29::event::KeyModifiers::NONE,
+            ),
+        )]);
+        for ch in "cmd1".chars() {
+            detector.parse_event(paste_key(
+                crossterm29::event::KeyCode::Char(ch),
+                crossterm29::event::KeyModifiers::NONE,
+            ));
+        }
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "a CR whose queued follower is not an LF is a typed submit"
+        );
+        assert_eq!(detector.pushback.len(), 1, "the typeahead key is kept");
+
+        // The next dispatch (the queue's next key, 'm') drains the pushback
+        // first: 'c' then 'm', both edits, no paste absorption.
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Char('m'),
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        match event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(events.len(), 2, "pushed-back 'c' precedes 'm'");
+                assert!(matches!(&events[0], ReedlineEvent::Edit(_)));
+                assert!(matches!(&events[1], ReedlineEvent::Edit(_)));
+            }
+            other => panic!("expected pushback + key edits, got {other:?}"),
+        }
+        assert!(detector.pushback.is_empty());
+    }
+
+    /// A bare Ctrl+J (the console's shape for a fed LF) with no chunk
+    /// pending is a paste newline by itself: it opens the chunk instead of
+    /// reaching reedline (humans do not submit with Ctrl+J).
+    #[test]
+    fn paste_chunk_detector_opens_chunk_on_lf_alone() {
+        let mut detector = paste_detector();
+        assert!(matches!(detector.parse_event(lf()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\n"));
+        // Burst text continues to be absorbed.
+        assert!(matches!(
+            detector.parse_event(paste_key(
+                crossterm29::event::KeyCode::Char('x'),
+                crossterm29::event::KeyModifiers::NONE
+            )),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\nx"));
+    }
+
+    /// ConPTY focus flicker between pasted lines must not hide the LF
+    /// partner from the lookahead: the CR still identifies as paste.
+    #[test]
+    fn paste_chunk_detector_skips_flicker_to_find_lf_partner() {
+        let mut detector = paste_detector_with_queue(vec![
+            crossterm29::event::Event::FocusGained,
+            crossterm29::event::Event::FocusLost,
+            crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
+                crossterm29::event::KeyCode::Enter,
+                crossterm29::event::KeyModifiers::CONTROL,
+            )),
+        ]);
+        for ch in "abc".chars() {
+            detector.parse_event(paste_key(
+                crossterm29::event::KeyCode::Char(ch),
+                crossterm29::event::KeyModifiers::NONE,
+            ));
+        }
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\n"));
+        assert!(detector.pushback.is_empty(), "flicker is inert");
+    }
+
+    /// A double Enter with nothing else queued: the first CR submits, the
+    /// second stays queued (pushback) and submits on the next dispatch —
+    /// the drain stops at the terminal Enter so reedline drops nothing.
+    #[test]
+    fn paste_chunk_detector_pushed_back_enter_submits_next_dispatch() {
+        let mut detector = paste_detector_with_queue(vec![crossterm29::event::Event::Key(
+            crossterm29::event::KeyEvent::new(
+                crossterm29::event::KeyCode::Enter,
+                crossterm29::event::KeyModifiers::NONE,
+            ),
+        )]);
+        detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Char('c'),
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::Enter));
+        assert_eq!(detector.pushback.len(), 1);
+        // Next dispatch: only the pushed-back Enter is emitted (a lone
+        // terminal event), and 'x' stays queued behind it.
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Char('x'),
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "the pushed-back submit dispatches alone; nothing trails it to drop"
+        );
+        assert_eq!(detector.pushback.len(), 1, "'x' stays queued");
+        // And it dispatches on the following call.
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Char('y'),
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        match event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(events.len(), 2);
+                assert!(matches!(&events[0], ReedlineEvent::Edit(_)), "x first");
+                assert!(matches!(&events[1], ReedlineEvent::Edit(_)), "y second");
+            }
+            other => panic!("expected x then y edits, got {other:?}"),
+        }
     }
 
     #[test]

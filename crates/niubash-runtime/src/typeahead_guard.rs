@@ -117,9 +117,9 @@ mod imp {
     const PARK_TIMEOUT_MS: u64 = 50;
 
     /// A console-input handle closed on drop, so a detached sweeper can
-    /// never leak one.
-    struct OwnedHandle(HANDLE);
-
+    /// never leak one. Visible to the tests, which stage their own records
+    /// through a duplicate of the same console handle (niubash#287).
+    pub(super) struct OwnedHandle(pub(super) HANDLE);
     // Safety: the handle is the process-wide console input buffer, which
     // is valid on any thread; each OwnedHandle is exclusively owned by
     // exactly one thread (the guard's reinject copy never crosses a
@@ -256,12 +256,16 @@ mod imp {
             if generation.load(Ordering::SeqCst) != my_generation {
                 // Disarmed while we were reading (possibly blocked and
                 // woken by a fresh record): hand everything we hold
-                // straight back to the queue and park. The disarm side
-                // cannot have taken these — it only takes the buffer
-                // after we park, and never re-reads it later.
-                if let Ok(buffer) = saved.lock() {
-                    reinject(conin, &buffer);
-                }
+                // straight back to the queue and park. The buffer is
+                // DRAINED under the lock: the disarm side takes whatever
+                // remains after we park, so reinjecting a borrowed view
+                // would let both paths write the same records back — every
+                // swept key arriving twice at the editor (niubash#287).
+                let records = saved
+                    .lock()
+                    .map(|mut buffer| std::mem::take(&mut *buffer))
+                    .unwrap_or_default();
+                reinject(conin, &records);
                 break;
             }
         }
@@ -278,7 +282,7 @@ mod imp {
         }
     }
 
-    fn duplicate_stdin_console_handle() -> Option<HANDLE> {
+    pub(super) fn duplicate_stdin_console_handle() -> Option<HANDLE> {
         unsafe {
             let source = GetStdHandle(STD_INPUT_HANDLE);
             if source.is_null() || source == INVALID_HANDLE_VALUE {
@@ -350,5 +354,126 @@ mod tests {
         let mut guard = TypeaheadGuard::disarmed();
         guard.arm();
         drop(guard);
+    }
+
+    /// niubash#287: the sweeper's self-heal path and `disarm_and_reinject`
+    /// must never write the same swept record back twice. Feed the live
+    /// console queue so the self-heal interleaving actually runs: r1 is
+    /// swept while armed, r2 lands as disarm fires, the sweeper wakes on it
+    /// and takes the generation-miss branch. Whatever the interleaving, the
+    /// invariant after the fix is "every swept record reinjected exactly
+    /// once" — the records must come back exactly once each (the buggy
+    /// borrowed-view reinject doubles them to four).
+    #[cfg(windows)]
+    #[test]
+    fn sweeper_selfheal_and_disarm_reinject_each_record_exactly_once() {
+        use std::time::Duration;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::System::Console::{
+            GetNumberOfConsoleInputEvents, ReadConsoleInputW, WriteConsoleInputW, INPUT_RECORD,
+            INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
+        };
+
+        if !stdin_is_console() {
+            // Redirected stdin (pipelines, some CI): the guard arms nothing
+            // and the shared console queue does not exist.
+            eprintln!("skip: stdin is not a console");
+            return;
+        }
+        let handle = imp::OwnedHandle(
+            imp::duplicate_stdin_console_handle().expect("console stdin duplicates"),
+        );
+
+        fn drain_console(handle: HANDLE) -> Vec<INPUT_RECORD> {
+            let mut all = Vec::new();
+            loop {
+                let mut pending = 0u32;
+                if unsafe { GetNumberOfConsoleInputEvents(handle, &mut pending) } == 0
+                    || pending == 0
+                {
+                    break;
+                }
+                let mut buffer: Vec<INPUT_RECORD> =
+                    vec![unsafe { std::mem::zeroed() }; pending as usize];
+                let mut read = 0u32;
+                let ok =
+                    unsafe { ReadConsoleInputW(handle, buffer.as_mut_ptr(), pending, &mut read) };
+                if ok == 0 || read == 0 {
+                    break;
+                }
+                buffer.truncate(read as usize);
+                all.extend(buffer);
+                if all.len() > 64 {
+                    break; // safety valve; never expected
+                }
+            }
+            all
+        }
+
+        fn write_record(handle: HANDLE, record: INPUT_RECORD) {
+            let mut written = 0u32;
+            let ok = unsafe { WriteConsoleInputW(handle, &record, 1, &mut written) };
+            assert_eq!(ok, 1, "test record must reach the console queue");
+        }
+
+        fn key_record(ch: u16) -> INPUT_RECORD {
+            INPUT_RECORD {
+                EventType: KEY_EVENT as u16,
+                Event: INPUT_RECORD_0 {
+                    KeyEvent: KEY_EVENT_RECORD {
+                        bKeyDown: 1,
+                        wRepeatCount: 1,
+                        wVirtualKeyCode: 0,
+                        wVirtualScanCode: 0,
+                        uChar: KEY_EVENT_RECORD_0 { UnicodeChar: ch },
+                        dwControlKeyState: 0,
+                    },
+                },
+            }
+        }
+
+        fn is_probe_press(record: &INPUT_RECORD) -> bool {
+            if record.EventType != KEY_EVENT as u16 {
+                return false;
+            }
+            // SAFETY: EventType is KEY_EVENT, so the KeyEvent arm is active.
+            let key = unsafe { &record.Event.KeyEvent };
+            key.bKeyDown != 0
+                && matches!(
+                    // SAFETY: union field read of the active KeyEvent arm.
+                    unsafe { key.uChar.UnicodeChar },
+                    97 | 98 // 'a' | 'b'
+                )
+        }
+
+        // Clean slate: drop anything a runner or earlier test left queued.
+        drain_console(handle.0);
+
+        let mut guard = TypeaheadGuard::disarmed();
+        guard.arm();
+        // Park the sweeper on its cadence, then land r1 where it will be
+        // swept into the guard's buffer.
+        std::thread::sleep(Duration::from_millis(30));
+        write_record(handle.0, key_record('a' as u16));
+        std::thread::sleep(Duration::from_millis(30));
+        // r2 as disarm fires: the sweeper is inside its read window, so the
+        // generation-miss self-heal branch runs while disarm waits for it
+        // to park.
+        write_record(handle.0, key_record('b' as u16));
+        guard.disarm_and_reinject();
+
+        // A detached sweeper still has PARK_TIMEOUT to self-heal.
+        std::thread::sleep(Duration::from_millis(50));
+        let drained = drain_console(handle.0);
+        let probes = drained
+            .iter()
+            .filter(|record| is_probe_press(record))
+            .count();
+        assert_eq!(
+            probes, 2,
+            "each swept record must be reinjected exactly once (niubash#287), got {probes}"
+        );
+        // Leave the shared queue clean for whatever runs next.
+        drain_console(handle.0);
     }
 }
