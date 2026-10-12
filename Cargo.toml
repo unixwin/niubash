@@ -2,7 +2,7 @@
 name = "niubash"
 version = "1.4.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.95"
 license = "MIT"
 authors = ["unixwin team <arookieofc@gmail.com>"]
 description = "AI-native bash-compatible shell for Windows, built on rubash + winuxcmd"

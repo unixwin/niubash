@@ -14,7 +14,7 @@
 [![niubash CI](https://github.com/unixwin/niubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/niubash/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/unixwin/niubash)](https://github.com/unixwin/niubash/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)](https://github.com/unixwin/niubash)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)](https://github.com/unixwin/niubash)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange)](https://github.com/unixwin/niubash)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/unixwin/niubash)](https://github.com/unixwin/niubash/stargazers)
 
@@ -91,7 +91,7 @@ Linux（x86_64、aarch64；glibc 2.35+）与 macOS（aarch64、x86_64）：拿
 tar -xzf niubash-v*-linux-x86_64.tar.gz && niubash-v*-linux-x86_64/niu
 ```
 
-源码构建（Rust 1.70+）：
+源码构建（Rust 1.95+）：
 `git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
 
 配置只有一个文件：`~/.niubashrc`，纯 Bash 语法——从

@@ -2,7 +2,7 @@
 name = "niubash-runtime"
 version = "1.4.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.95"
 license = "MIT"
 description = "Runtime crate for niubash: rubash-backed shell REPL on Windows"
 
