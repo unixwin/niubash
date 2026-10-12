@@ -23,8 +23,11 @@ C:\Program Files
 
 - **Bash syntax.** `if`, `for`, `case`, `$(...)`, pipes, redirects, heredocs,
   functions, aliases — the whole grammar, powered by
-  [rubash](https://github.com/unixwin/rubash), which passes the GNU Bash
-  project's own test suite (**86/86 upstream tests green**).
+  [rubash](https://github.com/unixwin/rubash), which is gated on the GNU Bash
+  project's own 83-suite upstream test corpus (**82 of 83 suites
+  byte-identical, per the 2026-09-25 ledger re-run**; the one residual,
+  nameref, is individually audited — see the [rubash compatibility
+  ledger](https://github.com/unixwin/rubash#compatibility-at-a-glance)).
 - **Windows-native.** One binary, one process. Native Windows paths
   (`C:\...` and `C:/...`), direct execution of `git.exe`, `node.exe`,
   `cargo.exe`, `python.exe` — no VM, no emulation layer, and no

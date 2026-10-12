@@ -121,9 +121,22 @@ impl HistoryConfig {
 }
 
 /// Completion menu display style.
+///
+/// The default is [`CompletionStyle::Gnu`] (owner ruling 2026-10-12): TAB
+/// completes the longest common prefix, and a second TAB on an unchanged
+/// line prints the candidates as width-adaptive columns next to the prompt
+/// and repaints it — a printed list, not an interactive menu. Arrow keys are
+/// never captured and no popup is drawn, matching GNU readline's factory
+/// behavior. The Ide popup remains available as
+/// `NIU_COMPLETION_STYLE=ide` / `niu config set completion.style ide`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionStyle {
-    /// Multi-column popup with descriptions (VS Code style). Default.
+    /// GNU readline default: first TAB completes the common prefix (a lone
+    /// candidate completes outright); an ambiguous second TAB lists the
+    /// candidates columnar and repaints the prompt.
+    Gnu,
+    /// Multi-column popup with descriptions (VS Code style). The pre-1.4.1
+    /// default, kept as an opt-in for existing users.
     Ide,
     /// Multi-column grid (like zsh `compinit`).
     Column,
@@ -136,6 +149,7 @@ pub enum CompletionStyle {
 impl CompletionStyle {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "gnu" | "readline" => Some(Self::Gnu),
             "ide" | "smart" | "popup" => Some(Self::Ide),
             "column" | "col" | "grid" => Some(Self::Column),
             "list" | "vertical" => Some(Self::List),
@@ -143,11 +157,23 @@ impl CompletionStyle {
             _ => None,
         }
     }
+
+    /// The canonical spelling used by the persisted config file, env values
+    /// and every display surface (`niu doctor`, `niu config`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gnu => "gnu",
+            Self::Ide => "ide",
+            Self::Column => "column",
+            Self::List => "list",
+            Self::Inline => "inline",
+        }
+    }
 }
 
 impl Default for CompletionStyle {
     fn default() -> Self {
-        Self::Ide
+        Self::Gnu
     }
 }
 
@@ -172,15 +198,10 @@ impl Default for MenuConfig {
 
 impl MenuConfig {
     pub fn with_env_overrides(mut self) -> Self {
-        if let Ok(value) = std::env::var("NIU_COMPLETION_STYLE") {
-            if let Some(style) = CompletionStyle::parse(&value) {
-                self.completion_style = style;
-            } else {
-                eprintln!(
-                    "niubash: NIU_COMPLETION_STYLE must be one of: ide, column, list, inline"
-                );
-            }
-        }
+        // Resolution order (owner ruling 2026-10-12): NIU_COMPLETION_STYLE env
+        // > persisted `completion.style` (config.toml) > the built-in default
+        // (gnu). `resolve_completion_style` warns once on a bad env value.
+        self.completion_style = resolve_completion_style().0;
         self
     }
 }
@@ -417,8 +438,21 @@ impl CommandNotFoundHint {
 /// (`~/.niubash/config.toml`), written by `niu config set`.
 pub const USER_CONFIG_SCHEMA: &str = "niubash:config@0.1.0";
 
-/// The one persisted setting today: the command-not-found hint policy.
+/// The command-not-found hint policy key (`niu config set
+/// command-not-found-hint`).
 pub const COMMAND_NOT_FOUND_HINT_KEY: &str = "command-not-found-hint";
+
+/// The TAB completion style key: `niu config set completion.style <value>`.
+/// In the file this is the TOML dotted key `completion.style` (a `[completion]`
+/// table with a `style` field), spelled with the dot on every command surface.
+pub const COMPLETION_STYLE_KEY: &str = "completion.style";
+
+/// The `[completion]` section of config.toml.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct CompletionConfigSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    style: Option<String>,
+}
 
 /// Where the persisted user settings live: `$NIU_CONFIG` overrides (tests,
 /// portable setups); default `~/.niubash/config.toml` (the mirrors.toml
@@ -448,6 +482,55 @@ struct UserConfigFile {
         skip_serializing_if = "Option::is_none"
     )]
     command_not_found_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion: Option<CompletionConfigSection>,
+}
+
+/// Read and parse the persisted user settings. Any problem — missing file,
+/// unreadable file, malformed TOML — degrades to an empty config: a config
+/// issue must never break the reading path.
+fn read_user_config() -> UserConfigFile {
+    std::fs::read_to_string(user_config_path())
+        .ok()
+        .and_then(|text| toml::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Render the config file fresh from `config` (the mirrors.toml writer
+/// convention): hand-added unknown keys or comments are not preserved, and
+/// every known key the caller left unset is omitted.
+fn write_user_config(config: &UserConfigFile) -> anyhow::Result<PathBuf> {
+    let path = user_config_path();
+    let mut text = String::new();
+    text.push_str(&format!("schema = \"{USER_CONFIG_SCHEMA}\"\n"));
+    if let Some(hint) = &config.command_not_found_hint {
+        text.push_str(&format!("{COMMAND_NOT_FOUND_HINT_KEY} = \"{hint}\"\n"));
+    }
+    if let Some(completion) = &config.completion {
+        if let Some(style) = &completion.style {
+            // Rendered as the dotted key `completion.style`; the [completion]
+            // table form the toml crate emits is the same namespace.
+            text.push_str(&format!("\n[completion]\nstyle = \"{style}\"\n"));
+        }
+    }
+    text.push_str(
+        "\n\
+        # ── notes ──────────────────────────────────────────────────────────\n\
+        # `niu config set <key> <value>` rewrites this file; setting a key\n\
+        # back to its default value removes the override again.\n\
+        # command-not-found-hint: package-search suggestion printed after\n\
+        #   \"command not found\". off (default) | wpm — wpm suggests one\n\
+        #   `wpm search --name` line for high-confidence near-misses only;\n\
+        #   third-party managers are never recommended (niubash#249).\n\
+        # completion.style: TAB completion shape. gnu (default) | ide |\n\
+        #   column | list | inline — `NIU_COMPLETION_STYLE` overrides this\n\
+        #   file (env > config > default).\n",
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, text)?;
+    Ok(path)
 }
 
 /// Resolve the effective hint policy: the persisted user setting
@@ -457,11 +540,8 @@ struct UserConfigFile {
 /// unknown value — degrades to the default (off): a config issue must
 /// never break the command-not-found path.
 pub fn resolve_command_not_found_hint() -> CommandNotFoundHint {
-    let path = user_config_path();
-    let mut hint = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| toml::from_str::<UserConfigFile>(&text).ok())
-        .and_then(|config| config.command_not_found_hint)
+    let mut hint = read_user_config()
+        .command_not_found_hint
         .and_then(|value| CommandNotFoundHint::parse(&value))
         .unwrap_or_default();
     if let Ok(value) = std::env::var("NIU_COMMAND_NOT_FOUND_HINT") {
@@ -473,32 +553,82 @@ pub fn resolve_command_not_found_hint() -> CommandNotFoundHint {
     hint
 }
 
+/// Where the effective completion style came from. Display surfaces (doctor,
+/// `niu config`) use it to say whether a value is the built-in default, a
+/// persisted pick or an environment override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionStyleSource {
+    /// No config file key and no env override.
+    Default,
+    /// `completion.style` in config.toml (env not set).
+    ConfigFile,
+    /// `NIU_COMPLETION_STYLE` set — wins over the config file.
+    Env,
+}
+
+/// Resolve the effective TAB completion style: `NIU_COMPLETION_STYLE` env >
+/// persisted `completion.style` (config.toml) > built-in default (gnu). An
+/// unparsable env value warns once (the shell's only completion-style
+/// diagnostic) and falls through to the lower-precedence source; an
+/// unparsable file value silently falls through like every other config
+/// degradation.
+pub fn resolve_completion_style() -> (CompletionStyle, CompletionStyleSource) {
+    let mut style = CompletionStyle::default();
+    let mut source = CompletionStyleSource::Default;
+    if let Some(parsed) = read_user_config()
+        .completion
+        .and_then(|completion| completion.style)
+        .and_then(|value| CompletionStyle::parse(&value))
+    {
+        style = parsed;
+        source = CompletionStyleSource::ConfigFile;
+    }
+    if let Ok(value) = std::env::var("NIU_COMPLETION_STYLE") {
+        match CompletionStyle::parse(&value) {
+            Some(parsed) => {
+                style = parsed;
+                source = CompletionStyleSource::Env;
+            }
+            None => eprintln!(
+                "niubash: NIU_COMPLETION_STYLE must be one of: gnu, ide, column, list, inline"
+            ),
+        }
+    }
+    (style, source)
+}
+
+/// Persist `completion.style` (the `niu config set completion.style` writer).
+/// The file is rewritten with both known settings preserved; passing the
+/// current built-in default removes the key again so the file never pins a
+/// stale default.
+pub fn set_completion_style(style: CompletionStyle) -> anyhow::Result<PathBuf> {
+    let mut config = read_user_config();
+    config.schema = Some(USER_CONFIG_SCHEMA.to_string());
+    let is_default = style == CompletionStyle::default();
+    if is_default {
+        config.completion = None;
+    } else {
+        config.completion = Some(CompletionConfigSection {
+            style: Some(style.as_str().to_string()),
+        });
+    }
+    write_user_config(&config)
+}
+
 /// Persist `command-not-found-hint` (the `niu config set` writer). The
 /// file renders fresh — hand-added unknown keys or comments are not
-/// preserved, matching the mirrors.toml writer convention.
+/// preserved, matching the mirrors.toml writer convention — and the other
+/// known settings are carried over.
 pub fn set_command_not_found_hint(hint: CommandNotFoundHint) -> anyhow::Result<PathBuf> {
-    let path = user_config_path();
-    let mut text = String::new();
-    text.push_str(&format!("schema = \"{USER_CONFIG_SCHEMA}\"\n"));
-    text.push_str(&format!(
-        "{COMMAND_NOT_FOUND_HINT_KEY} = \"{}\"\n",
-        hint.as_str()
-    ));
-    text.push_str(
-        "\n\
-        # ── notes ──────────────────────────────────────────────────────────\n\
-        # `niu config set command-not-found-hint wpm` rewrites this file;\n\
-        # `niu config set command-not-found-hint off` restores the default.\n\
-        # command-not-found-hint: package-search suggestion printed after\n\
-        #   \"command not found\". off (default) | wpm — wpm suggests one\n\
-        #   `wpm search --name` line for high-confidence near-misses only;\n\
-        #   third-party managers are never recommended (niubash#249).\n",
-    );
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let mut config = read_user_config();
+    config.schema = Some(USER_CONFIG_SCHEMA.to_string());
+    let is_default = hint == CommandNotFoundHint::default();
+    if is_default {
+        config.command_not_found_hint = None;
+    } else {
+        config.command_not_found_hint = Some(hint.as_str().to_string());
     }
-    std::fs::write(&path, text)?;
-    Ok(path)
+    write_user_config(&config)
 }
 
 #[derive(Debug, Clone)]
@@ -553,6 +683,12 @@ mod tests {
 
     #[test]
     fn completion_style_parse_accepts_valid_values() {
+        assert_eq!(CompletionStyle::parse("gnu"), Some(CompletionStyle::Gnu));
+        assert_eq!(
+            CompletionStyle::parse("readline"),
+            Some(CompletionStyle::Gnu)
+        );
+        assert_eq!(CompletionStyle::parse("GNU"), Some(CompletionStyle::Gnu));
         assert_eq!(
             CompletionStyle::parse("column"),
             Some(CompletionStyle::Column)
@@ -592,14 +728,116 @@ mod tests {
     }
 
     #[test]
-    fn completion_style_default_is_ide() {
-        assert_eq!(CompletionStyle::default(), CompletionStyle::Ide);
+    fn completion_style_default_is_gnu() {
+        // Owner ruling 2026-10-12: the factory TAB completion shape is the GNU
+        // readline default; the Ide popup moved to an opt-in.
+        assert_eq!(CompletionStyle::default(), CompletionStyle::Gnu);
+    }
+
+    #[test]
+    fn completion_style_as_str_round_trips_through_parse() {
+        for style in [
+            CompletionStyle::Gnu,
+            CompletionStyle::Ide,
+            CompletionStyle::Column,
+            CompletionStyle::List,
+            CompletionStyle::Inline,
+        ] {
+            assert_eq!(CompletionStyle::parse(style.as_str()), Some(style));
+        }
     }
 
     #[test]
     fn menu_config_default_completion_style() {
         let config = MenuConfig::default();
-        assert_eq!(config.completion_style, CompletionStyle::Ide);
+        assert_eq!(config.completion_style, CompletionStyle::Gnu);
+    }
+
+    #[test]
+    fn completion_style_persists_and_env_wins_over_file() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join(format!(
+            "niu-config-style-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_config = std::env::var_os("NIU_CONFIG");
+        let previous_env = std::env::var_os("NIU_COMPLETION_STYLE");
+        std::env::set_var("NIU_CONFIG", &temp);
+        let result = (|| {
+            // No file, no env: the built-in default.
+            std::fs::remove_file(&temp).ok();
+            assert_eq!(CompletionStyle::parse("gnu"), Some(CompletionStyle::Gnu));
+            let (style, source) = resolve_completion_style();
+            assert_eq!(style, CompletionStyle::Gnu);
+            assert_eq!(source, CompletionStyleSource::Default);
+
+            // Persisted file beats the default.
+            set_completion_style(CompletionStyle::Ide)?;
+            let (style, source) = resolve_completion_style();
+            assert_eq!(style, CompletionStyle::Ide);
+            assert_eq!(source, CompletionStyleSource::ConfigFile);
+            // The written file parses as the documented schema and spells the
+            // key as the dotted `completion.style` namespace.
+            let text = std::fs::read_to_string(&temp)?;
+            let parsed: UserConfigFile = toml::from_str(&text)?;
+            assert_eq!(
+                parsed.completion.and_then(|c| c.style).as_deref(),
+                Some("ide")
+            );
+
+            // A second setter must not clobber the first key (merge write).
+            set_command_not_found_hint(CommandNotFoundHint::Wpm)?;
+            let text = std::fs::read_to_string(&temp)?;
+            let parsed: UserConfigFile = toml::from_str(&text)?;
+            assert_eq!(parsed.command_not_found_hint.as_deref(), Some("wpm"));
+            assert_eq!(
+                parsed.completion.and_then(|c| c.style).as_deref(),
+                Some("ide")
+            );
+
+            // Env beats the file.
+            std::env::set_var("NIU_COMPLETION_STYLE", "list");
+            let (style, source) = resolve_completion_style();
+            assert_eq!(style, CompletionStyle::List);
+            assert_eq!(source, CompletionStyleSource::Env);
+
+            // Setting the built-in default removes the key again.
+            std::env::remove_var("NIU_COMPLETION_STYLE");
+            set_completion_style(CompletionStyle::Gnu)?;
+            let text = std::fs::read_to_string(&temp)?;
+            let parsed: UserConfigFile = toml::from_str(&text)?;
+            assert!(parsed.completion.is_none(), "default must not be pinned");
+
+            // An unparsable file value falls through to the default, and an
+            // unparsable env value warns and falls through too (tested by the
+            // warning landing on stderr — the value result is what's pinned).
+            std::fs::write(&temp, "[completion]\nstyle = \"winget\"").unwrap();
+            let (style, source) = resolve_completion_style();
+            assert_eq!(style, CompletionStyle::Gnu);
+            assert_eq!(source, CompletionStyleSource::Default);
+            Ok::<(), anyhow::Error>(())
+        })();
+        match previous_config {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        match previous_env {
+            Some(value) => std::env::set_var("NIU_COMPLETION_STYLE", value),
+            None => std::env::remove_var("NIU_COMPLETION_STYLE"),
+        }
+        let _ = std::fs::remove_dir_all(
+            temp.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        );
+        let _ = std::fs::remove_file(&temp);
+        result.unwrap();
     }
 
     #[test]

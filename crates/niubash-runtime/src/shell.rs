@@ -156,6 +156,12 @@ pub struct Shell {
     pub rc_file: Option<PathBuf>,
     // --noediting: disable readline-style line editing in the REPL.
     pub no_editing: bool,
+    // One-shot fast path (`Shell::new_one_shot`): the shell serves a single
+    // non-interactive command, so REPL-only state is never initialized and
+    // the prompt backend stays a bare placeholder. Bash renders no prompt and
+    // reads no completion state when non-interactive; the history provider
+    // and managed aliases still stay (both pinned by contract tests for -c).
+    pub one_shot: bool,
 }
 
 pub struct StdinCurrentShellChild {
@@ -206,24 +212,44 @@ impl Shell {
     pub fn new() -> anyhow::Result<Self> {
         // `niu` is the sole public executable. Keep `$0` aligned with the
         // user-facing command; explicit script and `-c` names still override
+        // `niu` is the sole public executable. Keep `$0` aligned with the
+        // user-facing command; explicit script and `-c` names still override
         // this value at their call sites. When the process was reached
         // through the sh.exe shim (the shim forwards its argv[0] stem via
         // NIU_INVOKED_AS), GNU shell.c set_shell_name shows the invocation
-        // name instead: `sh -c 'echo $0'` prints `sh`, never niu.
-        Self::new_with_script_name(Some(default_script_name().as_str()))
+        // name instead: `sh -c 'echo $0'` prints `sh`, never niu. The
+        // one-shot `-c` path (new_one_shot) carries the same name: the shim
+        // contract keys off the invocation, not off interactivity.
+        Self::new_with_script_name(Some(default_script_name().as_str()), false)
     }
 
     /// Construct a shell for scripts arriving on process stdin.
     pub fn new_for_stdin_script() -> anyhow::Result<Self> {
-        Self::new_with_script_name(None)
+        Self::new_with_script_name(None, false)
     }
 
-    fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
+    /// Construct a minimal shell for non-interactive one-shot execution
+    /// (`niu -c`, agent and CI harnesses).
+    ///
+    /// Skips everything only the interactive REPL reads — the prompt/theme
+    /// backend, the completion directory scan, and the final completion
+    /// snapshot. Bash itself renders no prompt and expands no completions
+    /// when non-interactive, so the one-shot surface matches those
+    /// semantics; the history provider and managed aliases stay (both
+    /// pinned by contract tests for `-c`). The shim-forwarded invocation
+    /// name applies here too: `sh -c ...` is a one-shot `sh`, and GNU
+    /// shell.c set_shell_name keys the `$0`/POSIX contract off the
+    /// invocation name, not off interactivity.
+    pub fn new_one_shot() -> anyhow::Result<Self> {
+        Self::new_with_script_name(Some(default_script_name().as_str()), true)
+    }
+
+    fn new_with_script_name(script_name: Option<&str>, one_shot: bool) -> anyhow::Result<Self> {
         // Consume the shim-forwarded invocation name before anything else
-        // reads it: it must not leak into child processes. Shell::new
-        // peeked at the same value for the `$0` default above (removal
-        // happens after that peek), and the shell-name block below reuses
-        // `invoked_as` rather than re-reading the now-cleared environment.
+        // reads it: it must not leak into child processes. The `$0` default
+        // above peeked at the same value (removal happens after that peek),
+        // and the shell-name block below reuses `invoked_as` rather than
+        // re-reading the now-cleared environment.
         let invoked_as = invoked_as_from_env();
         // 1. Load runtime defaults and environment-backed state.
         let mut config = load_config();
@@ -361,9 +387,16 @@ impl Shell {
         crate::startup_trace::tick("aliases");
 
         // 6. Prompt + theme. The template engine is the default backend;
-        // the segment engine stays available for explicit configs.
+        // the segment engine stays available for explicit configs. One-shot
+        // shells never render a prompt: use the cheapest backend instead of
+        // compiling the template or the segment engine.
         let prompt_style = config.shell.prompt_style.as_deref().unwrap_or("template");
-        let prompt: PromptBackend = if prompt_style == "segments" {
+        let prompt: PromptBackend = if one_shot {
+            PromptBackend::Bash(BashPrompt::new(
+                config.shell.prompt_symbol.clone(),
+                String::new(),
+            ))
+        } else if prompt_style == "segments" {
             let preset_name = config.shell.segment_preset.as_deref().unwrap_or("classic");
             let preset = SegmentPreset::from_name(preset_name).unwrap_or(SegmentPreset::Classic);
             let mut seg_config =
@@ -429,7 +462,8 @@ impl Shell {
         crate::startup_trace::tick("completion state");
 
         // 9. Load completion dirs from config (inline, not in thread).
-        {
+        // One-shot shells skip the scan: nothing reads it without a REPL.
+        if !one_shot {
             let mut s = completion_state.lock().unwrap();
             s.load_completion_dirs(&config.completion_dirs);
         }
@@ -471,10 +505,13 @@ impl Shell {
             no_profile: false,
             rc_file: None,
             no_editing: false,
+            one_shot,
         };
         crate::startup_trace::tick("completion + widgets");
         shell.sync_executor_pwd_from_process_cwd();
-        shell.update_completion_state();
+        if !one_shot {
+            shell.update_completion_state();
+        }
         crate::startup_trace::tick("Shell::new done");
         Ok(shell)
     }
@@ -1729,6 +1766,11 @@ impl Shell {
 
     /// Update the shared completion state from the current env + cwd.
     pub fn update_completion_state(&self) {
+        // One-shot shells have no REPL that reads completion state; the full
+        // env clone + function snapshot would be pure startup overhead.
+        if self.one_shot {
+            return;
+        }
         if let Ok(mut state) = self.completion_state.lock() {
             state.current_dir = self
                 .executor_pwd_host_path()
@@ -1753,6 +1795,18 @@ impl Shell {
             .into_iter()
             .map(|suggestion| suggestion.value)
             .collect()
+    }
+
+    /// The directory this shell considers current: the engine `PWD` when it
+    /// resolves to an existing host directory, else the process cwd.
+    ///
+    /// `execute_script` syncs the process cwd to the shell's final `PWD`
+    /// before returning, and an EXIT trap's `cd` only updates `PWD`, so
+    /// `PWD` is the truth for "where did this invocation end" — the value
+    /// the `--cwd-state` host contract records.
+    pub fn current_host_cwd(&self) -> PathBuf {
+        self.executor_pwd_host_path()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
     fn executor_pwd_host_path(&self) -> Option<PathBuf> {
@@ -5589,6 +5643,7 @@ niu_git_comp() {
             no_profile: false,
             rc_file: None,
             no_editing: false,
+            one_shot: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
         shell

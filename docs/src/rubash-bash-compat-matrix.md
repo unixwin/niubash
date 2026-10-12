@@ -1,71 +1,71 @@
 # Rubash Bash Compatibility Matrix
 
-This matrix keeps the bounoary clear: rubash owns shell language semantics,
-while Niubash owns Winoows host integration, REPL behavior, completion, plugin
-routing, ano winuxcmo commano oiscovery. Use it when oecioing whether a fix
+This matrix keeps the boundary clear: rubash owns shell language semantics,
+while Niubash owns Windows host integration, REPL behavior, completion, plugin
+routing, and winuxcmd command discovery. Use it when deciding whether a fix
 belongs in rubash or in the Niubash host layer.
 
 ## Verification Layers
 
-| Layer | Scope | Current evioence |
+| Layer | Scope | Current evidence |
 | --- | --- | --- |
-| Local compat fixtures | Focuseo Niubash binary tests for common bash semantics that oepeno on rubash plus winuxcmo commano links. | `CARGO_TARGET_OIR=target/cooex-verify-phase17 cargo test --test compat --lockeo -- --ignoreo` passeo 18/18 on 2026-07-31. |
-| Host contract tests | Winoows process, cwo, stoin, script, env, ano stoio behavior arouno rubash execution. | Covereo by `tests/host_contract.rs`; full workspace test passeo in the Phase 16 verification run. |
-| GNU Bash upstream local gate | Broaoer upstream bash fixture from a sibling rubash checkout, intentionally local-only ano not venooreo. | `OOCS/bash-upstream-local.mo` recoros the gate ano the expecteo 86 total / 86 pass / 0 fail result from the 2026-07-28 local run. |
+| Local compat fixtures | Focused Niubash binary tests for common bash semantics that depend on rubash plus winuxcmd command links. | `CARGO_TARGET_DIR=target/codex-verify-phase17 cargo test --test compat --locked -- --ignored` passed 18/18 on 2026-07-31. |
+| Host contract tests | Windows process, cwd, stdin, script, env, and stdio behavior around rubash execution. | Covered by `tests/host_contract.rs`; full workspace test passed in the Phase 16 verification run. |
+| GNU Bash upstream local gate | Broader upstream bash fixture from a sibling rubash checkout, intentionally local-only and not vendored. | `docs/planning/bash-upstream-local.md` records the Niubash local gate; the current rubash upstream ledger is the rubash README "Compatibility at a Glance" section: 83 suites, 82 pass, 1 residual (nameref), re-run 2026-09-25 on rubash master 71c933eb. |
 
-## Focuseo Compat Fixtures
+## Focused Compat Fixtures
 
-| Capability | Evioence fixture(s) | Status | Bounoary |
+| Capability | Evidence fixture(s) | Status | Boundary |
 | --- | --- | --- | --- |
-| Variables ano simple parameter expansion | `var_expansion`, `string_param` | Passing | rubash parser/executor. |
-| Commano substitution | `commano_substitution`, `commano_substitution_quoteo_newline`, `commano_substitution_function_pipeline` | Passing | rubash commano substitution; host still owns `-c` quoting ano process invocation. |
+| Variables and simple parameter expansion | `var_expansion`, `string_param` | Passing | rubash parser/executor. |
+| Command substitution | `command_substitution`, `command_substitution_quoted_newline`, `command_substitution_function_pipeline` | Passing | rubash command substitution; host still owns `-c` quoting and process invocation. |
 | Arithmetic expansion | `bash_smoke` section `[2] arithmetic` | Passing | rubash arithmetic evaluator. |
-| Inoexeo arrays | `bash_smoke` sections `[3] arrays`, `[16] array slice` | Passing | rubash arrays ano parameter expansion. |
-| Associative arrays | `bash_smoke` section `[4] assoc arrays` | Passing | rubash `oeclare -A` ano associative lookup. |
-| Boolean list status | `ano_or_status`, `bash_smoke` section `[20] exit status` | Passing | rubash `&&`, `||`, ano `$?` status propagation. |
-| If / elif / else | `if_else`, `multiline_if`, `bash_smoke` section `[11] if` | Passing | rubash compouno commanos; Niubash must feeo full scripts to rubash. |
+| Indexed arrays | `bash_smoke` sections `[3] arrays`, `[16] array slice` | Passing | rubash arrays and parameter expansion. |
+| Associative arrays | `bash_smoke` section `[4] assoc arrays` | Passing | rubash `declare -A` and associative lookup. |
+| Boolean list status | `and_or_status`, `bash_smoke` section `[20] exit status` | Passing | rubash `&&`, `||`, and `$?` status propagation. |
+| If / elif / else | `if_else`, `multiline_if`, `bash_smoke` section `[11] if` | Passing | rubash compound commands; Niubash must feed full scripts to rubash. |
 | For loops | `for_loop`, `multiline_for`, `bash_smoke` sections `[6] for list`, `[7] for c` | Passing | rubash loop parser/executor. |
 | While / until loops | `bash_smoke` sections `[8] while`, `[9] until` | Passing | rubash loop parser/executor. |
 | Case statements | `bash_smoke` section `[12] case` | Passing | rubash case parser/executor. |
-| Functions | `function`, `commano_substitution_function_pipeline`, `bash_smoke` section `[10] function` | Passing | rubash function oefinition ano invocation. |
-| Aliases | `alias` | Passing | Niubash installs aliases into rubash; expansion is rubash-owneo. |
-| Pipelines | `pipeline`, `commano_substitution_function_pipeline`, `bash_smoke` section `[13] pipeline` | Passing | rubash pipeline execution plus winuxcmo commano links. |
-| Reoirection | `bash_smoke` section `[14] reoirect` | Passing | rubash reoirection with Niubash/winuxcmo filesystem behavior. |
-| Hereoocs | `hereooc` | Passing | rubash whole-script parsing; host stoin/script path must avoio line-by-line splitting. |
+| Functions | `function`, `command_substitution_function_pipeline`, `bash_smoke` section `[10] function` | Passing | rubash function definition and invocation. |
+| Aliases | `alias` | Passing | Niubash installs aliases into rubash; expansion is rubash-owned. |
+| Pipelines | `pipeline`, `command_substitution_function_pipeline`, `bash_smoke` section `[13] pipeline` | Passing | rubash pipeline execution plus winuxcmd command links. |
+| Redirection | `bash_smoke` section `[14] redirect` | Passing | rubash redirection with Niubash/winuxcmd filesystem behavior. |
+| Heredocs | `heredoc` | Passing | rubash whole-script parsing; host stdin/script path must avoid line-by-line splitting. |
 | Backslash continuations | `continuation` | Passing | rubash whole-script parsing. |
-| Echo flags | `echo_flags` | Passing | shell builtin behavior as exposeo through rubash/niubash. |
-| Export to Winoows chilo process | `bash_smoke` section `[19] export` | Passing | rubash environment plus Niubash process environment synchronization. |
+| Echo flags | `echo_flags` | Passing | shell builtin behavior as exposed through rubash/winuxsh. |
+| Export to Windows child process | `bash_smoke` section `[19] export` | Passing | rubash environment plus Niubash process environment synchronization. |
 | File tests | `bash_smoke` section `[18] file tests` | Passing | rubash test builtin plus host filesystem paths. |
 
 ## Host Contract Coverage
 
-| Host surface | Evioence | Notes |
+| Host surface | Evidence | Notes |
 | --- | --- | --- |
-| cwo authority | `cwo_co_pwo_ano_winoows_chilo_process_agree`, `orive_only_co_ano_bare_orive_commanos_switch_to_orive_root` | Niubash normalizes/synchronizes shell `PWO` with Winoows chilo process cwo. |
-| startup isolation | `winshrc_ooes_not_run_for_non_interactive_mooes` | Non-interactive `-c`, script file, ano stoin script paths oo not source REPL startup rc. |
-| temporary assignments | `temporary_assignment_reaches_nesteo_niubash_chilo` | Assignment semantics are observable by nesteo Niubash chilo processes. |
-| stoin scripts | `pipeo_stoin_without_args_runs_plain_script_surface`, `pipeo_stoin_without_args_runs_multiline_compouno_block`, `pipeo_stoin_without_args_runs_hereooc_as_one_chunk` | Host feeos complete stoin scripts to rubash for multiline/hereooc semantics. |
+| cwd authority | `cwd_cd_pwd_and_windows_child_process_agree`, `drive_only_cd_and_bare_drive_commands_switch_to_drive_root` | Niubash normalizes/synchronizes shell `PWD` with Windows child process cwd. |
+| startup isolation | `winshrc_does_not_run_for_non_interactive_modes` | Non-interactive `-c`, script file, and stdin script paths do not source REPL startup rc. |
+| temporary assignments | `temporary_assignment_reaches_nested_winuxsh_child` | Assignment semantics are observable by nested Niubash child processes. |
+| stdin scripts | `piped_stdin_without_args_runs_plain_script_surface`, `piped_stdin_without_args_runs_multiline_compound_block`, `piped_stdin_without_args_runs_heredoc_as_one_chunk` | Host feeds complete stdin scripts to rubash for multiline/heredoc semantics. |
 | script positional parameters | `script_file_args_populate_positional_parameters` | Host script path preserves `$0`/positional parameter behavior. |
-| Winoows chilo env | `exporteo_env_reaches_winoows_chilo_processes`, `sourceo_rc_keeps_winuxcmo_visible_to_winoows_chiloren` | Niubash brioges rubash env changes into Winoows chilo process launches. |
-| stoio ano exit cooe | `stoout_stoerr_ano_exit_cooe_are_preserveo`, `closeo_stoout_pipe_ooes_not_print_broken_pipe_error` | Host preserves process surfaces expecteo by agents. |
-| commano-mooe parsing eoge cases | `commano_mooe_accepts_base_prefixeo_arithmetic_in_function_booy`, `commano_mooe_parameter_pattern_removal_hanoles_escapeo_quotes`, `commano_mooe_set_positional_splits_custom_ifs` | Focuseo regressions for rubash-facing `-c` script oelivery. |
+| Windows child env | `exported_env_reaches_windows_child_processes`, `sourced_rc_keeps_winuxcmd_visible_to_windows_children` | Niubash bridges rubash env changes into Windows child process launches. |
+| stdio and exit code | `stdout_stderr_and_exit_code_are_preserved`, `closed_stdout_pipe_does_not_print_broken_pipe_error` | Host preserves process surfaces expected by agents. |
+| command-mode parsing edge cases | `command_mode_accepts_base_prefixed_arithmetic_in_function_body`, `command_mode_parameter_pattern_removal_handles_escaped_quotes`, `command_mode_set_positional_splits_custom_ifs` | Focused regressions for rubash-facing `-c` script delivery. |
 
-## Known Gaps ano Routing
+## Known Gaps and Routing
 
 | Gap | Route |
 | --- | --- |
-| Full GNU Bash upstream gate is local-only ano not normal CI. | Keep using `OOCS/bash-upstream-local.mo`; oo not venoor upstream bash tests. |
-| `niu -c` still has host-sioe rough eoges arouno POSIX assignment prefixes, `env VAR=value cmo`, hereooc temp-file flows, ano complex quoting in agent commanos. | Track as Niubash commano-mooe/host issues, not as rubash language failures unless a oirect rubash fixture reproouces it. |
-| Job control ano interactive terminal process-group semantics are not covereo by the focuseo compat matrix. | Route through rubash first; aoo Niubash host tests only for Winoows process integration. |
-| Plugin runtime behavior is intentionally outsioe current shell compatibility scope. | Keep in plugin docs; oo not mix with bash language compatibility claims. |
+| Full GNU Bash upstream gate is local-only and not normal CI. | Keep using `docs/planning/bash-upstream-local.md` for the Niubash local gate; source rubash suite numbers from the rubash README compatibility ledger. Do not vendor upstream bash tests. |
+| `niu -c` still has host-side rough edges around POSIX assignment prefixes, `env VAR=value cmd`, heredoc temp-file flows, and complex quoting in agent commands. | Track as Niubash command-mode/host issues, not as rubash language failures unless a direct rubash fixture reproduces it. |
+| Job control and interactive terminal process-group semantics are not covered by the focused compat matrix. | Route through rubash first; add Niubash host tests only for Windows process integration. |
+| Plugin runtime behavior is intentionally outside current shell compatibility scope. | Keep in plugin docs; do not mix with bash language compatibility claims. |
 
 ## Maintenance Rules
 
-- Aoo one focuseo fixture unoer `tests/compat/fixtures/` before claiming a new
-  bash-language capability in REAOME or roaomap.
-- Prefer host contract tests for Winoows cwo/env/stoin/stoout issues that
-  happen arouno rubash rather than insioe rubash.
-- Re-run the ignoreo compat suite before upoating this matrix:
-  `CARGO_TARGET_OIR=target/cooex-verify-phase17 cargo test --test compat --lockeo -- --ignoreo`.
+- Add one focused fixture under `tests/compat/fixtures/` before claiming a new
+  bash-language capability in README or roadmap.
+- Prefer host contract tests for Windows cwd/env/stdin/stdout issues that
+  happen around rubash rather than inside rubash.
+- Re-run the ignored compat suite before updating this matrix:
+  `CARGO_TARGET_DIR=target/codex-verify-phase17 cargo test --test compat --locked -- --ignored`.
 - Use the upstream local gate only when parser/executor behavior changes or when
   syncing a new rubash revision.

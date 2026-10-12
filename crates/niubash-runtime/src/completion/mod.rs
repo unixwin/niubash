@@ -6,6 +6,7 @@ pub mod carapace;
 pub mod command;
 pub mod completer;
 pub mod external;
+pub mod gnu_menu;
 pub mod path;
 pub mod runtime;
 pub mod variables;

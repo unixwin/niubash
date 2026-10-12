@@ -16,7 +16,7 @@
 //!   self-update / update-niubash → REPL commands for Niubash self-update
 
 use std::io::{BufRead, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use rubash::invocation::ShellInvocation;
@@ -148,6 +148,20 @@ fn run_main() -> ExitCode {
         run_internal_pipeline_utility(name, &args[2..]);
     }
 
+    // `--cwd-state <file>`: restore the recorded directory before anything
+    // else runs — niu's own startup, a relative script path, and
+    // `source_non_interactive_env` must all see the directory the caller
+    // last left behind. The scan only ever strips a prefix group of its own
+    // flags, so positional parameters and bash-style options are untouched.
+    let args = match extract_cwd_state_options(&args) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("niu: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    restore_cwd_state();
+
     if let Err(e) = run(&args) {
         if is_broken_pipe_error(&e) {
             return ExitCode::from(1);
@@ -183,6 +197,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 | "--completion-probe"
                 | "--install-wt-profile"
                 | "--self-update"
+                | "--encoded-command"
         ) && !legacy_command_mode_has_post_c_login_flag(args)
         {
             // GNU shell.c parse_shell_options walks argv in one left-to-right
@@ -275,10 +290,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             shell.executor.set_positional_params(args[2..].to_vec());
             let code = shell.execute_script(&content)?;
             let code = shell.finish_with_exit_trap(code)?;
-            if code != 0 {
-                piped_stdout::finish_and_exit(code);
-            }
-            Ok(())
+            finish_one_shot(&shell, code)
         }
     }
 }
@@ -301,6 +313,7 @@ fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
         "--completion-probe",
         "--install-wt-profile",
         "--self-update",
+        "--encoded-command",
     ];
     let mut index = 1usize;
     while let Some(arg) = args.get(index) {
@@ -346,12 +359,33 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(rest),
+        "--encoded-command" => {
+            // Agent/CI channel: the payload arrives base64-encoded, so no
+            // shell quoting, heredoc, or `base64.exe` subprocess is involved
+            // on the way in. Same non-interactive contract as `-c` (GNU bash
+            // sources BASH_ENV for -c shells; so does this route).
+            let Some(payload) = rest.first() else {
+                anyhow::bail!("--encoded-command requires an argument");
+            };
+            let command = decode_base64_utf8(payload)?;
+            let mut shell = niubash_runtime::Shell::new_one_shot()?;
+            shell.executor.inherit_process_stdin();
+            shell.enable_process_stdin_pipeline_bridge();
+            shell.source_non_interactive_env();
+            shell.executor.set_env("BASH_EXECUTION_STRING", &command);
+            // Same -c diagnostic tag as the engine route (niubash#160):
+            // parser diagnostics take the `$0: -c: line N:` shape.
+            shell.executor.set_env("__RUBASH_IS_C", "1");
+            let code = shell.execute_script(&command)?;
+            let code = shell.finish_with_exit_trap(code)?;
+            finish_one_shot(&shell, code)
+        }
         "-C" | "--repl-command" => run_repl_command(word, leading_options, rest),
         // Only reachable for the legacy `niu -c -l <cmd>` shape: a plain
         // leading -c routes to the engine parser above.
         "-c" => {
             let command_mode = parse_legacy_command_mode(rest)?;
-            let mut shell = niubash_runtime::Shell::new()?;
+            let mut shell = niubash_runtime::Shell::new_one_shot()?;
             niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
@@ -371,10 +405,7 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             niubash_runtime::startup_trace::tick("-c: execute_script");
             let code = shell.finish_with_exit_trap(code)?;
             niubash_runtime::startup_trace::tick("-c: exit trap");
-            if code != 0 {
-                piped_stdout::finish_and_exit(code);
-            }
-            Ok(())
+            finish_one_shot(&shell, code)
         }
         other => anyhow::bail!("unknown launcher word '{other}'"),
     }
@@ -429,8 +460,15 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Single-command non-interactive invocation (unless -i forces the
+    // interactive startup files): skip REPL-only initialization — the prompt
+    // backend, the completion directory scan, and the completion snapshot.
+    // Script files and piped stdin keep the full constructor: their rc
+    // semantics are the plain ones and their startup is amortized.
     let mut shell = if invocation.read_stdin {
         niubash_runtime::Shell::new_for_stdin_script()?
+    } else if invocation.command.is_some() && !invocation.interactive {
+        niubash_runtime::Shell::new_one_shot()?
     } else {
         niubash_runtime::Shell::new()?
     };
@@ -505,10 +543,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         }
         let code = shell.finish_with_exit_trap(code)?;
         niubash_runtime::startup_trace::tick("invocation: exit trap");
-        if code != 0 {
-            piped_stdout::finish_and_exit(code);
-        }
-        return Ok(());
+        finish_one_shot(&shell, code)
     }
     if let Some(script_name) = invocation.script {
         // GNU: `bash -i script` is an interactive shell (forced_interactive)
@@ -523,10 +558,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         let content = std::fs::read_to_string(script_arg_to_host_path(&script_name))?;
         let code = shell.execute_script(&content)?;
         let code = shell.finish_with_exit_trap(code)?;
-        if code != 0 {
-            piped_stdout::finish_and_exit(code);
-        }
-        return Ok(());
+        finish_one_shot(&shell, code)
     }
     // GNU bash -i with a non-tty stdin still drives readline
     // (parse.y yy_readline_get -> bashline.c bash_readline): prompts and the
@@ -566,7 +598,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     let code = shell.execute_script(&content)?;
     let code = shell.finish_with_exit_trap(code)?;
     if code != 0 {
-        piped_stdout::finish_and_exit(code);
+        finish_one_shot(&shell, code);
     }
     Ok(())
 }
@@ -1138,9 +1170,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
                 if !pending.is_empty() {
                     let code = shell.execute_script(&pending.join("\n"))?;
                     let code = shell.finish_with_exit_trap(code)?;
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
+                    finish_one_shot(&shell, code);
                 }
                 break;
             }
@@ -1167,16 +1197,13 @@ fn run_stdin_script() -> anyhow::Result<()> {
         };
         if code != 0 {
             let code = shell.finish_with_exit_trap(code)?;
-            std::process::exit(code);
+            finish_one_shot(&shell, code);
         }
         pending.clear();
     }
 
     let code = shell.finish_with_exit_trap(0)?;
-    if code != 0 {
-        std::process::exit(code);
-    }
-    Ok(())
+    finish_one_shot(&shell, code);
 }
 
 fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
@@ -1338,6 +1365,12 @@ fn print_usage() {
     println!("  -V, --version             Version and component info");
     println!("  -c <command>              Execute a command ad-hoc");
     println!("  -C, --repl-command <cmd>  Execute one non-interactive REPL command");
+    println!("      --encoded-command <b64>  Execute a base64-encoded command (no quoting);");
+    println!(
+        "                               optional `v1:` prefix guards against MSYS path rewrite"
+    );
+    println!("      --cwd-state <file>       Restore the recorded directory at startup and");
+    println!("                               record the final directory back on exit");
     println!();
     println!("  --install-wt-profile      Add/update the Windows Terminal profile");
     println!("      --set-default         Also set Niubash as the WT default profile");
@@ -2801,15 +2834,28 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `niu config` — persisted user settings (`~/.niubash/config.toml`, the
-/// mirrors.toml convention). Deliberately tiny: one flat file, one setting
-/// today (the niubash#249 command-not-found hint policy). Any read problem
-/// degrades to the default in the runtime; `get`/`list` surface values as
-/// resolved (file, overridden by `NIU_COMMAND_NOT_FOUND_HINT`).
+/// mirrors.toml convention). Deliberately tiny: one flat file, two settings
+/// (the niubash#249 command-not-found hint policy, and since 1.4.1 the
+/// `completion.style` TAB shape). Any read problem degrades to the default
+/// in the runtime; `get`/`list` surface values as resolved (file, overridden
+/// by the `NIU_` env variable).
 fn run_config_command(args: &[String]) -> anyhow::Result<()> {
     use niubash_runtime::config::{
-        resolve_command_not_found_hint, set_command_not_found_hint, user_config_path,
-        CommandNotFoundHint, COMMAND_NOT_FOUND_HINT_KEY,
+        resolve_command_not_found_hint, resolve_completion_style, set_command_not_found_hint,
+        set_completion_style, user_config_path, CommandNotFoundHint, CompletionStyle,
+        CompletionStyleSource, COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_STYLE_KEY,
     };
+    // One line describing where the effective completion style came from —
+    // the precedence (env > config > default) is part of the contract, so
+    // every mutating command prints it.
+    fn print_completion_style_outcome(style: CompletionStyle, source: CompletionStyleSource) {
+        let origin = match source {
+            CompletionStyleSource::Env => " (NIU_COMPLETION_STYLE overrides the file)",
+            CompletionStyleSource::ConfigFile => " (persisted)",
+            CompletionStyleSource::Default => " (built-in default)",
+        };
+        println!("{COMPLETION_STYLE_KEY} = {}{origin}", style.as_str());
+    }
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
             print_config_usage();
@@ -2821,6 +2867,11 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                 "  {COMMAND_NOT_FOUND_HINT_KEY} = {}",
                 resolve_command_not_found_hint().as_str()
             );
+            let (style, source) = resolve_completion_style();
+            println!("  {COMPLETION_STYLE_KEY} = {}", style.as_str());
+            if source == CompletionStyleSource::Env {
+                println!("    (overridden by NIU_COMPLETION_STYLE)");
+            }
             Ok(())
         }
         Some("get") => {
@@ -2830,6 +2881,10 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
             match key.as_str() {
                 COMMAND_NOT_FOUND_HINT_KEY => {
                     println!("{}", resolve_command_not_found_hint().as_str());
+                    Ok(())
+                }
+                COMPLETION_STYLE_KEY => {
+                    println!("{}", resolve_completion_style().0.as_str());
                     Ok(())
                 }
                 unknown => anyhow::bail!(
@@ -2869,6 +2924,42 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                     }
                     Ok(())
                 }
+                COMPLETION_STYLE_KEY => {
+                    let Some(style) = CompletionStyle::parse(value) else {
+                        anyhow::bail!(
+                            "invalid value '{value}' for {COMPLETION_STYLE_KEY}: expected gnu, ide, column, list or inline"
+                        )
+                    };
+                    set_completion_style(style)?;
+                    println!(
+                        "{} {COMPLETION_STYLE_KEY} = {}",
+                        niubash_runtime::text_style::green("Set:"),
+                        style.as_str()
+                    );
+                    match style {
+                        CompletionStyle::Gnu => println!(
+                            "  TAB completes the common prefix; a second TAB lists the candidates"
+                        ),
+                        CompletionStyle::Ide => {
+                            println!("  TAB opens the VS Code-style popup with descriptions")
+                        }
+                        CompletionStyle::Column => println!("  TAB opens a zsh-style column grid"),
+                        CompletionStyle::List => println!("  TAB opens a fish-style vertical list"),
+                        CompletionStyle::Inline => println!(
+                            "  TAB inserts the first match and cycles (bash menu-complete)"
+                        ),
+                    }
+                    // The env variable outranks the file, so a stale
+                    // NIU_COMPLETION_STYLE would silently swallow this pick.
+                    let (effective, source) = resolve_completion_style();
+                    if source == CompletionStyleSource::Env {
+                        println!(
+                            "  note: NIU_COMPLETION_STYLE is set in this environment and wins:"
+                        );
+                    }
+                    print_completion_style_outcome(effective, source);
+                    Ok(())
+                }
                 unknown => anyhow::bail!(
                     "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
                 ),
@@ -2898,6 +2989,13 @@ fn print_config_usage() {
     println!("      off (default) | wpm — wpm suggests one `wpm search --name`");
     println!("      line for high-confidence near-misses; third-party managers are");
     println!("      never recommended (niubash#249).");
+    println!();
+    println!("  {k}", k = niubash_runtime::config::COMPLETION_STYLE_KEY);
+    println!("      Shape of the TAB completion UI. gnu (default) — TAB completes");
+    println!("      the common prefix, a second TAB lists the candidates next to the");
+    println!("      prompt like GNU readline. Alternatives: ide (VS Code popup),");
+    println!("      column (zsh grid), list (fish vertical), inline (bash");
+    println!("      menu-complete). NIU_COMPLETION_STYLE overrides this file.");
 }
 
 fn print_plugin_mirror_usage() {
@@ -3537,6 +3635,268 @@ fn is_broken_pipe_error(error: &anyhow::Error) -> bool {
 
 fn is_broken_pipe_io_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
+}
+
+/// Decode RFC 4648 standard base64 into UTF-8 for `--encoded-command`.
+/// Padding is optional and ASCII whitespace is ignored, so callers can pass
+/// pre-wrapped payloads untouched. An optional `v1:` prefix is stripped: it
+/// marks the payload as version-1 so MSYS path conversion can never mangle a
+/// leading `/` when the command line travels through Git Bash.
+fn decode_base64_utf8(input: &str) -> anyhow::Result<String> {
+    let input = input.strip_prefix("v1:").unwrap_or(input);
+    let bytes = decode_base64(input)?;
+    String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("--encoded-command: payload is not valid UTF-8"))
+}
+
+fn decode_base64(input: &str) -> anyhow::Result<Vec<u8>> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3 + 3);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in input.bytes() {
+        if byte.is_ascii_whitespace() || byte == b'=' {
+            continue;
+        }
+        let Some(value) = sextet(byte) else {
+            anyhow::bail!(
+                "--encoded-command: invalid base64 character {:?}",
+                byte as char
+            );
+        };
+        acc = (acc << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// `--cwd-state <file>` / `--cwd-state-verbose`: the directory memory an
+/// agent host uses to make one-shot invocations behave like one shell.
+///
+/// The option is deliberately explicit rather than a default: `niu -c` without
+/// it keeps the inherited working directory byte-for-byte, because CI drivers
+/// and interactive callers rely on the start directory being predictable. The
+/// state file is a small JSON object (`{"cwd": "...", "updatedAt": <unix ms>}`)
+/// so a host can read, display, or reset it with ordinary tooling. A bare
+/// path written by hand (`echo D:/work > state`) is tolerated on read.
+///
+/// The option lives in a process global rather than being threaded through
+/// `run`: the flags are argv-scoped at startup and every recorded exit path
+/// needs the same answer, so threading them through nine signatures would buy
+/// nothing. `-C/--repl-command` and the interactive REPL restore but never
+/// record: a REPL's exit path must not be rewritten by a host-side switch.
+struct CwdStateOption {
+    /// State file to restore from and record into.
+    path: Option<PathBuf>,
+    /// Report restore/record lines on stderr for debugging the contract.
+    verbose: bool,
+}
+
+static CWD_STATE: std::sync::OnceLock<CwdStateOption> = std::sync::OnceLock::new();
+
+fn cwd_state() -> Option<&'static CwdStateOption> {
+    CWD_STATE.get()
+}
+
+/// Split the cwd-state options off the front of argv.
+///
+/// The options form a *prefix* group: the scan stops at the first token that
+/// is not one of them, so the positional parameters of `niu -c <cmd> <name> ...`
+/// can never be mistaken for an option, and run's bash-style
+/// `ShellInvocation` parser never sees the flags at all.
+fn extract_cwd_state_options(args: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut options = CwdStateOption {
+        path: None,
+        verbose: false,
+    };
+    let mut rest: Vec<String> = Vec::with_capacity(args.len());
+    if let Some(program) = args.first() {
+        rest.push(program.clone());
+    }
+
+    let mut index = 1;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--cwd-state" => {
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| anyhow::anyhow!("--cwd-state requires a file path argument"))?;
+                options.path = Some(resolve_state_path(value));
+                index += 2;
+            }
+            "--cwd-state-verbose" => {
+                options.verbose = true;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+
+    rest.extend_from_slice(&args[index..]);
+    let _ = CWD_STATE.set(options);
+    Ok(rest)
+}
+
+/// Pin the state path to the directory niu was started in.
+///
+/// A relative path has to keep naming the same file for both halves of the
+/// contract: the record is written after the command ran, and `execute_script`
+/// has already moved the process into the shell's final directory by then, so
+/// resolving late would record into a different file than the one restored
+/// from.
+fn resolve_state_path(value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        return path;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path,
+    }
+}
+
+/// Move into the directory a previous invocation recorded.
+///
+/// Every failure is silent by design: a missing, unreadable, or stale state
+/// file must never turn into a command failure. The inherited working
+/// directory is the documented fallback, and the next record replaces the
+/// stale value, so the state heals itself without a cleanup step.
+fn restore_cwd_state() {
+    let Some(options) = cwd_state() else {
+        return;
+    };
+    let Some(state) = options.path.as_deref() else {
+        return;
+    };
+    let Some(directory) = read_cwd_state(state) else {
+        return;
+    };
+    match std::env::set_current_dir(&directory) {
+        Ok(()) => {
+            if options.verbose {
+                eprintln!("niu: cwd-state: restored {}", directory.display());
+            }
+        }
+        Err(error) => {
+            if options.verbose {
+                eprintln!(
+                    "niu: cwd-state: cannot enter {}: {error}",
+                    directory.display()
+                );
+            }
+        }
+    }
+}
+
+/// Read one state file: the JSON form first, then a hand-written bare path.
+fn read_cwd_state(state: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(state).ok()?;
+    let content = content.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        if let Some(cwd) = value.get("cwd").and_then(|cwd| cwd.as_str()) {
+            let path = PathBuf::from(cwd);
+            return path.is_dir().then_some(path);
+        }
+    }
+    let path = PathBuf::from(content);
+    path.is_dir().then_some(path)
+}
+
+/// Record the shell's final directory, then exit with `code`.
+///
+/// Records even when the command failed: this is `; pwd > state`, not
+/// `&& pwd > state` — one failed command must not drop the directory.
+/// Write failures are reported but never change the exit code.
+fn finish_one_shot(shell: &niubash_runtime::Shell, code: i32) -> ! {
+    record_cwd_state(shell);
+    piped_stdout::finish_and_exit(code)
+}
+
+fn record_cwd_state(shell: &niubash_runtime::Shell) {
+    let Some(options) = cwd_state() else {
+        return;
+    };
+    let Some(state) = options.path.as_deref() else {
+        return;
+    };
+    let directory = shell.current_host_cwd();
+    if let Some(parent) = state.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let record = serde_json::json!({
+        "cwd": directory.to_string_lossy(),
+        "updatedAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u128::from(d.as_millis()))
+            .unwrap_or(0),
+    });
+    let body = record.to_string();
+    // Atomic temp+rename; on Windows rename-over-existing can lose a race
+    // with a concurrent reader, so retry twice and fall back to a direct
+    // write. A failed record is bookkeeping trouble, not a command failure.
+    let tmp = state.with_extension("tmp");
+    let mut write_ok = std::fs::write(&tmp, body.as_bytes()).is_ok();
+    if write_ok {
+        write_ok = (0..2).any(|attempt| match std::fs::rename(&tmp, state) {
+            Ok(()) => true,
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(5 * (attempt + 1)));
+                false
+            }
+        });
+    }
+    if !write_ok {
+        write_ok = std::fs::write(state, body.as_bytes()).is_ok();
+    }
+    let _ = std::fs::remove_file(&tmp);
+    if !write_ok {
+        eprintln!("niu: cwd-state: failed to record {}", directory.display());
+    } else if options.verbose {
+        eprintln!("niu: cwd-state: recorded {}", directory.display());
+    }
+}
+
+#[cfg(test)]
+mod encoded_command_tests {
+    use super::*;
+
+    #[test]
+    fn base64_decodes_padded_unpadded_and_wrapped_payloads() {
+        assert_eq!(
+            decode_base64_utf8("ZWNobyBoZWxsbw==").unwrap(),
+            "echo hello"
+        );
+        assert_eq!(
+            decode_base64_utf8("v1:ZWNobyBoZWxsbw==").unwrap(),
+            "echo hello"
+        );
+        assert_eq!(decode_base64_utf8("YWJj").unwrap(), "abc");
+        assert_eq!(decode_base64_utf8("YQ==").unwrap(), "a");
+        assert_eq!(decode_base64_utf8("YQ").unwrap(), "a");
+        assert_eq!(
+            decode_base64_utf8(" ZWN obw =").unwrap(),
+            "echo", // stray whitespace and '=' are ignored anywhere
+        );
+        assert!(decode_base64_utf8("ZWNoby*").is_err());
+        // 0xFF 0xFF: never valid UTF-8, rejected with the payload diagnostic.
+        assert!(decode_base64_utf8("//8=").is_err());
+    }
 }
 
 #[cfg(test)]

@@ -9,9 +9,11 @@ description: Run Windows tasks in Niubash, the GNU Bash-compatible Windows-nativ
 
 Niubash is bash implemented natively in Rust for Windows: the language
 engine ([rubash](https://github.com/unixwin/rubash)) is a from-scratch Bash
-interpreter gated on GNU Bash's own upstream test suite — **83/83 full
-suites byte-identical to GNU output** (measured 2026-09-21, ledger in
-rubash's `docs/COMPATIBILITY-STATUS.md`). What it is not matters as much:
+interpreter gated on GNU Bash's own upstream test suite — **82 of 83 full
+suites byte-identical to GNU output** (2026-09-25 ledger re-run; the one
+residual, nameref, is individually audited — ledger in rubash's
+[README, "Compatibility at a
+Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it is not matters as much:
 
 - **No POSIX emulation layer.** No `cygwin1.dll`/`msys-2.0.dll`, no fork,
   no POSIX signal delivery, **no PTY emulation** — job control and terminal
@@ -57,7 +59,7 @@ rubash's `docs/COMPATIBILITY-STATUS.md`). What it is not matters as much:
 - **Launcher verbs** — `setup`, `font`, `doctor`, `plugin`, `skill`, `--self-update`; table in `references/quickref.md`.
 - **Plugin system** — git-clone-only external sources (oh-my-bash, bash-it, bpkg) behind an explicit trust gate, driven by a declarative spec (`~/.niubash/plugins.toml`) with lockfile verbs (`add/list/enable/disable/trust/sync/update/restore/rollback/clean/source/recipe/distro/mirror/ui`).
 - **TUI surfaces** — `niu setup` wizard (theme/prompt/tools), `niu plugin ui` menu, theme gallery, `niu font` picker; all non-interactive-friendly and safe to skip (`-c` loads none of them).
-- **Bundle version**: niubash 1.3.4 (generated; see `scripts/generate-skill.py`).
+- **Bundle version**: niubash 1.4.0 (generated; see `scripts/generate-skill.py`).
 <!-- END GENERATED:capability-snapshot -->
 
 Shell built-ins (the generated list below is the engine's own GNU bash 5.3

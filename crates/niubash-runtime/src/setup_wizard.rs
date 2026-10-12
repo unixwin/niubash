@@ -723,7 +723,10 @@ fn builtin_presets() -> Vec<Preset> {
             name: "minimal".into(),
             summary: "safe everywhere: no extra aliases".into(),
             cwd_style: "home".into(),
-            completion_style: "column".into(),
+            // The non-interactive fallback preset: it follows the product
+            // default (gnu, owner ruling 2026-10-12) instead of pinning the
+            // old column shape over scripted installs.
+            completion_style: "gnu".into(),
             aliases: BTreeMap::new(),
             conditional_aliases: BTreeMap::new(),
         },
@@ -1188,6 +1191,17 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // trust and activation stay explicit user verbs.
     let collection_pick = ask_plugin_collection(&mut io, &t);
 
+    // --- Q2.6: TAB completion shape (2026-10-12 discovery surface) ---
+    // The style was invisible config before 1.4.1: no wizard step, no doc,
+    // and `NIU_COMPLETION_STYLE` was tribal knowledge — while the default
+    // moved to the GNU readline shape. The step runs on first install AND
+    // on every `niu setup` re-run (existing users get navigated here too),
+    // with the user's current effective style pre-highlighted, so a re-run
+    // that changes nothing stays a no-op (the pick is only written when it
+    // differs — never forced over an existing configuration).
+    let current_completion_style = crate::config::resolve_completion_style().0;
+    let completion_style_pick = ask!(ask_completion_style(&mut io, &t, current_completion_style));
+
     // --- Q3: niu-git, offered once (never auto-installed, never nagged) ---
     // Windows-only question: niu-git is Windows-native git, and Linux/macOS
     // users already have native git. niu installs nothing itself (download
@@ -1206,6 +1220,12 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
 
     // --- Summary + explicit Apply gate ---
     let mut cfg = build_config(&theme_pick);
+    // Only a pick that differs from what is already effective writes an rc
+    // line; keeping the default (or the persisted value) leaves the file
+    // untouched so the runtime default can keep evolving.
+    if completion_style_pick != current_completion_style.as_str() {
+        cfg.completion_style = completion_style_pick;
+    }
     print_config_summary(
         &cfg,
         &theme_pick,
@@ -1779,6 +1799,63 @@ fn ask_plugin_collection(io: &mut WizardIo, t: &Lang) -> Option<Option<String>> 
         _ => None,
     };
     Some(name.map(str::to_string))
+}
+
+/// The TAB completion shape question (2026-10-12 discovery surface). The
+/// user's current effective style is pre-highlighted — on a re-run that
+/// means "press Enter, change nothing". The four alternatives are each
+/// described by their upstream shell identity, so the choice is legible
+/// even to someone who never knew `NIU_COMPLETION_STYLE` existed. `None` =
+/// Ctrl-C.
+fn ask_completion_style(
+    io: &mut WizardIo,
+    t: &Lang,
+    current: crate::config::CompletionStyle,
+) -> Option<String> {
+    use crate::config::CompletionStyle;
+    let entries = [
+        (
+            CompletionStyle::Gnu,
+            "gnu",
+            t.tr("default — TAB completes the prefix; TAB again lists, GNU readline style"),
+        ),
+        (
+            CompletionStyle::Ide,
+            "ide",
+            t.tr("VS Code-style popup with descriptions (the pre-1.4.1 default)"),
+        ),
+        (
+            CompletionStyle::Column,
+            "column",
+            t.tr("zsh-style multi-column grid"),
+        ),
+        (
+            CompletionStyle::List,
+            "list",
+            t.tr("fish-style vertical list with descriptions"),
+        ),
+        (
+            CompletionStyle::Inline,
+            "inline",
+            t.tr("bash menu-complete: TAB inserts and cycles candidates"),
+        ),
+    ];
+    let default_idx = entries
+        .iter()
+        .position(|(style, _, _)| *style == current)
+        .unwrap_or(0);
+    let options: Vec<String> = entries
+        .iter()
+        .map(|(_, name, description)| format!("{}  {}", pad_display(name, 10), description))
+        .collect();
+    let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let idx = io.choice(
+        t.tr("  \u{2328}\u{fe0f}  TAB completion style?"),
+        default_idx,
+        &option_refs,
+        t.tr("  |  change any time with `niu config set completion.style <name>` or NIU_COMPLETION_STYLE"),
+    )?; // cancelled
+    Some(entries[idx].1.to_string())
 }
 
 /// The recorded niu-git answer, when the user gave a lasting one ("never",
@@ -2671,6 +2748,60 @@ mod tests {
         clear_stale_apply_pending_marker(&home);
         assert!(!apply_pending_path(&home).is_file());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The completion style step (2026-10-12) pre-highlights the user's
+    /// current effective style, so Enter means "no change" and any other
+    /// pick is a deliberate move. The four alternatives are all offered
+    /// with descriptions.
+    #[test]
+    fn completion_style_step_preselects_the_effective_style() {
+        use crate::config::CompletionStyle;
+        // Current style gnu: the default highlight IS gnu; Enter keeps it.
+        let mut io = WizardIo::scripted(&[0]);
+        let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Gnu).unwrap();
+        assert_eq!(pick, "gnu");
+        // Current style ide: the highlight sits on ide; a scripted 0 is the
+        // user explicitly choosing gnu (the first row).
+        let mut io = WizardIo::scripted(&[0]);
+        let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Ide).unwrap();
+        assert_eq!(pick, "gnu");
+        // Every one of the five shapes is reachable by index.
+        for (index, expected) in [(1usize, "ide"), (2, "column"), (3, "list"), (4, "inline")] {
+            let mut io = WizardIo::scripted(&[index]);
+            let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Gnu).unwrap();
+            assert_eq!(pick, expected, "option row {index}");
+        }
+        // Non-interactive io answers the default — the current style, so a
+        // scripted/piped `niu setup` never changes the user's shape.
+        let mut io = WizardIo::new(false);
+        let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Column).unwrap();
+        assert_eq!(pick, "column");
+        // Ctrl-C cancels.
+        let mut io = WizardIo::scripted(&[usize::MAX]);
+        assert!(ask_completion_style(&mut io, &Lang::En, CompletionStyle::Gnu).is_none());
+    }
+
+    /// A pick that differs from what is already effective writes its rc
+    /// line; keeping the current shape writes nothing (the wizard must not
+    /// pin a value the runtime default could later improve).
+    #[test]
+    fn completion_style_pick_lands_in_the_rc_only_when_it_differs() {
+        let mut cfg = build_config(&ThemePick::Keep);
+        assert!(
+            cfg.completion_style.is_empty(),
+            "a fresh wizard config carries no completion override"
+        );
+        assert!(
+            !generate_rc(&cfg).contains("NIU_COMPLETION_STYLE="),
+            "no rc line without an override: {}",
+            generate_rc(&cfg)
+        );
+
+        // The user moved off the effective style: the rc line appears.
+        cfg.completion_style = "ide".into();
+        let rc = generate_rc(&cfg);
+        assert!(rc.contains("NIU_COMPLETION_STYLE='ide'"), "{rc}");
     }
 
     #[test]
