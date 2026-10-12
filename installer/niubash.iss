@@ -57,16 +57,28 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "path"; Description: "Add Niubash to my user PATH"; Flags: checkedonce
 Name: "wtprofile"; Description: "Add or update the Windows Terminal profile"; Flags: checkedonce
+; niubash#211: the desktop shortcut exists so the WT form has something to
+; upgrade; default checked — the WT experience is the owner-preferred default.
+Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: checkedonce
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; niubash#211: these are the conhost-baseline forms (direct niu.exe — what
+; Win10 hosts with conhost). When WT is detected after install, the
+; --install-wt-shortcuts [Run] step rewrites the SAME link files in place to
+; `wt.exe -p Niubash`; same paths keeps Inno's uninstall log authoritative.
 [Icons]
 Name: "{group}\Niubash"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{%USERPROFILE}"; IconFilename: "{app}\assets\niubash-icon.ico"
+Name: "{autodesktop}\Niubash"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{%USERPROFILE}"; IconFilename: "{app}\assets\niubash-icon.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\winuxcmd\usr\bin\winuxcmd.exe"; Parameters: "wpm links rebuild --root ""{app}\winuxcmd"" --force"; WorkingDir: "{app}\winuxcmd\usr\bin"; StatusMsg: "Activating WinuxCmd command links..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--install-wt-profile --quiet"; StatusMsg: "Adding Windows Terminal profile..."; Flags: runhidden waituntilterminated; Tasks: wtprofile
+; niubash#211: after the profile lands, upgrade the shortcut files to the WT
+; form (wt.exe resolved at runtime: WindowsApps alias -> PATH -> registry).
+; --update-only so a declined desktopicon task never grows a desktop icon.
+Filename: "{app}\{#AppExeName}"; Parameters: "--install-wt-shortcuts --quiet --update-only --desktop ""{autodesktop}"" --start-menu ""{group}"""; StatusMsg: "Applying Windows Terminal shortcuts..."; Flags: runhidden waituntilterminated; Tasks: wtprofile
 
 [Code]
 const

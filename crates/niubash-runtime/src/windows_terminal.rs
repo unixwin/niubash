@@ -4,7 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const NIU_PROFILE_GUID: &str = "{7d8b7341-8f4d-4c56-91f0-4ad220d41db1}";
-const PROFILE_NAME: &str = "Niubash";
+/// The WT profile name the upsert registers. Public because the shortcut
+/// form (niubash#211) addresses the profile by this name in
+/// `wt.exe -p <name>` arguments.
+pub const NIU_PROFILE_NAME: &str = "Niubash";
+const PROFILE_NAME: &str = NIU_PROFILE_NAME;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProfileInstallSummary {
@@ -82,6 +86,28 @@ where
     }
 
     Ok(summary)
+}
+
+/// True when a Niubash profile exists in at least one candidate WT
+/// settings.json on this machine. The shortcut form (niubash#211) gates its
+/// `wt.exe -p` branch on this: `wt -p` against an unregistered profile name
+/// errors out, so a machine whose profile install was skipped (or whose
+/// settings directories never appeared) must keep the conhost baseline.
+pub fn niubash_profile_registered() -> bool {
+    niubash_profile_registered_in(&candidate_settings_paths())
+}
+
+/// Testable form of [`niubash_profile_registered`]: checks explicit
+/// settings paths, so tests can stage stable + Preview layouts.
+pub fn niubash_profile_registered_in(settings_paths: &[PathBuf]) -> bool {
+    settings_paths
+        .iter()
+        .filter(|path| path.is_file())
+        .any(|path| {
+            read_settings_or_default(path)
+                .map(|root| niubash_profile_exists(&root))
+                .unwrap_or(false)
+        })
 }
 
 fn candidate_settings_paths() -> Vec<PathBuf> {
@@ -387,5 +413,52 @@ mod tests {
 
         let root: Value = serde_json::from_str(&fs::read_to_string(settings).unwrap()).unwrap();
         assert_eq!(root["defaultProfile"], NIU_PROFILE_GUID);
+    }
+
+    #[test]
+    fn profile_registration_detected_in_any_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let stable = temp.path().join("stable").join("settings.json");
+        let preview = temp.path().join("preview").join("settings.json");
+        fs::create_dir_all(stable.parent().unwrap()).unwrap();
+        fs::create_dir_all(preview.parent().unwrap()).unwrap();
+        fs::write(&stable, json!({ "profiles": { "list": [] } }).to_string()).unwrap();
+        fs::write(
+            &preview,
+            serde_json::to_string_pretty(&json!({
+                "profiles": {
+                    "list": [ { "guid": NIU_PROFILE_GUID, "name": PROFILE_NAME } ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Multi-channel machine (stable + Preview both installed): the
+        // profile registered under Preview alone counts as registered.
+        assert!(niubash_profile_registered_in(&[
+            stable.clone(),
+            preview.clone()
+        ]));
+
+        // And the same check over stable alone stays false — the probe is
+        // per settings file, not per machine-wide assumption.
+        assert!(!niubash_profile_registered_in(&[stable]));
+    }
+
+    #[test]
+    fn profile_registration_false_for_missing_or_profileless_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing").join("settings.json");
+        let profileless = temp.path().join("profileless").join("settings.json");
+        fs::create_dir_all(profileless.parent().unwrap()).unwrap();
+        fs::write(
+            &profileless,
+            json!({ "profiles": { "list": [] } }).to_string(),
+        )
+        .unwrap();
+
+        assert!(!niubash_profile_registered_in(&[missing]));
+        assert!(!niubash_profile_registered_in(&[profileless]));
     }
 }

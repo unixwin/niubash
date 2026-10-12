@@ -12,6 +12,8 @@
 //!   niu plugin source <cmd> → manage external plugin-manager sources
 //!   niu --completion-probe "line" [cursor] → print REPL completions
 //!   niu --install-wt-profile → add/update the Windows Terminal profile
+//!   niu --install-wt-shortcuts → desktop/Start-menu shortcuts (WT form
+//!     `wt.exe -p Niubash` when WT + profile are present, conhost otherwise)
 //!   niu --self-update → download and run the latest installer
 //!   self-update / update-niubash → REPL commands for Niubash self-update
 
@@ -196,6 +198,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 | "--repl-command"
                 | "--completion-probe"
                 | "--install-wt-profile"
+                | "--install-wt-shortcuts"
                 | "--self-update"
                 | "--encoded-command"
         ) && !legacy_command_mode_has_post_c_login_flag(args)
@@ -313,6 +316,7 @@ fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
         "--repl-command",
         "--completion-probe",
         "--install-wt-profile",
+        "--install-wt-shortcuts",
         "--self-update",
         "--encoded-command",
     ];
@@ -357,6 +361,10 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
         }
         "--install-wt-profile" => {
             install_windows_terminal_profile(rest)?;
+            Ok(())
+        }
+        "--install-wt-shortcuts" => {
+            install_windows_terminal_shortcuts(rest)?;
             Ok(())
         }
         "--self-update" => self_update::run(rest),
@@ -1381,6 +1389,10 @@ fn print_usage() {
     println!("  --install-wt-profile      Add/update the Windows Terminal profile");
     println!("      --set-default         Also set Niubash as the WT default profile");
     println!("      --quiet               Suppress non-error profile output");
+    println!("  --install-wt-shortcuts    Rewrite desktop/Start-menu shortcuts (WT form");
+    println!("                            `wt.exe -p Niubash` when WT is detected)");
+    println!("      --update-only         Only touch shortcut files that already exist");
+    println!("      --quiet               Suppress non-error shortcut output");
     println!("  --self-update             Download and run the latest release installer");
     println!("      --check               Only report the latest release");
     println!("      --dry-run             Download installer without running it");
@@ -3568,6 +3580,97 @@ fn install_windows_terminal_profile(_rest: &[String]) -> anyhow::Result<()> {
     anyhow::bail!("--install-wt-profile is only supported on Windows")
 }
 
+/// niubash#211: (re)write the desktop and Start-menu shortcuts in the WT
+/// form — `wt.exe -p Niubash` — when a `wt.exe` resolves AND the Niubash WT
+/// profile is registered; otherwise the conhost baseline (direct `niu.exe`,
+/// the shape the installer's `[Icons]` entries always carried). Options:
+///
+/// - `--quiet` suppress the per-link report
+/// - `--update-only` touch only links that already exist (installer handoff:
+///   never grow an icon the user's task selection declined)
+/// - `--desktop <dir>` / `--start-menu <dir>` explicit link directories
+///   (the installer passes `{autodesktop}` / `{group}`); without them the
+///   known-folder defaults are used
+#[cfg(windows)]
+fn install_windows_terminal_shortcuts(rest: &[String]) -> anyhow::Result<()> {
+    let mut quiet = false;
+    let mut update_only = false;
+    let mut desktop_dir: Option<PathBuf> = None;
+    let mut start_menu_dir: Option<PathBuf> = None;
+
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--quiet" => quiet = true,
+            "--update-only" => update_only = true,
+            "--desktop" => {
+                desktop_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("--desktop requires a directory")
+                    })?))
+            }
+            "--start-menu" => {
+                start_menu_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("--start-menu requires a directory")
+                    })?))
+            }
+            unknown => anyhow::bail!("unknown --install-wt-shortcuts option '{}'", unknown),
+        }
+    }
+
+    let commandline = std::env::current_exe()?;
+    let plan = niubash_runtime::shortcut::plan_for_installation(
+        &commandline,
+        shortcut_icon_path(&commandline).as_deref(),
+    );
+
+    let (desktop_lnk, start_menu_lnk) = match (desktop_dir, start_menu_dir) {
+        (Some(desktop), Some(start_menu)) => (
+            desktop.join(niubash_runtime::shortcut::LNK_FILE_NAME),
+            start_menu.join(niubash_runtime::shortcut::LNK_FILE_NAME),
+        ),
+        _ => niubash_runtime::shortcut::default_shortcut_paths()
+            .ok_or_else(|| anyhow::anyhow!("could not resolve the desktop or Start-menu folder"))?,
+    };
+
+    let summary = niubash_runtime::shortcut::install_shortcuts(
+        &plan,
+        &desktop_lnk,
+        &start_menu_lnk,
+        update_only,
+    )?;
+
+    if !quiet {
+        match plan.form {
+            niubash_runtime::shortcut::ShortcutForm::WindowsTerminal { wt_exe } => {
+                println!(
+                    "Shortcut form: Windows Terminal ({} -p ...)",
+                    wt_exe.display()
+                );
+            }
+            niubash_runtime::shortcut::ShortcutForm::Conhost => {
+                println!("Shortcut form: direct niu.exe (Windows Terminal not detected)");
+            }
+        }
+        for path in &summary.written {
+            println!("Wrote shortcut: {}", path.display());
+        }
+        for path in &summary.skipped {
+            println!("Skipped (not present): {}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
+/// Windows Terminal shortcut management is Windows-only; fail explicitly
+/// instead of silently succeeding on Unix.
+#[cfg(not(windows))]
+fn install_windows_terminal_shortcuts(_rest: &[String]) -> anyhow::Result<()> {
+    anyhow::bail!("--install-wt-shortcuts is only supported on Windows")
+}
+
 #[cfg(windows)]
 fn windows_terminal_icon_path(commandline: &std::path::Path) -> Option<PathBuf> {
     let app_dir = commandline.parent()?;
@@ -3579,6 +3682,22 @@ fn windows_terminal_icon_path(commandline: &std::path::Path) -> Option<PathBuf> 
     ]
     .into_iter()
     .find(|path| path.is_file())
+}
+
+/// The icon a generated shortcut shows. A `.lnk` icon can only reference
+/// `.ico` / exe resources (the WT profile's PNG list does not apply here),
+/// so prefer the bundled ico and fall back to the niu.exe embedded icon —
+/// the WT-form link must still wear the Niubash icon, not the WT one.
+#[cfg(windows)]
+fn shortcut_icon_path(commandline: &std::path::Path) -> Option<PathBuf> {
+    let app_dir = commandline.parent()?;
+    [
+        app_dir.join("assets").join("niubash-icon.ico"),
+        app_dir.join("niubash-icon.ico"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .or_else(|| Some(commandline.to_path_buf()))
 }
 
 fn print_completion_probe(rest: &[String]) -> anyhow::Result<()> {
