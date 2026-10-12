@@ -42,13 +42,15 @@ fn cwd_cd_pwd_and_windows_child_process_agree() {
 
     let stdout = stdout_lines(&output);
     assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], &target_shell_path);
+    // rubash#556 (P0 rubash#537): `pwd` renders the POSIX persona form
+    // unconditionally; the Win32 child still reports its own native cwd —
+    // the spawn boundary keeps native spelling (path contract).
+    let Some(target_persona_path) = slash_drive_path(&target) else {
+        let _ = std::fs::remove_dir_all(temp);
+        return;
+    };
+    assert_same_path(&stdout[0], &target_persona_path);
     assert_same_path(&stdout[1], &target_shell_path);
-    assert!(
-        !stdout[0].starts_with("/c/"),
-        "pwd must prefer Windows-native drive paths, got {:?}",
-        stdout[0]
-    );
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -232,8 +234,13 @@ fn bash_style_login_option_after_c_reaches_rubash() {
     let _ = std::fs::remove_dir_all(temp);
 }
 
+/// Slash-drive spelling stays accepted *input*; since rubash#556
+/// (P0 rubash#537) the engine's own `$PWD`/`pwd` rendering is the POSIX
+/// persona form, so the persona spelling is also the default *output* —
+/// the old "compat input must not become default output" pin belonged to the
+/// retired native-style hatch (the test formerly asserted a native `pwd`).
 #[test]
-fn slash_drive_paths_are_compat_input_not_default_output() {
+fn slash_drive_input_cd_works_and_pwd_renders_persona_form() {
     if !cfg!(windows) {
         return;
     }
@@ -254,12 +261,7 @@ fn slash_drive_paths_are_compat_input_not_default_output() {
 
     let stdout = stdout_lines(&output);
     assert_eq!(stdout.len(), 1, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], "C:/Users");
-    assert!(
-        !stdout[0].starts_with("/c/"),
-        "compat input must not become default output, got {:?}",
-        stdout[0]
-    );
+    assert_same_path(&stdout[0], "/c/Users");
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -285,6 +287,9 @@ fn slash_drive_root_cd_switches_to_drive_root() {
 
     let drive = (bytes[0] as char).to_ascii_uppercase();
     let drive_root = format!("{drive}:/");
+    // rubash#556 (P0 rubash#537): `pwd` renders the POSIX persona form
+    // (`/c/...`) unconditionally; the cmd.exe child keeps native spelling.
+    let persona_drive_root = format!("/{}/", drive.to_ascii_lowercase());
     let output = run_niu(
         &format!("cd /{}; pwd; cmd.exe /C cd", drive.to_ascii_lowercase()),
         &start,
@@ -294,7 +299,7 @@ fn slash_drive_root_cd_switches_to_drive_root() {
     assert_success(&output, "slash-drive root cd");
     let stdout = stdout_lines(&output);
     assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], &drive_root);
+    assert_same_path(&stdout[0], &persona_drive_root);
     assert_same_path(&stdout[1], &drive_root);
 
     let _ = std::fs::remove_dir_all(temp);
@@ -676,7 +681,13 @@ fn native_backslash_drive_paths_work_for_cd() {
     assert_success(&output, "native backslash path cd");
     let stdout = stdout_lines(&output);
     assert_eq!(stdout.len(), 1, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], &shell_path(&target));
+    // rubash#556 (P0 rubash#537): native backslash input stays accepted;
+    // `pwd` renders the POSIX persona form.
+    let Some(target_persona_path) = slash_drive_path(&target) else {
+        let _ = std::fs::remove_dir_all(temp);
+        return;
+    };
+    assert_same_path(&stdout[0], &target_persona_path);
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -702,6 +713,9 @@ fn drive_only_cd_and_bare_drive_commands_switch_to_drive_root() {
 
     let drive = (bytes[0] as char).to_ascii_uppercase();
     let drive_root = format!("{drive}:/");
+    // rubash#556 (P0 rubash#537): `pwd` renders the POSIX persona form
+    // (`/d/...`) unconditionally; the cmd.exe child keeps native spelling.
+    let persona_drive_root = format!("/{}/", drive.to_ascii_lowercase());
     let start_shell_path = shell_path(&start);
 
     let output = run_niu(
@@ -713,14 +727,14 @@ fn drive_only_cd_and_bare_drive_commands_switch_to_drive_root() {
     assert_success(&output, "drive-only cd");
     let stdout = stdout_lines(&output);
     assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], &drive_root);
+    assert_same_path(&stdout[0], &persona_drive_root);
     assert_same_path(&stdout[1], &drive_root);
 
     let output = run_niu(&format!("{drive}:; pwd; cmd.exe /C cd"), &start, &home, &[]);
     assert_success(&output, "bare drive command");
     let stdout = stdout_lines(&output);
     assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], &drive_root);
+    assert_same_path(&stdout[0], &persona_drive_root);
     assert_same_path(&stdout[1], &drive_root);
 
     let output = run_niu(
@@ -1066,7 +1080,13 @@ fn tilde_resolves_to_normal_windows_home() {
     let expected_home = shell_path(&home);
     let stdout = stdout_lines(&output);
     assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], &expected_home);
+    // rubash#556 (P0 rubash#537): `pwd` renders the POSIX persona form
+    // unconditionally; the cmd.exe child keeps native spelling.
+    let Some(expected_home_persona) = slash_drive_path(&home) else {
+        let _ = std::fs::remove_dir_all(temp);
+        return;
+    };
+    assert_same_path(&stdout[0], &expected_home_persona);
     assert_same_path(&stdout[1], &expected_home);
 
     let _ = std::fs::remove_dir_all(temp);
