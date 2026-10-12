@@ -5,8 +5,17 @@ use std::process::Command;
 fn main() {
     emit_rubash_revision();
 
-    #[cfg(windows)]
-    embed_windows_icon();
+    // Gate on the TARGET OS, not the host: the .res only links into PE
+    // binaries. `#[cfg(windows)]` here would describe the host and make
+    // `cargo check --target aarch64-linux-android` on a Windows dev box try
+    // to run the SDK's arm64 rc.exe, which is an arm64 binary and cannot
+    // launch on x64 (os error 216). Hosts cross-checking a windows target
+    // from non-windows OSes are not a supported flow (release builds Windows
+    // on Windows runners), and they now fail loudly instead of silently
+    // skipping the icon.
+    if std::env::var_os("CARGO_CFG_TARGET_OS").as_deref() == Some(std::ffi::OsStr::new("windows")) {
+        embed_windows_icon();
+    }
 }
 
 /// Locate a sibling `rubash` checkout. Only consulted when rubash is a path

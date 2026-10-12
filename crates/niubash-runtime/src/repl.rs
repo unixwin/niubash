@@ -871,6 +871,11 @@ fn add_menu_keybindings(keybindings: &mut Keybindings) {
     );
 }
 
+/// Ctrl+V -> system clipboard paste. Only wired when reedline carries the
+/// `system_clipboard` feature (gated to non-android targets in Cargo.toml,
+/// niubash#207): the PasteSystem edit command only exists under that feature,
+/// and android has no system clipboard to paste from.
+#[cfg(not(target_os = "android"))]
 fn add_system_clipboard_keybindings(keybindings: &mut Keybindings) {
     keybindings.add_binding(
         KeyModifiers::CONTROL,
@@ -878,6 +883,9 @@ fn add_system_clipboard_keybindings(keybindings: &mut Keybindings) {
         ReedlineEvent::Edit(vec![EditCommand::PasteSystem]),
     );
 }
+
+#[cfg(target_os = "android")]
+fn add_system_clipboard_keybindings(_keybindings: &mut Keybindings) {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeKeymapTarget {
