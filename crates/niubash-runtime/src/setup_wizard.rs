@@ -2750,6 +2750,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// The completion style step (2026-10-12) pre-highlights the user's
+    /// current effective style, so Enter means "no change" and any other
+    /// pick is a deliberate move. The four alternatives are all offered
+    /// with descriptions.
+    #[test]
+    fn completion_style_step_preselects_the_effective_style() {
+        use crate::config::CompletionStyle;
+        // Current style gnu: the default highlight IS gnu; Enter keeps it.
+        let mut io = WizardIo::scripted(&[0]);
+        let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Gnu).unwrap();
+        assert_eq!(pick, "gnu");
+        // Current style ide: the highlight sits on ide; a scripted 0 is the
+        // user explicitly choosing gnu (the first row).
+        let mut io = WizardIo::scripted(&[0]);
+        let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Ide).unwrap();
+        assert_eq!(pick, "gnu");
+        // Every one of the five shapes is reachable by index.
+        for (index, expected) in [(1usize, "ide"), (2, "column"), (3, "list"), (4, "inline")] {
+            let mut io = WizardIo::scripted(&[index]);
+            let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Gnu).unwrap();
+            assert_eq!(pick, expected, "option row {index}");
+        }
+        // Non-interactive io answers the default — the current style, so a
+        // scripted/piped `niu setup` never changes the user's shape.
+        let mut io = WizardIo::new(false);
+        let pick = ask_completion_style(&mut io, &Lang::En, CompletionStyle::Column).unwrap();
+        assert_eq!(pick, "column");
+        // Ctrl-C cancels.
+        let mut io = WizardIo::scripted(&[usize::MAX]);
+        assert!(ask_completion_style(&mut io, &Lang::En, CompletionStyle::Gnu).is_none());
+    }
+
+    /// A pick that differs from what is already effective writes its rc
+    /// line; keeping the current shape writes nothing (the wizard must not
+    /// pin a value the runtime default could later improve).
+    #[test]
+    fn completion_style_pick_lands_in_the_rc_only_when_it_differs() {
+        let mut cfg = build_config(&ThemePick::Keep);
+        assert!(
+            cfg.completion_style.is_empty(),
+            "a fresh wizard config carries no completion override"
+        );
+        assert!(
+            !generate_rc(&cfg).contains("NIU_COMPLETION_STYLE="),
+            "no rc line without an override: {}",
+            generate_rc(&cfg)
+        );
+
+        // The user moved off the effective style: the rc line appears.
+        cfg.completion_style = "ide".into();
+        let rc = generate_rc(&cfg);
+        assert!(rc.contains("NIU_COMPLETION_STYLE='ide'"), "{rc}");
+    }
+
     #[test]
     fn generated_rc_is_clean_of_the_retired_stack() {
         let rc = generate_rc(&clean_cfg());
