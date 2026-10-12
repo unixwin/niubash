@@ -290,7 +290,8 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             shell.executor.set_positional_params(args[2..].to_vec());
             let code = shell.execute_script(&content)?;
             let code = shell.finish_with_exit_trap(code)?;
-            finish_one_shot(&shell, code)
+            finish_one_shot(&shell, code);
+            Ok(())
         }
     }
 }
@@ -378,7 +379,8 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             shell.executor.set_env("__RUBASH_IS_C", "1");
             let code = shell.execute_script(&command)?;
             let code = shell.finish_with_exit_trap(code)?;
-            finish_one_shot(&shell, code)
+            finish_one_shot(&shell, code);
+            Ok(())
         }
         "-C" | "--repl-command" => run_repl_command(word, leading_options, rest),
         // Only reachable for the legacy `niu -c -l <cmd>` shape: a plain
@@ -405,7 +407,8 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             niubash_runtime::startup_trace::tick("-c: execute_script");
             let code = shell.finish_with_exit_trap(code)?;
             niubash_runtime::startup_trace::tick("-c: exit trap");
-            finish_one_shot(&shell, code)
+            finish_one_shot(&shell, code);
+            Ok(())
         }
         other => anyhow::bail!("unknown launcher word '{other}'"),
     }
@@ -543,7 +546,8 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         }
         let code = shell.finish_with_exit_trap(code)?;
         niubash_runtime::startup_trace::tick("invocation: exit trap");
-        finish_one_shot(&shell, code)
+        finish_one_shot(&shell, code);
+        return Ok(());
     }
     if let Some(script_name) = invocation.script {
         // GNU: `bash -i script` is an interactive shell (forced_interactive)
@@ -558,7 +562,8 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         let content = std::fs::read_to_string(script_arg_to_host_path(&script_name))?;
         let code = shell.execute_script(&content)?;
         let code = shell.finish_with_exit_trap(code)?;
-        finish_one_shot(&shell, code)
+        finish_one_shot(&shell, code);
+        return Ok(());
     }
     // GNU bash -i with a non-tty stdin still drives readline
     // (parse.y yy_readline_get -> bashline.c bash_readline): prompts and the
@@ -1204,6 +1209,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
 
     let code = shell.finish_with_exit_trap(0)?;
     finish_one_shot(&shell, code);
+    Ok(())
 }
 
 fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
@@ -3821,9 +3827,21 @@ fn read_cwd_state(state: &Path) -> Option<PathBuf> {
 /// Records even when the command failed: this is `; pwd > state`, not
 /// `&& pwd > state` — one failed command must not drop the directory.
 /// Write failures are reported but never change the exit code.
-fn finish_one_shot(shell: &niubash_runtime::Shell, code: i32) -> ! {
+///
+/// A nonzero code exits immediately (bash's exit_jump skips the normal
+/// teardown). rc 0 returns to the caller so `main` unwinds normally — and
+/// the unwind is load-bearing: `RubashHistoryProvider::drop`, the
+/// session-end HISTFILE write (niubash#265), only runs on a normal return.
+/// #272 routed every one-shot exit through `std::process::exit`, which
+/// skips `Drop`, silently stranding that write: a one-shot
+/// `history -c` left the file holding the pre-clear list
+/// (host_contract::history_and_fc_use_the_host_history_provider).
+fn finish_one_shot(shell: &niubash_runtime::Shell, code: i32) {
     record_cwd_state(shell);
-    piped_stdout::finish_and_exit(code)
+    piped_stdout::finish();
+    if code != 0 {
+        std::process::exit(code);
+    }
 }
 
 fn record_cwd_state(shell: &niubash_runtime::Shell) {
