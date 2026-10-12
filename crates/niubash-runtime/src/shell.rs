@@ -103,6 +103,15 @@ pub struct Shell {
     pub history_path: PathBuf,
     pub history_max_size: usize,
     pub history_ignore_space_prefixed: bool,
+    /// Handle to the hosted history provider, retained so a host can run
+    /// the session-end write explicitly (see
+    /// [`Shell::flush_session_history`]). The standard one-shot funnel does
+    /// NOT call this: since #281 its rc-0 exits return from main normally,
+    /// so the provider's own Drop flush runs — this exists for embedding
+    /// hosts that terminate through `std::process::exit` on paths the
+    /// funnel does not own. `None` in test constructions that never touch
+    /// history.
+    history_provider: Option<Rc<RefCell<crate::history::RubashHistoryProvider>>>,
     pub history_mode: crate::config::HistoryMode,
     pub menu_config: MenuConfig,
     pub editor_mode: EditorMode,
@@ -444,12 +453,14 @@ impl Shell {
         // startup over the history file (bashhist.c:320 load_history()
         // tolerates every read failure), so `niu -c` stays byte-stable for
         // agent one-shot use.
-        let history_provider = crate::history::RubashHistoryProvider::with_file(
-            config.history.max_size,
-            history_path.clone(),
-            config.history.mode,
-        );
-        executor.set_history_provider(Rc::new(RefCell::new(history_provider)));
+        let history_provider = Rc::new(RefCell::new(
+            crate::history::RubashHistoryProvider::with_file(
+                config.history.max_size,
+                history_path.clone(),
+                config.history.mode,
+            ),
+        ));
+        executor.set_history_provider(history_provider.clone());
         crate::startup_trace::tick("history provider");
 
         // 8. Completion state.
@@ -480,6 +491,7 @@ impl Shell {
             history_path,
             history_max_size: config.history.max_size,
             history_ignore_space_prefixed: config.history.ignore_space_prefixed,
+            history_provider: Some(history_provider),
             history_mode: config.history.mode,
             menu_config: config.menus.with_env_overrides(),
             editor_mode: config.editor.edit_mode,
@@ -1899,6 +1911,25 @@ impl Shell {
                 }
                 Ok(1)
             }
+        }
+    }
+
+    /// Run the session-end history write on demand (GNU exit_shell ->
+    /// write_history, bashhist.c).
+    ///
+    /// The standard exit paths do NOT need this: the one-shot funnel's rc-0
+    /// exits return from main normally (#281), so the provider's Drop flush
+    /// runs, and interactive sessions unwind the same way. This exists for
+    /// embedding hosts that terminate through `std::process::exit` on a
+    /// path the funnel does not own — a hard exit skips Drop, so the write
+    /// must be made explicitly. Best-effort exactly like every
+    /// history-file write: never fails, never reaches stderr.
+    pub fn flush_session_history(&self) {
+        let Some(handle) = self.history_provider.as_ref() else {
+            return;
+        };
+        if let Ok(mut provider) = handle.try_borrow_mut() {
+            provider.flush_at_session_end();
         }
     }
 
@@ -5618,6 +5649,7 @@ niu_git_comp() {
             history_path: PathBuf::from(".niubash_history"),
             history_max_size: 10000,
             history_ignore_space_prefixed: false,
+            history_provider: None,
             history_mode: crate::config::HistoryMode::default(),
             menu_config: MenuConfig::default(),
             editor_mode: EditorMode::Emacs,
