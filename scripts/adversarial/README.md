@@ -1,8 +1,8 @@
 # scripts/adversarial/ — the injection toolkit
 
 Reusable fault injectors for the adversarial matrix
-([docs/audit/adversarial-matrix.md](../../docs/audit/adversarial-matrix.md),
-[lanes/advmatrix.json](../../lanes/advmatrix.json)). Each tool is
+([docs/audit/adversarial-matrix.md](../../docs/audit/adversarial-matrix.md)).
+Each tool is
 self-contained (stdlib only, PowerShell 5.1 compatible, no admin unless
 stated), takes `--log-file`, and is sandbox-safe: nothing here touches a
 real profile or the network outside 127.0.0.1.
