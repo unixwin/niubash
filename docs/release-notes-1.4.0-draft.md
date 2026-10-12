@@ -37,10 +37,6 @@ round of honesty fixes.
   bionic-linked aarch64/armv7 Android zips (ELF-verified), OpenHarmony
   aarch64 check-only for now; both legs are continue-on-error and outside
   the release needs while they season.
-- **carapace-bin completion source** (#243): Tab completion for
-  third-party commands (git, curl, gh, docker, … ~1200 upstream specs)
-  with descriptions, whenever carapace-bin is installed
-  (`NIU_CARAPACE=off` disables; local definitions always win).
 - **`niu doctor` timing advice** (#241): points timing-sensitive scripts
   at the bash 5 builtin `$EPOCHREALTIME`/`$EPOCHSECONDS` instead of
   paying Windows process creation for every `$(date +%s%N)`.
@@ -60,6 +56,18 @@ round of honesty fixes.
 - **WinuxCmd applet completions compiled in** (#172): all 180 bundled
   applets complete with real flags and descriptions with zero
   configuration.
+
+### Changed
+
+- **Completion providers live in the rc data layer** (#243): the
+  carapace-bin completion source that #243 merged into the shell core is
+  removed before release (no tag ever carried it, so there is nothing to
+  migrate); providers integrate through the standard bash completion
+  protocol from `~/.niubashrc` instead, and `niu setup` offers an opt-in
+  carapace-bin snippet (default off). The native completion layers —
+  embedded WinuxCmd applet TOMLs, definition files, `complete` compspecs,
+  compdef functions — are unchanged. See the new "External Completion
+  Providers" docs page.
 
 ### Fixed
 
@@ -109,8 +117,6 @@ round of honesty fixes.
   the #202 author payload drops from a >300 s timeout to ~4.6 s (#252).
 - Release binaries are stripped (#228): smaller downloads and
   self-updates across all platforms.
-- carapace completion results are cached per session (5-minute TTL):
-  warm invocations cost 104–146 ms once per shape, then filter locally.
 - Timing scripts: `$EPOCHREALTIME` expands in microseconds where each
   external `date` call paid 10–30 ms of process creation (#241).
 - Engine: O(1) per-command boundary on arithmetic loops (rubash, #437
@@ -140,9 +146,6 @@ niubash 1.4.0 是一个兼容性与手感版本：引擎进一步对齐 GNU Bash
 - **Android / OpenHarmony 目标进入发版 CI 孵化**（#247）：bionic 链接
   的 aarch64/armv7 Android zip（ELF 校验）；OpenHarmony aarch64 暂为
   check-only；两条腿 continue-on-error，不进 release needs。
-- **carapace-bin 补全源**（#243）：安装 carapace-bin 后，第三方命令
-  （git、curl、gh、docker……上游约 1200 份 spec）的 Tab 补全带描述
-  （`NIU_CARAPACE=off` 关闭；本地定义始终优先）。
 - **`niu doctor` 计时建议**（#241）：把计时敏感脚本指向 bash 5 内建
   `$EPOCHREALTIME`/`$EPOCHSECONDS`，不再为每次 `$(date +%s%N)` 支付
   Windows 进程创建开销。
@@ -160,6 +163,15 @@ niubash 1.4.0 是一个兼容性与手感版本：引擎进一步对齐 GNU Bash
   联网即可用插件发行版与搜索。
 - **WinuxCmd applet 补全内置**（#172）：180 个内置 applet 全部零配置
   带真实 flag 与描述补全。
+
+### 变更
+
+- **补全 provider 回归 rc 数据层**（#243）：#243 内嵌进 shell 核心的
+  carapace-bin 补全源在发版前移除（没有任何 tag 携带过它，无迁移负担）；
+  provider 改为从 `~/.niubashrc` 按标准 bash completion 协议接入，
+  `niu setup` 提供可选项（默认关）写入标准 carapace-bin 片段。原生补全层
+  —— 内置 WinuxCmd applet TOML、补全定义文件、`complete` compspec、
+  compdef 函数 —— 全部不变。见新文档页「External Completion Providers」。
 
 ### 修复
 
@@ -203,8 +215,6 @@ niubash 1.4.0 是一个兼容性与手感版本：引擎进一步对齐 GNU Bash
   200 行粘贴墙钟 15–17 s → 3.9 s；#202 作者载荷从 >300 s 超时降到
   约 4.6 s（#252）。
 - 发版二进制去除符号表（#228）：全平台下载与自更新更小。
-- carapace 补全结果按会话缓存（5 分钟 TTL）：每形状仅一次 104–146 ms
-  热调用，其余本地过滤。
 - 计时脚本：`$EPOCHREALTIME` 微秒级展开，替代每次 10–30 ms 的外部
   `date` 进程创建（#241）。
 - 引擎：算术循环每命令边界 O(1)（rubash，#437 跟进，本轮 master）。

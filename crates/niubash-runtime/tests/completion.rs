@@ -125,6 +125,54 @@ description = "fixture flag"
     let _ = std::fs::remove_dir_all(temp_dir);
 }
 
+/// The bash_import channel: a standard bash completion script (the shape
+/// external providers ship) dropped as `<cmd>.bash` in a completion dir is
+/// parsed into a CommandDef and serves flag candidates — no provider code in
+/// the shell core, the script stays user data.
+#[test]
+fn bash_completion_script_serves_candidates_through_bash_import() {
+    let temp_dir = unique_temp_dir("niubash-bash-import-provider");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    // Standard bash completion code: opts= enumeration plus a
+    // case "${prev}" block with compgen value lists.
+    std::fs::write(
+        temp_dir.join("providertool.bash"),
+        r#"
+_providertool() {
+    local opts
+    opts="-h --help --format --color"
+    case "${prev}" in
+        --format|-f)
+            COMPREPLY=($(compgen -W "json yaml table" -- "${cur}"))
+            return 0
+            ;;
+        --color)
+            COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+            return 0
+            ;;
+        *)
+            COMPREPLY=()
+            ;;
+    esac
+}
+complete -F _providertool providertool
+"#,
+    )
+    .unwrap();
+
+    let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+    {
+        let mut s = state.lock().unwrap();
+        s.load_completion_dirs(&[temp_dir.clone()]);
+    }
+
+    assert_suggests(&state, "providertool --format ", "json");
+    assert_suggests(&state, "providertool --format ", "yaml");
+    assert_suggests(&state, "providertool --format ", "table");
+
+    let _ = std::fs::remove_dir_all(temp_dir);
+}
+
 #[test]
 fn user_toml_loads_command_definition_without_runtime_defaults() {
     let temp_dir = unique_temp_dir("niubash-completion-override");

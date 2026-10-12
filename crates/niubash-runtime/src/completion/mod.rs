@@ -2,7 +2,6 @@
 // Provides Tab completion for commands, paths, and variables
 
 pub mod bash_import;
-pub mod carapace;
 pub mod command;
 pub mod completer;
 pub mod external;

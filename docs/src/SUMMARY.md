@@ -5,6 +5,7 @@
 - [Getting Started](getting-started.md)
 - [Advanced Usage](advanced-usage.md)
 - [Plugins & the Bash Ecosystem](plugins.md)
+- [External Completion Providers](external-completion-providers.md)
 - [Hooks](hooks.md)
 - [Install & Self-Update](installer.md)
 - [Bash Compatibility Matrix](rubash-bash-compat-matrix.md)

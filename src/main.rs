@@ -3593,8 +3593,21 @@ fn print_completion_probe(rest: &[String]) -> anyhow::Result<()> {
     };
     let mut shell = niubash_runtime::Shell::new()?;
     shell.run_startup_rc();
-    for suggestion in shell.completion_probe(line, cursor_pos) {
-        println!("{}", suggestion);
+    // The REPL loads the rc-declared completion functions (NIU_COMPDEFS)
+    // after sourcing and installs the completion bridge before the line
+    // editor runs (repl.rs); the probe mirrors that sequence so compdef and
+    // compspec candidates reach the same completer state a Tab press sees.
+    shell.load_user_compdefs();
+    let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+    niubash_runtime::shell::install_completion_bridge(&shell);
+    // Sync the completer state, then run the completer with NO borrow held
+    // on the shell: candidate generation re-enters the engine through the
+    // bridge (compdef hooks run shell functions), exactly as at a live Tab.
+    shell.borrow().update_completion_state();
+    let mut completer =
+        niubash_runtime::completion::NiubashCompleter::new(shell.borrow().completion_state.clone());
+    for suggestion in completer.complete(line, cursor_pos.min(line.len())) {
+        println!("{}", suggestion.value);
     }
     Ok(())
 }

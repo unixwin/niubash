@@ -209,6 +209,55 @@ fn argument_position_does_not_suggest_commands() {
     assert_not_contains(&suggestions, "grep");
 }
 
+// ── External completion providers integrate as rc data ──────────────────────
+//
+// The shell core carries no third-party completion provider (the embedded
+// carapace source from #243 was removed before 1.4.0): providers integrate
+// through the startup rc, as data, the same way a zsh user sources a
+// completion hook. These probes source mock provider code from
+// ~/.niubashrc and assert candidates reach the Tab surface.
+
+/// A provider speaking the GNU static protocol: a `complete -W` compspec
+/// registered from rc-sourced code serves wordlist candidates at Tab.
+#[test]
+fn rc_sourced_compspec_wordlist_serves_candidates() {
+    let env = ProbeEnv::new("niubash-completion-rc-compspec");
+    env.write_primary_rc(
+        r#"# external provider hook — standard bash completion code (data layer)
+complete -W 'status switch merge rebase' providertool
+"#,
+    );
+
+    let suggestions = run_probe("providertool s", &env, &[]);
+
+    assert_contains(&suggestions, "status");
+    assert_contains(&suggestions, "switch");
+    assert_not_contains(&suggestions, "merge");
+}
+
+/// A provider speaking the shell-function protocol: an rc-declared compdef
+/// (NIU_COMPDEFS) runs the hook through the completion bridge and serves its
+/// `value<TAB>description` lines — the same shape carapace's fish output
+/// emits — filtered by the typed prefix.
+#[test]
+fn rc_sourced_provider_hook_function_serves_described_candidates() {
+    let env = ProbeEnv::new("niubash-completion-rc-provider-hook");
+    env.write_primary_rc(
+        r#"# external provider hook — carapace-style function, compdef registration
+_carapace_provider_hook() {
+    NIU_COMP_RESULT="checkout	Check out a branch"$'\n'"cherry-pick	Apply a commit"$'\n'"clean	Remove untracked files"
+}
+NIU_COMPDEFS="providercmd:_carapace_provider_hook"
+"#,
+    );
+
+    let suggestions = run_probe("providercmd ch", &env, &[]);
+
+    assert_contains(&suggestions, "checkout");
+    assert_contains(&suggestions, "cherry-pick");
+    assert_not_contains(&suggestions, "clean");
+}
+
 fn run_probe(line: &str, env: &ProbeEnv, extra_env: &[(&str, String)]) -> Vec<String> {
     let output = run_niu_probe(line, &env.start, &env.home, extra_env);
     assert_success(&output, line);
@@ -309,6 +358,11 @@ impl ProbeEnv {
 
     fn write_rc(&self, content: &str) {
         std::fs::write(self.home.join(".winuxshrc"), content).unwrap();
+    }
+
+    /// Write the primary startup rc (`~/.niubashrc`).
+    fn write_primary_rc(&self, content: &str) {
+        std::fs::write(self.home.join(".niubashrc"), content).unwrap();
     }
 }
 

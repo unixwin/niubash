@@ -26,30 +26,6 @@ All notable changes to Niubash are documented in this file.
 
 ### Added
 
-- carapace-bin completion source for third-party commands (niubash#187
-  "completion descriptions", spike on `feat/carapace-completions`): when a
-  carapace-bin binary is available (`NIU_CARAPACE` path, `PATH`, or
-  `<install>\opt\carapace\carapace.exe`; `NIU_CARAPACE=off` disables), Tab
-  completion for commands *without* a local completion definition (git,
-  curl, gh, docker, … — ~1200 specs upstream, MIT) now offers candidates
-  with descriptions, feeding the #187 description menu. Contract (verified
-  against v1.8.0): `carapace <command> fish <words...>` emits
-  `value<TAB>Description` lines, already prefix-filtered; `ERR`/`_` meta
-  lines are skipped. Winuxcmd applet TOMLs, bundle definitions and user
-  completion files always win — the carapace source stands down for every
-  covered command. Failures are invisible: a 300 ms hard timeout, silent
-  spawn/parse errors, and cache invalidation on `cd` (dynamic specs like
-  git branch lists are cwd-sensitive). Measured v1.8.0 invocation cost is
-  104-146 ms warm, above the interactive budget, so results are cached per
-  session keyed by (command, preceding words, word shape, cwd) with a
-  5-minute TTL; ordinary words fetch the full list once and are filtered
-  locally, so typing further characters hits the same cache entry. Bundle
-  decision deliberately deferred: carapace.exe is 87 MB (17 MB packed) —
-  adding it to `scripts/release/preinstall.json` needs a separate owner
-  call. Git's own spec does not resolve nested context through the CLI
-  bridge (`git commit <TAB>` falls back to top-level candidates; flag
-  completion works for static specs like cargo), noted as follow-up.
-
 - Doctor timing advice (niubash#201): `niu doctor` now carries an advisory
   row pointing timing/performance-sensitive scripts at the bash 5 builtin
   `$EPOCHREALTIME` / `$EPOCHSECONDS` instead of looping on the external
@@ -146,6 +122,26 @@ All notable changes to Niubash are documented in this file.
   byte-identical).
 
 ### Changed
+
+- Architecture correction before release: the carapace-bin completion source
+  merged from #243 is removed from the shell core. No shell hardcodes a
+  third-party completion provider into its source — the provider belongs in
+  the rc data layer, integrating through the standard bash completion
+  protocol the shell already speaks (`complete` compspecs, `NIU_COMPDEFS`
+  compdef functions, `<cmd>.toml`/`<cmd>.bash` definition files). The native
+  completion layers are unchanged (embedded WinuxCmd applet TOMLs, bundle
+  definitions, user completion files); `niu setup` grows an opt-in (default
+  off) rc snippet for carapace-bin — the same block a bash user writes by
+  hand, guarded and a no-op until carapace-bin is installed — and a new
+  docs page documents the rc-based contract for any provider that speaks
+  the bash completion protocol (carapace is one example). Binary-level tests
+  pin the rc route: a `complete -W` compspec and a compdef hook sourced from
+  `~/.niubashrc` both serve Tab candidates, and a standard `.bash` completion
+  script serves flag candidates through the bash-import channel. Interactive
+  Tab resolution of `complete -F`/`-C` hook functions remains an engine
+  (rubash) follow-up, documented in the provider page. Zero compatibility
+  debt: no 1.4.0 tag ever carried the embedded source, and the `NIU_CARAPACE`
+  variable was never a released surface (niubash#243, niubash#187).
 
 - command-not-found no longer advertises package managers by default
   (niubash#249): a typo like `win` prints only the GNU one-liner — the

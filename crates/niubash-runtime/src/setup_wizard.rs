@@ -442,6 +442,12 @@ pub struct WizardConfig {
     pub completion_style: String,
     /// Extra `alias name='cmd'` lines appended to the generated rc.
     pub aliases: Vec<(String, String)>,
+    /// Opt-in (default off): append the standard carapace-bin integration
+    /// snippet to the generated rc. The shell core carries no completion
+    /// provider — external providers integrate as rc data through the
+    /// standard bash completion protocol; the snippet is guarded and stays a
+    /// no-op until the user installs carapace-bin themselves.
+    pub external_completion_snippet: bool,
 }
 
 /// The theme question's outcome. `Keep` writes no theme lines, mirroring
@@ -1218,6 +1224,18 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
         }
     };
 
+    // --- Q4: external completion providers (opt-in, default off) ---
+    // The provider lives in the rc data layer, never in the shell core.
+    let external_completions = match ask_external_completion_provider(&mut io, &t) {
+        Some(choice) => choice,
+        // niubash#179 L02-3: Ctrl-C here must print the same cancelled
+        // note every other question prints — silent exit is a dead end.
+        None => {
+            print_cancelled_note();
+            return Ok(());
+        }
+    };
+
     // --- Summary + explicit Apply gate ---
     let mut cfg = build_config(&theme_pick);
     // Only a pick that differs from what is already effective writes an rc
@@ -1226,6 +1244,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     if completion_style_pick != current_completion_style.as_str() {
         cfg.completion_style = completion_style_pick;
     }
+    cfg.external_completion_snippet = external_completions;
     print_config_summary(
         &cfg,
         &theme_pick,
@@ -1747,6 +1766,40 @@ fn ask_niu_git(
     Some(NiuGitChoice::Skip)
 }
 
+/// Q4 — external completion providers (opt-in, default off). The shell core
+/// carries no completion provider (the #243 embedded carapace source was
+/// removed before release): providers integrate as rc data through the
+/// standard bash completion protocol. Accepting appends the standard
+/// carapace-bin rc snippet — the same block a bash user writes by hand —
+/// with the install requirement in a comment; niu installs nothing
+/// (download retraction 2026-10-04) and the guarded snippet stays a no-op
+/// until carapace-bin is on PATH. `None` = cancelled the wizard.
+fn ask_external_completion_provider(io: &mut WizardIo, t: &Lang) -> Option<bool> {
+    let options = [
+        format!(
+            "{}  {}",
+            pad_display(t.tr("Skip"), 14),
+            t.tr("default — add a provider later by editing the rc")
+        ),
+        format!(
+            "{}  {}",
+            pad_display(t.tr("carapace"), 14),
+            t.tr("append the standard carapace-bin snippet (requires carapace-bin)")
+        ),
+    ];
+    let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let idx = match io.choice(
+        t.tr("  \u{1f50c}  External completion providers (carapace-bin)?"),
+        0,
+        &option_refs,
+        t.tr("  \u{2502}  writes an rc snippet only — any tool speaking the bash completion protocol integrates the same way"),
+    ) {
+        Some(value) => value,
+        None => return None, // cancelled
+    };
+    Some(idx == 1)
+}
+
 fn wizard_answers_path(home: &std::path::Path) -> PathBuf {
     home.join(".niubash").join("wizard-answers.toml")
 }
@@ -2094,6 +2147,14 @@ fn print_config_summary(
             NiuGitChoice::Skip => t.tr("skipped").to_string(),
         },
     );
+    row(
+        "completions",
+        if cfg.external_completion_snippet {
+            t.tr("carapace rc snippet").to_string()
+        } else {
+            t.tr("unchanged").to_string()
+        },
+    );
     println!("  \u{2502}  {}", t.tr("everything else stays untouched"));
     println!();
 }
@@ -2278,6 +2339,27 @@ fn generate_rc(cfg: &WizardConfig) -> String {
     } else {
         String::new()
     };
+    // External completion providers (opt-in): the standard carapace-bin
+    // integration as rc data. Guarded, commented with the install
+    // requirement, and a no-op until the user installs carapace-bin —
+    // niu ships no provider and installs nothing.
+    let provider_block = if cfg.external_completion_snippet {
+        String::from(
+            r#"# External completion providers (opt-in) — integrate as rc data, the
+# standard bash-completion way. carapace-bin below is ONE example: any tool
+# that emits standard bash completion code (complete registrations) works
+# the same. niubash ships no provider: install carapace-bin yourself, e.g.
+#   wpm install carapace-bin
+# (or see https://github.com/carapace-sh/carapace-bin/releases). Until then
+# this block is a no-op.
+if command -v carapace >/dev/null 2>&1; then
+  source <(carapace _carapace)
+fi
+"#,
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"# Niubash interactive rc - generated by the setup wizard.
 # Edit this file with normal Niubash/bash syntax.
@@ -2301,7 +2383,7 @@ if [ -z "${{HOME:-}}" ] && [ -n "${{USERPROFILE:-}}" ]; then
 fi
 unset __niubash_home_drive __niubash_home_rest
 
-{external_block}{alias_block}{theme_note}
+{external_block}{alias_block}{theme_note}{provider_block}
 # Plugins are declared in ~/.niubash/plugins.toml (the spec); this one
 # bootstrap line reconciles on startup — quiet when everything is in sync
 # (set NIU_PLUGIN_BOOTSTRAP=off to skip).
@@ -2322,6 +2404,7 @@ command -v "${{NIU_SHELL:-niu}}" >/dev/null 2>&1 && "${{NIU_SHELL:-niu}}" plugin
         external_block = external.unwrap_or_default(),
         alias_block = alias_block,
         theme_note = theme_note,
+        provider_block = provider_block,
     )
 }
 
@@ -2439,6 +2522,17 @@ fn zh(en: &str) -> Option<&'static str> {
             "双框架 + 钩子 + 精选 bash 插件；fzf/starship 仅为安装建议（niu 不下载任何东西）",
         "  |  installs stay untrusted until `niu plugin trust`; Skip changes nothing" =>
             "  |  安装后保持未信任，待 `niu plugin trust` 审阅；跳过则不做任何改动",
+
+        // External completion providers question (Q4, opt-in)
+        "  \u{1f50c}  External completion providers (carapace-bin)?" =>
+            "  \u{1f50c}  外部补全 provider（carapace-bin）？",
+        "default — add a provider later by editing the rc" =>
+            "默认 —— 以后编辑 rc 自行添加 provider",
+        "append the standard carapace-bin snippet (requires carapace-bin)" =>
+            "追加标准 carapace-bin 接入片段（需自装 carapace-bin）",
+        "  \u{2502}  writes an rc snippet only — any tool speaking the bash completion protocol integrates the same way" =>
+            "  \u{2502}  只写入一段 rc 片段 —— 任何说 bash completion 协议的工具都能以同样方式接入",
+        "carapace rc snippet" => "carapace rc 片段",
 
         // Post-install theme pick (owner ruling 2026-10-03)
         "Trust now" => "现在信任",
@@ -2842,6 +2936,30 @@ mod tests {
         cfg.aliases = vec![("ll".to_string(), "ls -la".to_string())];
         let rc = generate_rc(&cfg);
         assert!(rc.contains("alias ll='ls -la'"));
+    }
+
+    /// The external-provider snippet is opt-in: the default rc carries no
+    /// carapace block at all (the shell core ships no provider), and the
+    /// opt-in block is the guarded standard integration with the install
+    /// requirement named in a comment.
+    #[test]
+    fn generated_rc_external_provider_snippet_is_opt_in() {
+        let default_rc = generate_rc(&clean_cfg());
+        assert!(!default_rc.contains("carapace"), "{default_rc}");
+
+        let mut cfg = clean_cfg();
+        cfg.external_completion_snippet = true;
+        let rc = generate_rc(&cfg);
+        // The guarded standard integration (data, not code).
+        assert!(
+            rc.contains("if command -v carapace >/dev/null 2>&1; then"),
+            "{rc}"
+        );
+        assert!(rc.contains("source <(carapace _carapace)"), "{rc}");
+        // The requirement comment names the install channel and states the
+        // no-op fallback honestly.
+        assert!(rc.contains("wpm install carapace-bin"), "{rc}");
+        assert!(rc.contains("no-op"), "{rc}");
     }
 
     /// niubash#157: the HOME bootstrap's `*)` branch must emit the closed

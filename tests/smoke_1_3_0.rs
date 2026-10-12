@@ -795,12 +795,41 @@ fn d2_wizard_one_run_theme_journey() {
     // Q2.5: pick the recommended collection (displayed option 3).
     s.expect("Plugin collection?");
     answer(&mut s, "3\r");
-    // Q3 (Windows only): niu-git — the default (Skip) is highlighted.
-    #[cfg(windows)]
-    {
-        s.expect("niu-git");
-        answer(&mut s, "\r");
+    // Q2.6 (master): TAB completion style — the current effective style is
+    // pre-highlighted, so Enter keeps it (a no-op pick writes no rc line).
+    s.expect("TAB completion style?");
+    answer(&mut s, "\r");
+    // Q3 (Windows only): niu-git — asked once per lasting answer and skipped
+    // entirely when the running installation already bundles niugit
+    // (niubash#230: never re-offer what is already there). Whether it
+    // renders is environment-conditional (the winuxcmd root discovery is
+    // not deterministic under the cleared journey env), so the journey
+    // waits for whichever question actually renders next — niu-git or the
+    // Q4 provider question — and answers what it sees. A strict expect on
+    // either one races the other and dead-ends the wizard.
+    let q4 = "External completion providers";
+    let either = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if s.screen_contains("niu-git") {
+            s.expect("niu-git");
+            answer(&mut s, "\r");
+            break;
+        }
+        if s.screen_contains(q4) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < either,
+            "neither the niu-git question nor the provider question rendered; screen:\n{}",
+            s.transcript()
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
+    // Q4: external completion providers — opt-in, default (Skip)
+    // highlighted; the journey asserts the default rc stays free of the
+    // carapace snippet.
+    s.expect(q4);
+    answer(&mut s, "\r");
     // Apply gate: Apply is the highlighted default.
     s.expect("Apply this configuration?");
     answer(&mut s, "\r");
@@ -978,6 +1007,10 @@ fn d3_setup_rerun_applies_in_the_live_session() {
         s.expect("niu-git");
         answer(&mut s, "\r");
     }
+    // Q4: external completion providers — opt-in, default (Skip) highlighted;
+    // the journey asserts the default rc stays free of the carapace snippet.
+    s.expect("External completion providers");
+    answer(&mut s, "\r");
     // Apply gate: Apply is the highlighted default.
     s.expect("Apply this configuration?");
     answer(&mut s, "\r");
@@ -1006,6 +1039,8 @@ fn d3_setup_rerun_applies_in_the_live_session() {
     let rc = fs::read_to_string(home.join(".niubashrc")).unwrap();
     assert!(rc.contains("OSH_THEME='agnoster'"), "{rc}");
     assert!(!rc.contains("OLD> "), "{rc}");
+    // Default answer to the provider question is Skip: no snippet in the rc.
+    assert!(!rc.contains("carapace"), "{rc}");
 
     s.send_line("exit");
     let code = s.wait_exit();
