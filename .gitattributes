@@ -1,3 +1,11 @@
+# Shell scripts are executed by Git Bash / winuxsh, both of which treat CR
+# as payload: a CRLF checkout breaks heredocs, array literals, and rename
+# gates ("if" + CR: command not found), and perf scripts hung parsing a
+# word-split array literal on an autocrlf=true checkout. Force LF globally
+# so any Windows checkout behaves like the store; the per-path pins below
+# stay as documentation of the sensitive spots.
+*.sh text eol=lf
+
 scripts/git-hooks/* text eol=lf
 # Smoke/verification shell scripts parse their own subprocess output; a
 # CRLF working copy would leak \r into those comparisons (same lesson as
