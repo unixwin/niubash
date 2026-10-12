@@ -42,8 +42,11 @@ jobs:
       # CreateFileW failure. Build with the committed lock; bump it by hand
       # when the engine moves.
 
-      - name: cargo fmt --check (root package)
-        run: cargo fmt --check -p niubash
+      # Workspace-wide: the niubash-runtime crate used to carry fmt
+      # violations that the -p niubash gate never saw (observed upstream by
+      # x2410516039/xgr-niubash; the tree has been clean since).
+      - name: cargo fmt --check (workspace)
+        run: cargo fmt --check --all
 
       - name: cargo build
         run: cargo build --locked
