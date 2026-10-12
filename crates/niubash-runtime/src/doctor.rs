@@ -242,6 +242,25 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     };
     writeln!(out, "  {info} terminal            {terminal}")?;
 
+    // ── Advisory: TAB completion shape (2026-10-12 discovery surface) ─────
+    // The completion style was invisible config before 1.4.1 — the wizard
+    // never asked and the env variable was hidden knowledge. The doctor
+    // states the effective value (file/env/default precedence applied) and
+    // names every switch, so the five shapes are discoverable.
+    let (style, source) = crate::config::resolve_completion_style();
+    let origin = match source {
+        crate::config::CompletionStyleSource::Env => " (NIU_COMPLETION_STYLE override)",
+        crate::config::CompletionStyleSource::ConfigFile => " (persisted)",
+        crate::config::CompletionStyleSource::Default => " (default)",
+    };
+    writeln!(
+        out,
+        "  {info} completion style    {}{origin} — change with: \
+         `niu config set completion.style ide|column|list|inline|gnu` \
+         (or NIU_COMPLETION_STYLE)",
+        style.as_str()
+    )?;
+
     // ── Advisory: timing scripts (niubash#201) ────────────────────────────
     // `date` is an external program: each `$(date +%s%N)` pays Windows
     // process creation (~10-30ms). The bash 5 builtin `$EPOCHREALTIME`

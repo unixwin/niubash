@@ -2801,15 +2801,28 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `niu config` — persisted user settings (`~/.niubash/config.toml`, the
-/// mirrors.toml convention). Deliberately tiny: one flat file, one setting
-/// today (the niubash#249 command-not-found hint policy). Any read problem
-/// degrades to the default in the runtime; `get`/`list` surface values as
-/// resolved (file, overridden by `NIU_COMMAND_NOT_FOUND_HINT`).
+/// mirrors.toml convention). Deliberately tiny: one flat file, two settings
+/// (the niubash#249 command-not-found hint policy, and since 1.4.1 the
+/// `completion.style` TAB shape). Any read problem degrades to the default
+/// in the runtime; `get`/`list` surface values as resolved (file, overridden
+/// by the `NIU_` env variable).
 fn run_config_command(args: &[String]) -> anyhow::Result<()> {
     use niubash_runtime::config::{
-        resolve_command_not_found_hint, set_command_not_found_hint, user_config_path,
-        CommandNotFoundHint, COMMAND_NOT_FOUND_HINT_KEY,
+        resolve_command_not_found_hint, resolve_completion_style, set_command_not_found_hint,
+        set_completion_style, user_config_path, CommandNotFoundHint, CompletionStyle,
+        CompletionStyleSource, COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_STYLE_KEY,
     };
+    // One line describing where the effective completion style came from —
+    // the precedence (env > config > default) is part of the contract, so
+    // every mutating command prints it.
+    fn print_completion_style_outcome(style: CompletionStyle, source: CompletionStyleSource) {
+        let origin = match source {
+            CompletionStyleSource::Env => " (NIU_COMPLETION_STYLE overrides the file)",
+            CompletionStyleSource::ConfigFile => " (persisted)",
+            CompletionStyleSource::Default => " (built-in default)",
+        };
+        println!("{COMPLETION_STYLE_KEY} = {}{origin}", style.as_str());
+    }
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
             print_config_usage();
@@ -2821,6 +2834,11 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                 "  {COMMAND_NOT_FOUND_HINT_KEY} = {}",
                 resolve_command_not_found_hint().as_str()
             );
+            let (style, source) = resolve_completion_style();
+            println!("  {COMPLETION_STYLE_KEY} = {}", style.as_str());
+            if source == CompletionStyleSource::Env {
+                println!("    (overridden by NIU_COMPLETION_STYLE)");
+            }
             Ok(())
         }
         Some("get") => {
@@ -2830,6 +2848,10 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
             match key.as_str() {
                 COMMAND_NOT_FOUND_HINT_KEY => {
                     println!("{}", resolve_command_not_found_hint().as_str());
+                    Ok(())
+                }
+                COMPLETION_STYLE_KEY => {
+                    println!("{}", resolve_completion_style().0.as_str());
                     Ok(())
                 }
                 unknown => anyhow::bail!(
@@ -2869,6 +2891,42 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                     }
                     Ok(())
                 }
+                COMPLETION_STYLE_KEY => {
+                    let Some(style) = CompletionStyle::parse(value) else {
+                        anyhow::bail!(
+                            "invalid value '{value}' for {COMPLETION_STYLE_KEY}: expected gnu, ide, column, list or inline"
+                        )
+                    };
+                    set_completion_style(style)?;
+                    println!(
+                        "{} {COMPLETION_STYLE_KEY} = {}",
+                        niubash_runtime::text_style::green("Set:"),
+                        style.as_str()
+                    );
+                    match style {
+                        CompletionStyle::Gnu => println!(
+                            "  TAB completes the common prefix; a second TAB lists the candidates"
+                        ),
+                        CompletionStyle::Ide => {
+                            println!("  TAB opens the VS Code-style popup with descriptions")
+                        }
+                        CompletionStyle::Column => println!("  TAB opens a zsh-style column grid"),
+                        CompletionStyle::List => println!("  TAB opens a fish-style vertical list"),
+                        CompletionStyle::Inline => println!(
+                            "  TAB inserts the first match and cycles (bash menu-complete)"
+                        ),
+                    }
+                    // The env variable outranks the file, so a stale
+                    // NIU_COMPLETION_STYLE would silently swallow this pick.
+                    let (effective, source) = resolve_completion_style();
+                    if source == CompletionStyleSource::Env {
+                        println!(
+                            "  note: NIU_COMPLETION_STYLE is set in this environment and wins:"
+                        );
+                    }
+                    print_completion_style_outcome(effective, source);
+                    Ok(())
+                }
                 unknown => anyhow::bail!(
                     "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
                 ),
@@ -2898,6 +2956,13 @@ fn print_config_usage() {
     println!("      off (default) | wpm — wpm suggests one `wpm search --name`");
     println!("      line for high-confidence near-misses; third-party managers are");
     println!("      never recommended (niubash#249).");
+    println!();
+    println!("  {k}", k = niubash_runtime::config::COMPLETION_STYLE_KEY);
+    println!("      Shape of the TAB completion UI. gnu (default) — TAB completes");
+    println!("      the common prefix, a second TAB lists the candidates next to the");
+    println!("      prompt like GNU readline. Alternatives: ide (VS Code popup),");
+    println!("      column (zsh grid), list (fish vertical), inline (bash");
+    println!("      menu-complete). NIU_COMPLETION_STYLE overrides this file.");
 }
 
 fn print_plugin_mirror_usage() {

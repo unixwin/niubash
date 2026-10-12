@@ -168,8 +168,21 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     crate::shell::install_completion_bridge(shell);
     let menu_config = shell_ref.menu_config;
 
+    // The GNU completion style redraws the prompt unchanged while its list
+    // is up; reedline replaces the prompt indicator with the active menu's
+    // marker, so the GNU menu carries the shell's own indicator (the same
+    // one the fresh prompt will render for this edit mode) — the redrawn
+    // line is pixel-identical, as GNU readline's is.
+    let gnu_indicator = shell_ref
+        .prompt
+        .render_prompt_indicator(match shell_ref.editor_mode {
+            EditorMode::Emacs => PromptEditMode::Emacs,
+            EditorMode::Vi => PromptEditMode::Vi(PromptViMode::Insert),
+        })
+        .into_owned();
+
     let completion_menu = ReedlineMenu::WithCompleter {
-        menu: configured_completion_menu(COMPLETION_MENU, menu_config),
+        menu: configured_completion_menu(COMPLETION_MENU, menu_config, &gnu_indicator),
         completer: Box::new(completer),
     };
     let history_menu = ReedlineMenu::HistoryMenu(Box::new(configured_list_menu(
@@ -253,8 +266,27 @@ fn configured_list_menu(name: &str, page_size: usize, config: MenuConfig) -> Lis
 }
 
 /// Build the completion menu according to the configured style.
-fn configured_completion_menu(name: &str, config: MenuConfig) -> Box<dyn reedline::Menu> {
+///
+/// `gnu_indicator` is the shell's own prompt indicator, used as the GNU
+/// menu's marker so the redrawn prompt stays identical while its list is up
+/// (see the comment at the call site).
+fn configured_completion_menu(
+    name: &str,
+    config: MenuConfig,
+    gnu_indicator: &str,
+) -> Box<dyn reedline::Menu> {
     match config.completion_style {
+        CompletionStyle::Gnu => {
+            // GNU readline factory semantics (the default): TAB #1 completes
+            // the common prefix, TAB #2 on an unchanged line prints the
+            // candidates columnar and the prompt is repainted — a printed
+            // list, no menu navigation, no arrow-key capture, no popup.
+            // See `completion::gnu_menu` for the state machine.
+            let menu = crate::completion::gnu_menu::GnuMenu::default()
+                .with_name(name)
+                .with_marker(gnu_indicator);
+            Box::new(menu)
+        }
         CompletionStyle::Ide => {
             // Multi-column popup with descriptions (VS Code style). Column
             // count adapts to the terminal width; descriptions render to the

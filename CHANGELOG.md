@@ -6,6 +6,24 @@ All notable changes to Niubash are documented in this file.
 
 ## [1.4.0] - 2026-10-10
 
+### Changed
+
+- Default TAB completion style is now the GNU readline shape
+  (`CompletionStyle::Gnu`, owner ruling 2026-10-12): TAB completes the
+  longest common prefix (a lone candidate completes outright), and a second
+  TAB on an unchanged line prints the candidates as width-adaptive columns
+  next to the prompt and repaints it — a printed list, not an interactive
+  menu (no selection, no arrow-key capture, no popup; a further TAB keeps
+  the list, any edit dismisses it). Implemented as a reedline `Menu`
+  (`completion::gnu_menu`) so it renders through the normal repaint
+  pipeline. The previous default Ide popup moves to an opt-in: restore it
+  with `NIU_COMPLETION_STYLE=ide` (also accepted: `smart`, `popup`) or
+  persist it with `niu config set completion.style ide` — precedence is
+  env > config file > default, and `niu doctor` now shows the effective
+  style with the switch commands. The setup wizard gained a completion
+  style step (current value pre-highlighted) on first run and on `niu
+  setup` re-runs.
+
 ### Added
 
 - carapace-bin completion source for third-party commands (niubash#187

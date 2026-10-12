@@ -58,9 +58,9 @@ Use `~/.niubashrc` as the normal human-authored entry point:
 
 ```bash
 # Optional floor knobs — they only shape the built-in default prompt and
-# completion menu; an enabled external theme claims PS1 and wins.
+# completion UI; an enabled external theme claims PS1 and wins.
 # NIU_PROMPT_CWD_STYLE='home'
-# NIU_COMPLETION_STYLE='column'
+# NIU_COMPLETION_STYLE='gnu'   # gnu | ide | column | list | inline
 
 alias ll='ls -la'
 export EDITOR=vim
@@ -84,18 +84,30 @@ needed environment variables directly to `niu -c` or the script process, or
 use `NIU_ENV` / `BASH_ENV` to source a dedicated one-shot init file (see
 [One-shot init file](#one-shot-init-file-niu_env--bash_env)).
 
-## Completion Menu Styles
+## Completion Styles
 
-The completion popup adapts with `NIU_COMPLETION_STYLE` (set it in
-`~/.niubashrc` or the environment):
+TAB completion comes in five shapes. The default since 1.4.1 is `gnu`
+(GNU readline factory behavior); before that it was `ide`. Pick one with
+`niu config set completion.style <name>` (persisted in
+`~/.niubash/config.toml`) or `NIU_COMPLETION_STYLE=<name>` in
+`~/.niubashrc` or the environment — the env variable wins over the
+persisted value:
 
-- `ide` (default) — multi-column popup with descriptions, VS Code style.
-  Column count adapts to the terminal width; the description of the selected
-  candidate renders beside it.
+- `gnu` (default) — GNU readline: TAB completes the longest common prefix
+  (a lone candidate completes outright); pressing TAB again on an unchanged
+  line prints the candidates as width-adaptive columns next to the prompt
+  and repaints it. The list is printed output, not a menu: nothing is
+  selected, arrow keys stay on history, no popup.
+- `ide` — multi-column popup with descriptions, VS Code style. Column count
+  adapts to the terminal width; the description of the selected candidate
+  renders beside it.
 - `column` — plain multi-column grid (like zsh `compinit`).
 - `list` — vertical list with descriptions (like fish).
 - `inline` — first match inserted directly, Tab cycles (like bash
   `menu-complete`).
+
+`show-all-if-ambiguous` / `show-all-if-unmodified`-style readline variables
+are not implemented yet; the double-TAB listing is the fixed shape.
 
 Flag completions (`ls --a<Tab>` → `--all` with its description) come from the
 bundle's generated completion assets and work in every style; `ide` and
