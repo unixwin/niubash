@@ -39,22 +39,20 @@ fn wait_for_key() -> anyhow::Result<()> {
 
 fn print_logo() -> anyhow::Result<i32> {
     let mut stdout = io::stdout();
+    // pyfiglet -f standard "niubash"; one accent color per band of lines.
     // Cyan
     stdout.write_all(b"\x1b[1;96m")?;
-    stdout.write_all(b"                _               _\n")?;
-    stdout.write_all(b"               (_)             | |\n")?;
+    stdout.write_all(b"       _       _               _     \n")?;
+    stdout.write_all(b" _ __ (_)_   _| |__   __ _ ___| |__  \n")?;
     // Yellow
     stdout.write_all(b"\x1b[1;93m")?;
-    stdout.write_all(b" _ __   __ _ __ _ _ __   __ _| |\n")?;
-    stdout.write_all(b"| '_ \\ / _` / _` | '_ \\ / _` | |\n")?;
+    stdout.write_all(b"| '_ \\| | | | | '_ \\ / _` / __| '_ \\ \n")?;
     // Green
     stdout.write_all(b"\x1b[1;92m")?;
-    stdout.write_all(b"| | | | (_| | (_| | | | | (_| | |\n")?;
-    stdout.write_all(b"|_| |_|\\__, |\\__,_|_| |_|\\__,_|_|\n")?;
+    stdout.write_all(b"| | | | | |_| | |_) | (_| \\__ \\ | | |\n")?;
     // Magenta
     stdout.write_all(b"\x1b[1;95m")?;
-    stdout.write_all(b"        __/ |\n")?;
-    stdout.write_all(b"       |___/\n")?;
+    stdout.write_all(b"|_| |_|_|\\__,_|_.__/ \\__,_|___/_| |_|\n")?;
     // Reset
     stdout.write_all(b"\x1b[0m")?;
     stdout.flush()?;
@@ -93,20 +91,12 @@ fn print_info() -> anyhow::Result<i32> {
         b"    \x1b[96m~/.niubashrc\x1b[0m  - your startup config, plain bash syntax\n",
     )?;
 
-    // Hidden commands
-    stdout.write_all(b"\n  \x1b[1;93mGames (type `game` for the list):\x1b[0m\n")?;
-    stdout.write_all(b"    \x1b[96mgame\x1b[0m    - Launcher for every game below\n")?;
-    stdout
-        .write_all(b"    \x1b[96mdino\x1b[0m    - The runner: jump the cacti, duck the birds\n")?;
+    // Games
+    stdout.write_all(b"\n  \x1b[1;93mGames:\x1b[0m\n")?;
     stdout.write_all(b"    \x1b[96msnake\x1b[0m   - Eat the apples, do not eat yourself\n")?;
-    stdout.write_all(b"    \x1b[96mcow\x1b[0m     - The bull, animated\n")?;
-    stdout.write_all(b"    \x1b[96mtyping\x1b[0m  - Words per minute\n")?;
-    stdout.write_all(b"    \x1b[96mtic\x1b[0m     - Tic-tac-toe against the machine\n")?;
 
-    // Hidden one-shot toys
+    // Hidden commands
     stdout.write_all(b"\n  \x1b[1;93mHidden commands:\x1b[0m\n")?;
-    stdout.write_all(b"    \x1b[96mmatrix\x1b[0m  - Take the red pill\n")?;
-    stdout.write_all(b"    \x1b[96mparty\x1b[0m   - Dance time\n")?;
     stdout.write_all(b"    \x1b[96mabout\x1b[0m   - This screen\n")?;
 
     // Footer
