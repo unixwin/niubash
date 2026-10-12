@@ -222,6 +222,12 @@ fn classify_word(
         if is_shell_builtin(&unquoted) {
             return SyntaxKind::Builtin;
         }
+        // REPL-only commands (`self-update`, `update-niubash`, `logout`) never
+        // resolve on PATH, but the interactive shell accepts them, so color
+        // them like builtins instead of unknown tokens (niu#260).
+        if crate::repl::is_repl_reserved_command(&unquoted) {
+            return SyntaxKind::Builtin;
+        }
         if highlighter.is_known_command(&unquoted) {
             return SyntaxKind::Command;
         }
@@ -977,6 +983,34 @@ mod tests {
         assert_eq!(
             style_for(&styled, "dsh"),
             highlighter.style(SyntaxKind::Command)
+        );
+    }
+
+    #[test]
+    fn highlights_repl_only_commands_as_builtins() {
+        // niu#260: `self-update` (and friends) are intercepted by the REPL
+        // before engine command resolution, so they never appear on PATH and
+        // must not be painted as unknown tokens.
+        let highlighter = NiubashSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
+
+        for word in ["self-update", "update-niubash", "logout"] {
+            let styled = highlighter.highlight(word, 0);
+            assert_eq!(
+                style_for(&styled, word),
+                highlighter.style(SyntaxKind::Builtin),
+                "expected {word} to highlight as builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn repl_only_words_in_argument_position_stay_default() {
+        let highlighter = NiubashSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
+        let styled = highlighter.highlight("echo self-update", 0);
+
+        assert_eq!(
+            style_for(&styled, "self-update"),
+            highlighter.style(SyntaxKind::Default)
         );
     }
 

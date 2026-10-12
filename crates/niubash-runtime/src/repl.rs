@@ -124,6 +124,15 @@ pub fn parse_user_bindkeys(value: &str) -> Vec<NativeWidgetBinding> {
         .collect()
 }
 
+/// First words the interactive REPL resolves itself, before engine command
+/// resolution: `exit`/`logout` (exit trap) and `self-update`/`update-niubash`
+/// (self-update hand-off). None of them exist on PATH or in the engine builtin
+/// table, so the syntax highlighter consults this predicate to avoid painting
+/// valid REPL commands as unknown tokens (niu#260).
+pub fn is_repl_reserved_command(word: &str) -> bool {
+    matches!(word, "exit" | "logout" | "self-update" | "update-niubash")
+}
+
 /// Extract the arguments of a `self-update` / `update-niubash` REPL command,
 /// or `None` when the line is not one.
 pub fn self_update_command_args(line: &str) -> Option<Vec<String>> {
@@ -2031,6 +2040,17 @@ mod tests {
     fn history_exclusion_prefix_tracks_ignore_space_config() {
         assert_eq!(history_exclusion_prefix(false), None);
         assert_eq!(history_exclusion_prefix(true), Some(" ".to_string()));
+    }
+
+    #[test]
+    fn repl_reserved_commands_cover_exit_logout_and_self_update_words() {
+        for word in ["exit", "logout", "self-update", "update-niubash"] {
+            assert!(is_repl_reserved_command(word), "{word} should be reserved");
+        }
+        // Case-sensitive, matching the REPL's own exact-match intercepts.
+        assert!(!is_repl_reserved_command("Self-Update"));
+        assert!(!is_repl_reserved_command("self_update"));
+        assert!(!is_repl_reserved_command("ls"));
     }
 
     #[test]
