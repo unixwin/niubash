@@ -77,6 +77,25 @@ impl std::fmt::Debug for RubashHistoryProvider {
     }
 }
 
+impl Drop for RubashHistoryProvider {
+    fn drop(&mut self) {
+        // GNU bash ends every session that remembers history by writing
+        // the final list to $HISTFILE (bashhist.c exit_shell ->
+        // write_history; the shell overwrites HISTFILE unless histappend
+        // is set). niu's hosted history syncs every save immediately, so
+        // this write is normally a no-op — but it is also the only thing
+        // that carries a GNU `history -c` to the file: the builtin clears
+        // the in-memory list only (builtins/history.def:185, niubash#182),
+        // and bash's file-side counterpart of a cleared list is exactly
+        // this exit write. Best-effort like every history-file write: it
+        // never fails the session and never reaches stderr. Sessions that
+        // terminate through std::process::exit (nonzero `-c` statuses, the
+        // exit-jump path) skip Drop and keep the pre-clear file, the same
+        // as the pre-existing drop-time sync.
+        self.flush_at_session_end();
+    }
+}
+
 impl RubashHistoryProvider {
     /// Build the host history provider.
     ///
@@ -92,6 +111,12 @@ impl RubashHistoryProvider {
         Self {
             inner: LiveFileBackedHistory::with_mode(capacity, path, mode),
         }
+    }
+
+    /// Session-end history write (the GNU exit path). See
+    /// [`LiveFileBackedHistory::flush_at_session_end`] for the semantics.
+    pub(crate) fn flush_at_session_end(&mut self) {
+        self.inner.flush_at_session_end();
     }
 }
 
@@ -556,6 +581,86 @@ impl LiveFileBackedHistory {
     pub(crate) fn backing_file(&self) -> Option<PathBuf> {
         self.state.lock().ok().and_then(|state| state.path.clone())
     }
+
+    /// Session-end history write: leave the backing file holding exactly
+    /// what the session's final in-memory list holds (the file-side
+    /// counterpart of bashhist.c exit_shell -> write_history).
+    ///
+    /// Every provider save already syncs to the file, so the list and the
+    /// file can only diverge through GNU `history -c`, which clears the
+    /// in-memory list and deliberately leaves the file alone
+    /// (builtins/history.def:185 — the bash-it theme `-c && -r` cycle
+    /// reloads those lines mid-session, niubash#182). bash still ends the
+    /// session by writing the list to HISTFILE, so a list that `-c`
+    /// emptied truncates the file at exit; a non-empty final list takes
+    /// the `-a` dedupe append instead of a blind overwrite, so lines
+    /// another shell appended after our last sync are never rolled back.
+    ///
+    /// Best-effort like every history-file write: a failure warns once and
+    /// never reaches stderr (`-c` one-shot stderr stays byte-stable).
+    pub(crate) fn flush_at_session_end(&mut self) {
+        let capacity = self.capacity;
+        let mode = self.mode;
+        let Ok(state) = self.state.get_mut() else {
+            return;
+        };
+        let Some(path) = state.path.clone() else {
+            // Degraded memory-only session: no backing file to reconcile,
+            // and none must be created.
+            return;
+        };
+        // See the file as it is now: another shell may have appended since
+        // the last sync, and the empty-list decision below must not erase
+        // those lines.
+        Self::refresh_if_stale(capacity, state, mode);
+        let entries: Vec<String> = match state
+            .history
+            .search(SearchQuery::all_that_contain_rev(String::new()))
+        {
+            Ok(items) => items
+                .into_iter()
+                .rev()
+                .map(|item| item.command_line)
+                .collect(),
+            Err(error) => {
+                warn_io_failure(state, "history list read at session end failed", error);
+                return;
+            }
+        };
+        if entries.is_empty() {
+            // Only an existing file needs truncating; a session without
+            // history must not create an empty one.
+            if !path.exists() {
+                return;
+            }
+            if let Err(error) = std::fs::write(&path, "") {
+                warn_io_failure(state, "history file truncate at session end failed", error);
+                return;
+            }
+        } else {
+            let existing: std::collections::HashSet<String> = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.trim().to_string())
+                .collect();
+            let missing = entries.iter().any(|entry| !existing.contains(entry.trim()));
+            if !missing {
+                return;
+            }
+            // The refresh above guarantees the file already holds every
+            // entry before reedline's unwritten buffer, so the buffer IS
+            // the missing set: one sync writes exactly those lines through
+            // reedline's own accounting. Raw-appending here instead would
+            // leave that accounting stale and the reader's Drop-time sync
+            // would re-append the same lines (the dedupe hazard
+            // `read_history`'s fast path exists for, niubash#182).
+            if let Err(error) = state.history.sync() {
+                warn_io_failure(state, "history file append at session end failed", error);
+                return;
+            }
+        }
+        state.signature = file_signature_lossy(&path, state);
+    }
 }
 
 impl History for LiveFileBackedHistory {
@@ -950,6 +1055,110 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "echo written\n",
             "-a after -w must not duplicate"
+        );
+    }
+
+    #[test]
+    fn session_end_write_carries_a_cleared_list_to_the_file() {
+        // The host contract (tests/host_contract.rs
+        // history_and_fc_use_the_host_history_provider): `history -c` as
+        // the last command of a session leaves an EMPTY history file. The
+        // -c builtin itself clears memory only (builtins/history.def:185,
+        // niubash#182); bash's file-side counterpart of a cleared list is
+        // the exit write (bashhist.c exit_shell -> write_history), which
+        // the provider performs when the session ends.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "kept-one\nkept-two\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        provider.clear().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "kept-one\nkept-two\n",
+            "-c itself must not touch the file"
+        );
+
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "",
+            "the session-end write carries the cleared list to the file"
+        );
+    }
+
+    #[test]
+    fn session_end_write_never_rolls_back_foreign_file_lines() {
+        // -c mid-session, then another shell appends to the file before
+        // this session ends (the concurrent-shells contract of
+        // LiveFileBackedHistory): the session-end write must keep those
+        // lines instead of blindly overwriting with the cleared list.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "kept-one\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        provider.clear().unwrap();
+        std::fs::write(&path, "kept-one\nfrom-another-shell\n").unwrap();
+
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "kept-one\nfrom-another-shell\n",
+            "lines another shell appended survive the session-end write"
+        );
+    }
+
+    #[test]
+    fn session_end_write_appends_missing_entries_without_duplicates() {
+        // A non-empty final list takes the -a dedupe append. The real
+        // divergence it repairs: a transient mid-session sync failure (the
+        // file locked by another process, a read-only DACL) left session
+        // entries in memory only. Simulated here with a read-only file
+        // while the second entry is saved.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        provider.append("echo synced".to_string()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo synced\n");
+
+        let mut readonly = std::fs::metadata(&path).unwrap().permissions();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly).unwrap();
+        provider.append("echo lost".to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "echo synced\n",
+            "the read-only file kept the session entry memory-only"
+        );
+        let mut writable = std::fs::metadata(&path).unwrap().permissions();
+        writable.set_readonly(false);
+        std::fs::set_permissions(&path, writable).unwrap();
+
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "echo synced\necho lost\n",
+            "the session-end append restores only the missing entry"
+        );
+    }
+
+    #[test]
+    fn session_end_write_skips_a_degraded_session() {
+        // A memory-only session (unopenable file) has no backing file to
+        // reconcile — and must not create one at session end.
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("blocker");
+        std::fs::write(&blocker, "file, not a dir").unwrap();
+        let path = blocker.join(".niubash_history");
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        provider.append("echo memory".to_string()).unwrap();
+        drop(provider);
+        assert!(
+            !path.exists(),
+            "a degraded session must not materialize a history file"
         );
     }
 }
