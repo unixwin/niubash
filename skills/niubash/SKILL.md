@@ -59,7 +59,7 @@ Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it 
 - **Launcher verbs** — `setup`, `font`, `doctor`, `plugin`, `skill`, `--self-update`; table in `references/quickref.md`.
 - **Plugin system** — git-clone-only external sources (oh-my-bash, bash-it, bpkg) behind an explicit trust gate, driven by a declarative spec (`~/.niubash/plugins.toml`) with lockfile verbs (`add/list/enable/disable/trust/sync/update/restore/rollback/clean/source/recipe/distro/mirror/ui`).
 - **TUI surfaces** — `niu setup` wizard (theme/prompt/tools), `niu plugin ui` menu, theme gallery, `niu font` picker; all non-interactive-friendly and safe to skip (`-c` loads none of them).
-- **Bundle version**: niubash 1.3.4 (generated; see `scripts/generate-skill.py`).
+- **Bundle version**: niubash 1.4.0 (generated; see `scripts/generate-skill.py`).
 <!-- END GENERATED:capability-snapshot -->
 
 Shell built-ins (the generated list below is the engine's own GNU bash 5.3
