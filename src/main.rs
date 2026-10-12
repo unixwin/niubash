@@ -183,6 +183,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 | "--completion-probe"
                 | "--install-wt-profile"
                 | "--self-update"
+                | "--encoded-command"
         ) && !legacy_command_mode_has_post_c_login_flag(args)
         {
             // GNU shell.c parse_shell_options walks argv in one left-to-right
@@ -301,6 +302,7 @@ fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
         "--completion-probe",
         "--install-wt-profile",
         "--self-update",
+        "--encoded-command",
     ];
     let mut index = 1usize;
     while let Some(arg) = args.get(index) {
@@ -346,6 +348,30 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(rest),
+        "--encoded-command" => {
+            // Agent/CI channel: the payload arrives base64-encoded, so no
+            // shell quoting, heredoc, or `base64.exe` subprocess is involved
+            // on the way in. Same non-interactive contract as `-c` (GNU bash
+            // sources BASH_ENV for -c shells; so does this route).
+            let Some(payload) = rest.first() else {
+                anyhow::bail!("--encoded-command requires an argument");
+            };
+            let command = decode_base64_utf8(payload)?;
+            let mut shell = niubash_runtime::Shell::new_one_shot()?;
+            shell.executor.inherit_process_stdin();
+            shell.enable_process_stdin_pipeline_bridge();
+            shell.source_non_interactive_env();
+            shell.executor.set_env("BASH_EXECUTION_STRING", &command);
+            // Same -c diagnostic tag as the engine route (niubash#160):
+            // parser diagnostics take the `$0: -c: line N:` shape.
+            shell.executor.set_env("__RUBASH_IS_C", "1");
+            let code = shell.execute_script(&command)?;
+            let code = shell.finish_with_exit_trap(code)?;
+            if code != 0 {
+                piped_stdout::finish_and_exit(code);
+            }
+            Ok(())
+        }
         "-C" | "--repl-command" => run_repl_command(word, leading_options, rest),
         // Only reachable for the legacy `niu -c -l <cmd>` shape: a plain
         // leading -c routes to the engine parser above.
@@ -1345,6 +1371,10 @@ fn print_usage() {
     println!("  -V, --version             Version and component info");
     println!("  -c <command>              Execute a command ad-hoc");
     println!("  -C, --repl-command <cmd>  Execute one non-interactive REPL command");
+    println!("      --encoded-command <b64>  Execute a base64-encoded command (no quoting);");
+    println!(
+        "                               optional `v1:` prefix guards against MSYS path rewrite"
+    );
     println!();
     println!("  --install-wt-profile      Add/update the Windows Terminal profile");
     println!("      --set-default         Also set Niubash as the WT default profile");
@@ -3544,6 +3574,79 @@ fn is_broken_pipe_error(error: &anyhow::Error) -> bool {
 
 fn is_broken_pipe_io_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
+}
+
+/// Decode RFC 4648 standard base64 into UTF-8 for `--encoded-command`.
+/// Padding is optional and ASCII whitespace is ignored, so callers can pass
+/// pre-wrapped payloads untouched. An optional `v1:` prefix is stripped: it
+/// marks the payload as version-1 so MSYS path conversion can never mangle a
+/// leading `/` when the command line travels through Git Bash.
+fn decode_base64_utf8(input: &str) -> anyhow::Result<String> {
+    let input = input.strip_prefix("v1:").unwrap_or(input);
+    let bytes = decode_base64(input)?;
+    String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("--encoded-command: payload is not valid UTF-8"))
+}
+
+fn decode_base64(input: &str) -> anyhow::Result<Vec<u8>> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3 + 3);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in input.bytes() {
+        if byte.is_ascii_whitespace() || byte == b'=' {
+            continue;
+        }
+        let Some(value) = sextet(byte) else {
+            anyhow::bail!(
+                "--encoded-command: invalid base64 character {:?}",
+                byte as char
+            );
+        };
+        acc = (acc << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod encoded_command_tests {
+    use super::*;
+
+    #[test]
+    fn base64_decodes_padded_unpadded_and_wrapped_payloads() {
+        assert_eq!(
+            decode_base64_utf8("ZWNobyBoZWxsbw==").unwrap(),
+            "echo hello"
+        );
+        assert_eq!(
+            decode_base64_utf8("v1:ZWNobyBoZWxsbw==").unwrap(),
+            "echo hello"
+        );
+        assert_eq!(decode_base64_utf8("YWJj").unwrap(), "abc");
+        assert_eq!(decode_base64_utf8("YQ==").unwrap(), "a");
+        assert_eq!(decode_base64_utf8("YQ").unwrap(), "a");
+        assert_eq!(
+            decode_base64_utf8(" ZWN obw =").unwrap(),
+            "echo", // stray whitespace and '=' are ignored anywhere
+        );
+        assert!(decode_base64_utf8("ZWNoby*").is_err());
+        // 0xFF 0xFF: never valid UTF-8, rejected with the payload diagnostic.
+        assert!(decode_base64_utf8("//8=").is_err());
+    }
 }
 
 #[cfg(test)]
