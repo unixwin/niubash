@@ -24,10 +24,16 @@
 //!   gate that flips green when the upstream fix lands in the pinned
 //!   rubash revision.
 
+#[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 
+// The boundary tests below are Windows-gated; on unix the helpers would be
+// dead weight, so they follow the same gate.
+#[cfg(windows)]
 fn niu_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_niu"))
 }
@@ -35,6 +41,7 @@ fn niu_binary() -> PathBuf {
 /// Runs a script body through the built niu binary and returns trimmed
 /// stdout. The body is written to an LF-terminated file so no host-shell
 /// quoting can perturb the bytes under test.
+#[cfg(windows)]
 fn run_script(body: &str) -> String {
     let dir = std::env::temp_dir().join("niubash-issue149");
     fs::create_dir_all(&dir).unwrap();

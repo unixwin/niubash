@@ -21,10 +21,16 @@
 //! apply_env_command_environment cross the boundary in Windows-native form);
 //! these tests pin the boundary at the niubash product level.
 
+#[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 
+// The boundary tests below are Windows-gated; on unix the helpers would be
+// dead weight, so they follow the same gate.
+#[cfg(windows)]
 fn niu_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_niu"))
 }
@@ -34,6 +40,7 @@ fn niu_binary() -> PathBuf {
 /// returns trimmed stdout. The body is written to a unique LF-terminated
 /// file so no host-shell quoting perturbs the bytes under test and parallel
 /// tests cannot race on one script path.
+#[cfg(windows)]
 fn run_script(body: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
