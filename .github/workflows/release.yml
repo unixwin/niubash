@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       winuxcmd_tag:
-        description: "WinuxCmd tag to bundle, for example v1.1.6 (required, no 'latest' fallback — niubash#312)"
+        description: "WinuxCmd tag to bundle, for example v1.1.7 (required, no 'latest' fallback — niubash#312)"
         required: true
         type: string
       winuxcmd_sha256:
