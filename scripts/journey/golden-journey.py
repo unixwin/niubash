@@ -2174,12 +2174,38 @@ def journey(exe: Path, root: Path, verdict: Verdict,
         except TimeoutError as err:
             raise AssertionError(f"collection question never appeared: {err}")
 
+        # Q2.6 (the 2026-10-12 wizard surface; the step niubash#322 added to
+        # the d3 smoke journey too): the TAB completion style menu runs on
+        # every first run AND re-run. The current effective style (gnu on a
+        # fresh install) is pre-highlighted, so Enter is a no-op pick — no
+        # rc line is written when the pick equals the effective style.
+        try:
+            session.wait_for("TAB completion style?", timeout=60)
+            session.answer(ENTER)
+            step.check("completion-style question answered with the "
+                       "pre-highlighted default", True)
+        except TimeoutError as err:
+            raise AssertionError(
+                f"TAB completion style question never appeared: {err}")
+
         try:
             session.wait_for("niu-git", timeout=60)
             session.answer(ENTER)  # default Skip
             step.check("niu-git question answered with Skip", True)
         except TimeoutError as err:
             raise AssertionError(f"niu-git question never appeared: {err}")
+
+        # Q4: external completion providers (carapace-bin) — Skip is the
+        # highlighted default and writes no rc snippet; the journey never
+        # opts in.
+        try:
+            session.wait_for("External completion providers", timeout=60)
+            session.answer(ENTER)
+            step.check("providers question answered with Skip", True)
+        except TimeoutError as err:
+            raise AssertionError(
+                f"external completion providers question never appeared: "
+                f"{err}")
 
         try:
             session.wait_for("Apply this configuration?", timeout=60)
@@ -2911,9 +2937,11 @@ def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
     rerun_wizard — 'Reconfigure your interactive prompt/plugins. Existing
     rc will be backed up.'). pick=None answers the gallery's
     'Skip - keep my current theme' (the highlighted default); a name or
-    candidate list is DOWN-walked in the gallery. Returns the theme name
-    the run picked (None = Skip). Every key is gated on the wizard's own
-    screens; delivery hardening comes from send_line/answer."""
+    candidate list is DOWN-walked in the gallery. Every question after the
+    gallery (Q2.6 TAB completion style, Q3 niu-git, Q4 external completion
+    providers) takes its highlighted default via Enter. Returns the theme
+    name the run picked (None = Skip). Every key is gated on the wizard's
+    own screens; delivery hardening comes from send_line/answer."""
     session.send_line("niu setup", anchor=False)
     session.wait_for("Reconfigure your interactive prompt/plugins", timeout=90)
     session.wait_for("Pick a theme", timeout=180)
@@ -2942,8 +2970,15 @@ def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
             raise AssertionError(f"gallery walk never reached {pick}")
         verdict.capture(capture + "-highlighted", session)
         session.answer(ENTER)
+    session.wait_for("TAB completion style?", timeout=60)
+    # Q2.6 runs on every re-run too; the current effective style is
+    # pre-highlighted, so Enter is a no-op pick (niubash#322's missing
+    # step, same as the J2 and d3 fixes).
+    session.answer(ENTER)
     session.wait_for("niu-git", timeout=60)
     session.answer(ENTER)  # Skip — the default; never auto-installs
+    session.wait_for("External completion providers", timeout=60)
+    session.answer(ENTER)  # Skip — the default; no carapace rc snippet
     session.wait_for("Apply this configuration?", timeout=60)
     session.answer(ENTER)  # Apply — the highlighted default
     session.wait_for("Shell rc written", timeout=120)

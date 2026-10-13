@@ -6,6 +6,9 @@
     {
       "name": "gawk",
       "version": "5.4.1",
+      "commands": [
+        "gawk"
+      ],
       "sha256": {
         "windows-x64": "25373ae83ec539dbe8b4208e1b4c1afa891f902df1a19138ecda5451ccded4b6"
       },
@@ -13,15 +16,21 @@
     },
     {
       "name": "niugit",
-      "version": "2.55.0.3",
+      "version": "2.55.0.4",
+      "commands": [
+        "git"
+      ],
       "sha256": {
-        "windows-x64": "71db2476ce77d1242acc0c8ac0ab75dcd02680f616e0c094129da31a028ef309"
+        "windows-x64": "b37000979ab6be21435270ab8c0da8a229a945946454dd78840929503eab296f"
       },
-      "purpose": "Niu-git 2.55.0.3 (native Windows git without MSYS). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. The payload is the whole niu-git tree (git.exe at the package root plus the mingw64/ directory carrying its minimal dependency DLLs and etc/) landing in <root>\\opt\\niugit; wpm registers command `git`, so usr\\bin\\git.exe forwards into the package. It is schannel-only TLS with no bundled shell/perl and accepts POSIX-shaped (/d/...) path args."
+      "purpose": "Niu-git 2.55.0.4 (native Windows git without MSYS; 2.55.0.4 fixes wrapper argv fidelity). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. The payload is the whole niu-git tree (git.exe at the package root plus the mingw64/ directory carrying its minimal dependency DLLs and etc/) landing in <root>\\opt\\niugit; wpm registers command `git`, so usr\\bin\\git.exe forwards into the package (there is no niugit.exe shim — the verify step asserts on the registered commands). It is schannel-only TLS with no bundled shell/perl and accepts POSIX-shaped (/d/...) path args."
     },
     {
       "name": "ripgrep",
       "version": "15.2.0",
+      "commands": [
+        "rg"
+      ],
       "sha256": {
         "windows-x64": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
         "windows-arm64": "e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f"
@@ -31,6 +40,9 @@
     {
       "name": "fd",
       "version": "10.4.2",
+      "commands": [
+        "fd"
+      ],
       "sha256": {
         "windows-x64": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
         "windows-arm64": "4f9110c2d5b33a7f760bfa5510f4c113d828109f7277d421b1053a9943c0fc92"
@@ -47,8 +59,9 @@
   ],
   "notes": [
     "Fail-open contract: a failed install is a loud warning (GITHUB_STEP_SUMMARY + ::warning), never a release blocker. Pre-installing is an enhancement, not a promise; users can always run `winuxcmd wpm install <name>` against an installed package.",
-    "Pin contract (niubash#312): every package entry carries `version` plus a `sha256` map keyed by wpm arch (windows-x64 / windows-arm64). The release workflow refuses to install a package whose live-index artifact digest does not equal the pin — that failure takes the same loud fail-open path as a transport failure, so a release's contents cannot silently drift with the index state of the build minute. Pins were recorded from unixwin/wpm-source main @ cad1544 (official-2026.10.10); bump them deliberately, together with `version`.",
-    "Architecture: niugit and gawk exist as windows-x64 artifacts only in the wpm index; on the arm64 release leg those installs fail by design and the leg ships without them. ripgrep and fd carry windows-arm64 artifacts and pre-install on both legs. The post-package verify step asserts only on legs where the binaries exist.",
+    "Pin contract (niubash#312): every package entry carries `version` plus a `sha256` map keyed by wpm arch (windows-x64 / windows-arm64). The release workflow refuses to install a package whose live-index artifact digest does not equal the pin — that failure takes the same loud fail-open path as a transport failure, so a release's contents cannot silently drift with the index state of the build minute. Pins were recorded from unixwin/wpm-source main @ dbf971d (official-2026.10.13); bump them deliberately, together with `version`.",
+    "Commands contract: every package entry carries `commands`, mirroring the wpm index's `commands` field — wpm materializes a usr\\bin shim per registered command (niugit ships git.exe, ripgrep ships rg.exe), never per package name, and the release verify step asserts on these (plus the shims entries), not on package names.",
+    "Architecture: niugit and gawk exist as windows-x64 artifacts only in the wpm index; on the arm64 release leg those installs fail by design and the leg ships without them. ripgrep and fd carry windows-arm64 artifacts and pre-install on both legs. The post-package verify step hard-asserts only what the pre-install step reported as installed, per the fail-open contract.",
     "No symlinks, ever: shims are winuxcmd.exe hardlinks (copies on file systems without hardlink support). The issue red lines stand - no archive formats are added, no symbolic links are created, and the runtime never downloads binaries (the assembly happens here, in CI).",
     "The staged package ships <root>\\usr\\bin shims and the <root>\\opt payload tree only - never the .wpm state directory (cache/staging/index)."
   ],

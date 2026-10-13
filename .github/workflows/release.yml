@@ -427,21 +427,38 @@ jobs:
           }
 
           $binDir = Join-Path $stage "winuxcmd\usr\bin"
-          $shimNames = @($manifest.shims | ForEach-Object { $_.name }) + @($manifest.packages | ForEach-Object { $_.name })
-          $shimNames = $shimNames | Select-Object -Unique
-          foreach ($name in $shimNames) {
+          # niubash#312 says this step hard-asserts only what the pre-install
+          # step reported as INSTALLED (the fail-open contract): a package
+          # skipped by design on this leg (no arch pin, pin mismatch) asserts
+          # nothing. And wpm materializes a usr\bin shim per REGISTERED
+          # COMMAND — the niugit package ships git.exe, ripgrep ships rg.exe —
+          # never per package name, so the assertion targets each package's
+          # `commands` from the manifest (mirroring the wpm index), with the
+          # package name as the fallback for entries that carry none.
+          function Assert-StagedShim([string]$name, [string]$packageName) {
             $exe = Join-Path $binDir "$name.exe"
             if (-not (Test-Path -LiteralPath $exe)) {
-              if ($installed.Count -gt 0) {
-                throw "pre-install reported '$($installed -join ',')' installed but $exe is missing from the staged package"
-              }
-              continue
+              throw "pre-install reported '$packageName' installed but $exe is missing from the staged package"
             }
             $out = & $exe --version 2>&1
             if ($LASTEXITCODE -ne 0 -or -not "$out") {
               throw "$name --version failed inside the staged package (exit $LASTEXITCODE)"
             }
             Write-Host "$name --version: $($out | Select-Object -First 1)"
+          }
+          foreach ($package in $manifest.packages) {
+            if ($installed -notcontains $package.name) { continue }
+            $names = @($package.commands | Where-Object { $_ })
+            if ($names.Count -eq 0) { $names = @($package.name) }
+            foreach ($name in $names) {
+              Assert-StagedShim $name $package.name
+            }
+          }
+          foreach ($shim in $manifest.shims) {
+            # A manifest shim exists only when its target package installed
+            # (the pre-install step materializes it under exactly that rule).
+            if ($installed -notcontains $shim.target) { continue }
+            Assert-StagedShim $shim.name $shim.target
           }
 
           if ($installed -contains "gawk") {
@@ -885,9 +902,12 @@ jobs:
             ndk_triple: aarch64-linux-android
           # rubash#456 fixed the armv7 bionic cfg surface (u16 S_IFMT,
           # i32 off_t), so this leg compiles; keep it optional alongside.
+          # The NDK triple is armv7a (with the trailing a) — the rust
+          # target name armv7-linux-androideabi must NOT be pasted onto the
+          # NDK wrapper names.
           - arch: armv7
             rust_target: armv7-linux-androideabi
-            ndk_triple: armv7-linux-androideabi
+            ndk_triple: armv7a-linux-androideabi
 
     steps:
       - uses: actions/checkout@v4.2.2
@@ -951,8 +971,14 @@ jobs:
       - name: Build niubash (bionic, release)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          # NDK wrapper naming: clang drivers are <triple><api>-clang. The
+          # armv7 triple is armv7a-linux-androideabi (r27c ships
+          # armv7a-linux-androideabi24-clang; there is no
+          # armv7-linux-androideabi24-clang — the missing trailing "a" is
+          # what red the armv7 leg with "linker not found"). aarch64 has no
+          # suffix in its triple, so its line is already the real name.
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi24-clang
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
 
       # The runner cannot execute bionic binaries, so the four-check smoke
@@ -1510,8 +1536,36 @@ jobs:
       # because rubash 1.0.0 is not on crates.io; `cargo publish` refuses a
       # bare path dependency. Re-add version = "1.0.0" once rubash 1.0.0 is
       # published.
+      #
+      # crates.io is idempotent per version: re-running a release (the
+      # v1.4.0 run's crates job died on steps the first attempt had already
+      # published) hits HTTP 400 "crate version `x.y.z` is already
+      # uploaded". That verdict means the version IS live on crates.io —
+      # a successful publish, not a failure. Both steps grep for exactly
+      # that server response and treat it as success; any other failure
+      # still fails the step (loudly, under the job's continue-on-error).
       - name: Publish niubash-runtime to crates.io
-        run: cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $output = cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }} 2>&1
+          $output | ForEach-Object { Write-Host "$_" }
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          if (($output | ForEach-Object { "$_" }) -match "is already uploaded") {
+            Write-Host "niubash-runtime's version is already on crates.io - the publish already happened; treating as success"
+            exit 0
+          }
+          exit 1
 
       - name: Publish niubash to crates.io
-        run: cargo publish --locked -p niubash --token ${{ secrets.CRATES_IO_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $output = cargo publish --locked -p niubash --token ${{ secrets.CRATES_IO_TOKEN }} 2>&1
+          $output | ForEach-Object { Write-Host "$_" }
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          if (($output | ForEach-Object { "$_" }) -match "is already uploaded") {
+            Write-Host "niubash's version is already on crates.io - the publish already happened; treating as success"
+            exit 0
+          }
+          exit 1
