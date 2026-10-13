@@ -93,12 +93,20 @@ fn display_cwd(cwd: &Path) -> String {
     posix
 }
 
-/// `branch` / `branch*` (dirty) / short SHA (detached) — `None` outside a
-/// repository. Opens the worktree containing `cwd` (git2 walks parents the
-/// way `discover` does), reads HEAD, and only runs the status sweep when a
-/// worktree exists (bare repos and detached cores skip it — they have
-/// nothing to be dirty against).
-fn branch_segment(cwd: &Path) -> Option<String> {
+/// The git segment of the prompt: `branch` / `branch*` (dirty) / short SHA
+/// (detached) — `None` outside a repository. Opens the worktree containing
+/// `cwd` (git2 walks parents the way `discover` does), reads HEAD, and only
+/// runs the status sweep when a worktree exists (bare repos and detached
+/// cores skip it — they have nothing to be dirty against).
+///
+/// Public so the segment prompt engine can drive it
+/// (`SegmentId::Vcs`, niubash#331): the oh-my-niu bundle's
+/// `[segments.git] id = "vcs"` declaration resolves to this renderer.
+/// In-process git2 only — the segment path must never spawn a git child
+/// (niubash#145 red line, niubash#604 lesson). The dirty `*` suffix is the
+/// dirty-state marker; the segment engine keys its `[git_dirty]` yellow off
+/// exactly that star.
+pub fn branch_segment(cwd: &Path) -> Option<String> {
     let repo = git2::Repository::discover(cwd).ok()?;
     let head = repo.head().ok()?;
     let name = if head.is_branch() {

@@ -31,6 +31,11 @@ pub enum SegmentId {
     BackgroundJobs,
     CommandExecutionTime,
     Newline,
+    /// Version-control segment (git). niubash#331: the oh-my-niu bundle's
+    /// `[segments.git] id = "vcs"` declaration, powered by #292's in-process
+    /// git2 renderer (`branch` / `branch*` / short SHA) — zero child
+    /// processes on the prompt path.
+    Vcs,
     Custom(String),
 }
 
@@ -52,6 +57,10 @@ impl SegmentId {
             "backgroundjobs" => Some(Self::BackgroundJobs),
             "commandexecutiontime" | "cmdexectime" => Some(Self::CommandExecutionTime),
             "newline" => Some(Self::Newline),
+            // The bundle segment is named `git`, the native id is `vcs`
+            // (prompts/segments.toml: `[segments.git] id = "vcs"`) — accept
+            // either spelling so the declaration and the presets resolve.
+            "vcs" | "git" => Some(Self::Vcs),
             _ => None,
         }
     }
@@ -201,6 +210,7 @@ fn render_content(segment: &SegmentId, config: &SegmentPromptConfig) -> Option<S
             let ms = std::env::var("NIU_CMD_EXEC_TIME_MS").ok();
             ms.filter(|m| !m.is_empty()).map(|m| format!("{}ms", m))
         }
+        SegmentId::Vcs => vcs_segment_content(),
         SegmentId::Newline => Some(String::new()),
         SegmentId::Custom(name) => {
             let env_name = format!("NIU_SEGMENT_{}", name.to_ascii_uppercase());
@@ -224,6 +234,39 @@ fn short_dir(path: &Path) -> String {
         }
     }
     path_str.to_string()
+}
+
+/// The Vcs segment body: `branch` / `branch*` (dirty) / short SHA (detached),
+/// `None` (empty segment) outside a repository — the #292 git2 renderer, so
+/// the whole path stays in-process. No `Command`/spawn anywhere on this
+/// route: niubash#604 measured PS1-embedded `$(...)` at ~100x the native
+/// segment cost, and the niubash#145 red line forbids prompt-path forks.
+#[cfg(windows)]
+fn vcs_segment_content() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    crate::git_prompt::branch_segment(&cwd)
+}
+
+/// Off-Windows the git segment is not a surface (`git_prompt` is a
+/// windows-only module, see lib.rs): the segment renders empty the same way
+/// the gitbash prompt style falls back to the template floor there.
+#[cfg(not(windows))]
+fn vcs_segment_content() -> Option<String> {
+    None
+}
+
+/// Vcs colouring, the oh-my-niu theme contract: `[git_clean]` cyan,
+/// `[git_dirty]` yellow. The renderer marks dirtiness with the trailing `*`
+/// (`branch*`), so the star alone decides the colour — a detached short SHA
+/// renders clean-cyan exactly the way #292's gitbash segment does. Applied
+/// regardless of preset (the compiled palettes carry no per-preset git
+/// colours; the bundle themes speak with one voice here).
+fn vcs_colour(content: &str) -> SegmentColour {
+    if content.ends_with('*') {
+        (Some(Color::Yellow), None)
+    } else {
+        (Some(Color::Cyan), None)
+    }
 }
 
 // ---- Prompt configuration ----
@@ -339,7 +382,7 @@ impl SegmentPrompt {
                 break;
             }
             if let Some(content) = render_content(element, &self.config) {
-                let (fg, bg) = self.colour_for(element);
+                let (fg, bg) = self.colour_for(element, &content);
                 segments.push(RenderedSegment { content, fg, bg });
             }
         }
@@ -353,7 +396,13 @@ impl SegmentPrompt {
             .join(" ")
     }
 
-    fn colour_for(&self, segment: &SegmentId) -> SegmentColour {
+    fn colour_for(&self, segment: &SegmentId, content: &str) -> SegmentColour {
+        // Vcs carries its own colour contract (oh-my-niu themes'
+        // `[git_clean]` cyan / `[git_dirty]` yellow), keyed off the dirty
+        // star the renderer appends — see `vcs_colour`.
+        if *segment == SegmentId::Vcs {
+            return vcs_colour(content);
+        }
         match self.config.preset {
             Some(preset) => preset_colour(preset, segment),
             // Custom element orders without a preset render unstyled; the
@@ -374,7 +423,7 @@ impl SegmentPrompt {
                 continue;
             }
             if let Some(content) = render_content(element, &self.config) {
-                let (fg, bg) = self.colour_for(element);
+                let (fg, bg) = self.colour_for(element, &content);
                 current.push(RenderedSegment { content, fg, bg });
             }
         }
@@ -520,9 +569,10 @@ mod tests {
     fn segment_id_from_name_case_insensitive() {
         assert_eq!(SegmentId::from_name("dir"), Some(SegmentId::Dir));
         assert_eq!(SegmentId::from_name("DIR"), Some(SegmentId::Dir));
-        // The host no longer renders VCS status (issue #145): "vcs" stopped
-        // being a known segment name when the built-in git prompt retired.
-        assert_eq!(SegmentId::from_name("vcs"), None);
+        // niubash#331 revives the segment: "vcs" (the native id the oh-my-niu
+        // bundle declares) and "git" (the bundle segment name) both resolve.
+        assert_eq!(SegmentId::from_name("vcs"), Some(SegmentId::Vcs));
+        assert_eq!(SegmentId::from_name("git"), Some(SegmentId::Vcs));
         assert_eq!(
             SegmentId::from_name("prompt_char"),
             Some(SegmentId::PromptChar)
@@ -533,6 +583,23 @@ mod tests {
         );
         assert_eq!(SegmentId::from_name("newline"), Some(SegmentId::Newline));
         assert_eq!(SegmentId::from_name(""), None);
+    }
+
+    #[test]
+    fn vcs_from_name_matrix() {
+        // Native id, bundle segment name, case, separator spellings — the
+        // parser strips non-alphanumerics, so every shape lands on Vcs.
+        for name in ["vcs", "git", "VCS", "Git", "GIT", "v-c-s", "v_c_s"] {
+            assert_eq!(
+                SegmentId::from_name(name),
+                Some(SegmentId::Vcs),
+                "{name:?} must resolve to SegmentId::Vcs"
+            );
+        }
+        // Near-misses stay unknown.
+        for name in ["gitstatus", "vc", "gitbash"] {
+            assert_eq!(SegmentId::from_name(name), None, "{name:?} is not Vcs");
+        }
     }
 
     #[test]
@@ -707,5 +774,299 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
+    }
+
+    // ---- SegmentId::Vcs (niubash#331) ----
+    //
+    // git2 is a windows-only dependency (Cargo.toml target gate), so the
+    // fixture-building tests are windows-gated like the git_prompt module.
+
+    /// A CwdGuard for the `current_dir`-driven Vcs segment; serialised with
+    /// the PROCESS_STATE_LOCK like every other process-state mutation
+    /// (Windows env/cwd races — wt61).
+    #[cfg(windows)]
+    struct CwdGuard {
+        previous: std::path::PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl CwdGuard {
+        fn enter(path: &Path) -> Self {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { previous }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    /// Minimal one-commit repository (clean index) — the shared fixture for
+    /// the Vcs render matrix.
+    fn init_clean_repo(dir: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(dir).unwrap();
+        let mut index = repo.index().unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        // `tree` borrows `repo`; release it before the repo is handed back.
+        drop(tree);
+        repo
+    }
+
+    #[cfg(windows)]
+    fn vcs_content_in(dir: &Path) -> Option<String> {
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd = CwdGuard::enter(dir);
+        vcs_segment_content()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vcs_segment_is_empty_outside_a_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(vcs_content_in(tmp.path()), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vcs_segment_shows_branch_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_clean_repo(tmp.path());
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let content = vcs_content_in(tmp.path()).unwrap();
+        assert_eq!(content, branch, "clean repo: bare branch, no star");
+        assert!(!content.ends_with('*'), "{content:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vcs_segment_marks_dirty_with_the_star() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_clean_repo(tmp.path());
+        let file = tmp.path().join("tracked.txt");
+        std::fs::write(&file, b"dirty").unwrap();
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let content = vcs_content_in(tmp.path()).unwrap();
+        assert_eq!(content, format!("{branch}*"), "dirty repo: branch + star");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vcs_segment_shows_short_sha_when_detached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_clean_repo(tmp.path());
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.set_head_detached(oid).unwrap();
+        let content = vcs_content_in(tmp.path()).unwrap();
+        assert_eq!(content, &oid.to_string()[..7], "detached: short SHA");
+    }
+
+    #[test]
+    fn vcs_colour_follows_the_oh_my_niu_theme_contract() {
+        // [git_clean] cyan / [git_dirty] yellow — the dirty star decides.
+        let (clean_fg, clean_bg) = vcs_colour("main");
+        let (dirty_fg, dirty_bg) = vcs_colour("main*");
+        let (detached_fg, _) = vcs_colour("a1b2c3d");
+        assert_eq!(clean_fg, Some(Color::Cyan));
+        assert_eq!(clean_bg, None);
+        assert_eq!(dirty_fg, Some(Color::Yellow));
+        assert_eq!(dirty_bg, None);
+        assert_eq!(detached_fg, Some(Color::Cyan), "detached renders clean");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vcs_segment_paints_cyan_clean_and_yellow_dirty() {
+        let cases: [(bool, Color); 2] = [(false, Color::Cyan), (true, Color::Yellow)];
+        for (dirty, expected) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo = init_clean_repo(tmp.path());
+            if dirty {
+                std::fs::write(tmp.path().join("tracked.txt"), b"dirty").unwrap();
+            }
+            let cfg = SegmentPromptConfig {
+                left_elements: vec![SegmentId::Vcs],
+                right_elements: vec![],
+                separator: " ".to_string(),
+                prompt_symbol: "\u{276f}".to_string(),
+                preset: Some(SegmentPreset::Lean),
+            };
+            let prompt = SegmentPrompt::new(cfg);
+            let left = {
+                let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let _cwd = CwdGuard::enter(tmp.path());
+                prompt.render_left()
+            };
+            let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+            let ansi = if expected == Color::Cyan {
+                "\u{1b}[36m"
+            } else {
+                "\u{1b}[33m"
+            };
+            assert!(
+                left.contains(ansi),
+                "dirty={dirty} must paint {expected:?}: {left:?}"
+            );
+            assert!(left.contains(&branch), "dirty={dirty}: {left:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vcs_segment_render_p50_within_10ms_budget() {
+        // Issue #331 scope 4: p50 <= 10ms (10x headroom over the 2.5ms
+        // warm git2 measurement). The median of 21 renders absorbs the
+        // first-open cold cost; a per-prompt git child process (#604's
+        // anti-pattern) would blow the budget by an order of magnitude.
+        let tmp = tempfile::tempdir().unwrap();
+        init_clean_repo(tmp.path());
+
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd = CwdGuard::enter(tmp.path());
+        for _ in 0..3 {
+            let _ = vcs_segment_content(); // warm-up
+        }
+        let mut samples: Vec<std::time::Duration> = Vec::with_capacity(21);
+        for _ in 0..21 {
+            let start = std::time::Instant::now();
+            let _ = vcs_segment_content();
+            samples.push(start.elapsed());
+        }
+        samples.sort();
+        let p50 = samples[samples.len() / 2];
+        assert!(
+            p50.as_millis() <= 10,
+            "Vcs segment p50 {p50:?} exceeds the 10ms budget (max {max:?})",
+            max = samples[samples.len() - 1]
+        );
+    }
+
+    /// Verbatim mirror of oh-my-niu `prompts/segments.toml` (bundle clone,
+    /// unixwin/oh-my-niu). Pinned here so contract drift fails this test on
+    /// either side: a renamed id or a preset referencing an unknown segment
+    /// breaks resolution the day the bundle ships.
+    const OH_MY_NIU_SEGMENTS_TOML: &str = r#"
+[segments.cwd]
+id = "dir"
+description = "Current working directory, shortened for prompt display."
+
+[segments.git]
+id = "vcs"
+description = "Git branch and compact repository status."
+
+[segments.status]
+id = "status"
+description = "Last command exit status when non-zero."
+
+[segments.time]
+id = "time"
+description = "Current local time."
+
+[segments.user_host]
+id = "context"
+description = "User and host context."
+
+[segments.prompt_char]
+id = "prompt_char"
+description = "Mode-neutral prompt symbol."
+
+[segments.newline]
+id = "newline"
+description = "Prompt line break."
+
+[segments.command_execution_time]
+id = "command_execution_time"
+description = "Previous command duration."
+
+[presets.lean]
+left = ["cwd", "git", "newline", "prompt_char"]
+right = []
+separator = " "
+
+[presets.classic]
+left = ["cwd", "git", "newline"]
+right = ["status", "time"]
+separator = "\uE0B0"
+git_prompt_format = "git:({git_branch})"
+
+[presets.rainbow]
+left = ["cwd", "git", "newline"]
+right = ["status", "time"]
+separator = "\uE0B0"
+git_prompt_format = "git:({git_branch})"
+
+[presets.pure]
+left = ["user_host", "cwd", "git", "command_execution_time", "newline", "prompt_char"]
+right = []
+separator = " "
+
+[presets.robbyrussell]
+left = ["user_host", "cwd", "git", "newline", "prompt_char"]
+right = []
+separator = " "
+"#;
+
+    #[test]
+    fn oh_my_niu_segments_toml_ids_resolve() {
+        let value: toml::Value = toml::from_str(OH_MY_NIU_SEGMENTS_TOML).unwrap();
+        let segments = value["segments"].as_table().unwrap();
+        let mut name_to_id = std::collections::BTreeMap::new();
+        for (name, spec) in segments {
+            let id = spec["id"].as_str().unwrap();
+            let resolved = SegmentId::from_name(id);
+            assert!(
+                resolved.is_some(),
+                "bundle id {id:?} (segment {name:?}) has no native SegmentId"
+            );
+            name_to_id.insert(name.as_str(), id);
+        }
+        // Every shipped preset element must resolve — directly by native
+        // name, or through the bundle's name -> id mapping.
+        for (preset, spec) in value["presets"].as_table().unwrap() {
+            for side in ["left", "right"] {
+                let Some(list) = spec.get(side).and_then(|l| l.as_array()) else {
+                    continue;
+                };
+                for element in list {
+                    let name = element.as_str().unwrap();
+                    let resolves = SegmentId::from_name(name).is_some()
+                        || name_to_id
+                            .get(name)
+                            .is_some_and(|id| SegmentId::from_name(id).is_some());
+                    assert!(
+                        resolves,
+                        "preset {preset:?} references unresolvable segment {name:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oh_my_niu_git_segment_resolves_under_name_and_id() {
+        // The issue's headline socket: `[segments.git] id = "vcs"`. Both the
+        // bundle name ("git") and the native id ("vcs") land on SegmentId::Vcs.
+        assert_eq!(SegmentId::from_name("git"), Some(SegmentId::Vcs));
+        assert_eq!(SegmentId::from_name("vcs"), Some(SegmentId::Vcs));
+        // Preset integration: the shipped `lean` preset lists `git`; through
+        // the bundle mapping it must resolve to the native Vcs segment.
+        let value: toml::Value = toml::from_str(OH_MY_NIU_SEGMENTS_TOML).unwrap();
+        let lean_left: Vec<String> = value["presets"]["lean"]["left"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().unwrap().to_string())
+            .collect();
+        let git_name = "git";
+        assert!(lean_left.contains(&git_name.to_string()));
+        let bundle_id = value["segments"][git_name]["id"].as_str().unwrap();
+        assert_eq!(SegmentId::from_name(bundle_id), Some(SegmentId::Vcs));
     }
 }
