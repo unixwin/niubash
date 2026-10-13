@@ -185,11 +185,12 @@ pub struct StdinCurrentShellChild {
 }
 
 /// The `$0` a fresh shell starts with. GNU shell.c set_shell_name uses the
-/// invocation name: when the process was reached through the sh.exe shim the
+/// invocation name: when the process was reached through a shell shim the
 /// shim forwards its argv[0] stem in NIU_INVOKED_AS, so `sh -c 'echo $0'`
-/// prints `sh` (or `-sh` for a login-marked name), not niu. Any other
-/// invocation — plain niu, the bash shim (which deliberately forwards no
-/// name) — keeps the historical `niu` default byte-for-byte.
+/// prints `sh` (or `-sh` for a login-marked name), not niu — and since
+/// rubash#598 the same forward carries the bash/rbash faces, so
+/// `bash -c 'echo $0'` prints `bash`. Any other invocation (plain niu, an
+/// unrecognized stem) keeps the historical `niu` default byte-for-byte.
 fn default_script_name() -> String {
     default_script_name_from(std::env::var("NIU_INVOKED_AS").ok())
 }
@@ -213,7 +214,12 @@ fn default_script_name_from(raw: Option<String>) -> String {
     let lowered = basename.to_ascii_lowercase();
     let stem = lowered.strip_suffix(".exe").unwrap_or(&lowered);
     let unmarked = stem.strip_prefix('-').unwrap_or(stem);
-    if matches!(unmarked, "sh" | "ash") {
+    // The four faces the shim forwards (rubash#598): sh/ash key the POSIX
+    // contract, bash/rbash only need `$0` to read the invocation name
+    // (GNU shell.c set_shell_name binds dollar_vars[0] to argv[0] for
+    // every face; shell.c:1258-1299 keys rbash off it). Everything else
+    // stays the plain-niu default.
+    if matches!(unmarked, "sh" | "ash" | "bash" | "rbash") {
         stem.to_string()
     } else {
         "niu".to_string()
@@ -5966,16 +5972,33 @@ mod invocation_name_tests {
     }
 
     #[test]
-    fn plain_niu_and_bash_shim_keep_the_niu_default() {
-        // bash.exe forwards no NIU_INVOKED_AS (byte-identical forward), and a
-        // direct niu.exe run carries no sh/ash stem either way.
-        assert_eq!(default_script_name_from(None), "niu");
-        assert_eq!(default_script_name_from(Some("bash".to_string())), "niu");
+    fn bash_and_rbash_faces_report_the_invocation_name() {
+        // rubash#598 companion (niubash#321): the shim forwards the
+        // bash/rbash stems too, and GNU set_shell_name binds $0 to argv[0]
+        // for every face — `bash -c 'echo $0'` must read `bash`, not niu.
+        assert_eq!(default_script_name_from(Some("bash".to_string())), "bash");
         assert_eq!(
-            default_script_name_from(Some("C:/x/bin/bash.exe".to_string())),
+            default_script_name_from(Some("C:/x/winuxcmd/bin/bash.exe".to_string())),
+            "bash"
+        );
+        assert_eq!(default_script_name_from(Some("rbash".to_string())), "rbash");
+        assert_eq!(
+            default_script_name_from(Some("-BASH.EXE".to_string())),
+            "-bash"
+        );
+    }
+
+    #[test]
+    fn plain_niu_and_unknown_stems_keep_the_niu_default() {
+        // A direct niu.exe run (or any stem the shim never forwards) keeps
+        // the historical default byte-for-byte.
+        assert_eq!(default_script_name_from(None), "niu");
+        assert_eq!(default_script_name_from(Some("niu".to_string())), "niu");
+        assert_eq!(default_script_name_from(Some("mysh".to_string())), "niu");
+        assert_eq!(
+            default_script_name_from(Some("C:/x/bin/niubash.exe".to_string())),
             "niu"
         );
-        assert_eq!(default_script_name_from(Some("niu".to_string())), "niu");
     }
 
     #[test]
