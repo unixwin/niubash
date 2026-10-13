@@ -20,6 +20,38 @@ All notable changes to Niubash are documented in this file.
   swept console input records: the sweeper's self-heal path drains the
   buffer before writing it back, so a record can no longer be reinjected
   twice (once by the self-heal, once by disarm; niubash#287).
+- The plugin trust gate now runs at runtime, not only at trust time
+  (niubash#297): `niu plugin sync` and `plugin list` re-verify every
+  trusted source against its lockfile pin, so a tree modified after
+  `trust` reads `drift` (never a lying `unchanged`) and
+  `degraded=true` with the drift reason in `--json` — the tree stops
+  contributing assets until it is repaired. sync records drifted ids in
+  `sources/drifted-sources.txt`, and the managed rc blocks carry a static
+  guard that prints the warning at every startup (the rc stays static
+  text; no hashing in it). `plugin restore` wording is honest about
+  rebuilding from the pin ("rebuilt from the lockfile pin", not "tree
+  matches"). bash-it's `enabled/` entries — the one legitimate tree
+  mutation `niu plugin enable` itself makes — are transparent to the pin,
+  while an injected `enabled/` file with unpinned content still trips
+  both `verify` and `trust`.
+- `niu plugin mirror set http://…` is refused without an explicit
+  `--allow-plaintext` confirm (niubash#298): a plaintext mirror ships
+  every git fetch unencrypted and unauthenticated, and the confirm still
+  prints the standing warning. The first fetch of an unpinned non-catalog
+  origin is now flagged for what it is: `plugin add` prints a
+  "NOT integrity-verified" warning and the record carries
+  `first_fetch_verified: false` (visible in `plugin list --json`); a
+  `--checksum` pin or a curated catalog origin marks it verified.
+- `niu plugin clean` reports every orphan directory under `sources/` the
+  registry does not claim (niubash#299) instead of silently keeping
+  manager-shaped ones and ignoring the rest; `--orphans` is the explicit
+  confirm that deletes them.
+- `niu plugin add <path>` positional form is first-class (niubash#300):
+  a bare local directory snapshot-copies in, a single `.sh`/`.bash`
+  file becomes its own one-file wild source, a nonexistent path fails
+  honestly (instead of a baffling `git clone` status 128 after the
+  trust-boundary banner), and the help documents the path and
+  `file://` forms.
 
 ## [1.4.0] - 2026-10-10
 

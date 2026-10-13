@@ -306,11 +306,33 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
              (`niu plugin list` for assets)"
         )?;
         for status in sources.iter().filter(|s| s.state == "degraded") {
+            // niubash#297: drift (a trusted tree that no longer matches its
+            // lockfile pin) is a different failure than a missing tree —
+            // name it, and point at the verify verb that reports the
+            // checksums before the repair.
+            let drifted = status.degraded_reason.as_deref()
+                == Some(crate::plugins::sources::DEGRADED_DRIFTED);
             writeln!(
                 out,
-                "  {warn} source degraded     '{}' tree missing — fallback active; \
-                 repair with `niu plugin restore {}`",
-                status.record.id, status.record.id
+                "  {warn} source degraded     '{}' {} — {}; {}",
+                status.record.id,
+                status
+                    .degraded_reason
+                    .as_deref()
+                    .unwrap_or(crate::plugins::sources::DEGRADED_MISSING),
+                if drifted {
+                    "its assets stay unloaded"
+                } else {
+                    "fallback active"
+                },
+                if drifted {
+                    format!(
+                        "review with `niu plugin source verify {}`; repair with `niu plugin restore {}`",
+                        status.record.id, status.record.id
+                    )
+                } else {
+                    format!("repair with `niu plugin restore {}`", status.record.id)
+                }
             )?;
         }
     }

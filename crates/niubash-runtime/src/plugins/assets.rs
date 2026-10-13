@@ -307,6 +307,12 @@ fn render_block(record: &SourceRecord, model: &SelectionModel, state: &BlockStat
             body.push_str(&format!("if [ -r \"{path}\" ]; then\n  . \"{path}\"\nfi\n"));
         }
     }
+    // Drift guard (niubash#297, deliberately STATIC text): `niu plugin sync`
+    // lists drifted source ids in drifted-sources.txt under the sources
+    // root; the block prints the warning at startup. No hashing here — the
+    // rc stays static and cacheable, the ledger file is the only dynamic
+    // channel.
+    body.push_str(&drift_guard_lines(&record.id));
     let loader = adapter.loader_snippet(record);
     if !loader.is_empty() {
         body.push_str(&loader);
@@ -316,6 +322,20 @@ fn render_block(record: &SourceRecord, model: &SelectionModel, state: &BlockStat
         begin_marker(&record.id),
         body,
         end_marker(&record.id)
+    )
+}
+
+/// The static drift-guard snippet for one source's managed block: warn at
+/// startup when `niu plugin sync` recorded this id in the drift ledger.
+fn drift_guard_lines(id: &str) -> String {
+    format!(
+        "# drift guard (static): `niu plugin sync` lists drifted ids in drifted-sources.txt\n\
+         _niu_drift=\"${{NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}}/drifted-sources.txt\"\n\
+         if [ -s \"$_niu_drift\" ] && command -v grep >/dev/null 2>&1 && grep -qx {} \"$_niu_drift\" 2>/dev/null; then\n\
+         \x20 echo \"niubash plugin: source {id} no longer matches its lockfile pin — run: niu plugin source verify {id}; repair with: niu plugin restore {id}\" >&2\n\
+         fi\n\
+         unset _niu_drift\n",
+        shell_quote(id)
     )
 }
 
