@@ -1161,8 +1161,14 @@ jobs:
       # known-fail exits 0 (labeling, never waiving — the owning ticket
       # owns the fix), an unlabeled fail exits 1. Guarded here so the
       # contract cannot drift silently between the module and the job.
+      # Same deterministic delivery as the gate itself: on a tag-push of
+      # an old release the working tree is that tag's own tree, which
+      # predates this self-check — take the current gate from the
+      # dispatch ref's object store.
       - name: Verdict-exit contract self-check
-        run: python scripts/journey/test_verdict_exit.py
+        run: |
+          git checkout origin/master -- scripts/journey/test_verdict_exit.py
+          python scripts/journey/test_verdict_exit.py
 
       - name: Run the golden user journey
         shell: pwsh
