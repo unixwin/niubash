@@ -247,6 +247,7 @@ pub struct ShortcutInstallSummary {
 /// that already exist (Inno created exactly the icons the user opted into),
 /// so the rewrite never grows a desktop icon the desktopicon task declined.
 /// A bare run (no installer baseline) passes `false` and creates both.
+#[cfg(windows)]
 pub fn install_shortcuts(
     plan: &ShortcutPlan,
     desktop_lnk: &Path,

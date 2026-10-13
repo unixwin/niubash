@@ -21,6 +21,24 @@ use niubash_runtime::shortcut::{
 };
 use std::path::{Path, PathBuf};
 
+/// The shell link object resolves `SetPath` inputs to their canonical
+/// spelling, so a target staged under an 8.3 short-name directory
+/// (CI checkouts: `RUNNER~1`) reads back long-form (`runneradmin`).
+/// Compare canonicalized on both sides — spelling is not the contract,
+/// identity is.
+fn canonical(path: &Path) -> PathBuf {
+    let c = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let s = c.as_os_str().to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped.to_string()),
+        None => c,
+    }
+}
+
+fn assert_same_path(left: &Path, right: &Path) {
+    assert_eq!(canonical(left), canonical(right));
+}
+
 /// Stage `wt.exe` / `niu.exe` / icon files so every path a plan carries
 /// exists, and return their absolute paths.
 fn stage_targets(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -65,10 +83,10 @@ fn wt_form_shortcut_round_trips_target_and_arguments() {
     write_shortcut(&wt_form_plan(temp.path(), &wt, &icon), &lnk).unwrap();
     let readback = read_shortcut(&lnk).unwrap();
 
-    assert_eq!(readback.target, wt);
+    assert_same_path(&readback.target, &wt);
     assert_eq!(readback.arguments, "-p Niubash");
-    assert_eq!(readback.icon, Some(icon));
-    assert_eq!(readback.working_directory, temp.path());
+    assert_same_path(readback.icon.as_deref().unwrap_or(Path::new("")), &icon);
+    assert_same_path(&readback.working_directory, temp.path());
 }
 
 #[test]
@@ -80,9 +98,9 @@ fn conhost_form_shortcut_round_trips_direct_exe() {
     write_shortcut(&conhost_form_plan(temp.path(), &niu), &lnk).unwrap();
     let readback = read_shortcut(&lnk).unwrap();
 
-    assert_eq!(readback.target, niu);
+    assert_same_path(&readback.target, &niu);
     assert_eq!(readback.arguments, "");
-    assert_eq!(readback.working_directory, temp.path());
+    assert_same_path(&readback.working_directory, temp.path());
 }
 
 #[test]
