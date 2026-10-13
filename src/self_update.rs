@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -127,7 +128,7 @@ pub fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    let installer_path = download_first_available_asset(&options.repo, &release.tag_name, &assets)?;
+    let installer_path = download_verified_installer(&options.repo, &release.tag_name, &assets)?;
     println!("Downloaded: {}", installer_path.display());
 
     if options.dry_run {
@@ -333,15 +334,18 @@ fn download_asset(repo: &str, tag: &str, asset: &GitHubAsset) -> Result<PathBuf>
     Ok(path)
 }
 
-fn download_first_available_asset(
-    repo: &str,
-    tag: &str,
-    assets: &[GitHubAsset],
-) -> Result<PathBuf> {
-    let mut errors = Vec::new();
+/// Download the first installer asset that fetches, then prove it is the
+/// published artifact before it may run (niubash#311). The installer keeps
+/// the existing stable-name-first, versioned-fallback contract; integrity is
+/// mandatory and FAIL-CLOSED: the `.sha256` sidecar published beside the
+/// same asset must download and match, otherwise the update aborts — a
+/// missing digest is an abort, never a skip, and a mismatched digest never
+/// reaches `launch_installer`.
+fn download_verified_installer(repo: &str, tag: &str, assets: &[GitHubAsset]) -> Result<PathBuf> {
+    let mut download_errors = Vec::new();
     for asset in assets {
-        match download_asset(repo, tag, asset) {
-            Ok(path) => return Ok(path),
+        let installer_path = match download_asset(repo, tag, asset) {
+            Ok(path) => path,
             Err(err) => {
                 let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
                 let detail = if chain.len() > 1 {
@@ -349,15 +353,100 @@ fn download_first_available_asset(
                 } else {
                     chain.first().cloned().unwrap_or_default()
                 };
-                errors.push(format!("{}: {detail}", asset.name));
+                download_errors.push(format!("{}: {detail}", asset.name));
+                continue;
             }
-        }
+        };
+
+        // The installer landed, so integrity is now required: verify against
+        // the digest published beside THIS asset's name — never another
+        // asset's digest (stable and versioned assets are uploaded in the
+        // same release, but only the paired sidecar proves these bytes).
+        let digest_asset = digest_asset_for(asset);
+        let digest_path = download_asset(repo, tag, &digest_asset).with_context(|| {
+            format!(
+                "SHA-256 digest asset '{}' could not be downloaded; refusing to run an \
+                 unverifiable installer (fail-closed, niubash#311). Download the \
+                 installer manually from https://github.com/{repo}/releases/tag/{tag} \
+                 and check it against the release's SHA256SUMS before installing",
+                digest_asset.name
+            )
+        })?;
+        let expected = parse_sha256_digest(
+            &std::fs::read_to_string(&digest_path)
+                .with_context(|| format!("read digest {}", digest_path.display()))?,
+        )
+        .with_context(|| format!("digest asset {} is malformed", digest_asset.name))?;
+        verify_installer_digest(&installer_path, &expected)?;
+        println!("SHA-256 verified: {expected}");
+        return Ok(installer_path);
     }
 
     anyhow::bail!(
         "failed to download installer for {tag}; tried {}",
-        errors.join("; ")
+        download_errors.join("; ")
     )
+}
+
+/// The digest sidecar always travels under the SAME name and URL as its
+/// installer asset, plus a `.sha256` suffix (`releases/latest/download/
+/// niubash-win-<arch>-setup.exe.sha256` for the stable alias).
+fn digest_asset_for(installer: &GitHubAsset) -> GitHubAsset {
+    GitHubAsset {
+        name: format!("{}.sha256", installer.name),
+        browser_download_url: format!("{}.sha256", installer.browser_download_url),
+    }
+}
+
+fn verify_installer_digest(path: &Path, expected_hex: &str) -> Result<()> {
+    let actual = sha256_hex_file(path)?;
+    if !digests_match(&actual, expected_hex) {
+        anyhow::bail!(
+            "SHA-256 mismatch for {}: expected {expected_hex}, got {actual}. The \
+             downloaded installer is not the published artifact and will NOT be run \
+             (niubash#311); re-download from the GitHub release page",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn sha256_hex_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(hex_lower(&Sha256::digest(&bytes)))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Equality that walks every byte pair, so comparison time does not leak how
+/// much of the digest matched.
+fn digests_match(actual: &str, expected: &str) -> bool {
+    let actual = actual.as_bytes();
+    let expected = expected.as_bytes();
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (a, e) in actual.iter().zip(expected.iter()) {
+        diff |= a ^ e;
+    }
+    diff == 0
+}
+
+/// Pull a 64-digit SHA-256 hex digest out of a `.sha256` sidecar. Accepts
+/// every shape the release pipeline and common tools emit: bare hex, the
+/// coreutils `"<hex>  <file>"` / `"<hex> *<file>"` forms, and PowerShell's
+/// `Get-FileHash` `"SHA256 (<file>) = <HEX>"` (any case, CRLF or LF).
+fn parse_sha256_digest(raw: &str) -> Result<String> {
+    let normalized = raw.replace(['*', '(', ')', ',', '='], " ");
+    for token in normalized.split_whitespace() {
+        if token.len() == 64 && token.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Ok(token.to_ascii_lowercase());
+        }
+    }
+    anyhow::bail!("no 64-hex-digit SHA-256 digest found")
 }
 
 struct HttpResponse {
@@ -964,6 +1053,134 @@ mod tests {
     #[test]
     fn sanitizes_download_file_names() {
         assert_eq!(safe_asset_name("../bad setup.exe"), ".._bad_setup.exe");
+    }
+
+    #[test]
+    fn digest_sidecar_shares_the_installer_asset_name_and_url() {
+        let stable = installer_assets("unixwin/niubash", "v0.8.2", "x64");
+        let stable_digest = digest_asset_for(&stable[0]);
+        assert_eq!(stable_digest.name, "niubash-win-x64-setup.exe.sha256");
+        assert_eq!(
+            stable_digest.browser_download_url,
+            "https://github.com/unixwin/niubash/releases/latest/download/niubash-win-x64-setup.exe.sha256"
+        );
+
+        let versioned_digest = digest_asset_for(&stable[1]);
+        assert_eq!(
+            versioned_digest.name,
+            "niubash-v0.8.2-win-x64-setup.exe.sha256"
+        );
+        assert_eq!(
+            versioned_digest.browser_download_url,
+            "https://github.com/unixwin/niubash/releases/download/v0.8.2/niubash-v0.8.2-win-x64-setup.exe.sha256"
+        );
+    }
+
+    #[test]
+    fn parses_bare_hex_digest_sidecar() {
+        let hex = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(parse_sha256_digest(hex).unwrap(), hex);
+        assert_eq!(parse_sha256_digest(&format!("{hex}\n")).unwrap(), hex);
+    }
+
+    #[test]
+    fn parses_coreutils_and_get_file_hash_sidecar_shapes() {
+        let hex = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        // coreutils sha256sum text mode
+        assert_eq!(
+            parse_sha256_digest(&format!("{hex}  niubash-win-x64-setup.exe")).unwrap(),
+            hex
+        );
+        // coreutils binary mode marker
+        assert_eq!(
+            parse_sha256_digest(&format!("{hex}*niubash-win-x64-setup.exe")).unwrap(),
+            hex
+        );
+        // PowerShell Get-FileHash, uppercase with CRLF
+        assert_eq!(
+            parse_sha256_digest(&format!(
+                "SHA256 (niubash-win-x64-setup.exe) = {} \r\n",
+                hex.to_ascii_uppercase()
+            ))
+            .unwrap(),
+            hex
+        );
+    }
+
+    #[test]
+    fn rejects_digest_sidecar_without_hex() {
+        assert!(parse_sha256_digest("404: Not Found").is_err());
+        assert!(parse_sha256_digest("").is_err());
+        // Not-a-digest length or non-hex content must not parse.
+        assert!(parse_sha256_digest("deadbeef").is_err());
+    }
+
+    #[test]
+    fn digest_comparison_is_exact_and_length_safe() {
+        let hex = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(digests_match(hex, hex));
+        // Case folding happens in parse_sha256_digest, not in the comparison:
+        // the compare is raw byte equality.
+        assert!(!digests_match(hex, &hex.to_ascii_uppercase()));
+        let mut tampered = hex.to_string();
+        tampered.replace_range(0..1, "0");
+        assert!(!digests_match(hex, &tampered));
+        assert!(!digests_match(hex, "shorter"));
+    }
+
+    #[test]
+    fn hashes_known_sha256_vector() {
+        let path = temp_installer_path("sha-vector");
+        std::fs::write(&path, b"abc").unwrap();
+
+        let hex = sha256_hex_file(&path).unwrap();
+
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn accepts_installer_matching_published_digest() {
+        let path = temp_installer_path("digest-ok");
+        std::fs::write(&path, b"MZinstaller-payload").unwrap();
+        let expected = sha256_hex_file(&path).unwrap();
+
+        verify_installer_digest(&path, &expected).unwrap();
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn aborts_installer_on_digest_mismatch() {
+        let path = temp_installer_path("digest-bad");
+        std::fs::write(&path, b"MZtampered-payload").unwrap();
+        let expected = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        let err = verify_installer_digest(&path, expected)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("SHA-256 mismatch"), "{err}");
+        assert!(err.contains("will NOT be run"), "{err}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn aborts_installer_on_unreadable_digest_file() {
+        let path = temp_installer_path("digest-missing-input");
+        std::fs::write(&path, b"MZinstaller-payload").unwrap();
+        let expected = sha256_hex_file(&path).unwrap();
+        let missing = temp_installer_path("digest-missing-sidecar");
+
+        let err = verify_installer_digest(&missing, &expected)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("read"), "{err}");
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(windows)]

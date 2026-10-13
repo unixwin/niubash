@@ -2417,8 +2417,6 @@ fn write_primary_rc(home: &std::path::Path, rc_content: &str) -> anyhow::Result<
     let niubash_dir = home.join(".niubash");
     std::fs::create_dir_all(&niubash_dir)?;
     let stamp = timestamp_id();
-    let tmp_path = niubash_dir.join(format!(".niubashrc.tmp-{stamp}"));
-    std::fs::write(&tmp_path, rc_content)?;
 
     let backup_path = if rc_path.is_file() {
         let backup_dir = niubash_dir.join("backups");
@@ -2430,16 +2428,11 @@ fn write_primary_rc(home: &std::path::Path, rc_content: &str) -> anyhow::Result<
         None
     };
 
-    if rc_path.exists() {
-        std::fs::remove_file(&rc_path)?;
-    }
-    match std::fs::rename(&tmp_path, &rc_path) {
-        Ok(()) => {}
-        Err(_) => {
-            std::fs::copy(&tmp_path, &rc_path)?;
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-    }
+    // niubash#304: swap the new rc in through a same-dir temp + replace
+    // rename (MoveFileEx REPLACE_EXISTING on Windows). The former
+    // remove-then-rename dance left the rc ABSENT between the two steps —
+    // the window a concurrent reader (pipe/sed) actually observed.
+    crate::path_utils::write_file_atomic(&rc_path, rc_content.as_bytes())?;
     Ok(backup_path)
 }
 
@@ -3065,6 +3058,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         })
         .expect("fixture source add must succeed");
         crate::plugins::sources::trust_source("oh-my-bash").expect("fixture trust must succeed");
@@ -3125,6 +3119,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         })
         .expect("bash-it fixture source add must succeed");
         crate::plugins::sources::trust_source("bash-it").expect("bash-it fixture trust");
@@ -3504,6 +3499,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         })
         .expect("fixture source add must succeed");
     }
@@ -3738,6 +3734,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         })
         .expect("bash-completion fixture add must succeed");
         let candidates = post_install_theme_candidates(Some(&CollectionJournal {

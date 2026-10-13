@@ -1,22 +1,40 @@
 {
   "schema": 1,
   "name": "niubash-release-preinstall",
-  "description": "Release CI pre-install manifest (niubash#189, extended by niubash#209). The release workflow installs every entry of `packages` into the staged WinuxCmd root with `winuxcmd wpm install <name> --root <staged-root> --yes`, then materializes every entry of `shims` as a winuxcmd.exe hardlink in usr\\bin. The package index lives in unixwin/wpm-source (index.json); wpm itself ships inside winuxcmd.exe (`winuxcmd wpm ...`), so no separate wpm.exe is needed.",
+  "description": "Release CI pre-install manifest (niubash#189, extended by niubash#209, pinned by niubash#312). The release workflow verifies each entry's pinned artifact SHA-256 against the wpm index (wpm info --json), then installs every verified entry of `packages` into the staged WinuxCmd root with `winuxcmd wpm install <name> --root <staged-root> --yes` — wpm itself re-verifies the downloaded zip against its index entry, so pin == index == downloaded bytes — and finally materializes every entry of `shims` as a winuxcmd.exe hardlink in usr\\bin. The package index lives in unixwin/wpm-source (index.json); wpm itself ships inside winuxcmd.exe (`winuxcmd wpm ...`), so no separate wpm.exe is needed.",
   "packages": [
     {
       "name": "gawk",
+      "version": "5.4.1",
+      "sha256": {
+        "windows-x64": "25373ae83ec539dbe8b4208e1b4c1afa891f902df1a19138ecda5451ccded4b6"
+      },
       "purpose": "GNU Awk 5.4.1. bash-it plugins and completions hard-depend on awk (the gradle completion pipes through `awk '{print $1}'` on every use); gawk IS the GNU implementation, so plugin scripts written against GNU awk keep their dialect. The wpm `gawk` package is layout=shim: the payload (gawk.exe, awk.exe, and its five DLLs) lands in <root>\\opt\\gawk and usr\\bin\\gawk.exe is a winuxcmd.exe hardlink shim that forwards there."
     },
     {
       "name": "niugit",
+      "version": "2.55.0.3",
+      "sha256": {
+        "windows-x64": "71db2476ce77d1242acc0c8ac0ab75dcd02680f616e0c094129da31a028ef309"
+      },
       "purpose": "Niu-git 2.55.0.3 (native Windows git without MSYS). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. The payload is the whole niu-git tree (git.exe at the package root plus the mingw64/ directory carrying its minimal dependency DLLs and etc/) landing in <root>\\opt\\niugit; wpm registers command `git`, so usr\\bin\\git.exe forwards into the package. It is schannel-only TLS with no bundled shell/perl and accepts POSIX-shaped (/d/...) path args."
     },
     {
       "name": "ripgrep",
+      "version": "15.2.0",
+      "sha256": {
+        "windows-x64": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+        "windows-arm64": "e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f"
+      },
       "purpose": "Ripgrep 15.2.0 (`rg`). A common interactive/search tool users expect right after first setup; shipped so the out-of-the-box shell has modern search without a network fetch (niubash#209). Single static rg.exe payload in <root>\\opt\\ripgrep with command `rg` registered. Unlike niugit/gawk, the wpm index carries a windows-arm64 artifact too, so this one pre-installs on BOTH Windows legs."
     },
     {
       "name": "fd",
+      "version": "10.4.2",
+      "sha256": {
+        "windows-x64": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
+        "windows-arm64": "4f9110c2d5b33a7f760bfa5510f4c113d828109f7277d421b1053a9943c0fc92"
+      },
       "purpose": "fd 10.4.2. The find counterpart to ripgrep; same rationale (niubash#209): bundled at CI time so users never need a network install for the basics. Single static fd.exe payload in <root>\\opt\\fd with command `fd` registered, with a windows-arm64 artifact in the index as well."
     }
   ],
@@ -29,6 +47,7 @@
   ],
   "notes": [
     "Fail-open contract: a failed install is a loud warning (GITHUB_STEP_SUMMARY + ::warning), never a release blocker. Pre-installing is an enhancement, not a promise; users can always run `winuxcmd wpm install <name>` against an installed package.",
+    "Pin contract (niubash#312): every package entry carries `version` plus a `sha256` map keyed by wpm arch (windows-x64 / windows-arm64). The release workflow refuses to install a package whose live-index artifact digest does not equal the pin — that failure takes the same loud fail-open path as a transport failure, so a release's contents cannot silently drift with the index state of the build minute. Pins were recorded from unixwin/wpm-source main @ cad1544 (official-2026.10.10); bump them deliberately, together with `version`.",
     "Architecture: niugit and gawk exist as windows-x64 artifacts only in the wpm index; on the arm64 release leg those installs fail by design and the leg ships without them. ripgrep and fd carry windows-arm64 artifacts and pre-install on both legs. The post-package verify step asserts only on legs where the binaries exist.",
     "No symlinks, ever: shims are winuxcmd.exe hardlinks (copies on file systems without hardlink support). The issue red lines stand - no archive formats are added, no symbolic links are created, and the runtime never downloads binaries (the assembly happens here, in CI).",
     "The staged package ships <root>\\usr\\bin shims and the <root>\\opt payload tree only - never the .wpm state directory (cache/staging/index)."

@@ -1,0 +1,213 @@
+# Issue #305: static completion table for tar (common flags, bsdtar/GNU tar
+# shared subset). Hand-curated from the documented CLI; no external completion
+# script is executed. Same schema as the embedded applet definitions.
+command = "tar"
+description = "create and manipulate tape archives"
+
+[[flags]]
+short = "-c"
+long = "--create"
+description = "create a new archive"
+
+[[flags]]
+short = "-x"
+long = "--extract"
+description = "extract files from an archive"
+
+[[flags]]
+long = "--get"
+description = "extract files from an archive"
+
+[[flags]]
+short = "-t"
+long = "--list"
+description = "list the contents of an archive"
+
+[[flags]]
+short = "-r"
+long = "--append"
+description = "append files to the end of an archive"
+
+[[flags]]
+short = "-u"
+long = "--update"
+description = "append only files newer than the copy in the archive"
+
+[[flags]]
+short = "-d"
+long = "--diff"
+description = "find differences between an archive and the file system"
+
+[[flags]]
+long = "--compare"
+description = "find differences between an archive and the file system"
+
+[[flags]]
+short = "-A"
+long = "--catenate"
+description = "append archives to the end of another archive"
+
+[[flags]]
+long = "--concatenate"
+description = "append archives to the end of another archive"
+
+[[flags]]
+long = "--delete"
+description = "delete from an archive (not on magnetic tape)"
+
+[[flags]]
+short = "-f"
+long = "--file"
+description = "use the given archive file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-v"
+long = "--verbose"
+description = "verbosely list files processed"
+
+[[flags]]
+short = "-z"
+long = "--gzip"
+description = "filter the archive through gzip"
+
+[[flags]]
+short = "-j"
+long = "--bzip2"
+description = "filter the archive through bzip2"
+
+[[flags]]
+short = "-J"
+long = "--xz"
+description = "filter the archive through xz"
+
+[[flags]]
+long = "--lzma"
+description = "filter the archive through lzma"
+
+[[flags]]
+long = "--zstd"
+description = "filter the archive through zstd"
+
+[[flags]]
+short = "-Z"
+long = "--compress"
+description = "filter the archive through compress"
+
+[[flags]]
+short = "-a"
+long = "--auto-compress"
+description = "pick the compression from the archive suffix"
+
+[[flags]]
+short = "-C"
+long = "--directory"
+description = "change to the given directory before processing"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+long = "--exclude"
+description = "exclude files matching the given pattern"
+takes_value = true
+
+[[flags]]
+short = "-T"
+long = "--files-from"
+description = "read the list of file names from the given file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-X"
+long = "--exclude-from"
+description = "exclude patterns listed in the given file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+long = "--strip-components"
+description = "strip the given number of leading path components"
+takes_value = true
+
+[[flags]]
+short = "-k"
+long = "--keep-old-files"
+description = "do not replace existing files when extracting"
+
+[[flags]]
+long = "--keep-newer-files"
+description = "do not replace existing files newer than the archive copy"
+
+[[flags]]
+long = "--overwrite"
+description = "replace existing files when extracting"
+
+[[flags]]
+long = "--skip-old-files"
+description = "skip existing files when extracting"
+
+[[flags]]
+short = "-O"
+long = "--to-stdout"
+description = "extract files to standard output"
+
+[[flags]]
+short = "-m"
+long = "--touch"
+description = "do not extract file modified time"
+
+[[flags]]
+short = "-p"
+long = "--same-permissions"
+description = "extract information about file permissions"
+
+[[flags]]
+long = "--preserve-permissions"
+description = "extract information about file permissions"
+
+[[flags]]
+long = "--no-same-permissions"
+description = "do not extract file permissions"
+
+[[flags]]
+long = "--numeric-owner"
+description = "always use numbers for user/group names"
+
+[[flags]]
+long = "--no-recursion"
+description = "avoid descending automatically in directories"
+
+[[flags]]
+long = "--one-top-level"
+description = "extract all members into a single directory"
+
+[[flags]]
+long = "--remove-files"
+description = "remove files after adding them to the archive"
+
+[[flags]]
+long = "--totals"
+description = "print the total bytes written"
+
+[[flags]]
+short = "-w"
+long = "--interactive"
+description = "ask for confirmation for every action"
+
+[[flags]]
+long = "--confirmation"
+description = "ask for confirmation for every action"
+
+[[flags]]
+long = "--null"
+description = "file names are terminated by NUL instead of newline"
+
+[[flags]]
+long = "--version"
+description = "print the tar program version"
+
+[[flags]]
+long = "--help"
+description = "print a usage summary"

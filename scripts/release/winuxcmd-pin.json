@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "winuxcmd_tag": "v1.1.6",
+  "description": "WinuxCmd release pin for niubash releases (niubash#312). Tag-push releases bundle exactly this WinuxCmd tag: the workflow downloads the matching WinuxCmd-*-win-<arch>.zip asset and fails unless its SHA-256 equals the value recorded here. workflow_dispatch releases must instead pass the same information explicitly via the winuxcmd_tag and winuxcmd_sha256 inputs; this file is then only the reference for what the last pinned release used.",
+  "sha256": {
+    "windows-x64": "eb3ec8d0aef12938998121ae30ea084fb414348e9ea2b5808c7c1af9762e332c",
+    "windows-arm64": "aa5dfef0dc00e617334c345236e0bc99b519284b15a3750e884e95ae04f421cc"
+  },
+  "notes": [
+    "The hashes cover the WinuxCmd-<version>-win-<arch>.zip release assets (the only format the release bundles), not the .7z/.tar.gz/setup.exe variants.",
+    "Recorded from WinuxCmd v1.1.6 (2026-10-10); the windows-arm64 value was verified against a full re-download of the release asset, and both values cross-check the unixwin/wpm-source index entry for the winuxcmd package.",
+    "Bumping the pin is a deliberate release decision: update winuxcmd_tag and both sha256 values together, and rerun a release so the bundled engine changes intentionally."
+  ]
+}

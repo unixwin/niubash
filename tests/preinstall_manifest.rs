@@ -3,17 +3,26 @@
 //! `scripts/release/preinstall.json` is release-CI policy, not tribal
 //! memory: the workflow installs `packages` via `winuxcmd wpm install`,
 //! materializes `shims` as winuxcmd.exe hardlinks, and must never ship a
-//! name recorded in `excluded`. These tests pin the schema and the
-//! owner-ordered exclusions so a manifest edit cannot silently re-admit a
-//! forbidden package (compression tools, goawk, `link`) or drop the fail-open
-//! disclosure. The workflow reads the same file; a schema break fails
-//! `cargo test` here before it can fail a release.
+//! name recorded in `excluded`. Since niubash#312 every package entry also
+//! pins its exact artifact SHA-256 per arch — the release refuses to
+//! install anything whose live-index digest differs from the pin, so a
+//! manifest edit cannot silently change what a release ships. These tests
+//! pin the schema and the owner-ordered exclusions so a manifest edit
+//! cannot silently re-admit a forbidden package (compression tools, goawk,
+//! `link`), drop the fail-open disclosure, or drop the pins. The workflow
+//! reads the same file; a schema break fails `cargo test` here before it
+//! can fail a release. `scripts/release/winuxcmd-pin.json` (the bundled
+//! WinuxCmd engine pin, same issue) is schema-checked here too.
 
 use serde_json::Value;
 use std::path::PathBuf;
 
 fn manifest_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release/preinstall.json")
+}
+
+fn winuxcmd_pin_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/release/winuxcmd-pin.json")
 }
 
 fn load_manifest() -> Value {
@@ -45,6 +54,56 @@ fn assert_name_shape(name: &str, context: &str) {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '+' || c == '-'),
         "{context}: name {name:?} is not a valid wpm package name"
     );
+}
+
+/// niubash#312: a pinned artifact digest is exactly 64 lowercase hex digits.
+fn assert_sha256_pin(hash: &str, context: &str) {
+    assert!(
+        hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "{context}: sha256 pin {hash:?} is not a 64-hex-digit digest"
+    );
+    assert!(
+        hash.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+        "{context}: sha256 pin {hash:?} must be lowercase hex (Get-FileHash output is normalized at pin time)"
+    );
+}
+
+/// niubash#312: every package entry pins `version` and a per-arch `sha256`
+/// map (keys `windows-x64` / `windows-arm64`). The release workflow refuses
+/// to install a package without a pin for its arch, so a missing pin here
+/// silently degrades the release — it must be a loud schema break instead.
+fn assert_package_pin(package: &Value) {
+    let name = package
+        .get("name")
+        .and_then(Value::as_str)
+        .expect("package entries always carry a name when pins are checked");
+    assert!(
+        package
+            .get("version")
+            .and_then(Value::as_str)
+            .is_some_and(|version| !version.trim().is_empty()),
+        "package {name:?} needs a non-empty version next to its sha256 pin"
+    );
+    let pins = package
+        .get("sha256")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| {
+            panic!("package {name:?} needs a sha256 object keyed by arch (niubash#312)")
+        });
+    assert!(
+        !pins.is_empty(),
+        "package {name:?} has an empty sha256 pin map; pin at least one arch"
+    );
+    for (arch, hash) in pins {
+        assert!(
+            arch == "windows-x64" || arch == "windows-arm64",
+            "package {name:?}: pin arch {arch:?} is not a wpm arch key"
+        );
+        let hash = hash
+            .as_str()
+            .unwrap_or_else(|| panic!("package {name:?}: pin for {arch:?} must be a string"));
+        assert_sha256_pin(hash, &format!("package {name:?} pin {arch:?}"));
+    }
 }
 
 #[test]
@@ -86,6 +145,7 @@ fn manifest_schema_is_complete() {
                 .is_some_and(|purpose| !purpose.trim().is_empty()),
             "package {name:?} needs a non-empty purpose (why it ships)"
         );
+        assert_package_pin(package);
         names.push(name.to_string());
     }
     let unique = names
@@ -252,6 +312,63 @@ fn fail_open_disclosure_is_part_of_the_manifest() {
             .is_some_and(|notes| !notes.is_empty()),
         "manifest notes must not be empty"
     );
+}
+
+#[test]
+fn pin_contract_is_recorded_in_the_notes() {
+    // niubash#312: the sha256 pins are only as durable as their story. The
+    // notes must say where the pins came from so the next bump is a
+    // deliberate, re-recorded change instead of a mystery constant.
+    let manifest = load_manifest();
+    let notes = string_list(&manifest.get("notes").cloned().unwrap_or(Value::Null));
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("niubash#312") && note.to_ascii_lowercase().contains("pin")),
+        "manifest notes must record the niubash#312 pin contract"
+    );
+}
+
+/// niubash#312: the bundled WinuxCmd engine is pinned the same way the
+/// pre-install packages are — an exact tag plus per-arch zip digests, both
+/// consumed by the release workflow's download step.
+#[test]
+fn winuxcmd_pin_pins_a_tag_and_both_arch_digests() {
+    let raw = std::fs::read_to_string(winuxcmd_pin_path())
+        .expect("winuxcmd pin must exist at scripts/release/winuxcmd-pin.json");
+    let pin = serde_json::from_str::<Value>(&raw).expect("winuxcmd pin must be valid JSON");
+
+    assert_eq!(
+        pin.get("schema").and_then(Value::as_u64),
+        Some(1),
+        "winuxcmd pin schema must be 1; bump requires updating this test file too"
+    );
+    let tag = pin
+        .get("winuxcmd_tag")
+        .and_then(Value::as_str)
+        .expect("winuxcmd pin needs a winuxcmd_tag string");
+    assert!(
+        tag.starts_with('v')
+            && tag[1..]
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+            && tag[1..].split('.').count() == 3,
+        "winuxcmd pin tag {tag:?} is not a vX.Y.Z release tag"
+    );
+
+    let digests = pin
+        .get("sha256")
+        .and_then(Value::as_object)
+        .expect("winuxcmd pin needs a sha256 object keyed by arch");
+    // The release matrix builds exactly these two Windows legs; both must
+    // stay pinned so neither arch bundles an unverified engine.
+    for arch in ["windows-x64", "windows-arm64"] {
+        let hash = digests
+            .get(arch)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("winuxcmd pin is missing the {arch:?} zip digest"));
+        assert_sha256_pin(hash, &format!("winuxcmd pin {arch:?}"));
+    }
 }
 
 fn string_list_of(manifest: &Value, key: &str) -> Vec<String> {

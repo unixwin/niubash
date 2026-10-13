@@ -1,0 +1,705 @@
+# Issue #305: static completion table for kubectl (subcommands + common
+# per-subcommand flags). Hand-curated from the documented CLI; no external
+# completion script is executed. Same schema as the embedded applet
+# definitions.
+command = "kubectl"
+description = "command-line client for the Kubernetes API"
+
+[[flags]]
+short = "-n"
+long = "--namespace"
+description = "use the given namespace scope"
+takes_value = true
+
+[[flags]]
+long = "--context"
+description = "use the given kubeconfig context"
+takes_value = true
+
+[[flags]]
+long = "--kubeconfig"
+description = "use the given kubeconfig file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-s"
+long = "--server"
+description = "use the address and port of the API server"
+takes_value = true
+
+[[flags]]
+long = "--token"
+description = "bearer token for authentication"
+takes_value = true
+
+[[flags]]
+long = "--insecure-skip-tls-verify"
+description = "skip verification of the server certificate"
+
+[[flags]]
+long = "--request-timeout"
+description = "abort requests after the given timeout"
+takes_value = true
+
+[[subcommands]]
+name = "get"
+description = "display one or many resources"
+
+[[subcommands.flags]]
+short = "-o"
+long = "--output"
+description = "output format"
+takes_value = true
+values = ["json", "yaml", "wide", "name"]
+
+[[subcommands.flags]]
+short = "-A"
+long = "--all-namespaces"
+description = "list resources across all namespaces"
+
+[[subcommands.flags]]
+short = "-w"
+long = "--watch"
+description = "watch for changes"
+
+[[subcommands.flags]]
+long = "--watch-only"
+description = "watch for changes, without listing first"
+
+[[subcommands.flags]]
+long = "--show-labels"
+description = "show all labels in the last column"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--selector"
+description = "filter by label selector"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--field-selector"
+description = "filter by field selector"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--sort-by"
+description = "sort the output by the given JSONPath expression"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--no-headers"
+description = "do not print column headers"
+
+[[subcommands.flags]]
+long = "--chunk-size"
+description = "fetch large lists in chunks of the given size"
+takes_value = true
+
+[[subcommands]]
+name = "describe"
+description = "show details of a specific resource"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--selector"
+description = "filter by label selector"
+takes_value = true
+
+[[subcommands]]
+name = "apply"
+description = "apply a configuration to a resource by file name or stdin"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--filename"
+description = "file or directory containing the configuration"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+short = "-R"
+long = "--recursive"
+description = "process the directory used in -f recursively"
+
+[[subcommands.flags]]
+short = "-k"
+long = "--kustomize"
+description = "process a kustomization directory"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+long = "--dry-run"
+description = "run in dry-run mode without persisting changes"
+takes_value = true
+values = ["none", "server", "client"]
+
+[[subcommands.flags]]
+long = "--server-side"
+description = "apply on the server instead of the client"
+
+[[subcommands.flags]]
+long = "--prune"
+description = "delete resources no longer in the configuration"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--selector"
+description = "selector for the prune operation"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--force"
+description = "delete and re-create conflicting resources"
+
+[[subcommands.flags]]
+long = "--overwrite"
+description = "resolve conflicts by taking the applied values (default)"
+
+[[subcommands.flags]]
+long = "--wait"
+description = "wait for the configuration to be reconciled"
+
+[[subcommands.flags]]
+long = "--validate"
+description = "enable or disable schema validation"
+
+[[subcommands]]
+name = "create"
+description = "create a resource from a file or from stdin"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--filename"
+description = "file or directory containing the configuration"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+long = "--dry-run"
+description = "run in dry-run mode without persisting changes"
+takes_value = true
+values = ["none", "server", "client"]
+
+[[subcommands.flags]]
+long = "--edit"
+description = "edit the API resource before creating"
+
+[[subcommands]]
+name = "delete"
+description = "delete resources by file names, stdin, or resource names"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--filename"
+description = "file or directory containing the configuration"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--selector"
+description = "filter by label selector"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--all"
+description = "delete all resources of the given type"
+
+[[subcommands.flags]]
+long = "--grace-period"
+description = "seconds granted for graceful termination"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--now"
+description = "skip graceful termination"
+
+[[subcommands.flags]]
+long = "--timeout"
+description = "time to wait before giving up"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--wait"
+description = "wait for the resource to be gone"
+
+[[subcommands.flags]]
+long = "--ignore-not-found"
+description = "treat a missing resource as a successful delete"
+
+[[subcommands.flags]]
+short = "-k"
+long = "--kustomize"
+description = "process a kustomization directory"
+takes_value = true
+values_from = "path"
+
+[[subcommands]]
+name = "edit"
+description = "edit a resource on the server"
+
+[[subcommands.flags]]
+short = "-o"
+long = "--output"
+description = "output format"
+takes_value = true
+values = ["yaml", "json"]
+
+[[subcommands]]
+name = "exec"
+description = "execute a command in a container"
+
+[[subcommands.flags]]
+short = "-i"
+long = "--stdin"
+description = "pass stdin to the container"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--tty"
+description = "allocate a pseudo-terminal"
+
+[[subcommands.flags]]
+short = "-c"
+long = "--container"
+description = "container name"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "suppress prompt messages"
+
+[[subcommands]]
+name = "expose"
+description = "take a resource and expose it as a new service"
+
+[[subcommands.flags]]
+long = "--port"
+description = "port the service should serve"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--type"
+description = "service type"
+takes_value = true
+values = ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"]
+
+[[subcommands.flags]]
+long = "--name"
+description = "name for the new service"
+takes_value = true
+
+[[subcommands]]
+name = "logs"
+description = "print the logs of a container in a pod"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--follow"
+description = "stream the log output"
+
+[[subcommands.flags]]
+short = "-c"
+long = "--container"
+description = "container name"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-p"
+long = "--previous"
+description = "print the logs of the previous instance"
+
+[[subcommands.flags]]
+long = "--tail"
+description = "number of lines to show from the end"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--since"
+description = "show logs newer than the given duration"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--since-time"
+description = "show logs newer than the given timestamp"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--timestamps"
+description = "include timestamps on each line"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--selector"
+description = "filter by label selector"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--all-containers"
+description = "get all containers' logs"
+
+[[subcommands.flags]]
+long = "--prefix"
+description = "prefix each log line with the source pod/container"
+
+[[subcommands]]
+name = "port-forward"
+description = "forward one or more local ports to a pod"
+
+[[subcommands.flags]]
+long = "--address"
+description = "addresses to listen on"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--pod-running-timeout"
+description = "time to wait until the pod is running"
+takes_value = true
+
+[[subcommands]]
+name = "proxy"
+description = "create a proxy server between localhost and the API server"
+
+[[subcommands.flags]]
+long = "--port"
+description = "port to listen on"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--address"
+description = "address to listen on"
+takes_value = true
+
+[[subcommands]]
+name = "cp"
+description = "copy files and directories between a container and the filesystem"
+
+[[subcommands.flags]]
+short = "-c"
+long = "--container"
+description = "container name"
+takes_value = true
+
+[[subcommands]]
+name = "auth"
+description = "inspect authorization"
+
+[[subcommands]]
+name = "rollout"
+description = "manage the rollout of a resource"
+
+[[subcommands]]
+name = "scale"
+description = "set a new size for a deployment, replica set, or replication controller"
+
+[[subcommands.flags]]
+long = "--replicas"
+description = "the new desired number of replicas"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--current-replicas"
+description = "precondition on the current number of replicas"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--resource-version"
+description = "precondition on the resource version"
+takes_value = true
+
+[[subcommands]]
+name = "autoscale"
+description = "auto-scale a deployment, replica set, or replication controller"
+
+[[subcommands.flags]]
+long = "--min"
+description = "minimum number of replicas"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--max"
+description = "maximum number of replicas"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--cpu-percent"
+description = "target CPU utilization"
+takes_value = true
+
+[[subcommands]]
+name = "annotate"
+description = "update the annotations on a resource"
+
+[[subcommands.flags]]
+long = "--overwrite"
+description = "overwrite existing annotations"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--selector"
+description = "filter by label selector"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--all"
+description = "select all resources of the given type"
+
+[[subcommands]]
+name = "label"
+description = "update the labels on a resource"
+
+[[subcommands.flags]]
+long = "--overwrite"
+description = "overwrite existing labels"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--selector"
+description = "filter by label selector"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--all"
+description = "select all resources of the given type"
+
+[[subcommands]]
+name = "patch"
+description = "update fields of a resource"
+
+[[subcommands.flags]]
+short = "-p"
+long = "--patch"
+description = "the patch to apply"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--patch-file"
+description = "a file containing the patch to apply"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+long = "--type"
+description = "patch type"
+takes_value = true
+values = ["strategic", "merge", "json"]
+
+[[subcommands]]
+name = "replace"
+description = "replace a resource by file name or stdin"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--filename"
+description = "file or directory containing the configuration"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+long = "--force"
+description = "delete and re-create the resource"
+
+[[subcommands]]
+name = "wait"
+description = "wait for a condition on one or many resources"
+
+[[subcommands.flags]]
+long = "--for"
+description = "the condition to wait for"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--timeout"
+description = "time to wait before giving up"
+takes_value = true
+
+[[subcommands]]
+name = "config"
+description = "modify kubeconfig files"
+
+[[subcommands]]
+name = "version"
+description = "print the client and server version"
+
+[[subcommands.flags]]
+long = "--client"
+description = "print the client version only"
+
+[[subcommands.flags]]
+long = "--short"
+description = "print just the version number"
+
+[[subcommands.flags]]
+short = "-o"
+long = "--output"
+description = "output format"
+takes_value = true
+values = ["yaml", "json"]
+
+[[subcommands]]
+name = "api-resources"
+description = "print the supported API resources"
+
+[[subcommands.flags]]
+short = "-o"
+long = "--output"
+description = "output format"
+takes_value = true
+values = ["wide", "name", "no-headers"]
+
+[[subcommands.flags]]
+long = "--namespaced"
+description = "only namespaced resources"
+
+[[subcommands.flags]]
+long = "--api-group"
+description = "limit to the given API group"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--verbs"
+description = "limit to resources supporting the given verbs"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--sort-by"
+description = "sort by the given column"
+takes_value = true
+
+[[subcommands]]
+name = "api-versions"
+description = "print the supported API versions"
+
+[[subcommands]]
+name = "cluster-info"
+description = "display cluster information"
+
+[[subcommands]]
+name = "top"
+description = "display resource usage"
+
+[[subcommands]]
+name = "drain"
+description = "drain a node in preparation for maintenance"
+
+[[subcommands.flags]]
+long = "--ignore-daemonsets"
+description = "ignore DaemonSet-managed pods"
+
+[[subcommands.flags]]
+long = "--delete-emptydir-data"
+description = "allow deleting pods using emptyDir volumes"
+
+[[subcommands.flags]]
+long = "--force"
+description = "continue with unmanaged pods"
+
+[[subcommands.flags]]
+long = "--grace-period"
+description = "grace period for pod termination"
+takes_value = true
+
+[[subcommands]]
+name = "cordon"
+description = "mark a node as unschedulable"
+
+[[subcommands]]
+name = "uncordon"
+description = "mark a node as schedulable"
+
+[[subcommands]]
+name = "taint"
+description = "update the taints on a node"
+
+[[subcommands]]
+name = "explain"
+description = "show documentation for a resource"
+
+[[subcommands.flags]]
+long = "--recursive"
+description = "print the full object structure"
+
+[[subcommands.flags]]
+long = "--api-version"
+description = "use the given API version"
+takes_value = true
+
+[[subcommands]]
+name = "run"
+description = "run a particular image in a pod"
+
+[[subcommands.flags]]
+long = "--image"
+description = "the container image to run"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--rm"
+description = "delete the pod after it exits"
+
+[[subcommands.flags]]
+short = "-it"
+description = "keep stdin open and allocate a pseudo-terminal"
+
+[[subcommands.flags]]
+long = "--restart"
+description = "restart policy"
+takes_value = true
+values = ["Always", "OnFailure", "Never"]
+
+[[subcommands.flags]]
+long = "--port"
+description = "port the container exposes"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--expose"
+description = "create a service for the pod"
+
+[[subcommands.flags]]
+long = "--env"
+description = "set an environment variable"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--labels"
+description = "labels to apply to the pod"
+takes_value = true
+
+[[subcommands]]
+name = "attach"
+description = "attach to a running container"
+
+[[subcommands.flags]]
+short = "-c"
+long = "--container"
+description = "container name"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-i"
+long = "--stdin"
+description = "pass stdin to the container"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--tty"
+description = "allocate a pseudo-terminal"
+
+[[subcommands]]
+name = "diff"
+description = "diff the live version against a would-be applied version"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--filename"
+description = "file or directory containing the configuration"
+takes_value = true
+values_from = "path"
+
+[[subcommands]]
+name = "options"
+description = "print the list of flags inherited by all commands"

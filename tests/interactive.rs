@@ -901,6 +901,44 @@ fn multiline_crlf_paste_buffers_whole_chunk_and_executes_once() {
     s.expect_prompt();
 }
 
+/// niubash#308: the paste and its submit Enter land in ONE burst —
+/// `send(paste_crlf + "\r")`, a single write, the Enter <50 ms after the
+/// last paste key. The trailing bare CR carries no LF partner, so it is the
+/// submit, not paste data: the whole buffered chunk must execute on that
+/// FIRST Enter. The pre-#308 behavior pushed the Enter into the pending
+/// chunk as a newline — nothing executed and a second Enter was needed.
+///
+/// Windows-only: the burst window is the Windows paste-chunk heuristic; on
+/// Unix the same write executes per line through the tty's CR translation,
+/// which is the ordinary non-paste path (the bracketed-paste test above
+/// covers Unix paste buffering).
+#[test]
+fn paste_with_same_burst_enter_submits_on_first_enter() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("paste_with_same_burst_enter_submits_on_first_enter") {
+        return;
+    }
+    // Output markers are rc variables: only EXECUTED output can produce
+    // them, never the echoed edit buffer.
+    let rc = format!(
+        "{}\nTS1=BURSTENTER-ONE-DONE\nTS2=BURSTENTER-TWO-DONE\n",
+        driver::default_rc()
+    );
+    let mut s =
+        NiuSession::spawn_custom("paste-burst-enter-308", &rc, &[], (120, 30), HEAVY_TIMEOUT);
+    s.wait_ready();
+    // One write — paste body plus the submit Enter, no gap, no second send.
+    s.send("echo $TS1\r\necho $TS2\r\n\r");
+    // The first Enter executes the whole chunk, in paste order, and the
+    // session lands on a fresh prompt (a swallowed Enter would leave no
+    // output and no new prompt, failing these expects on timeout).
+    s.expect("BURSTENTER-ONE-DONE");
+    s.expect("BURSTENTER-TWO-DONE");
+    s.expect_prompt();
+}
+
 /// niubash#277/#280 adjacency: ESC-sequenced arrow keys (ConPTY synthesizes
 /// them into arrow KEY_EVENTs from the pty's ESC[A..D stream) ride the
 /// input path untouched by paste-chunk detection — no chunk opens, no
@@ -1755,4 +1793,203 @@ fn gitbash_factory_prompt_renders_and_tracks_the_branch() {
         after.contains("master") || after.contains("main"),
         "expected the cyan branch segment after cd into a repo, pane:\n{after}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Matrix 6b: multiline paste across EMPTY lines (niubash#291, #309 surface)
+// ---------------------------------------------------------------------------
+
+/// Execution-level markers for paste fidelity assertions (niubash#291
+/// discipline): the pasted body carries `echo RES_$((40+2))`-shaped lines,
+/// so the OUTPUT (`RES_42`) is a string that appears NOWHERE in the echoed
+/// input (the echo renders the unexpanded `$((40+2))`). `RES_42` on screen
+/// therefore proves the line executed with every leading byte intact — a
+/// swallowed head (`cho RES_...`) is a not-found and leaves no marker.
+/// Substring checks against the screen are banned here: the scratch probe
+/// this suite replaces asserted `!screen.contains("cho two")`, which fails
+/// on a CORRECT run too ("cho two" is a substring of the intact rendering
+/// "echo two") — a false positive that masqueraded as niubash#291.
+const PASTE_MARKER_A: &str = "echo RES_$((40+2))";
+const PASTE_MARKER_A_OUT: &str = "RES_42";
+const PASTE_MARKER_B: &str = "echo RES_$((50+8))";
+const PASTE_MARKER_B_OUT: &str = "RES_58";
+
+fn marker_rc() -> String {
+    driver::default_rc()
+}
+
+/// niubash#291, the reported shape: a pasted block containing an EMPTY line
+/// must keep the following line's leading bytes. The exact reported burst —
+/// `echo one\r\n\r\necho two\r\n\n` in one write, then the user's Enter
+/// after the burst settles — with execution-marker lines: both markers on
+/// screen prove both lines ran byte-intact, including the line after the
+/// empty line.
+#[test]
+fn empty_line_paste_keeps_the_next_line_intact() {
+    if !cfg!(windows) {
+        // Unix runs the real bracketed paste path (Event::Paste); the
+        // arrival heuristic under test does not exist there.
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_keeps_the_next_line_intact") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "paste-empty-line",
+        &marker_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(&format!("{PASTE_MARKER_A}\r\n\r\n{PASTE_MARKER_B}\r\n\n"));
+    // Leave the burst window, then the user's own Enter (owner rhythm).
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect(PASTE_MARKER_A_OUT);
+    s.expect(PASTE_MARKER_B_OUT);
+    s.expect_prompt();
+}
+
+/// niubash#309 coverage on the #291 shape: the submit Enter lands INSIDE
+/// the burst window (one write — `send(paste + "\r")`, the owner's
+/// paste-then-Enter-at-once rhythm). The trailing bare CR has no LF
+/// partner behind it, so it is the submit: the whole block (empty line
+/// included) executes on the FIRST Enter — this test sends nothing after
+/// the single write, so a swallowed Enter cannot produce the markers.
+#[test]
+fn empty_line_paste_same_burst_enter_submits_on_first_enter() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_same_burst_enter_submits_on_first_enter") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "paste-empty-line-same-burst",
+        &marker_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(&format!("{PASTE_MARKER_A}\r\n\r\n{PASTE_MARKER_B}\r\n\r"));
+    s.expect(PASTE_MARKER_A_OUT);
+    s.expect(PASTE_MARKER_B_OUT);
+    s.expect_prompt();
+}
+
+/// Two consecutive empty lines: the line after them still executes with
+/// every byte intact.
+#[test]
+fn empty_line_paste_two_consecutive_empty_lines_execute_both_lines() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_two_consecutive_empty_lines_execute_both_lines") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "paste-two-empty-lines",
+        &marker_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(&format!(
+        "{PASTE_MARKER_A}\r\n\r\n\r\n{PASTE_MARKER_B}\r\n\n"
+    ));
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect(PASTE_MARKER_A_OUT);
+    s.expect(PASTE_MARKER_B_OUT);
+    s.expect_prompt();
+}
+
+/// An indented line right after an empty line: the leading spaces are data
+/// and the line executes as-is.
+#[test]
+fn empty_line_paste_indented_line_after_empty_line_executes() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_indented_line_after_empty_line_executes") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "paste-indented-after-empty",
+        &marker_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(&format!("{PASTE_MARKER_A}\r\n\r\n  {PASTE_MARKER_B}\r\n\n"));
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect(PASTE_MARKER_A_OUT);
+    s.expect(PASTE_MARKER_B_OUT);
+    s.expect_prompt();
+}
+
+/// Control: the same CRLF block WITHOUT the empty line — pins that the
+/// plain multi-line paste (the #288 surface) is untouched by whatever the
+/// empty-line handling does.
+#[test]
+fn crlf_paste_without_empty_lines_control_executes_every_line() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("crlf_paste_without_empty_lines_control_executes_every_line") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "paste-no-empty-control",
+        &marker_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(&format!("{PASTE_MARKER_A}\r\n{PASTE_MARKER_B}\r\n"));
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect(PASTE_MARKER_A_OUT);
+    s.expect(PASTE_MARKER_B_OUT);
+    s.expect_prompt();
+}
+
+/// The owner machine's prompt was a claimed/custom one (`user@host ~ %`,
+/// issue comment 3) — the one reproduction variable the original 30-run
+/// sweep never varied. Same #291 shape under an ANSI-claimed PS1.
+#[test]
+fn empty_line_paste_under_claimed_prompt_executes_both_lines() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_under_claimed_prompt_executes_both_lines") {
+        return;
+    }
+    let rc = concat!(
+        "PS1='\\[\\e[1;36m\\]user@host ~ %\\[\\e[0m\\] '\n",
+        "PS2='> '\n",
+        "NIU_DISABLE_DEFAULT_PLUGINS=1\n",
+    );
+    let mut s = NiuSession::spawn_custom(
+        "paste-empty-line-claimed",
+        rc,
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    // A claimed PS1 renders itself, not the P1> sentinel — wait for the
+    // claimed prompt text instead of wait_ready().
+    s.expect("Niubash");
+    s.expect("user@host");
+    s.send(&format!("{PASTE_MARKER_A}\r\n\r\n{PASTE_MARKER_B}\r\n\n"));
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect(PASTE_MARKER_A_OUT);
+    s.expect(PASTE_MARKER_B_OUT);
 }

@@ -1000,8 +1000,14 @@ fn d3_setup_rerun_applies_in_the_live_session() {
     // DIFFERENT theme than the session's current look.
     s.expect("Pick a theme");
     answer(&mut s, "2\r");
-    // Q2.5 is skipped (the source registry is non-empty). Q3 (Windows only):
-    // niu-git — the default (Skip) is highlighted.
+    // Q2.5 is skipped (the source registry is non-empty). Q2.6 (2026-10-12):
+    // TAB completion style — the step runs on every `niu setup` re-run with
+    // the current effective style pre-highlighted, so Enter keeps it (a
+    // no-op pick writes no rc line). Without this answer the wizard waits
+    // on the menu and the journey dead-ends at its 180s session timeout.
+    s.expect("TAB completion style?");
+    answer(&mut s, "\r");
+    // Q3 (Windows only): niu-git — the default (Skip) is highlighted.
     #[cfg(windows)]
     {
         s.expect("niu-git");

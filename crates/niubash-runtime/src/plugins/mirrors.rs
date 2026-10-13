@@ -117,7 +117,10 @@ fn render_config(config: &MirrorConfig) -> String {
         # Community mirror examples — UNSUPPORTED and may disappear at any\n\
         # time; verify a service works for you before relying on it:\n\
         #   git_instead_of = \"https://gitclone.com/github.com\"\n\
-        #   git_instead_of = \"https://hub.fastgit.xyz/github.com\"\n",
+        #   git_instead_of = \"https://ghproxy.net/github.com\"\n\
+        # (niubash#303: the second example replaces a mirror that died\n\
+        # years ago; both suggestions were verified live, git transport\n\
+        # included, at edit time.)\n",
     );
     text
 }
@@ -413,6 +416,32 @@ mod tests {
         with_temp_mirrors(|_path| {
             assert!(set_custom_git_mirror("not a url").is_err());
             assert!(set_custom_git_mirror("").is_err());
+        });
+    }
+
+    /// niubash#303: the shipped template's community examples must never
+    /// recommend a mirror that has been dead for years — hub.fastgit.xyz
+    /// 404s since ~2021 and still sat in every freshly-rendered
+    /// mirrors.toml. Each replacement suggestion must be a live-service
+    /// URL shape (gitclone.com and ghproxy.net were both verified with a
+    /// real `git clone` through the insteadOf rewrite at edit time).
+    #[test]
+    fn rendered_template_suggests_only_live_mirrors() {
+        with_temp_mirrors(|path| {
+            set_direct().unwrap();
+            let text = fs::read_to_string(path).unwrap();
+            assert!(
+                !text.contains("fastgit"),
+                "template still recommends the dead hub.fastgit.xyz:\n{text}"
+            );
+            assert!(
+                text.contains("#   git_instead_of = \"https://gitclone.com/github.com\""),
+                "gitclone example missing:\n{text}"
+            );
+            assert!(
+                text.contains("#   git_instead_of = \"https://ghproxy.net/github.com\""),
+                "ghproxy.net example missing:\n{text}"
+            );
         });
     }
 }
