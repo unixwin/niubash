@@ -68,6 +68,7 @@ pub mod ctrl_c;
 pub mod doctor;
 pub(crate) mod easter_eggs;
 pub mod fonts;
+#[cfg(windows)]
 pub mod git_prompt;
 pub(crate) mod history;
 pub mod interactive_menu;

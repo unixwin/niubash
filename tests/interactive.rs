@@ -1756,3 +1756,43 @@ fn gitbash_factory_prompt_renders_and_tracks_the_branch() {
         "expected the cyan branch segment after cd into a repo, pane:\n{after}"
     );
 }
+
+#[test]
+fn zz_minimal_empty_line_paste_probe() {
+    if !require_pty_or_skip("empty-line paste probe") {
+        return;
+    }
+    let mut session = driver::NiuSession::spawn_custom(
+        "empty-line-paste",
+        "PS1='> '\n",
+        &[],
+        (120, 30),
+        driver::DEFAULT_TIMEOUT,
+    );
+    // No rc sentinel: poll for the claimed prompt char instead.
+    for _ in 0..40 {
+        session.drain_screen();
+        if session.transcript().contains("> ") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    // Paste shape: a code line, an EMPTY line, another code line - CR
+    // endings like a real Windows paste, Enter in the same burst (the
+    // owner rhythm from niubash#291).
+    session.send("echo one\r\n\r\necho two\r\n\n");
+    // Leave the burst window, then Enter separately (owner rhythm).
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    session.send("\r");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let screen = session.drain_screen();
+    assert!(
+        screen.contains("two"),
+        "echo two output missing entirely; screen:\n{screen}"
+    );
+    assert!(
+        !screen.contains("cho two"),
+        "leading bytes of the line after the empty line were swallowed; screen:\n{screen}"
+    );
+    session.send_line("exit");
+}
