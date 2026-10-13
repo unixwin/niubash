@@ -287,14 +287,11 @@ impl Shell {
         } else {
             None
         };
-        if cfg!(windows) {
-            // Keep the embedded Rubash path-display contract active for the
-            // entire shell lifetime; `cd` consults the process environment.
-            std::env::set_var("NIU_SHELL_PATH_STYLE", "native");
-            // Deprecated bridge: current rubash upstream still reads the
-            // pre-rename variable; drop once rubash renames its readers.
-            std::env::set_var("WINUXSH_SHELL_PATH_STYLE", "native");
-        }
+        // NIU_SHELL_PATH_STYLE / WINUXSH_SHELL_PATH_STYLE are no longer set
+        // here: rubash#556 (P0 #537) retired the engine-side readers, so the
+        // vars are inert and only misinformed child processes. The engine now
+        // renders $PWD/`pwd` in the POSIX persona form unconditionally; native
+        // spelling is a spawn-boundary concern the host handles below.
         if let Some(shell_path) = &default_shell_path {
             std::env::set_var("SHELL", shell_path);
         }
@@ -1815,12 +1812,27 @@ impl Shell {
         host_path.is_dir().then_some(host_path)
     }
 
+    /// The engine-canonical persona rendering of a host path, used everywhere
+    /// the host (re)stamps the executor's `PWD`: rubash#556 (P0 #537) made the
+    /// engine render `$PWD`/`pwd` in the POSIX persona form (`/c/...`)
+    /// unconditionally, so a host-side stamp in native drive form would bend
+    /// shell-visible PWD back into the retired style and make the form depend
+    /// on which route (simple sequence vs compound line) executed last. The
+    /// root mapping still applies first so isolated-root layouts keep their
+    /// `/...` spelling; native drive spelling stays a spawn-boundary concern
+    /// (process cwd, child argv, PATH translation).
+    fn persona_pwd_from_host_path(&self, host_path: &str) -> String {
+        rubash::executor::shell_pwd_display_path(&host_path_to_shell_path_with_root(
+            host_path,
+            self.shell_root.as_deref(),
+        ))
+    }
+
     fn sync_executor_pwd_from_process_cwd(&mut self) {
         let Ok(cwd) = std::env::current_dir() else {
             return;
         };
-        let normalized_pwd =
-            host_path_to_shell_path_with_root(&cwd.to_string_lossy(), self.shell_root.as_deref());
+        let normalized_pwd = self.persona_pwd_from_host_path(&cwd.to_string_lossy());
         self.executor.set_env("PWD", &normalized_pwd);
     }
 
@@ -1841,10 +1853,7 @@ impl Shell {
             Some(p) => p.to_string(),
             None => {
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let pwd = host_path_to_shell_path_with_root(
-                    &cwd.to_string_lossy(),
-                    self.shell_root.as_deref(),
-                );
+                let pwd = self.persona_pwd_from_host_path(&cwd.to_string_lossy());
                 self.executor.set_env("PWD", &pwd);
                 return;
             }
@@ -1853,26 +1862,17 @@ impl Shell {
         let target = host_pwd.clone();
         if !target.is_dir() {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let pwd = host_path_to_shell_path_with_root(
-                &cwd.to_string_lossy(),
-                self.shell_root.as_deref(),
-            );
+            let pwd = self.persona_pwd_from_host_path(&cwd.to_string_lossy());
             self.executor.set_env("PWD", &pwd);
             return;
         }
         if std::env::set_current_dir(&target).is_err() {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let pwd = host_path_to_shell_path_with_root(
-                &cwd.to_string_lossy(),
-                self.shell_root.as_deref(),
-            );
+            let pwd = self.persona_pwd_from_host_path(&cwd.to_string_lossy());
             self.executor.set_env("PWD", &pwd);
             return;
         }
-        let normalized_pwd = host_path_to_shell_path_with_root(
-            &host_pwd.to_string_lossy(),
-            self.shell_root.as_deref(),
-        );
+        let normalized_pwd = self.persona_pwd_from_host_path(&host_pwd.to_string_lossy());
         self.executor.set_env("PWD", &normalized_pwd);
         if let Some(old_pwd) = self.executor.get_env("OLDPWD").map(str::to_owned) {
             let normalized_old_pwd = normalize_shell_visible_path(&old_pwd);
@@ -5291,19 +5291,24 @@ niu_git_comp() {
             "completion cwd did not sync, PWD={:?}",
             shell.executor.get_env("PWD")
         );
-        assert_eq!(
-            shell.executor.get_env("PWD").as_deref(),
-            Some(target_shell_path.as_str())
-        );
         if cfg!(windows) {
-            assert!(
-                !shell
-                    .executor
-                    .get_env("PWD")
-                    .unwrap_or_default()
-                    .starts_with("/c/"),
-                "PWD should be Windows-native, got {:?}",
-                shell.executor.get_env("PWD")
+            // rubash#556 (P0 #537): $PWD/`pwd` render the POSIX persona form
+            // unconditionally — the native-style hatch is retired, and the
+            // form must not depend on which route executed the cd.
+            let pwd = shell.executor.get_env("PWD").unwrap_or_default();
+            let expected_persona = format!(
+                "/{}{}",
+                (target_shell_path.as_bytes()[0] as char).to_ascii_lowercase(),
+                &target_shell_path[2..]
+            );
+            assert_eq!(
+                pwd, expected_persona,
+                "PWD must render the POSIX persona form (rubash#556/#537), got {pwd:?}"
+            );
+        } else {
+            assert_eq!(
+                shell.executor.get_env("PWD").as_deref(),
+                Some(target_shell_path.as_str())
             );
         }
 
