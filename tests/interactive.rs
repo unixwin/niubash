@@ -901,6 +901,44 @@ fn multiline_crlf_paste_buffers_whole_chunk_and_executes_once() {
     s.expect_prompt();
 }
 
+/// niubash#308: the paste and its submit Enter land in ONE burst —
+/// `send(paste_crlf + "\r")`, a single write, the Enter <50 ms after the
+/// last paste key. The trailing bare CR carries no LF partner, so it is the
+/// submit, not paste data: the whole buffered chunk must execute on that
+/// FIRST Enter. The pre-#308 behavior pushed the Enter into the pending
+/// chunk as a newline — nothing executed and a second Enter was needed.
+///
+/// Windows-only: the burst window is the Windows paste-chunk heuristic; on
+/// Unix the same write executes per line through the tty's CR translation,
+/// which is the ordinary non-paste path (the bracketed-paste test above
+/// covers Unix paste buffering).
+#[test]
+fn paste_with_same_burst_enter_submits_on_first_enter() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("paste_with_same_burst_enter_submits_on_first_enter") {
+        return;
+    }
+    // Output markers are rc variables: only EXECUTED output can produce
+    // them, never the echoed edit buffer.
+    let rc = format!(
+        "{}\nTS1=BURSTENTER-ONE-DONE\nTS2=BURSTENTER-TWO-DONE\n",
+        driver::default_rc()
+    );
+    let mut s =
+        NiuSession::spawn_custom("paste-burst-enter-308", &rc, &[], (120, 30), HEAVY_TIMEOUT);
+    s.wait_ready();
+    // One write — paste body plus the submit Enter, no gap, no second send.
+    s.send("echo $TS1\r\necho $TS2\r\n\r");
+    // The first Enter executes the whole chunk, in paste order, and the
+    // session lands on a fresh prompt (a swallowed Enter would leave no
+    // output and no new prompt, failing these expects on timeout).
+    s.expect("BURSTENTER-ONE-DONE");
+    s.expect("BURSTENTER-TWO-DONE");
+    s.expect_prompt();
+}
+
 /// niubash#277/#280 adjacency: ESC-sequenced arrow keys (ConPTY synthesizes
 /// them into arrow KEY_EVENTs from the pty's ESC[A..D stream) ride the
 /// input path untouched by paste-chunk detection — no chunk opens, no
