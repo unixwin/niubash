@@ -28,6 +28,7 @@
 //! these vtables, so an ordering mistake fails loudly instead of corrupting
 //! launches.
 
+#[cfg(windows)]
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -225,6 +226,7 @@ fn wt_app_paths_registry_candidates() -> Vec<PathBuf> {
     Vec::new()
 }
 
+#[cfg(windows)]
 fn wide_to_string(buffer: &[u16]) -> String {
     let end = buffer
         .iter()
@@ -441,6 +443,7 @@ fn com_apartment() -> Result<ComApartment> {
     Err(anyhow::anyhow!("CoInitializeEx failed: 0x{hr:08X}"))
 }
 
+#[cfg(windows)]
 fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
