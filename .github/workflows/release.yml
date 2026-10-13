@@ -1539,11 +1539,18 @@ jobs:
       #
       # crates.io is idempotent per version: re-running a release (the
       # v1.4.0 run's crates job died on steps the first attempt had already
-      # published) hits HTTP 400 "crate version `x.y.z` is already
-      # uploaded". That verdict means the version IS live on crates.io —
-      # a successful publish, not a failure. Both steps grep for exactly
-      # that server response and treat it as success; any other failure
-      # still fails the step (loudly, under the job's continue-on-error).
+      # published) fails with one of two idempotency verdicts, both meaning
+      # the version IS live on crates.io — a successful publish, not a
+      # failure:
+      #   - HTTP 400 from the upload: "crate version `x.y.z` is already
+      #     uploaded" (the re-run this tolerance was built for), or
+      #   - the sparse-index pre-flight: "crate <name>@<x.y.z> already
+      #     exists on crates.io index" (release run 38404767765 — cargo
+      #     sees the version in the index and refuses before any upload,
+      #     so the HTTP-400 text never appears).
+      # Both steps grep for either phrasing and treat it as success; any
+      # other failure still fails the step (loudly, under the job's
+      # continue-on-error).
       - name: Publish niubash-runtime to crates.io
         shell: pwsh
         run: |
@@ -1551,7 +1558,7 @@ jobs:
           $output = cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }} 2>&1
           $output | ForEach-Object { Write-Host "$_" }
           if ($LASTEXITCODE -eq 0) { exit 0 }
-          if (($output | ForEach-Object { "$_" }) -match "is already uploaded") {
+          if (($output | ForEach-Object { "$_" }) -match "is already uploaded|already exists on crates\.io") {
             Write-Host "niubash-runtime's version is already on crates.io - the publish already happened; treating as success"
             exit 0
           }
@@ -1564,7 +1571,7 @@ jobs:
           $output = cargo publish --locked -p niubash --token ${{ secrets.CRATES_IO_TOKEN }} 2>&1
           $output | ForEach-Object { Write-Host "$_" }
           if ($LASTEXITCODE -eq 0) { exit 0 }
-          if (($output | ForEach-Object { "$_" }) -match "is already uploaded") {
+          if (($output | ForEach-Object { "$_" }) -match "is already uploaded|already exists on crates\.io") {
             Write-Host "niubash's version is already on crates.io - the publish already happened; treating as success"
             exit 0
           }

@@ -1294,6 +1294,53 @@ fn resolve_target(name: &str) -> anyhow::Result<Target> {
             &matches[0].0,
         ),
         _ => {
+            // A bare name shipping from several trusted sources is
+            // ambiguous — UNLESS the spec's own theme claim names exactly
+            // one of the matches. The wizard's finish screen and the setup
+            // journal print the bare name in the undo receipt
+            // (`niu plugin disable powerline-multiline`), so the undo
+            // contract needs the ACTIVE theme's owning source to win the
+            // resolution instead of a refusal
+            // (wt80-undo-receipt-ambiguous-theme, release run 38404767765
+            // P4-S3): the ambiguity exists precisely because that claim's
+            // pick installed the same name from two frameworks (niu#168's
+            // same-name family). The claim is recorded intent, not a
+            // guess; with no claim, or a claim matching several
+            // candidates, the honest ambiguity error stands.
+            if let Ok(Some(spec)) = spec::load_spec() {
+                let claims: Vec<(&str, &str)> = spec
+                    .sources
+                    .iter()
+                    .filter_map(|entry| {
+                        let id = entry.id.as_deref()?;
+                        let theme = entry.theme.as_deref()?;
+                        if theme.is_empty() {
+                            None
+                        } else {
+                            Some((id, theme))
+                        }
+                    })
+                    .collect();
+                let owned: Vec<&(SourceRecord, SourceAsset)> = matches
+                    .iter()
+                    .filter(|(record, asset)| {
+                        asset.kind == SourceAssetKind::Theme
+                            && claims
+                                .iter()
+                                .any(|(id, theme)| *id == record.id && *theme == asset.name)
+                    })
+                    .collect();
+                if owned.len() == 1 {
+                    let (record, asset) = owned[0];
+                    return check_gate(
+                        Target::Asset {
+                            record: record.clone(),
+                            asset: asset.clone(),
+                        },
+                        record,
+                    );
+                }
+            }
             let options: Vec<String> = matches
                 .iter()
                 .map(|(record, asset)| format!("{}/{}", record.id, asset.name))
@@ -2284,6 +2331,63 @@ mod tests {
             "tree untouched"
         );
         let _ = fs::remove_dir_all(&origin);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    #[test]
+    fn ambiguous_theme_disable_resolves_to_the_claim_owner() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Two frameworks ship the same theme name — niu#168's same-name
+        // family (oh-my-bash AND bash-it carry e.g. powerline-multiline).
+        // The wizard's undo receipt prints the bare name, so the bare-name
+        // disable must reach the theme's OWNING source instead of refusing
+        // (wt80-undo-receipt-ambiguous-theme, release run 38404767765
+        // P4-S3).
+        let omb_origin = unique_temp_dir("same-name-omb");
+        write_omb_fixture(&omb_origin);
+        let bashit_origin = unique_temp_dir("same-name-bashit");
+        write_bash_it_fixture(&bashit_origin);
+        fs::create_dir_all(bashit_origin.join("themes/agnoster")).unwrap();
+        fs::write(
+            bashit_origin.join("themes/agnoster/agnoster.theme.bash"),
+            "PS1='agnoster-bashit> '\n",
+        )
+        .unwrap();
+        let box_ = sandbox("same-name-undo");
+        install(&omb_origin);
+        install(&bashit_origin);
+        trust("oh-my-bash");
+        trust("bash-it");
+
+        // No claim yet: the bare name stays honestly ambiguous.
+        let err = disable("agnoster").expect_err("ambiguous disable must fail");
+        assert!(
+            err.to_string().contains("exists in multiple sources"),
+            "{err}"
+        );
+
+        // The wizard's path: the pick claims the theme for one framework
+        // (the qualified enable), then the undo receipt runs the bare-name
+        // disable from the finish screen.
+        enable("oh-my-bash/agnoster").expect("qualified theme enable");
+        assert!(rc_text().contains("OSH_THEME='agnoster'"), "{}", rc_text());
+        disable("agnoster").expect("bare-name disable resolves to the claim owner");
+        assert!(!rc_text().contains("OSH_THEME="), "{}", rc_text());
+        let spec = spec_text();
+        assert!(
+            spec.contains("theme = ''"),
+            "theme pick explicitly cleared: {spec}"
+        );
+
+        // The claim is evidence, not a blanket pass: once cleared (theme
+        // = ''), the bare name is ambiguous again.
+        let err = disable("agnoster").expect_err("cleared claim restores ambiguity");
+        assert!(
+            err.to_string().contains("exists in multiple sources"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&omb_origin);
+        let _ = fs::remove_dir_all(&bashit_origin);
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
