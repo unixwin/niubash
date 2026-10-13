@@ -102,6 +102,9 @@ pub struct Shell {
     /// every prompt rebuild re-renders it from the current directory until
     /// a PS1/theme claim displaces it (the claim check lives in
     /// `prompt_for_display`). Never set for one-shot shells.
+    /// off-Windows the field is write-only (the refresh site is cfg'd out)
+    /// — the allow keeps the -D warnings unix lanes clean.
+    #[cfg_attr(not(windows), allow(dead_code))]
     gitbash_prompt_active: bool,
     pub home_dir: PathBuf,
     pub shell_root: Option<PathBuf>,
