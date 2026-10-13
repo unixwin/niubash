@@ -697,6 +697,151 @@ fn foreign_body_lines(
 const MIGRATED_USER_LINES_HEADER: &str =
     "# user lines moved out of a managed block by `niu plugin` (niu #176) — review and keep";
 
+/// Any wording of the migration header niu ever wrote (niubash#324): the
+/// stable prefix outlived the suffix edits, and section detection must
+/// recognize the older spellings a corrupt rc still carries.
+fn is_migrated_section_header(line: &str) -> bool {
+    line.trim()
+        .starts_with("# user lines moved out of a managed block by")
+}
+
+/// A line that always terminates a migrated-user-lines section: any managed
+/// marker shape (exact or near, any id — niu's own block vocabulary never
+/// appears inside a section body).
+fn is_managed_marker_boundary(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('#')
+        && (trimmed
+            .trim_start_matches('#')
+            .trim_start()
+            .starts_with(">>>")
+            || trimmed
+                .trim_start_matches('#')
+                .trim_start()
+                .starts_with("<<<"))
+}
+
+/// One drift-guard line (niubash#297's static snippet, id embedded in the
+/// echo): the exact shapes niu itself writes. A moved-out copy of these is
+/// niu-authored debris — the guard belongs INSIDE the managed block, where
+/// every rewrite re-renders it, never in the user area.
+fn is_drift_guard_debris(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == "fi"
+        || trimmed
+            == r#"_niu_drift="${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/drifted-sources.txt""#
+        || trimmed.starts_with("if [ -s \"$_niu_drift\" ]")
+        || trimmed.starts_with("echo \"niubash plugin: source ")
+        || trimmed == "unset _niu_drift"
+        || trimmed.starts_with("# drift guard (static): `niu plugin sync` lists drifted ids")
+}
+
+/// Inclusive `(start, stop)` spans of the rc's migrated-user-lines sections:
+/// a [`MIGRATED_USER_LINES_HEADER`] line plus the body up to (not
+/// including) the next section header, any managed marker line, or EOF.
+fn migrated_section_spans(lines: &[String]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if is_migrated_section_header(&lines[index]) {
+            let mut stop = index;
+            while stop + 1 < lines.len()
+                && !is_migrated_section_header(&lines[stop + 1])
+                && !is_managed_marker_boundary(&lines[stop + 1])
+            {
+                stop += 1;
+            }
+            // Trailing blank lines are separators, not section content.
+            while stop > index && lines[stop].trim().is_empty() {
+                stop -= 1;
+            }
+            spans.push((index, stop));
+            index = stop + 1;
+        } else {
+            index += 1;
+        }
+    }
+    spans
+}
+
+/// Strip niu-authored drift-guard debris out of the rc's migrated sections
+/// (niubash#324): older builds' managed-block rewrites copied previously
+/// moved-out content as fresh user lines, and the copy boundary recognized
+/// the guard's closing `fi` as managed structure while migrating its
+/// openers — leaving N dangling `if` fragments in the user area, a syntax
+/// error on every startup. The debris is redundant by construction (every
+/// managed-block rewrite re-renders the complete guard inside the block),
+/// so a section whose every non-comment line is guard-shaped goes
+/// entirely. A section mixing genuine user lines with debris is kept
+/// VERBATIM — the user area is only ever edited whole-section here, never
+/// line-wise (niubash#176: user lines are sacrosanct, and surgical edits
+/// could orphan a user's own if/fi pair).
+///
+/// Returns the rewritten lines and how many sections disappeared.
+fn normalize_migrated_sections(lines: Vec<String>) -> (Vec<String>, usize) {
+    let spans = migrated_section_spans(&lines);
+    if spans.is_empty() {
+        return (lines, 0);
+    }
+    let mut dropped = Vec::new();
+    for (start, stop) in spans {
+        let mut has_debris = false;
+        let mut all_debris = true;
+        let mut index = start + 1;
+        while index <= stop {
+            let trimmed = lines[index].trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                index += 1;
+                continue;
+            }
+            if is_drift_guard_debris(trimmed) {
+                has_debris = true;
+            } else {
+                all_debris = false;
+            }
+            index += 1;
+        }
+        if has_debris && all_debris {
+            dropped.push((start, stop));
+        }
+        // A section mixing user lines with debris is left verbatim: the
+        // user area is only ever edited whole-section here, never line-wise
+        // (niubash#176 — user lines are sacrosanct; the debris alongside
+        // them is inert once the section keeps its user lines).
+    }
+    if dropped.is_empty() {
+        return (lines, 0);
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    let mut cursor = 0;
+    let mut removed = 0;
+    for (start, stop) in dropped {
+        out.extend(lines[cursor..start].iter().cloned());
+        cursor = stop + 1;
+        removed += 1;
+        // Consume the section's own trailing separator blanks so a dropped
+        // run of sections leaves no stacked blank lines behind (and no
+        // user blank elsewhere is ever touched).
+        while cursor < lines.len() && lines[cursor].trim().is_empty() {
+            cursor += 1;
+        }
+    }
+    out.extend(lines[cursor..].iter().cloned());
+    (out, removed)
+}
+
+/// True when the rc on disk still carries moved-out drift-guard debris
+/// (niubash#324) — the signal that lets the materializer's byte-identical
+/// fast path fall through to a repair.
+fn rc_has_migrated_debris() -> bool {
+    let Ok(text) = fs::read_to_string(rc_file()) else {
+        return false;
+    };
+    let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let (_, removed) = normalize_migrated_sections(lines);
+    removed > 0
+}
+
 /// Insert or replace a managed block in the rc file, creating the rc when
 /// absent. Returns the rc path (for the outcome message) plus how many
 /// existing marker pairs (exact or near-marker, see
@@ -708,17 +853,35 @@ const MIGRATED_USER_LINES_HEADER: &str =
 /// ([`backup_rc`]), the file's own line endings are preserved, user lines
 /// found inside the replaced block(s) are migrated out (with a stderr
 /// warning) instead of silently dropped, and hand-edited near-marker blocks
-/// are repaired rather than duplicated.
+/// are repaired rather than duplicated. niubash#324 adds: previously
+/// migrated sections are normalized first (stale guard debris removed, the
+/// owner-corrupt rc converges) and a newly migrated line that an existing
+/// section already carries is merged into it, never copied again.
 fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(PathBuf, usize)> {
     let path = rc_file();
     let raw = fs::read_to_string(&path).ok();
     let eol = raw.as_deref().map(detect_eol).unwrap_or("\n");
-    let mut lines: Vec<String> = raw
+    let lines: Vec<String> = raw
         .as_deref()
         .map(|text| text.lines().map(str::to_string).collect())
         .unwrap_or_else(|| {
             vec!["# Niubash interactive rc - edited by you and `niu plugin`.".to_string()]
         });
+    // niubash#324: normalize BEFORE the span scan (dropped sections shift
+    // indices), and remember the surviving sections' lines — a migrated
+    // line they already carry must not be appended a second time.
+    let (mut lines, debris_removed) = normalize_migrated_sections(lines);
+    if debris_removed > 0 {
+        eprintln!(
+            "warning: removed {debris_removed} stale moved-out drift-guard remnant(s) left by \
+             an older niu (niu #324) — the guard lives inside the managed block"
+        );
+    }
+    let pile_lines: std::collections::BTreeSet<String> = migrated_section_spans(&lines)
+        .iter()
+        .flat_map(|(start, stop)| lines[*start + 1..=*stop].iter().cloned())
+        .map(|line| line.trim().to_string())
+        .collect();
     let block_lines: Vec<String> = block.lines().map(str::to_string).collect();
     let id = marker_id(begin).unwrap_or_default().to_string();
     let mut spans = managed_block_spans(&lines, begin, end)?;
@@ -738,7 +901,12 @@ fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(P
         );
     }
     let managed = record_for_marker(begin, &read_source_registry());
-    let foreign = foreign_body_lines(&lines, &spans, block, managed.as_ref());
+    // niubash#324 (move, not copy): a line an existing migrated section
+    // already carries is NOT migrated again — the pile keeps one copy under
+    // its header and the in-block copy leaves with this rewrite, so the
+    // user area never grows a duplicate section per verb.
+    let mut foreign = foreign_body_lines(&lines, &spans, block, managed.as_ref());
+    foreign.retain(|line| !pile_lines.contains(&line.trim().to_string()));
     let consumed = spans.len();
     let mut insert_after_block = lines.len();
     match spans.as_slice() {
@@ -803,6 +971,23 @@ fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
     };
     let eol = detect_eol(&text);
     let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    // niubash#324: normalize the migrated sections BEFORE the span scan
+    // (dropped debris shifts indices) — an already-corrupt rc converges on
+    // the removal path too, even when this verb has no block to remove.
+    let (lines, debris_removed) = normalize_migrated_sections(lines);
+    if debris_removed > 0 {
+        eprintln!(
+            "warning: removed {debris_removed} stale moved-out drift-guard remnant(s) left by \
+             an older niu (niu #324) — the guard lives inside the managed block"
+        );
+    }
+    // Same move-not-copy dedupe as the write path (niubash#324): lines an
+    // existing migrated section carries are never re-inserted.
+    let pile_lines: std::collections::BTreeSet<String> = migrated_section_spans(&lines)
+        .iter()
+        .flat_map(|(start, stop)| lines[*start + 1..=*stop].iter().cloned())
+        .map(|line| line.trim().to_string())
+        .collect();
     let id = marker_id(begin).unwrap_or_default().to_string();
     let mut spans = managed_block_spans(&lines, begin, end)?;
     for span in near_marker_spans(&lines, &id, begin, end)? {
@@ -812,6 +997,14 @@ fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
     }
     spans.sort_unstable();
     if spans.is_empty() {
+        if debris_removed > 0 {
+            // No block to remove, but the normalization repaired the rc:
+            // persist it through the same backup + atomic swap.
+            backup_rc();
+            let mut joined = lines.join(eol);
+            joined.push_str(eol);
+            crate::path_utils::write_file_atomic(&path, joined.as_bytes())?;
+        }
         return Ok(0);
     }
     // Recognized managed lines for the removal path: the canonical
@@ -821,7 +1014,7 @@ fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
     // unresolvable record conservatively migrates nothing.
     let registry = read_source_registry();
     let managed = record_for_marker(begin, &registry);
-    let foreign = match &managed {
+    let mut foreign = match &managed {
         Some((record, model)) => {
             let rendered = adapter_for(&record.adapter).map(|_adapter| {
                 let state = managed_state(&record.id, model, &record.id);
@@ -836,6 +1029,7 @@ fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
         }
         None => Vec::new(),
     };
+    foreign.retain(|line| !pile_lines.contains(&line.trim().to_string()));
     let first_start = spans[0].0;
     let mut rewritten: Vec<String> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
@@ -1794,7 +1988,10 @@ fn apply_block(
 /// block(s) with the canonical rendering unless the single existing block
 /// is already byte-identical. Duplicate pairs are always collapsed and
 /// reported as a `merged` row — byte-stability of the FIRST block must not
-/// let sync call a duplicated-block rc "in sync" (wt83 #175).
+/// let sync call a duplicated-block rc "in sync" (wt83 #175). The
+/// byte-identical fast path also falls through when the rc still carries
+/// moved-out guard debris (niubash#324): the block is in sync but the file
+/// around it is not, and the rewrite normalizes it.
 fn write_block_report(
     record: &SourceRecord,
     rendered: &str,
@@ -1802,7 +1999,8 @@ fn write_block_report(
 ) -> anyhow::Result<(String, String)> {
     let pair_count = managed_block_pair_count(&record.id)?;
     let unchanged = pair_count == 1
-        && managed_block_text(&record.id).as_deref() == Some(rendered.to_string()).as_deref();
+        && managed_block_text(&record.id).as_deref() == Some(rendered.to_string()).as_deref()
+        && !rc_has_migrated_debris();
     if unchanged {
         return Ok(("unchanged".to_string(), detail.to_string()));
     }
@@ -2760,5 +2958,274 @@ mod tests {
             *violations
         );
         let _ = fs::remove_dir_all(&_sandbox.temp);
+    }
+
+    // ── niubash#324: moved-out user lines are moved, never copied ───────────
+
+    /// The moved-out drift-guard fragment exactly as the corrupt rc of
+    /// niubash#324 carries it: the niubash#297 static guard whose closing
+    /// `fi` the old copy boundary recognized as managed structure and left
+    /// behind. `with_fi` restores the complete shape.
+    fn moved_out_guard(id: &str, with_fi: bool) -> String {
+        format!(
+            "# drift guard (static): `niu plugin sync` lists drifted ids in drifted-sources.txt\n\
+             _niu_drift=\"${{NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}}/drifted-sources.txt\"\n\
+             if [ -s \"$_niu_drift\" ] && command -v grep >/dev/null 2>&1 && grep -qx '{id}' \
+             \"$_niu_drift\" 2>/dev/null; then\n\
+             \x20 echo \"niubash plugin: source {id} no longer matches its lockfile pin — run: \
+             niu plugin source verify {id}; repair with: niu plugin restore {id}\" >&2\n\
+             {}unset _niu_drift\n",
+            if with_fi { "fi\n" } else { "" }
+        )
+    }
+
+    fn if_fi_balance(text: &str) -> (usize, usize) {
+        let opens = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("if "))
+            .count();
+        let closes = text.lines().filter(|line| line.trim() == "fi").count();
+        (opens, closes)
+    }
+
+    /// THE niubash#324 repro (the owner's real-machine rc): after the legit
+    /// managed oh-my-bash block, SIX consecutive copies of the moved-out
+    /// header + guard fragment, only the last carrying its `fi` — five
+    /// dangling `if`s, a syntax error on every startup. Every plugin verb
+    /// (the startup `sync --bootstrap` among them) must CONVERGE the file:
+    /// exactly one complete guard, inside the managed block, zero
+    /// moved-out sections, if/fi balanced file-wide — and then hold that
+    /// state byte-stably across further verb rounds.
+    #[test]
+    fn corrupt_owner_rc_converges_to_one_in_block_guard_on_plugin_ops() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let origin = unique_temp_dir("i324-origin");
+        write_omb_fixture(&origin);
+        let box_ = sandbox("i324-converge");
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("canonical block first");
+
+        // The corrupt fixture: managed block + 5 fi-less fragments + the
+        // final complete copy (issue #324's exact shape).
+        let base = rc_text().trim_end().to_string();
+        let mut corrupt = base.clone();
+        for with_fi in [false, false, false, false, false, true] {
+            corrupt.push('\n');
+            corrupt.push_str(MIGRATED_USER_LINES_HEADER);
+            corrupt.push('\n');
+            corrupt.push_str(&moved_out_guard("oh-my-bash", with_fi));
+        }
+        fs::write(rc_file(), &corrupt).unwrap();
+        let count = |needle: &str| rc_text().matches(needle).count();
+        assert_eq!(count("moved out of a managed block"), 6, "{}", rc_text());
+        let (opens, closes) = if_fi_balance(&rc_text());
+        assert_eq!(opens - closes, 5, "five dangling ifs seeded: {}", rc_text());
+
+        // Six rounds of the plugin verbs, sync/enable/disable alternating.
+        for _round in 0..6 {
+            super::super::sync::sync_spec(super::super::sync::SyncOptions::default())
+                .expect("sync");
+            disable("git").expect("asset disable");
+            enable("git").expect("asset enable");
+            disable("oh-my-bash").expect("source disable");
+            enable("oh-my-bash").expect("source enable");
+        }
+        super::super::sync::sync_spec(super::super::sync::SyncOptions::default())
+            .expect("final sync");
+
+        let text = rc_text();
+        assert_eq!(
+            count("moved out of a managed block"),
+            0,
+            "every moved-out guard section converged away: {text}"
+        );
+        assert_eq!(
+            count("# drift guard (static)"),
+            1,
+            "exactly one complete guard remains: {text}"
+        );
+        assert_eq!(count("unset _niu_drift"), 1, "{text}");
+        assert_eq!(
+            if_fi_balance(&text).0,
+            if_fi_balance(&text).1,
+            "no dangling if survives: {text}"
+        );
+        let begin = text.find(">>> niu source oh-my-bash").unwrap();
+        let end = text.find("<<< niu source oh-my-bash").unwrap();
+        let guard = text.find("# drift guard (static)").unwrap();
+        assert!(
+            guard > begin && guard < end,
+            "the one guard lives INSIDE the managed block: {text}"
+        );
+        assert!(
+            text.contains("oh-my-bash.sh"),
+            "the source still loads (guarded loader intact): {text}"
+        );
+
+        // Fixed point: a further identical verb round changes nothing.
+        let settled = rc_text();
+        super::super::sync::sync_spec(super::super::sync::SyncOptions::default()).unwrap();
+        disable("git").unwrap();
+        enable("git").unwrap();
+        disable("oh-my-bash").unwrap();
+        enable("oh-my-bash").unwrap();
+        super::super::sync::sync_spec(super::super::sync::SyncOptions::default()).unwrap();
+        assert_eq!(rc_text(), settled, "converged rc is a fixed point");
+
+        let _ = fs::remove_dir_all(&origin);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// The healthy #176 shape (managed block + ONE moved-out section) must
+    /// never GROW across a plugin-verb loop: the section's guard copy is
+    /// niu debris, so the first verb converges it away (the complete guard
+    /// is re-rendered inside the block), and from then on the whole file
+    /// is byte-stable with its `fi` intact — the loop regression the issue
+    /// asks for.
+    #[test]
+    fn moved_out_guard_region_converges_then_stays_byte_stable_across_verb_loops() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let origin = unique_temp_dir("i324-healthy");
+        write_omb_fixture(&origin);
+        let box_ = sandbox("i324-stable");
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("canonical block first");
+        let base = rc_text().trim_end().to_string();
+        let healthy = format!(
+            "{base}\n{}\n{}",
+            MIGRATED_USER_LINES_HEADER,
+            moved_out_guard("oh-my-bash", true)
+        );
+        fs::write(rc_file(), &healthy).unwrap();
+
+        // Warm-up round (the source disable/enable cycle legitimately
+        // rewrites the block once), then byte-stability across the loop.
+        super::super::sync::sync_spec(super::super::sync::SyncOptions::default()).unwrap();
+        disable("git").unwrap();
+        enable("git").unwrap();
+        disable("oh-my-bash").unwrap();
+        enable("oh-my-bash").unwrap();
+        let settled = rc_text();
+        assert_eq!(
+            settled.matches("moved out of a managed block").count(),
+            0,
+            "the pile was guard debris; it converged with the block re-rendered: {settled}"
+        );
+        for _round in 0..6 {
+            super::super::sync::sync_spec(super::super::sync::SyncOptions::default()).unwrap();
+            disable("git").unwrap();
+            enable("git").unwrap();
+            disable("oh-my-bash").unwrap();
+            enable("oh-my-bash").unwrap();
+            assert_eq!(
+                rc_text(),
+                settled,
+                "user-lines region byte-stable across the loop"
+            );
+        }
+        let (opens, closes) = if_fi_balance(&rc_text());
+        assert_eq!(opens, closes, "fi intact: {}", rc_text());
+
+        let _ = fs::remove_dir_all(&origin);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// Move, not copy (niubash#324): a user line that comes back INSIDE the
+    /// block (restore-from-backup, an old installer, a hand edit) and is
+    /// migrated a second time merges into the existing migrated section —
+    /// the pile never grows a duplicate section per verb.
+    #[test]
+    fn re_migrated_user_line_already_in_a_pile_is_never_copied_again() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let origin = unique_temp_dir("i324-dedupe");
+        write_omb_fixture(&origin);
+        let box_ = sandbox("i324-dedupe");
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("canonical block first");
+
+        // The alias was already migrated out once; the SAME line is back
+        // inside the block.
+        let hijacked = rc_text().replacen(
+            "# <<< niu source oh-my-bash <<<",
+            &format!(
+                "alias hh='history'\n# <<< niu source oh-my-bash <<<\n{}\nalias hh='history'",
+                MIGRATED_USER_LINES_HEADER
+            ),
+            1,
+        );
+        fs::write(rc_file(), &hijacked).unwrap();
+
+        enable("cargo").expect("the rewrite that re-migrates the alias");
+        let text = rc_text();
+        assert_eq!(
+            text.matches("moved out of a managed block").count(),
+            1,
+            "one migrated section, not one per verb: {text}"
+        );
+        assert_eq!(
+            text.matches("alias hh='history'").count(),
+            1,
+            "one copy of the user line — the pile's: {text}"
+        );
+        let begin = text.find(">>> niu source oh-my-bash").unwrap();
+        let end = text.find("<<< niu source oh-my-bash").unwrap();
+        let alias = text.find("alias hh='history'").unwrap();
+        assert!(
+            alias > end && alias > begin,
+            "the alias lives outside the block: {text}"
+        );
+        assert!(text.contains("aliases=('cargo')"), "{text}");
+
+        // And the healed rc is stable across further rewrites.
+        let before = rc_text();
+        disable("cargo").unwrap();
+        enable("cargo").unwrap();
+        assert_eq!(rc_text(), before, "byte-stable after the merge");
+
+        let _ = fs::remove_dir_all(&origin);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// The conservative edge (niubash#324): a migrated section mixing
+    /// genuine user lines with guard debris is kept VERBATIM — whole
+    /// sections are dropped, never line-wise edits that could orphan a
+    /// user's own if/fi pair. Pure debris sections (the owner's file) go
+    /// entirely; user lines are never touched by the convergence.
+    #[test]
+    fn mixed_user_and_debris_pile_section_is_kept_verbatim() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let origin = unique_temp_dir("i324-mixed");
+        write_omb_fixture(&origin);
+        let box_ = sandbox("i324-mixed");
+        install(&origin);
+        trust("oh-my-bash");
+        enable("git").expect("canonical block first");
+
+        let mixed_section = format!(
+            "{}\nalias uu='uptime'\n{}",
+            MIGRATED_USER_LINES_HEADER,
+            moved_out_guard("oh-my-bash", false)
+        );
+        let seeded = format!("{}\n{}\n", rc_text().trim_end(), mixed_section);
+        fs::write(rc_file(), &seeded).unwrap();
+
+        enable("cargo").expect("a rewrite runs the normalizer");
+        let text = rc_text();
+        assert!(
+            text.contains("alias uu='uptime'"),
+            "the user line survives verbatim: {text}"
+        );
+        assert_eq!(
+            text.matches("moved out of a managed block").count(),
+            1,
+            "the mixed section is kept, not dropped: {text}"
+        );
+        assert_eq!(text.matches("alias uu='uptime'").count(), 1, "{text}");
+
+        let _ = fs::remove_dir_all(&origin);
+        let _ = fs::remove_dir_all(&box_.temp);
     }
 }
