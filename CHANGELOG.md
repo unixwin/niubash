@@ -41,6 +41,64 @@ All notable changes to Niubash are documented in this file.
   buffer before writing it back, so a record can no longer be reinjected
   twice (once by the self-heal, once by disarm; niubash#287).
 
+- The `niu plugin` help and doc examples no longer point at a dead repo:
+  the wild-GitHub-plugin example was `niu plugin add
+  rcrowley/bash-preexec`, but rcrowley/bash-preexec 404s (the project
+  moved to rcaloras/bash-preexec years ago), so a copy-paste of the
+  example failed. Every live reference — help text, the plugins.toml spec
+  example, the plugins guide, the wild-source fixture — now names
+  rcaloras/bash-preexec, and the example repo was verified cloneable
+  (niubash#301).
+
+- The config subsystem honors `HOME` isolation (niubash#302): every niu
+  subsystem — config.toml, mirrors.toml, the plugin rc, doctor, prompt,
+  the setup wizard — resolves the home directory through one shared
+  resolver in which an explicit `HOME` environment override wins on every
+  platform. Before, the Windows resolver ranked `USERPROFILE` first, so a
+  HOME-only sandbox (tests, CI, portable setups) silently read and wrote
+  the real profile. A default Windows session (`HOME` unset) resolves
+  exactly where it always has, and the classic Unix `HOME`-first
+  convention is unchanged.
+
+- The freshly-rendered mirrors.toml template no longer recommends
+  hub.fastgit.xyz (dead since ~2021; niubash#303). The second community
+  example is now ghproxy.net, verified live at edit time with a real
+  `git clone` through the `insteadOf` rewrite (gitclone.com, the first
+  example, re-verified the same way). The examples stay comments marked
+  UNSUPPORTED — they may die at any moment and are the user's to verify.
+
+- `.niubashrc` rewrites are atomic (niubash#304): every managed-block
+  rewrite (`niu plugin enable/disable/sync`) and the setup wizard's rc
+  write now stage the new content in a same-directory temp file and swap
+  it in with a single replace-rename (`MoveFileExW
+  MOVEFILE_REPLACE_EXISTING` on Windows, `rename(2)` elsewhere). The
+  former truncate-in-place write and the wizard's former
+  remove-then-rename left windows where a concurrent reader — a pipe or
+  `sed` run against the rc — saw the file empty, partial, or briefly
+  absent; a reader now always observes a complete old or new generation.
+
+- The installer cleans up after itself (niubash#313). Uninstall now also
+  removes the `{app}\winuxcmd\bin` entry from the user `PATH` — the
+  install-time `wpm links rebuild` adds it, but the uninstaller only ever
+  removed `{app}`, leaving a dangling PATH entry after every uninstall.
+  The installer gained `[InstallDelete]`/`[UninstallDelete]` sweeps for
+  files earlier builds shipped and the current payload retired (the
+  reverted dual-name build's `niubash.exe`, stray self-update
+  `niu.exe.old-*` backups), which previously survived upgrade AND
+  uninstall on real machines.
+
+### Changed
+
+- Installer disclosure (niubash#313): the "Create a desktop shortcut"
+  task is new in 1.4.x and default-checked. Silent installs and upgrades
+  (`/SILENT`, `/VERYSILENT`) never show the task page, and Inno has no
+  saved selection for a new task name — so a silent upgrade of a 1.3.x
+  machine runs the task with its default state and grows a desktop icon
+  (rewritten in place to the Windows Terminal form by the shortcut step)
+  without ever asking. Owner ruling: the behavior is intended; it is
+  disclosed here and in the installer source. Interactive installs keep
+  remembering an unchecked choice.
+
 ## [1.4.0] - 2026-10-10
 
 ### Changed

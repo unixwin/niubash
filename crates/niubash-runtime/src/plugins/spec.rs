@@ -18,7 +18,7 @@
 //! theme  = "agnoster"
 //!
 //! [[sources]]
-//! target = "rcrowley/bash-preexec" # wild file source (GitHub shorthand)
+//! target = "rcaloras/bash-preexec" # wild file source (GitHub shorthand)
 //! enable = ["bash-preexec.sh"]     # asset names are tree-relative paths
 //! ```
 
@@ -247,7 +247,7 @@ mod tests {
                     enable: vec!["git".to_string(), "npm".to_string()],
                 },
                 SpecSource {
-                    target: "rcrowley/bash-preexec".to_string(),
+                    target: "rcaloras/bash-preexec".to_string(),
                     id: Some("bash-preexec".to_string()),
                     kind: None,
                     ref_name: None,
@@ -262,7 +262,7 @@ mod tests {
         assert!(text.contains("target = 'oh-my-bash'"), "{text}");
         assert!(text.contains("theme = 'agnoster'"), "{text}");
         assert!(text.contains("enable = ['git', 'npm']"), "{text}");
-        assert!(text.contains("target = 'rcrowley/bash-preexec'"), "{text}");
+        assert!(text.contains("target = 'rcaloras/bash-preexec'"), "{text}");
         // Reload parses back to the same spec.
         let loaded = load_spec().unwrap().expect("spec present");
         assert_eq!(loaded, spec);
@@ -298,7 +298,7 @@ mod tests {
                     enable: vec![],
                 },
                 SpecSource {
-                    target: "https://github.com/rcrowley/bash-preexec.git".to_string(),
+                    target: "https://github.com/rcaloras/bash-preexec.git".to_string(),
                     id: Some("preexec".to_string()),
                     kind: None,
                     ref_name: None,
@@ -313,7 +313,7 @@ mod tests {
         );
         assert_eq!(
             spec.entry_for_id("preexec").unwrap().target,
-            "https://github.com/rcrowley/bash-preexec.git"
+            "https://github.com/rcaloras/bash-preexec.git"
         );
         assert!(spec.entry_for_id("unknown").is_none());
         // A bare non-catalog word resolves to nothing here (derived at

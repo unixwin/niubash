@@ -3547,7 +3547,7 @@ fn print_plugin_usage() {
     println!();
     println!("Examples:");
     println!("  niu plugin add oh-my-bash        # catalog shorthand");
-    println!("  niu plugin add rcrowley/bash-preexec   # wild GitHub plugin");
+    println!("  niu plugin add rcaloras/bash-preexec   # wild GitHub plugin");
     println!("  niu plugin enable bash-preexec/bash-preexec.sh   # pick the file");
     println!("  niu plugin add bpkg --path <dir> # adopt a bpkg-installed tree");
     println!("  niu plugin sync                  # reconcile spec <-> machine");

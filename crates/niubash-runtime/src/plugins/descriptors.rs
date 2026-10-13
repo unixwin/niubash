@@ -825,7 +825,7 @@ mod tests {
     #[test]
     fn origin_tail_extraction() {
         assert_eq!(
-            origin_tail("https://github.com/rcrowley/bash-preexec.git"),
+            origin_tail("https://github.com/rcaloras/bash-preexec.git"),
             "bash-preexec"
         );
         assert_eq!(origin_tail("https://example.com/x/y/"), "y");
