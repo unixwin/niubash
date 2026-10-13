@@ -606,9 +606,12 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         return niubash_runtime::repl::run_repl(shell);
     }
     shell.source_non_interactive_env();
-    let mut content = String::new();
-    std::io::stdin().read_to_string(&mut content)?;
-    let code = shell.execute_script(&content)?;
+    // rubash#586: the engine's stdin-script driver reads the stream on
+    // demand (GNU input.c:381-397 gives a non-seekable stdin a 1-byte
+    // parser buffer). A read_to_string slurp here feeds every later
+    // consumer (exec cat / read / a top-level exec) EOF and pushes the
+    // unconsumed tail back as code - data-as-code.
+    let code = rubash::script_driver::run_stdin_script(&mut shell.executor);
     let code = shell.finish_with_exit_trap(code)?;
     if code != 0 {
         finish_one_shot(&shell, code);
