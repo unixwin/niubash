@@ -724,3 +724,106 @@ fn failed_add_rolls_back_and_prune_removes_legacy_strands() {
 
     let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
+
+/// niubash#293 + niubash#295: `niu plugin add` of a dead origin fails
+/// BOUNDED at the fetch budget, the error names the origin, and the spec
+/// declaration is rolled back — the strand that used to deadlock every
+/// later add ("already declared") never lands, and the same target can be
+/// added again immediately.
+#[test]
+fn plugin_add_of_a_dead_origin_times_out_rolls_back_and_retries() {
+    let mut sandbox = Sandbox::new("add-dead-origin");
+    // Keep the budget tiny: the blackhole (RFC 5737 TEST-NET-3) hangs the
+    // connect phase, the budget kills the clone's whole process tree.
+    sandbox
+        .envs
+        .push(("NIU_PLUGIN_FETCH_TIMEOUT_MS", "800".to_string()));
+
+    let first = run_niu_with_env(
+        &["plugin", "add", "https://203.0.113.1/stalled-plugin.git"],
+        &sandbox.envs,
+    );
+    assert!(
+        !first.status.success(),
+        "a dead origin must fail the add: stdout={} stderr={}",
+        stdout_text(&first),
+        stderr_text(&first)
+    );
+    let combined = format!("{}{}", stdout_text(&first), stderr_text(&first));
+    assert!(
+        combined.contains("203.0.113.1"),
+        "the failure must name the origin: {combined}"
+    );
+    assert!(
+        combined.contains("rolled back"),
+        "the spec declaration must roll back: {combined}"
+    );
+    assert!(
+        !sandbox.spec().contains("stalled-plugin"),
+        "no stranded declaration: {}",
+        sandbox.spec()
+    );
+    assert!(
+        !sandbox
+            .sources_root
+            .read_dir()
+            .map(|entries| entries
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().starts_with(".staging-")))
+            .unwrap_or(false),
+        "no staging leftovers"
+    );
+
+    // The deadlock is broken: the same target adds again and fails with
+    // the SAME honest fetch error, never "already declared".
+    let second = run_niu_with_env(
+        &["plugin", "add", "https://203.0.113.1/stalled-plugin.git"],
+        &sandbox.envs,
+    );
+    assert!(
+        !second.status.success(),
+        "the retry fetches and fails again"
+    );
+    let combined = format!("{}{}", stdout_text(&second), stderr_text(&second));
+    assert!(
+        !combined.contains("already declared"),
+        "no stranded-declaration deadlock: {combined}"
+    );
+    assert!(
+        combined.contains("rolled back"),
+        "the retried add rolls back too: {combined}"
+    );
+
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
+}
+
+/// niubash#293: `niu plugin sync --timeout <seconds>` parses, and a bogus
+/// value is refused with a clear message (the flag is the verb-level knob
+/// for peculiar networks).
+#[test]
+fn plugin_sync_timeout_flag_parses_and_validates() {
+    let sandbox = Sandbox::new("sync-timeout-flag");
+
+    let bad = run_niu_with_env(&["plugin", "sync", "--timeout", "0"], &sandbox.envs);
+    assert!(!bad.status.success(), "zero seconds must be refused");
+    assert!(
+        stderr_text(&bad).contains("--timeout"),
+        "{}",
+        stderr_text(&bad)
+    );
+
+    let bad = run_niu_with_env(&["plugin", "sync", "--timeout=abc"], &sandbox.envs);
+    assert!(!bad.status.success(), "non-numeric must be refused");
+    assert!(
+        stderr_text(&bad).contains("--timeout"),
+        "{}",
+        stderr_text(&bad)
+    );
+
+    // A healthy value passes parsing and reaches the reconciler (empty
+    // spec: legacy-mode report, exit 0).
+    let good = run_niu_with_env(&["plugin", "sync", "--timeout", "120"], &sandbox.envs);
+    assert_success(&good, "valid --timeout");
+
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
+}

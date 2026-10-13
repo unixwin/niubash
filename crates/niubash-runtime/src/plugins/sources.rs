@@ -82,6 +82,53 @@ pub fn startup_fetch_budget() -> Duration {
     }
 }
 
+/// Wall-clock budget for ONE verb-invoked git transport phase (`niu plugin
+/// add` / `sync` / `update` / `restore` / `distro import`; niubash#293):
+/// before this cap an explicit verb cloned without any deadline — a bad
+/// origin (dead host, blackholed SYN, stalled TLS) hung the verb for
+/// minutes, the user killed niu, and the killing left orphan `git.exe`
+/// helpers plus (for `add`) a spec declaration no verb could remove.
+/// 120s covers a full framework clone on a bad day; `--timeout <seconds>`
+/// (`niu plugin sync` / `niu plugin add`) and `NIU_PLUGIN_FETCH_TIMEOUT_MS`
+/// override it per run.
+pub const VERB_FETCH_BUDGET: Duration = Duration::from_secs(120);
+
+/// The effective verb fetch budget: `NIU_PLUGIN_FETCH_TIMEOUT_MS` overrides
+/// the default (milliseconds; tests and peculiar networks). An invalid or
+/// zero value falls back to the default.
+pub fn verb_fetch_budget() -> Duration {
+    match std::env::var("NIU_PLUGIN_FETCH_TIMEOUT_MS") {
+        Ok(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(VERB_FETCH_BUDGET),
+        Err(_) => VERB_FETCH_BUDGET,
+    }
+}
+
+/// Proxy environment variables a spawned `git` must see (niubash#294): a
+/// manual `git clone` in the user's shell honors `HTTP(S)_PROXY`, and the
+/// verb's clone must too. The child inherits the parent environment by
+/// default, but that inheritance is implicit — launcher/wrapper layers are
+/// in the wild that rewrite the block and drop case-variants (Windows env
+/// names are case-insensitive, POSIX curl's is not: `HTTP_PROXY` alone is
+/// invisible to git's http:// transport), so every git spawn forwards the
+/// known proxy variables explicitly and mirrors each spelling to its
+/// case-variant.
+pub const PROXY_ENV_VARS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceAssetKind {
@@ -654,12 +701,21 @@ pub struct SourceInstallRequest {
     /// (their own layout detect already ran); file sources name it in the
     /// recommended enable verb (`niu plugin enable <id>/<entry>`).
     pub entry: Option<String>,
-    /// Hard wall-clock budget for the git transport phase of this install
-    /// (the `--bootstrap` startup form sets [`STARTUP_FETCH_BUDGET`];
-    /// explicit verbs leave it `None` — a user-invoked fetch may take as
-    /// long as the network needs). On expiry the git child is killed and
-    /// the install fails like any fetch failure (memoized at startup).
+    /// Hard wall-clock budget for the git transport phase of this install.
+    /// The `--bootstrap` startup form sets [`STARTUP_FETCH_BUDGET`]; every
+    /// other caller leaves it `None` and gets the verb budget
+    /// ([`VERB_FETCH_BUDGET`], niubash#293) — a user-invoked fetch is
+    /// bounded too, so a dead origin costs one budget, not a hung verb and
+    /// a hand-killed niu leaving orphan git helpers. On expiry the git
+    /// process tree is killed and the install fails like any fetch failure
+    /// (memoized at startup; the error names the timed-out origin).
     pub fetch_budget: Option<Duration>,
+    /// Startup-only credential guards (`GIT_TERMINAL_PROMPT=0`, empty
+    /// credential helper): an auth-demanding origin fails the startup fetch
+    /// instead of hanging the session behind a hidden prompt. Explicit
+    /// verbs keep git's own prompting behavior — a user-invoked add may
+    /// legitimately answer a prompt (within the fetch budget).
+    pub credential_guard: bool,
 }
 
 struct FetchedSource {
@@ -700,16 +756,40 @@ fn clone_arg_list(origin: &str, ref_name: &str, credential_guard: bool) -> Vec<S
     args
 }
 
+/// Per-fetch git transport limits: the wall-clock deadline that bounds the
+/// whole phase (computed ONCE per install so multi-command fetches — init +
+/// fetch + checkout — share one budget), plus the startup-only credential
+/// guards. Decoupled (niubash#293): an explicit verb is budgeted but keeps
+/// git's prompting behavior; only the startup form guards credentials.
+#[derive(Debug, Clone, Copy, Default)]
+struct FetchLimits {
+    deadline: Option<Instant>,
+    /// The configured budget, for the failure message.
+    budget: Option<Duration>,
+    credential_guard: bool,
+}
+
+impl FetchLimits {
+    fn from_request(request: &SourceInstallRequest) -> Self {
+        let budget = Some(request.fetch_budget.unwrap_or_else(verb_fetch_budget));
+        FetchLimits {
+            deadline: budget.map(|budget| Instant::now() + budget),
+            budget,
+            credential_guard: request.credential_guard,
+        }
+    }
+}
+
 fn git_clone_to(
     staging: &Path,
     origin: &str,
     ref_name: &str,
-    deadline: Option<Instant>,
+    limits: FetchLimits,
 ) -> anyhow::Result<()> {
-    let args = clone_arg_list(origin, ref_name, deadline.is_some());
+    let args = clone_arg_list(origin, ref_name, limits.credential_guard);
     let mut command = Command::new("git");
     command.args(&args).arg(staging);
-    run_git_bounded(command, deadline, "clone")
+    run_git_bounded(command, limits, "clone", origin)
 }
 
 /// Fetch one exact commit without a branch clone: init + shallow
@@ -722,10 +802,10 @@ fn git_fetch_commit_to(
     staging: &Path,
     origin: &str,
     commit: &str,
-    deadline: Option<Instant>,
+    limits: FetchLimits,
 ) -> anyhow::Result<()> {
     let mirror_args = super::mirrors::git_clone_args(origin);
-    let guarded = deadline.is_some();
+    let guarded = limits.credential_guard;
     let run = |args: &[&str]| -> anyhow::Result<()> {
         let mut command = Command::new("git");
         command
@@ -739,7 +819,7 @@ fn git_fetch_commit_to(
             command.arg("-c").arg("credential.helper=");
         }
         command.args(args);
-        run_git_bounded(command, deadline, args.first().copied().unwrap_or(""))
+        run_git_bounded(command, limits, args.first().copied().unwrap_or(""), origin)
     };
     fs::create_dir_all(staging)?;
     run(&["init", "-q"])?;
@@ -748,7 +828,7 @@ fn git_fetch_commit_to(
         // Some servers refuse fetch-by-sha; fall back to a plain shallow
         // clone of the default branch and check the commit out from it.
         fs::remove_dir_all(staging)?;
-        git_clone_to(staging, origin, "HEAD", deadline)?;
+        git_clone_to(staging, origin, "HEAD", limits)?;
         run(&["checkout", "-q", commit])?;
         return Ok(());
     }
@@ -768,21 +848,86 @@ fn apply_credential_guards(command: &mut Command) {
         .env("GIT_ASKPASS", "echo");
 }
 
-/// Run one git command to completion under an optional wall-clock deadline
-/// (the budgeted startup path, which also gets the credential guards).
-/// The deadline closes the slowsource P0's two startup failure modes: a
-/// TLS reset that costs git's whole handshake (~5s today) and a dropped
-/// SYN that hangs it for minutes — `status()` has no timeout. On expiry
-/// the whole process tree is killed (see `kill_on_close_job`) and the
-/// install fails into the startup memo, so later startups defer.
+/// The proxy environment a spawned `git` must carry (niubash#294): every
+/// known proxy variable that is set in this process, forwarded explicitly,
+/// plus the case-variant mirror — a `HTTP_PROXY`-only environment gains
+/// `http_proxy` (and vice versa) so curl inside git finds a spelling it
+/// honors regardless of how the parent's block was normalized. Pure enough
+/// to assert on the Command (`get_envs`) without spawning.
+fn proxy_env_forwarding() -> Vec<(String, std::ffi::OsString)> {
+    let mut out: Vec<(String, std::ffi::OsString)> = Vec::new();
+    for name in PROXY_ENV_VARS {
+        if let Some(value) = std::env::var_os(name) {
+            out.push((name.to_string(), value));
+        }
+    }
+    for (upper, lower) in [
+        ("HTTP_PROXY", "http_proxy"),
+        ("HTTPS_PROXY", "https_proxy"),
+        ("ALL_PROXY", "all_proxy"),
+        ("NO_PROXY", "no_proxy"),
+    ] {
+        let upper_value = std::env::var_os(upper);
+        let lower_value = std::env::var_os(lower);
+        match (upper_value, lower_value) {
+            (Some(value), None) => out.push((lower.to_string(), value)),
+            (None, Some(value)) => out.push((upper.to_string(), value)),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn apply_proxy_passthrough(command: &mut Command) {
+    for (name, value) in proxy_env_forwarding() {
+        command.env(name, value);
+    }
+}
+
+/// One bounded, proxy-forwarding, tree-killing `git clone` for the plugin
+/// verbs that fetch a tree outside the source-install pipeline (`distro
+/// import`, niubash#293/#294): the verb budget bounds it, the process tree
+/// dies at the deadline, and the clone honors the user's proxy environment
+/// exactly like a manual `git clone`.
+pub(crate) fn git_clone_bounded(origin: &str, dest: &Path) -> anyhow::Result<()> {
+    let args = clone_arg_list(origin, "HEAD", false);
+    let mut command = Command::new("git");
+    command.args(&args).arg(dest);
+    let budget = verb_fetch_budget();
+    run_git_bounded(
+        command,
+        FetchLimits {
+            deadline: Some(Instant::now() + budget),
+            budget: Some(budget),
+            credential_guard: false,
+        },
+        "clone",
+        origin,
+    )
+}
+
+/// Run one git command to completion under the fetch limits (every verb's
+/// transport is bounded now — niubash#293; only the startup form adds the
+/// credential guards). The deadline closes the slowsource P0's two failure
+/// modes — a TLS reset that costs git's whole handshake and a dropped SYN
+/// that hangs it for minutes — and the verb-level twin: a bad origin used
+/// to hang an explicit `niu plugin add`/`sync` for minutes until the user
+/// killed niu, leaving orphan `git.exe` helpers behind. `status()` has no
+/// timeout; this polls instead. On expiry the whole process tree is killed
+/// (see `kill_on_close_job`) and the error NAMES the origin and budget, so
+/// the report says which source hung.
 fn run_git_bounded(
     mut command: Command,
-    deadline: Option<Instant>,
+    limits: FetchLimits,
     subcommand: &str,
+    origin: &str,
 ) -> anyhow::Result<()> {
-    if deadline.is_some() {
+    if limits.credential_guard {
         apply_credential_guards(&mut command);
     }
+    // niubash#294: the proxy environment rides along explicitly — the
+    // child's clone must behave like the user's manual `git clone`.
+    apply_proxy_passthrough(&mut command);
     // A kill-on-close job binds the whole git process tree: killing
     // `git.exe` alone orphans `git-remote-https`, which keeps writing the
     // staging clone and holds the files a synchronous cleanup then blocks
@@ -802,19 +947,24 @@ fn run_git_bounded(
             Some(status) => {
                 if !status.success() {
                     anyhow::bail!(
-                        "git {subcommand} exited with status {}",
+                        "git {subcommand} of '{origin}' exited with status {}",
                         status.code().unwrap_or(1)
                     );
                 }
                 return Ok(());
             }
             None => {
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                if limits
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                {
                     let _ = child.kill();
                     let _ = child.wait();
                     anyhow::bail!(
-                        "git {subcommand} timed out (startup fetch budget); \
-                         `niu plugin sync` retries without the cap"
+                        "git {subcommand} of '{origin}' timed out after {}s (fetch \
+                         budget; `--timeout <seconds>` raises it) — nothing was \
+                         installed",
+                        limits.budget.map(|budget| budget.as_secs()).unwrap_or(0)
                     );
                 }
                 std::thread::sleep(POLL);
@@ -910,10 +1060,13 @@ fn fetch_source_to_staging(request: &SourceInstallRequest) -> anyhow::Result<Fet
     }
     fs::create_dir_all(&staging)?;
     let staging_for_cleanup = staging.clone();
-    // The startup form's hard wall-clock budget (`STARTUP_FETCH_BUDGET`)
-    // covers the whole git transport phase; the local-snapshot path is
-    // plain file IO (no network child) and stays unbudgeted.
-    let deadline = request.fetch_budget.map(|budget| Instant::now() + budget);
+    // Every git transport phase is bounded (niubash#293): the startup form
+    // carries its tight `STARTUP_FETCH_BUDGET`, every other caller gets the
+    // verb budget (`VERB_FETCH_BUDGET`, `--timeout`-overridable). The
+    // deadline is computed once here, so a multi-command fetch (init +
+    // fetch + checkout) shares one budget. The local-snapshot path is plain
+    // file IO (no network child) and stays unbudgeted.
+    let limits = FetchLimits::from_request(request);
     let origin_path = Path::new(origin);
     let result = (|| -> anyhow::Result<FetchedSource> {
         // Origin semantics: an explicit ref or commit forces git semantics
@@ -935,11 +1088,11 @@ fn fetch_source_to_staging(request: &SourceInstallRequest) -> anyhow::Result<Fet
             None => LOCAL_ORIGIN_REF.to_string(),
         };
         if commit.is_some() {
-            git_fetch_commit_to(&staging, origin, commit.as_deref().unwrap(), deadline)?;
+            git_fetch_commit_to(&staging, origin, commit.as_deref().unwrap(), limits)?;
         } else if ref_name == LOCAL_ORIGIN_REF {
             copy_tree(origin_path, &staging)?;
         } else {
-            git_clone_to(&staging, origin, &ref_name, deadline)?;
+            git_clone_to(&staging, origin, &ref_name, limits)?;
         }
 
         let adapter = match &request.adapter {
@@ -1282,6 +1435,7 @@ pub fn rollback_source(id: &str) -> anyhow::Result<SourceUpdateSummary> {
         id: None,
         entry: None,
         fetch_budget: None,
+        credential_guard: false,
     })?;
 
     remove_tree_if_present(&record.path)
@@ -1513,6 +1667,7 @@ pub fn restore_source(id: &str) -> anyhow::Result<SourceSyncOutcome> {
         id: None,
         entry: None,
         fetch_budget: None,
+        credential_guard: false,
     })?;
     remove_tree_if_present(&record.path)
         .with_context(|| format!("failed to remove tree {}", record.path.display()))?;
@@ -1695,6 +1850,18 @@ mod tests {
             std::env::set_var(name, value);
             Self { name, previous }
         }
+
+        fn set_os(name: &'static str, value: &std::ffi::OsStr) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1735,18 +1902,33 @@ mod tests {
     }
 
     /// The bounded git runner kills a hung child at the deadline and says
-    /// so (the slowsource P0: an unbounded startup fetch hung the session
-    /// on blackholed networks).
+    /// so, naming the origin (the slowsource P0 bounded the startup fetch;
+    /// niubash#293 extends the bound to the explicit verbs — the error must
+    /// say WHICH source hung).
     #[test]
     fn run_git_bounded_kills_a_hung_child_at_the_deadline() {
         let start = Instant::now();
         let err = run_git_bounded(
             sleeping_command(),
-            Some(Instant::now() + Duration::from_millis(250)),
+            FetchLimits {
+                deadline: Some(Instant::now() + Duration::from_millis(250)),
+                budget: Some(Duration::from_secs(120)),
+                credential_guard: false,
+            },
             "clone",
+            "https://blackhole.example/repo.git",
         )
         .expect_err("a killed child must fail the run");
-        assert!(err.to_string().contains("timed out"), "{err}");
+        let message = err.to_string();
+        assert!(message.contains("timed out"), "{message}");
+        assert!(
+            message.contains("https://blackhole.example/repo.git"),
+            "the timeout must name the origin: {message}"
+        );
+        assert!(
+            message.contains("120"),
+            "the budget is in the message: {message}"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "the kill must land at the deadline, took {:?}",
@@ -1755,21 +1937,35 @@ mod tests {
     }
 
     /// Without a deadline the same runner behaves like the old `status()`:
-    /// success passes, a non-zero exit reports the status.
+    /// success passes, a non-zero exit reports the status (and names the
+    /// origin, so a multi-source report is attributable).
     #[test]
     fn run_git_bounded_unbudgeted_propagates_exit_status() {
         let mut ok = Command::new(if cfg!(windows) { "cmd" } else { "true" });
         if cfg!(windows) {
             ok.args(["/c", "exit", "0"]);
         }
-        run_git_bounded(ok, None, "init").expect("exit 0 must pass");
+        run_git_bounded(
+            ok,
+            FetchLimits::default(),
+            "init",
+            "https://exit-code.example/ok.git",
+        )
+        .expect("exit 0 must pass");
 
         let mut bad = Command::new(if cfg!(windows) { "cmd" } else { "false" });
         if cfg!(windows) {
             bad.args(["/c", "exit", "3"]);
         }
-        let err = run_git_bounded(bad, None, "fetch").expect_err("exit 3 must fail");
+        let err = run_git_bounded(
+            bad,
+            FetchLimits::default(),
+            "fetch",
+            "https://exit-code.example/bad.git",
+        )
+        .expect_err("exit 3 must fail");
         assert!(err.to_string().contains("status 3"), "{err}");
+        assert!(err.to_string().contains("exit-code.example"), "{err}");
     }
 
     /// The guards are plain env overrides on the spawned command —
@@ -1790,6 +1986,109 @@ mod tests {
         };
         assert_eq!(env_of("GIT_TERMINAL_PROMPT"), Some("0"));
         assert_eq!(env_of("GIT_ASKPASS"), Some("echo"));
+    }
+
+    /// niubash#294: the proxy environment rides onto every spawned git
+    /// command — and an uppercase-only environment (the field shape: the
+    /// user exported `HTTPS_PROXY`, a wrapper layer dropped the lowercase
+    /// variant) yields a spelling curl inside git honors regardless of the
+    /// platform's case rules. Absent variables are never invented. (Env
+    /// names are case-insensitive on Windows, so the guards here clear by
+    /// one spelling and every command-env lookup ignores case.)
+    #[test]
+    fn proxy_environment_is_forwarded_and_case_mirrored() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Clear-then-set, declared so the reverse drop order restores the
+        // original block exactly (a Windows remove is case-insensitive).
+        let _clear_https_upper = EnvVarGuard::remove("HTTPS_PROXY");
+        let _clear_https_lower = EnvVarGuard::remove("https_proxy");
+        let _https = EnvVarGuard::set_os(
+            "HTTPS_PROXY",
+            std::ffi::OsStr::new("http://proxy.example:7890"),
+        );
+        let _clear_http_upper = EnvVarGuard::remove("HTTP_PROXY");
+        let _clear_http_lower = EnvVarGuard::remove("http_proxy");
+        let _clear_all_upper = EnvVarGuard::remove("ALL_PROXY");
+        let _clear_all_lower = EnvVarGuard::remove("all_proxy");
+        let _clear_no_upper = EnvVarGuard::remove("NO_PROXY");
+        let _clear_no_lower = EnvVarGuard::remove("no_proxy");
+
+        let mut command = Command::new("git");
+        apply_proxy_passthrough(&mut command);
+        // Case-insensitive on purpose: the child block carries ONE
+        // https_proxy variable under some spelling — every lookup must
+        // find the forwarded value.
+        let value_for = |key: &str| {
+            command
+                .get_envs()
+                .filter(|(name, _)| {
+                    name.to_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(key))
+                })
+                .find_map(|(_, value)| value)
+                .and_then(|value| value.to_str())
+        };
+        assert_eq!(value_for("HTTPS_PROXY"), Some("http://proxy.example:7890"));
+        assert_eq!(
+            value_for("https_proxy"),
+            Some("http://proxy.example:7890"),
+            "a lowercase spelling must exist for curl's case-sensitive lookup"
+        );
+        assert_eq!(
+            value_for("HTTP_PROXY"),
+            None,
+            "absent variables are not invented"
+        );
+        assert_eq!(value_for("ALL_PROXY"), None);
+        assert_eq!(value_for("NO_PROXY"), None);
+        assert_eq!(value_for("no_proxy"), None);
+    }
+
+    /// niubash#293: an explicit verb with no `fetch_budget` gets the verb
+    /// budget (`NIU_PLUGIN_FETCH_TIMEOUT_MS` here), so a blackholed origin
+    /// fails BOUNDED and the error names the origin — it used to hang the
+    /// verb until the user killed niu.
+    #[test]
+    fn verb_fetch_budget_bounds_an_explicit_fetch_by_default() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("verb-budget");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.toml"));
+        let _budget =
+            EnvVarGuard::set_os("NIU_PLUGIN_FETCH_TIMEOUT_MS", std::ffi::OsStr::new("300"));
+
+        let start = Instant::now();
+        let err = install_or_adopt(SourceInstallRequest {
+            // RFC 5737 TEST-NET-3: never routable, so the clone hangs in
+            // the connect phase instead of failing fast.
+            origin: "https://203.0.113.1/repo.git".to_string(),
+            ..SourceInstallRequest::default()
+        })
+        .expect_err("a blackholed fetch must fail at the verb budget");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the verb budget must bound the fetch, took {:?}",
+            start.elapsed()
+        );
+        let message = err.to_string();
+        assert!(message.contains("timed out"), "{message}");
+        assert!(
+            message.contains("203.0.113.1"),
+            "the timeout must name the source: {message}"
+        );
+        // The killed fetch leaves no staging churn behind.
+        let leftovers: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            leftovers.iter().all(|name| name == "registry.toml"),
+            "no staging leftovers: {leftovers:?}"
+        );
+
+        let _ = fs::remove_dir_all(&temp);
     }
 
     fn write_omb_fixture(root: &Path, marker: &str) {
@@ -1890,6 +2189,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         }
     }
 
@@ -2244,6 +2544,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         };
         let v1 = add_source(request("v1")).expect("install from git ref v1");
         trust_source("oh-my-bash").unwrap();
@@ -2694,6 +2995,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         };
         let v1 = add_source(request("v1")).unwrap();
         assert!(v1.commit_sha.is_some(), "git installs pin the commit");
@@ -2777,6 +3079,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         };
         let v1 = add_source(request("v1")).unwrap();
         trust_source("oh-my-bash").unwrap();

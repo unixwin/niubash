@@ -32,6 +32,7 @@
 //! memoized and deferred on later startups — only explicit verbs retry.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use super::assets;
 use super::sources::{
@@ -60,6 +61,13 @@ pub struct SyncOptions {
     /// spec declares WHAT to install; a one-shot supply-chain pin belongs
     /// to the invocation that made it.
     pub checksum_pin: Option<(String, String)>,
+    /// Explicit-verb fetch budget override (`niu plugin sync --timeout
+    /// <seconds>` / `niu plugin add --timeout <seconds>`, niubash#293):
+    /// bounds each declared entry's git transport so one bad origin costs
+    /// its own budget instead of hanging the verb. `None` runs the default
+    /// verb budget (`sources::verb_fetch_budget`); the startup form keeps
+    /// its tighter `STARTUP_FETCH_BUDGET` regardless.
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -423,13 +431,25 @@ fn sync_with_spec(
                     expected_checksum,
                     id: entry.id.clone(),
                     entry: None,
-                    // Startup fetches run under a hard wall-clock budget
-                    // (sources::STARTUP_FETCH_BUDGET): a bad network day
-                    // (TLS resets, blackholes) must cost the interactive
-                    // session one bounded attempt, not an unbounded hang;
-                    // the memo then defers later startups, and the explicit
-                    // verbs below retry without the cap.
-                    fetch_budget: options.startup.then_some(sources::startup_fetch_budget()),
+                    // Every sync form is budgeted (niubash#293): the
+                    // startup form under its hard wall-clock budget
+                    // (sources::STARTUP_FETCH_BUDGET), the explicit verbs
+                    // under the verb budget (`--timeout`-overridable) — a
+                    // bad network day (TLS resets, blackholes, dead
+                    // origins) costs one bounded attempt per source, not
+                    // an unbounded hang the user can only escape by
+                    // killing niu. Per-entry (niubash#296): each source's
+                    // fetch gets its own fresh budget, so one stalled
+                    // origin never consumes the others' window.
+                    fetch_budget: Some(if options.startup {
+                        sources::startup_fetch_budget()
+                    } else {
+                        options.timeout.unwrap_or_else(sources::verb_fetch_budget)
+                    }),
+                    // Startup-only: an auth-demanding origin fails the
+                    // startup fetch instead of hanging behind a hidden
+                    // prompt. Explicit verbs keep git's prompting behavior.
+                    credential_guard: options.startup,
                 };
                 match sources::install_or_adopt(request) {
                     Ok((record, already_installed)) => {
@@ -468,6 +488,22 @@ fn sync_with_spec(
                         if options.startup {
                             record_bootstrap_failure(&origin, &entry.ref_name, &err.to_string());
                         }
+                        // niubash#295: an entry that just failed to install
+                        // (explicit verb, bounded fetch) is stranded the
+                        // moment the run ends — declared, never installed,
+                        // and no verb could remove it (`source remove`
+                        // needs an install; the prune snapshot used to see
+                        // only startup-memoized strands). Join this run's
+                        // stranded population so `sync --prune` removes it
+                        // in the SAME run (and the add verb's own rollback
+                        // covers the `niu plugin add` shape).
+                        stranded.push(StrandedEntry {
+                            label: entry.id.clone().unwrap_or_else(|| entry.target.clone()),
+                            target: entry.target.clone(),
+                            id: entry.id.clone(),
+                            ref_name: entry.ref_name.clone(),
+                            origin: origin.clone(),
+                        });
                         rows.push(SyncRow {
                             id: entry.id.clone().unwrap_or_else(|| entry.target.clone()),
                             action: "failed".to_string(),
@@ -643,7 +679,7 @@ fn sync_with_spec(
                         id: entry.label,
                         action: "removed".to_string(),
                         detail: "stranded declaration pruned — never installed \
-                                 and its startup install kept failing"
+                                 and its install kept failing"
                             .to_string(),
                     });
                 }
@@ -1163,8 +1199,10 @@ mod tests {
             expected_checksum: None,
             id: None,
             entry: None,
-            // Explicit (non-startup) install: no fetch budget (wt71).
+            // Explicit (non-startup) install: the default verb budget
+            // (a local copy never reaches the git transport, wt71).
             fetch_budget: None,
+            credential_guard: false,
         })
         .unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
@@ -2386,6 +2424,152 @@ mod tests {
         );
         let memo = fs::read_to_string(&ledger).unwrap();
         assert!(!memo.contains("[[failure]]"), "memo cleared: {memo}");
+
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// niubash#296: one stalled origin must not take the whole sync down.
+    /// Two declared sources — a blackholed URL first, a healthy local tree
+    /// second — under a small explicit-verb budget: the bad entry fails a
+    /// BOUNDED fetch whose row names the origin, the healthy entry still
+    /// installs, and the spec keeps both declarations (a plain sync never
+    /// auto-prunes; `--prune` is the explicit confirm).
+    #[test]
+    fn sync_isolates_a_stalled_source_and_still_installs_the_rest() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = unique_temp_dir("iso-holder");
+        let origin = holder.join("healthy");
+        fs::create_dir_all(&origin).unwrap();
+        write_wild_fixture(&origin);
+        let box_ = sandbox("isolation");
+
+        spec::save_spec(&PluginSpec {
+            schema: None,
+            sources: vec![
+                SpecSource {
+                    target: "https://203.0.113.1/stalled-repo.git".to_string(),
+                    id: Some("stalled".to_string()),
+                    kind: None,
+                    ref_name: None,
+                    theme: None,
+                    enable: vec![],
+                },
+                SpecSource {
+                    target: origin.to_string_lossy().into_owned(),
+                    id: Some("healthy".to_string()),
+                    kind: None,
+                    ref_name: None,
+                    theme: None,
+                    enable: vec!["pre.sh".to_string()],
+                },
+            ],
+        })
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        let report = sync_spec(SyncOptions {
+            timeout: Some(Duration::from_millis(400)),
+            ..SyncOptions::default()
+        })
+        .unwrap();
+        let elapsed = start.elapsed();
+        println!("isolated two-source sync wall: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "the stalled source must cost its own budget, not the sync: {elapsed:?}"
+        );
+
+        // The stalled entry: a failed row naming the origin (niubash#293 —
+        // the report says WHICH source hung; the timeout wording itself is
+        // pinned by the deterministic runner test in sources.rs).
+        let stalled = report
+            .rows
+            .iter()
+            .find(|row| row.id == "stalled")
+            .expect("stalled row");
+        assert_eq!(stalled.action, "failed", "{:?}", report.rows);
+        assert!(
+            stalled.detail.contains("203.0.113.1"),
+            "the failure must name the source: {:?}",
+            report.rows
+        );
+
+        // The healthy entry installed despite the failure above it.
+        assert!(
+            report
+                .rows
+                .iter()
+                .any(|row| row.id == "healthy" && row.action == "awaiting-trust"),
+            "{:?}",
+            report.rows
+        );
+        assert!(read_source_registry()
+            .iter()
+            .any(|record| record.id == "healthy"));
+
+        // No auto-prune: the failed declaration stays until --prune.
+        assert_eq!(spec_sources().len(), 2, "{:?}", spec_sources());
+
+        let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// niubash#295: a declared entry that just failed to install joins the
+    /// stranded population, so `sync --prune` removes it in the SAME run —
+    /// the `niu plugin add` of a dead origin (killed mid-hang before the
+    /// verb budget existed) no longer deadlocks in a declaration no verb
+    /// could remove, and a re-add becomes possible again.
+    #[test]
+    fn sync_prune_removes_the_declaration_that_just_failed_to_install() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let box_ = sandbox("prune-fresh-strand");
+        let target = "https://203.0.113.1/stranded.git";
+
+        spec::save_spec(&PluginSpec {
+            schema: None,
+            sources: vec![SpecSource {
+                target: target.to_string(),
+                id: Some("stranded".to_string()),
+                kind: None,
+                ref_name: None,
+                theme: None,
+                enable: vec![],
+            }],
+        })
+        .unwrap();
+
+        // The kill-leftover shape: a legacy run stranded the declaration
+        // with NO startup memo. The explicit verb attempts it (bounded),
+        // fails, and --prune takes the declaration back out in one run.
+        let report = sync_spec(SyncOptions {
+            prune: true,
+            timeout: Some(Duration::from_millis(400)),
+            ..SyncOptions::default()
+        })
+        .unwrap();
+        assert!(
+            report
+                .rows
+                .iter()
+                .any(|row| row.id == "stranded" && row.action == "failed"),
+            "{:?}",
+            report.rows
+        );
+        assert!(
+            report.rows.iter().any(|row| row.id == "stranded"
+                && row.action == "removed"
+                && row.detail.contains("stranded declaration pruned")),
+            "{:?}",
+            report.rows
+        );
+        assert!(
+            spec_sources().is_empty(),
+            "the stranded declaration is gone: {:?}",
+            spec_sources()
+        );
+        // The deadlock is broken: the (target, id) is declarable again.
+        let spec = spec::load_spec().unwrap().unwrap_or_default();
+        assert!(declared_entry(&spec, target, Some("stranded"), target).is_none());
 
         let _ = fs::remove_dir_all(&box_.temp);
     }

@@ -1728,6 +1728,8 @@ struct PluginSourceArgs {
     path: Option<String>,
     url: Option<String>,
     id: Option<String>,
+    /// `--timeout <seconds>` (niubash#293): per-run fetch budget override.
+    timeout: Option<std::time::Duration>,
 }
 
 fn parse_plugin_source_args(args: &[String]) -> anyhow::Result<PluginSourceArgs> {
@@ -1738,6 +1740,7 @@ fn parse_plugin_source_args(args: &[String]) -> anyhow::Result<PluginSourceArgs>
         path: None,
         url: None,
         id: None,
+        timeout: None,
     };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -1757,6 +1760,13 @@ fn parse_plugin_source_args(args: &[String]) -> anyhow::Result<PluginSourceArgs>
             );
         } else if let Some(value) = arg.strip_prefix("--checksum=") {
             parsed.checksum = Some(value.to_string());
+        } else if arg == "--timeout" {
+            let value = iter
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--timeout requires a value (seconds)"))?;
+            parsed.timeout = Some(parse_timeout_seconds(value)?);
+        } else if let Some(value) = arg.strip_prefix("--timeout=") {
+            parsed.timeout = Some(parse_timeout_seconds(value)?);
         } else if arg == "--path" {
             parsed.path = Some(
                 iter.next()
@@ -1823,6 +1833,7 @@ fn resolve_source_install_request(args: PluginSourceArgs) -> anyhow::Result<Plug
                         ref_name: args.ref_name.clone(),
                         expected_checksum: args.checksum.clone(),
                         id: args.id.clone(),
+                        timeout: args.timeout,
                     });
                 }
                 anyhow::bail!(
@@ -1842,6 +1853,7 @@ fn resolve_source_install_request(args: PluginSourceArgs) -> anyhow::Result<Plug
         ref_name: args.ref_name,
         expected_checksum: args.checksum,
         id: args.id,
+        timeout: args.timeout,
     })
 }
 
@@ -1851,6 +1863,8 @@ struct PluginSourceRequest {
     ref_name: Option<String>,
     expected_checksum: Option<String>,
     id: Option<String>,
+    /// `--timeout <seconds>` (niubash#293): rides into the install request.
+    timeout: Option<std::time::Duration>,
 }
 
 impl PluginSourceRequest {
@@ -1863,7 +1877,8 @@ impl PluginSourceRequest {
             expected_checksum: self.expected_checksum.clone(),
             id: self.id.clone(),
             entry: None,
-            fetch_budget: None,
+            fetch_budget: self.timeout,
+            credential_guard: false,
         }
     }
 }
@@ -2067,6 +2082,7 @@ fn run_plugin_source_update_command(args: &[String]) -> anyhow::Result<()> {
         ref_name: parsed.ref_name,
         expected_checksum: parsed.checksum,
         id: None,
+        timeout: parsed.timeout,
     };
     let summary =
         niubash_runtime::plugins::sources::update_source(&id, request.to_install_request())?;
@@ -2295,6 +2311,10 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
                 .expected_checksum
                 .clone()
                 .map(|checksum| (entry_target.clone(), checksum)),
+            // `--timeout <seconds>` (niubash#293): bounds this add's fetch
+            // so a dead origin fails (and rolls the declaration back)
+            // instead of hanging until the user kills niu.
+            timeout: request.timeout,
             ..niubash_runtime::plugins::sync::SyncOptions::default()
         },
     ) {
@@ -3235,17 +3255,45 @@ fn run_plugin_restore_command(args: &[String]) -> anyhow::Result<()> {
 /// (fetch gate only — trust never auto-flips), materialize the managed rc
 /// blocks from the spec idempotently, and suggest cleanup for installed
 /// sources the spec no longer declares (`--prune` is the explicit confirm).
+/// `--timeout <seconds>` (`niu plugin sync` / `niu plugin add`, niubash#293):
+/// the per-source fetch budget override for this run. Parsed from either
+/// `--timeout 90` or `--timeout=90`; zero and non-numeric values are refused.
+fn parse_timeout_seconds(raw: &str) -> anyhow::Result<std::time::Duration> {
+    let value = raw.trim();
+    let secs: u64 = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--timeout expects whole seconds (got '{value}')"))?;
+    if secs == 0 {
+        anyhow::bail!("--timeout must be at least 1 second");
+    }
+    Ok(std::time::Duration::from_secs(secs))
+}
+
 /// `--bootstrap` is the quiet rc-startup form: zero output when clean.
 fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
     let mut prune = false;
     let mut bootstrap = false;
     let mut adopt = false;
-    for arg in args {
+    let mut timeout: Option<std::time::Duration> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--prune" => prune = true,
             "--bootstrap" => bootstrap = true,
             "--adopt" => adopt = true,
-            unknown => anyhow::bail!("unknown plugin sync option '{}'", unknown),
+            "--timeout" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--timeout requires a value (seconds)"))?;
+                timeout = Some(parse_timeout_seconds(value)?);
+            }
+            unknown => {
+                if let Some(value) = unknown.strip_prefix("--timeout=") {
+                    timeout = Some(parse_timeout_seconds(value)?);
+                } else {
+                    anyhow::bail!("unknown plugin sync option '{}'", unknown);
+                }
+            }
         }
     }
     if bootstrap
@@ -3259,6 +3307,7 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
             adopt,
             startup: bootstrap,
             checksum_pin: None,
+            timeout,
         })?;
     // niubash#196: a hand-written theme variable outside the managed blocks
     // is not the supported channel — `niu plugin sync` rewrites the managed
@@ -3428,6 +3477,9 @@ fn print_plugin_add_usage() {
     println!("  --checksum <sha256>    Refuse the fetch on a tree-checksum mismatch");
     println!("  --path <dir>           Pin the origin to a local directory");
     println!("  --url <git-url>        Pin the origin to a git url");
+    println!("  --timeout <seconds>    Fetch budget for this add (default 120s; the");
+    println!("                         clone is killed at the budget, the spec");
+    println!("                         declaration rolls back, nothing hangs)");
     println!();
     println!("After adding:");
     println!("  niu plugin trust <id>      Review and activate the source");
@@ -3458,7 +3510,8 @@ fn print_plugin_usage() {
     println!("  enable <target>          Activate a source or asset (wild sources");
     println!("                           pick files: <id>/<file>.bash)");
     println!("  disable <target>         Deactivate a source or asset");
-    println!("  sync [--prune] [--adopt] Reconcile the spec: install declared,");
+    println!("  sync [--prune] [--adopt] [--timeout <seconds>]");
+    println!("                           Reconcile the spec: install declared,");
     println!("                           materialize rc blocks, suggest cleanup");
     println!("                           (--prune removes undeclared sources;");
     println!("                           --adopt declares installed sources into");

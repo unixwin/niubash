@@ -1952,6 +1952,7 @@ mod tests {
             id: None,
             entry: None,
             fetch_budget: None,
+            credential_guard: false,
         })
         .expect("fixture add");
     }

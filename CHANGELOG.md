@@ -6,6 +6,26 @@ All notable changes to Niubash are documented in this file.
 
 ### Fixed
 
+- Plugin verbs can no longer hang forever on a dead origin, and a failed
+  add no longer strands its spec declaration (niubash#293, niubash#294,
+  niubash#295, niubash#296). Every git transport a plugin verb spawns —
+  `niu plugin add`/`sync`/`update`/`restore`/`distro import` — now runs
+  under a 120 s wall-clock budget (`--timeout <seconds>` on `add`/`sync`,
+  or `NIU_PLUGIN_FETCH_TIMEOUT_MS`, overrides it per run; the rc
+  `--bootstrap` form keeps its tighter 3 s): at the budget the clone's
+  whole process tree is killed (no more orphan `git.exe` helpers after a
+  hand-killed niu) and the failure row names the timed-out origin. The
+  spawned git also carries the user's proxy environment explicitly
+  (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`, each mirrored to
+  its case-variant, so an uppercase-only environment still reaches git's
+  case-sensitive transport). A sync stays per-source isolated: one
+  stalled origin costs its own budget and a failed row while the rest of
+  the spec reconciles. A declaration whose install just failed joins the
+  stranded population, so `niu plugin sync --prune` removes it in the
+  same run — and `niu plugin add` of a dead origin rolls its declaration
+  back on the bounded failure, so the target can be re-added instead of
+  deadlocking on "already declared".
+
 - The Windows paste-chunk detection no longer swallows the first Enter of
   every line (niubash#284, a niubash#252 regression): whether a bare Enter
   submits or opens a paste chunk is now decided structurally — by the LF

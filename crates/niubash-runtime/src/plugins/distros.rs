@@ -13,6 +13,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+// The import clone goes through `sources::git_clone_bounded`; `Command`
+// remains a test-only tool here (seeding offline mirrors).
+#[cfg(test)]
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context};
@@ -205,15 +208,12 @@ pub fn import(origin: &str) -> anyhow::Result<Collection> {
         if path.is_dir() {
             copy_tree(path, &staging)?;
         } else {
-            let status = Command::new("git")
-                .args(["clone", "--depth", "1"])
-                .arg(&normalized)
-                .arg(&staging)
-                .status()
-                .context("failed to run git; is git on PATH?")?;
-            if !status.success() {
-                bail!("git clone of '{normalized}' failed");
-            }
+            // niubash#293/#294: the import clone is bounded by the verb
+            // budget (the process tree dies at the deadline) and carries
+            // the proxy environment, exactly like the source-install
+            // transport — a dead origin used to hang `distro import`
+            // indefinitely on a bare `git clone ... .status()`.
+            super::sources::git_clone_bounded(&normalized, &staging)?;
         }
         Ok(())
     })();
@@ -540,6 +540,64 @@ mod tests {
             .iter()
             .any(|l| l.collection.name == "test-distro"));
         drop(_distros);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#293: a `distro import` from a dead git origin fails BOUNDED
+    /// at the verb budget (`NIU_PLUGIN_FETCH_TIMEOUT_MS` here) and names
+    /// the origin — the import used to hang on a bare
+    /// `git clone ... .status()` until the user killed niu.
+    #[test]
+    fn import_from_a_dead_origin_fails_bounded_at_the_verb_budget() {
+        if Command::new("git")
+            .arg("--version")
+            .status()
+            .map(|status| !status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping bounded-import: git not usable on PATH");
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!(
+            "niu-distros-bounded-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _distros = EnvGuard::set(
+            "NIU_PLUGIN_DISTROS_ROOT",
+            &temp.join("distros").to_string_lossy(),
+        );
+        let _budget = EnvGuard::set("NIU_PLUGIN_FETCH_TIMEOUT_MS", "300");
+
+        let start = std::time::Instant::now();
+        let err = import("https://203.0.113.1/stalled-collection.git")
+            .expect_err("a blackholed import must fail at the verb budget");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "the import must be bounded, took {:?}",
+            start.elapsed()
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("203.0.113.1"),
+            "the failure must name the origin: {message}"
+        );
+        // No staging churn survives the failed import.
+        let leftovers: Vec<String> = fs::read_dir(temp.join("distros"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            leftovers.iter().all(|name| name == "registry.toml"),
+            "no staging leftovers: {leftovers:?}"
+        );
+
         let _ = fs::remove_dir_all(&temp);
     }
 
