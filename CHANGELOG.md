@@ -4,137 +4,24 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-
-- Plugin verbs can no longer hang forever on a dead origin, and a failed
-  add no longer strands its spec declaration (niubash#293, niubash#294,
-  niubash#295, niubash#296). Every git transport a plugin verb spawns —
-  `niu plugin add`/`sync`/`update`/`restore`/`distro import` — now runs
-  under a 120 s wall-clock budget (`--timeout <seconds>` on `add`/`sync`,
-  or `NIU_PLUGIN_FETCH_TIMEOUT_MS`, overrides it per run; the rc
-  `--bootstrap` form keeps its tighter 3 s): at the budget the clone's
-  whole process tree is killed (no more orphan `git.exe` helpers after a
-  hand-killed niu) and the failure row names the timed-out origin. The
-  spawned git also carries the user's proxy environment explicitly
-  (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`, each mirrored to
-  its case-variant, so an uppercase-only environment still reaches git's
-  case-sensitive transport). A sync stays per-source isolated: one
-  stalled origin costs its own budget and a failed row while the rest of
-  the spec reconciles. A declaration whose install just failed joins the
-  stranded population, so `niu plugin sync --prune` removes it in the
-  same run — and `niu plugin add` of a dead origin rolls its declaration
-  back on the bounded failure, so the target can be re-added instead of
-  deadlocking on "already declared".
-
-- The Windows paste-chunk detection no longer swallows the first Enter of
-  every line (niubash#284, a niubash#252 regression): whether a bare Enter
-  submits or opens a paste chunk is now decided structurally — by the LF
-  partner (`Enter + CONTROL`) queued right behind it, the console's shape
-  for a machine-fed CRLF line break — not by the 50 ms arrival-burst
-  heuristic. "Text + Enter" in one burst (fast human typing, ConPTY test
-  drivers, expect scripts, `send-keys`) submits on the first Enter again;
-  multi-line pastes keep buffering quietly until the user's own Enter
-  (0 mid-paste executions, niubash#202 contract unchanged). A typeahead
-  line queued behind a submitting Enter is pushed back and lands, in
-  order, at the next prompt. The TypeaheadGuard no longer double-injects
-  swept console input records: the sweeper's self-heal path drains the
-  buffer before writing it back, so a record can no longer be reinjected
-  twice (once by the self-heal, once by disarm; niubash#287).
-- The plugin trust gate now runs at runtime, not only at trust time
-  (niubash#297): `niu plugin sync` and `plugin list` re-verify every
-  trusted source against its lockfile pin, so a tree modified after
-  `trust` reads `drift` (never a lying `unchanged`) and
-  `degraded=true` with the drift reason in `--json` — the tree stops
-  contributing assets until it is repaired. sync records drifted ids in
-  `sources/drifted-sources.txt`, and the managed rc blocks carry a static
-  guard that prints the warning at every startup (the rc stays static
-  text; no hashing in it). `plugin restore` wording is honest about
-  rebuilding from the pin ("rebuilt from the lockfile pin", not "tree
-  matches"). bash-it's `enabled/` entries — the one legitimate tree
-  mutation `niu plugin enable` itself makes — are transparent to the pin,
-  while an injected `enabled/` file with unpinned content still trips
-  both `verify` and `trust`.
-- `niu plugin mirror set http://…` is refused without an explicit
-  `--allow-plaintext` confirm (niubash#298): a plaintext mirror ships
-  every git fetch unencrypted and unauthenticated, and the confirm still
-  prints the standing warning. The first fetch of an unpinned non-catalog
-  origin is now flagged for what it is: `plugin add` prints a
-  "NOT integrity-verified" warning and the record carries
-  `first_fetch_verified: false` (visible in `plugin list --json`); a
-  `--checksum` pin or a curated catalog origin marks it verified.
-- `niu plugin clean` reports every orphan directory under `sources/` the
-  registry does not claim (niubash#299) instead of silently keeping
-  manager-shaped ones and ignoring the rest; `--orphans` is the explicit
-  confirm that deletes them.
-- `niu plugin add <path>` positional form is first-class (niubash#300):
-  a bare local directory snapshot-copies in, a single `.sh`/`.bash`
-  file becomes its own one-file wild source, a nonexistent path fails
-  honestly (instead of a baffling `git clone` status 128 after the
-  trust-boundary banner), and the help documents the path and
-  `file://` forms.
-
-- The `niu plugin` help and doc examples no longer point at a dead repo:
-  the wild-GitHub-plugin example was `niu plugin add
-  rcrowley/bash-preexec`, but rcrowley/bash-preexec 404s (the project
-  moved to rcaloras/bash-preexec years ago), so a copy-paste of the
-  example failed. Every live reference — help text, the plugins.toml spec
-  example, the plugins guide, the wild-source fixture — now names
-  rcaloras/bash-preexec, and the example repo was verified cloneable
-  (niubash#301).
-
-- The config subsystem honors `HOME` isolation (niubash#302): every niu
-  subsystem — config.toml, mirrors.toml, the plugin rc, doctor, prompt,
-  the setup wizard — resolves the home directory through one shared
-  resolver in which an explicit `HOME` environment override wins on every
-  platform. Before, the Windows resolver ranked `USERPROFILE` first, so a
-  HOME-only sandbox (tests, CI, portable setups) silently read and wrote
-  the real profile. A default Windows session (`HOME` unset) resolves
-  exactly where it always has, and the classic Unix `HOME`-first
-  convention is unchanged.
-
-- The freshly-rendered mirrors.toml template no longer recommends
-  hub.fastgit.xyz (dead since ~2021; niubash#303). The second community
-  example is now ghproxy.net, verified live at edit time with a real
-  `git clone` through the `insteadOf` rewrite (gitclone.com, the first
-  example, re-verified the same way). The examples stay comments marked
-  UNSUPPORTED — they may die at any moment and are the user's to verify.
-
-- `.niubashrc` rewrites are atomic (niubash#304): every managed-block
-  rewrite (`niu plugin enable/disable/sync`) and the setup wizard's rc
-  write now stage the new content in a same-directory temp file and swap
-  it in with a single replace-rename (`MoveFileExW
-  MOVEFILE_REPLACE_EXISTING` on Windows, `rename(2)` elsewhere). The
-  former truncate-in-place write and the wizard's former
-  remove-then-rename left windows where a concurrent reader — a pipe or
-  `sed` run against the rc — saw the file empty, partial, or briefly
-  absent; a reader now always observes a complete old or new generation.
-
-- The installer cleans up after itself (niubash#313). Uninstall now also
-  removes the `{app}\winuxcmd\bin` entry from the user `PATH` — the
-  install-time `wpm links rebuild` adds it, but the uninstaller only ever
-  removed `{app}`, leaving a dangling PATH entry after every uninstall.
-  The installer gained `[InstallDelete]`/`[UninstallDelete]` sweeps for
-  files earlier builds shipped and the current payload retired (the
-  reverted dual-name build's `niubash.exe`, stray self-update
-  `niu.exe.old-*` backups), which previously survived upgrade AND
-  uninstall on real machines.
-
-### Changed
-
-- Installer disclosure (niubash#313): the "Create a desktop shortcut"
-  task is new in 1.4.x and default-checked. Silent installs and upgrades
-  (`/SILENT`, `/VERYSILENT`) never show the task page, and Inno has no
-  saved selection for a new task name — so a silent upgrade of a 1.3.x
-  machine runs the task with its default state and grows a desktop icon
-  (rewritten in place to the Windows Terminal form by the shortcut step)
-  without ever asking. Owner ruling: the behavior is intended; it is
-  disclosed here and in the installer source. Interactive installs keep
-  remembering an unchecked choice.
+Nothing yet.
 
 ## [1.4.0] - 2026-10-10
 
 ### Changed
 
+- **The factory default prompt on Windows is now the Git Bash skeleton**
+  (owner adjudication 2026-10-12, #292): green `user@host`, yellow
+  POSIX-persona cwd, cyan branch (+ dirty `*`) and `$ ` — the MINGW64
+  environment segment is deliberately omitted (that is MinGW identity,
+  not this shell's) and there is no static product tag. The branch/dirty
+  segment reads the repository through git2 (owner-approved library
+  dependency, Windows-target-only compile) instead of a git child
+  process, so the prompt path never spawns (the niubash#145 red line):
+  measured cold 39 ms, warm p50 2.5 ms / p90 3.7 ms per prompt against
+  Git Bash's per-prompt `__git_ps1` fork (~100-300 ms). Claims still
+  win: a PS1/theme claim displaces the floor per prompt, and `set -o
+  vi` keeps its live editing-mode indicator (niubash#184).
 - Default TAB completion style is now the GNU readline shape
   (`CompletionStyle::Gnu`, owner ruling 2026-10-12): TAB completes the
   longest common prefix (a lone candidate completes outright), and a second
@@ -153,6 +40,31 @@ All notable changes to Niubash are documented in this file.
 
 ### Added
 
+- **Windows Terminal-form desktop/Start-menu shortcuts on Windows 10**
+  (niubash#211, #290): Win10 has no default-terminal setting, so
+  direct-exe shortcuts used to be hosted by conhost. When a `wt.exe`
+  resolves (WindowsApps alias -> PATH -> App Paths registry) and the
+  Niubash WT profile is registered, generated shortcuts take the
+  `wt.exe -p Niubash` form; without WT the conhost baseline stays
+  unchanged. `niu --install-wt-shortcuts` (`--update-only`,
+  `--desktop|--start-menu`) is the standalone verb and the installer
+  handoff, and it only rewrites links that already exist, so a declined
+  desktop icon is never grown.
+- **`niu --cwd-state <file>` directory memory for one-shot agent
+  invocations** (#272): opt-in, so a chain of one-shot `niu -c` calls
+  behaves like one shell — the directory recorded in `<file>` is
+  restored before startup (before niu's own startup logic, relative
+  script paths, and `source_non_interactive_env`) and the shell's final
+  directory is recorded back after every one-shot exit path. Without
+  the flag, behavior is byte-for-byte unchanged.
+- **`niu --encoded-command <base64>`** (#271): agents and CI callers
+  get a quoting-free channel — an RFC 4648 payload (padding optional,
+  ASCII whitespace ignored, must decode to valid UTF-8) executes
+  through the same one-shot path as `-c`, with the same
+  `BASH_ENV`/`NIU_ENV` sourcing and `BASH_EXECUTION_STRING` contract.
+  An optional `v1:` prefix is stripped defensively: MSYS path
+  conversion rewrites arguments starting with `/`, and a base64 payload
+  can start with `/`.
 - Doctor timing advice (niubash#201): `niu doctor` now carries an advisory
   row pointing timing/performance-sensitive scripts at the bash 5 builtin
   `$EPOCHREALTIME` / `$EPOCHSECONDS` instead of looping on the external
@@ -289,14 +201,244 @@ All notable changes to Niubash are documented in this file.
   (niubash#230), and the setup wizard detects release-bundled components as
   already-present instead of re-offering them (niubash#231).
 - Documentation passes: a "Calling PowerShell from niu" page joins the
-  platform docs (when to reach for powershell.exe from niu, and how) with
-  a README style pass (niubash#203, niubash#253), and the MSYS labels
-  (`uname` -> `MSYS_NT`, `OSTYPE=msys`, `MACHTYPE` `x86_64-pc-msys`) are
-  documented as what they are — a compatibility persona of a pure native
-  Windows build with no msys-2.0.dll/cygwin1.dll, with the measured
-  behavioral boundary (niubash#248).
+  platform docs (when to reach for powershell.exe from niu, and how)
+  with a README style pass (niubash#203, niubash#253); the READMEs were
+  then restructured evidence-first around quick answers and the
+  five-platform identity (niubash#255); the Platform Support page
+  documents the status matrix, what the HarmonyOS bash actually is, and
+  HNP packaging (#225, #226, #227); and the MSYS labels (`uname` ->
+  `MSYS_NT`, `OSTYPE=msys`, `MACHTYPE` `x86_64-pc-msys`) are documented
+  as what they are — a compatibility persona of a pure native Windows
+  build with no msys-2.0.dll/cygwin1.dll, with the measured behavioral
+  boundary (niubash#248).
+- One-shot `niu -c` invocations take a fast path that skips REPL-only
+  initialization (prompt/theme backend, completion directory scan,
+  completion-state snapshot); the history provider and managed aliases
+  keep their `-c` contract, and `bash -i -c` still sources the rc.
+  Measured 13.9 -> 12.1 ms in-process startup for `niu -c 'echo hello'`
+  with a 29-case behavior battery at zero diff (#270).
+- REPL-only commands (`self-update`, `update-niubash`, `logout`) are
+  highlighted as builtins instead of unknown-token red (#281).
+- The easter eggs are pruned to snake and about; the about logo is
+  pyfiglet-exact (#264).
+- The declared MSRV is 1.95 — reedline 0.50 in the lock requires it
+  (#267).
+- Installer disclosure (niubash#313): the "Create a desktop shortcut"
+  task is new in 1.4.x and default-checked. Silent installs and upgrades
+  (`/SILENT`, `/VERYSILENT`) never show the task page, and Inno has no
+  saved selection for a new task name — so a silent upgrade of a 1.3.x
+  machine runs the task with its default state and grows a desktop icon
+  (rewritten in place to the Windows Terminal form by the shortcut step)
+  without ever asking. Owner ruling: the behavior is intended; it is
+  disclosed here and in the installer source. Interactive installs keep
+  remembering an unchecked choice.
 
 ### Fixed
+
+- **The self-update installer is SHA256-verified, fail-closed, and the
+  release ecosystem is pinned** (niubash#311, niubash#312, PR #318):
+  every Windows setup.exe ships with a coreutils-style `.sha256` sidecar
+  (plus an aggregate `SHA256SUMS` for the whole release — both are
+  release assets, and the same digests feed the winget manifest).
+  `niu self-update` downloads the sidecar published beside the same
+  asset it fetched, hashes the installer, and aborts before launch on
+  any mismatch — or when the sidecar cannot be fetched at all (the
+  error points at the manual-download path). Release builds no longer
+  taste the live ecosystem: workflow dispatches require a pinned
+  WinuxCmd tag plus per-arch zip digests, tag pushes read the committed
+  `scripts/release/winuxcmd-pin.json`, and the wpm pre-install manifest
+  pins every package's artifact SHA-256 per arch (pin == index ==
+  shipped bytes; a pin failure keeps the loud fail-open warn-and-ship
+  path).
+- Plugin verbs can no longer hang forever on a dead origin, and a failed
+  add no longer strands its spec declaration (niubash#293, niubash#294,
+  niubash#295, niubash#296). Every git transport a plugin verb spawns —
+  `niu plugin add`/`sync`/`update`/`restore`/`distro import` — now runs
+  under a 120 s wall-clock budget (`--timeout <seconds>` on `add`/`sync`,
+  or `NIU_PLUGIN_FETCH_TIMEOUT_MS`, overrides it per run; the rc
+  `--bootstrap` form keeps its tighter 3 s): at the budget the clone's
+  whole process tree is killed (no more orphan `git.exe` helpers after a
+  hand-killed niu) and the failure row names the timed-out origin. The
+  spawned git also carries the user's proxy environment explicitly
+  (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`, each mirrored to
+  its case-variant, so an uppercase-only environment still reaches git's
+  case-sensitive transport). A sync stays per-source isolated: one
+  stalled origin costs its own budget and a failed row while the rest of
+  the spec reconciles. A declaration whose install just failed joins the
+  stranded population, so `niu plugin sync --prune` removes it in the
+  same run — and `niu plugin add` of a dead origin rolls its declaration
+  back on the bounded failure, so the target can be re-added instead of
+  deadlocking on "already declared".
+
+- The Windows paste-chunk detection no longer swallows the first Enter of
+  every line (niubash#284, a niubash#252 regression): whether a bare Enter
+  submits or opens a paste chunk is now decided structurally — by the LF
+  partner (`Enter + CONTROL`) queued right behind it, the console's shape
+  for a machine-fed CRLF line break — not by the 50 ms arrival-burst
+  heuristic. "Text + Enter" in one burst (fast human typing, ConPTY test
+  drivers, expect scripts, `send-keys`) submits on the first Enter again;
+  multi-line pastes keep buffering quietly until the user's own Enter
+  (0 mid-paste executions, niubash#202 contract unchanged). A typeahead
+  line queued behind a submitting Enter is pushed back and lands, in
+  order, at the next prompt. The TypeaheadGuard no longer double-injects
+  swept console input records: the sweeper's self-heal path drains the
+  buffer before writing it back, so a record can no longer be reinjected
+  twice (once by the self-heal, once by disarm; niubash#287).
+- A paste burst's trailing bare Enter now submits the buffered chunk
+  (niubash#308): a paste followed immediately by Enter — one write, the
+  Enter inside the burst window — used to be swallowed, and a second
+  Enter was needed. The same LF-partner lookahead that decides the
+  chunk-open Enter now runs in the pending branch: silence (or any
+  other queued key) behind the CR proves the chunk complete, and the
+  chunk flushes and submits in one batch on the first Enter.
+  Execution-level paste regressions pin empty-line fidelity across
+  every shape (niubash#291, PR #317).
+- The plugin trust gate now runs at runtime, not only at trust time
+  (niubash#297): `niu plugin sync` and `plugin list` re-verify every
+  trusted source against its lockfile pin, so a tree modified after
+  `trust` reads `drift` (never a lying `unchanged`) and
+  `degraded=true` with the drift reason in `--json` — the tree stops
+  contributing assets until it is repaired. sync records drifted ids in
+  `sources/drifted-sources.txt`, and the managed rc blocks carry a static
+  guard that prints the warning at every startup (the rc stays static
+  text; no hashing in it). `plugin restore` wording is honest about
+  rebuilding from the pin ("rebuilt from the lockfile pin", not "tree
+  matches"). bash-it's `enabled/` entries — the one legitimate tree
+  mutation `niu plugin enable` itself makes — are transparent to the pin,
+  while an injected `enabled/` file with unpinned content still trips
+  both `verify` and `trust`.
+- `niu plugin mirror set http://…` is refused without an explicit
+  `--allow-plaintext` confirm (niubash#298): a plaintext mirror ships
+  every git fetch unencrypted and unauthenticated, and the confirm still
+  prints the standing warning. The first fetch of an unpinned non-catalog
+  origin is now flagged for what it is: `plugin add` prints a
+  "NOT integrity-verified" warning and the record carries
+  `first_fetch_verified: false` (visible in `plugin list --json`); a
+  `--checksum` pin or a curated catalog origin marks it verified.
+- `niu plugin clean` reports every orphan directory under `sources/` the
+  registry does not claim (niubash#299) instead of silently keeping
+  manager-shaped ones and ignoring the rest; `--orphans` is the explicit
+  confirm that deletes them.
+- `niu plugin add <path>` positional form is first-class (niubash#300):
+  a bare local directory snapshot-copies in, a single `.sh`/`.bash`
+  file becomes its own one-file wild source, a nonexistent path fails
+  honestly (instead of a baffling `git clone` status 128 after the
+  trust-boundary banner), and the help documents the path and
+  `file://` forms.
+
+- **Managed rc-block rewrites converge and self-repair** (niubash#324,
+  PR #325): an rc already carrying "user lines moved out" debris (the
+  issue's six-section fixture — five dangling `if`s, a syntax error on
+  every startup) stayed corrupt through every sync/enable/disable
+  forever, because the rewrite paths never inspected the user area.
+  Every plugin verb now normalizes the migrated sections first: a
+  section whose every non-comment line is guard-shaped goes entirely, a
+  section mixing genuine user lines with debris is kept verbatim
+  (whole-section edits only — niubash#176 keeps user lines
+  sacrosanct), and a re-fed user line merges into the pile instead of
+  appending a duplicate section per verb. Even the startup
+  `niu plugin sync --bootstrap` repairs the file — no one-shot cleanup
+  command needed.
+- **Completion covers the commands people actually type** (niubash#305,
+  #306, #307, PR #319): git, tar, curl, ssh, docker, kubectl and npm
+  are not WinuxCmd applets and completed as bare filenames — a second
+  compiled base layer now ships hand-curated static subcommand/flag
+  tables for them (no external completion script is ever executed).
+  `NIU_COMPDEFS` lines that resolve to an existing directory now
+  declare completion-definition directories (`<cmd>.toml` on the
+  embedded applet schema, `<cmd>.bash` statically parsed by the
+  bash-import reader — file bodies are never executed); previously the
+  declared surface had no user-reachable entry point and zero effect in
+  every mode. And `--completion-probe` sources `NIU_ENV` (`BASH_ENV`
+  fallback) before the interactive rc, so compspecs declared in an
+  agent init file reach the probe.
+- **`niu -s` reads stdin scripts on demand** (rubash#586 host half,
+  PR #314): the whole stdin used to be slurped with `read_to_string`
+  before execution, so a `$(exec cat)`/`read`/top-level `exec cat`
+  consumer hit EOF immediately and the unconsumed tail came back as
+  code. The host now drives the engine's on-demand reader (the rubash
+  #593 library surface): the consumer sees exactly the bytes after the
+  last submitted command, and the repro is byte-verified against WSL
+  GNU bash 5.3.0.
+- **The bash/rbash invocation faces report their name** (niubash#321,
+  PR #323): `bash -c 'echo $0'` printed `niu` — the shim's
+  `NIU_INVOKED_AS` forward now carries all four faces
+  (sh/ash/bash/rbash, login marker and `.exe` stripping preserved) and
+  POSIX mode stays keyed off the face; the d3 setup-rerun journey
+  answers the new TAB-completion wizard step (niubash#322).
+- The `niu plugin` help and doc examples no longer point at a dead repo:
+  the wild-GitHub-plugin example was `niu plugin add
+  rcrowley/bash-preexec`, but rcrowley/bash-preexec 404s (the project
+  moved to rcaloras/bash-preexec years ago), so a copy-paste of the
+  example failed. Every live reference — help text, the plugins.toml spec
+  example, the plugins guide, the wild-source fixture — now names
+  rcaloras/bash-preexec, and the example repo was verified cloneable
+  (niubash#301).
+
+- The config subsystem honors `HOME` isolation (niubash#302): every niu
+  subsystem — config.toml, mirrors.toml, the plugin rc, doctor, prompt,
+  the setup wizard — resolves the home directory through one shared
+  resolver in which an explicit `HOME` environment override wins on every
+  platform. Before, the Windows resolver ranked `USERPROFILE` first, so a
+  HOME-only sandbox (tests, CI, portable setups) silently read and wrote
+  the real profile. A default Windows session (`HOME` unset) resolves
+  exactly where it always has, and the classic Unix `HOME`-first
+  convention is unchanged.
+
+- The freshly-rendered mirrors.toml template no longer recommends
+  hub.fastgit.xyz (dead since ~2021; niubash#303). The second community
+  example is now ghproxy.net, verified live at edit time with a real
+  `git clone` through the `insteadOf` rewrite (gitclone.com, the first
+  example, re-verified the same way). The examples stay comments marked
+  UNSUPPORTED — they may die at any moment and are the user's to verify.
+
+- `.niubashrc` rewrites are atomic (niubash#304): every managed-block
+  rewrite (`niu plugin enable/disable/sync`) and the setup wizard's rc
+  write now stage the new content in a same-directory temp file and swap
+  it in with a single replace-rename (`MoveFileExW
+  MOVEFILE_REPLACE_EXISTING` on Windows, `rename(2)` elsewhere). The
+  former truncate-in-place write and the wizard's former
+  remove-then-rename left windows where a concurrent reader — a pipe or
+  `sed` run against the rc — saw the file empty, partial, or briefly
+  absent; a reader now always observes a complete old or new generation.
+
+- The installer cleans up after itself (niubash#313). Uninstall now also
+  removes the `{app}\winuxcmd\bin` entry from the user `PATH` — the
+  install-time `wpm links rebuild` adds it, but the uninstaller only ever
+  removed `{app}`, leaving a dangling PATH entry after every uninstall.
+  The installer gained `[InstallDelete]`/`[UninstallDelete]` sweeps for
+  files earlier builds shipped and the current payload retired (the
+  reverted dual-name build's `niubash.exe`, stray self-update
+  `niu.exe.old-*` backups), which previously survived upgrade AND
+  uninstall on real machines.
+
+- A closed stdout pipe terminates niu (niubash#245, PR #256): when the
+  shell's own stdout is the pipe whose reader went away, non-interactive
+  executions interpose a kernel pipe + pump thread and exit with one
+  diagnostic and status 1 — previously, with no SIGPIPE on Windows,
+  every later write failed again and an unbounded builtin loop printed
+  one diagnostic per iteration forever (`niu -c 'yes' | head -c 1`
+  never exited). The contract is pinned across every non-interactive
+  execution shape — script-file producer, stdin-script producer,
+  external child as the producer, and stderr gone too (niubash#286,
+  PR #289).
+- The history provider writes the final list back to `HISTFILE` at
+  session end (niubash#265) — the missing exit half of the
+  niubash#182/#250 GNU `-c` semantics: after a one-shot
+  `niu -c "history -c"` the host file holds the empty list, like GNU
+  bash's `exit_shell()` write. The rc-0 one-shot path returns from main
+  instead of `process::exit` so the write runs.
+- `sh -c` enters POSIX mode with `$0 = sh` (niubash#262): the installed
+  `sh.exe` is the same forwarder binary as `bash.exe`, so Windows
+  argv[0] could not carry the invocation contract to niu. The shim
+  forwards its argv[0] stem as `NIU_INVOKED_AS` (actively scrubbed
+  under every other name, so a nested `sh -c 'niu ...'` keeps its own
+  face).
+- Path-form expectations align with the engine's POSIX persona
+  (niubash#283): the host cwd sync no longer re-stamps the executor PWD
+  into native drive form, so the rendered form no longer depends on
+  which route executed the command (simple sequences vs compound lines
+  and command substitutions).
 
 - Plain-text `--help` and a non-tty-safe banner (niubash#229), plus a warning
   when a hand-written rc would clobber the wizard theme.
