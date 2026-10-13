@@ -146,6 +146,11 @@ pub struct Shell {
     /// User-declared completion functions parsed from `NIU_COMPDEFS` in the
     /// startup rc: `(command, function)` pairs.
     pub compdefs: Vec<(String, String)>,
+    /// Config-layer completion directories (`FullConfig::completion_dirs`),
+    /// recorded at construction so the post-rc `load_user_compdefs` reload
+    /// (NIU_COMPDEFS directory entries, issue #306) rebuilds the union
+    /// instead of dropping the config surface.
+    config_completion_dirs: Vec<PathBuf>,
     pub hooks: HookConfig,
     pub aliases: HashMap<String, String>,
     pub last_interactive_command: Option<String>,
@@ -502,6 +507,7 @@ impl Shell {
             engine_bindings: Vec::new(),
             engine_bind_generation: 0,
             compdefs: Vec::new(),
+            config_completion_dirs: config.completion_dirs.clone(),
             hooks: config.hooks,
             aliases,
             last_interactive_command: None,
@@ -1530,28 +1536,49 @@ impl Shell {
         self.executor.has_function(name)
     }
 
-    /// Load user completion functions from the `NIU_COMPDEFS` variable
-    /// declared in the startup rc. Each line is `command:function`.
+    /// Load user completion declarations from the `NIU_COMPDEFS` variable
+    /// declared in the startup rc. Each line is `command:function`, or —
+    /// since issue #306 — a path to an existing directory holding
+    /// completion-definition files: `<cmd>.toml` (the same schema as the
+    /// embedded applet definitions) and `<cmd>.bash` (statically parsed, the
+    /// file body is never executed). Directory lines are resolved first so a
+    /// Windows drive-letter path (`D:/defs`) is never misread as a
+    /// `command:function` pair; declared directories are loaded into the
+    /// completion state together with the config-layer directories.
     pub fn load_user_compdefs(&mut self) {
         let value = self
             .executor
             .get_env("NIU_COMPDEFS")
             .map(str::to_owned)
             .unwrap_or_default();
-        self.compdefs = value
-            .lines()
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty() && !entry.starts_with('#'))
-            .filter_map(|entry| {
-                let (command, function) = entry.split_once(':')?;
+        let mut compdefs = Vec::new();
+        let mut compdef_dirs: Vec<PathBuf> = Vec::new();
+        for entry in value.lines().map(str::trim) {
+            if entry.is_empty() || entry.starts_with('#') {
+                continue;
+            }
+            let candidate = self.resolve_non_interactive_env_path(entry);
+            if candidate.is_dir() {
+                compdef_dirs.push(candidate);
+                continue;
+            }
+            if let Some((command, function)) = entry.split_once(':') {
                 let command = command.trim();
                 let function = function.trim();
                 if command.is_empty() || function.is_empty() {
-                    return None;
+                    continue;
                 }
-                Some((command.to_string(), function.to_string()))
-            })
-            .collect();
+                compdefs.push((command.to_string(), function.to_string()));
+            }
+        }
+        self.compdefs = compdefs;
+        if !compdef_dirs.is_empty() {
+            let mut dirs = self.config_completion_dirs.clone();
+            dirs.extend(compdef_dirs);
+            if let Ok(mut state) = self.completion_state.lock() {
+                state.load_completion_dirs(&dirs);
+            }
+        }
     }
 
     /// Run a shell-function completion (`compdef`) and collect its
@@ -4288,6 +4315,135 @@ niu_git_comp() {
     }
 
     #[test]
+    fn niu_compdefs_directory_entries_load_completion_files() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-compdefs-dir");
+        let home = temp.join("home");
+        let defs = temp.join("compdefs");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&defs).unwrap();
+        // Native TOML: same schema as the embedded applet definitions.
+        std::fs::write(
+            defs.join("mytool.toml"),
+            r#"command = "mytool"
+description = "fixture command"
+
+[[flags]]
+long = "--fixture-flag"
+description = "declared in the completion dir"
+"#,
+        )
+        .unwrap();
+        // Standard bash completion script: statically parsed (opts= line plus
+        // a case block), the file body is never executed.
+        std::fs::write(
+            defs.join("bashtool.bash"),
+            r#"_bashtool() {
+    local opts
+    opts="-h -V --verbose --output"
+    case "${prev}" in
+        --output|-o)
+            COMPREPLY=($(compgen -f "${cur}"))
+            return 0
+            ;;
+        *)
+            COMPREPLY=()
+            ;;
+    esac
+}
+complete -F _bashtool bashtool
+"#,
+        )
+        .unwrap();
+
+        let defs_forward = defs.to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            format!(
+                r#"
+NIU_COMPDEFS="{defs_forward}"
+
+niu_fixture_comp() {{
+    NIU_COMP_RESULT="alpha"
+}}
+NIU_COMPDEFS="$NIU_COMPDEFS
+mytool2:niu_fixture_comp"
+"#
+            ),
+        )
+        .unwrap();
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.load_user_compdefs();
+
+        // The `command:function` pair in the same variable still reaches the
+        // function layer.
+        assert_eq!(
+            shell.compdefs,
+            vec![("mytool2".to_string(), "niu_fixture_comp".to_string())]
+        );
+        // Both definition files from the declared directory serve flag
+        // candidates through the same completion state the probe reads.
+        assert!(
+            shell
+                .completion_probe("mytool -", 10)
+                .contains(&"--fixture-flag".to_string()),
+            "TOML definition from the NIU_COMPDEFS directory must serve flags"
+        );
+        assert!(
+            shell
+                .completion_probe("bashtool -", 10)
+                .contains(&"--verbose".to_string()),
+            "bash completion import from the NIU_COMPDEFS directory must serve flags"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn niu_env_compspecs_reach_the_completion_surface() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let _bash_guard = EnvVarGuard::unset("BASH_ENV");
+
+        let temp = unique_temp_dir("niubash-env-compspec");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env_file = home.join("agent.env");
+        std::fs::write(
+            &env_file,
+            r#"
+complete -W 'status switch merge rebase' envtool
+_envtooldyn_hook() {
+    COMPREPLY=()
+}
+complete -F _envtooldyn_hook envtooldyn
+"#,
+        )
+        .unwrap();
+
+        let _niu_guard = EnvVarGuard::set("NIU_ENV", &env_file);
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.source_non_interactive_env();
+
+        // Issue #307: `complete` registrations from NIU_ENV land in the
+        // engine compspec registry — the state `--completion-probe` serves
+        // candidates from. The `-F` registration itself is visible here;
+        // turning the -F hook into Tab candidates is the rubash engine
+        // follow-up, so candidate flow is covered by the -W compspec and the
+        // binary probe tests.
+        assert!(shell.executor.has_compspec("envtool"));
+        assert!(shell.executor.has_compspec("envtooldyn"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn run_startup_rc_syncs_process_path_from_executor() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
@@ -5668,6 +5824,7 @@ niu_git_comp() {
             engine_bindings: Vec::new(),
             engine_bind_generation: 0,
             compdefs: Vec::new(),
+            config_completion_dirs: Vec::new(),
             hooks,
             aliases: HashMap::new(),
             last_interactive_command: None,

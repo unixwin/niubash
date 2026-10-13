@@ -86,7 +86,19 @@ impl CompletionState {
             external.load_dir(dir);
         }
         self.completion_dirs = dirs.to_vec();
-        self.add_plugin(Arc::new(external));
+        // Replace an existing external plugin in place so a second load (the
+        // rc-declared NIU_COMPDEFS directories after Shell::new seeded the
+        // config layer, issue #306) rebuilds the same slot instead of
+        // stacking a duplicate plugin that would emit every candidate twice.
+        if let Some(slot) = self.plugins.iter_mut().rev().find(|p| {
+            p.as_any()
+                .downcast_ref::<ExternalCompletionPlugin>()
+                .is_some()
+        }) {
+            *slot = Arc::new(external);
+        } else {
+            self.add_plugin(Arc::new(external));
+        }
     }
 
     /// Replace the bundle-provided definitions inside the external

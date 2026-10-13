@@ -133,12 +133,19 @@ python scripts/generate-winuxcmd-completions.py --winuxcmd <path-to-winuxcmd.exe
 python scripts/test-winuxcmd-completions.py   # golden check: corpus vs committed assets
 ```
 
-Priority is layered: the embedded applet defaults are the base layer, and
-completion definitions loaded later override them per command — a
-bundle/pack TOML or a user completion-dir TOML whose file stem (or `command`
-key) matches the applet name replaces the built-in definition entirely, so
-trimming or extending an applet's flags is a plain file drop, not a fight
-with the defaults.
+A second compiled layer covers the common external commands that are not
+WinuxCmd applets — git, tar, curl, ssh, docker, kubectl, and npm (issue
+#305): static subcommand/flag tables under
+`crates/niubash-runtime/assets/completions/common/`, so `git co<Tab>` offers
+`checkout`/`commit`/`config` and `kubectl get -<Tab>` offers `-o`/
+`--all-namespaces` on a fresh install.
+
+Priority is layered: the embedded applet and common-command defaults are the
+base layer, and completion definitions loaded later override them per
+command — a bundle/pack TOML or a user completion-dir TOML whose file stem
+(or `command` key) matches the built-in name replaces the built-in
+definition entirely, so trimming or extending a command's flags is a plain
+file drop, not a fight with the defaults.
 
 ## AI Agent Skill Bundle
 
@@ -259,6 +266,18 @@ When completing arguments for a registered command, the function runs with:
   `NIU_COMP_CWORD` (bash `COMP_CWORD` semantics). Both are temporary.
 - Out: `NIU_COMP_RESULT`, one candidate per line, shaped `value` or
   `value<TAB>description`.
+
+A `NIU_COMPDEFS` line can also name a directory (issue #306): every line
+that resolves to an existing directory is loaded as a completion-definition
+directory — `<cmd>.toml` files in the same schema as the embedded applet
+definitions, and `<cmd>.bash` standard bash completion scripts (read as
+data, never executed). Remaining lines are `command:function` pairs:
+
+```bash
+NIU_COMPDEFS="C:/agents/completions"
+NIU_COMPDEFS="$NIU_COMPDEFS
+git:niu_git_comp"
+```
 
 Compdef functions run synchronously during completion, while the line editor
 owns the terminal. They must not print to stdout: compute with command

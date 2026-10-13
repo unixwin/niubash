@@ -54,19 +54,49 @@ Candidates are filtered by the typed prefix; `NIU_COMPDEFS` holds one
 
 `<cmd>.toml` (flags, subcommands, value sources — the richest surface) and
 `<cmd>.bash` (standard bash completion scripts: the `opts="..."` line plus a
-`case "${prev}"` block with `compgen` value lists) placed in a completion
-directory are parsed into the same definitions the embedded applet layer
-uses. See [Advanced Usage](advanced-usage.md#winuxcmd-applet-completions)
-for the file formats and the priority layering — embedded WinuxCmd applet
-definitions are the base layer and later definitions override them per
-command.
+`case "${prev}"` block with `compgen` value lists) are parsed into the same
+definitions the embedded base layers use. The files are never executed: both
+formats are read as data.
+
+A completion-definition directory is declared with a directory line in
+`NIU_COMPDEFS` — the same variable that carries `command:function` pairs
+(issue #306). Every line that resolves to an existing directory is loaded
+(both file formats); every other line is a `command:function` pair. A user
+`mytool.toml` overrides the compiled-in definition for `mytool` entirely:
+
+```bash
+# ~/.niubashrc — completion files as plain rc data
+NIU_COMPDEFS="C:/agents/completions"
+NIU_COMPDEFS="$NIU_COMPDEFS
+mytool:_mytool_comp"
+```
+
+```text
+C:/agents/completions/mytool.toml      # command/flags/subcommands TOML
+C:/agents/completions/othertool.bash   # standard bash completion script
+```
+
+### Built-in base layers
+
+Two compiled layers ship in the binary, so a fresh install completes common
+commands with no configuration at all:
+
+- every WinuxCmd applet (`grep --col<Tab>` → `--color`/`--colour`,
+  `ls --color <Tab>` → `always`/`auto`/`never`) — generated from the applet
+  `--help` transcripts;
+- common external commands — git, tar, curl, ssh, docker, kubectl, and npm —
+  as static subcommand/flag tables (issue #305): `git co<Tab>` offers
+  `checkout`/`commit`/`config`, `kubectl get -<Tab>` offers `-o`/
+  `--all-namespaces`, `curl -X <Tab>` offers the HTTP methods.
 
 ## Priority
 
-Local definitions always win over external providers: embedded applet TOMLs,
-bundle definitions, and user completion files are consulted before any
-rc-integrated provider fires, so a provider can never shadow a definition
-you already have.
+Local definitions always win over external providers: the embedded applet
+and common-command definitions, bundle definitions, and user completion
+files are consulted before any rc-integrated provider fires, so a provider
+can never shadow a definition you already have. Within the file layers a
+later definition replaces an earlier one per command: embedded defaults →
+bundle definitions → user completion files.
 
 ## Example: carapace-bin
 

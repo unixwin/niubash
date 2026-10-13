@@ -3711,11 +3711,20 @@ fn print_completion_probe(rest: &[String]) -> anyhow::Result<()> {
         line.len()
     };
     let mut shell = niubash_runtime::Shell::new()?;
+    // Issue #307: the probe is the agent-facing completion surface, so it
+    // sources NIU_ENV first (bash-compatible BASH_ENV fallback; NIU_ENV wins —
+    // the same precedence `-c` applies through `source_non_interactive_env`).
+    // `complete` compspecs and NIU_COMPDEFS declarations from an agent init
+    // file must be visible to the probe; sourced before the interactive rc so
+    // the rc stays the more specific override.
+    shell.source_non_interactive_env();
     shell.run_startup_rc();
     // The REPL loads the rc-declared completion functions (NIU_COMPDEFS)
     // after sourcing and installs the completion bridge before the line
     // editor runs (repl.rs); the probe mirrors that sequence so compdef and
     // compspec candidates reach the same completer state a Tab press sees.
+    // Runs after both startup files so NIU_COMPDEFS declared in NIU_ENV /
+    // BASH_ENV lands in the same registry.
     shell.load_user_compdefs();
     let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
     niubash_runtime::shell::install_completion_bridge(&shell);

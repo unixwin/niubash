@@ -1,0 +1,207 @@
+# Issue #305: static completion table for ssh (OpenSSH client common flags).
+# Hand-curated from the documented CLI; no external completion script is
+# executed. Same schema as the embedded applet definitions.
+command = "ssh"
+description = "OpenSSH remote login client"
+
+[[flags]]
+short = "-4"
+description = "use IPv4 addresses only"
+
+[[flags]]
+short = "-6"
+description = "use IPv6 addresses only"
+
+[[flags]]
+short = "-A"
+description = "enable forwarding of the authentication agent connection"
+
+[[flags]]
+short = "-a"
+description = "disable forwarding of the authentication agent connection"
+
+[[flags]]
+short = "-B"
+description = "bind the connection to the given interface"
+takes_value = true
+
+[[flags]]
+short = "-b"
+description = "use the given source address for the connection"
+takes_value = true
+
+[[flags]]
+short = "-C"
+description = "compress all data"
+
+[[flags]]
+short = "-c"
+description = "select the cipher specification for encrypting the session"
+takes_value = true
+
+[[flags]]
+short = "-D"
+description = "open a dynamic application-level port forward"
+takes_value = true
+
+[[flags]]
+short = "-E"
+description = "append debug output to the given error log file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-e"
+description = "set the escape character for sessions with a pty"
+takes_value = true
+
+[[flags]]
+short = "-F"
+description = "use the given alternative per-user configuration file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-f"
+description = "request ssh to go to background just before command execution"
+
+[[flags]]
+short = "-G"
+description = "print the effective configuration to stdout"
+
+[[flags]]
+short = "-g"
+description = "allow remote hosts to connect to forwarded local ports"
+
+[[flags]]
+short = "-I"
+description = "use the given PKCS#11 shared library"
+takes_value = true
+
+[[flags]]
+short = "-i"
+description = "use the given identity (private key) file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-J"
+description = "connect via the given jump host chain"
+takes_value = true
+
+[[flags]]
+short = "-K"
+description = "enable GSSAPI-based authentication and forwarding"
+
+[[flags]]
+short = "-k"
+description = "disable forwarding of GSSAPI credentials"
+
+[[flags]]
+short = "-L"
+description = "open a local port forward"
+takes_value = true
+
+[[flags]]
+short = "-l"
+description = "log in with the given user name"
+takes_value = true
+
+[[flags]]
+short = "-M"
+description = "place the client into master mode for connection sharing"
+
+[[flags]]
+short = "-m"
+description = "select the MAC specification"
+takes_value = true
+
+[[flags]]
+short = "-N"
+description = "do not execute a remote command"
+
+[[flags]]
+short = "-n"
+description = "redirect stdin from /dev/null"
+
+[[flags]]
+short = "-O"
+description = "use the given control command with a master instance"
+takes_value = true
+values = ["check", "forward", "cancel", "exit", "stop", "proxy"]
+
+[[flags]]
+short = "-o"
+description = "set the given ssh_config option"
+takes_value = true
+
+[[flags]]
+short = "-p"
+description = "connect to the given port on the remote host"
+takes_value = true
+
+[[flags]]
+short = "-Q"
+description = "query ssh for the given feature's supported algorithms"
+takes_value = true
+
+[[flags]]
+short = "-q"
+description = "quiet mode"
+
+[[flags]]
+short = "-R"
+description = "open a remote port forward"
+takes_value = true
+
+[[flags]]
+short = "-S"
+description = "use the given control socket for connection sharing"
+takes_value = true
+
+[[flags]]
+short = "-s"
+description = "invoke the given subsystem on the remote host"
+takes_value = true
+
+[[flags]]
+short = "-T"
+description = "disable pseudo-terminal allocation"
+
+[[flags]]
+short = "-t"
+description = "force pseudo-terminal allocation"
+
+[[flags]]
+short = "-u"
+description = "unset the environment when a pty is allocated"
+
+[[flags]]
+short = "-V"
+description = "display the version number"
+
+[[flags]]
+short = "-v"
+description = "verbose mode (repeat for more verbosity)"
+
+[[flags]]
+short = "-W"
+description = "forward stdin/stdout to the given host:port"
+takes_value = true
+
+[[flags]]
+short = "-w"
+description = "request tunnel device forwarding"
+takes_value = true
+
+[[flags]]
+short = "-X"
+description = "enable X11 forwarding"
+
+[[flags]]
+short = "-x"
+description = "disable X11 forwarding"
+
+[[flags]]
+short = "-Y"
+description = "enable trusted X11 forwarding"

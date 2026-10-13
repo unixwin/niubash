@@ -317,20 +317,27 @@ impl ExternalCompletionPlugin {
         }
     }
 
-    /// Create a plugin seeded with the embedded WinuxCmd applet definitions.
+    /// Create a plugin seeded with the embedded WinuxCmd applet definitions
+    /// and the common external-command definitions (git, tar, curl, ssh,
+    /// docker, kubectl, npm — issue #305).
     ///
     /// These defaults are the compiled fallback layer (layer 0): they are
     /// loaded at construction time, before bundle definitions
     /// (`replace_definitions` overwrites per command), translated definitions
     /// (`load_definitions` merges) and user completion dirs (`load_dir`
     /// overwrites per command) — so a user TOML always wins, matching the
-    /// documented load order. The definitions themselves are generated from
+    /// documented load order. The WinuxCmd definitions are generated from
     /// `winuxcmd --help` by `scripts/generate-winuxcmd-completions.py` and
     /// embedded from `assets/completions/winuxcmd/` via
-    /// [`crate::completion::winuxcmd_assets`].
+    /// [`crate::completion::winuxcmd_assets`]; the common external-command
+    /// tables are hand-curated static data embedded via
+    /// [`crate::completion::common_assets`].
     pub fn new() -> Self {
-        static EMBEDDED_DEFS: LazyLock<Vec<CommandDef>> =
-            LazyLock::new(|| crate::completion::winuxcmd_assets::definitions().collect());
+        static EMBEDDED_DEFS: LazyLock<Vec<CommandDef>> = LazyLock::new(|| {
+            crate::completion::winuxcmd_assets::definitions()
+                .chain(crate::completion::common_assets::definitions())
+                .collect()
+        });
         let mut plugin = Self {
             definitions: HashMap::new(),
             mem_cache: Mutex::new(HashMap::new()),

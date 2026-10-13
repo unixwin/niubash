@@ -258,6 +258,215 @@ NIU_COMPDEFS="providercmd:_carapace_provider_hook"
     assert_not_contains(&suggestions, "clean");
 }
 
+// ── Issue #307: the probe sources NIU_ENV / BASH_ENV like `-c` ───────────────
+
+/// An agent init file (NIU_ENV) registering `complete` compspecs must reach
+/// the probe: the `-W` wordlist serves candidates, and the `-F` registration
+/// lands in the engine compspec registry the probe reads.
+#[test]
+fn completion_probe_loads_niu_env_compspecs() {
+    let env = ProbeEnv::new("niubash-completion-niu-env");
+    let env_file = env.root.join("agent.env");
+    std::fs::write(
+        &env_file,
+        r#"# agent init file: GNU completion registrations travel as rc data
+complete -W 'status switch merge rebase' envtool
+_envtooldyn_hook() {
+    COMPREPLY=()
+}
+complete -F _envtooldyn_hook envtooldyn
+"#,
+    )
+    .unwrap();
+
+    let suggestions = run_probe("envtool s", &env, &[("NIU_ENV", path_string(&env_file))]);
+
+    assert_contains(&suggestions, "status");
+    assert_contains(&suggestions, "switch");
+    assert_not_contains(&suggestions, "merge");
+}
+
+/// NIU_ENV wins over BASH_ENV — the same precedence `niu -c` applies — so
+/// only the NIU_ENV compspec is registered when both are set.
+#[test]
+fn completion_probe_prefers_niu_env_over_bash_env() {
+    let env = ProbeEnv::new("niubash-completion-niu-env-priority");
+    let niu_file = env.root.join("niu.env");
+    let bash_file = env.root.join("bash.env");
+    std::fs::write(&niu_file, "complete -W 'alpha beta' ptool\n").unwrap();
+    std::fs::write(&bash_file, "complete -W 'gamma delta' ptool\n").unwrap();
+
+    let suggestions = run_probe(
+        "ptool a",
+        &env,
+        &[
+            ("NIU_ENV", path_string(&niu_file)),
+            ("BASH_ENV", path_string(&bash_file)),
+        ],
+    );
+
+    assert_contains(&suggestions, "alpha");
+    assert_not_contains(&suggestions, "gamma");
+}
+
+/// With NIU_ENV unset the probe falls back to BASH_ENV (bash-compatible).
+#[test]
+fn completion_probe_falls_back_to_bash_env() {
+    let env = ProbeEnv::new("niubash-completion-bash-env");
+    let bash_file = env.root.join("bash.env");
+    std::fs::write(&bash_file, "complete -W 'gamma delta' ptool\n").unwrap();
+
+    let suggestions = run_probe(
+        "ptool g",
+        &env,
+        &[
+            ("NIU_ENV", String::new()),
+            ("BASH_ENV", path_string(&bash_file)),
+        ],
+    );
+
+    assert_contains(&suggestions, "gamma");
+    // The wordlist is prefix-filtered by the typed word (same as GNU
+    // compgen), so candidates outside the prefix stay out.
+    assert_not_contains(&suggestions, "delta");
+    assert_not_contains(&suggestions, "alpha");
+}
+
+// ── Issue #306: NIU_COMPDEFS directory entries declare completion files ──────
+
+/// A NIU_COMPDEFS line pointing at an existing directory declares
+/// completion-definition files: `<cmd>.toml` (embedded-applet schema) and
+/// `<cmd>.bash` (statically parsed; the file body is never executed).
+#[test]
+fn completion_dir_declared_in_niu_compdefs_serves_candidates() {
+    let env = ProbeEnv::new("niubash-completion-compdefs-dir");
+    let defs = env.root.join("compdefs");
+    std::fs::create_dir_all(&defs).unwrap();
+    std::fs::write(
+        defs.join("mytool.toml"),
+        r#"command = "mytool"
+description = "fixture command"
+
+[[flags]]
+long = "--fixture-flag"
+description = "declared in the completion dir"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        defs.join("bashtool.bash"),
+        r#"_bashtool() {
+    local opts
+    opts="-h -V --verbose --output"
+    case "${prev}" in
+        --output|-o)
+            COMPREPLY=($(compgen -f "${cur}"))
+            return 0
+            ;;
+        *)
+            COMPREPLY=()
+            ;;
+    esac
+}
+complete -F _bashtool bashtool
+"#,
+    )
+    .unwrap();
+    env.write_primary_rc(&format!("NIU_COMPDEFS=\"{}\"\n", path_string(&defs)));
+
+    let toml_suggestions = run_probe("mytool -", &env, &[]);
+    assert_contains(&toml_suggestions, "--fixture-flag");
+
+    let bash_suggestions = run_probe("bashtool -", &env, &[]);
+    assert_contains(&bash_suggestions, "--verbose");
+}
+
+// ── Issue #305: built-in definitions for common external commands ────────────
+//
+// git, tar, curl, ssh, docker, kubectl, and npm are not WinuxCmd applets; the
+// compiled common layer must serve each of them through the probe surface.
+
+#[test]
+fn builtin_git_definition_completes_subcommands_and_flags() {
+    let env = ProbeEnv::new("niubash-completion-builtin-git");
+
+    let subcommands = run_probe("git ch", &env, &[]);
+    assert_contains(&subcommands, "checkout");
+    assert_contains(&subcommands, "cherry-pick");
+    assert_not_contains(&subcommands, "clone");
+
+    let flags = run_probe("git commit -", &env, &[]);
+    assert_contains(&flags, "--message");
+    assert_contains(&flags, "--amend");
+}
+
+#[test]
+fn builtin_tar_definition_completes_flags() {
+    let env = ProbeEnv::new("niubash-completion-builtin-tar");
+
+    let suggestions = run_probe("tar --", &env, &[]);
+    assert_contains(&suggestions, "--gzip");
+    assert_contains(&suggestions, "--extract");
+    assert_contains(&suggestions, "--auto-compress");
+}
+
+#[test]
+fn builtin_curl_definition_completes_flag_values() {
+    let env = ProbeEnv::new("niubash-completion-builtin-curl");
+
+    let suggestions = run_probe("curl -X ", &env, &[]);
+    assert_contains(&suggestions, "POST");
+    assert_contains(&suggestions, "PUT");
+    assert_not_contains(&suggestions, "--silent");
+}
+
+#[test]
+fn builtin_ssh_definition_completes_flags() {
+    let env = ProbeEnv::new("niubash-completion-builtin-ssh");
+
+    let suggestions = run_probe("ssh -", &env, &[]);
+    assert_contains(&suggestions, "-i");
+    assert_contains(&suggestions, "-p");
+    assert_contains(&suggestions, "-V");
+}
+
+#[test]
+fn builtin_docker_definition_completes_subcommands_and_flags() {
+    let env = ProbeEnv::new("niubash-completion-builtin-docker");
+
+    let subcommands = run_probe("docker r", &env, &[]);
+    assert_contains(&subcommands, "run");
+    assert_contains(&subcommands, "rmi");
+
+    let flags = run_probe("docker run -", &env, &[]);
+    assert_contains(&flags, "--name");
+    assert_contains(&flags, "-d");
+}
+
+#[test]
+fn builtin_kubectl_definition_completes_subcommands_and_flags() {
+    let env = ProbeEnv::new("niubash-completion-builtin-kubectl");
+
+    let subcommands = run_probe("kubectl g", &env, &[]);
+    assert_contains(&subcommands, "get");
+
+    let flags = run_probe("kubectl get -", &env, &[]);
+    assert_contains(&flags, "--all-namespaces");
+    assert_contains(&flags, "-o");
+}
+
+#[test]
+fn builtin_npm_definition_completes_subcommands_and_flags() {
+    let env = ProbeEnv::new("niubash-completion-builtin-npm");
+
+    let subcommands = run_probe("npm i", &env, &[]);
+    assert_contains(&subcommands, "install");
+    assert_contains(&subcommands, "init");
+
+    let flags = run_probe("npm install -", &env, &[]);
+    assert_contains(&flags, "--save-dev");
+}
+
 fn run_probe(line: &str, env: &ProbeEnv, extra_env: &[(&str, String)]) -> Vec<String> {
     let output = run_niu_probe(line, &env.start, &env.home, extra_env);
     assert_success(&output, line);
@@ -271,7 +480,12 @@ fn run_niu_probe(line: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String
         .arg(line)
         .current_dir(cwd)
         .env("HOME", home)
-        .env("USERPROFILE", home);
+        .env("USERPROFILE", home)
+        // Hermetic by default: a developer machine's agent init file must not
+        // leak compspecs into a probe assertion. Tests that exercise the
+        // env-file surface (issue #307) override these explicitly.
+        .env("NIU_ENV", "")
+        .env("BASH_ENV", "");
 
     for (key, value) in extra_env {
         command.env(key, value);
@@ -338,6 +552,13 @@ fn assert_before(values: &[String], earlier: &str, later: &str) {
 
 fn native_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+/// Forward-slash spelling of a host path: safe to embed in an rc assignment
+/// or pass as NIU_ENV/BASH_ENV on both Windows and Unix — the shell's own
+/// path resolution (resolve_non_interactive_env_path) handles either form.
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 struct ProbeEnv {

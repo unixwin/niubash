@@ -1,0 +1,345 @@
+# Issue #305: static completion table for curl (common flags). Hand-curated
+# from the documented CLI; no external completion script is executed. Same
+# schema as the embedded applet definitions.
+command = "curl"
+description = "transfer a URL"
+
+[[flags]]
+short = "-A"
+long = "--user-agent"
+description = "send the given User-Agent string"
+takes_value = true
+
+[[flags]]
+short = "-a"
+long = "--append"
+description = "append to the target file instead of overwriting"
+
+[[flags]]
+long = "--basic"
+description = "use HTTP basic authentication"
+
+[[flags]]
+short = "-b"
+long = "--cookie"
+description = "send cookies from the given string or file"
+takes_value = true
+
+[[flags]]
+short = "-c"
+long = "--cookie-jar"
+description = "write cookies to the given file after the operation"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-C"
+long = "--continue-at"
+description = "resume the transfer at the given offset"
+takes_value = true
+
+[[flags]]
+long = "--connect-timeout"
+description = "maximum time allowed for the connection"
+takes_value = true
+
+[[flags]]
+long = "--compressed"
+description = "request a compressed response"
+
+[[flags]]
+long = "--create-dirs"
+description = "create the local directory hierarchy for output files"
+
+[[flags]]
+short = "-d"
+long = "--data"
+description = "send the given data in a POST request"
+takes_value = true
+
+[[flags]]
+long = "--data-raw"
+description = "send the given data in a POST request, no @-file reading"
+takes_value = true
+
+[[flags]]
+long = "--data-binary"
+description = "send the given data as-is in a POST request"
+takes_value = true
+
+[[flags]]
+long = "--data-urlencode"
+description = "send URL-encoded data in a POST request"
+takes_value = true
+
+[[flags]]
+short = "-D"
+long = "--dump-header"
+description = "write received protocol headers to the given file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-f"
+long = "--fail"
+description = "fail silently on HTTP errors"
+
+[[flags]]
+long = "--fail-with-body"
+description = "fail on HTTP errors but save the body"
+
+[[flags]]
+short = "-F"
+long = "--form"
+description = "send the given multipart form field"
+takes_value = true
+
+[[flags]]
+short = "-G"
+long = "--get"
+description = "put the POST data in the URL query string"
+
+[[flags]]
+short = "-g"
+long = "--globoff"
+description = "disable URL globbing"
+
+[[flags]]
+short = "-h"
+long = "--help"
+description = "show the help text"
+
+[[flags]]
+short = "-H"
+long = "--header"
+description = "send the given extra header"
+takes_value = true
+
+[[flags]]
+long = "--http1.1"
+description = "use HTTP/1.1"
+
+[[flags]]
+long = "--http2"
+description = "use HTTP/2"
+
+[[flags]]
+short = "-i"
+long = "--include"
+description = "include protocol headers in the output"
+
+[[flags]]
+short = "-I"
+long = "--head"
+description = "fetch the headers only"
+
+[[flags]]
+short = "-j"
+long = "--junk-session-cookies"
+description = "ignore session cookies"
+
+[[flags]]
+short = "-k"
+long = "--insecure"
+description = "allow insecure server connections with TLS"
+
+[[flags]]
+short = "-K"
+long = "--config"
+description = "read the config from the given file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-L"
+long = "--location"
+description = "follow redirects"
+
+[[flags]]
+long = "--location-trusted"
+description = "follow redirects and send credentials to other hosts"
+
+[[flags]]
+short = "-m"
+long = "--max-time"
+description = "maximum time allowed for the whole operation"
+takes_value = true
+
+[[flags]]
+short = "-M"
+long = "--manual"
+description = "show the full manual"
+
+[[flags]]
+short = "-n"
+long = "--netrc"
+description = "read credentials from .netrc"
+
+[[flags]]
+short = "-o"
+long = "--output"
+description = "write output to the given file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-O"
+long = "--remote-name"
+description = "write output to a file named after the remote file"
+
+[[flags]]
+long = "--output-dir"
+description = "directory for files written with -O/--remote-name"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-P"
+long = "--ftp-port"
+description = "use active FTP with the given address"
+takes_value = true
+
+[[flags]]
+short = "-p"
+long = "--proxytunnel"
+description = "tunnel through the HTTP proxy"
+
+[[flags]]
+short = "-q"
+description = "do not read the curlrc config for this invocation"
+
+[[flags]]
+short = "-Q"
+long = "--quote"
+description = "send the given command to the server before the transfer"
+takes_value = true
+
+[[flags]]
+short = "-r"
+long = "--range"
+description = "retrieve only the given byte range"
+takes_value = true
+
+[[flags]]
+short = "-R"
+long = "--remote-time"
+description = "set the output file time to the remote file time"
+
+[[flags]]
+long = "--retry"
+description = "retry a transient error up to the given number of times"
+takes_value = true
+
+[[flags]]
+long = "--retry-max-time"
+description = "maximum time spent on retries"
+takes_value = true
+
+[[flags]]
+short = "-s"
+long = "--silent"
+description = "silent mode: no progress meter"
+
+[[flags]]
+short = "-S"
+long = "--show-error"
+description = "show errors even in silent mode"
+
+[[flags]]
+short = "-T"
+long = "--upload-file"
+description = "upload the given local file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+long = "--trace"
+description = "write a debug trace to the given file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+long = "--trace-ascii"
+description = "write an ASCII debug trace to the given file"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+short = "-u"
+long = "--user"
+description = "server user name and password"
+takes_value = true
+
+[[flags]]
+short = "-U"
+long = "--proxy-user"
+description = "proxy user name and password"
+takes_value = true
+
+[[flags]]
+short = "-v"
+long = "--verbose"
+description = "make the operation more talkative"
+
+[[flags]]
+short = "-V"
+long = "--version"
+description = "output version information and exit"
+
+[[flags]]
+short = "-w"
+long = "--write-out"
+description = "print the given information after the transfer"
+takes_value = true
+
+[[flags]]
+short = "-x"
+long = "--proxy"
+description = "use the given proxy"
+takes_value = true
+
+[[flags]]
+short = "-X"
+long = "--request"
+description = "use the given HTTP method"
+takes_value = true
+values = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE"]
+
+[[flags]]
+short = "-Z"
+long = "--parallel"
+description = "perform transfers in parallel"
+
+[[flags]]
+short = "-z"
+long = "--time-cond"
+description = "transfer based on a time condition"
+takes_value = true
+
+[[flags]]
+short = "-4"
+long = "--ipv4"
+description = "resolve names to IPv4 addresses only"
+
+[[flags]]
+short = "-6"
+long = "--ipv6"
+description = "resolve names to IPv6 addresses only"
+
+[[flags]]
+short = "-0"
+long = "--http1.0"
+description = "use HTTP/1.0"
+
+[[flags]]
+short = "-1"
+long = "--tlsv1"
+description = "use TLS version 1 or later"
+
+[[flags]]
+long = "--ssl-reqd"
+description = "require TLS for the connection"
+
+[[flags]]
+long = "--no-keepalive"
+description = "disable TCP keepalive"
