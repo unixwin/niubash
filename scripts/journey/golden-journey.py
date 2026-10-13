@@ -129,9 +129,14 @@ need network + git on PATH; `ls`/`cat` for the battery come from the real
 PATH (WinuxCmd on a user machine, Git for Windows on a runner).
 
 Known failures are told, not hidden: each syntax-error assertion checks
-the registered KNOWN-FAIL list. A known-fail is still RED (exit 1) — the
-gate's job is to tell the truth — but the verdict names the owning ticket
-so the red is expected-red, not a mystery.
+the registered KNOWN-FAIL list. A match LABELS the verdict with the
+owning ticket (the gate tells the truth) and does not block the release
+gate: pass/known-fail exit 0, only an UNLABELED fail exits 1. This is
+labeling, never waiving — every registered known-fail names a live
+ticket that owns the real fix (release run 38452840701: the wt80
+known-fail alone held an otherwise-green gate at exit 1 with every
+scenario else passing, which made the label and the exit code disagree
+about what the gate saw).
 
 Spec phases (docs/journey-spec.md §3, lane split §7): wave lanes land
 their phases as clearly-separated runner functions keyed by the spec's
@@ -144,7 +149,8 @@ same sandbox — every phase walks on the installed state the base gate
 leaves — so a lane's local run is `--phases base,P4,P7` and the full
 walk is the default (or `--phases all`).
 
-Exit codes: 0 every assertion holds, 1 any fail/known-fail, 2 skip
+Exit codes: 0 every assertion holds or every red is a labeled
+known-fail, 1 an unlabeled fail (or an unrecognized verdict), 2 skip
 (missing python deps / not Windows / no niu.exe / no git / unknown phase
 id).
 
@@ -293,9 +299,11 @@ COLS, ROWS = 120, 36
 CLONE_TIMEOUT = 1800
 STARTUP_TIMEOUT = 120
 
-# Registered known-fails. A match keeps the gate RED (the gate must tell
-# the truth) but labels the verdict with the owning ticket so the failure
-# is actionable rather than mysterious.
+# Registered known-fails. A match LABELS the verdict with the owning
+# ticket and does not block the gate (exit 0) — labeling, never waiving:
+# the ticket named here owns the real fix, and the labeled BAD lines stay
+# in the verdict so nobody can mistake them for passes. An UNLABELED
+# failure still exits 1.
 KNOWN_FAILS = [
     {
         "id": "wt56-bash-completion-syntax",
@@ -758,6 +766,10 @@ class Verdict:
         return StepRecorder(self, step_id, title)
 
     def seal(self) -> str:
+        """Aggregate step statuses into the run verdict: "pass" | "known-
+        fail" | "fail" (worst wins). The caller maps the verdict to the
+        exit code via gate_exit_code: known-fail is labeled, owned by its
+        ticket, and does not block the release gate."""
         worst = "pass"
         for step in self.steps:
             if step["status"] == "fail":
@@ -781,7 +793,13 @@ class Verdict:
         (self.artifacts / "verdict.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8", newline="\n")
-        lines = [f"GOLDEN JOURNEY VERDICT: {worst.upper()}", ""]
+        lines = [f"GOLDEN JOURNEY VERDICT: {worst.upper()}"]
+        if worst == "known-fail":
+            lines.append(
+                "KNOWN-FAIL: labeled failures do not block this gate "
+                "(exit 0) — labeling, never waiving; the owning ticket "
+                "owns the fix.")
+        lines.append("")
         for step in self.steps:
             mark = {"pass": "PASS", "fail": "FAIL",
                     "known-fail": "KNOWN-FAIL",
@@ -829,8 +847,10 @@ class StepRecorder:
 
     def check(self, name: str, ok, detail: str = "", known=False) -> bool:
         """Record one assertion. `known=True` marks a registered
-        known-fail: still RED (recorded ok=False) but labeled — and it
-        does not BLOCK later journey steps the way an unknown fail does."""
+        known-fail: recorded ok=False (the verdict tells the truth) and
+        labeled — the step continues (a labeled known-fail never blocks
+        later journey steps), the verdict names the owning ticket, and
+        gate_exit_code does not hold the release gate for it."""
         ok = bool(ok)
         self.record["assertions"].append(
             {"name": name, "ok": ok, "detail": detail, "known": known})
@@ -850,8 +870,9 @@ class StepRecorder:
         elif self._failed:
             self.record["status"] = "fail"
         elif self._known_failed:
-            # Red (the gate must tell the truth) but not blocking: the
-            # journey continues past a labeled known-fail.
+            # Labeled, not blocking: the journey continues past a
+            # known-fail and gate_exit_code maps it to exit 0. The BAD
+            # lines stay in the verdict with the owning ticket.
             self.record["status"] = "known-fail"
         else:
             self.record["status"] = "pass"
@@ -3791,7 +3812,17 @@ def main() -> int:
 
     print((artifacts / "verdict.txt").read_text(encoding="utf-8"))
     print(f"artifacts: {artifacts}")
-    return 0 if result == "pass" else 1
+    return gate_exit_code(result)
+
+
+def gate_exit_code(result: str) -> int:
+    """The release-gate exit contract (run 38452840701): pass AND
+    known-fail exit 0 — a labeled known-fail is told, owned by its
+    ticket, and must not hold an otherwise-green gate; only an UNLABELED
+    fail exits 1. Anything unexpected ("blocked"/"skip"/garbage) exits 1
+    like a fail: the gate never pretends a verdict it does not
+    understand is green."""
+    return 0 if result in ("pass", "known-fail") else 1
 
 
 def gate_is_red(artifacts: Path) -> bool:

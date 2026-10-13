@@ -1157,6 +1157,13 @@ jobs:
       - name: Install journey dependencies
         run: pip install pywinpty pyte
 
+      # The verdict-to-exit contract the gate below runs under: labeled
+      # known-fail exits 0 (labeling, never waiving — the owning ticket
+      # owns the fix), an unlabeled fail exits 1. Guarded here so the
+      # contract cannot drift silently between the module and the job.
+      - name: Verdict-exit contract self-check
+        run: python scripts/journey/test_verdict_exit.py
+
       - name: Run the golden user journey
         shell: pwsh
         run: |

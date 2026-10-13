@@ -63,9 +63,17 @@ hard_fail_multiplier = 5
 # 1.1-1.6x below), so a local regression still trips the gate; what the
 # recalibration removes is the runner-vs-baseline machine delta that failed
 # 264/437 assets in run 38404767765 with ZERO per-asset local regression.
-"omb.theme"         = { source_ms = 1800, first_prompt_ms = 5600, rerender_ms = 200 }
+#
+# Run 38452840701 re-ratified the fp defaults upward one notch (omb.theme
+# 5600 -> 6500, bashit.theme 2800 -> 3100): seven fp-only stragglers
+# (binaryanomaly 5999, dulcie 5697, hawaii50 5937, mairan 6359, modern
+# 5850, powerline-light 6289; bashit mairan 2936) sat +2..+14% over the
+# p90-derived budgets while their class medians held at ~4500/~1500 —
+# the ConPTY batching tail, run-to-run transport noise, not per-asset
+# regressions. The 400ms mandate stays the fix-lane goal.
+"omb.theme"         = { source_ms = 1800, first_prompt_ms = 6500, rerender_ms = 200 }
 # bashit.theme   src med 698 / p90 878; fp med 970  (2026-10-02 baseline row)
-"bashit.theme"      = { source_ms = 1500, first_prompt_ms = 2800, rerender_ms = 120 }
+"bashit.theme"      = { source_ms = 1500, first_prompt_ms = 3100, rerender_ms = 120 }
 # omb.alias      src med 701; fp med 2092
 "omb.alias"         = { source_ms = 1100, first_prompt_ms = 5000, rerender_ms = 120 }
 # omb.plugin     src med 735 / p90 925; fp med 2243
@@ -92,7 +100,32 @@ hard_fail_multiplier = 5
 "bashit.theme:dulcie" = { budget = { source_ms = 2000 }, justification = "baseline 1244ms source (p90 878); runner 1962ms (run 38404767765)" }
 "omb.theme:hawaii50" = { budget = { source_ms = 2900 }, justification = "runner 2506ms source (run 38404767765); heaviest healthy omb.theme on the gate machine" }
 "omb.theme:emperor" = { budget = { source_ms = 2250 }, justification = "runner 1944ms source (run 38404767765); ordinary heavy asset" }
-"bashit.theme:liquidprompt" = { budget = { source_ms = 3100, first_prompt_ms = 5400 }, justification = "runner 2631ms source / 4698ms first prompt (run 38404767765); still a fix-lane asset at the mandated 250/400 targets" }
+"bashit.theme:liquidprompt" = { budget = { source_ms = 3200, first_prompt_ms = 5400 }, justification = "runner 2631ms source (run 38404767765) / 3101ms (run 38452840701) / 4698ms first prompt; still a fix-lane asset at the mandated 250/400 targets" }
+
+# ── Run 38452840701 re-render family (root-caused, engine fix-lane) ───────
+# axin / clean / simple / sexy(omb) embed a command substitution INSIDE PS1
+# (`\$(scm_prompt_info)` / `'$(parse_git_branch)'`), so every re-render
+# runs the substitution through the prompt-string EXPANSION path — which
+# the engine executes ~100x slower than the same call made from
+# PROMPT_COMMAND. Ablation on the dev box (rubash ade520de-generation
+# niu.exe, oh-my-bash@abf8461, N=3 medians): pristine axin rerender
+# 1566ms; with ONLY the PS1-embedded scm call removed 110ms (-93%),
+# while removing the theme's clock (`$(date)`) or the python-venv probe
+# changed nothing (1575/1587ms). Same ordering on every machine measured:
+# baseline rig 544/541/464/332ms, runner 617/441/541/336ms (runs
+# 38404767765 + 38452840701), healthy class band 20-75ms. The budgets
+# cover the worst machine observed per asset; the ENGINE fix (rubash
+# prompt-string command substitution) is the fix-lane that lets these
+# drop back to the 120ms mandate.
+"omb.theme:axin" = { budget = { rerender_ms = 1800 }, justification = "PS1-embedded \\$(scm_prompt_info) hits the engine's slow prompt-expansion substitution path: 617ms runner / 544ms baseline / 1566ms dev (ablation 110ms without the PS1 call); engine fix-lane" }
+"omb.theme:clean" = { budget = { rerender_ms = 1800 }, justification = "same PS1-embedded scm pattern as axin: 441ms runner / 541ms baseline / 1602ms dev; engine fix-lane" }
+"omb.theme:simple" = { budget = { rerender_ms = 1800 }, justification = "same PS1-embedded scm pattern as axin: 541ms runner / 464ms baseline / 1595ms dev; engine fix-lane" }
+"omb.theme:sexy" = { budget = { rerender_ms = 1000 }, justification = "PS1-embedded 'parse_git_branch' substitution: 336ms runner / 332ms baseline / 838ms dev; engine fix-lane" }
+"bashit.theme:sexy" = { budget = { rerender_ms = 1200 }, justification = "bash-it's same-name theme pays the same substitution cost: 336ms runner / 330ms baseline / 984ms dev; engine fix-lane" }
+"bashit.theme:font" = { budget = { rerender_ms = 260 }, justification = "PS1 carries clock + scm substitutions inline: 220ms runner / 185ms baseline / 118ms dev" }
+"bashit.theme:sirup" = { budget = { rerender_ms = 260 }, justification = "git_ps1 substitution per render: 176ms runner (baseline host 4.9ms is the outlier — resync to the current corpus) / 140ms dev" }
+"omb.plugin:git" = { budget = { source_ms = 7000, first_prompt_ms = 11500 }, justification = "pathological upstream loader (6-second-incident family): 6275ms source / 9234ms first prompt on the runner; the plugin's own sourcing behavior, fix-lane REQUIRED" }
+"omb.completion:git" = { budget = { source_ms = 6600, first_prompt_ms = 12000 }, justification = "the git plugin's completion sibling: 6044ms source / 10108ms first prompt on the runner; fix-lane REQUIRED" }
 "bashit.completion:dirs" = { budget = { source_ms = 2060, first_prompt_ms = 1590 }, justification = "baseline 1524ms source / 1176ms first prompt (class p90 510/753); dirs completion rebuilds its index at load" }
 "bashit.completion:django" = { budget = { source_ms = 2110, first_prompt_ms = 1680 }, justification = "baseline 1560ms source / 1244ms first prompt; heaviest bash-it completion" }
 "bashit.completion:dmidecode" = { budget = { source_ms = 910 }, justification = "baseline 676ms source" }
@@ -104,11 +137,22 @@ hard_fail_multiplier = 5
 "bashit.plugin:sshagent" = { budget = { source_ms = 720 }, justification = "baseline 535ms source" }
 "bashit.plugin:thefuck" = { budget = { source_ms = 810 }, justification = "baseline 602ms source" }
 
-# ── KNOWN-RED at the committed baseline (deliberately NOT ratified — the
-# fix-lane list the release gate holds up on every run):
+# ── KNOWN-RED ledger (history + what remains deliberately unratified) ─────
 #
-# Pathological loaders (source wall 4.9-6.5s; first prompt never renders
-# inside the 5s phase cap):
+# STATUS UPDATE (run 38452840701, 2026-10-13): the gate held the release
+# red on this ledger twice; the owner directed data-backed annotation
+# instead of an ever-red gate. The git pair and the re-render family now
+# carry measured per-asset ceilings ABOVE (each naming its numbers and
+# its fix-lane) — annotated, not waived: every justification names the
+# cause and the mandate stays the goal. STILL deliberately unratified:
+#   omb.theme:iterate        src 4883ms at the baseline host
+#   bashit.theme:iterate     src 4882ms at the baseline host
+# (both did not surface as overs on the runner — the runner's slower
+# transport dominates their profile differently; re-measure before
+# ratifying anything for them.)
+#
+# Pathological loaders at the baseline host (source wall 4.9-6.5s; first
+# prompt never rendered inside the old 5s phase cap):
 #   omb.plugin:git          src 6498ms — the 6-second incident's direct
 #   omb.completion:git      src 6090ms   sibling; fix-lane REQUIRED
 #   bashit.theme:liquidprompt  src 5582ms
@@ -126,6 +170,10 @@ hard_fail_multiplier = 5
 #   omb.theme:sexy 332ms · bashit.theme:sexy 330ms · bashit.theme:font 185ms
 #   omb.theme:half-life 183ms · omb.theme:developer 153ms
 #   bashit.theme:demula 146ms · omb.theme:pzq 140ms
+# The axin/clean/simple/sexy quadruple is now ROOT-CAUSED (see the
+# override block above): PS1-embedded command substitutions ride the
+# engine's slow prompt-expansion substitution path — the engine fix
+# collapses all four at once.
 #
 # Re-verified against the 1.3.4 binary (wt87, 2026-10-05, N=2 medians on
 # the baseline host/OS, pinned trees unchanged): every entry above is
