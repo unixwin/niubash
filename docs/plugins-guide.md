@@ -15,7 +15,7 @@ over the spec; `niu plugin sync` reconciles the spec with the machine.
 
 | Layer | What lives there | Example |
 |---|---|---|
-| Base (wild) | Any repo or file with sourceable `*.sh` / `*.bash` | `niu plugin add rcrowley/bash-preexec`, a gist-style `spark.bash` |
+| Base (wild) | Any repo or file with sourceable `*.sh` / `*.bash` | `niu plugin add rcaloras/bash-preexec`, a gist-style `spark.bash` |
 | Managers | oh-my-bash, bash-it, bash-completion, bpkg trees | `niu plugin add oh-my-bash` |
 | Red lines | Engine has zero plugin special-cases; no shims | framework plugins fail *identically* to GNU bash when sourced bare |
 
@@ -46,7 +46,7 @@ enable = ["git", "npm"]          # manager-native selection (OMB: plugins=() rc 
 theme  = "agnoster"              # optional: OSH_THEME / BASH_IT_THEME; absent = unmanaged
 
 [[sources]]
-target = "rcrowley/bash-preexec" # wild file source: GitHub shorthand
+target = "rcaloras/bash-preexec" # wild file source: GitHub shorthand
 id     = "bash-preexec"          # bound automatically at first sync
 enable = ["bash-preexec.sh"]     # asset names are tree-relative paths
 ```
@@ -95,7 +95,7 @@ pair lazy.nvim/vim-plug use.
 | Command | Spec entry written | Notes |
 |---|---|---|
 | `niu plugin add oh-my-bash` | `target = "oh-my-bash"`, `id = "oh-my-bash"` | Catalog shorthand; installs from the official origin |
-| `niu plugin add rcrowley/bash-preexec` | `target = "rcrowley/bash-preexec"` | Wild source; id derived (`bash-preexec`) and bound at first sync |
+| `niu plugin add rcaloras/bash-preexec` | `target = "rcaloras/bash-preexec"` | Wild source; id derived (`bash-preexec`) and bound at first sync |
 | `niu plugin add bpkg --path <dir>` | `target = "<dir>"`, `kind = "bpkg"` | Adopt a tree `bpkg install` already downloaded; per-package id; npm-shaped `package.json` is refused |
 
 Every `add` lands the source **untrusted**: nothing activates until you

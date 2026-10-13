@@ -3257,6 +3257,135 @@ mod tests {
         assert!(detector.pending.is_some(), "the burst continues buffering");
     }
 
+    /// The text that reaches reedline when the pasted block `input` is fed
+    /// through the detector, reassembled from the translated events (typed
+    /// edits + flushed chunk inserts). Models the console queue the way one
+    /// WriteConsoleInput burst delivers it: every `\n` directly after a
+    /// `\r` is that CR's LF partner, queued behind it in the same write and
+    /// consumed by the CR's probe (niubash#308) — it never dispatches as
+    /// its own event; a `\n` after a `\n` is a lone Ctrl+J.
+    fn feed_paste_burst(input: &str) -> String {
+        let (mut detector, queue) = paste_detector_and_queue(Vec::new());
+        let mut reassembled = String::new();
+        fn append_event_text(event: &ReedlineEvent, out: &mut String) {
+            match event {
+                ReedlineEvent::Edit(commands) => {
+                    for command in commands {
+                        match command {
+                            EditCommand::InsertChar(c) => out.push(*c),
+                            EditCommand::InsertString(s) => out.push_str(s),
+                            other => {
+                                panic!("unexpected edit command in paste reassembly: {other:?}")
+                            }
+                        }
+                    }
+                }
+                ReedlineEvent::Multiple(events) => {
+                    for event in events {
+                        append_event_text(event, out);
+                    }
+                }
+                // The user's submit Enter is not paste data.
+                ReedlineEvent::Enter => {}
+                ReedlineEvent::None => {}
+                other => panic!("unexpected event in paste reassembly: {other:?}"),
+            }
+        }
+        let mut skip_next_lf = false;
+        for ch in input.chars() {
+            let event = match ch {
+                '\r' => {
+                    queue.lock().expect("test queue").push_back(lf_key_event());
+                    skip_next_lf = true;
+                    detector.parse_event(cr())
+                }
+                '\n' => {
+                    if skip_next_lf {
+                        skip_next_lf = false;
+                        continue;
+                    }
+                    detector.parse_event(lf())
+                }
+                _ => {
+                    skip_next_lf = false;
+                    detector.parse_event(paste_key(
+                        crossterm29::event::KeyCode::Char(ch),
+                        crossterm29::event::KeyModifiers::NONE,
+                    ))
+                }
+            };
+            append_event_text(&event, &mut reassembled);
+        }
+        // The burst settles; the user's Enter flushes the chunk and submits.
+        expire_burst(&mut detector);
+        let event = detector.parse_event(cr());
+        match &event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(events.len(), 2, "flush insert then submit: {event:?}");
+                assert!(matches!(events[1], ReedlineEvent::Enter));
+            }
+            other => panic!("expected flush + submit, got {other:?}"),
+        }
+        append_event_text(&event, &mut reassembled);
+        reassembled
+    }
+
+    /// niubash#291: the line after an EMPTY line in a pasted chunk keeps
+    /// every byte. The exact reported burst — `echo one\r\n\r\necho two\r
+    /// \n\n`, then a separate submit Enter — must reach reedline byte for
+    /// byte: whatever the chunk's line handling does at the `\n\n`
+    /// boundary, reassembly may not lose the `e` of `echo two`.
+    #[test]
+    fn paste_chunk_reassembles_empty_line_paste_byte_exact() {
+        let input = "echo one\r\n\r\necho two\r\n\n";
+        let reassembled = feed_paste_burst(input);
+        assert_eq!(
+            reassembled,
+            input.replace("\r\n", "\n"),
+            "the pasted block lost or altered bytes at the empty-line boundary"
+        );
+    }
+
+    /// Two consecutive empty lines inside the chunk: both boundaries stay
+    /// byte-exact (no break lost, none doubled).
+    #[test]
+    fn paste_chunk_reassembles_two_consecutive_empty_lines_byte_exact() {
+        let input = "echo one\r\n\r\n\r\necho two\r\n\n";
+        let reassembled = feed_paste_burst(input);
+        assert_eq!(
+            reassembled,
+            input.replace("\r\n", "\n"),
+            "the pasted block lost or altered bytes across two empty lines"
+        );
+    }
+
+    /// An indented line right after an empty line: leading spaces are data,
+    /// not a swallow-into-the-previous-line cue.
+    #[test]
+    fn paste_chunk_reassembles_indented_line_after_empty_line_byte_exact() {
+        let input = "echo one\r\n\r\n  echo two\r\n\n";
+        let reassembled = feed_paste_burst(input);
+        assert_eq!(
+            reassembled,
+            input.replace("\r\n", "\n"),
+            "the indented line after the empty line lost or altered bytes"
+        );
+    }
+
+    /// Control: the same shape WITHOUT the empty line (pure CRLF block) —
+    /// guards that whatever the empty-line handling does, the plain block
+    /// stays byte-exact too.
+    #[test]
+    fn paste_chunk_reassembles_crlf_block_without_empty_lines_byte_exact() {
+        let input = "echo one\r\necho two\r\n";
+        let reassembled = feed_paste_burst(input);
+        assert_eq!(
+            reassembled,
+            input.replace("\r\n", "\n"),
+            "the plain CRLF block lost or altered bytes"
+        );
+    }
+
     /// niubash#308 adjacency: typeahead (not an LF partner) queued behind a
     /// bare CR that lands on a pending chunk. The chunk flushes and submits,
     /// and the typeahead key is pushed back so it lands, in order, in the

@@ -59,10 +59,37 @@ Name: "path"; Description: "Add Niubash to my user PATH"; Flags: checkedonce
 Name: "wtprofile"; Description: "Add or update the Windows Terminal profile"; Flags: checkedonce
 ; niubash#211: the desktop shortcut exists so the WT form has something to
 ; upgrade; default checked — the WT experience is the owner-preferred default.
+; niubash#313 (R3) disclosure: this task name is new in 1.4.x. Silent installs
+; and upgrades (/SILENT, /VERYSILENT) never show the task page, and Inno's
+; UsePreviousTasks default has no saved selection for a NEW task name — so
+; silent upgrades of 1.3.x machines run this task with its default (checked)
+; state and GROW a desktop icon without being asked. Owner ruling: the
+; behavior is intended, and it is disclosed in the release notes
+; (CHANGELOG Unreleased); interactive installs keep remembering an unchecked
+; choice.
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: checkedonce
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; niubash#313 (R4): [Files] overwrites but never removes — a file an earlier
+; build shipped and the current payload retired survives every upgrade (and,
+; sitting in {app} after uninstall, keeps the directory alive). Sweep the
+; known retired names before extraction; new retirements add a line here.
+[InstallDelete]
+; The reverted dual-name build (071d16e) shipped niu.exe AND niubash.exe; the
+; revert (0999540) stopped shipping the second binary but never removed it
+; from upgraded machines.
+Type: files; Name: "{app}\niubash.exe"
+; Self-update-era stray rollback backups observed on real machines; dead
+; weight once a full installer payload replaces the tree.
+Type: files; Name: "{app}\niu.exe.old-*"
+
+; niubash#313 (R4): the same strays must not survive uninstall — processed
+; after the uninstall log replay, so they cannot pin {app} behind.
+[UninstallDelete]
+Type: files; Name: "{app}\niubash.exe"
+Type: files; Name: "{app}\niu.exe.old-*"
 
 ; niubash#211: these are the conhost-baseline forms (direct niu.exe — what
 ; Win10 hosts with conhost). When WT is detected after install, the
@@ -171,23 +198,36 @@ end;
 procedure RemoveAppDirFromUserPath();
 var
   PathValue: string;
+  NewValue: string;
   AppDir: string;
+  WinuxCmdBinDir: string;
 begin
   AppDir := ExpandConstant('{app}');
+  // niubash#313 (R1): wpm's install-time `links rebuild` puts
+  // {app}\winuxcmd\bin on the user PATH, but the uninstall only removed
+  // {app} — every uninstall left that dangling entry behind. Sweep both.
+  WinuxCmdBinDir := AppDir + '\winuxcmd\bin';
+
   if not RegQueryStringValue(HKEY_CURRENT_USER, NiubashEnvironmentKey, NiubashPathValueName, PathValue) then
   begin
     Exit;
   end;
 
-  StringChangeEx(PathValue, AppDir + ';', '', True);
-  StringChangeEx(PathValue, ';' + AppDir, '', True);
-  if SameText(PathValue, AppDir) then
+  NewValue := PathValue;
+  StringChangeEx(NewValue, WinuxCmdBinDir + ';', '', True);
+  StringChangeEx(NewValue, ';' + WinuxCmdBinDir, '', True);
+  StringChangeEx(NewValue, AppDir + ';', '', True);
+  StringChangeEx(NewValue, ';' + AppDir, '', True);
+  if SameText(NewValue, AppDir) or SameText(NewValue, WinuxCmdBinDir) then
   begin
-    PathValue := '';
+    NewValue := '';
   end;
 
-  RegWriteExpandStringValue(HKEY_CURRENT_USER, NiubashEnvironmentKey, NiubashPathValueName, PathValue);
-  BroadcastEnvironmentChange();
+  if NewValue <> PathValue then
+  begin
+    RegWriteExpandStringValue(HKEY_CURRENT_USER, NiubashEnvironmentKey, NiubashPathValueName, NewValue);
+    BroadcastEnvironmentChange();
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

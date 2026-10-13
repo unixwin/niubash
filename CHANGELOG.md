@@ -40,6 +40,96 @@ All notable changes to Niubash are documented in this file.
   swept console input records: the sweeper's self-heal path drains the
   buffer before writing it back, so a record can no longer be reinjected
   twice (once by the self-heal, once by disarm; niubash#287).
+- The plugin trust gate now runs at runtime, not only at trust time
+  (niubash#297): `niu plugin sync` and `plugin list` re-verify every
+  trusted source against its lockfile pin, so a tree modified after
+  `trust` reads `drift` (never a lying `unchanged`) and
+  `degraded=true` with the drift reason in `--json` — the tree stops
+  contributing assets until it is repaired. sync records drifted ids in
+  `sources/drifted-sources.txt`, and the managed rc blocks carry a static
+  guard that prints the warning at every startup (the rc stays static
+  text; no hashing in it). `plugin restore` wording is honest about
+  rebuilding from the pin ("rebuilt from the lockfile pin", not "tree
+  matches"). bash-it's `enabled/` entries — the one legitimate tree
+  mutation `niu plugin enable` itself makes — are transparent to the pin,
+  while an injected `enabled/` file with unpinned content still trips
+  both `verify` and `trust`.
+- `niu plugin mirror set http://…` is refused without an explicit
+  `--allow-plaintext` confirm (niubash#298): a plaintext mirror ships
+  every git fetch unencrypted and unauthenticated, and the confirm still
+  prints the standing warning. The first fetch of an unpinned non-catalog
+  origin is now flagged for what it is: `plugin add` prints a
+  "NOT integrity-verified" warning and the record carries
+  `first_fetch_verified: false` (visible in `plugin list --json`); a
+  `--checksum` pin or a curated catalog origin marks it verified.
+- `niu plugin clean` reports every orphan directory under `sources/` the
+  registry does not claim (niubash#299) instead of silently keeping
+  manager-shaped ones and ignoring the rest; `--orphans` is the explicit
+  confirm that deletes them.
+- `niu plugin add <path>` positional form is first-class (niubash#300):
+  a bare local directory snapshot-copies in, a single `.sh`/`.bash`
+  file becomes its own one-file wild source, a nonexistent path fails
+  honestly (instead of a baffling `git clone` status 128 after the
+  trust-boundary banner), and the help documents the path and
+  `file://` forms.
+
+- The `niu plugin` help and doc examples no longer point at a dead repo:
+  the wild-GitHub-plugin example was `niu plugin add
+  rcrowley/bash-preexec`, but rcrowley/bash-preexec 404s (the project
+  moved to rcaloras/bash-preexec years ago), so a copy-paste of the
+  example failed. Every live reference — help text, the plugins.toml spec
+  example, the plugins guide, the wild-source fixture — now names
+  rcaloras/bash-preexec, and the example repo was verified cloneable
+  (niubash#301).
+
+- The config subsystem honors `HOME` isolation (niubash#302): every niu
+  subsystem — config.toml, mirrors.toml, the plugin rc, doctor, prompt,
+  the setup wizard — resolves the home directory through one shared
+  resolver in which an explicit `HOME` environment override wins on every
+  platform. Before, the Windows resolver ranked `USERPROFILE` first, so a
+  HOME-only sandbox (tests, CI, portable setups) silently read and wrote
+  the real profile. A default Windows session (`HOME` unset) resolves
+  exactly where it always has, and the classic Unix `HOME`-first
+  convention is unchanged.
+
+- The freshly-rendered mirrors.toml template no longer recommends
+  hub.fastgit.xyz (dead since ~2021; niubash#303). The second community
+  example is now ghproxy.net, verified live at edit time with a real
+  `git clone` through the `insteadOf` rewrite (gitclone.com, the first
+  example, re-verified the same way). The examples stay comments marked
+  UNSUPPORTED — they may die at any moment and are the user's to verify.
+
+- `.niubashrc` rewrites are atomic (niubash#304): every managed-block
+  rewrite (`niu plugin enable/disable/sync`) and the setup wizard's rc
+  write now stage the new content in a same-directory temp file and swap
+  it in with a single replace-rename (`MoveFileExW
+  MOVEFILE_REPLACE_EXISTING` on Windows, `rename(2)` elsewhere). The
+  former truncate-in-place write and the wizard's former
+  remove-then-rename left windows where a concurrent reader — a pipe or
+  `sed` run against the rc — saw the file empty, partial, or briefly
+  absent; a reader now always observes a complete old or new generation.
+
+- The installer cleans up after itself (niubash#313). Uninstall now also
+  removes the `{app}\winuxcmd\bin` entry from the user `PATH` — the
+  install-time `wpm links rebuild` adds it, but the uninstaller only ever
+  removed `{app}`, leaving a dangling PATH entry after every uninstall.
+  The installer gained `[InstallDelete]`/`[UninstallDelete]` sweeps for
+  files earlier builds shipped and the current payload retired (the
+  reverted dual-name build's `niubash.exe`, stray self-update
+  `niu.exe.old-*` backups), which previously survived upgrade AND
+  uninstall on real machines.
+
+### Changed
+
+- Installer disclosure (niubash#313): the "Create a desktop shortcut"
+  task is new in 1.4.x and default-checked. Silent installs and upgrades
+  (`/SILENT`, `/VERYSILENT`) never show the task page, and Inno has no
+  saved selection for a new task name — so a silent upgrade of a 1.3.x
+  machine runs the task with its default state and grows a desktop icon
+  (rewritten in place to the Windows Terminal form by the shortcut step)
+  without ever asking. Owner ruling: the behavior is intended; it is
+  disclosed here and in the installer source. Interactive installs keep
+  remembering an unchecked choice.
 
 ## [1.4.0] - 2026-10-10
 

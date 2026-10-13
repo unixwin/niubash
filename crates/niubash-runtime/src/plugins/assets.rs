@@ -307,6 +307,12 @@ fn render_block(record: &SourceRecord, model: &SelectionModel, state: &BlockStat
             body.push_str(&format!("if [ -r \"{path}\" ]; then\n  . \"{path}\"\nfi\n"));
         }
     }
+    // Drift guard (niubash#297, deliberately STATIC text): `niu plugin sync`
+    // lists drifted source ids in drifted-sources.txt under the sources
+    // root; the block prints the warning at startup. No hashing here — the
+    // rc stays static and cacheable, the ledger file is the only dynamic
+    // channel.
+    body.push_str(&drift_guard_lines(&record.id));
     let loader = adapter.loader_snippet(record);
     if !loader.is_empty() {
         body.push_str(&loader);
@@ -316,6 +322,20 @@ fn render_block(record: &SourceRecord, model: &SelectionModel, state: &BlockStat
         begin_marker(&record.id),
         body,
         end_marker(&record.id)
+    )
+}
+
+/// The static drift-guard snippet for one source's managed block: warn at
+/// startup when `niu plugin sync` recorded this id in the drift ledger.
+fn drift_guard_lines(id: &str) -> String {
+    format!(
+        "# drift guard (static): `niu plugin sync` lists drifted ids in drifted-sources.txt\n\
+         _niu_drift=\"${{NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}}/drifted-sources.txt\"\n\
+         if [ -s \"$_niu_drift\" ] && command -v grep >/dev/null 2>&1 && grep -qx {} \"$_niu_drift\" 2>/dev/null; then\n\
+         \x20 echo \"niubash plugin: source {id} no longer matches its lockfile pin — run: niu plugin source verify {id}; repair with: niu plugin restore {id}\" >&2\n\
+         fi\n\
+         unset _niu_drift\n",
+        shell_quote(id)
     )
 }
 
@@ -763,7 +783,10 @@ fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(P
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, text)?;
+    // niubash#304: the rewrite swaps in through a same-dir temp + replace
+    // rename, so a concurrent reader (a `sed`/pipe run against the rc)
+    // never observes the truncate-in-place window a bare fs::write opens.
+    crate::path_utils::write_file_atomic(&path, text.as_bytes())?;
     Ok((path, consumed))
 }
 
@@ -836,7 +859,8 @@ fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
     let mut joined = rewritten.join(eol);
     joined.push_str(eol);
     backup_rc();
-    fs::write(&path, joined)?;
+    // niubash#304: same atomic swap as the insert path — no truncate window.
+    crate::path_utils::write_file_atomic(&path, joined.as_bytes())?;
     Ok(spans.len())
 }
 
@@ -2660,5 +2684,81 @@ mod tests {
 
         let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// niubash#304: while the managed-block writer rewrites the rc, a
+    /// concurrent reader must never observe an empty/missing window. The
+    /// rewrite swaps the file in whole (same-dir temp + replace rename;
+    /// Windows MoveFileExW REPLACE_EXISTING), so every read either fails
+    /// to race at all or lands on a complete old/new generation carrying
+    /// the sentinel body. A truncate-in-place writer would strand reads
+    /// with an empty/partial body; the wizard's former
+    /// remove-then-rename would strand them with NotFound.
+    #[test]
+    fn concurrent_reader_never_sees_an_empty_rc_window() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _sandbox = sandbox("atomic-rc-reader");
+        let rc = rc_file();
+        let filler = "# user filler line padding the rc body\n".repeat(4000);
+        fs::write(&rc, format!("{filler}SENTINEL-RC-BODY-END\n")).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let violations = Arc::new(Mutex::new(Vec::new()));
+        let reader = {
+            let stop = Arc::clone(&stop);
+            let violations = Arc::clone(&violations);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    match fs::read_to_string(&rc) {
+                        Ok(text) => {
+                            if text.is_empty() || !text.contains("SENTINEL-RC-BODY-END") {
+                                violations.lock().unwrap().push(format!(
+                                    "window: len={} sentinel={} head={:?}",
+                                    text.len(),
+                                    text.contains("SENTINEL-RC-BODY-END"),
+                                    text.chars().take(40).collect::<String>(),
+                                ));
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            violations
+                                .lock()
+                                .unwrap()
+                                .push("window: rc momentarily absent".to_string());
+                        }
+                        Err(_) => {}
+                    }
+                }
+            })
+        };
+
+        for generation in 0..120 {
+            let id = format!("gen{generation}");
+            let block = format!(
+                "{begin}\n. \"$HOME/.niubash/sources/{id}.sh\"\n{end}\n",
+                begin = begin_marker(&id),
+                end = end_marker(&id),
+            );
+            let (path, _) = write_managed_block(&begin_marker(&id), &end_marker(&id), &block)
+                .expect("managed rewrite");
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains("SENTINEL-RC-BODY-END"),
+                "writer's own generation {generation} lost the user body"
+            );
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+        let violations = violations.lock().unwrap();
+        assert!(
+            violations.is_empty(),
+            "concurrent readers observed an empty/missing rc window: {:#?}",
+            *violations
+        );
+        let _ = fs::remove_dir_all(&_sandbox.temp);
     }
 }

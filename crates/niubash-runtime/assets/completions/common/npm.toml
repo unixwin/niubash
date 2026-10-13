@@ -1,0 +1,416 @@
+# Issue #305: static completion table for npm (subcommands + common flags).
+# Hand-curated from the documented CLI; no external completion script is
+# executed. Same schema as the embedded applet definitions.
+command = "npm"
+description = "Node.js package manager"
+
+[[flags]]
+short = "-g"
+long = "--global"
+description = "operate in global mode"
+
+[[flags]]
+long = "--save"
+description = "save the installed package to dependencies"
+
+[[flags]]
+short = "-D"
+long = "--save-dev"
+description = "save the installed package to devDependencies"
+
+[[flags]]
+short = "-P"
+long = "--save-prod"
+description = "save the installed package to dependencies"
+
+[[flags]]
+short = "-O"
+long = "--save-optional"
+description = "save the installed package to optionalDependencies"
+
+[[flags]]
+short = "-E"
+long = "--save-exact"
+description = "save the exact version instead of a range"
+
+[[flags]]
+long = "--no-save"
+description = "do not save the installed package to the manifest"
+
+[[flags]]
+long = "--dry-run"
+description = "report what would have happened without doing it"
+
+[[flags]]
+long = "--force"
+description = "force the operation despite conflicts"
+
+[[flags]]
+long = "--registry"
+description = "use the given registry"
+takes_value = true
+
+[[flags]]
+long = "--prefix"
+description = "the directory prefix for the operation"
+takes_value = true
+values_from = "path"
+
+[[flags]]
+long = "--workspaces"
+description = "run the command in the context of all workspaces"
+
+[[flags]]
+short = "-w"
+long = "--workspace"
+description = "run the command in the given workspace"
+takes_value = true
+
+[[flags]]
+long = "--json"
+description = "output JSON"
+
+[[flags]]
+long = "--long"
+description = "show extended information"
+
+[[flags]]
+long = "--parseable"
+description = "output parseable results"
+
+[[flags]]
+long = "--silent"
+description = "suppress output"
+
+[[flags]]
+short = "-v"
+long = "--version"
+description = "print the npm version"
+
+[[subcommands]]
+name = "install"
+description = "install a package and its dependencies"
+
+[[subcommands.flags]]
+short = "-g"
+long = "--global"
+description = "operate in global mode"
+
+[[subcommands.flags]]
+short = "-D"
+long = "--save-dev"
+description = "save to devDependencies"
+
+[[subcommands.flags]]
+short = "-P"
+long = "--save-prod"
+description = "save to dependencies"
+
+[[subcommands.flags]]
+short = "-O"
+long = "--save-optional"
+description = "save to optionalDependencies"
+
+[[subcommands.flags]]
+short = "-E"
+long = "--save-exact"
+description = "save the exact version"
+
+[[subcommands.flags]]
+long = "--no-save"
+description = "do not save to the manifest"
+
+[[subcommands.flags]]
+long = "--no-package-lock"
+description = "do not read or write the package-lock file"
+
+[[subcommands.flags]]
+long = "--dry-run"
+description = "report what would have happened"
+
+[[subcommands.flags]]
+long = "--audit"
+description = "run an audit after installing"
+
+[[subcommands.flags]]
+long = "--force"
+description = "force the installation despite conflicts"
+
+[[subcommands.flags]]
+short = "-w"
+long = "--workspace"
+description = "install into the given workspace"
+takes_value = true
+
+[[subcommands]]
+name = "add"
+description = "alias for install"
+
+[[subcommands]]
+name = "ci"
+description = "install exactly from the package-lock file"
+
+[[subcommands]]
+name = "uninstall"
+description = "remove a package"
+
+[[subcommands]]
+name = "rm"
+description = "alias for uninstall"
+
+[[subcommands]]
+name = "un"
+description = "alias for uninstall"
+
+[[subcommands]]
+name = "run"
+description = "run an arbitrary package script"
+
+[[subcommands]]
+name = "run-script"
+description = "run an arbitrary package script"
+
+[[subcommands.flags]]
+long = "--if-present"
+description = "do not fail when the script is undefined"
+
+[[subcommands.flags]]
+long = "--silent"
+description = "suppress output of the npm command itself"
+
+[[subcommands.flags]]
+long = "--workspaces"
+description = "run the script in all workspaces"
+
+[[subcommands]]
+name = "test"
+description = "run the package's test script"
+
+[[subcommands]]
+name = "t"
+description = "alias for test"
+
+[[subcommands]]
+name = "start"
+description = "run the package's start script"
+
+[[subcommands]]
+name = "stop"
+description = "run the package's stop script"
+
+[[subcommands]]
+name = "restart"
+description = "run the package's restart script"
+
+[[subcommands]]
+name = "init"
+description = "create a package.json file"
+
+[[subcommands.flags]]
+short = "-y"
+long = "--yes"
+description = "accept the defaults without asking"
+
+[[subcommands.flags]]
+long = "--scope"
+description = "create a scoped package"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-w"
+long = "--workspace"
+description = "initialize the given workspace"
+takes_value = true
+
+[[subcommands]]
+name = "publish"
+description = "publish a package to the registry"
+
+[[subcommands.flags]]
+long = "--access"
+description = "access level for the published package"
+takes_value = true
+values = ["public", "restricted"]
+
+[[subcommands.flags]]
+long = "--tag"
+description = "register the package under the given dist-tag"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--dry-run"
+description = "report what would have been published"
+
+[[subcommands.flags]]
+long = "--force"
+description = "publish even if the version already exists"
+
+[[subcommands.flags]]
+long = "--registry"
+description = "use the given registry"
+takes_value = true
+
+[[subcommands]]
+name = "pack"
+description = "create a tarball from a package"
+
+[[subcommands.flags]]
+long = "--dry-run"
+description = "report the tarball contents without writing"
+
+[[subcommands]]
+name = "login"
+description = "log in to the registry"
+
+[[subcommands]]
+name = "adduser"
+description = "add a registry user account"
+
+[[subcommands]]
+name = "logout"
+description = "log out of the registry"
+
+[[subcommands]]
+name = "whoami"
+description = "print the logged-in user name"
+
+[[subcommands]]
+name = "update"
+description = "update packages to their latest versions"
+
+[[subcommands.flags]]
+short = "-g"
+long = "--global"
+description = "update global packages"
+
+[[subcommands.flags]]
+short = "-D"
+long = "--save-dev"
+description = "update devDependencies"
+
+[[subcommands]]
+name = "up"
+description = "alias for update"
+
+[[subcommands]]
+name = "outdated"
+description = "check for outdated packages"
+
+[[subcommands.flags]]
+long = "--long"
+description = "show extended information"
+
+[[subcommands.flags]]
+long = "--json"
+description = "output JSON"
+
+[[subcommands.flags]]
+short = "-g"
+long = "--global"
+description = "check global packages"
+
+[[subcommands]]
+name = "ls"
+description = "list installed packages"
+
+[[subcommands]]
+name = "list"
+description = "list installed packages"
+
+[[subcommands.flags]]
+short = "-g"
+long = "--global"
+description = "list global packages"
+
+[[subcommands.flags]]
+long = "--depth"
+description = "dependency-tree depth to display"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--all"
+description = "show all outdated/installed packages"
+
+[[subcommands.flags]]
+long = "--link"
+description = "list linked packages"
+
+[[subcommands]]
+name = "audit"
+description = "run a security audit"
+
+[[subcommands.flags]]
+long = "--json"
+description = "output JSON"
+
+[[subcommands.flags]]
+long = "--audit-level"
+description = "only fail for findings at or above the given level"
+takes_value = true
+values = ["info", "low", "moderate", "high", "critical", "none"]
+
+[[subcommands]]
+name = "fund"
+description = "funding information for dependencies"
+
+[[subcommands]]
+name = "config"
+description = "manage the npm configuration"
+
+[[subcommands.flags]]
+short = "-g"
+long = "--global"
+description = "operate on the global config"
+
+[[subcommands.flags]]
+long = "--json"
+description = "output JSON"
+
+[[subcommands]]
+name = "exec"
+description = "run a command from a local or remote package"
+
+[[subcommands.flags]]
+long = "--call"
+description = "run the given shell command with the package binaries"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--workspaces"
+description = "run in the context of all workspaces"
+
+[[subcommands]]
+name = "cache"
+description = "manage the package cache"
+
+[[subcommands]]
+name = "link"
+description = "symlink a package folder"
+
+[[subcommands]]
+name = "rebuild"
+description = "rebuild a package"
+
+[[subcommands]]
+name = "prune"
+description = "remove extraneous packages"
+
+[[subcommands]]
+name = "view"
+description = "view registry information for a package"
+
+[[subcommands]]
+name = "info"
+description = "alias for view"
+
+[[subcommands]]
+name = "docs"
+description = "open a package's documentation page"
+
+[[subcommands]]
+name = "repo"
+description = "open a package's repository page"
+
+[[subcommands]]
+name = "help"
+description = "get help on npm"

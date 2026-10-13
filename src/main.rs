@@ -1554,14 +1554,27 @@ fn run_plugin_discover_command(args: &[String]) -> anyhow::Result<()> {
         } else {
             String::new()
         };
+        // niubash#297: a drifted trusted tree is named as such, with the way
+        // out — not folded into the generic degraded marker.
+        let drift_hint = if status.degraded_reason.as_deref()
+            == Some(niubash_runtime::plugins::sources::DEGRADED_DRIFTED)
+        {
+            niubash_runtime::text_style::yellow(&format!(
+                "\n     tree drifted from the lockfile pin — review: niu plugin source verify {}; repair: niu plugin restore {}",
+                status.record.id, status.record.id
+            ))
+        } else {
+            String::new()
+        };
         println!(
-            "  {} {:<12} {:<12} {}{}{}",
+            "  {} {:<12} {:<12} {}{}{}{}",
             marker,
             status.record.id,
             status.record.version,
             status.record.license,
             assets,
-            gutted_hint
+            gutted_hint,
+            drift_hint
         );
     }
     println!();
@@ -1678,7 +1691,10 @@ fn print_plugin_source_usage() {
     println!("Commands:");
     println!("  list [--json]           List installed sources and their state");
     println!("  add <id|url|path> [--ref <ref>] [--checksum <sha256>]");
-    println!("                          Install a source tree (untrusted)");
+    println!("                          Install a source tree (untrusted). <path> is a");
+    println!("                          local directory or .sh/.bash file — snapshot-");
+    println!("                          copied in; file:///<path> clones via git");
+    println!("                          instead (niubash#300)");
     println!("  trust <id>              Review and activate a source's assets");
     println!("  remove <id>             Uninstall a source tree and its record");
     println!("  update [<id>] [--ref <ref>] [--checksum <sha256>]");
@@ -1800,10 +1816,27 @@ fn parse_plugin_source_args(args: &[String]) -> anyhow::Result<PluginSourceArgs>
     Ok(parsed)
 }
 
+/// Does this target spell a local path (as opposed to a git URL, a GitHub
+/// shorthand, or a bare catalog/recipe id)? Windows drive forms, separator
+/// forms, cwd-relative forms, and anything that exists on disk count.
+fn looks_like_local_path(target: &str) -> bool {
+    if target.contains("://") || target.starts_with("git@") {
+        return false;
+    }
+    let path = std::path::Path::new(target);
+    target.starts_with("./")
+        || target.starts_with("../")
+        || target.starts_with('/')
+        || target.contains('\\')
+        || target.contains(':')
+        || path.is_dir()
+        || path.is_file()
+}
+
 /// Resolve CLI target/flags into an install request. The first positional
 /// may be an adapter id (origin then comes from --url/--path), or the origin
-/// itself (git url / local directory), with the adapter auto-detected from
-/// the fetched tree's layout.
+/// itself (git url / local directory / local file), with the adapter
+/// auto-detected from the fetched tree's layout.
 fn resolve_source_install_request(args: PluginSourceArgs) -> anyhow::Result<PluginSourceRequest> {
     let explicit_origin = args.url.clone().or_else(|| args.path.clone());
     let (adapter, origin) = match (&args.target, &explicit_origin) {
@@ -1820,9 +1853,15 @@ fn resolve_source_install_request(args: PluginSourceArgs) -> anyhow::Result<Plug
             (Some(target.clone()), origin.clone())
         }
         (Some(target), None) => {
+            if target.trim().is_empty() {
+                anyhow::bail!(
+                    "plugin source add requires <id|owner/repo|url|path> \
+                     (an empty target resolves to nothing)"
+                );
+            }
             // The positional is the origin (git url / GitHub shorthand /
-            // local directory); a bare adapter id resolves to its catalog
-            // origin so `niu plugin add oh-my-bash` just works.
+            // local directory or file); a bare adapter id resolves to its
+            // catalog origin so `niu plugin add oh-my-bash` just works.
             if niubash_runtime::plugins::sources::adapter_for(target).is_some()
                 && !std::path::Path::new(target).exists()
                 && !target.contains('/')
@@ -1842,6 +1881,39 @@ fn resolve_source_install_request(args: PluginSourceArgs) -> anyhow::Result<Plug
                 anyhow::bail!(
                     "source '{target}' needs an origin: add --url <git-url> or --path <dir>"
                 );
+            }
+            // niubash#300: a bare LOCAL PATH is a first-class form —
+            // snapshot-copied in like `file://`, no git semantics. One that
+            // does not exist must fail honestly here, not as a baffling
+            // `git clone` status 128 after the trust-boundary banner —
+            // unless the spec already declares that spelling, which is the
+            // more accurate diagnosis (the stranded-declaration refusal
+            // with the `sync --prune` hint, niubash#174/#176) and fires
+            // before any fetch in the add flow.
+            if looks_like_local_path(target) && !std::path::Path::new(target).exists() {
+                let stable = stable_local_target(target);
+                let declared = niubash_runtime::plugins::spec::load_spec()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|spec| {
+                        // The user's raw spelling (the shape a stranded
+                        // declaration carries) and the stabilized form
+                        // both count as "already declared".
+                        niubash_runtime::plugins::sync::declared_entry(&spec, target, None, &stable)
+                            .is_some()
+                            || niubash_runtime::plugins::sync::declared_entry(
+                                &spec, &stable, None, &stable,
+                            )
+                            .is_some()
+                    });
+                if !declared {
+                    anyhow::bail!(
+                        "local path '{target}' does not exist — install a directory or a \
+                         .sh/.bash file that is present on disk, a git url, or a catalog id \
+                         ({} or owner/repo)",
+                        supported_sources_hint()
+                    );
+                }
             }
             (None, target.clone())
         }
@@ -1944,9 +2016,37 @@ fn run_plugin_source_add_command(args: &[String]) -> anyhow::Result<()> {
         "license {} | tree sha256 {}",
         record.license, record.checksum_sha256
     );
+    print_first_fetch_warning(&record);
     println!("the source is untrusted; review it, then run:");
     println!("  niu plugin source trust {}", record.id);
     Ok(())
+}
+
+/// niubash#298: the checksum pin covers every fetch AFTER the first — the
+/// first delivery itself only had one when the user pinned `--checksum` or
+/// the origin is a curated catalog entry. A remote unpinned non-catalog
+/// first fetch is warned about here, and the state stays recorded in the
+/// registry (`first_fetch_verified`, visible in `plugin list --json`).
+/// Local snapshots have no network delivery, so they are recorded but not
+/// nagged about.
+fn print_first_fetch_warning(record: &niubash_runtime::plugins::sources::SourceRecord) {
+    if record.first_fetch_verified {
+        return;
+    }
+    let remote = record.url.contains("://") || record.url.starts_with("git@");
+    if !remote {
+        return;
+    }
+    println!(
+        "  {}",
+        niubash_runtime::text_style::yellow(&format!(
+            "first fetch of '{}' was NOT integrity-verified (no --checksum pin, non-catalog \
+             origin): the recorded checksum now locks this exact tree — review it with \
+             `niu plugin source verify {}`; a plaintext/mirrored transport could have \
+             rewritten the first delivery",
+            record.url, record.id
+        ))
+    );
 }
 
 fn run_plugin_source_list_command(args: &[String]) -> anyhow::Result<()> {
@@ -1969,10 +2069,15 @@ fn run_plugin_source_list_command(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     for status in statuses {
-        let marker = match status.state.as_str() {
-            "ready" => niubash_runtime::text_style::green("ready"),
-            "untrusted" => niubash_runtime::text_style::yellow("untrusted"),
-            _ => niubash_runtime::text_style::red("degraded (native fallback active)"),
+        let marker = match status.degraded_reason.as_deref() {
+            Some(reason) if reason == niubash_runtime::plugins::sources::DEGRADED_DRIFTED => {
+                niubash_runtime::text_style::red("drifted (pin mismatch)")
+            }
+            Some(_) => niubash_runtime::text_style::red("degraded (native fallback active)"),
+            None => match status.state.as_str() {
+                "ready" => niubash_runtime::text_style::green("ready"),
+                _ => niubash_runtime::text_style::yellow("untrusted"),
+            },
         };
         let assets = status
             .asset_count
@@ -1993,6 +2098,19 @@ fn run_plugin_source_list_command(args: &[String]) -> anyhow::Result<()> {
             niubash_runtime::text_style::dim(&assets),
             niubash_runtime::text_style::dim(&status.record.path.display().to_string())
         );
+        // niubash#297: the drift state must come with its way out, spelled
+        // the same way sync names it.
+        if status.degraded_reason.as_deref()
+            == Some(niubash_runtime::plugins::sources::DEGRADED_DRIFTED)
+        {
+            println!(
+                "     {}",
+                niubash_runtime::text_style::yellow(&format!(
+                    "tree no longer matches the lockfile pin — review: niu plugin source verify {}; repair: niu plugin restore {}",
+                    status.record.id, status.record.id
+                ))
+            );
+        }
     }
     Ok(())
 }
@@ -2394,6 +2512,7 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
                     "license {} | tree sha256 {}",
                     record.license, record.checksum_sha256
                 );
+                print_first_fetch_warning(&record);
                 if let Some(commit) = &record.commit_sha {
                     println!(
                         "pinned commit {} ({})",
@@ -2839,8 +2958,24 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "set" => {
-            let Some(target) = args.get(1) else {
-                anyhow::bail!("plugin mirror set requires a mirror url, or 'none' for direct")
+            let mut plaintext = false;
+            let mut target: Option<&String> = None;
+            for arg in &args[1..] {
+                if arg == "--allow-plaintext" {
+                    plaintext = true;
+                } else if arg.starts_with('-') {
+                    anyhow::bail!("unknown plugin mirror set option '{arg}'");
+                } else if target.is_some() {
+                    anyhow::bail!("plugin mirror set accepts at most one mirror url");
+                } else {
+                    target = Some(arg);
+                }
+            }
+            let Some(target) = target else {
+                anyhow::bail!(
+                    "plugin mirror set requires a mirror url, or 'none' for direct \
+                     (--allow-plaintext confirms an http:// mirror)"
+                )
             };
             if target == "none" {
                 mirrors::set_direct()?;
@@ -2849,6 +2984,20 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
                     niubash_runtime::text_style::green("Set:")
                 );
                 return Ok(());
+            }
+            // niubash#298: a plaintext http:// mirror ships every git fetch
+            // (credentials, cookies, tree contents) unencrypted and
+            // unauthenticated — setting one requires the explicit
+            // --allow-plaintext confirm, in interactive and scripted runs
+            // alike.
+            if target.to_ascii_lowercase().starts_with("http://") && !plaintext {
+                anyhow::bail!(
+                    "refusing to set a plaintext http:// mirror without confirmation: \
+                     '{target}' ships every fetch unencrypted (and unauthenticated — a \
+                     network actor can rewrite the trees git downloads). Re-run with \
+                     `niu plugin mirror set {target} --allow-plaintext` if you accept \
+                     this on a trusted network; prefer an https:// mirror."
+                );
             }
             let base = mirrors::set_custom_git_mirror(target)?;
             println!(
@@ -2868,6 +3017,16 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
                     "community mirrors may disappear at any time — verify the one you pasted"
                 )
             );
+            if plaintext && target.to_ascii_lowercase().starts_with("http://") {
+                println!(
+                    "  {}",
+                    niubash_runtime::text_style::yellow(
+                        "WARNING: plaintext http:// mirror — fetches are unencrypted and \
+                         unauthenticated; the tree checksum pin (`niu plugin source verify`) \
+                         is the only tamper tripwire."
+                    )
+                );
+            }
             Ok(())
         }
         unknown => anyhow::bail!("unknown plugin mirror subcommand '{unknown}'"),
@@ -3054,6 +3213,9 @@ fn print_plugin_mirror_usage() {
     println!("                          mirror (url gets a trailing '/' if missing)");
     println!("  set none                Go back to direct connection");
     println!();
+    println!("A plaintext http:// mirror is refused without --allow-plaintext (it");
+    println!("ships every fetch unencrypted and unauthenticated — niubash#298).");
+    println!();
     println!("Config file (edit directly for exact control):");
     println!("  schema = \"niubash:mirrors@0.1.0\"");
     println!("  active = \"custom\"");
@@ -3102,11 +3264,21 @@ fn run_plugin_list_command(args: &[String]) -> anyhow::Result<()> {
             niubash_runtime::text_style::dim(&status.record.license)
         );
         if status.degraded {
+            let drifted = status.degraded_reason.as_deref()
+                == Some(niubash_runtime::plugins::sources::DEGRADED_DRIFTED);
             println!(
                 "     {}",
-                niubash_runtime::text_style::dim(&format!(
-                    "tree missing — repair with `niu plugin restore {}`",
-                    status.record.id
+                niubash_runtime::text_style::yellow(&format!(
+                    "{} — {}",
+                    status.degraded_reason.as_deref().unwrap_or("tree missing"),
+                    if drifted {
+                        format!(
+                            "review with `niu plugin source verify {}`, repair with `niu plugin restore {}`",
+                            status.record.id, status.record.id
+                        )
+                    } else {
+                        format!("repair with `niu plugin restore {}`", status.record.id)
+                    }
                 ))
             );
             continue;
@@ -3418,21 +3590,43 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `niu plugin clean` — remove staging leftovers and orphaned trees
-/// (vim-plug `:PlugClean`).
-fn run_plugin_clean_command(_args: &[String]) -> anyhow::Result<()> {
-    let outcomes = niubash_runtime::plugins::sources::clean_sources();
+/// `niu plugin clean` — remove staging leftovers and report orphaned trees;
+/// `--orphans` is the explicit confirm that deletes them (vim-plug
+/// `:PlugClean`, niubash#299: orphans are listed, never silently removed).
+fn run_plugin_clean_command(args: &[String]) -> anyhow::Result<()> {
+    let mut delete_orphans = false;
+    for arg in args {
+        match arg.as_str() {
+            "--orphans" => delete_orphans = true,
+            unknown => anyhow::bail!("unknown plugin clean option '{unknown}'"),
+        }
+    }
+    let outcomes = niubash_runtime::plugins::sources::clean_sources(delete_orphans);
     if outcomes.is_empty() {
         println!("nothing to clean");
         return Ok(());
     }
-    for outcome in outcomes {
-        let marker = if outcome.outcome == "removed" {
-            niubash_runtime::text_style::green("removed")
-        } else {
-            niubash_runtime::text_style::red("failed")
+    let mut orphans = 0usize;
+    for outcome in &outcomes {
+        let marker = match outcome.outcome.as_str() {
+            "removed" => niubash_runtime::text_style::green("removed"),
+            "orphan" => {
+                orphans += 1;
+                niubash_runtime::text_style::yellow("orphan")
+            }
+            _ => niubash_runtime::text_style::red("failed"),
         };
         println!("  {marker} {:<25} {}", outcome.id, outcome.detail);
+    }
+    if orphans > 0 && !delete_orphans {
+        println!(
+            "{}",
+            niubash_runtime::text_style::yellow(&format!(
+                "{orphans} orphaned director{} found — review the list above, then run \
+                 `niu plugin clean --orphans` to delete",
+                if orphans == 1 { "y" } else { "ies" }
+            ))
+        );
     }
     Ok(())
 }
@@ -3474,6 +3668,18 @@ fn print_plugin_add_usage() {
     println!("Declare a source in the spec (~/.niubash/plugins.toml) and install it");
     println!("(fetch gate only; everything lands untrusted until you trust it).");
     println!();
+    println!("Target forms:");
+    println!("  <id>                    A curated catalog id (oh-my-bash, bash-it,");
+    println!("                          bash-completion) — resolves to the official origin");
+    println!("  <owner/repo>            GitHub shorthand — expands to");
+    println!("                          https://github.com/<owner/repo>.git");
+    println!("  <url>                   A git url (https://, git@, or");
+    println!("                          file:///<path> — file:// clones via git)");
+    println!("  <path>                  A local directory (snapshot-copied in) or a");
+    println!("                          single .sh/.bash file (its own one-file source");
+    println!("                          tree); the copy is registered untrusted —");
+    println!("                          niubash#300, the bare-path form is first-class");
+    println!();
     println!("Options:");
     println!("  --id <name>            Pin the source id (else derived/bound at sync)");
     println!("  --ref <ref>            Fetch this ref (first fetch only)");
@@ -3506,9 +3712,10 @@ fn print_plugin_usage() {
     println!("                           [--checksum <sha256>] [--path <dir>]");
     println!("                           [--url <git-url>]");
     println!("                           Declare + install a source (catalog id,");
-    println!("                           GitHub shorthand, url, or local path; the");
-    println!("                           entry lands in the spec, untrusted; recipe");
-    println!("                           ids route through their driver)");
+    println!("                           GitHub shorthand, git url — file:// works,");
+    println!("                           or a local dir / .sh file copied in as an");
+    println!("                           untrusted snapshot; the entry lands in the");
+    println!("                           spec; recipe ids route through their driver)");
     println!("  list [--json]            Sources, their assets, activation state");
     println!("  enable <target>          Activate a source or asset (wild sources");
     println!("                           pick files: <id>/<file>.bash)");
@@ -3524,7 +3731,8 @@ fn print_plugin_usage() {
     println!("                           all); the lockfile pin moves");
     println!("  restore [<id>]           Rebuild tree(s) from the lockfile pin");
     println!("  rollback <id>            Restore the previous source state");
-    println!("  clean                    Remove staging leftovers and orphans");
+    println!("  clean [--orphans]        Remove staging leftovers; list orphan dirs");
+    println!("                           (--orphans deletes them, niubash#299)");
     println!("  trust <id>               Review and activate a source's assets");
     println!("  discover [--verbose]     Dry ecosystem overview (read-only)");
     println!("  ui                       Menu UI (sections by state, same verbs)");
@@ -3550,7 +3758,7 @@ fn print_plugin_usage() {
     println!();
     println!("Examples:");
     println!("  niu plugin add oh-my-bash        # catalog shorthand");
-    println!("  niu plugin add rcrowley/bash-preexec   # wild GitHub plugin");
+    println!("  niu plugin add rcaloras/bash-preexec   # wild GitHub plugin");
     println!("  niu plugin enable bash-preexec/bash-preexec.sh   # pick the file");
     println!("  niu plugin add bpkg --path <dir> # adopt a bpkg-installed tree");
     println!("  niu plugin sync                  # reconcile spec <-> machine");
@@ -3767,11 +3975,20 @@ fn print_completion_probe(rest: &[String]) -> anyhow::Result<()> {
         line.len()
     };
     let mut shell = niubash_runtime::Shell::new()?;
+    // Issue #307: the probe is the agent-facing completion surface, so it
+    // sources NIU_ENV first (bash-compatible BASH_ENV fallback; NIU_ENV wins —
+    // the same precedence `-c` applies through `source_non_interactive_env`).
+    // `complete` compspecs and NIU_COMPDEFS declarations from an agent init
+    // file must be visible to the probe; sourced before the interactive rc so
+    // the rc stays the more specific override.
+    shell.source_non_interactive_env();
     shell.run_startup_rc();
     // The REPL loads the rc-declared completion functions (NIU_COMPDEFS)
     // after sourcing and installs the completion bridge before the line
     // editor runs (repl.rs); the probe mirrors that sequence so compdef and
     // compspec candidates reach the same completer state a Tab press sees.
+    // Runs after both startup files so NIU_COMPDEFS declared in NIU_ENV /
+    // BASH_ENV lands in the same registry.
     shell.load_user_compdefs();
     let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
     niubash_runtime::shell::install_completion_bridge(&shell);

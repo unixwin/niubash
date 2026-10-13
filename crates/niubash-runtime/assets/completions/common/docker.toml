@@ -1,0 +1,796 @@
+# Issue #305: static completion table for docker (subcommands + common
+# per-subcommand flags). Hand-curated from the documented CLI; no external
+# completion script is executed. Same schema as the embedded applet
+# definitions.
+command = "docker"
+description = "container engine client"
+
+[[subcommands]]
+name = "attach"
+description = "attach local standard streams to a running container"
+
+[[subcommands.flags]]
+long = "--detach-keys"
+description = "override the key sequence for detaching"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--no-stdin"
+description = "do not attach stdin"
+
+[[subcommands.flags]]
+long = "--sig-proxy"
+description = "proxy all received signals to the process (default)"
+
+[[subcommands]]
+name = "build"
+description = "build an image from a Dockerfile"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--tag"
+description = "name and optionally a tag for the image"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-f"
+long = "--file"
+description = "path to the Dockerfile"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+long = "--no-cache"
+description = "do not use cache when building"
+
+[[subcommands.flags]]
+long = "--pull"
+description = "always attempt to pull a newer base image"
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "suppress build output"
+
+[[subcommands.flags]]
+long = "--build-arg"
+description = "set a build-time variable"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--target"
+description = "set the target build stage"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--network"
+description = "set the network mode during build"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--platform"
+description = "set the target platform"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--progress"
+description = "set the progress output type"
+takes_value = true
+values = ["auto", "plain", "tty", "quiet"]
+
+[[subcommands.flags]]
+long = "--force-rm"
+description = "always remove intermediate containers"
+
+[[subcommands]]
+name = "commit"
+description = "create a new image from a container's changes"
+
+[[subcommands.flags]]
+short = "-a"
+long = "--author"
+description = "set the commit author"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-m"
+long = "--message"
+description = "set the commit message"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-c"
+long = "--change"
+description = "apply a Dockerfile instruction"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-p"
+long = "--pause"
+description = "pause the container during commit (default)"
+
+[[subcommands]]
+name = "cp"
+description = "copy files and directories between a container and the filesystem"
+
+[[subcommands.flags]]
+short = "-a"
+long = "--archive"
+description = "archive mode: copy uid/gid and permissions"
+
+[[subcommands.flags]]
+short = "-L"
+long = "--follow-link"
+description = "always follow symbolic links in the source"
+
+[[subcommands]]
+name = "create"
+description = "create a new container without starting it"
+
+[[subcommands.flags]]
+long = "--name"
+description = "assign a name to the container"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-p"
+long = "--publish"
+description = "publish a container port to the host"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-v"
+long = "--volume"
+description = "bind-mount a volume"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-e"
+long = "--env"
+description = "set an environment variable"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--network"
+description = "connect the container to a network"
+takes_value = true
+
+[[subcommands]]
+name = "events"
+description = "stream real-time events from the server"
+
+[[subcommands.flags]]
+long = "--filter"
+description = "filter output based on conditions"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--since"
+description = "show events created since the given timestamp"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--until"
+description = "show events created until the given timestamp"
+takes_value = true
+
+[[subcommands]]
+name = "exec"
+description = "run a command in a running container"
+
+[[subcommands.flags]]
+short = "-d"
+long = "--detach"
+description = "run the command in the background"
+
+[[subcommands.flags]]
+short = "-i"
+long = "--interactive"
+description = "keep stdin open"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--tty"
+description = "allocate a pseudo-terminal"
+
+[[subcommands.flags]]
+short = "-e"
+long = "--env"
+description = "set an environment variable"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-u"
+long = "--user"
+description = "run the command as the given user"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-w"
+long = "--workdir"
+description = "working directory inside the container"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--privileged"
+description = "give extended privileges to the command"
+
+[[subcommands]]
+name = "export"
+description = "export a container's filesystem as a tar archive"
+
+[[subcommands.flags]]
+short = "-o"
+long = "--output"
+description = "write to the given file"
+takes_value = true
+values_from = "path"
+
+[[subcommands]]
+name = "history"
+description = "show the history of an image"
+
+[[subcommands.flags]]
+long = "--no-trunc"
+description = "do not truncate output"
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "only show image IDs"
+
+[[subcommands.flags]]
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands]]
+name = "image"
+description = "manage images"
+
+[[subcommands]]
+name = "images"
+description = "list images"
+
+[[subcommands.flags]]
+short = "-a"
+long = "--all"
+description = "show all images, including intermediate ones"
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "only show image IDs"
+
+[[subcommands.flags]]
+long = "--digests"
+description = "show digests"
+
+[[subcommands.flags]]
+long = "--filter"
+description = "filter output based on conditions"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--no-trunc"
+description = "do not truncate output"
+
+[[subcommands]]
+name = "import"
+description = "import a tarball to create a filesystem image"
+
+[[subcommands.flags]]
+short = "-m"
+long = "--message"
+description = "set the import commit message"
+takes_value = true
+
+[[subcommands]]
+name = "info"
+description = "display system-wide information"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands]]
+name = "inspect"
+description = "show detailed information on objects"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-s"
+long = "--size"
+description = "show total file sizes"
+
+[[subcommands.flags]]
+long = "--type"
+description = "only inspect objects of the given type"
+takes_value = true
+
+[[subcommands]]
+name = "kill"
+description = "kill a running container"
+
+[[subcommands.flags]]
+short = "-s"
+long = "--signal"
+description = "send the given signal"
+takes_value = true
+
+[[subcommands]]
+name = "load"
+description = "load an image from a tar archive"
+
+[[subcommands.flags]]
+short = "-i"
+long = "--input"
+description = "read from the given tar archive file"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "suppress the load output"
+
+[[subcommands]]
+name = "login"
+description = "log in to a registry"
+
+[[subcommands.flags]]
+short = "-u"
+long = "--username"
+description = "registry user name"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-p"
+long = "--password"
+description = "registry password"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--password-stdin"
+description = "read the password from stdin"
+
+[[subcommands]]
+name = "logout"
+description = "log out from a registry"
+
+[[subcommands]]
+name = "logs"
+description = "fetch the logs of a container"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--follow"
+description = "follow log output"
+
+[[subcommands.flags]]
+long = "--tail"
+description = "show the given number of lines from the end"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-t"
+long = "--timestamps"
+description = "show timestamps"
+
+[[subcommands.flags]]
+long = "--since"
+description = "show logs since the given timestamp"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--until"
+description = "show logs before the given timestamp"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--details"
+description = "show extra details on log lines"
+
+[[subcommands]]
+name = "network"
+description = "manage networks"
+
+[[subcommands]]
+name = "pause"
+description = "pause all processes in a container"
+
+[[subcommands]]
+name = "port"
+description = "list port mappings for a container"
+
+[[subcommands]]
+name = "ps"
+description = "list containers"
+
+[[subcommands.flags]]
+short = "-a"
+long = "--all"
+description = "show all containers, including stopped ones"
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "only show container IDs"
+
+[[subcommands.flags]]
+short = "-s"
+long = "--size"
+description = "show total file sizes"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--latest"
+description = "show the most recently created container"
+
+[[subcommands.flags]]
+long = "--filter"
+description = "filter output based on conditions"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--no-trunc"
+description = "do not truncate output"
+
+[[subcommands]]
+name = "pull"
+description = "download an image from a registry"
+
+[[subcommands.flags]]
+long = "--all-tags"
+description = "download all tagged images"
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "suppress verbose output"
+
+[[subcommands.flags]]
+long = "--platform"
+description = "set the target platform"
+takes_value = true
+
+[[subcommands]]
+name = "push"
+description = "upload an image to a registry"
+
+[[subcommands.flags]]
+long = "--all-tags"
+description = "upload all tagged images"
+
+[[subcommands.flags]]
+short = "-q"
+long = "--quiet"
+description = "suppress verbose output"
+
+[[subcommands]]
+name = "rename"
+description = "rename a container"
+
+[[subcommands]]
+name = "restart"
+description = "restart containers"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--time"
+description = "seconds to wait before killing the container"
+takes_value = true
+
+[[subcommands]]
+name = "rm"
+description = "remove containers"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--force"
+description = "force the removal of a running container"
+
+[[subcommands.flags]]
+short = "-l"
+long = "--link"
+description = "remove the specified link"
+
+[[subcommands.flags]]
+short = "-v"
+long = "--volumes"
+description = "remove anonymous volumes"
+
+[[subcommands]]
+name = "rmi"
+description = "remove images"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--force"
+description = "force the removal of the image"
+
+[[subcommands.flags]]
+long = "--no-prune"
+description = "do not delete untagged parents"
+
+[[subcommands]]
+name = "run"
+description = "create and start a container"
+
+[[subcommands.flags]]
+short = "-d"
+long = "--detach"
+description = "run the container in the background"
+
+[[subcommands.flags]]
+short = "-i"
+long = "--interactive"
+description = "keep stdin open"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--tty"
+description = "allocate a pseudo-terminal"
+
+[[subcommands.flags]]
+long = "--name"
+description = "assign a name to the container"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-p"
+long = "--publish"
+description = "publish a container port to the host"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-P"
+long = "--publish-all"
+description = "publish all exposed ports to random host ports"
+
+[[subcommands.flags]]
+short = "-v"
+long = "--volume"
+description = "bind-mount a volume"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--rm"
+description = "remove the container when it exits"
+
+[[subcommands.flags]]
+short = "-e"
+long = "--env"
+description = "set an environment variable"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--env-file"
+description = "read environment variables from the given file"
+takes_value = true
+values_from = "path"
+
+[[subcommands.flags]]
+short = "-w"
+long = "--workdir"
+description = "working directory inside the container"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-u"
+long = "--user"
+description = "run as the given user"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--entrypoint"
+description = "overwrite the image entrypoint"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-h"
+long = "--hostname"
+description = "container host name"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--network"
+description = "connect the container to a network"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--restart"
+description = "restart policy to apply when the container exits"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--memory"
+description = "memory limit"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--cpus"
+description = "number of CPUs"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--privileged"
+description = "give extended privileges to the container"
+
+[[subcommands.flags]]
+long = "--link"
+description = "add a link to another container"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--mount"
+description = "attach a filesystem mount"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--platform"
+description = "set the target platform"
+takes_value = true
+
+[[subcommands]]
+name = "save"
+description = "save images to a tar archive"
+
+[[subcommands.flags]]
+short = "-o"
+long = "--output"
+description = "write to the given file"
+takes_value = true
+values_from = "path"
+
+[[subcommands]]
+name = "search"
+description = "search a registry for images"
+
+[[subcommands.flags]]
+long = "--filter"
+description = "filter output based on conditions"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--limit"
+description = "limit the number of results"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--no-trunc"
+description = "do not truncate output"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands]]
+name = "start"
+description = "start stopped containers"
+
+[[subcommands.flags]]
+short = "-a"
+long = "--attach"
+description = "attach stdout/stderr and forward signals"
+
+[[subcommands.flags]]
+short = "-i"
+long = "--interactive"
+description = "attach stdin"
+
+[[subcommands]]
+name = "stats"
+description = "live stream of container resource usage"
+
+[[subcommands.flags]]
+short = "-a"
+long = "--all"
+description = "include stopped containers"
+
+[[subcommands.flags]]
+long = "--no-stream"
+description = "disable streaming stats"
+
+[[subcommands.flags]]
+long = "--no-trunc"
+description = "do not truncate output"
+
+[[subcommands.flags]]
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands]]
+name = "stop"
+description = "stop running containers"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--time"
+description = "seconds to wait before killing the container"
+takes_value = true
+
+[[subcommands]]
+name = "system"
+description = "manage the docker daemon"
+
+[[subcommands]]
+name = "tag"
+description = "create a tag referring to a source image"
+
+[[subcommands]]
+name = "top"
+description = "show the running processes of a container"
+
+[[subcommands]]
+name = "unpause"
+description = "unpause all processes in a container"
+
+[[subcommands]]
+name = "update"
+description = "update the configuration of containers"
+
+[[subcommands.flags]]
+long = "--memory"
+description = "memory limit"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--cpus"
+description = "number of CPUs"
+takes_value = true
+
+[[subcommands.flags]]
+long = "--restart"
+description = "restart policy to apply when the container exits"
+takes_value = true
+
+[[subcommands]]
+name = "version"
+description = "show the docker version information"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--format"
+description = "format the output"
+takes_value = true
+
+[[subcommands]]
+name = "volume"
+description = "manage volumes"
+
+[[subcommands]]
+name = "wait"
+description = "block until a container stops, printing its exit code"
+
+[[subcommands]]
+name = "compose"
+description = "multi-container application management (plugin)"
+
+[[subcommands]]
+name = "container"
+description = "manage containers"
+
+[[subcommands]]
+name = "diff"
+description = "show changes to files on a container's filesystem"

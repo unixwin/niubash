@@ -3,6 +3,7 @@
 
 pub mod bash_import;
 pub mod command;
+pub mod common_assets;
 pub mod completer;
 pub mod external;
 pub mod gnu_menu;

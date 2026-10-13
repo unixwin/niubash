@@ -952,4 +952,73 @@ mod tests {
         let _ = std::fs::remove_file(&temp);
         result.unwrap();
     }
+
+    /// niubash#302: `HOME` alone must sandbox the config subsystem. With
+    /// `NIU_CONFIG` unset, `HOME` pointed at an isolated dir and
+    /// `USERPROFILE` deliberately left at a DIFFERENT dir, reads AND writes
+    /// have to land under the isolated home — an explicit `HOME` override
+    /// never loses to the system profile (it did before, when the resolver
+    /// ranked `USERPROFILE` first on Windows, and a HOME-only sandbox
+    /// silently leaked writes into the real profile).
+    #[test]
+    fn home_env_isolation_redirects_config_reads_and_writes() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stamp = format!(
+            "niu-config-isolation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let isolated_home = std::env::temp_dir().join(format!("{stamp}-home"));
+        let decoy_profile = std::env::temp_dir().join(format!("{stamp}-profile"));
+        std::fs::create_dir_all(isolated_home.join(".niubash")).unwrap();
+        std::fs::create_dir_all(decoy_profile.join(".niubash")).unwrap();
+
+        let previous_niu_config = std::env::var_os("NIU_CONFIG");
+        let previous_home = std::env::var_os("HOME");
+        let previous_profile = std::env::var_os("USERPROFILE");
+        std::env::remove_var("NIU_CONFIG");
+        std::env::set_var("HOME", &isolated_home);
+        std::env::set_var("USERPROFILE", &decoy_profile);
+        let result = (|| {
+            // Write through the real writer: the file must appear under the
+            // isolated home and NOWHERE near the decoy profile.
+            let written =
+                set_command_not_found_hint(CommandNotFoundHint::Wpm).expect("config write");
+            assert_eq!(
+                written,
+                crate::path_utils::normalize_existing_host_path(isolated_home.clone())
+                    .join(".niubash")
+                    .join("config.toml"),
+                "the write must land in the HOME sandbox"
+            );
+            assert!(
+                !decoy_profile.join(".niubash").join("config.toml").exists(),
+                "USERPROFILE profile was written to despite HOME isolation"
+            );
+            // Read back through the real resolver: the persisted value is
+            // visible (so the read path resolves the same isolated home).
+            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Wpm);
+            Ok::<(), anyhow::Error>(())
+        })();
+        match previous_niu_config {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_profile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let _ = std::fs::remove_dir_all(&isolated_home);
+        let _ = std::fs::remove_dir_all(&decoy_profile);
+        result.unwrap();
+    }
 }

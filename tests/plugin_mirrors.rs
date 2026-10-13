@@ -195,3 +195,73 @@ fn mirror_list_reports_hand_edited_git_only_config() {
 
     let _ = fs::remove_dir_all(&home);
 }
+
+/// niubash#298: a plaintext `http://` mirror ships every git fetch
+/// unencrypted and unauthenticated — setting one is refused without the
+/// explicit `--allow-plaintext` confirm, in interactive and scripted runs
+/// alike, and the confirm still prints the standing warning.
+#[test]
+fn plaintext_http_mirror_requires_explicit_confirmation() {
+    let home = temp_dir("mirror-cli-plaintext");
+    let config = home.join("mirrors.toml");
+    let envs = [("NIU_MIRRORS", config.to_string_lossy().into_owned())];
+
+    // Without the flag: refused, nothing written.
+    let refused = run_niu_with_env(
+        &[
+            "plugin",
+            "mirror",
+            "set",
+            "http://mirror.example.com/github.com",
+        ],
+        &envs,
+    );
+    assert!(
+        !refused.status.success(),
+        "plaintext mirror must be refused: {}",
+        stdout_text(&refused)
+    );
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(err.contains("--allow-plaintext"), "{err}");
+    assert!(!config.exists(), "the refused mirror must not be persisted");
+
+    // With the flag: set, and the warning ships.
+    let allowed = run_niu_with_env(
+        &[
+            "plugin",
+            "mirror",
+            "set",
+            "http://mirror.example.com/github.com",
+            "--allow-plaintext",
+        ],
+        &envs,
+    );
+    assert_success(&allowed, "mirror set --allow-plaintext");
+    let text = stdout_text(&allowed);
+    assert!(
+        text.contains("http://mirror.example.com/github.com"),
+        "{text}"
+    );
+    assert!(
+        text.contains("unencrypted"),
+        "the plaintext warning must ship: {text}"
+    );
+    let stored = fs::read_to_string(&config).unwrap();
+    assert!(stored.contains("http://mirror.example.com/github.com"),);
+
+    // An https:// mirror never needs the flag.
+    let https = home.join("https.toml");
+    let envs2 = [("NIU_MIRRORS", https.to_string_lossy().into_owned())];
+    let set = run_niu_with_env(
+        &[
+            "plugin",
+            "mirror",
+            "set",
+            "https://gitclone.example.com/github.com",
+        ],
+        &envs2,
+    );
+    assert_success(&set, "https mirror set needs no confirm");
+
+    let _ = fs::remove_dir_all(&home);
+}

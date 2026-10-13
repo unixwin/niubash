@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixture modeled on rcrowley/bash-preexec (MIT): the canonical wild
+# Fixture modeled on rcaloras/bash-preexec (MIT): the canonical wild
 # single-file plugin. Shape kept faithful to upstream: PROMPT_COMMAND
 # wrapping, preexec/precmd user hooks, preexec_functions/precmd_functions
 # arrays. Loading must be byte-faithful to manually sourcing this file

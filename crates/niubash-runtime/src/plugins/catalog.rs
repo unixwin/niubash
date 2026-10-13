@@ -47,6 +47,14 @@ pub fn catalog_entry(id: &str) -> Option<CatalogEntry> {
     catalog_entries().into_iter().find(|entry| entry.id == id)
 }
 
+/// True when the origin is one of the curated catalog origins (niubash#298):
+/// its first fetch rides a compiled-in, reviewed origin, so the delivery has
+/// an integrity reference a wild URL lacks.
+pub fn is_catalog_origin(origin: &str) -> bool {
+    let origin = origin.trim();
+    catalog_entries().iter().any(|entry| entry.origin == origin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
