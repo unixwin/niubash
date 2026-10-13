@@ -424,8 +424,12 @@ impl Prompt for BashPrompt {
         self.right_on_last_line
     }
 
-    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Borrowed("")
+    fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
+        // The Git Bash skeleton has no vi indicator (Git Bash does not
+        // either), but `set -o vi` sessions must not lose niubash#184's
+        // editing-mode surface when the factory default switches to this
+        // prompt — render the same live strings the template floor uses.
+        Cow::Owned(mode_indicator_for(mode, "i", "- "))
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {

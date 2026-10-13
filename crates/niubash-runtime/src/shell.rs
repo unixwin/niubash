@@ -98,6 +98,11 @@ pub struct Shell {
     /// claim and restores this floor on release; the floor itself never
     /// writes PS1, so it can never fight an active claim.
     floor_prompt: PromptBackend,
+    /// Windows factory-default "Git Bash compatible" prompt is active:
+    /// every prompt rebuild re-renders it from the current directory until
+    /// a PS1/theme claim displaces it (the claim check lives in
+    /// `prompt_for_display`). Never set for one-shot shells.
+    gitbash_prompt_active: bool,
     pub home_dir: PathBuf,
     pub shell_root: Option<PathBuf>,
     pub history_path: PathBuf,
@@ -396,12 +401,42 @@ impl Shell {
         // the segment engine stays available for explicit configs. One-shot
         // shells never render a prompt: use the cheapest backend instead of
         // compiling the template or the segment engine.
-        let prompt_style = config.shell.prompt_style.as_deref().unwrap_or("template");
+        // Factory default (owner adjudication 2026-10-12): on Windows an
+        // unstyled shell renders the built-in "Git Bash compatible" prompt
+        // (src/git_prompt.rs — green user@host, yellow cwd, cyan branch,
+        // no git child process). Explicit styles win; PS1/theme claims
+        // still displace it per prompt (see prompt_for_display).
+        #[cfg(windows)]
+        let factory_style = "gitbash";
+        #[cfg(not(windows))]
+        let factory_style = "template";
+        let prompt_style = config
+            .shell
+            .prompt_style
+            .as_deref()
+            .unwrap_or(factory_style);
         let prompt: PromptBackend = if one_shot {
             PromptBackend::Bash(BashPrompt::new(
                 config.shell.prompt_symbol.clone(),
                 String::new(),
             ))
+        } else if prompt_style == "gitbash" {
+            #[cfg(windows)]
+            {
+                PromptBackend::Bash(BashPrompt::new(
+                    crate::git_prompt::render(
+                        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    ),
+                    String::new(),
+                ))
+            }
+            #[cfg(not(windows))]
+            {
+                // A config that names "gitbash" off-Windows falls back to the
+                // template floor: the theme is a Windows-only surface (owner
+                // adjudication) and src/git_prompt.rs does not compile there.
+                PromptBackend::Template(NiubashPrompt::new(None, None))
+            }
         } else if prompt_style == "segments" {
             let preset_name = config.shell.segment_preset.as_deref().unwrap_or("classic");
             let preset = SegmentPreset::from_name(preset_name).unwrap_or(SegmentPreset::Classic);
@@ -478,10 +513,12 @@ impl Shell {
 
         let native_widgets = config.native_widgets.clone();
 
+        let gitbash_prompt_active = cfg!(windows) && !one_shot && prompt_style == "gitbash";
         let mut shell = Self {
             executor,
             completion_state,
             prompt: prompt.clone(),
+            gitbash_prompt_active,
             floor_prompt: prompt,
             home_dir,
             shell_root,
@@ -1211,6 +1248,23 @@ impl Shell {
         }
         self.bash_prompt_command_running = false;
         exit_jump
+    }
+
+    /// The prompt the next REPL read should render. On the Windows factory
+    /// default ("gitbash") this re-renders from the current directory every
+    /// call — the branch/dirty segment follows `cd` without any PS1 claim.
+    /// A PS1/theme claim (prompt_slot_claimed) always wins: the claim path
+    /// rewrites `self.prompt`, so the flag check alone is not enough — an
+    /// active flag with a live claim renders the claimed prompt untouched.
+    pub(crate) fn prompt_for_display(&mut self) -> PromptBackend {
+        #[cfg(windows)]
+        if self.gitbash_prompt_active && !self.prompt_slot_claimed() {
+            let left = crate::git_prompt::render(
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            );
+            self.prompt = PromptBackend::Bash(BashPrompt::new(left, String::new()));
+        }
+        self.prompt.clone()
     }
 
     fn sync_bash_prompt_from_env(&mut self) {
@@ -5648,6 +5702,7 @@ niu_git_comp() {
             executor,
             completion_state: Arc::new(Mutex::new(CompletionState::new(PathBuf::from(".")))),
             prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
+            gitbash_prompt_active: false,
             floor_prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             home_dir: PathBuf::from("."),
             shell_root: None,

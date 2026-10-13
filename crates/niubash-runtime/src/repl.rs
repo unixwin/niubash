@@ -2024,7 +2024,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             if shell.borrow_mut().refresh_edit_mode().is_some() {
                 line_editor = build_line_editor(&shell)?;
             }
-            let prompt = shell.borrow().prompt.clone();
+            let prompt = shell.borrow_mut().prompt_for_display();
             typeahead.disarm_and_reinject();
             line_editor.read_line(&prompt)
         } else {

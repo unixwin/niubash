@@ -1447,13 +1447,13 @@ fn vi_floor_indicator_follows_esc_live() {
     // Insert-mode indicator after the prompt's `% `. (No trailing space in
     // the pattern: with an empty buffer ConPTY elides the space into the
     // erase-to-EOL.)
-    s.expect("% i");
+    s.expect("$ i");
     settle_and_drain(&mut s);
 
     s.send("abc");
     // ESC flips the live mode; the repaint carries the normal indicator.
     send_esc(&mut s);
-    s.expect("% - ");
+    s.expect("$ - ");
     settle_and_drain(&mut s);
     // Normal-mode dd kills the line; back to insert for a clean one.
     s.send("dd");
@@ -1669,5 +1669,90 @@ fn prompt_command_exit_ends_noediting_repl_session() {
         transcript.matches(driver::PROMPT1).count(),
         0,
         "no prompt may render after a PC exit jump: {transcript}"
+    );
+}
+
+/// niubash: the Windows factory-default "Git Bash compatible" prompt.
+///
+/// Real-ConPTY proof for the owner adjudication (2026-10-12): with no rc
+/// theme and no PS1 claim, the interactive prompt on Windows renders the
+/// Git Bash skeleton — green `user@host`, yellow POSIX-persona cwd, `$ ` —
+/// and a `cd` into a repository adds the cyan branch segment without any
+/// rc or PROMPT_COMMAND involvement. The rc here is empty on purpose: the
+/// sandbox rc's `P1> ` sentinel would claim the prompt and hide the floor.
+#[test]
+fn gitbash_factory_prompt_renders_and_tracks_the_branch() {
+    if !driver::require_pty_or_skip("gitbash factory prompt") {
+        return;
+    }
+    let repo_dir = std::env::temp_dir().join(format!(
+        "gitbash-floor-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let repo_path = repo_dir.clone();
+    let run_path = repo_dir.clone();
+    let run = move |cmd: &str| {
+        std::process::Command::new("git")
+            .args(["-C", run_path.to_string_lossy().as_ref()])
+            .args(cmd.split_whitespace())
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git")
+    };
+    run("init");
+    std::fs::write(repo_path.join("f.txt"), b"x").unwrap();
+    run("add f.txt");
+    run("commit -m init");
+
+    let mut session = driver::NiuSession::spawn_custom(
+        "gitbash-floor",
+        "", // empty rc: no theme, no PS1 claim — the factory floor shows
+        &[],
+        (120, 30),
+        driver::DEFAULT_TIMEOUT,
+    );
+    // No rc sentinel here: the floor prompt has no `P1> `, so readiness is
+    // polled on the skeleton's own SGR signature.
+    let mut first = String::new();
+    for _ in 0..40 {
+        first.push_str(&session.drain_screen());
+        if first.contains("\x1b[33m") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        first.contains("\x1b[32m") && first.contains("\x1b[33m"),
+        "expected the green user@host + yellow cwd skeleton on the floor prompt, got:\n{first}"
+    );
+    assert!(
+        !first.contains("\x1b[36m"),
+        "no branch outside a repo:\n{first}"
+    );
+
+    let home = std::env::var("USERPROFILE").unwrap();
+    let drive = home.chars().next().unwrap().to_lowercase();
+    let tail = repo_path.to_string_lossy().replace('\\', "/");
+    let repo_posix = format!("/{drive}{}", &tail[2..]);
+    let _ = &repo_dir;
+    session.send_line(&format!("cd {repo_posix}"));
+    let mut after = String::new();
+    for _ in 0..40 {
+        after.push_str(&session.drain_screen());
+        if after.contains("master") || after.contains("main") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        after.contains("master") || after.contains("main"),
+        "expected the cyan branch segment after cd into a repo, pane:\n{after}"
     );
 }
