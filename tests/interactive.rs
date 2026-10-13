@@ -1671,3 +1671,218 @@ fn prompt_command_exit_ends_noediting_repl_session() {
         "no prompt may render after a PC exit jump: {transcript}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Matrix 6b: multiline paste across EMPTY lines (niubash#291)
+// ---------------------------------------------------------------------------
+
+/// niubash#291, the reported shape: a pasted block containing an EMPTY line
+/// must keep the following line's leading bytes. The exact reported burst —
+/// `echo one\r\n\r\necho two\r\n\n` in one write, then the user's Enter
+/// after the burst settles — is asserted two ways:
+///
+/// * Execution: both commands run and the prompt returns (marker-precise
+///   outputs are pinned by the variants below, whose `$VAR` form keeps the
+///   echoed command line distinct from its output).
+/// * Rendering: every `cho two`/`cho one` on screen is the tail of an
+///   intact `echo two`/`echo one`. (The scratch probe this regression
+///   replaces asserted `!screen.contains("cho two")`, which fails on a
+///   CORRECT run too — "cho two" is a substring of the intact rendering
+///   "echo two". A real swallow leaves an orphan occurrence — the executed
+///   `cho two` line, its not-found diagnostic — and breaks the count
+///   equality.)
+#[test]
+fn empty_line_paste_keeps_the_next_line_intact() {
+    if !cfg!(windows) {
+        // Unix runs the real bracketed paste path (Event::Paste); the
+        // arrival heuristic under test does not exist there.
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_keeps_the_next_line_intact") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "paste-empty-line",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send("echo one\r\n\r\necho two\r\n\n");
+    // Leave the burst window, then the user's own Enter (owner rhythm).
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect("two");
+    s.expect_prompt();
+    let transcript = s.transcript();
+    assert_eq!(
+        transcript.matches("cho two").count(),
+        transcript.matches("echo two").count(),
+        "orphan 'cho two': the line after the empty line lost its leading bytes:\n{transcript}"
+    );
+    assert_eq!(
+        transcript.matches("cho one").count(),
+        transcript.matches("echo one").count(),
+        "orphan 'cho one': the first line of the pasted block lost bytes:\n{transcript}"
+    );
+}
+
+/// Execution-level proof of the #291 shape: the `$M1`/`$M2` form makes the
+/// OUTPUTS (`one-291`/`two-291`) strings that exist nowhere in the echoed
+/// input, so "both lines ran" is asserted literally — including the line
+/// after the empty line.
+#[test]
+fn empty_line_paste_executes_both_lines_with_marker_outputs() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_executes_both_lines_with_marker_outputs") {
+        return;
+    }
+    let rc = format!("{}\nM1=one-291\nM2=two-291\n", driver::default_rc());
+    let mut s = NiuSession::spawn_custom(
+        "paste-empty-line-markers",
+        &rc,
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send("echo $M1\r\n\r\necho $M2\r\n\n");
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect("one-291");
+    s.expect("two-291");
+    s.expect_prompt();
+}
+
+/// Two consecutive empty lines: both boundaries keep the following line
+/// byte-exact (no break lost, none doubled, no leading bytes swallowed).
+#[test]
+fn empty_line_paste_two_consecutive_empty_lines_keep_the_next_line_intact() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip(
+        "empty_line_paste_two_consecutive_empty_lines_keep_the_next_line_intact",
+    ) {
+        return;
+    }
+    let rc = format!("{}\nM1=one-291\nM2=two-291\n", driver::default_rc());
+    let mut s =
+        NiuSession::spawn_custom("paste-two-empty-lines", &rc, &[], (120, 30), HEAVY_TIMEOUT);
+    s.wait_ready();
+    s.send("echo $M1\r\n\r\n\r\necho $M2\r\n\n");
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect("one-291");
+    s.expect("two-291");
+    s.expect_prompt();
+    let transcript = s.transcript();
+    assert_eq!(
+        transcript.matches("cho $M2").count(),
+        transcript.matches("echo $M2").count(),
+        "orphan 'cho $M2': the line after two empty lines lost its leading bytes:\n{transcript}"
+    );
+}
+
+/// An indented line right after an empty line: the leading spaces are data
+/// (the line renders and executes as-is), not a swallow cue.
+#[test]
+fn empty_line_paste_indented_line_after_empty_line_stays_intact() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_indented_line_after_empty_line_stays_intact") {
+        return;
+    }
+    let rc = format!("{}\nM1=one-291\nM2=two-291\n", driver::default_rc());
+    let mut s = NiuSession::spawn_custom(
+        "paste-indented-after-empty",
+        &rc,
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send("echo $M1\r\n\r\n  echo $M2\r\n\n");
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect("one-291");
+    s.expect("two-291");
+    s.expect_prompt();
+    // The chunk insert renders as one plain (unhighlighted) batch, so the
+    // indented command line must appear with its leading spaces intact.
+    // (The `$M2` tail is ANSI-highlighted, so the pin stops at "  echo ".)
+    let transcript = s.transcript();
+    assert!(
+        transcript.contains("  echo "),
+        "the indented line lost its leading spaces in the render:\n{transcript}"
+    );
+}
+
+/// Control: the same CRLF block WITHOUT the empty line — pins that the
+/// plain multi-line paste (the #288 surface) is untouched by whatever the
+/// empty-line handling does.
+#[test]
+fn crlf_paste_without_empty_lines_control_keeps_every_line_intact() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("crlf_paste_without_empty_lines_control_keeps_every_line_intact") {
+        return;
+    }
+    let rc = format!("{}\nM1=one-291\nM2=two-291\n", driver::default_rc());
+    let mut s =
+        NiuSession::spawn_custom("paste-no-empty-control", &rc, &[], (120, 30), HEAVY_TIMEOUT);
+    s.wait_ready();
+    s.send("echo $M1\r\necho $M2\r\n");
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect("one-291");
+    s.expect("two-291");
+    s.expect_prompt();
+}
+
+/// The owner machine's prompt was a claimed/custom one (`user@host ~ %`,
+/// issue comment 3) — the one reproduction variable the original 30-run
+/// sweep never varied. Same #291 shape under an ANSI-claimed PS1.
+#[test]
+fn empty_line_paste_under_claimed_prompt_keeps_the_next_line_intact() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !require_pty_or_skip("empty_line_paste_under_claimed_prompt_keeps_the_next_line_intact") {
+        return;
+    }
+    let rc = concat!(
+        "PS1='\\[\\e[1;36m\\]user@host ~ %\\[\\e[0m\\] '\n",
+        "PS2='> '\n",
+        "NIU_DISABLE_DEFAULT_PLUGINS=1\n",
+        "M1=one-291\n",
+        "M2=two-291\n",
+    );
+    let mut s = NiuSession::spawn_custom(
+        "paste-empty-line-claimed",
+        rc,
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    // A claimed PS1 renders itself, not the P1> sentinel — wait for the
+    // claimed prompt text instead of wait_ready().
+    s.expect("Niubash");
+    s.expect("user@host");
+    s.send("echo $M1\r\n\r\necho $M2\r\n\n");
+    std::thread::sleep(Duration::from_millis(200));
+    s.send("\r");
+    s.expect("one-291");
+    s.expect("two-291");
+    let transcript = s.transcript();
+    assert_eq!(
+        transcript.matches("cho $M2").count(),
+        transcript.matches("echo $M2").count(),
+        "orphan 'cho $M2' under a claimed prompt: the line after the empty line lost bytes:\n{transcript}"
+    );
+}
