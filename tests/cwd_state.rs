@@ -52,13 +52,18 @@ fn run_niu(cwd: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// Shell `pwd` output and a host path differ in separator and case on Windows;
-/// compare both normalized.
+/// Shell `pwd` output and a host path differ in separator and case on Windows,
+/// and — since rubash#556 (P0 rubash#537) — in drive spelling: the engine
+/// renders `$PWD`/`pwd` in the POSIX persona form (`/c/...`) unconditionally,
+/// while host paths are native (`C:/...`). Normalize both sides onto the
+/// persona form so these tests keep pinning the cwd-state contract, not the
+/// rendering form.
 fn normalize(path: &str) -> String {
-    path.trim()
-        .replace('\\', "/")
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
+    let mut path = path.trim().replace('\\', "/");
+    if path.len() >= 3 && path.as_bytes()[1] == b':' && path.as_bytes()[2] == b'/' {
+        path = format!("/{}{}", path[..1].to_ascii_lowercase(), &path[2..]);
+    }
+    path.trim_end_matches('/').to_ascii_lowercase()
 }
 
 /// The directory recorded in a state file, if the file holds valid JSON.
