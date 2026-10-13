@@ -148,8 +148,24 @@ fn repl_command_cat_expands_tilde_paths_through_normal_command_resolution() {
     let _ = std::fs::remove_dir_all(temp);
 }
 
+/// Two contracts ride on this compound `-c` line, split by the rubash#556
+/// (P0 rubash#537) ruling (2026-10-12, owner-adjudicated; full archaeology in
+/// the rubash PR): PWD form is shell semantics, so `$PWD` and `pwd` render the
+/// POSIX persona form (`/c/...`) unconditionally — the native-style hatch that
+/// starved nvm's find_up loop is retired engine-side AND host-side (niu's
+/// host cwd sync stamps the same canonical renderer). Native drive spelling
+/// stays correct only at the Win32 spawn boundary (path contract): the
+/// tilde-expanded argv handed to the external `cat.cmd` must remain usable,
+/// and the shim fails the command (`exit /b 12`) if it ever sees a slash-drive
+/// first argument. The old `command_mode_compound_commands_keep_home_paths_
+/// native` pin asserted the pre-#556 native PWD rendering and was red on
+/// every niubash PR (#278 first) once `branch = master` pulled #556 in.
+/// The assertions pin the persona FORM (drive prefix + home basename) rather
+/// than full-path bytes: a first-cut full-string comparison was red on the
+/// CI merge-ref (PR #283's first run) while green locally — environment
+/// path-spelling variance is not what this test adjudicates.
 #[test]
-fn command_mode_compound_commands_keep_home_paths_native() {
+fn command_mode_compound_commands_posix_pwd_and_native_spawn_argv() {
     if !cfg!(windows) {
         return;
     }
@@ -187,13 +203,48 @@ fn command_mode_compound_commands_keep_home_paths_native() {
 
     assert_success(&output, "command mode compound native home paths");
     let stdout = stdout_text(&output);
+    // Spawn boundary (unchanged by rubash#556): the external cat.cmd must
+    // receive a usable native-form path, not the persona display form.
     assert!(stdout.contains("catrc:ok"), "stdout was {stdout:?}");
+    // PWD rendering (rubash#556/#537): POSIX persona form, unconditionally.
+    // Pin the FORM, not the full spelling: the drive prefix and the hermetic
+    // home basename are stable across environments, while full-path equality
+    // between the test-side string and the engine's rendering is not the
+    // contract under test (CI runners and the engine may disagree on 8.3
+    // short-name vs long-name spellings of the same directory).
+    let home_drive = drive_letter(&home).expect("temp home sits on a drive letter");
+    let pwd_line = stdout
+        .lines()
+        .find(|line| line.starts_with("PWD="))
+        .unwrap_or_else(|| panic!("compound -c must echo PWD=: {stdout:?}"));
     assert!(
-        !stdout.contains("/c/"),
-        "command mode leaked slash-drive paths: {stdout:?}"
+        pwd_line.starts_with(&format!("PWD=/{home_drive}/")),
+        "$PWD must render the POSIX persona form (rubash#556/#537): {stdout:?}"
     );
-    assert!(stdout.contains("PWD="), "stdout was {stdout:?}");
+    assert!(
+        pwd_line.ends_with("/home"),
+        "cd ~ must land in the hermetic home, in persona form: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains(&format!("PWD={}:/", home_drive.to_ascii_uppercase()))
+            && !stdout.contains(&format!("PWD={home_drive}:/")),
+        "PWD must not render native drive form (rubash#556 retired the hatch): {stdout:?}"
+    );
+    assert!(
+        stdout.lines().any(|line| {
+            line.starts_with(&format!("/{home_drive}/")) && line.ends_with("/home")
+        }),
+        "pwd must render the POSIX persona form (rubash#556/#537): {stdout:?}"
+    );
     let _ = std::fs::remove_dir_all(temp);
+}
+
+/// The lowercased drive letter of a Windows path, for persona prefixes.
+fn drive_letter(path: &Path) -> Option<char> {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic())
+        .then(|| (bytes[0] as char).to_ascii_lowercase())
 }
 
 #[test]
