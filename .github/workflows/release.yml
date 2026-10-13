@@ -11,8 +11,12 @@ on:
         required: true
         type: string
       winuxcmd_tag:
-        description: "WinuxCmd tag to bundle; leave empty for latest release"
-        required: false
+        description: "WinuxCmd tag to bundle, for example v1.1.6 (required, no 'latest' fallback — niubash#312)"
+        required: true
+        type: string
+      winuxcmd_sha256:
+        description: "Expected SHA-256 of the WinuxCmd zip per arch, JSON: {\"windows-x64\":\"…\",\"windows-arm64\":\"…\"} (niubash#312)"
+        required: true
         type: string
 
 permissions:
@@ -73,6 +77,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "installer") | Out-Null
           Copy-Item -LiteralPath installer/niubash.iss -Destination (Join-Path $env:RUNNER_TEMP "installer\niubash.iss") -Force
           Copy-Item -LiteralPath assets/niubash-icon.ico -Destination (Join-Path $env:RUNNER_TEMP "niubash-icon.ico") -Force
+          # niubash#312: the ecosystem pins are CURRENT release policy, same
+          # discipline as the packager and the journey/perf gates — a dispatch
+          # of an old tag runs today's pins (the tag's own copy predates them),
+          # while a tag push re-reads the identical file committed at the tag.
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "release-policy") | Out-Null
+          Copy-Item -LiteralPath scripts/release/preinstall.json -Destination (Join-Path $env:RUNNER_TEMP "release-policy\preinstall.json") -Force
+          Copy-Item -LiteralPath scripts/release/winuxcmd-pin.json -Destination (Join-Path $env:RUNNER_TEMP "release-policy\winuxcmd-pin.json") -Force
 
       - name: Checkout release tag
         shell: pwsh
@@ -83,6 +94,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path installer | Out-Null
           Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "installer\niubash.iss") -Destination installer/niubash.iss -Force
           Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "niubash-icon.ico") -Destination assets/niubash-icon.ico -Force
+          New-Item -ItemType Directory -Force -Path scripts/release | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "release-policy\preinstall.json") -Destination scripts/release/preinstall.json -Force
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "release-policy\winuxcmd-pin.json") -Destination scripts/release/winuxcmd-pin.json -Force
 
       - name: Validate Cargo version matches release tag
         shell: pwsh
@@ -130,22 +144,47 @@ jobs:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
 
-      - name: Download architecture-matched WinuxCmd release
+      - name: Download pinned WinuxCmd release
         id: winuxcmd
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          WINUXCMD_TAG_INPUT: ${{ inputs.winuxcmd_tag }}
+          WINUXCMD_SHA256_INPUT: ${{ inputs.winuxcmd_sha256 }}
         run: |
+          $ErrorActionPreference = "Stop"
           $repo = "unixwin/WinuxCmd"
-          $requestedTag = ""
+          $archKey = "windows-${{ matrix.arch }}"
+
+          # niubash#312: the bundled WinuxCmd is PINNED, never "whatever the
+          # ecosystem's latest release was at build time". Manual dispatches
+          # must name the exact tag AND the expected zip SHA-256. Tag-push
+          # releases read the pin committed at the tag
+          # (scripts/release/winuxcmd-pin.json). Either way the downloaded zip
+          # is hashed and must match before anything is extracted — a
+          # mismatched or unpinned WinuxCmd fails the release.
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $requestedTag = "${{ inputs.winuxcmd_tag }}"
+            $requestedTag = $env:WINUXCMD_TAG_INPUT
+            if ([string]::IsNullOrWhiteSpace($requestedTag)) {
+              throw "winuxcmd_tag is required (niubash#312: releases must pin the WinuxCmd tag; no 'latest' fallback)"
+            }
+            if ([string]::IsNullOrWhiteSpace($env:WINUXCMD_SHA256_INPUT)) {
+              throw "winuxcmd_sha256 is required (niubash#312: releases must assert the WinuxCmd zip SHA-256)"
+            }
+            $expectedSha = ($env:WINUXCMD_SHA256_INPUT | ConvertFrom-Json).$archKey
           }
-          if ([string]::IsNullOrWhiteSpace($requestedTag)) {
-            $releaseJson = gh release view --repo $repo --json tagName,assets | ConvertFrom-Json
-          } else {
-            $releaseJson = gh release view $requestedTag --repo $repo --json tagName,assets | ConvertFrom-Json
+          else {
+            $pin = Get-Content -LiteralPath scripts/release/winuxcmd-pin.json -Raw |
+              ConvertFrom-Json
+            $requestedTag = $pin.winuxcmd_tag
+            $expectedSha = $pin.sha256.$archKey
           }
+          if ([string]::IsNullOrWhiteSpace($expectedSha)) {
+            throw "no expected WinuxCmd zip SHA-256 pinned for $archKey; refusing to bundle an unverified WinuxCmd (niubash#312)"
+          }
+
+          # Exact-tag lookup only: no gh release view without a tag argument.
+          $releaseJson = gh release view $requestedTag --repo $repo --json tagName,assets | ConvertFrom-Json
           $asset = $releaseJson.assets |
             Where-Object { $_.name -like "${{ matrix.winuxcmd_asset_pattern }}" } |
             Select-Object -First 1
@@ -157,8 +196,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
           gh release download $releaseJson.tagName --repo $repo --pattern $asset.name --dir $downloadDir
 
+          $zipPath = Join-Path $downloadDir $asset.name
+          $actualSha = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha -ne $expectedSha.ToLowerInvariant()) {
+            throw "WinuxCmd zip $($asset.name) SHA-256 mismatch: expected $expectedSha, got $actualSha (niubash#312)"
+          }
+          Write-Host "WinuxCmd $($releaseJson.tagName) $($asset.name) SHA-256 verified: $actualSha"
+
           $extractDir = Join-Path $downloadDir "extract"
-          Expand-Archive -LiteralPath (Join-Path $downloadDir $asset.name) -DestinationPath $extractDir -Force
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
           $winuxcmdExe = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter winuxcmd.exe |
             Select-Object -First 1
           if (-not $winuxcmdExe) {
@@ -183,6 +229,15 @@ jobs:
       # forwarding to <root>\opt\<pkg>\ payloads), and package-release.ps1
       # copies both into the package.
       #
+      # niubash#312 — PINNED pre-install: the committed manifest carries the
+      # exact artifact SHA-256 per package and arch. Before installing, the
+      # live wpm index this build resolves must agree with the pin; wpm then
+      # verifies the downloaded zip against that same index entry, so
+      # pin == index == downloaded bytes closes the chain and the release no
+      # longer depends on the index state of the build minute. A missing or
+      # mismatched pin is a LOUD fail-open skip (below) — the package ships
+      # without pre-install rather than with unverified bytes.
+      #
       # FAIL-OPEN (owner decision): pre-installing is an enhancement, not a
       # promise. A failed install (e.g. arm64 legs — the wpm index carries
       # windows-x64 artifacts only for these packages) is a loud ::warning
@@ -199,8 +254,64 @@ jobs:
           $manifest = Get-Content -LiteralPath scripts/release/preinstall.json -Raw | ConvertFrom-Json
           $winuxcmdExe = "${{ steps.winuxcmd.outputs.exe }}"
           $root = Join-Path $env:RUNNER_TEMP "preinstall-root-${{ matrix.arch }}"
+          $archKey = "windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path (Join-Path $root "usr\bin") | Out-Null
           Copy-Item -LiteralPath $winuxcmdExe -Destination (Join-Path $root "usr\bin\winuxcmd.exe") -Force
+
+          # wpm info consults the root's LOCAL index only (a fresh root does
+          # not auto-fetch — only install does), so fetch it once up front.
+          # The pin checks below and the installs then resolve the SAME cached
+          # index; a transport failure here is fail-open per-package below.
+          $previousEap = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          $indexOutput = & $winuxcmdExe wpm index update --root $root 2>&1
+          $ErrorActionPreference = $previousEap
+          $indexOutput | ForEach-Object { Write-Host "$_" }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::wpm index update failed on ${{ matrix.arch }}; every package will fail its pin check and ship WITHOUT pre-install (fail-open, niubash#312)"
+          }
+
+          function Confirm-PackagePin([object]$package, [string]$pinArchKey) {
+            # niubash#312: refuse to install bytes the committed manifest did
+            # not pin. Reads the live index metadata via `wpm info --json`;
+            # the subsequent install verifies its download against the same
+            # index entry, so a pass here pins the exact shipped artifact.
+            $expected = $package.sha256.$pinArchKey
+            if (-not $expected) {
+              Write-Host "::warning::package '$($package.name)' has no $pinArchKey sha256 pin in preinstall.json; skipping pre-install on ${{ matrix.arch }} (fail-open, niubash#312)"
+              return $false
+            }
+            # Same stderr discipline as Install-Package below: capture the
+            # whole output stream, EAP scoped to Continue so a native stderr
+            # record cannot terminate the step before the fail-open path runs.
+            $previousEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $infoOutput = & $winuxcmdExe wpm info $package.name --root $root --json 2>&1
+            $ErrorActionPreference = $previousEap
+            if ($LASTEXITCODE -ne 0) {
+              $infoOutput | ForEach-Object { Write-Host "$_" }
+              Write-Host "::warning::wpm info '$($package.name)' failed; cannot verify the preinstall pin (fail-open, niubash#312)"
+              return $false
+            }
+            try {
+              $info = (($infoOutput | ForEach-Object { "$_" }) -join "`n") | ConvertFrom-Json
+            }
+            catch {
+              Write-Host "::warning::wpm info '$($package.name)' did not return parseable JSON; cannot verify the preinstall pin (fail-open, niubash#312)"
+              return $false
+            }
+            $artifact = $info.artifacts.$pinArchKey
+            if (-not $artifact -or -not $artifact.sha256) {
+              Write-Host "::warning::wpm index carries no $pinArchKey artifact for '$($package.name)' (expected on this leg); skipping pre-install (fail-open)"
+              return $false
+            }
+            if ($artifact.sha256.ToLowerInvariant() -ne $expected.ToLowerInvariant()) {
+              Write-Host "::warning::preinstall pin mismatch for '$($package.name)' ($pinArchKey): manifest pins $expected but the live index resolves $($artifact.sha256); refusing to install unverified bytes (niubash#312)"
+              return $false
+            }
+            Write-Host "pin verified: $($package.name) $($info.version) $pinArchKey sha256 match"
+            return $true
+          }
 
           function Install-Package([string]$name) {
             # Attempt 1-2: direct. Attempt 3: local proxy fallback
@@ -249,6 +360,13 @@ jobs:
           $installed = @()
           $failed = @()
           foreach ($package in $manifest.packages) {
+            # niubash#312: nothing installs unless the committed pin matches
+            # the live index. A pin failure counts as a failed install — the
+            # same loud, non-blocking fail-open path as a transport failure.
+            if (-not (Confirm-PackagePin $package $archKey)) {
+              $failed += $package.name
+              continue
+            }
             if (Install-Package $package.name) {
               $installed += $package.name
               Write-Host "pre-installed: $($package.name)"
@@ -367,6 +485,27 @@ jobs:
           Copy-Item -LiteralPath $versionedZip -Destination "dist/niubash-win-${{ matrix.arch }}.zip" -Force
           Copy-Item -LiteralPath $versionedSetup -Destination "dist/niubash-win-${{ matrix.arch }}-setup.exe" -Force
 
+      # niubash#311: every setup.exe ships a `.sha256` sidecar next to it, in
+      # the coreutils "<hex>  <filename>" form. `niu --self-update` fetches
+      # the stable alias's sidecar and verifies the downloaded installer
+      # against it before executing (fail-closed). The same digests feed the
+      # winget manifest's InstallerSha256 and the release's SHA256SUMS.
+      - name: Emit SHA-256 digest sidecars for the installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($file in @(
+            "dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe",
+            "dist/niubash-win-${{ matrix.arch }}-setup.exe"
+          )) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "expected installer artifact missing: $file"
+            }
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            Set-Content -LiteralPath "$file.sha256" -Value "$hash  $(Split-Path -Leaf $file)" -Encoding ascii
+            Write-Host "$(Split-Path -Leaf $file): $hash"
+          }
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
@@ -374,8 +513,10 @@ jobs:
           path: |
             dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
             dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
+            dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe.sha256
             dist/niubash-win-${{ matrix.arch }}.zip
             dist/niubash-win-${{ matrix.arch }}-setup.exe
+            dist/niubash-win-${{ matrix.arch }}-setup.exe.sha256
           if-no-files-found: error
           retention-days: 1
 
@@ -1268,6 +1409,28 @@ jobs:
           fi
           echo "all platform builds compiled rubash git $(printf '%s\n' $revs | sed '/^$/d' | sort -u)"
 
+      # niubash#311: one aggregate checksum file for the whole release. Payload
+      # artifacts only — the per-installer .sha256 sidecars are listed BY NAME
+      # here (hashing a hash would be circular), and the installer digests in
+      # this file are the same values the winget manifest's InstallerSha256
+      # consumes. A missing payload set is an error, never an empty sums file.
+      - name: Generate SHA256SUMS for every shipped artifact
+        run: |
+          set -euo pipefail
+          : > SHA256SUMS
+          count=0
+          while IFS= read -r file; do
+            hash="$(sha256sum "$file" | awk '{print $1}')"
+            printf '%s  %s\n' "$hash" "$(basename "$file")" >> SHA256SUMS
+            count=$((count + 1))
+          done < <(find artifacts -type f \( -name '*.zip' -o -name '*.exe' -o -name '*.tar.gz' \) | sort)
+          if [ "$count" -eq 0 ]; then
+            echo "no payload artifacts found to hash" >&2
+            exit 1
+          fi
+          echo "hashed $count artifacts:"
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -1290,10 +1453,14 @@ jobs:
             macOS (aarch64, x86_64): portable tarballs with the `niu` binary, README, and LICENSE. Untar anywhere and run `./niu`.
 
             Every artifact was smoke-verified on the build OS of the job that produced it, before upload: `niu -c 'echo ok'`, `printf 'a\nb\n' | niu -c 'sort | head -1'`, an offline `NIU_PLUGIN_SPEC=<empty> niu plugin sync --bootstrap` (exit 0, no output, no network), and a `niu --version` check against this tag and the engine revision.
+
+            Integrity (niubash#311): `SHA256SUMS` lists the SHA-256 of every shipped artifact, and each Windows installer has a `.sha256` sidecar beside it. `niu --self-update` verifies the installer against the sidecar before running it and aborts rather than execute anything it cannot verify. The same digests feed the winget manifest `InstallerSha256`.
           files: |
             artifacts/**/*.zip
             artifacts/**/*.exe
             artifacts/**/*.tar.gz
+            artifacts/**/*.sha256
+            SHA256SUMS
           fail_on_unmatched_files: true
           overwrite_files: true
           generate_release_notes: true
