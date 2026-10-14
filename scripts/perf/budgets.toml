@@ -195,3 +195,60 @@ hard_fail_multiplier = 5
 # regression); the rerender family (axin/clean/simple/sexy/font) stays
 # over. Every entry above remains deliberately unratified: the gate stays
 # red on them by design until the fix-lane lands.
+#
+# ── STATUS UPDATE (runs 38462805309 + 38481728706, 2026-10-13) ────────────
+# Two further windows-2025 runs after the #329 re-ratification, recorded
+# NOT ratified: every number below stays over its budget exactly as
+# measured, the gate held both runs red on them, and nothing in this block
+# changes any budget or any gate rule. Numbers first:
+#
+#   run 38462805309 — 6 over / 0 hard-fail (437 assets):
+#     omb.theme:minimal-gh   fp 6805/6500 (1.05x)  samples 5242-7142
+#     omb.theme:modern       fp 7369/6500 (1.13x)  samples 5349-7376
+#     omb.completion:helm    src 4005/1850 (2.16x) samples 1072-4511, loader 4000
+#     omb.completion:git     src 6608/6600 (1.00x) — 8ms over the ratified
+#                            fix-lane ceiling; samples 6556-7177
+#     bashit.theme:elixr     rr  174/120  (1.45x)  samples 17-214
+#     bashit.theme:hawaii50  src 1742/1500 (1.16x) samples 1737-1780 (tight)
+#   run 38481728706 — 9 over / 0 hard-fail (437 assets):
+#     omb.theme:mairan       fp 9925/6500 (1.53x)  samples 8397-11107
+#     omb.theme:mbriggs      src 2089/1800 (1.16x) samples 1071-2476
+#     omb.theme:minimal      fp 7047/6500 (1.08x)  samples 5407-8640
+#     omb.theme:minimal-gh   fp 7093/6500 (1.09x)  (recurred from 38462805309)
+#     omb.theme:modern       fp 6528/6500 (1.00x)  +28ms (recurred)
+#     bashit.theme:barbuk    src 2031/1500 (1.35x) samples 929-2044
+#     bashit.theme:elixr     rr  162/120  (1.35x)  samples 31-197 (recurred)
+#     bashit.plugin:todo     src  685/620  (1.10x)  one-rep spike 4362
+#     bashit.plugin:virtualenv src 683/620 (1.10x)  one-rep spike 4312
+#
+# What four windows-2025 runs now show jointly (38404767765 / 38452840701 /
+# 38462805309 / 38481728706): class medians are STABLE (omb.theme fp
+# 4500 -> 4616 across runs), zero hard-fails (5x) ever fired, and the over
+# SET moves between runs — only modern/minimal-gh/elixr recur, each at a
+# different ratio. The fp overs cluster ALPHABETICALLY inside each run
+# (minimal / minimal-gh / modern / mairan are adjacent, i.e. measured in
+# the same minutes) and the fp tail grows run over run (6.0 -> 7.4 -> 9.9s)
+# while the median holds: transient runner contention windows, not
+# per-asset regressions — the #328 machine-mismatch diagnosis, refined
+# from machine-vs-baseline to minute-vs-minute on the same runner family.
+#
+# Three assets do NOT fit the noise band and stay deliberately unratified
+# (an unexplained number gets a fix-lane, never an amnesty):
+#   omb.theme:mairan      fp 1723 (baseline host) -> 6359 -> 9925 while its
+#                         class median holds — unexplained, re-measure
+#   omb.completion:helm   src 678 (baseline host) -> 4005, bimodal samples,
+#                         loader median 4000 — unexplained, investigate
+#   bashit.theme:elixr    rr: the COMMITTED BASELINE itself is 171ms over
+#                         the 120ms mandate (wt87 re-verify said 101ms, the
+#                         two runner runs say 174/162, samples bimodal
+#                         17-214) — measurement-unstable AND over-mandate
+#                         at the baseline; fix-lane candidate
+# Class-default re-ratification cannot absorb this honestly: covering the
+# fp tail (9925 and growing) would put omb.theme first_prompt_ms above the
+# 12s phase cap, i.e. the fp budget stops being a tooth at all. Closing
+# the residual is a GATE-SEMANTICS decision (hard-fail-only blocking with
+# soft-over warnings, and/or a reproducibility re-measure for over-phase
+# verdicts) — owner adjudication requested; proposals + the full data
+# table live in the PR that carries this note. Until then the gate keeps
+# holding releases red on whatever a given minute's contention window
+# serves it, by the letter of the iron directive.

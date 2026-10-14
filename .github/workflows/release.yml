@@ -1119,27 +1119,30 @@ jobs:
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      # Same discipline as the packager preservation in build-windows: a
-      # workflow_dispatch of an old tag must run the CURRENT journey gate
-      # (old tags predate it), against that tag's own source build.
-      - name: Preserve current journey gate
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "journey") | Out-Null
-          Copy-Item -Recurse -LiteralPath scripts/journey -Destination (Join-Path $env:RUNNER_TEMP "journey") -Force
-
+      # The CURRENT gate (origin/master's whole scripts/journey) runs against
+      # the tag's own source build — a workflow_dispatch of an old tag must
+      # not run the tag's frozen copy (old tags predate the gate), and a tag
+      # push must not run the tag's stale copy either. Delivered by git
+      # pathspec, end to end (release run 38481728706): the RUNNER_TEMP/
+      # Copy-Item relay this replaces nested the directory at BOTH hops —
+      # Copy-Item -Recurse copies INTO an existing destination, and the
+      # Preserve hop pre-created RUNNER_TEMP\journey, so the restore copied
+      # the already-nested parent and the gate landed at
+      # scripts/journey/journey/ — the same nesting #327's remove-then-copy
+      # fix had already documented for the restore hop alone (release runs
+      # 2-5), now also hitting from the Preserve hop. The verdict
+      # self-check then restored exactly one file to the right path and died
+      # on the missing golden-journey.py beside it.
       - name: Checkout release tag
         shell: pwsh
         run: |
           git fetch --tags --force
           git checkout "${{ steps.release.outputs.tag }}"
-          New-Item -ItemType Directory -Force -Path scripts | Out-Null
-          # Remove-then-copy: Copy-Item -Recurse onto an EXISTING
-          # scripts/journey (the tag carries the gate too) NESTS the
-          # copy as scripts/journey/journey/ while the invoked file
-          # stays the tag's stale version (release runs 2-5).
+          # Remove-then-checkout: the tag tree's own scripts/journey (if any)
+          # must not leak stale files master has deleted; git pathspec
+          # checkout overlays, it never deletes.
           if (Test-Path scripts/journey) { Remove-Item -Recurse -Force scripts/journey }
-          Copy-Item -Recurse -LiteralPath (Join-Path $env:RUNNER_TEMP "journey") scripts/journey
+          git checkout origin/master -- scripts/journey
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1.11
@@ -1161,22 +1164,24 @@ jobs:
       # known-fail exits 0 (labeling, never waiving — the owning ticket
       # owns the fix), an unlabeled fail exits 1. Guarded here so the
       # contract cannot drift silently between the module and the job.
-      # Same deterministic delivery as the gate itself: on a tag-push of
-      # an old release the working tree is that tag's own tree, which
-      # predates this self-check — take the current gate from the
-      # dispatch ref's object store.
+      # Same deterministic delivery as the gate itself — the WHOLE directory,
+      # not one file: the self-check loads golden-journey.py from beside
+      # itself (test_verdict_exit.py:21), so delivering only the test file
+      # left it executing against a module that was not there (release run
+      # 38481728706). fetch-depth 0 guarantees origin/master is present;
+      # the checkout above already delivered the same tree, this idempotent
+      # re-assert keeps the self-check self-contained against reordering.
       - name: Verdict-exit contract self-check
         run: |
-          git checkout origin/master -- scripts/journey/test_verdict_exit.py
+          git checkout origin/master -- scripts/journey
           python scripts/journey/test_verdict_exit.py
 
       - name: Run the golden user journey
         shell: pwsh
         run: |
-          # Deterministic gate delivery: take scripts/journey straight from
-          # the dispatch ref's git object store (no temp dirs, no
-          # Copy-Item semantics — runs 2-8). fetch-depth 0 guarantees the
-          # ref is present.
+          # Same delivery as the self-check above: scripts/journey straight
+          # from origin/master's git object store (no temp dirs, no
+          # Copy-Item semantics — runs 2-8, 38481728706).
           git checkout origin/master -- scripts/journey
           python scripts/journey/golden-journey.py `
             (Resolve-Path target/release/niu.exe) `
