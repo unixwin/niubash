@@ -73,25 +73,35 @@ jobs:
     needs: harvest
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4 # niubash：eco 脚本（引擎源码不在此树内签出）
-      - name: clone rubash outside the workspace tree
-        run: git clone --depth 1 https://github.com/${{ github.repository_owner }}/rubash.git "${{ runner.temp }}/rubash"
+      - uses: actions/checkout@v4 # niubash：eco 脚本 + the shell under test
+      # The sibling path matters: Cargo.toml patches rubash to ../rubash
+      # (same step the main ci.yml windows job uses).
+      - name: clone rubash as the ../rubash sibling dependency
+        run: git clone --depth 1 https://github.com/${{ github.repository_owner }}/rubash.git "${{ github.workspace }}/../rubash"
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: install test deps
         run: pip install pyte pywinpty # pywinpty 提供的模块名就是 winpty
       - name: build engine
-        run: cargo build --release --manifest-path "${{ runner.temp }}/rubash/Cargo.toml"
+        run: cargo build --release --manifest-path "${{ github.workspace }}/../rubash/Cargo.toml"
+      # The interactive lane needs the SHELL, not just the engine: rubash's
+      # bash.exe is a shim that resolves niu.exe and execs it, so a runner
+      # with no niu.exe exits 127 on every asset ("bash shim: cannot locate
+      # niu.exe"). Build the host from this checkout and drive niu.exe
+      # directly, exactly like the local lane's --niu target/debug/niu.exe.
+      - name: build niubash (the shell under test)
+        run: cargo build --release --locked
       - name: locate binaries
         id: bins
         shell: pwsh
         run: |
-          $dir = "${{ runner.temp }}/rubash/target/release"
-          $bash = Get-ChildItem $dir -Filter 'bash.exe' | Select-Object -First 1
-          $rubash = Get-ChildItem $dir -Filter 'rubash.exe' | Select-Object -First 1
-          "bash=$($bash.FullName)" >> $env:GITHUB_OUTPUT
-          if ($rubash) { "rubash=$($rubash.FullName)" >> $env:GITHUB_OUTPUT }
-          else { "rubash=$($bash.FullName)" >> $env:GITHUB_OUTPUT }
+          $rubashDir = "${{ github.workspace }}/../rubash/target/release"
+          $rubash = Get-ChildItem $rubashDir -Filter 'rubash.exe' | Select-Object -First 1
+          $niu = Get-Item "${{ github.workspace }}/target/release/niu.exe" -ErrorAction SilentlyContinue
+          if (-not $rubash) { throw "rubash.exe not built in $rubashDir" }
+          if (-not $niu) { throw "niu.exe not built in ${{ github.workspace }}/target/release" }
+          "niu=$($niu.FullName)" >> $env:GITHUB_OUTPUT
+          "rubash=$($rubash.FullName)" >> $env:GITHUB_OUTPUT
       - name: download manifest
         uses: actions/download-artifact@v4
         with: { name: eco-manifest, path: eco }
@@ -101,7 +111,7 @@ jobs:
         run: |
           python scripts/harvest/eco-test.py `
             --tiers "${{ github.event.inputs.test_tiers || 't1' }}" `
-            --niu "${{ steps.bins.outputs.bash }}" `
+            --niu "${{ steps.bins.outputs.niu }}" `
             --rubash "${{ steps.bins.outputs.rubash }}" `
             --manifest-dir eco/manifest `
             --results-dir eco/results `
