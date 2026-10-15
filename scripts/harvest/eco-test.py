@@ -809,7 +809,8 @@ def report(results_path: Path, top: int, include_storms: bool,
 
 # ── Step summary + fetch gate (the #356 "green job, dead tier" class) ───────
 
-def write_step_summary(counts, tested, results_path, gate_msg=None):
+def write_step_summary(counts, tested, results_path, gate_msg=None,
+                       idle_note=None):
     """Append the verdict distribution to $GITHUB_STEP_SUMMARY (no-op when
     unset, so local runs stay quiet). Six nightly runs reported success with
     547/547 FETCH-FAILED: the distribution has to be visible, not buried in
@@ -824,6 +825,10 @@ def write_step_summary(counts, tested, results_path, gate_msg=None):
     for v, n in collections.Counter(counts).most_common():
         lines.append(f"| {v} | {n} |")
     lines += ["", f"{tested} assets tested this run · `{results_path}`", ""]
+    if idle_note:
+        # An idle lane must not read as a broken one (#356 was the opposite
+        # failure: a broken lane reading as healthy). Say which it is.
+        lines += [idle_note, ""]
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
@@ -1038,7 +1043,13 @@ def main(argv=None):
             print(f"::error::{gate_msg}")
         else:
             print(f"ERROR: {gate_msg}")
-    write_step_summary(counts, tested, results_path, gate_msg)
+    write_step_summary(
+        counts, tested, results_path, gate_msg,
+        idle_note=(f"**nothing pending** — all {len(assets)} assets in tiers "
+                   f"{tier_list} already carry a verdict; this run resumed "
+                   f"from the persisted manifest instead of re-testing "
+                   f"(idle lane, not a fetch failure)." if not pending else
+                   None))
     if gate_msg:
         return 3
     return 0
