@@ -177,6 +177,7 @@ pub struct Shell {
     pub rc_file: Option<PathBuf>,
     // --noediting: disable readline-style line editing in the REPL.
     pub no_editing: bool,
+    startup_invocation: Option<rubash::invocation::ShellInvocation>,
     // One-shot fast path (`Shell::new_one_shot`): the shell serves a single
     // non-interactive command, so REPL-only state is never initialized and
     // the prompt backend stays a bare placeholder. Bash renders no prompt and
@@ -549,6 +550,7 @@ impl Shell {
             no_profile: false,
             rc_file: None,
             no_editing: false,
+            startup_invocation: None,
             one_shot,
         };
         crate::startup_trace::tick("completion + widgets");
@@ -930,6 +932,21 @@ impl Shell {
         Ok(code)
     }
 
+    pub fn apply_invocation_before_startup(
+        &mut self,
+        invocation: &rubash::invocation::ShellInvocation,
+    ) -> Result<(), String> {
+        invocation.apply_to_executor_before_startup(&mut self.executor)?;
+        self.startup_invocation = Some(invocation.clone());
+        Ok(())
+    }
+
+    fn finish_startup(&mut self) {
+        if let Some(invocation) = self.startup_invocation.take() {
+            invocation.finish_startup(&mut self.executor);
+        }
+    }
+
     /// Source the user's REPL startup file once before the first prompt.
     ///
     /// `~/.niubashrc` is the only automatic interactive rc entry point.
@@ -939,6 +956,7 @@ impl Shell {
     /// an old rc are inert assignments the host no longer reads.
     pub fn run_startup_rc(&mut self) {
         self.run_startup_files(true);
+        self.finish_startup();
     }
 
     /// niubash#180 session side: a finished `niu setup` run (a child
@@ -1008,6 +1026,7 @@ impl Shell {
     /// without any of the REPL-only markers.
     pub fn run_interactive_startup_rc(&mut self) {
         self.run_startup_files(false);
+        self.finish_startup();
     }
 
     fn run_startup_files(&mut self, repl: bool) {
@@ -1049,6 +1068,7 @@ impl Shell {
 
         self.update_completion_state();
         if repl {
+            self.finish_startup();
             self.run_greeting_hooks();
         }
     }
@@ -1131,6 +1151,11 @@ impl Shell {
     /// file is sourced: no plugins, prompts, or completion machinery is loaded,
     /// so interactive-only content stays out of the one-shot execution path.
     pub fn source_non_interactive_env(&mut self) {
+        self.source_non_interactive_startup_file();
+        self.finish_startup();
+    }
+
+    fn source_non_interactive_startup_file(&mut self) {
         let niu_raw = std::env::var(NIU_ENV_VAR)
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -5826,6 +5851,30 @@ complete -F _envtooldyn_hook envtooldyn
         );
     }
 
+    #[test]
+    fn restricted_startup_finishes_before_greeting_and_precmd_hooks() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-restricted-hooks");
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join(NIU_RC_FILE), "cd .\nSTARTUP_CD=$?\n").unwrap();
+        let mut shell = test_shell(HookConfig {
+            greeting: vec!["cd .; GREETING_CD=$?".into()],
+            precmd: vec!["cd .; PRECMD_CD=$?".into()],
+            ..HookConfig::default()
+        });
+        shell.home_dir = temp.clone();
+        let invocation = rubash::invocation::ShellInvocation::parse(&["-r".into()]).unwrap();
+        shell.apply_invocation_before_startup(&invocation).unwrap();
+        shell.run_startup_rc();
+        assert_eq!(shell.executor.get_env("STARTUP_CD"), Some("0"));
+        assert_eq!(shell.executor.get_env("GREETING_CD"), Some("1"));
+        shell.run_precmd_hooks();
+        assert_eq!(shell.executor.get_env("PRECMD_CD"), Some("1"));
+        assert!(shell.startup_invocation.is_none());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
     fn test_shell(hooks: HookConfig) -> Shell {
         let mut executor = Executor::new();
         executor.set_shopt_option("expand_aliases", true);
@@ -5867,6 +5916,7 @@ complete -F _envtooldyn_hook envtooldyn
             no_profile: false,
             rc_file: None,
             no_editing: false,
+            startup_invocation: None,
             one_shot: false,
         };
         shell.sync_executor_pwd_from_process_cwd();

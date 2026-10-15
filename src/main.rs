@@ -506,8 +506,8 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     shell.no_profile = invocation.no_profile;
     shell.rc_file = invocation.rc_file.clone().map(PathBuf::from);
     shell.no_editing = invocation.no_editing;
-    invocation
-        .apply_to_executor(&mut shell.executor)
+    shell
+        .apply_invocation_before_startup(&invocation)
         .map_err(|error| {
             // shell.c reports a bad -o/-O option name through the line-0
             // diagnostic ("bash: line 0: badopt: invalid shell option name").
@@ -541,7 +541,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             shell.set_script_name(&name);
         }
         shell.executor.set_env("BASH_EXECUTION_STRING", &command);
-        // __RUBASH_IS_C is already live here: invocation.apply_to_executor
+        // __RUBASH_IS_C is already live here: invocation.apply_to_executor_before_startup
         // (rubash invocation.rs:273-275) sets it for every command string,
         // so parser diagnostics take the `$0: -c: line N:` shape (error.c
         // get_name_for_error; niubash#160).
@@ -1151,8 +1151,8 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
         shell.no_profile = invocation.no_profile;
         shell.rc_file = invocation.rc_file.clone().map(PathBuf::from);
         shell.no_editing = invocation.no_editing;
-        invocation
-            .apply_to_executor(&mut shell.executor)
+        shell
+            .apply_invocation_before_startup(&invocation)
             .map_err(|error| {
                 if error.contains("invalid shell option name") {
                     eprintln!("bash: line 0: {error}");

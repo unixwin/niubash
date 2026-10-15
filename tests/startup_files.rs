@@ -91,6 +91,16 @@ impl Drop for Fixture {
 /// point at the fixture home, and every startup-file variable the matrix
 /// exercises starts from a known state.
 fn run_niu(args: &[&str], home: &Path, cwd: &Path, envs: &[(&str, String)]) -> Output {
+    run_niu_with_input(args, home, cwd, envs, None)
+}
+
+fn run_niu_with_input(
+    args: &[&str],
+    home: &Path,
+    cwd: &Path,
+    envs: &[(&str, String)],
+    input: Option<&str>,
+) -> Output {
     let mut command = Command::new(niu_binary());
     command
         .args(args)
@@ -102,13 +112,213 @@ fn run_niu(args: &[&str], home: &Path, cwd: &Path, envs: &[(&str, String)]) -> O
         .env_remove("BASH_ENV")
         .env_remove("NIU_ENV")
         .env_remove("ENV")
-        .stdin(Stdio::null());
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     for (key, value) in envs {
         command.env(key, value);
     }
-    command
-        .output()
-        .unwrap_or_else(|err| panic!("spawn niu: {err}"))
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn niu: {err}"));
+    if let Some(input) = input {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn restricted_invocation_defers_restrictions_until_startup_in_every_dispatch() {
+    let fixture = Fixture::new("restricted-dispatch");
+    let startup = "cd \"$HOME\"\nPATH=restricted-startup-path\nSTARTUP_COUNT=$(( ${STARTUP_COUNT:-0} + 1 ))\nprintf 'startup:%s\\n' \"$STARTUP_COUNT\"\n";
+    std::fs::write(fixture.home.join(".niubashrc"), startup).unwrap();
+    let env_file = fixture.home.join("restricted.env");
+    std::fs::write(&env_file, startup).unwrap();
+    let script = fixture.home.join("restricted.niu");
+    for body in [
+        "printf 'body:%s:%s\\n' \"$STARTUP_COUNT\" \"$PATH\"; cd .",
+        "printf 'body:%s:%s\\n' \"$STARTUP_COUNT\" \"$PATH\"; PATH=body-path",
+    ] {
+        std::fs::write(&script, body).unwrap();
+        let script_name = script.to_str().unwrap();
+        let cases = [
+            (vec!["-r", "-c", body], None),
+            (vec!["-r", "-i", "-c", body], None),
+            (vec!["-r", script_name], None),
+            (vec!["-r", "-i", script_name], None),
+            (vec!["-r", "-s"], Some(format!("{body}\n"))),
+            (vec!["-r"], Some(format!("{body}\n"))),
+            (vec!["-r", "-i"], Some(format!("{body}\nexit $?\n"))),
+            (vec!["-r", "-i", "-s"], Some(format!("{body}\nexit $?\n"))),
+            (vec!["-r", "-C", body], None),
+        ];
+        for env_name in ["BASH_ENV", "NIU_ENV"] {
+            for (args, input) in &cases {
+                let output = run_niu_with_input(
+                    args,
+                    fixture.path(),
+                    &fixture.start,
+                    &[(env_name, env_file.to_string_lossy().into_owned())],
+                    input.as_deref(),
+                );
+                let stdout = stdout_of(&output);
+                let stderr = stderr_of(&output);
+                assert_eq!(
+                    stdout.matches("startup:1").count(),
+                    1,
+                    "{args:?}: {stdout}\n{stderr}"
+                );
+                assert!(
+                    stdout.contains("body:1:restricted-startup-path"),
+                    "{args:?}: {stdout}\n{stderr}"
+                );
+                assert!(!output.status.success(), "{args:?}: {stdout}\n{stderr}");
+                let diagnostic = if body.ends_with("PATH=body-path") {
+                    "PATH: readonly variable"
+                } else {
+                    "cd: restricted"
+                };
+                assert!(stderr.contains(diagnostic), "{args:?}: {stderr}");
+            }
+        }
+    }
+}
+
+#[test]
+fn restricted_norc_and_missing_startup_still_restrict_the_body() {
+    let fixture = Fixture::new("restricted-norc");
+    for rc_exists in [false, true] {
+        if rc_exists {
+            fixture.write_rc("must-not-run");
+        }
+        for args in [
+            vec![
+                "--norc",
+                "-r",
+                "-i",
+                "-c",
+                "echo ${STARTUP_MARKER:-unset}; cd .",
+            ],
+            vec!["--norc", "-r", "-C", "echo ${STARTUP_MARKER:-unset}; cd ."],
+            vec!["--norc", "-r", "-i"],
+            vec!["-r", "-c", "echo ${STARTUP_MARKER:-unset}; cd ."],
+            vec!["-r", "-s"],
+        ] {
+            let input = (args.last() == Some(&"-i") || args.last() == Some(&"-s"))
+                .then_some("echo ${STARTUP_MARKER:-unset}; cd .\nexit $?\n");
+            let output = run_niu_with_input(&args, fixture.path(), &fixture.start, &[], input);
+            assert_eq!(stdout_of(&output), "unset", "{args:?}");
+            assert!(!output.status.success(), "{args:?}");
+            assert!(stderr_of(&output).contains("restricted"), "{args:?}");
+        }
+    }
+}
+
+#[test]
+fn startup_set_r_is_not_cleared_when_invocation_is_unrestricted() {
+    let fixture = Fixture::new("startup-set-r");
+    let startup = "set -r\n";
+    std::fs::write(fixture.home.join(".niubashrc"), startup).unwrap();
+    let env_file = fixture.home.join("restricted.env");
+    std::fs::write(&env_file, startup).unwrap();
+    for args in [
+        vec!["-c", "cd ."],
+        vec!["-i", "-c", "cd ."],
+        vec!["-C", "cd ."],
+    ] {
+        let output = run_niu(
+            &args,
+            fixture.path(),
+            &fixture.start,
+            &[("BASH_ENV", env_file.to_string_lossy().into_owned())],
+        );
+        assert!(!output.status.success(), "{args:?}");
+        assert!(stderr_of(&output).contains("restricted"), "{args:?}");
+    }
+}
+
+#[test]
+fn restricted_is_not_a_valid_named_invocation_option() {
+    let fixture = Fixture::new("restricted-invalid-option");
+    fixture.write_rc("must-not-run");
+    for args in [
+        vec!["-o", "restricted", "-c", "echo body"],
+        vec!["-o", "restricted", "-C", "echo body"],
+        vec!["-c", "-o", "restricted", "echo body"],
+    ] {
+        let output = run_niu(&args, fixture.path(), &fixture.start, &[]);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(stdout_of(&output).is_empty(), "{args:?}");
+        assert!(
+            stderr_of(&output).contains("restricted: invalid shell option name"),
+            "{args:?}: {}",
+            stderr_of(&output)
+        );
+    }
+}
+
+#[test]
+fn restricted_startup_respects_rcfile_posix_and_norc_env_boundaries() {
+    let fixture = Fixture::new("restricted-startup-boundaries");
+    fixture.write_rc("wrong-rc");
+    let startup = fixture.home.join("custom.rc");
+    std::fs::write(
+        &startup,
+        "cd \"$HOME\"\nPATH=boundary-path\nset +r\nprintf 'custom-startup\\n'\n",
+    )
+    .unwrap();
+    let startup_name = startup.to_str().unwrap();
+    let body = "printf 'body:%s\\n' \"$PATH\"; cd .";
+    for (args, envs, expected_startup) in [
+        (
+            vec!["--rcfile", startup_name, "-r", "-i", "-c", body],
+            vec![],
+            true,
+        ),
+        (
+            vec!["--rcfile", startup_name, "-r", "-C", body],
+            vec![],
+            true,
+        ),
+        (
+            vec!["--norc", "--rcfile", startup_name, "-r", "-C", body],
+            vec![],
+            false,
+        ),
+        (
+            vec!["--norc", "-r", "-c", body],
+            vec![("BASH_ENV", startup_name.to_owned())],
+            true,
+        ),
+        (
+            vec!["--posix", "--norc", "-r", "-i", "-c", body],
+            vec![("ENV", startup_name.to_owned())],
+            true,
+        ),
+        (vec!["--posix", "-r", "-i", "-c", body], vec![], false),
+    ] {
+        let output = run_niu(&args, fixture.path(), &fixture.start, &envs);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(stderr_of(&output).contains("cd: restricted"), "{args:?}");
+        let stdout = stdout_of(&output);
+        assert_eq!(
+            stdout.matches("custom-startup").count(),
+            usize::from(expected_startup),
+            "{args:?}: {stdout}"
+        );
+        if expected_startup {
+            assert!(stdout.contains("body:boundary-path"), "{args:?}: {stdout}");
+        }
+        assert!(!stdout.contains("wrong-rc"), "{args:?}: {stdout}");
+    }
 }
 
 fn stdout_of(output: &Output) -> String {
