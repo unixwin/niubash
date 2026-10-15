@@ -874,7 +874,15 @@ def main(argv=None):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    results_dir = Path(args.results_dir)
+    # EVERY path becomes absolute before it is used. The workflow passes
+    # workspace-relative paths (eco/...), and `tmp_root` is handed to the
+    # child as HOME/USERPROFILE: a relative HOME lets niu resolve
+    # `eco/tmp/sand-x/.niubashrc` against the child's OWN cwd, the rc check
+    # misses, `is_first_run()` fires and the setup wizard blocks the asset
+    # until the startup timeout (544/544 HANG, run 38690079988). wsl_path()
+    # is drive-absolute-only too, so a relative --tmp-root also broke the
+    # GNU parity oracle.
+    results_dir = Path(args.results_dir).resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
     results_path = results_dir / "test-results.jsonl"
 
@@ -883,7 +891,7 @@ def main(argv=None):
                       args.include_gnu)
 
     import sqlite3
-    manifest_dir = Path(args.manifest_dir)
+    manifest_dir = Path(args.manifest_dir).resolve()
     db = sqlite3.connect(manifest_dir / "eco-manifest.sqlite",
                          check_same_thread=False,
                          timeout=30)  # harvest+test can run concurrently
@@ -930,16 +938,16 @@ def main(argv=None):
     print(f"manifest: {len(assets)} assets in tiers {tier_list}; "
           f"{len(done)} already tested; {len(pending)} pending")
 
-    niu = Path(args.niu)
-    rubash = Path(args.rubash)
+    niu = Path(args.niu).resolve()
+    rubash = Path(args.rubash).resolve()
     if not niu.exists():
         print(f"FATAL: niu not found at {niu} (build first: cargo build)")
         return 2
     if not rubash.exists():
         print(f"FATAL: rubash not found at {rubash}")
         return 2
-    tmp_root = Path(args.tmp_root)
-    cache_root = Path(args.cache_dir)
+    tmp_root = Path(args.tmp_root).resolve()
+    cache_root = Path(args.cache_dir).resolve()
     # Fail fast and loud on an unusable path: the #356 failure mode was an
     # E:\ mkdir exception swallowed per asset as FETCH-FAILED × 547.
     for label, p in (("tmp root", tmp_root), ("cache dir", cache_root)):
