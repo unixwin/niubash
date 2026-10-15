@@ -2,7 +2,7 @@
 //!
 //! * `niu plugin sync` materializes the rc managed block from the spec
 //!   **idempotently** — an unchanged spec yields a byte-identical rc and a
-//!   clean report; the `--bootstrap` startup form is silent when clean;
+//!   clean report; `--bootstrap` is always a silent compatibility no-op;
 //! * merge semantics: entries the spec dropped leave the block, hand-added
 //!   OMB array entries survive, a hand-set theme survives a spec that
 //!   declares none;
@@ -124,8 +124,8 @@ impl Sandbox {
 }
 
 /// Sync materializes idempotently: an unchanged spec regenerates the rc
-/// block byte-identically, reports clean, and the bootstrap startup form
-/// prints nothing. Spec drops remove entries; hand-added array items and a
+/// block byte-identically, reports clean, and the bootstrap compatibility
+/// no-op prints nothing. Spec drops remove entries; hand-added array items and a
 /// hand-set theme survive.
 #[test]
 fn sync_is_idempotent_bootstrap_quiet_and_merges_honestly() {
@@ -181,7 +181,7 @@ fn sync_is_idempotent_bootstrap_quiet_and_merges_honestly() {
         stdout_text(&third)
     );
 
-    // Bootstrap form is quiet when clean (stdout AND stderr).
+    // Bootstrap is a silent no-op (stdout AND stderr).
     let boot = run_niu_with_env(&["plugin", "sync", "--bootstrap"], &sandbox.envs);
     assert_success(&boot, "bootstrap clean");
     assert!(
@@ -630,11 +630,25 @@ fn plugin_add_honors_the_checksum_pin_and_rolls_back_on_failure() {
 }
 
 /// A failed `niu plugin add` leaves NOTHING behind (wt83 #174): the spec
-/// declaration is rolled back, the startup form has nothing to defer, and
-/// a legacy stranded entry (declared, never installed, startup-failed) is
+/// declaration is rolled back, bootstrap remains a silent no-op, and
+/// a legacy stranded entry (declared, never installed) is
 /// removed by `niu plugin sync --prune` with a printed line.
 #[test]
 fn failed_add_rolls_back_and_prune_removes_legacy_strands() {
+    fn plugin_state_snapshot(directory: &std::path::Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                entries.push((path.clone(), None));
+                entries.extend(plugin_state_snapshot(&path));
+            } else {
+                entries.push((path.clone(), Some(fs::read(path).unwrap())));
+            }
+        }
+        entries.sort();
+        entries
+    }
     let sandbox = Sandbox::new("add-rollback");
     // A tree with no manager layout and no sourceable shell file: the
     // fetch fails honestly (the audit's a14 shape, offline).
@@ -671,15 +685,15 @@ fn failed_add_rolls_back_and_prune_removes_legacy_strands() {
 
     // The startup form has nothing to defer or nag about.
     let boot = run_niu_with_env(&["plugin", "sync", "--bootstrap"], &sandbox.envs);
+    assert_success(&boot, "bootstrap after rolled-back add");
     assert!(
-        !stderr_text(&boot).contains("deferred"),
+        stdout_text(&boot).is_empty() && stderr_text(&boot).is_empty(),
         "startup must be silent after a rolled-back add: {}",
         stderr_text(&boot)
     );
 
     // A LEGACY strand (declared by an old add, never installed): the
-    // startup memo makes every startup print the deferred line; --prune is
-    // the one-time removal, with a printed row.
+    // compatibility no-op must leave it alone; explicit --prune removes it.
     let missing = sandbox.home.parent().unwrap().join("missing-tree");
     fs::write(
         sandbox.spec_path(),
@@ -690,18 +704,16 @@ fn failed_add_rolls_back_and_prune_removes_legacy_strands() {
     )
     .unwrap();
 
-    let boot1 = run_niu_with_env(&["plugin", "sync", "--bootstrap"], &sandbox.envs);
-    assert!(
-        stderr_text(&boot1).contains("failed stranded"),
-        "{}",
-        stderr_text(&boot1)
-    );
-    let boot2 = run_niu_with_env(&["plugin", "sync", "--bootstrap"], &sandbox.envs);
-    assert!(
-        stderr_text(&boot2).contains("deferred stranded"),
-        "{}",
-        stderr_text(&boot2)
-    );
+    let state_before = plugin_state_snapshot(sandbox.home.parent().unwrap());
+    for _ in 0..2 {
+        let boot = run_niu_with_env(&["plugin", "sync", "--bootstrap"], &sandbox.envs);
+        assert_success(&boot, "bootstrap with stranded declaration");
+        assert!(stdout_text(&boot).is_empty() && stderr_text(&boot).is_empty());
+        assert_eq!(
+            plugin_state_snapshot(sandbox.home.parent().unwrap()),
+            state_before
+        );
+    }
 
     let prune = run_niu_with_env(&["plugin", "sync", "--prune"], &sandbox.envs);
     assert_success(&prune, "prune runs");
@@ -716,8 +728,9 @@ fn failed_add_rolls_back_and_prune_removes_legacy_strands() {
         sandbox.spec()
     );
     let boot3 = run_niu_with_env(&["plugin", "sync", "--bootstrap"], &sandbox.envs);
+    assert_success(&boot3, "bootstrap after prune");
     assert!(
-        stderr_text(&boot3).trim().is_empty(),
+        stdout_text(&boot3).is_empty() && stderr_text(&boot3).is_empty(),
         "startup is silent again: {}",
         stderr_text(&boot3)
     );

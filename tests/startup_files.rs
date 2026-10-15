@@ -131,6 +131,28 @@ fn assert_success(output: &Output, context: &str) {
 
 const PROBE: &str = "echo ${STARTUP_MARKER:-unset}";
 
+fn seed_ignored_rc_files(fixture: &Fixture) -> Vec<(PathBuf, Vec<u8>)> {
+    [".winuxshrc", ".winshrc", ".bashrc"]
+        .into_iter()
+        .map(|name| {
+            let path = fixture.home.join(name);
+            let content = format!(
+                "export STARTUP_MARKER={name}\nprintf executed >> \"$HOME/unexpected-rc-execution\"\n"
+            )
+            .into_bytes();
+            std::fs::write(&path, &content).unwrap();
+            (path, content)
+        })
+        .collect()
+}
+
+fn assert_ignored_rc_files_unchanged(fixture: &Fixture, files: &[(PathBuf, Vec<u8>)]) {
+    for (path, original) in files {
+        assert_eq!(&std::fs::read(path).unwrap(), original, "{path:?}");
+    }
+    assert!(!fixture.home.join("unexpected-rc-execution").exists());
+}
+
 /// Interactive REPL startup sources ~/.niubashrc located through $HOME.
 #[test]
 fn interactive_repl_sources_home_niubashrc() {
@@ -141,12 +163,91 @@ fn interactive_repl_sources_home_niubashrc() {
     assert_eq!(stdout_of(&output), "from_rc");
 }
 
+/// Startup must be read-only with respect to the user's primary rc. A fresh
+/// home must not acquire a generated `~/.niubashrc` merely because niu starts.
+#[test]
+fn startup_does_not_create_primary_rc_in_a_fresh_home() {
+    let fixture = Fixture::new("fresh-home-no-write");
+    let rc = fixture.home.join(".niubashrc");
+    assert!(!rc.exists(), "fixture must start without {rc:?}");
+
+    let output = run_niu(
+        &["-C", "echo startup-ok"],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    assert_success(&output, "fresh-home startup");
+    assert_eq!(stdout_of(&output), "startup-ok");
+    assert!(!rc.exists(), "startup must not create {rc:?}");
+}
+
+/// A broken primary rc is user-owned input. Startup may report its parse
+/// error, but it must not repair, truncate, or replace the file implicitly.
+#[test]
+fn startup_does_not_repair_or_rewrite_primary_rc() {
+    let fixture = Fixture::new("broken-primary-no-repair");
+    let ignored = seed_ignored_rc_files(&fixture);
+    let rc = fixture.home.join(".niubashrc");
+    let original = "if true; then\n  export STARTUP_MARKER=fragment\n";
+    std::fs::write(&rc, original).unwrap();
+
+    let output = run_niu(
+        &["-C", "echo startup-ok"],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    assert_success(&output, "broken-primary startup");
+    assert_eq!(stdout_of(&output), "startup-ok");
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), original);
+    assert_ignored_rc_files_unchanged(&fixture, &ignored);
+}
+
+#[test]
+fn startup_without_primary_ignores_legacy_and_bash_rc_files() {
+    for args in [vec!["-C", PROBE], vec!["-i", "-c", PROBE]] {
+        let fixture = Fixture::new("primary-only-missing");
+        let ignored = seed_ignored_rc_files(&fixture);
+        let output = run_niu(&args, fixture.path(), &fixture.start, &[]);
+        assert_success(&output, "primary-only startup");
+        assert_eq!(stdout_of(&output), "unset");
+        assert!(!fixture.home.join(".niubashrc").exists());
+        assert_ignored_rc_files_unchanged(&fixture, &ignored);
+    }
+}
+
+#[test]
+fn startup_primary_is_exclusive_and_not_rewritten() {
+    for original in ["export STARTUP_MARKER=primary\n", ""] {
+        let fixture = Fixture::new("primary-only-existing");
+        let ignored = seed_ignored_rc_files(&fixture);
+        let rc = fixture.home.join(".niubashrc");
+        std::fs::write(&rc, original).unwrap();
+        let output = run_niu(&["-C", PROBE], fixture.path(), &fixture.start, &[]);
+        assert_success(&output, "exclusive primary startup");
+        assert_eq!(
+            stdout_of(&output),
+            if original.is_empty() {
+                "unset"
+            } else {
+                "primary"
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), original);
+        assert_ignored_rc_files_unchanged(&fixture, &ignored);
+    }
+}
+
 /// `--rcfile` overrides the default interactive rc file (GNU bashrc_file).
 #[test]
 fn rcfile_overrides_default_rc() {
     let fixture = Fixture::new("rcfile");
+    let ignored = seed_ignored_rc_files(&fixture);
     fixture.write_rc("from_default_rc");
+    let primary_before = std::fs::read(fixture.home.join(".niubashrc")).unwrap();
     let alt = fixture.write_file("alt.rc", "from_rcfile");
+    let alt_before = std::fs::read(&alt).unwrap();
     let output = run_niu(
         &["--rcfile", alt.to_string_lossy().as_ref(), "-C", PROBE],
         fixture.path(),
@@ -155,6 +256,78 @@ fn rcfile_overrides_default_rc() {
     );
     assert_success(&output, "rcfile");
     assert_eq!(stdout_of(&output), "from_rcfile");
+    assert_eq!(std::fs::read(&alt).unwrap(), alt_before);
+    assert_eq!(
+        std::fs::read(fixture.home.join(".niubashrc")).unwrap(),
+        primary_before
+    );
+    assert_ignored_rc_files_unchanged(&fixture, &ignored);
+}
+
+#[test]
+fn missing_rcfile_never_falls_back_or_creates_configuration() {
+    let fixture = Fixture::new("missing-rcfile");
+    let ignored = seed_ignored_rc_files(&fixture);
+    fixture.write_rc("from_default_rc");
+    let primary_before = std::fs::read(fixture.home.join(".niubashrc")).unwrap();
+    let missing = fixture.home.join("missing.rc");
+    let output = run_niu(
+        &["--rcfile", missing.to_string_lossy().as_ref(), "-C", PROBE],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    assert_success(&output, "missing explicit rcfile");
+    assert_eq!(stdout_of(&output), "unset");
+    assert!(!missing.exists());
+    assert_eq!(
+        std::fs::read(fixture.home.join(".niubashrc")).unwrap(),
+        primary_before
+    );
+    assert_ignored_rc_files_unchanged(&fixture, &ignored);
+}
+
+#[test]
+fn startup_mode_boundaries_do_not_probe_other_rc_files() {
+    for flags in [vec!["--norc", "-C"], vec!["--posix", "-C"], vec!["-c"]] {
+        let fixture = Fixture::new("rc-mode-boundary");
+        let ignored = seed_ignored_rc_files(&fixture);
+        fixture.write_rc("must_not_run");
+        let primary = fixture.home.join(".niubashrc");
+        let original = std::fs::read(&primary).unwrap();
+        let mut args = flags;
+        args.push(PROBE);
+        let output = run_niu(&args, fixture.path(), &fixture.start, &[]);
+        assert_success(&output, "rc mode boundary");
+        assert_eq!(stdout_of(&output), "unset");
+        assert_eq!(std::fs::read(&primary).unwrap(), original);
+        assert_ignored_rc_files_unchanged(&fixture, &ignored);
+    }
+}
+
+#[test]
+fn norc_overrides_explicit_rcfile_without_modifying_it() {
+    let fixture = Fixture::new("norc-rcfile");
+    let ignored = seed_ignored_rc_files(&fixture);
+    let alt = fixture.write_file("alt.rc", "must_not_run");
+    let original = std::fs::read(&alt).unwrap();
+    let output = run_niu(
+        &[
+            "--norc",
+            "--rcfile",
+            alt.to_string_lossy().as_ref(),
+            "-C",
+            PROBE,
+        ],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    assert_success(&output, "norc with explicit rcfile");
+    assert_eq!(stdout_of(&output), "unset");
+    assert_eq!(std::fs::read(&alt).unwrap(), original);
+    assert!(!fixture.home.join(".niubashrc").exists());
+    assert_ignored_rc_files_unchanged(&fixture, &ignored);
 }
 
 /// `--norc` skips the interactive rc (GNU no_rc gates execute_bashrc_file).

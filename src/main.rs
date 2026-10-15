@@ -1441,7 +1441,7 @@ fn print_usage() {
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
-    println!("Configuration: ~/.niubashrc for interactive startup; a pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc");
+    println!("Configuration: ~/.niubashrc for interactive startup (primary-only; no automatic legacy migration)");
     println!();
     println!("Environment:");
     println!(
@@ -3462,7 +3462,7 @@ fn parse_timeout_seconds(raw: &str) -> anyhow::Result<std::time::Duration> {
     Ok(std::time::Duration::from_secs(secs))
 }
 
-/// `--bootstrap` is the quiet rc-startup form: zero output when clean.
+/// `--bootstrap` is a silent compatibility no-op for existing rc files.
 fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
     let mut prune = false;
     let mut bootstrap = false;
@@ -3489,24 +3489,20 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
             }
         }
     }
-    if bootstrap
-        && std::env::var_os("NIU_PLUGIN_BOOTSTRAP") == Some(std::ffi::OsString::from("off"))
-    {
+    if bootstrap {
         return Ok(());
     }
     let report =
         niubash_runtime::plugins::sync::sync_spec(niubash_runtime::plugins::sync::SyncOptions {
             prune,
             adopt,
-            startup: bootstrap,
+            startup: false,
             checksum_pin: None,
             timeout,
         })?;
     // niubash#196: a hand-written theme variable outside the managed blocks
     // is not the supported channel — `niu plugin sync` rewrites the managed
-    // blocks from the spec, so the rc line is ignored/dropped. Point at the
-    // spec once (startup form stays silent; the stderr nag must not pollute
-    // every shell boot).
+    // blocks from the spec, so the rc line is ignored/dropped.
     let stray = niubash_runtime::plugins::assets::stray_theme_assignment_lines();
     if !stray.is_empty() {
         eprintln!(
@@ -3516,31 +3512,6 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
             stray.join("; "),
             niubash_runtime::plugins::spec::spec_path().display()
         );
-    }
-    if bootstrap {
-        // Startup form: silent when clean; install notices only otherwise
-        // (iron law 2 keeps degraded state visible). In imperative mode
-        // (no spec) there is nothing to reconcile — undeclared sources are
-        // the LEGACY state, not drift, and startup must stay silent about
-        // them (sync.rs §4; the 1.3.0 startup nag printed them forever).
-        for row in &report.rows {
-            if row.action == "unchanged" {
-                continue;
-            }
-            eprintln!(
-                "niu plugin sync: {} {} — {}",
-                row.action, row.id, row.detail
-            );
-        }
-        if report.spec_present {
-            for id in &report.undeclared {
-                eprintln!(
-                    "niu plugin sync: {id} installed but not declared \
-                     (`niu plugin sync` for details)"
-                );
-            }
-        }
-        return Ok(());
     }
     if !report.spec_present {
         // Imperative mode (no spec): the 1.3.0 dead end printed an advice
@@ -3744,7 +3715,8 @@ fn print_plugin_usage() {
     println!("                           (--prune removes undeclared sources;");
     println!("                           --adopt declares installed sources into");
     println!("                           the spec, snapshotting the live state)");
-    println!("  sync --bootstrap         Same, quiet startup form (rc one-liner)");
+    println!("  sync --bootstrap         Silent compatibility no-op; no installs,");
+    println!("                           syncs, or rc writes (legacy rc lines)");
     println!("  update [<id>]            Update source(s) to the ref tip (no id =");
     println!("                           all); the lockfile pin moves");
     println!("  restore [<id>]           Rebuild tree(s) from the lockfile pin");
@@ -3783,7 +3755,7 @@ fn print_plugin_usage() {
     println!("  niu plugin sync --adopt          # declare installed sources into");
     println!("                           # the spec (imperative -> declarative;");
     println!("                           # snapshots the live enable/theme)");
-    println!("  niu plugin sync --bootstrap      # quiet startup form (rc line)");
+    println!("  niu plugin sync --bootstrap      # legacy rc compatibility no-op");
 }
 
 /// Parse `--preset <name>` / `--preset=<name>` from `niu setup` arguments.

@@ -165,13 +165,6 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     if rc.is_file() {
         writeln!(out, "  {ok} startup rc          {}", display(&rc))?;
         critical_passed += 1;
-    } else if home.join(".winuxshrc").is_file() {
-        writeln!(
-            out,
-            "  {ok} startup rc          {} (legacy, migrates on next start)",
-            display(&home.join(".winuxshrc"))
-        )?;
-        critical_passed += 1;
     } else {
         writeln!(
             out,

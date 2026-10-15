@@ -17,11 +17,6 @@ const EGG_NAMES: &[&str] = &["about", "snake"];
 const DIM: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
 
-/// The `about` screen, reusable as the post-setup first-run tour.
-pub(crate) fn about_tour() -> anyhow::Result<i32> {
-    about::run()
-}
-
 /// True when `command` is a registered egg name. Used to decide routing.
 pub(crate) fn is_registered(command: &str) -> bool {
     EGG_NAMES.contains(&command.to_ascii_lowercase().as_str())

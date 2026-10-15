@@ -35,7 +35,6 @@ const COMPATIBLE_SHELL_PATH_ENV: &str = "NIU_COMPATIBLE_SHELL_PATH";
 #[allow(dead_code)]
 #[allow(dead_code)]
 const NIU_RC_FILE: &str = ".niubashrc";
-const NIU_COMPAT_RC_FILE: &str = ".winuxshrc";
 /// Niubash-native non-interactive environment file variable. Takes precedence
 /// over `BASH_ENV` so an agent shell can point at a dedicated init file.
 const NIU_ENV_VAR: &str = "NIU_ENV";
@@ -933,9 +932,9 @@ impl Shell {
 
     /// Source the user's REPL startup file once before the first prompt.
     ///
-    /// `~/.niubashrc` is the primary interactive entry point. A pre-rename
-    /// `~/.winuxshrc` is migrated once into `~/.niubashrc` (original file
-    /// kept). The rc is ordinary shell code: the built-in plugin/theme
+    /// `~/.niubashrc` is the only automatic interactive rc entry point.
+    /// Without it, native defaults remain active; no other rc is searched.
+    /// The rc is ordinary shell code: the built-in plugin/theme
     /// stack is retired (niubash#145), so NIU_PLUGINS / NIU_THEME lines in
     /// an old rc are inert assignments the host no longer reads.
     pub fn run_startup_rc(&mut self) {
@@ -1021,12 +1020,6 @@ impl Shell {
         normalize_executor_home_env(&mut self.executor, &self.home_dir);
         ensure_windows_profile_env(&mut self.executor, &self.home_dir);
         ensure_prompt_terminal_env(&mut self.executor);
-        if self.no_profile {
-            // GNU bash --noprofile skips login-profile startup; niubash has
-            // no separate profile file, so skip the legacy migration pass.
-        } else {
-            migrate_legacy_winuxsh_rc(&self.home_dir);
-        }
         // GNU shell.c:1241-1246 (bash --posix) and shell.c:1238-1239 (invoked
         // as sh, which Shell::new turns into posix mode): the interactive
         // startup file is `$ENV`, not the bash rc file, and an unset `$ENV`
@@ -1194,10 +1187,6 @@ impl Shell {
         let primary = self.home_dir.join(NIU_RC_FILE);
         if primary.is_file() {
             return Some(primary);
-        }
-        let compat = self.home_dir.join(NIU_COMPAT_RC_FILE);
-        if compat.is_file() {
-            return Some(compat);
         }
         None
     }
@@ -3375,51 +3364,6 @@ fn compatible_shell_path_from_env() -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
-/// One-time migration: rewrite a pre-rename `~/.winuxshrc` into
-/// `~/.niubashrc` with the `NIU_*` environment prefix. The original file is
-/// kept untouched; the rewrite is silent and idempotent.
-fn migrate_legacy_winuxsh_rc(home_dir: &Path) {
-    let source = home_dir.join(NIU_COMPAT_RC_FILE);
-    let target = home_dir.join(NIU_RC_FILE);
-    if target.is_file() || !source.is_file() {
-        return;
-    }
-    let Ok(content) = std::fs::read_to_string(&source) else {
-        return;
-    };
-    let migrated = rewrite_legacy_rc_content(&content);
-    if std::fs::write(&target, migrated).is_err() {
-        log::debug!(
-            "failed to migrate {} to {}",
-            source.display(),
-            target.display()
-        );
-    }
-}
-
-/// Rename-brand textual rewrite for migrated rc files. `oh-my-winuxsh`
-/// bundle references are preserved verbatim; `winuxcmd` names never match
-/// the rewritten patterns.
-fn rewrite_legacy_rc_content(content: &str) -> String {
-    const BUNDLE_PROTECT: &str = "\u{1}OH_MY_BUNDLE_SLUG\u{1}";
-    content
-        .replace("oh-my-winuxsh", BUNDLE_PROTECT)
-        .replace("update-winuxsh", "update-niubash")
-        .replace(".winuxshrc", ".niubashrc")
-        .replace("winuxshrc", "niubashrc")
-        .replace("winuxsh.exe", "niu.exe")
-        .replace("WINUXSH_", "NIU_")
-        .replace("winuxsh", "niu")
-        .replace("Winuxsh", "Niubash")
-        .replace("WINUXSH", "NIUBASH")
-        .replace(BUNDLE_PROTECT, "oh-my-winuxsh")
-        // 1.0.0 ships the renamed entry point; migrated rc files keep their
-        // legacy directory candidates but must probe the new entry name to
-        // find the shipped bundle via NIU_APP_BUNDLE_PATH.
-        .replace("oh-my-winuxsh.winux", "oh-my-niu.niu")
-        .replace("oh-my-niu.winux", "oh-my-niu.niu")
-}
-
 fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
     if !cfg!(windows) {
         return Ok(None);
@@ -3944,35 +3888,34 @@ mod tests {
     }
 
     #[test]
-    fn compat_winuxshrc_is_migrated_and_sourced() {
+    fn missing_primary_rc_ignores_other_rc_files_without_modifying_them() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("niubash-compat-rc-migration");
+        let temp = unique_temp_dir("niubash-primary-only-defaults");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(NIU_COMPAT_RC_FILE),
-            "export NIU_COMPAT_RC_LOADED=1\nalias source_alias='echo user-override'\n",
-        )
-        .unwrap();
-
-        let mut shell = Shell::new().unwrap();
-        shell.home_dir = home.clone();
-        shell.run_startup_rc();
-
-        // A pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc (original
-        // kept) and then sourced as the primary startup rc.
-        assert_eq!(shell.executor.get_env("NIU_COMPAT_RC_LOADED"), Some("1"));
-        assert_eq!(
-            shell.aliases.get("source_alias").map(String::as_str),
-            Some("echo user-override")
-        );
-        assert!(home.join(NIU_RC_FILE).is_file());
-        assert!(home.join(NIU_COMPAT_RC_FILE).is_file());
-
+        let original = "export NIU_IGNORED_RC_TEST=loaded\nalias ignored_rc_alias='echo loaded'\n";
+        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            std::fs::write(home.join(name), original).unwrap();
+        }
+        for repl in [true, false] {
+            let mut shell = test_shell(HookConfig::default());
+            shell.home_dir = home.clone();
+            let default_prompt = shell.executor.get_env("PS1").map(str::to_owned);
+            assert_eq!(shell.startup_rc_path(), None);
+            for _ in 0..2 {
+                shell.run_startup_files(repl);
+                assert_eq!(shell.executor.get_env("NIU_IGNORED_RC_TEST"), None);
+                assert!(!shell.aliases.contains_key("ignored_rc_alias"));
+                assert_eq!(shell.executor.get_env("PS1"), default_prompt.as_deref());
+                assert!(!home.join(NIU_RC_FILE).exists());
+                for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+                    assert_eq!(std::fs::read_to_string(home.join(name)).unwrap(), original);
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(temp);
     }
-
     #[test]
     fn standard_prompt_does_not_expose_private_use_markers() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -4021,89 +3964,69 @@ alias hello='echo from-alias'
     }
 
     #[test]
-    fn niubashrc_takes_precedence_over_compat_winuxshrc() {
+    fn primary_rc_is_the_only_automatic_startup_file() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("niubash-primary-rc-startup");
+        let temp = unique_temp_dir("niubash-primary-only-startup");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(NIU_COMPAT_RC_FILE),
-            "export NIU_RC_SOURCE=compat\n",
-        )
-        .unwrap();
-        std::fs::write(home.join(NIU_RC_FILE), "export NIU_RC_SOURCE=primary\n").unwrap();
-
-        let mut shell = test_shell(HookConfig::default());
-        shell.home_dir = home;
-        shell.run_startup_rc();
-
-        assert_eq!(shell.executor.get_env("NIU_RC_SOURCE"), Some("primary"));
-
+        let ignored = "export NIU_IGNORED_RC_TEST=loaded\n";
+        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            std::fs::write(home.join(name), ignored).unwrap();
+        }
+        for (primary, expected) in [
+            ("export NIU_PRIMARY_RC_TEST=primary\n", Some("primary")),
+            ("", None),
+            ("if then\n", None),
+        ] {
+            std::fs::write(home.join(NIU_RC_FILE), primary).unwrap();
+            let mut shell = test_shell(HookConfig::default());
+            shell.home_dir = home.clone();
+            assert_eq!(shell.startup_rc_path(), Some(home.join(NIU_RC_FILE)));
+            shell.run_startup_rc();
+            assert_eq!(shell.executor.get_env("NIU_PRIMARY_RC_TEST"), expected);
+            assert_eq!(shell.executor.get_env("NIU_IGNORED_RC_TEST"), None);
+            assert_eq!(
+                std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap(),
+                primary
+            );
+            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+                assert_eq!(std::fs::read_to_string(home.join(name)).unwrap(), ignored);
+            }
+        }
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
-    fn compat_winuxshrc_used_when_primary_absent() {
+    fn startup_rc_override_and_norc_leave_ignored_rc_files_untouched() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("niubash-compat-rc-startup");
+        let temp = unique_temp_dir("niubash-rc-selection-read-only");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(NIU_COMPAT_RC_FILE),
-            "export NIU_RC_SOURCE=compat\n",
-        )
-        .unwrap();
+        let original = "export NIU_LEGACY_SELECTION_TEST=legacy\n";
+        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            std::fs::write(home.join(name), original).unwrap();
+        }
+        let custom = home.join("custom.rc");
+        std::fs::write(&custom, "export NIU_CUSTOM_SELECTION_TEST=custom\n").unwrap();
 
-        let mut shell = test_shell(HookConfig::default());
-        shell.home_dir = home;
-        shell.run_startup_rc();
-
-        assert_eq!(shell.executor.get_env("NIU_RC_SOURCE"), Some("compat"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn legacy_winuxshrc_is_migrated_to_niubashrc_once() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("niubash-rc-migration");
-        let home = temp.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(NIU_COMPAT_RC_FILE),
-            r#"
-export NIU_THEME=sky
-export WINUXSH_OLD_PREFIX=kept-as-niu
-[ -f "$HOME/oh-my-winuxsh/theme" ] && . "$HOME/oh-my-winuxsh/theme"
-[ -f "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux" ] && . "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux"
-"#,
-        )
-        .unwrap();
-
-        let mut shell = test_shell(HookConfig::default());
-        shell.home_dir = home.clone();
-        shell.run_startup_rc();
-
-        let migrated = std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap();
-        assert!(migrated.contains("export NIU_THEME=sky"));
-        assert!(migrated.contains("export NIU_OLD_PREFIX=kept-as-niu"));
-        assert!(migrated.contains("oh-my-winuxsh/theme"));
-        assert!(migrated.contains("oh-my-niu.niu"));
-        assert!(!migrated.contains("oh-my-winuxsh.winux"));
-        assert!(!migrated.contains("WINUXSH"));
-        assert_eq!(shell.executor.get_env("NIU_THEME"), Some("sky"));
-        // The original file is kept untouched as a backup.
-        assert!(home.join(NIU_COMPAT_RC_FILE).is_file());
-        // Re-running must not clobber an existing primary rc.
-        std::fs::write(home.join(NIU_RC_FILE), "export NIU_THEME=custom\n").unwrap();
-        migrate_legacy_winuxsh_rc(&home);
-        assert_eq!(
-            std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap(),
-            "export NIU_THEME=custom\n"
-        );
+        for no_rc in [true, false] {
+            let mut shell = test_shell(HookConfig::default());
+            shell.home_dir = home.clone();
+            shell.no_rc = no_rc;
+            shell.rc_file = Some(custom.clone());
+            shell.run_interactive_startup_rc();
+            assert_eq!(shell.executor.get_env("NIU_LEGACY_SELECTION_TEST"), None);
+            assert_eq!(
+                shell.executor.get_env("NIU_CUSTOM_SELECTION_TEST"),
+                if no_rc { None } else { Some("custom") }
+            );
+            assert!(!home.join(NIU_RC_FILE).exists());
+            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+                assert_eq!(std::fs::read_to_string(home.join(name)).unwrap(), original);
+            }
+        }
 
         let _ = std::fs::remove_dir_all(temp);
     }

@@ -1921,7 +1921,7 @@ fn drain_pending_notices() {
 }
 
 /// One dim orientation line shown only on the very first interactive start,
-/// right after the setup wizard — it points at `about`, the in-shell tour.
+/// pointing at `about`, the in-shell tour.
 /// Follows the wizard language so a Chinese first run reads Chinese.
 fn print_first_run_hint() {
     let hint = if crate::setup_wizard::wizard_lang_is_chinese() {
@@ -1943,15 +1943,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // exits with a broken console (e.g. ssh.exe on a failed auth) must not
     // leave the REPL drawing literal escape sequences with a hidden cursor.
     let console_baseline = crate::console_guard::capture();
-    // First-run setup wizard, then the `about` tour: the screen clears, shows
-    // what this shell is and where to go next, and waits for a keypress.
     let first_run = crate::setup_wizard::is_first_run();
-    if first_run {
-        let _ = crate::setup_wizard::run_wizard();
-        if crate::terminal::stdout_is_terminal() {
-            let _ = crate::easter_eggs::about_tour();
-        }
-    }
 
     let welcome = format!("Niubash {}", env!("CARGO_PKG_VERSION"));
     println!("{}", welcome);

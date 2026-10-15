@@ -1,4 +1,8 @@
-//! First-run setup wizard.
+//! Explicit setup wizard.
+//!
+//! Phase 1 of niubash#359 removes automatic startup configuration writes.
+//! Explicit setup still writes configuration; the later full write prohibition
+//! remains outstanding. This module is not an automatic startup entry point.
 //!
 //! Minimal external-first flow (niubash#145 owner decision 2026-09-28): the
 //! built-in theme/plugin stack is retired, so the wizard writes a clean rc
@@ -18,7 +22,6 @@ use crate::interactive_menu::{self, pad_display, Selection};
 use crate::path_utils::shell_home_dir;
 
 const PRIMARY_RC_FILE: &str = ".niubashrc";
-const COMPAT_RC_FILE: &str = ".winuxshrc";
 const SETUP_DONE_FILE: &str = ".setup-done";
 
 /// One-shot handoff marker (niubash#180): every rc rewrite leaves
@@ -1037,14 +1040,11 @@ macro_rules! ask {
 }
 
 /// Returns `true` if the user has never run the setup wizard before
-/// (i.e. no primary/compat rc file and no setup marker). Legacy/managed TOML
-/// metadata no longer blocks first-run rc onboarding.
+/// (i.e. no primary rc file and no setup marker). Other rc files are ignored.
 pub fn is_first_run() -> bool {
     let home = setup_home_dir();
-    for name in [PRIMARY_RC_FILE, COMPAT_RC_FILE] {
-        if home.join(name).is_file() {
-            return false;
-        }
+    if home.join(PRIMARY_RC_FILE).is_file() {
+        return false;
     }
     !home.join(".niubash").join(SETUP_DONE_FILE).is_file()
 }
@@ -1052,7 +1052,9 @@ pub fn is_first_run() -> bool {
 /// Run the interactive setup wizard.
 ///
 /// Prints a welcome banner, asks the user a few questions with defaults,
-/// writes `~/.niubashrc`, and creates the `.setup-done` marker.
+/// writes `~/.niubashrc`, and creates the `.setup-done` marker. This remains
+/// an explicit write path in phase 1 of niubash#359, not the final write-free
+/// design; shell startup must not call it.
 pub fn run_wizard() -> anyhow::Result<()> {
     run_wizard_inner(false)
 }
@@ -1641,9 +1643,7 @@ fn describe_theme_pick(pick: &ThemePick, t: Lang) -> String {
 /// the LAST theme-bearing block wins, mirroring rc load order). Used so
 /// "Skip — keep my current theme" is honest and side-effect free.
 fn current_theme_pick(home: &std::path::Path) -> ThemePick {
-    let text = std::fs::read_to_string(home.join(PRIMARY_RC_FILE))
-        .ok()
-        .or_else(|| std::fs::read_to_string(home.join(COMPAT_RC_FILE)).ok());
+    let text = std::fs::read_to_string(home.join(PRIMARY_RC_FILE)).ok();
     let Some(text) = text else {
         return ThemePick::Keep;
     };
@@ -2384,15 +2384,6 @@ fi
 unset __niubash_home_drive __niubash_home_rest
 
 {external_block}{alias_block}{theme_note}{provider_block}
-# Plugins are declared in ~/.niubash/plugins.toml (the spec); this one
-# bootstrap line reconciles on startup — quiet when everything is in sync
-# (set NIU_PLUGIN_BOOTSTRAP=off to skip).
-# NIU_SHELL is exported by niu itself (its own executable path), so the
-# reconcile runs under THIS niu even when PATH still resolves to an older
-# install first; outside niu (plain `source ~/.niubashrc`) it falls back
-# to whatever `niu` is on PATH.
-command -v "${{NIU_SHELL:-niu}}" >/dev/null 2>&1 && "${{NIU_SHELL:-niu}}" plugin sync --bootstrap
-
 # Change things later (nothing here runs automatically):
 #   niu plugin discover          see external sources & themes (read-only)
 #   niu plugin add <target>      declare + install a plugin source
@@ -2787,6 +2778,32 @@ mod tests {
     }
 
     #[test]
+    fn first_run_detection_ignores_other_rc_files_without_writing() {
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("wizard-primary-only-first-run");
+        std::fs::create_dir_all(&temp).unwrap();
+        let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&temp));
+        let _userprofile = EnvGuard::unset("USERPROFILE");
+        let ignored = "OSH_THEME='ignored'\n";
+        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            std::fs::write(temp.join(name), ignored).unwrap();
+        }
+        assert!(is_first_run());
+        assert!(!temp.join(PRIMARY_RC_FILE).exists());
+        assert!(!temp.join(".niubash").exists());
+        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            assert_eq!(std::fs::read_to_string(temp.join(name)).unwrap(), ignored);
+        }
+        std::fs::write(temp.join(PRIMARY_RC_FILE), "").unwrap();
+        assert!(!is_first_run());
+        std::fs::remove_file(temp.join(PRIMARY_RC_FILE)).unwrap();
+        std::fs::create_dir_all(temp.join(".niubash")).unwrap();
+        std::fs::write(temp.join(".niubash").join(SETUP_DONE_FILE), "").unwrap();
+        assert!(!is_first_run());
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn setup_home_dir_accepts_shell_style_home_env() {
         let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = unique_temp_dir("niubash-setup-home").join("home");
@@ -2907,19 +2924,10 @@ mod tests {
         assert!(rc.contains("NIU_PROMPT_CWD_STYLE='home'"), "{rc}");
         assert!(rc.contains("NIU_COMPLETION_STYLE='column'"), "{rc}");
         assert!(rc.contains("USERPROFILE"), "{rc}");
-        // The how-to-change-later hints are still there, plus the
-        // one-line spec bootstrap (§14.6.3). The bootstrap must run under
-        // NIU_SHELL (the running exe) with a bare-`niu` fallback — a bare
-        // `niu` alone PATH-shadow-resolves to a stale install and either
-        // errors (`unknown plugin subcommand 'sync'`) or reconciles under
-        // another vintage's semantics (wt82-L01 V1).
         assert!(rc.contains("niu plugin discover"), "{rc}");
         assert!(rc.contains("niu plugin add <target>"), "{rc}");
         assert!(rc.contains("niu plugin sync"), "{rc}");
-        assert!(
-            rc.contains(r#"command -v "${NIU_SHELL:-niu}" >/dev/null 2>&1 && "${NIU_SHELL:-niu}" plugin sync --bootstrap"#),
-            "{rc}"
-        );
+        assert!(!rc.contains("--bootstrap"), "{rc}");
         assert!(rc.contains("niu setup"), "{rc}");
     }
 
@@ -3860,12 +3868,21 @@ mod tests {
     }
 
     #[test]
-    fn current_theme_pick_reads_existing_rc() {
+    fn current_theme_pick_reads_only_primary_rc() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _theme_env = EnvGuard::unset("NIU_THEME");
         let temp = unique_temp_dir("wizard-current-theme");
         std::fs::create_dir_all(&temp).unwrap();
         assert_eq!(current_theme_pick(&temp), ThemePick::Keep);
+        let ignored = "OSH_THEME='ignored'\n";
+        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            std::fs::write(temp.join(name), ignored).unwrap();
+        }
+        assert_eq!(current_theme_pick(&temp), ThemePick::Keep);
+        assert!(!temp.join(PRIMARY_RC_FILE).exists());
+        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            assert_eq!(std::fs::read_to_string(temp.join(name)).unwrap(), ignored);
+        }
 
         std::fs::write(temp.join(PRIMARY_RC_FILE), "NIU_THEME='classic'\n").unwrap();
         // The retired NIU_THEME channel is ignored (niubash#145).
