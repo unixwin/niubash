@@ -15,6 +15,9 @@ on:
       test_tiers:
         description: "test 层级（windows runner）"
         default: "t1"
+      redo:
+        description: "重测已有 verdict 的资产（--redo，用于验证取数链路）"
+        default: "false"
 
 permissions:
   contents: write # 推 state 回 data 分支
@@ -32,10 +35,14 @@ jobs:
         with:
           ref: eco-harvest-state
           path: eco-restore
+      # #357: the persisted surface is state + MANIFEST. Restoring only the
+      # cursor meant every run rebuilt a fresh "当夜增量" corpus (1571 assets)
+      # while the 10k-asset local master corpus never reached CI.
       - name: seed state
         run: |
           mkdir -p eco/state eco/manifest
           if [ -d eco-restore/state ]; then cp -r eco-restore/state/. eco/state/; fi
+          if [ -d eco-restore/manifest ]; then cp -r eco-restore/manifest/. eco/manifest/; fi
       - name: harvest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,39 +57,51 @@ jobs:
           path: |
             eco/manifest
             eco/state
-      - name: persist state to data branch
+      # Run-to-run accumulation, verifiable: the next run restores what this
+      # one committed (assets must be monotonically non-decreasing).
+      - name: persist state + manifest to data branch
         run: |
           cd eco
           git init -q -b eco-harvest-state .
           git config user.name "eco-bot"
           git config user.email "actions@github.com"
-          git add state
-          git commit -qm "state: ${{ github.event.inputs.tier || 't1' }} @ $(date -u +%FT%TZ)"
+          git add state manifest
+          git commit -qm "state+manifest: ${{ github.event.inputs.tier || 't1' }} @ $(date -u +%FT%TZ)"
           git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" eco-harvest-state:eco-harvest-state
 
   test:
     needs: harvest
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4 # niubash：eco 脚本（引擎源码不在此树内签出）
-      - name: clone rubash outside the workspace tree
-        run: git clone --depth 1 https://github.com/${{ github.repository_owner }}/rubash.git "${{ runner.temp }}/rubash"
+      - uses: actions/checkout@v4 # niubash：eco 脚本 + the shell under test
+      # The sibling path matters: Cargo.toml patches rubash to ../rubash
+      # (same step the main ci.yml windows job uses).
+      - name: clone rubash as the ../rubash sibling dependency
+        run: git clone --depth 1 https://github.com/${{ github.repository_owner }}/rubash.git "${{ github.workspace }}/../rubash"
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - name: install test deps
         run: pip install pyte pywinpty # pywinpty 提供的模块名就是 winpty
       - name: build engine
-        run: cargo build --release --manifest-path "${{ runner.temp }}/rubash/Cargo.toml"
+        run: cargo build --release --manifest-path "${{ github.workspace }}/../rubash/Cargo.toml"
+      # The interactive lane needs the SHELL, not just the engine: rubash's
+      # bash.exe is a shim that resolves niu.exe and execs it, so a runner
+      # with no niu.exe exits 127 on every asset ("bash shim: cannot locate
+      # niu.exe"). Build the host from this checkout and drive niu.exe
+      # directly, exactly like the local lane's --niu target/debug/niu.exe.
+      - name: build niubash (the shell under test)
+        run: cargo build --release --locked
       - name: locate binaries
         id: bins
         shell: pwsh
         run: |
-          $dir = "${{ runner.temp }}/rubash/target/release"
-          $bash = Get-ChildItem $dir -Filter 'bash.exe' | Select-Object -First 1
-          $rubash = Get-ChildItem $dir -Filter 'rubash.exe' | Select-Object -First 1
-          "bash=$($bash.FullName)" >> $env:GITHUB_OUTPUT
-          if ($rubash) { "rubash=$($rubash.FullName)" >> $env:GITHUB_OUTPUT }
-          else { "rubash=$($bash.FullName)" >> $env:GITHUB_OUTPUT }
+          $rubashDir = "${{ github.workspace }}/../rubash/target/release"
+          $rubash = Get-ChildItem $rubashDir -Filter 'rubash.exe' | Select-Object -First 1
+          $niu = Get-Item "${{ github.workspace }}/target/release/niu.exe" -ErrorAction SilentlyContinue
+          if (-not $rubash) { throw "rubash.exe not built in $rubashDir" }
+          if (-not $niu) { throw "niu.exe not built in ${{ github.workspace }}/target/release" }
+          "niu=$($niu.FullName)" >> $env:GITHUB_OUTPUT
+          "rubash=$($rubash.FullName)" >> $env:GITHUB_OUTPUT
       - name: download manifest
         uses: actions/download-artifact@v4
         with: { name: eco-manifest, path: eco }
@@ -92,13 +111,35 @@ jobs:
         run: |
           python scripts/harvest/eco-test.py `
             --tiers "${{ github.event.inputs.test_tiers || 't1' }}" `
-            --niu "${{ steps.bins.outputs.bash }}" `
+            --niu "${{ steps.bins.outputs.niu }}" `
             --rubash "${{ steps.bins.outputs.rubash }}" `
             --manifest-dir eco/manifest `
             --results-dir eco/results `
-            --tmp-root eco/tmp
+            --cache-dir eco/cache `
+            --tmp-root eco/tmp ${{ github.event.inputs.redo == 'true' && '--redo' || '' }}
+          # exit 3 = fetch gate tripped (#356): FETCH-FAILED > 10%, the job
+          # must go red instead of shipping a green shell around a dead tier.
       - name: upload verdicts
+        if: always() # audit lane keeps the partials even when the gate trips
         uses: actions/upload-artifact@v4
         with:
           name: eco-results-${{ github.run_id }}
           path: eco/results
+      # #357: verdicts land in the manifest DB, so persist it next to the
+      # cursor — otherwise every run re-tests the whole restored corpus,
+      # because eco-results itself never survives to the following run.
+      - name: persist manifest verdicts to data branch
+        if: always()
+        shell: bash # same dialect as the harvest job's persist step
+        run: |
+          if [ ! -f eco/manifest/eco-manifest.sqlite ]; then
+            echo "no manifest in this job (tester never reached the DB) — skipping"
+            exit 0
+          fi
+          cd eco
+          git init -q -b eco-harvest-state .
+          git config user.name "eco-bot"
+          git config user.email "actions@github.com"
+          git add state manifest
+          git commit -qm "manifest+verdicts: ${{ github.event.inputs.test_tiers || 't1' }} @ $(date -u +%FT%TZ)"
+          git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" eco-harvest-state:eco-harvest-state

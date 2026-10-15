@@ -5,7 +5,8 @@ into the manifest and emit the engine-divergence gold list.
 Consumes the manifest produced by scripts/harvest/eco-harvest.py. Per asset:
 
   1. fetch content on demand (raw.githubusercontent at the pinned commit;
-     gz cache under E:/eco-harvest/cache; T4 assets get sha256 backfilled),
+     gz cache under --cache-dir (dev-box E:/eco-harvest/cache when that drive
+     exists, else <repo>/eco/cache — #356); T4 assets get sha256 backfilled),
   2. rubash -n pre-filter,
   3. if rubash accepts: ConPTY-test in a sandbox `niu -i` (the wt91/journey
      harness shape: sandbox HOME with a minimal rc, marker-verified input
@@ -26,6 +27,8 @@ Verdicts:
   GNU-ALSO-FAILS            niu failed AND GNU failed the same way
                             (upstream content, not an engine bug)
   DUPLICATE                 T4 late-dedup: sha256 already in the manifest
+  FETCH-GONE                pinned raw URL is permanently gone
+                            (404/410/451 — not retried, not gate-relevant)
   FETCH-FAILED              raw fetch failed after retries (resumable)
 
 Results stream to results/test-results.jsonl (one line per asset, flushed).
@@ -37,6 +40,10 @@ Usage:
   python scripts/harvest/eco-test.py --tiers t1,t3 --workers 8
   python scripts/harvest/eco-test.py --report            # group the gold
   python scripts/harvest/eco-test.py --tier all --workers 16  # full run
+
+Exit codes: 0 clean · 2 setup failure (missing binary / unusable path)
+            3 fetch gate tripped (#356: FETCH-FAILED share above
+            --max-fetch-failed-rate, default 10%)
 """
 
 from __future__ import annotations
@@ -75,9 +82,30 @@ NOW = lambda: dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_NIU = REPO_ROOT / "target" / "debug" / "niu.exe"
 DEFAULT_RUBASH = Path("D:/repo/rubash/target/debug/rubash.exe")
-ECO_ROOT = Path("D:/eco-harvest")
-CACHE_ROOT = Path("E:/eco-harvest/cache")
-TMP_ROOT = Path("E:/eco-harvest/tmp")
+
+
+def _data_dir(env: str, preferred: Path, fallback: Path) -> Path:
+    """Env override > dev-box path (only when that drive exists) > fallback.
+
+    The E:\\ defaults were this machine's layout (#356): on a runner with no
+    E: drive the first `CACHE_ROOT.mkdir` raised `[WinError 3] 'E:\\'`, every
+    nightly asset landed in FETCH-FAILED, and the job still exited 0."""
+    override = os.environ.get(env)
+    if override:
+        return Path(override)
+    try:
+        if preferred.anchor and Path(preferred.anchor).exists():
+            return preferred
+    except OSError:
+        pass
+    return fallback
+
+
+ECO_ROOT = _data_dir("ECO_ROOT", Path("D:/eco-harvest"), REPO_ROOT / "eco")
+CACHE_ROOT = _data_dir("ECO_CACHE_DIR", Path("E:/eco-harvest/cache"),
+                        ECO_ROOT / "cache")
+TMP_ROOT = _data_dir("ECO_TMP_DIR", Path("E:/eco-harvest/tmp"),
+                     ECO_ROOT / "tmp")
 RESULTS_DIR = ECO_ROOT / "results"
 
 COLS, ROWS = 100, 30
@@ -138,19 +166,30 @@ def error_line_count(stripped: str):
     return count, head
 
 
-# ── Content fetch (on demand, gz-cached on E:) ──────────────────────────────
+# ── Content fetch (on demand, gz-cached under --cache-dir) ───────────────────
 _fetch_lock = threading.Lock()
 _fetch_failures = 0
 
 
-def fetch_asset(asset: dict, token: str | None) -> Path | None:
+class FetchGone(Exception):
+    """The pinned raw URL is permanently gone (404/410/451).
+
+    A raw URL is content-addressed at a fixed commit, so a 404 means the repo
+    or commit is unreachable, not that we asked badly. Retry such rows forever
+    and they burn the 6-rung ladder on every run AND inflate the fetch gate
+    (#356) until the alarm means nothing — so they get a permanent badge."""
+
+
+def fetch_asset(asset: dict, token: str | None, cache_root: Path,
+                tmp_root: Path) -> Path | None:
     """Fetch raw bytes at the pinned commit into the gz cache; returns the
-    extracted work-file path. T4 (no git blob sha) backfills a sha256."""
+    extracted work-file path. T4 (no git blob sha) backfills a sha256.
+    Raises FetchGone for a permanently dead URL."""
     h = asset["content_hash"]
-    sub = CACHE_ROOT / h[:2]
+    sub = cache_root / h[:2]
     gz = sub / f"{h}.gz"
     with _fetch_lock:
-        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
     url = asset["source_url"]
     req = urllib.request.Request(url, headers={"User-Agent":
                                                "niubash-eco-test/wt92"})
@@ -166,6 +205,9 @@ def fetch_asset(asset: dict, token: str | None) -> Path | None:
                     data = resp.read()
                 break
             except urllib.error.HTTPError as err:
+                if err.code in (404, 410, 451):
+                    raise FetchGone(
+                        f"HTTP {err.code} — pinned raw URL gone") from None
                 if err.code in (403, 429, 502, 503, 504) and \
                         attempt < FETCH_RETRIES:
                     retry_after = err.headers.get("Retry-After")
@@ -193,7 +235,9 @@ def fetch_asset(asset: dict, token: str | None) -> Path | None:
         sha256 = hashlib.sha256(data).hexdigest()
         asset["sha256"] = sha256
     # Work file (kept through GNU parity, cleaned after the asset finishes).
-    workdir = TMP_ROOT / f"work-{h[:12]}"
+    # --tmp-root governs it: a stray dev-box TMP_ROOT must not decide where
+    # CI writes its scratch (#356 was exactly that class of leak).
+    workdir = tmp_root / f"work-{h[:12]}"
     workdir.mkdir(parents=True, exist_ok=True)
     suffix = Path(asset["path"]).suffix or ".sh"
     work = workdir / f"asset{suffix}"
@@ -215,8 +259,11 @@ class GnuBash:
     def __init__(self):
         self.bin = None
         for cand in ("/usr/local/bin/bash", "/usr/bin/bash", "bash"):
-            r = subprocess.run(["wsl.exe", cand, "--version"],
-                               capture_output=True, text=True, timeout=60)
+            try:
+                r = subprocess.run(["wsl.exe", cand, "--version"],
+                                   capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                continue  # no wsl.exe / no distro: degrade, never crash
             if r.returncode == 0 and "GNU bash" in r.stdout:
                 self.bin = cand
                 ver = r.stdout.splitlines()[0].strip()
@@ -549,7 +596,12 @@ def test_one(asset: dict, cfg) -> dict:
                    detail="control characters in raw URL (unfetchable)")
         return rec
     try:
-        work = fetch_asset(asset, cfg.token)
+        work = fetch_asset(asset, cfg.token, cfg.cache_root, cfg.tmp_root)
+    except FetchGone as err:
+        # Permanent (not in `transient`): resume skips it, the fetch gate
+        # ignores it — a dead upstream URL is not our fetch tier breaking.
+        rec.update(verdict="FETCH-GONE", detail=str(err)[:160])
+        return rec
     except Exception as err:
         rec.update(verdict="FETCH-FAILED", detail=str(err)[:160])
         return rec
@@ -749,10 +801,39 @@ def report(results_path: Path, top: int, include_storms: bool,
                             "assets": [{"repo": r["repo"], "path": r["path"],
                                         "hash": r["content_hash"]}
                                        for r in rs]})
-    out = RESULTS_DIR / "divergence-groups.json"
+    out = results_path.parent / "divergence-groups.json"
     out.write_text(json.dumps(report_json, indent=2), encoding="utf-8")
     print(f"\ngroup json: {out}")
     return 0
+
+
+# ── Step summary + fetch gate (the #356 "green job, dead tier" class) ───────
+
+def write_step_summary(counts, tested, results_path, gate_msg=None,
+                       idle_note=None):
+    """Append the verdict distribution to $GITHUB_STEP_SUMMARY (no-op when
+    unset, so local runs stay quiet). Six nightly runs reported success with
+    547/547 FETCH-FAILED: the distribution has to be visible, not buried in
+    the log."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = ["## eco-test verdicts", ""]
+    if gate_msg:
+        lines += [f"> 🚨 **fetch gate failed**: {gate_msg}", ""]
+    lines += ["| verdict | count |", "| --- | ---: |"]
+    for v, n in collections.Counter(counts).most_common():
+        lines.append(f"| {v} | {n} |")
+    lines += ["", f"{tested} assets tested this run · `{results_path}`", ""]
+    if idle_note:
+        # An idle lane must not read as a broken one (#356 was the opposite
+        # failure: a broken lane reading as healthy). Say which it is.
+        lines += [idle_note, ""]
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -772,6 +853,12 @@ def main(argv=None):
     ap.add_argument("--manifest-dir", default=str(ECO_ROOT / "manifest"))
     ap.add_argument("--results-dir", default=str(RESULTS_DIR))
     ap.add_argument("--tmp-root", default=str(TMP_ROOT))
+    ap.add_argument("--cache-dir", default=str(CACHE_ROOT),
+                    help="gz content cache (default falls back to "
+                         "<repo>/eco/cache when the dev-box drive is gone)")
+    ap.add_argument("--max-fetch-failed-rate", type=float, default=0.10,
+                    help="exit 3 when FETCH-FAILED exceeds this share of the "
+                         "assets tested this run (0 disables the gate)")
     ap.add_argument("--redo", action="store_true",
                     help="re-test assets that already have a result line")
     ap.add_argument("--report", action="store_true",
@@ -787,7 +874,15 @@ def main(argv=None):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    results_dir = Path(args.results_dir)
+    # EVERY path becomes absolute before it is used. The workflow passes
+    # workspace-relative paths (eco/...), and `tmp_root` is handed to the
+    # child as HOME/USERPROFILE: a relative HOME lets niu resolve
+    # `eco/tmp/sand-x/.niubashrc` against the child's OWN cwd, the rc check
+    # misses, `is_first_run()` fires and the setup wizard blocks the asset
+    # until the startup timeout (544/544 HANG, run 38690079988). wsl_path()
+    # is drive-absolute-only too, so a relative --tmp-root also broke the
+    # GNU parity oracle.
+    results_dir = Path(args.results_dir).resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
     results_path = results_dir / "test-results.jsonl"
 
@@ -796,7 +891,7 @@ def main(argv=None):
                       args.include_gnu)
 
     import sqlite3
-    manifest_dir = Path(args.manifest_dir)
+    manifest_dir = Path(args.manifest_dir).resolve()
     db = sqlite3.connect(manifest_dir / "eco-manifest.sqlite",
                          check_same_thread=False,
                          timeout=30)  # harvest+test can run concurrently
@@ -819,6 +914,17 @@ def main(argv=None):
                     continue
                 if r.get("verdict") not in transient:
                     done.add(r["content_hash"])
+    # The manifest DB is now persisted run-to-run (#357: it rides the
+    # eco-harvest-state branch), so a RESTORED verdict — not only a local
+    # results file — marks an asset done. Without this every CI run would
+    # re-test the whole corpus from scratch, because eco-results never
+    # survives to the next run. Transient verdicts stay pending: they retry.
+    if not args.redo:
+        done.update(r[0] for r in db.execute(
+            f"SELECT content_hash FROM assets WHERE tier IN ({qmarks}) "
+            f"AND verdict IS NOT NULL AND verdict NOT IN "
+            f"({','.join('?' * len(transient))})",
+            [*tier_list, *sorted(transient)]))
     rows = db.execute(
         f"SELECT content_hash, hash_kind, source_url, repo, path, commit_sha, "
         f"bytes, category, tier FROM assets WHERE tier IN ({qmarks}) "
@@ -832,19 +938,37 @@ def main(argv=None):
     print(f"manifest: {len(assets)} assets in tiers {tier_list}; "
           f"{len(done)} already tested; {len(pending)} pending")
 
-    niu = Path(args.niu)
-    rubash = Path(args.rubash)
+    niu = Path(args.niu).resolve()
+    rubash = Path(args.rubash).resolve()
     if not niu.exists():
         print(f"FATAL: niu not found at {niu} (build first: cargo build)")
         return 2
     if not rubash.exists():
         print(f"FATAL: rubash not found at {rubash}")
         return 2
-    tmp_root = Path(args.tmp_root)
-    tmp_root.mkdir(parents=True, exist_ok=True)
+    tmp_root = Path(args.tmp_root).resolve()
+    cache_root = Path(args.cache_dir).resolve()
+    # Fail fast and loud on an unusable path: the #356 failure mode was an
+    # E:\ mkdir exception swallowed per asset as FETCH-FAILED × 547.
+    for label, p in (("tmp root", tmp_root), ("cache dir", cache_root)):
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as err:
+            print(f"FATAL: {label} {p} not creatable: {err}")
+            return 2
 
-    token = subprocess.run(["gh", "auth", "token"], capture_output=True,
-                           text=True).stdout.strip() or None
+    # Auth (#222 was the CI token layer; #356 the path layer): prefer the
+    # injected token, fall back to gh, and never crash the lane on a missing
+    # gh binary — an unauthenticated fetch would otherwise surface as a
+    # 403-shaped FETCH-FAILED storm.
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        try:
+            token = subprocess.run(["gh", "auth", "token"],
+                                   capture_output=True,
+                                   text=True).stdout.strip() or None
+        except OSError:
+            token = None
     gnu = GnuBash()
     if gnu.bin is None:
         print("WARNING: WSL GNU bash unavailable — parity classification "
@@ -858,6 +982,7 @@ def main(argv=None):
     cfg.niu = niu
     cfg.rubash = rubash
     cfg.tmp_root = tmp_root
+    cfg.cache_root = cache_root
     cfg.gnu = gnu
     cfg.slow_threshold = args.slow_threshold
     cfg.token = token
@@ -907,6 +1032,34 @@ def main(argv=None):
     print(f"projection for the current manifest "
           f"({len(assets)} assets): {len(assets)/max(rate*3600,1)*24/3600:.2f} "
           f"days single full pass at this throughput")
+
+    # Fetch gate (#356): raw-fetch death is infrastructure (bad path, bad
+    # token, dead CDN), never a property of the assets — and it used to be
+    # completely invisible: no non-zero exit, no ::warning, no summary, so
+    # six nights of a 100%-dead tier shipped green. Above the threshold the
+    # run is a failure, full stop.
+    fetch_failed = counts.get("FETCH-FAILED", 0)
+    fetch_rate = fetch_failed / tested if tested else 0.0
+    gate_msg = None
+    if tested and args.max_fetch_failed_rate > 0 and \
+            fetch_rate > args.max_fetch_failed_rate:
+        gate_msg = (f"FETCH-FAILED {fetch_failed}/{tested} "
+                    f"({fetch_rate:.1%}) exceeds "
+                    f"{args.max_fetch_failed_rate:.0%} — the fetch tier is "
+                    f"dead; see {results_path}")
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(f"::error::{gate_msg}")
+        else:
+            print(f"ERROR: {gate_msg}")
+    write_step_summary(
+        counts, tested, results_path, gate_msg,
+        idle_note=(f"**nothing pending** — all {len(assets)} assets in tiers "
+                   f"{tier_list} already carry a verdict; this run resumed "
+                   f"from the persisted manifest instead of re-testing "
+                   f"(idle lane, not a fetch failure)." if not pending else
+                   None))
+    if gate_msg:
+        return 3
     return 0
 
 
