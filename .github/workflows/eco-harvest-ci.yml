@@ -15,6 +15,9 @@ on:
       test_tiers:
         description: "test 层级（windows runner）"
         default: "t1"
+      redo:
+        description: "重测已有 verdict 的资产（--redo，用于验证取数链路）"
+        default: "false"
 
 permissions:
   contents: write # 推 state 回 data 分支
@@ -32,10 +35,14 @@ jobs:
         with:
           ref: eco-harvest-state
           path: eco-restore
+      # #357: the persisted surface is state + MANIFEST. Restoring only the
+      # cursor meant every run rebuilt a fresh "当夜增量" corpus (1571 assets)
+      # while the 10k-asset local master corpus never reached CI.
       - name: seed state
         run: |
           mkdir -p eco/state eco/manifest
           if [ -d eco-restore/state ]; then cp -r eco-restore/state/. eco/state/; fi
+          if [ -d eco-restore/manifest ]; then cp -r eco-restore/manifest/. eco/manifest/; fi
       - name: harvest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,14 +57,16 @@ jobs:
           path: |
             eco/manifest
             eco/state
-      - name: persist state to data branch
+      # Run-to-run accumulation, verifiable: the next run restores what this
+      # one committed (assets must be monotonically non-decreasing).
+      - name: persist state + manifest to data branch
         run: |
           cd eco
           git init -q -b eco-harvest-state .
           git config user.name "eco-bot"
           git config user.email "actions@github.com"
-          git add state
-          git commit -qm "state: ${{ github.event.inputs.tier || 't1' }} @ $(date -u +%FT%TZ)"
+          git add state manifest
+          git commit -qm "state+manifest: ${{ github.event.inputs.tier || 't1' }} @ $(date -u +%FT%TZ)"
           git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" eco-harvest-state:eco-harvest-state
 
   test:
@@ -96,9 +105,31 @@ jobs:
             --rubash "${{ steps.bins.outputs.rubash }}" `
             --manifest-dir eco/manifest `
             --results-dir eco/results `
-            --tmp-root eco/tmp
+            --cache-dir eco/cache `
+            --tmp-root eco/tmp ${{ github.event.inputs.redo == 'true' && '--redo' || '' }}
+          # exit 3 = fetch gate tripped (#356): FETCH-FAILED > 10%, the job
+          # must go red instead of shipping a green shell around a dead tier.
       - name: upload verdicts
+        if: always() # audit lane keeps the partials even when the gate trips
         uses: actions/upload-artifact@v4
         with:
           name: eco-results-${{ github.run_id }}
           path: eco/results
+      # #357: verdicts land in the manifest DB, so persist it next to the
+      # cursor — otherwise every run re-tests the whole restored corpus,
+      # because eco-results itself never survives to the following run.
+      - name: persist manifest verdicts to data branch
+        if: always()
+        shell: bash # same dialect as the harvest job's persist step
+        run: |
+          if [ ! -f eco/manifest/eco-manifest.sqlite ]; then
+            echo "no manifest in this job (tester never reached the DB) — skipping"
+            exit 0
+          fi
+          cd eco
+          git init -q -b eco-harvest-state .
+          git config user.name "eco-bot"
+          git config user.email "actions@github.com"
+          git add state manifest
+          git commit -qm "manifest+verdicts: ${{ github.event.inputs.test_tiers || 't1' }} @ $(date -u +%FT%TZ)"
+          git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" eco-harvest-state:eco-harvest-state
