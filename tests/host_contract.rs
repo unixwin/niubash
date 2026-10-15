@@ -56,7 +56,7 @@ fn cwd_cd_pwd_and_windows_child_process_agree() {
 }
 
 #[test]
-fn history_and_fc_use_the_host_history_provider() {
+fn noninteractive_history_does_not_load_or_write_the_host_history_file() {
     let temp = unique_temp_dir("niubash-host-history-provider");
     let home = temp.join("home");
     let start = temp.join("start");
@@ -65,30 +65,86 @@ fn history_and_fc_use_the_host_history_provider() {
     let history = home.join(".niubash_history");
     std::fs::write(&history, "first command\nsecond command\n").unwrap();
 
-    let output = run_niu("history; fc 2", &start, &home, &[]);
-    assert_success(&output, "host history provider");
-    let stdout = normalize_text(&output.stdout);
-    assert!(stdout.contains("1  first command"), "stdout was {stdout:?}");
-    assert!(
-        stdout.contains("2  second command"),
-        "stdout was {stdout:?}"
+    let output = run_niu("history; echo rc=$?", &start, &home, &[]);
+    assert_success(&output, "noninteractive history");
+    assert_eq!(normalize_text(&output.stdout), "rc=0");
+    assert!(output.stderr.is_empty(), "{output:?}");
+
+    let saved = run_niu(
+        "history -s third command; history; history -c; history",
+        &start,
+        &home,
+        &[],
     );
+    assert_success(&saved, "session-only history");
+    assert_eq!(normalize_text(&saved.stdout), "1  third command");
+    assert!(saved.stderr.is_empty(), "{saved:?}");
+    assert_eq!(
+        std::fs::read_to_string(&history).unwrap(),
+        "first command\nsecond command\n"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
 
-    let saved = run_niu("history -s third command", &start, &home, &[]);
-    assert_success(&saved, "host history save");
-    assert!(std::fs::read_to_string(&history)
-        .unwrap()
-        .contains("third command"));
+#[test]
+fn noninteractive_history_files_require_explicit_read_and_write() {
+    let temp = unique_temp_dir("niubash-explicit-history");
+    let home = temp.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let history = temp.join("input-history");
+    let written = temp.join("output-history");
+    std::fs::write(&history, "seed-entry\n").unwrap();
+    let script = format!(
+        "history; history -r {}; history -s session-entry; history; history -w {}",
+        shell_quote(&shell_path(&history)),
+        shell_quote(&shell_path(&written)),
+    );
+    let output = run_niu(&script, &temp, &home, &[]);
+    assert_success(&output, "explicit noninteractive history files");
+    assert_eq!(
+        normalize_text(&output.stdout),
+        "1  seed-entry\n    2  session-entry"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        normalize_text(&std::fs::read(&written).unwrap()),
+        "seed-entry\nsession-entry"
+    );
+    assert!(!home.join(".niubash_history").exists());
+    let _ = std::fs::remove_dir_all(temp);
+}
 
-    let deleted = run_niu("history -d 2", &start, &home, &[]);
-    assert_success(&deleted, "host history delete");
-    let after_delete = std::fs::read_to_string(&history).unwrap();
-    assert!(!after_delete.contains("second command"));
-    assert!(after_delete.contains("third command"));
+#[test]
+fn script_and_stdin_history_do_not_load_the_interactive_history_file() {
+    let temp = unique_temp_dir("niubash-script-history-isolation");
+    let home = temp.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let history = home.join(".niubash_history");
+    std::fs::write(&history, "private-interactive-entry\n").unwrap();
+    let script = temp.join("probe.sh");
+    let source = "history; history -s script-entry; history; history -c\n";
+    std::fs::write(&script, source).unwrap();
 
-    let cleared = run_niu("history -c", &start, &home, &[]);
-    assert_success(&cleared, "host history clear");
-    assert_eq!(std::fs::read_to_string(&history).unwrap(), "");
+    for from_stdin in [false, true] {
+        let mut command = Command::new(niu_binary());
+        command
+            .current_dir(&temp)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home);
+        if from_stdin {
+            command.stdin(std::fs::File::open(&script).unwrap());
+        } else {
+            command.arg(&script);
+        }
+        let output = command.output().unwrap();
+        assert_success(&output, "script history isolation");
+        assert_eq!(normalize_text(&output.stdout), "1  script-entry");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            std::fs::read_to_string(&history).unwrap(),
+            "private-interactive-entry\n"
+        );
+    }
     let _ = std::fs::remove_dir_all(temp);
 }
 

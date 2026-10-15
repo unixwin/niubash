@@ -1060,9 +1060,8 @@ mod tests {
 
     #[test]
     fn session_end_write_carries_a_cleared_list_to_the_file() {
-        // The host contract (tests/host_contract.rs
-        // history_and_fc_use_the_host_history_provider): `history -c` as
-        // the last command of a session leaves an EMPTY history file. The
+        // Interactive `history -c` as the last command of a session leaves
+        // an EMPTY history file. The
         // -c builtin itself clears memory only (builtins/history.def:185,
         // niubash#182); bash's file-side counterpart of a cleared list is
         // the exit write (bashhist.c exit_shell -> write_history), which

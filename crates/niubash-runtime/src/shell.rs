@@ -263,8 +263,8 @@ impl Shell {
     /// backend, the completion directory scan, and the final completion
     /// snapshot. Bash itself renders no prompt and expands no completions
     /// when non-interactive, so the one-shot surface matches those
-    /// semantics; the history provider and managed aliases stay (both
-    /// pinned by contract tests for `-c`). The shim-forwarded invocation
+    /// semantics; managed aliases stay, while the history provider is
+    /// installed only on interactive entry. The shim-forwarded invocation
     /// name applies here too: `sh -c ...` is a one-shot `sh`, and GNU
     /// shell.c set_shell_name keys the `$0`/POSIX contract off the
     /// invocation name, not off interactivity.
@@ -493,23 +493,6 @@ impl Shell {
             .path
             .clone()
             .unwrap_or_else(|| home_dir.join(".niubash_history"));
-        // The history provider is infallible (niubash#134): an unopenable
-        // history file — restricted-token sandbox (os error 5), path is a
-        // directory, unwritable profile — degrades to an in-memory history
-        // with a log::warn diagnostic. GNU bash likewise never aborts
-        // startup over the history file (bashhist.c:320 load_history()
-        // tolerates every read failure), so `niu -c` stays byte-stable for
-        // agent one-shot use.
-        let history_provider = Rc::new(RefCell::new(
-            crate::history::RubashHistoryProvider::with_file(
-                config.history.max_size,
-                history_path.clone(),
-                config.history.mode,
-            ),
-        ));
-        executor.set_history_provider(history_provider.clone());
-        crate::startup_trace::tick("history provider");
-
         // 8. Completion state.
         let mut initial_completion_state = CompletionState::new(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -540,7 +523,7 @@ impl Shell {
             history_path,
             history_max_size: config.history.max_size,
             history_ignore_space_prefixed: config.history.ignore_space_prefixed,
-            history_provider: Some(history_provider),
+            history_provider: None,
             history_mode: config.history.mode,
             menu_config: config.menus.with_env_overrides(),
             editor_mode: config.editor.edit_mode,
@@ -697,6 +680,17 @@ impl Shell {
     /// interactive diagnostics read "niu: line 1: ..." like a -c run.
     pub fn enter_interactive(&mut self) {
         self.interactive = true;
+        if self.history_provider.is_none() {
+            let provider = Rc::new(RefCell::new(
+                crate::history::RubashHistoryProvider::with_file(
+                    self.history_max_size,
+                    self.history_path.clone(),
+                    self.history_mode,
+                ),
+            ));
+            self.executor.set_history_provider(provider.clone());
+            self.history_provider = Some(provider);
+        }
         self.executor.set_env("__RUBASH_SHELL_NAME", "niu");
         // unixwin/niubash#117: a PS1 inherited from the process environment
         // (Git for Windows exports its session PS1 into every child) carries
@@ -3741,6 +3735,37 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn host_history_provider_is_installed_only_on_interactive_entry() {
+        use rubash::history::HistoryProvider;
+
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "interactive-entry\n").unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = path.clone();
+        assert!(shell.history_provider.is_none());
+
+        shell.enter_interactive();
+        let provider = shell.history_provider.as_ref().unwrap().clone();
+        assert_eq!(
+            provider.borrow_mut().entries().unwrap(),
+            ["interactive-entry"]
+        );
+        provider.borrow_mut().clear().unwrap();
+        shell.enter_interactive();
+        assert!(Rc::ptr_eq(
+            &provider,
+            shell.history_provider.as_ref().unwrap()
+        ));
+        assert!(provider.borrow_mut().entries().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "interactive-entry\n"
+        );
+    }
+
+    #[test]
     fn refresh_edit_mode_rc_vi_switches_at_startup() {
         // The standard bashrc line: `set -o vi` before the first prompt.
         let mut shell = test_shell(HookConfig::default());
@@ -5681,7 +5706,9 @@ complete -F _envtooldyn_hook envtooldyn
         // leaves a PS1 set by the user's own rc fully in charge.
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
+        let history_dir = tempfile::tempdir().unwrap();
         let mut shell = test_shell(HookConfig::default());
+        shell.history_path = history_dir.path().join("first-history");
         shell
             .executor
             .set_env("PS1", r"\[\033]0;x\007\]`__git_ps1` $ ");
@@ -5697,6 +5724,7 @@ complete -F _envtooldyn_hook envtooldyn
         // A PS1 without Git Bash session machinery is user content and must
         // survive into prompt adoption exactly as before.
         let mut plain = test_shell(HookConfig::default());
+        plain.history_path = history_dir.path().join("plain-history");
         plain.executor.set_env("PS1", r"\u@\h:\w\$ ");
         plain.enter_interactive();
         assert_eq!(plain.executor.get_env("PS1"), Some(r"\u@\h:\w\$ "));
@@ -5715,7 +5743,9 @@ complete -F _envtooldyn_hook envtooldyn
     fn framework_ps1_set_after_interactive_entry_is_never_discarded() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
+        let history_dir = tempfile::tempdir().unwrap();
         let mut shell = test_shell(HookConfig::default());
+        shell.history_path = history_dir.path().join("history");
         shell.enter_interactive();
         // Simulate a framework theme block sourced from the rc. The value
         // deliberately reuses #117's marker shapes to prove ordering, not
