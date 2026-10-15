@@ -2522,7 +2522,7 @@ mod tests {
             first_fetch_verified: true,
         };
         let snippet = adapter_for("oh-my-bash").unwrap().loader_snippet(&record);
-        assert!(snippet.contains("if [ -r "), "{snippet}");
+        assert!(snippet.contains("if [ -f "), "{snippet}");
         assert!(snippet.contains("/oh-my-bash/oh-my-bash.sh"), "{snippet}");
         assert!(snippet.contains("export OSH"), "{snippet}");
         // Separator normalization keeps OMB's internal globs working when
@@ -3092,7 +3092,7 @@ mod tests {
         // path; the root var is assigned inside the guard.
         assert!(
             snippet.contains(
-                "if [ -r \"${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/bash-it/bash_it.sh\" ]"
+                "if [ -f \"${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/bash-it/bash_it.sh\" ]"
             ),
             "{snippet}"
         );
@@ -3146,7 +3146,7 @@ mod tests {
             first_fetch_verified: true,
         };
         let snippet = adapter.loader_snippet(&record);
-        assert!(snippet.contains("if [ -r "), "{snippet}");
+        assert!(snippet.contains("if [ -f "), "{snippet}");
         assert!(snippet.contains("/bash_completion\" ]"), "{snippet}");
         assert!(
             snippet.contains("native completions stay as fallback"),

@@ -430,10 +430,11 @@ impl Shell {
             .as_deref()
             .unwrap_or(factory_style);
         let prompt: PromptBackend = if one_shot {
-            PromptBackend::Bash(BashPrompt::new(
-                config.shell.prompt_symbol.clone(),
-                String::new(),
-            ))
+            // One-shot shells never render a prompt. Keep the backend
+            // terminal-free: BashPrompt::new probes terminal width during
+            // construction and can spawn `tput` twice on non-tty Unix
+            // invocations (niubash#351).
+            PromptBackend::Template(NiubashPrompt::new(Some(String::new()), None))
         } else if prompt_style == "gitbash" {
             #[cfg(windows)]
             {
@@ -5636,6 +5637,15 @@ complete -F _envtooldyn_hook envtooldyn
             _ => panic!("expected Bash prompt backend"),
         }
         assert_eq!(shell.executor.last_exit_code(), 7);
+    }
+
+    #[test]
+    fn one_shot_shell_uses_a_terminal_free_prompt_backend() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = Shell::new_one_shot().expect("one-shot shell should initialize");
+
+        assert!(shell.one_shot);
+        assert!(matches!(shell.prompt, PromptBackend::Template(_)));
     }
 
     #[test]

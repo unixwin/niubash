@@ -45,7 +45,7 @@ unset __niubash_home_drive __niubash_home_rest
 # OSH_THEME='agnoster'
 # plugins=('git')
 # # oh-my-bash source (external, primary; fallback stays active when absent)
-# if [ -r "${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/oh-my-bash/oh-my-bash.sh" ]; then
+# if [ -f "${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/oh-my-bash/oh-my-bash.sh" ]; then
 #   OSH="${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/oh-my-bash"
 #   OSH="${OSH//\\//}"
 #   export OSH

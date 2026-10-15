@@ -1192,8 +1192,12 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             ReedlineEvent::Enter,
         ])),
         "autosuggest-partial-accept" => Some(ReedlineEvent::HistoryHintWordComplete),
-        "history-substring-search-up" => Some(ReedlineEvent::Up),
-        "history-substring-search-down" => Some(ReedlineEvent::Down),
+        "history-substring-search-up" | "history-search-backward" | "up-line-or-history" => {
+            Some(ReedlineEvent::Up)
+        }
+        "history-substring-search-down" | "history-search-forward" | "down-line-or-history" => {
+            Some(ReedlineEvent::Down)
+        }
         "accept-line" => Some(ReedlineEvent::Enter),
         "beginning-of-line" => Some(edit_event(EditCommand::MoveToLineStart { select: false })),
         "end-of-line" => Some(edit_event(EditCommand::MoveToLineEnd { select: false })),
@@ -1224,8 +1228,6 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "expand-or-complete" | "complete-word" => Some(completion_event()),
         "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
-        "up-line-or-history" => Some(ReedlineEvent::Up),
-        "down-line-or-history" => Some(ReedlineEvent::Down),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -2707,6 +2709,24 @@ mod tests {
             keybindings.find_binding(KeyModifiers::NONE, KeyCode::Tab),
             Some(ReedlineEvent::UntilFound(_))
         ));
+    }
+
+    #[test]
+    fn native_widget_maps_bash_history_navigation_aliases() {
+        for widget in [
+            "history-substring-search-up",
+            "history-search-backward",
+            "up-line-or-history",
+        ] {
+            assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Up));
+        }
+        for widget in [
+            "history-substring-search-down",
+            "history-search-forward",
+            "down-line-or-history",
+        ] {
+            assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Down));
+        }
     }
 
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {

@@ -304,7 +304,7 @@ fn render_block(record: &SourceRecord, model: &SelectionModel, state: &BlockStat
         files.dedup();
         for file in files {
             let path = format!("{base}/{file}");
-            body.push_str(&format!("if [ -r \"{path}\" ]; then\n  . \"{path}\"\nfi\n"));
+            body.push_str(&format!("if [ -f \"{path}\" ]; then\n  . \"{path}\"\nfi\n"));
         }
     }
     // Drift guard (niubash#297, deliberately STATIC text): `niu plugin sync`
@@ -680,10 +680,10 @@ fn foreign_body_lines(
             }
             if let Some((_, SelectionModel::DirectFiles)) = managed {
                 // The guarded per-file source lines are rendered structure:
-                // `if [ -r "…" ]; then` / `  . "…"` / `fi`.
+                // guarded source lines rendered by this manager.
                 if trimmed == "fi"
                     || trimmed.starts_with(". \"")
-                    || trimmed.starts_with("if [ -r \"")
+                    || trimmed.starts_with("if [ -f \"")
                 {
                     continue;
                 }
@@ -2539,7 +2539,7 @@ mod tests {
         let rc = rc_text();
         assert!(
             rc.contains(&format!(
-                "if [ -r \"${{NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}}/{}/spark.bash\" ]; then",
+                "if [ -f \"${{NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}}/{}/spark.bash\" ]; then",
                 record.id
             )),
             "{rc}"

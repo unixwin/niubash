@@ -341,7 +341,7 @@ fn real_ohmybash_chain_keeps_claim_or_floor_invariant() {
     // Point the loader at the real corpus tree: OSH is the tree root, bound
     // directly at the corpus path inside the guarded block.
     let loader = format!(
-        "export DISABLE_AUTO_UPDATE=true\nOSH='{0}'\nif [ -r \"$OSH/oh-my-bash.sh\" ]; then\n  OSH_THEME=agnoster\n  . \"$OSH/oh-my-bash.sh\"\nfi\n",
+        "export DISABLE_AUTO_UPDATE=true\nOSH='{0}'\nif [ -f \"$OSH/oh-my-bash.sh\" ]; then\n  OSH_THEME=agnoster\n  . \"$OSH/oh-my-bash.sh\"\nfi\n",
         corpus.to_string_lossy().replace('\\', "/")
     );
     fs::write(sandbox.home.join(".niubashrc"), loader).unwrap();

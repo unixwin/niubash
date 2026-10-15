@@ -397,7 +397,7 @@ impl super::sources::PluginSourceAdapter for DescriptorAdapter {
                     id = record.id,
                     note = self.0.fallback_note,
                 ));
-                snippet.push_str("if [ -r \"");
+                snippet.push_str("if [ -f \"");
                 snippet.push_str(&base);
                 snippet.push('/');
                 snippet.push_str(entry);

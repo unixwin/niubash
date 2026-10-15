@@ -151,7 +151,7 @@ fn oh_my_bash_assets_enable_disable_through_rc_arrays() {
     assert!(rc.contains("plugins=('git')"), "{rc}");
     assert!(rc.contains("aliases=('cargo')"), "{rc}");
     assert!(rc.contains("completions=('gradle')"), "{rc}");
-    assert!(rc.contains("if [ -r "), "{rc}");
+    assert!(rc.contains("if [ -f "), "{rc}");
 
     // The overview marks the enabled assets and the activation.
     let list = run_niu_with_env(&["plugin", "list"], &envs);

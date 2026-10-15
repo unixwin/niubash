@@ -502,7 +502,7 @@ fn omb_theme_claim_renders_and_floor_returns_on_release() {
     // theme line + guarded loader for the fixture tree.
     let base = "${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/oh-my-bash";
     let rc = format!(
-        "OSH_THEME='agnoster'\nif [ -r \"{base}/oh-my-bash.sh\" ]; then\n  OSH=\"{base}\"\n  OSH=\"${{OSH//\\\\//}}\"\n  export OSH\n  . \"$OSH/oh-my-bash.sh\"\nfi\n"
+        "OSH_THEME='agnoster'\nif [ -f \"{base}/oh-my-bash.sh\" ]; then\n  OSH=\"{base}\"\n  OSH=\"${{OSH//\\\\//}}\"\n  export OSH\n  . \"$OSH/oh-my-bash.sh\"\nfi\n"
     );
     let mut s = NiuSession::spawn_custom(
         "omb-claim",

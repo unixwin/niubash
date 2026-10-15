@@ -3456,7 +3456,7 @@ mod tests {
         // and no native theme pair or template override.
         assert!(rc.contains("OSH_THEME='robbyrussell'"), "{rc}");
         assert!(rc.contains("NIU_THEME_SOURCE=omb"), "{rc}");
-        assert!(rc.contains("if [ -r "), "{rc}");
+        assert!(rc.contains("if [ -f "), "{rc}");
         assert!(rc.contains(". \"$OSH/oh-my-bash.sh\""), "{rc}");
         assert!(
             rc.contains("${NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}/oh-my-bash"),
