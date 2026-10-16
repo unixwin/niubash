@@ -10,4 +10,55 @@ if ! cargo fmt --check >/dev/null 2>&1; then
     cargo fmt --check 2>&1 | head -20 >&2
     exit 1
 fi
+# Reject dependency downgrades in Cargo.lock (2026-10-17: a blind
+# `cargo update -p rubash` on a Termux checkout silently downgraded
+# windows-sys 0.61.2 -> 0.59.0 and dirtied unrelated pins; release builds
+# use --locked, so a bad lock breaks the build or ships old deps).
+# Intentional downgrades: ALLOW_LOCK_DOWNGRADE=1 git commit.
+if ! git diff --cached --quiet -- Cargo.lock; then
+    tmp_old="$(mktemp)" tmp_new="$(mktemp)"
+    trap 'rm -f "$tmp_old" "$tmp_new"' EXIT INT TERM
+    git show HEAD:Cargo.lock >"$tmp_old" 2>/dev/null || : >"$tmp_old"
+    git show :Cargo.lock >"$tmp_new"
+    downgraded="$(awk '
+        function vercmp(a, b,   na, nb, i, va, vb) {
+            na = split(a, va, /\./); nb = split(b, vb, /\./);
+            for (i = 1; i <= na || i <= nb; i++) {
+                va[i] += 0; vb[i] += 0;
+                if (va[i] < vb[i]) return -1;
+                if (va[i] > vb[i]) return 1;
+            }
+            if (a < b) return -1;
+            return (a > b);
+        }
+        function flush(   k) {
+            if (n == "") return;
+            k = n "|" s;
+            if (in_new) {
+                if (!(k in newmax) || vercmp(v, newmax[k]) > 0) newmax[k] = v;
+            } else {
+                if (!(k in oldmax) || vercmp(v, oldmax[k]) > 0) oldmax[k] = v;
+            }
+            n = "";
+        }
+        FNR == 1 { flush(); in_new = (FILENAME != ARGV[1]); n = ""; v = ""; s = "registry" }
+        /^\[\[package\]\]/ { flush(); n = ""; v = ""; s = "registry" }
+        /^name = / { gsub(/.*= "|"/, ""); n = $0 }
+        /^version = / { gsub(/.*= "|"/, ""); v = $0 }
+        /^source = / { gsub(/.*= "|"/, ""); s = $0 }
+        /^$/ { flush() }
+        END {
+            flush();
+            for (k in newmax)
+                if ((k in oldmax) && vercmp(newmax[k], oldmax[k]) < 0)
+                    print "  " k ": " oldmax[k] " -> " newmax[k];
+        }
+    ' "$tmp_old" "$tmp_new")"
+    if [ -n "$downgraded" ] && [ -z "$ALLOW_LOCK_DOWNGRADE" ]; then
+        echo "pre-commit: Cargo.lock downgrade rejected:" >&2
+        echo "$downgraded" >&2
+        echo "If this is intentional: ALLOW_LOCK_DOWNGRADE=1 git commit." >&2
+        exit 1
+    fi
+fi
 exit 0
