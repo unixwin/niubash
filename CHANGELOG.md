@@ -4,6 +4,35 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The factory prompt's git segment runs the user's own git** instead of the
+  in-process libgit2 dependency: one bounded
+  `git status --porcelain=v2 --branch` inside a repository, and **no spawn at
+  all** outside one (a few `stat`s, where `__git_ps1` forks anyway). Fidelity
+  is the reason to switch — sparse checkouts, linked worktrees, submodules and
+  `safe.directory` refusals are answered by the git the user actually runs
+  (libgit2 silently dropped the branch segment on old-owner trees once) — and
+  the cost is unchanged in practice: measured p50 26 ms / max 37 ms per prompt
+  inside a repository, i.e. the bare git call and nothing more, against Git
+  Bash's `__git_ps1` 100-300 ms (three to five forks). Isolation rules, one
+  per incident: never through a shell (a missing git is an OS error, not
+  `command not found` noise), stdout captured and stderr discarded (git
+  warnings never reach the screen), `--no-optional-locks` +
+  `GIT_OPTIONAL_LOCKS=0` (never takes `index.lock`), `-c core.fsmonitor=false`
+  (never starts an fsmonitor daemon from a prompt), a 2 s timeout with the
+  child killed, and no `CREATE_NO_WINDOW` (measured +28 ms per call: it makes
+  Windows allocate a hidden console for every prompt; a console child inherits
+  ours and shows no window). This also drops the `git2`/libgit2 dependency:
+  ~1.28 MB of the binary and 323 locked packages (libgit2-sys, url/idna/ICU,
+  cc, pkg-config, vcpkg, ...). Both niubash#145 startup invariants still pass
+  (`legacy_niu_plugins_rc_reaches_prompt`,
+  `legacy_framework_rc_reaches_prompt`): nothing is waited on before the first
+  paint, and the prompt-scoped child is reaped by the prompt itself. A
+  brand-new repository (unborn HEAD) now shows its branch, where libgit2's
+  `head()` errored and the segment vanished.
+
+
 ### Fixed
 
 - **dirname/basename**: slash-shaped operands stay verbatim — `dirname /a/b`

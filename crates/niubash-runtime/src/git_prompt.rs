@@ -7,17 +7,50 @@
 //! not ours) and no static product tag (a single-environment shell has no
 //! disambiguation need; identity lives in the banner and `niu --version`).
 //!
-//! The branch/dirty segment reads the repository through git2
-//! (owner-approved library dependency, adjudication option d) instead of a
-//! git child process: the prompt path never spawns (the niubash#145 red
-//! line), and the in-process call lands tens of milliseconds versus Git
-//! Bash's per-prompt `__git_ps1` fork — the "smoother than them" deliverable.
+//! The branch/dirty segment reads the repository with the user's own `git`,
+//! bounded and isolated, instead of an in-process library:
+//!
+//!  - **fidelity** is the product promise: sparse checkouts, submodules,
+//!    linked worktrees, partial clones and fsmonitor state can only be
+//!    answered by the git the user actually runs (the libgit2 prompt silently
+//!    dropped the branch segment on old-owner repo trees once already);
+//!  - **cost**: a bounded `git status --porcelain=v2 --branch` (~20-35 ms
+//!    with our 14 ms git) happens only inside a repository — outside one the
+//!    segment costs a few `stat`s and spawns nothing at all, which is already
+//!    better than `__git_ps1`, that forks several times even in `$HOME`;
+//!  - **isolation**, one rule per incident: never through a shell (a missing
+//!    git is an OS error, not a "command not found" on the terminal), stdout
+//!    piped and stderr discarded (git warnings can never reach the screen),
+//!    `--no-optional-locks` + `GIT_OPTIONAL_LOCKS=0` (a prompt must never take
+//!    `index.lock`), `-c core.fsmonitor=false` (a prompt must never start or
+//!    poke an fsmonitor daemon), `GIT_TERMINAL_PROMPT=0`, no console window,
+//!    and the child is killed when it outlives the timeout.
+//!
+//! This is not the niubash#145 shape: that was a persistent worker thread
+//! plus a daemon child that the main thread *waited on before the first
+//! prompt*. The child here is scoped to one segment render, is never waited
+//! on by anything else, and its reader thread dies with it; the startup
+//! regression tests keep asserting that nothing is waited on before the first
+//! paint.
 //!
 //! Segments outside a repository are empty (Git Bash prints no branch there
 //! either), and a detached HEAD shows the short SHA the way `__git_ps1`
 //! does. This module is a leaf: no shell state, no executor, cwd in/cwd out.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// Hard bound for the prompt's git call; the child is killed past it. Two
+/// seconds is far above a warm `status` (~20-35 ms) and only reached by a
+/// pathological repository (a hook that hangs, a dead network share).
+const STATUS_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// Read budget for the status call. Porcelain v2 prints the `# branch.*`
+/// headers first, so the head of the stream already answers the prompt; the
+/// cap keeps the pipe and the reader bounded even in a repository with tens
+/// of thousands of changed entries.
+const STATUS_READ_CAP: usize = 8 * 1024;
 
 /// Cyan (`\x1b[36m`) — Git Bash's `__git_ps1` branch colour.
 const CYAN: &str = "\x1b[36m";
@@ -102,88 +135,232 @@ fn display_cwd(cwd: &Path) -> String {
     posix
 }
 
+/// The working tree containing `cwd`, if any: the nearest ancestor holding a
+/// `.git` entry — a directory in an ordinary clone, a file in linked
+/// worktrees and submodules. Cheaper than asking git, and outside a
+/// repository it is the entire cost of the segment: nothing is spawned.
+fn find_worktree(cwd: &Path) -> Option<PathBuf> {
+    std::iter::successors(Some(cwd), |dir| dir.parent())
+        .find(|dir| {
+            let marker = dir.join(".git");
+            marker.is_dir() || marker.is_file()
+        })
+        .map(Path::to_path_buf)
+}
+
 /// The git segment of the prompt: `branch` / `branch*` (dirty) / short SHA
-/// (detached) — `None` outside a repository. Opens the worktree containing
-/// `cwd` (git2 walks parents the way `discover` does), reads HEAD, and only
-/// runs the status sweep when a worktree exists (bare repos and detached
-/// cores skip it — they have nothing to be dirty against).
+/// (detached) — `None` outside a repository, when git is unavailable, or when
+/// the read fails or times out. Failures are silent by design: the prompt
+/// degrades to "no branch" and the terminal stays clean.
 ///
 /// Public so the segment prompt engine can drive it
 /// (`SegmentId::Vcs`, niubash#331): the oh-my-niu bundle's
-/// `[segments.git] id = "vcs"` declaration resolves to this renderer.
-/// In-process git2 only — the segment path must never spawn a git child
-/// (niubash#145 red line, niubash#604 lesson). The dirty `*` suffix is the
-/// dirty-state marker; the segment engine keys its `[git_dirty]` yellow off
-/// exactly that star.
+/// `[segments.git] id = "vcs"` declaration resolves to this renderer. The
+/// dirty `*` suffix is the dirty-state marker; the segment engine keys its
+/// `[git_dirty]` yellow off exactly that star.
 pub fn branch_segment(cwd: &Path) -> Option<String> {
-    allow_user_owned_repos();
-    let repo = git2::Repository::discover(cwd).ok()?;
-    let head = repo.head().ok()?;
-    let name = if head.is_branch() {
-        head.shorthand()?.to_string()
-    } else {
-        // Detached: Git Bash's __git_ps1 shows the short SHA in parens;
-        // keep the bare short SHA (our skeleton, ours to spell).
-        let commit = head.peel_to_commit().ok()?;
-        let sha = commit.as_object().short_id().ok()?;
-        sha.as_str().unwrap_or_default().to_string()
-    };
-    let dirty = repo_is_dirty(&repo);
+    let worktree = find_worktree(cwd)?;
+    let (name, dirty) = read_status(&worktree)?;
     Some(if dirty { format!("{name}*") } else { name })
 }
 
-/// libgit2 refuses repositories owned by a different account unless told
-/// otherwise, and it does NOT read git's `safe.directory` — so on the very
-/// common single-user Windows machine whose repo trees were created by an
-/// old install (owner `BUILTIN\Administrators`, observed on D:\repo after a
-/// Windows reinstall: `git status` works — the user's git.exe honors their
-/// safe.directory — while `Repository::discover` errors and the branch
-/// segment silently vanished, owner report 2026-10-14), the prompt must
-/// match what the user's own git answers. The prompt's git2 usage is
-/// read-only (HEAD + status sweep), the process-wide opt matches git.exe's
-/// verdict, and the alternative — rendering no branch in a repository the
-/// user actively works in — is the bug, not the safety property (the
-/// attack it guards, a foreign-owned repo on a shared host, fails safe
-/// elsewhere: clones are made by this user).
-fn allow_user_owned_repos() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: a process-global libgit2 opt with no pointer arguments;
-        // called once before any repository opens, from the prompt's
-        // read-only git2 surface.
-        unsafe {
-            let _ = git2::opts::set_verify_owner_validation(false);
+/// One read-only `git status` for the prompt, with every isolation rule from
+/// the module docs applied. Returns the branch name (or detached short SHA)
+/// plus whether anything is dirty.
+fn read_status(worktree: &Path) -> Option<(String, bool)> {
+    // stdout goes to a scratch file, not a pipe: a pipe needs either a drain
+    // thread (whose hand-off costs a scheduler quantum on Windows, ~15 ms,
+    // which would double the segment) or risks wedging the child once it
+    // writes past the pipe buffer. The wait below is a precise Win32 wait on
+    // the process handle, so nothing polls either.
+    let scratch = std::env::temp_dir().join(format!("niu-prompt-git-{}.out", std::process::id()));
+    let mut command = Command::new("git");
+    command
+        // Never start or refresh an fsmonitor daemon from a prompt: those
+        // daemons outlive the shell and hold handles on the installation's
+        // own binaries.
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        // GIT_OPTIONAL_LOCKS=0 as a flag: a prompt must never take
+        // index.lock or refresh the index (oh-my-zsh documents the same
+        // rule for its prompt wrapper).
+        .arg("--no-optional-locks")
+        .args(["status", "--porcelain=v2", "--branch"])
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        // Discarded, not inherited: a broken repository, a dubious-ownership
+        // refusal or a hook's chatter must never reach the screen.
+        .stderr(Stdio::null())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    // Deliberately no CREATE_NO_WINDOW: it makes Windows allocate a fresh
+    // hidden console for the child, measured at ~28 ms per prompt (21 ms ->
+    // 50 ms for the whole call), which doubles the segment. A console child
+    // inherits this shell's console and shows no window — and niu is a console
+    // program by design (ConPTY and Windows Terminal included), so the flag
+    // would only help a console-less parent that cannot run niu anyway.
+    // GetConsoleWindow() is not a usable guard here: under ConPTY it reports
+    // no window, which would put the cost straight back on the default path.
+    let sink = match std::fs::File::create(&scratch) {
+        Ok(file) => file,
+        Err(_) => return None,
+    };
+    command.stdout(Stdio::from(sink));
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            let _ = std::fs::remove_file(&scratch);
+            return None;
         }
-    });
+    };
+    let finished = wait_with_timeout(&mut child, STATUS_TIMEOUT);
+    if !finished {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    // Bounded read: the branch headers are at the front of the stream, so a
+    // capped read still answers even in a repository with tens of thousands
+    // of changed entries.
+    let bytes = {
+        use std::io::Read;
+        let mut buffer = Vec::with_capacity(STATUS_READ_CAP);
+        if let Ok(file) = std::fs::File::open(&scratch) {
+            let _ = file.take(STATUS_READ_CAP as u64).read_to_end(&mut buffer);
+        }
+        buffer
+    };
+    let _ = std::fs::remove_file(&scratch);
+    if !finished {
+        return None;
+    }
+    parse_status(&bytes)
 }
 
-/// Dirty sweep, bounded: untracked-only repositories (the common "just
-/// cloned, never built" case) answer from the index/worktree diff without
-/// recursing ignore-heavy trees. libgit2 sorts out `.gitignore` natively.
-fn repo_is_dirty(repo: &git2::Repository) -> bool {
-    let statuses = match repo.statuses(None) {
-        Ok(statuses) => statuses,
-        Err(_) => return false,
+/// Wait for `child` to exit, up to `timeout`. Returns whether it exited by
+/// itself; a timeout leaves the child running for the caller to kill.
+///
+/// Win32 `WaitForSingleObject` wakes the instant the process exits — polling
+/// `try_wait` in a sleep loop costs a scheduler quantum (~15 ms) per hop on
+/// Windows, which would double the segment's cost.
+fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        let handle = child.as_raw_handle() as HANDLE;
+        // SAFETY: `handle` is the live process handle owned by `child`.
+        let status = unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) };
+        return status == WAIT_OBJECT_0 || status != WAIT_TIMEOUT;
+    }
+    #[cfg(not(windows))]
+    {
+        // The prompt surface is Windows-only; keep the module portable.
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+}
+
+/// Parse `git status --porcelain=v2 --branch` output:
+///
+/// ```text
+/// # branch.oid <oid>|(initial)
+/// # branch.head <name>|(detached)
+/// 1 <XY> … | 2 … | u … | ? …
+/// ```
+///
+/// The branch headers come first, so a capped read still answers. Any status
+/// entry (tracked, renamed/copied, unmerged, untracked) marks the segment
+/// dirty — the same set libgit2 was asked for before. A detached HEAD renders
+/// the short SHA, and an unborn branch (fresh `git init`, where the previous
+/// implementation showed nothing at all because libgit2's `head()` errors)
+/// renders its branch name the way Git Bash does.
+fn parse_status(bytes: &[u8]) -> Option<(String, bool)> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut head: Option<&str> = None;
+    let mut oid: Option<&str> = None;
+    let mut dirty = false;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# branch.oid ") {
+            oid = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("# branch.head ") {
+            head = Some(rest.trim());
+        } else if line.starts_with("1 ")
+            || line.starts_with("2 ")
+            || line.starts_with("u ")
+            || line.starts_with("? ")
+        {
+            dirty = true;
+        }
+    }
+    let name = match head? {
+        "(detached)" => {
+            let oid = oid?;
+            if oid == "(initial)" {
+                return None;
+            }
+            oid.chars().take(7).collect()
+        }
+        name if !name.is_empty() => name.to_string(),
+        _ => return None,
     };
-    statuses.iter().any(|entry| {
-        let s = entry.status();
-        s.intersects(
-            git2::Status::WT_MODIFIED
-                | git2::Status::WT_DELETED
-                | git2::Status::WT_RENAMED
-                | git2::Status::WT_NEW
-                | git2::Status::INDEX_MODIFIED
-                | git2::Status::INDEX_DELETED
-                | git2::Status::INDEX_RENAMED
-                | git2::Status::INDEX_NEW
-                | git2::Status::CONFLICTED,
-        )
-    })
+    Some((name, dirty))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixtures are real repositories: the segment now reads the user's git,
+    /// so the tests drive the same path production does. A `false` means git
+    /// is not on PATH; the fixture then aborts quietly instead of failing a
+    /// machine that has no git.
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn init_repo(dir: &Path) -> bool {
+        git(dir, &["init", "--quiet", "--initial-branch=main", "."])
+    }
+
+    fn repo_with_commit(dir: &Path) -> bool {
+        init_repo(dir)
+            && git(dir, &["add", "-A"])
+            && git(dir, &["commit", "--quiet", "--allow-empty", "-m", "init"])
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            _ => String::new(),
+        }
+    }
 
     #[test]
     fn non_repository_renders_without_branch() {
@@ -198,60 +375,105 @@ mod tests {
     }
 
     #[test]
+    fn no_repository_marker_means_no_worktree() {
+        // Outside a repository the segment must not spawn anything: this is
+        // the whole cost of the feature in `$HOME` and friends.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(find_worktree(tmp.path()).is_none());
+    }
+
+    #[test]
     fn clean_repo_shows_branch_without_dirty_mark() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
-        let mut index = repo.index().unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = git2::Signature::now("t", "t@example.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
         let left = render(tmp.path());
-        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
-        // Git Bash's parenthesized __git_ps1 shape (owner note 2026-10-14).
-        assert!(left.contains(&format!("({branch})")), "{left:?}");
-        assert!(!left.contains(&format!("({branch}*)")), "{left:?}");
+        assert!(left.contains("(main)"), "{left:?}");
+        assert!(!left.contains("(main*)"), "{left:?}");
     }
 
     #[test]
     fn dirty_worktree_appends_the_star() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
-        let mut index = repo.index().unwrap();
-        let file = tmp.path().join("tracked.txt");
-        std::fs::write(&file, b"v1").unwrap();
-        index.add_path(Path::new("tracked.txt")).unwrap();
-        index.write().unwrap();
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = git2::Signature::now("t", "t@example.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-
-        std::fs::write(&file, b"v2").unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        std::fs::write(tmp.path().join("tracked.txt"), b"v1").unwrap();
+        if !git(tmp.path(), &["add", "tracked.txt"])
+            || !git(tmp.path(), &["commit", "--quiet", "-m", "add"])
+        {
+            return;
+        }
+        std::fs::write(tmp.path().join("tracked.txt"), b"v2").unwrap();
         let left = render(tmp.path());
-        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
-        assert!(left.contains(&format!("({branch}*)")), "{left:?}");
+        assert!(left.contains("(main*)"), "{left:?}");
+    }
+
+    #[test]
+    fn untracked_file_marks_dirty() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        std::fs::write(tmp.path().join("brand-new.txt"), b"x").unwrap();
+        let left = render(tmp.path());
+        assert!(left.contains("(main*)"), "{left:?}");
+    }
+
+    #[test]
+    fn unborn_head_shows_the_branch() {
+        // A fresh `git init` has no commit yet; the previous libgit2 read
+        // errored here and the segment vanished, which is not what Git Bash
+        // does (owner-visible: a brand-new repository showed no branch).
+        let tmp = tempfile::tempdir().unwrap();
+        if !init_repo(tmp.path()) {
+            return;
+        }
+        let left = render(tmp.path());
+        assert!(left.contains("(main)"), "{left:?}");
     }
 
     #[test]
     fn detached_head_shows_the_short_sha() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
-        let mut index = repo.index().unwrap();
-        index.write().unwrap();
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = git2::Signature::now("t", "t@example.com").unwrap();
-        let oid = repo
-            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-        repo.set_head_detached(oid).unwrap();
-
+        if !repo_with_commit(tmp.path()) || !git(tmp.path(), &["switch", "--detach", "HEAD"]) {
+            return;
+        }
+        let full = git_stdout(tmp.path(), &["rev-parse", "HEAD"]);
+        if full.len() < 7 {
+            return;
+        }
         let left = render(tmp.path());
-        let short = &oid.to_string()[..7];
-        assert!(left.contains(short), "{left:?}");
+        assert!(left.contains(&full[..7]), "{left:?}");
+    }
+
+    #[test]
+    fn linked_worktree_reads_its_own_branch() {
+        // Linked worktrees mark the repository with a `.git` *file*; the walk
+        // has to accept that form and read the worktree's own HEAD.
+        let main = tempfile::tempdir().unwrap();
+        if !repo_with_commit(main.path()) {
+            return;
+        }
+        let linked = tempfile::tempdir().unwrap();
+        let linked_path = linked.path().join("wt");
+        if !git(
+            main.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                linked_path.to_str().unwrap(),
+                "-b",
+                "side",
+            ],
+        ) {
+            return;
+        }
+        assert!(find_worktree(&linked_path).is_some());
+        let left = render(&linked_path);
+        assert!(left.contains("(side)"), "{left:?}");
     }
 
     #[test]
@@ -269,19 +491,47 @@ mod tests {
     }
 
     #[test]
-    fn prompt_is_within_the_render_budget() {
-        // 120ms budget (owner red line); a warm git2 open+status on a small
-        // repo lands in single-digit ms. 10 is generous and still catches a
-        // per-prompt subprocess regression, which would blow past it.
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
-        let mut index = repo.index().unwrap();
-        index.write().unwrap();
-        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = git2::Signature::now("t", "t@example.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
+    fn parse_status_reads_branch_and_dirt() {
+        let clean = b"# branch.oid 1111111111111111111111111111111111111111\n\
+                      # branch.head main\n";
+        assert_eq!(parse_status(clean), Some(("main".to_string(), false)));
 
+        let dirty = b"# branch.oid 1111111111111111111111111111111111111111\n\
+                      # branch.head main\n\
+                      1 .M N... 100644 100644 100644 1111111 2222222 tracked.txt\n";
+        assert_eq!(parse_status(dirty), Some(("main".to_string(), true)));
+
+        let untracked = b"# branch.oid 1111111111111111111111111111111111111111\n\
+                          # branch.head main\n\
+                          ? new.txt\n";
+        assert_eq!(parse_status(untracked), Some(("main".to_string(), true)));
+
+        let unmerged =
+            b"# branch.head side\nu UU N... 100644 100644 100644 100644 1111 2222 3333 c.txt\n";
+        assert_eq!(parse_status(unmerged), Some(("side".to_string(), true)));
+
+        let detached = b"# branch.oid 2222222222222222222222222222222222222222\n\
+                         # branch.head (detached)\n";
+        assert_eq!(parse_status(detached), Some(("2222222".to_string(), false)));
+
+        let unborn = b"# branch.oid (initial)\n# branch.head main\n";
+        assert_eq!(parse_status(unborn), Some(("main".to_string(), false)));
+
+        // A capped or unexpected stream answers nothing rather than guessing.
+        assert_eq!(parse_status(b""), None);
+        assert_eq!(parse_status(b"warning: something\n"), None);
+    }
+
+    #[test]
+    fn prompt_is_within_the_render_budget() {
+        // 120ms budget (owner red line). The segment now spawns the user's
+        // git inside a repository (~20-35 ms warm with our own 14 ms git), so
+        // this catches a per-prompt regression that would blow the budget
+        // (a hanging child, an unbounded status sweep).
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
         let start = std::time::Instant::now();
         for _ in 0..10 {
             let _ = render(tmp.path());

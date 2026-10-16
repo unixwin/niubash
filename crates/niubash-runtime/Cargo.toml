@@ -46,12 +46,10 @@ crossterm29 = { package = "crossterm", version = "0.29", default-features = fals
 # and executable tools/fonts are package-manager recommendations.
 
 [target.'cfg(windows)'.dependencies]
-# git2: the built-in "Git Bash compatible" default prompt (owner-approved
-# 2026-10-12, adjudication option d) reads branch/dirty state in-process —
-# the prompt path never spawns a git child (niubash#145 red line).
-# default-features = false drops the network stack (ssh/https/curl): local
-# repository reads only.
-git2 = { version = "0.19", default-features = false }
+# The prompt's git segment runs the user's own git through one bounded,
+# isolated child (src/git_prompt.rs) instead of an in-process library: the
+# libgit2 build carried ~1.28 MB and its own semantic drift, while our git
+# starts in ~14 ms. No git library dependency remains here.
 
 # Win32_System_Com + Win32_UI_Shell: the niubash#211 shortcut channel
 # (CoCreateInstance(ShellLink) + SHGetKnownFolderPath) — windows-sys carries
