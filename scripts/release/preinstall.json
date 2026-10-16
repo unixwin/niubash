@@ -5,14 +5,14 @@
   "packages": [
     {
       "name": "gawk",
-      "version": "5.4.1",
+      "version": "5.4.1-unixwin1",
       "commands": [
         "gawk"
       ],
       "sha256": {
-        "windows-x64": "25373ae83ec539dbe8b4208e1b4c1afa891f902df1a19138ecda5451ccded4b6"
+        "windows-x64": "afdce80fc4fac9d2d6886a9c3c75b9120bca84d2011a395b5b90909c74e24568"
       },
-      "purpose": "GNU Awk 5.4.1. bash-it plugins and completions hard-depend on awk (the gradle completion pipes through `awk '{print $1}'` on every use); gawk IS the GNU implementation, so plugin scripts written against GNU awk keep their dialect. The wpm `gawk` package is layout=shim: the payload (gawk.exe, awk.exe, and its five DLLs) lands in <root>\\opt\\gawk and usr\\bin\\gawk.exe is a winuxcmd.exe hardlink shim that forwards there."
+      "purpose": "GNU Awk 5.4.1. bash-it plugins and completions hard-depend on awk (the gradle completion pipes through `awk '{print $1}'` on every use); gawk IS the GNU implementation, so plugin scripts written against GNU awk keep their dialect. The wpm `gawk` package is layout=shim: the payload (gawk.exe, awk.exe, and the three DLLs it imports - libgmp-10, libmpfr-6, libreadline8; revision unixwin1 drops the two unreferenced ones and the unused extension tree, 7.8 MB -> 4.4 MB) lands in <root>\\opt\\gawk and usr\\bin\\gawk.exe is a winuxcmd.exe hardlink shim that forwards there."
     },
     {
       "name": "niugit",
