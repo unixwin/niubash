@@ -2013,3 +2013,82 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
         .as_nanos();
     std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
 }
+
+/// unixwin/niubash#377: a shell invoked as `bash`/`sh` behaves like one.
+/// Niubash's product verbs are not shell words - `bash setup` runs a file named
+/// `setup` (GNU shell.c), it does not open the setup wizard - and while
+/// `$BASH` follows the invoked face, the shell-path contract (`NIU_SHELL`)
+/// still names the real binary of the installation.
+#[test]
+fn shell_faces_do_not_expose_product_verbs_and_name_the_real_shell() {
+    let temp = unique_temp_dir("niubash-host-face-product-verbs");
+    let home = temp.join("home");
+    let bin = temp.join("bin");
+    // A minimal installation: the shell next to a bundled winuxcmd tree, and
+    // the face hardlinked (copied, portably) into the PATH entry directory.
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(temp.join("winuxcmd").join("usr").join("bin")).unwrap();
+    let niu = temp.join(if cfg!(windows) { "niu.exe" } else { "niu" });
+    std::fs::copy(niu_binary(), &niu).unwrap();
+    let face = bin.join(if cfg!(windows) { "bash.exe" } else { "bash" });
+    std::fs::copy(&niu, &face).unwrap();
+
+    let spawn = |target: &Path, args: &[&str]| {
+        Command::new(target)
+            .args(args)
+            .current_dir(&home)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env_remove("NIU_INVOKED_AS")
+            .output()
+            .unwrap_or_else(|err| panic!("spawn {} {args:?}: {err}", target.display()))
+    };
+
+    // `bash setup` with no such file: the engine's ENOENT surface, not a wizard.
+    let missing = spawn(&face, &["setup"]);
+    assert_eq!(
+        missing.status.code(),
+        Some(127),
+        "bash setup -> {:?} / {}",
+        missing.status,
+        normalize_text(&missing.stderr)
+    );
+    assert!(
+        normalize_text(&missing.stderr).contains("No such file or directory"),
+        "{}",
+        normalize_text(&missing.stderr)
+    );
+
+    // With a script of that name, the shell runs the script.
+    std::fs::write(home.join("setup"), "echo ran-the-script\n").unwrap();
+    let script = spawn(&face, &["setup"]);
+    assert_success(&script, "bash setup with the script present");
+    assert!(
+        normalize_text(&script.stdout).contains("ran-the-script"),
+        "{}",
+        normalize_text(&script.stdout)
+    );
+
+    // Environment contract: the shell path, and the face for $BASH.
+    let env_out = spawn(&face, &["-c", "echo $NIU_SHELL; echo $BASH"]);
+    assert_success(&env_out, "bash face environment");
+    let text = normalize_text(&env_out.stdout);
+    let mut lines = text.lines();
+    let shell = lines.next().unwrap_or_default().to_lowercase();
+    let bash = lines.next().unwrap_or_default().to_lowercase();
+    assert!(
+        shell.ends_with(if cfg!(windows) { "niu.exe" } else { "niu" }),
+        "NIU_SHELL must name the real shell, got {shell:?}"
+    );
+    assert!(
+        bash.ends_with(if cfg!(windows) { "bash.exe" } else { "bash" }),
+        "$BASH must follow the invoked face, got {bash:?}"
+    );
+
+    // The product verbs are still there on the niu face.
+    let niu_help = spawn(&niu, &["setup", "-h"]);
+    assert_success(&niu_help, "niu setup -h");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}

@@ -79,6 +79,21 @@ pub fn find_installation_root(exe: &Path) -> PathBuf {
     start
 }
 
+/// The real `niu.exe` of the installation the running executable belongs to.
+/// Reached as `bash.exe`/`sh.exe` - a hardlink, or the forwarding shim's
+/// re-exec - the running path is the face, not the shell, which is why the
+/// contract variables (`NIU_SHELL`, `WINUXSH_SHELL`) and the shim's own target
+/// search must resolve this way. Without an installation to point at, the
+/// invoked path is the best answer available.
+pub fn resolved_shell_path(invoked: &Path) -> PathBuf {
+    let candidate = find_installation_root(invoked).join("niu.exe");
+    if candidate.is_file() {
+        candidate
+    } else {
+        invoked.to_path_buf()
+    }
+}
+
 /// Every `<dir>/<face>` the installation could carry, whether or not the
 /// directory exists.
 pub fn planned_shell_links(root: &Path, niu: &Path) -> Vec<PathBuf> {
@@ -279,6 +294,35 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(portable);
+    }
+
+    #[test]
+    fn resolved_shell_path_names_the_real_shell_not_the_face() {
+        let root = unique_temp_dir("resolved-shell-path");
+        std::fs::create_dir_all(root.join("winuxcmd").join("usr").join("bin")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("niu.exe"), b"niu payload").unwrap();
+        std::fs::write(root.join("winuxcmd/usr/bin/winuxcmd.exe"), b"dispatcher").unwrap();
+        std::fs::write(root.join("bin/bash.exe"), b"niu payload").unwrap();
+
+        // Invoked through the face, the contract still names the shell.
+        assert_eq!(
+            resolved_shell_path(&root.join("bin/bash.exe")),
+            root.join("niu.exe")
+        );
+        assert_eq!(
+            resolved_shell_path(&root.join("niu.exe")),
+            root.join("niu.exe")
+        );
+
+        // No installation: the invoked path is what we have.
+        let bare = unique_temp_dir("resolved-shell-path-bare");
+        let bare_exe = bare.join("bash.exe");
+        std::fs::write(&bare_exe, b"standalone").unwrap();
+        assert_eq!(resolved_shell_path(&bare_exe), bare_exe);
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(bare);
     }
 
     #[test]
