@@ -93,9 +93,30 @@ wpm update winuxcmd          # the Unix commands it ships with
 
 ## Bash And sh Command Links
 
-When the WinuxCmd installer creates `bash.exe`, `sh.exe`, or `ash.exe` command
-links to Niubash, the link launcher must pass the invocation identity without
-relying on the resolved executable path:
+`bash.exe` and `sh.exe` are **the shell itself under another name**: where
+hardlinks are available they are hardlinks to `niu.exe`, and the engine takes
+the face from `argv[0]` (`$0`, `BASH_VERSION`, and POSIX mode for `sh`/`ash`).
+That is worth real time - a hardlink costs nothing, while a forwarding launcher
+runs one extra process on every `bash -c` / `sh -c` (measured at ~13 ms per
+call, unixwin/niubash#377).
+
+Run this after laying the tree down, and again after any update that replaces
+`niu.exe` (a replaced binary leaves the names pointing at the previous inode):
+
+```sh
+niu --relink-shells --force
+```
+
+It links `bash.exe` and `sh.exe` in `<root>\bin`, `<root>\winuxcmd\bin` and
+`<root>\winuxcmd\usr\bin`, skips directories that are not present, is
+idempotent, and parks an existing name out of the way before replacing it, so a
+shell that is running right now keeps its bytes. The Niubash installer does
+this from `[Run]`.
+
+Where hardlinks are unavailable (exFAT, a network share) the shipped forwarding
+shim stays the fallback. It sets `NIU_INVOKED_AS=bash` / `NIU_INVOKED_AS=sh`
+and re-executes `niu`, which produces exactly the identity the `argv[0]` path
+provides - keep both working instead of assuming either:
 
 ```text
 NIU_INVOKED_AS=bash
@@ -103,12 +124,11 @@ NIU_INVOKED_AS=sh
 NIU_INVOKED_AS=ash
 ```
 
-Niubash already consumes this value before constructing Rubash. `sh` and `ash`
-select POSIX mode; `bash` keeps Bash mode. A plain `niu.exe` launch must
-leave the variable unset. The launcher must preserve all original argv values
-and must not implement a second shell-option parser.
+Niubash consumes that value before constructing Rubash; a plain `niu.exe`
+launch must leave it unset, and a launcher must preserve all original argv
+values rather than parsing shell options of its own.
 
-Installer acceptance tests for the WinuxCmd link provider:
+Installer acceptance tests for either provider:
 
 ```sh
 bash.exe -c 'test -z "$POSIXLY_CORRECT"'
@@ -116,9 +136,9 @@ sh.exe -c 'set -o | grep posix'
 ash.exe -c 'set -o | grep posix'
 ```
 
-This repository does not create the command links. The installation provider
-currently needs to implement this contract; do not replace it with a
-`current_exe()` heuristic in Niubash.
+This repository does not create the links inside a WinuxCmd tree by itself; the
+installation provider calls `niu --relink-shells` (or implements the
+`NIU_INVOKED_AS` contract above).
 
 ## Plugin Ecosystem In Packages
 

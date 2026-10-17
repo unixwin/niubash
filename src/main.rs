@@ -324,6 +324,7 @@ fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
         "--completion-probe",
         "--install-wt-profile",
         "--install-wt-shortcuts",
+        "--relink-shells",
         "--self-update",
         "--encoded-command",
     ];
@@ -391,6 +392,14 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
         }
         "--install-wt-shortcuts" => {
             install_windows_terminal_shortcuts(rest)?;
+            Ok(())
+        }
+        "--relink-shells" => {
+            // The installer, the WinuxCmd link provider and a portable unzip
+            // call this after laying the tree down, and after an update
+            // replaced niu.exe: the shell faces become hardlinks to the real
+            // binary instead of forwarding shims (unixwin/niubash#377).
+            relink_shell_faces(rest)?;
             Ok(())
         }
         "--self-update" => self_update::run(rest),
@@ -3867,6 +3876,46 @@ fn install_windows_terminal_profile(_rest: &[String]) -> anyhow::Result<()> {
 ///   (the installer passes `{autodesktop}` / `{group}`); without them the
 ///   known-folder defaults are used
 #[cfg(windows)]
+/// Point every `bash.exe`/`sh.exe` name of this installation at the running
+/// `niu.exe`, replacing forwarding shims where hardlinks are available.
+fn relink_shell_faces(rest: &[String]) -> anyhow::Result<()> {
+    let mut force = false;
+    let mut quiet = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--quiet" => quiet = true,
+            other => anyhow::bail!("--relink-shells: unknown argument '{other}'"),
+        }
+    }
+
+    let niu = std::env::current_exe()
+        .map_err(|error| anyhow::anyhow!("cannot determine the running niu.exe: {error}"))?;
+    let root = niubash_runtime::shell_links::find_installation_root(&niu);
+    let report = niubash_runtime::shell_links::link_shell_faces(&root, &niu, force);
+
+    if !quiet {
+        println!(
+            "niu: shell links under {}: {} created, {} already current, {} skipped, {} failed",
+            root.display(),
+            report.created.len(),
+            report.already_current.len(),
+            report.skipped.len(),
+            report.failed.len()
+        );
+        for (path, reason) in &report.skipped {
+            println!("  skipped {}: {reason}", path.display());
+        }
+    }
+    if !report.failed.is_empty() {
+        for (path, error) in &report.failed {
+            eprintln!("niu: failed to link {}: {error}", path.display());
+        }
+        anyhow::bail!("{} shell link(s) could not be created", report.failed.len());
+    }
+    Ok(())
+}
+
 fn install_windows_terminal_shortcuts(rest: &[String]) -> anyhow::Result<()> {
     let mut quiet = false;
     let mut update_only = false;

@@ -82,6 +82,7 @@ pub mod prompt_segments;
 pub mod repl;
 pub mod setup_wizard;
 pub mod shell;
+pub mod shell_links;
 pub mod shortcut;
 pub mod skill;
 pub mod startup_trace;

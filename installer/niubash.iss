@@ -101,6 +101,12 @@ Name: "{autodesktop}\Niubash"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{%U
 
 [Run]
 Filename: "{app}\winuxcmd\usr\bin\winuxcmd.exe"; Parameters: "wpm links rebuild --root ""{app}\winuxcmd"" --force"; WorkingDir: "{app}\winuxcmd\usr\bin"; StatusMsg: "Activating WinuxCmd command links..."; Flags: runhidden waituntilterminated
+; unixwin/niubash#377: the shell faces become hardlinks to the real binary
+; instead of the forwarding shims the package ships (one process saved per
+; `bash -c`/`sh -c`). Idempotent; also refreshes names left on the previous
+; inode when an update replaced niu.exe. The shims stay the fallback wherever
+; hardlinks are unavailable.
+Filename: "{app}\{#AppExeName}"; Parameters: "--relink-shells --force --quiet"; WorkingDir: "{app}"; StatusMsg: "Linking bash and sh to the shell..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExeName}"; Parameters: "--install-wt-profile --quiet"; StatusMsg: "Adding Windows Terminal profile..."; Flags: runhidden waituntilterminated; Tasks: wtprofile
 ; niubash#211: after the profile lands, upgrade the shortcut files to the WT
 ; form (wt.exe resolved at runtime: WindowsApps alias -> PATH -> registry).
