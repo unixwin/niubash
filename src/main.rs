@@ -1415,12 +1415,23 @@ fn print_usage() {
     println!("                               record the final directory back on exit");
     println!();
     println!("Bash-compatible invocation options (GNU semantics, parsed by the engine):");
-    println!("  -i                        Force interactive");
-    println!("  -l, --login               Act as a login shell");
-    println!("  -s                        Read commands from standard input");
-    println!("  -o <option>               Set a `set -o` option (e.g. -o posix)");
-    println!("  -O <shopt>                Set a `shopt` option (e.g. -O extglob)");
-    println!("  -abefhkmnprtuvxBCEHPT     GNU single-letter shell options (e.g. -e -u -x)");
+    // Generated from rubash::usage::SHORT_OPTIONS — the same table the
+    // parser's accepted-letter set derives from — so the product help lists
+    // every working short option and cannot drift from the parser again
+    // (niubash#385; the long list below has been generated since b40ad8a).
+    for option in rubash::usage::SHORT_OPTIONS {
+        let mut spec = format!("-{}", option.letter);
+        if let Some(value) = option.value_name {
+            spec.push_str(" <");
+            spec.push_str(value);
+            spec.push('>');
+        }
+        if let Some(long) = option.long_alias {
+            spec.push_str(", ");
+            spec.push_str(long);
+        }
+        println!("  {spec:<26}{}", option.description);
+    }
     println!("  GNU long options:");
     for name in rubash::usage::LONG_OPTIONS {
         println!("    --{name}");
