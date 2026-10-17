@@ -188,7 +188,7 @@ fn replace_with_link(source: &Path, link: &Path) -> Result<()> {
 /// `windows_by_handle` feature, so the Windows side asks the filesystem
 /// directly.
 #[cfg(windows)]
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     matches!((file_identity(a), file_identity(b)), (Some(x), Some(y)) if x == y)
 }
 
@@ -233,7 +233,7 @@ fn file_identity(path: &Path) -> Option<(u32, u32, u32)> {
 }
 
 #[cfg(not(windows))]
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
         return false;

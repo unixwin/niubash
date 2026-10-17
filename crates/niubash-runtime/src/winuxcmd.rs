@@ -564,9 +564,19 @@ fn bundled_activation_script(exe: &Path) -> Option<PathBuf> {
 }
 
 fn has_required_command_links(dir: &Path) -> bool {
+    // Presence is not enough: a command link left on the *previous*
+    // winuxcmd.exe by an update runs an older build forever, and nothing else
+    // notices (unixwin/WinuxCmd#1206 - observed as a stale `yes.exe` hours
+    // after the update). Comparing identity makes activation - which runs
+    // `wpm links rebuild --force` when this returns false - repair the set on
+    // the next shell start instead of waiting for someone to look.
+    let engine = dir.join("winuxcmd.exe");
     ["ls.exe", "cat.exe", "grep.exe", "ln.exe"]
         .iter()
-        .all(|name| dir.join(name).is_file())
+        .all(|name| {
+            let link = dir.join(name);
+            link.is_file() && super::shell_links::same_file(&engine, &link)
+        })
 }
 
 /// True when the resolved winuxcmd install already has its command links
@@ -927,11 +937,25 @@ mod tests {
 
         assert!(!has_required_command_links(&dir));
 
+        // Names that are not links to this winuxcmd.exe do not count: an
+        // update that left them on the previous image must trigger the rebuild.
         for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
-            std::fs::write(dir.join(name), b"").unwrap();
+            std::fs::write(dir.join(name), b"a different image").unwrap();
         }
+        assert!(!has_required_command_links(&dir));
 
+        std::fs::write(dir.join("winuxcmd.exe"), b"the installed engine").unwrap();
+        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
+            let _ = std::fs::remove_file(dir.join(name));
+            std::fs::hard_link(dir.join("winuxcmd.exe"), dir.join(name)).unwrap();
+        }
         assert!(has_required_command_links(&dir));
+
+        // One stale name is enough to ask for a rebuild.
+        let stale = dir.join("cat.exe");
+        let _ = std::fs::remove_file(&stale);
+        std::fs::write(&stale, b"previous image").unwrap();
+        assert!(!has_required_command_links(&dir));
 
         let _ = std::fs::remove_dir_all(dir);
     }
