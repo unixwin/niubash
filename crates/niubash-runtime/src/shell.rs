@@ -179,6 +179,12 @@ pub struct Shell {
     // --noediting: disable readline-style line editing in the REPL.
     pub no_editing: bool,
     startup_invocation: Option<rubash::invocation::ShellInvocation>,
+    // niubash#402: set by `execute_script_inner` when a script the host
+    // ran ended in a top-level `exit` (the engine's `ExitCode` unwind, GNU
+    // jump_to_top_level EXITPROG). The startup-file sourcer consumes it so an
+    // `exit` in the rc terminates the invocation with that status instead of
+    // being flattened to a plain status that lets the command line run.
+    script_exit_jump: bool,
     // One-shot fast path (`Shell::new_one_shot`): the shell serves a single
     // non-interactive command, so REPL-only state is never initialized and
     // the prompt backend stays a bare placeholder. Bash renders no prompt and
@@ -558,6 +564,7 @@ impl Shell {
             rc_file: None,
             no_editing: false,
             startup_invocation: None,
+            script_exit_jump: false,
             one_shot,
         };
         crate::startup_trace::tick("completion + widgets");
@@ -949,10 +956,14 @@ impl Shell {
     /// Without it, native defaults remain active; no other rc is searched.
     /// The rc is ordinary shell code: the built-in plugin/theme
     /// stack is retired (niubash#145), so NIU_PLUGINS / NIU_THEME lines in
-    /// an old rc are inert assignments the host no longer reads.
-    pub fn run_startup_rc(&mut self) {
-        self.run_startup_files(true);
+    /// an old rc are inert assignments the host no longer reads. Returns
+    /// `Some(status)` when the rc ended with a top-level `exit`
+    /// (niubash#402); the caller must then end the invocation with that
+    /// status instead of drawing a prompt or running the command line.
+    pub fn run_startup_rc(&mut self) -> Option<i32> {
+        let exit = self.run_startup_files(true);
         self.finish_startup();
+        exit
     }
 
     /// niubash#180 session side: a finished `niu setup` run (a child
@@ -1019,13 +1030,16 @@ impl Shell {
     /// (`niu -i -c 'cmd'`, `niu -i script`). GNU shell.c: `-i` sets
     /// forced_interactive during option parsing, so run_startup_files
     /// (shell.c:1147) takes the interactive branch — rc file, not BASH_ENV —
-    /// without any of the REPL-only markers.
-    pub fn run_interactive_startup_rc(&mut self) {
-        self.run_startup_files(false);
+    /// without any of the REPL-only markers. Returns `Some(status)` when the
+    /// rc ended with a top-level `exit` (niubash#402); the caller must then
+    /// terminate instead of running the command line.
+    pub fn run_interactive_startup_rc(&mut self) -> Option<i32> {
+        let exit = self.run_startup_files(false);
         self.finish_startup();
+        exit
     }
 
-    fn run_startup_files(&mut self, repl: bool) {
+    fn run_startup_files(&mut self, repl: bool) -> Option<i32> {
         // niubash#180 baseline: this session sources the current rc right
         // now, so a marker left by a setup that ran before this session
         // started is stale by definition — consume it here so only a setup
@@ -1042,22 +1056,34 @@ impl Shell {
         // in this branch.
         if self.posix_mode_active() {
             self.execute_env_file("ENV");
-            return;
+            return None;
         }
         if self.no_rc {
-            return;
+            return None;
         }
         let Some(path) = self.startup_rc_path() else {
-            return;
+            return None;
         };
         if !path.is_file() {
-            return;
+            return None;
         }
 
         if repl {
             self.executor.set_env("NIU_REPL_STARTUP", "1");
         }
-        self.source_startup_file(&path);
+        let exit = self.source_startup_file(&path);
+        if let Some(status) = exit {
+            // niubash#402: the rc ended with `exit` — the invocation
+            // terminates with that status and none of the remaining startup
+            // steps (completion sync, greeting) or the caller's command line
+            // run (GNU jump_to_top_level unwinds reader_loop). Unset the
+            // marker directly so the cleanup cannot overwrite the jump's
+            // status.
+            if repl {
+                self.executor.unset_env("NIU_REPL_STARTUP");
+            }
+            return Some(status);
+        }
         if repl {
             let _ = self.execute_script("unset NIU_REPL_STARTUP");
         }
@@ -1067,21 +1093,36 @@ impl Shell {
             self.finish_startup();
             self.run_greeting_hooks();
         }
+        None
     }
 
     /// Source one startup file with GNU maybe_execute_file semantics:
-    /// failures warn but never abort the shell (evalfile.c:339; the callers
-    /// of run_startup_files ignore its return value).
-    fn source_startup_file(&mut self, path: &Path) {
-        match self.source_file_into_current_shell(path) {
-            Ok(code) => {
-                if code != 0 {
-                    log::warn!("{} exited with status {}", path.display(), code);
-                }
+    /// failures warn but never abort the shell (evalfile.c:339). Returns
+    /// `Some(status)` only when the file ended with a top-level `exit`
+    /// (niubash#402) — an ordinary nonzero status is logged and ignored,
+    /// exactly as GNU keeps reading after a failing command.
+    fn source_startup_file(&mut self, path: &Path) -> Option<i32> {
+        let code = match self.source_file_into_current_shell(path) {
+            Ok(code) => code,
+            Err(err) => {
+                log::warn!("{} failed: {}", path.display(), err);
+                1
             }
-            Err(err) => log::warn!("{} failed: {}", path.display(), err),
-        }
+        };
         self.sync_process_path_from_executor_path();
+        // niubash#402: an `exit` executed while the startup file is sourced
+        // terminates the invoking shell with that status (GNU
+        // jump_to_top_level unwinds reader_loop), so hand it to the caller
+        // to end the invocation; a plain failing command is not a jump and
+        // only warns.
+        if self.script_exit_jump {
+            self.script_exit_jump = false;
+            return Some(code);
+        }
+        if code != 0 {
+            log::warn!("{} exited with status {}", path.display(), code);
+        }
+        None
     }
 
     /// True when this shell runs in POSIX mode. All three sources flip it
@@ -1368,7 +1409,14 @@ impl Shell {
 
     fn source_file_into_current_shell(&mut self, path: &Path) -> anyhow::Result<i32> {
         let shell_path = host_path_to_shell_path(&path.to_string_lossy());
-        self.execute_script(&format!(". {}", shell_quote(&shell_path)))
+        // niubash#402: clear before sourcing so only this file's own
+        // top-level `exit` (recorded by `execute_script_inner`) is observed
+        // by the caller below. The `. <path>` command is one simple command
+        // with no history/alias/heredoc content of its own, so the grouped
+        // readers are bypassed: they would flatten the `exit` into a plain
+        // status before it can be seen.
+        self.script_exit_jump = false;
+        self.execute_script_inner(&format!(". {}", shell_quote(&shell_path)), false, 0, false)
     }
 
     /// Run native hooks before rendering the next prompt.
@@ -2044,6 +2092,22 @@ impl Shell {
         interactive_terminal_colors: bool,
         line_offset: usize,
     ) -> anyhow::Result<i32> {
+        self.execute_script_inner(script, interactive_terminal_colors, line_offset, true)
+    }
+
+    /// The body of [`execute_script_with_options`]. `allow_grouped_readers`
+    /// is false only for the startup-file `. <path>` source (niubash#402):
+    /// the engine's grouped readers flatten a top-level `exit` into a plain
+    /// status before the caller can observe it, so the source path forces the
+    /// tokenize+parse+execute_ast route, whose `ExitCode` unwind is recorded
+    /// in `script_exit_jump`.
+    fn execute_script_inner(
+        &mut self,
+        script: &str,
+        interactive_terminal_colors: bool,
+        line_offset: usize,
+        allow_grouped_readers: bool,
+    ) -> anyhow::Result<i32> {
         let script = if interactive_terminal_colors {
             script
         } else {
@@ -2087,7 +2151,8 @@ impl Shell {
         // route — GNU interactive shells prompt PS2 instead of failing the
         // read (the engine gate mirrors this with `!interactive`).
         let parse_posix = self.executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-        if !self.interactive
+        if allow_grouped_readers
+            && !self.interactive
             && (rubash::script_driver::heredoc_delimiter_unclosed_quote(&script).is_some()
                 || (rubash::lexer::has_unclosed_input_syntax_posix(&script, parse_posix)
                     && !script.contains("<<")))
@@ -2105,7 +2170,8 @@ impl Shell {
             self.sync_alias_mirror_from_executor();
             return Ok(code);
         }
-        if !self.interactive
+        if allow_grouped_readers
+            && !self.interactive
             && (rubash::script_driver::script_uses_history(&script)
                 || rubash::script_driver::script_uses_aliases(
                     &script,
@@ -2133,8 +2199,11 @@ impl Shell {
         // semantics for the same reasons as the line route above; the
         // non-interactive legs above already use this driver for
         // alias/history-bearing scripts.
-        if let Some(code) = self.execute_interactive_reader_batch(&script, &tokens, line_offset) {
-            return Ok(code);
+        if allow_grouped_readers {
+            if let Some(code) = self.execute_interactive_reader_batch(&script, &tokens, line_offset)
+            {
+                return Ok(code);
+            }
         }
         for token in &mut tokens {
             token.position += line_offset;
@@ -2161,7 +2230,16 @@ impl Shell {
 
         let code = match execution {
             Ok(code) => code,
-            Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
+            Err(rubash::executor::ExecuteError::ExitCode(code)) => {
+                // niubash#402: the script unwound with a top-level `exit`
+                // (GNU jump_to_top_level EXITPROG; the engine uses the same
+                // `ExitCode` classification for the errexit ERREXIT unwind —
+                // GNU terminates for both), so record it. The startup-file
+                // sourcer ends the invocation with this status instead of
+                // reading it as an ordinary command result.
+                self.script_exit_jump = true;
+                code
+            }
             Err(rubash::executor::ExecuteError::Return(code)) => code,
             Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
             Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => code,
@@ -6091,6 +6169,7 @@ complete -F _envtooldyn_hook envtooldyn
             rc_file: None,
             no_editing: false,
             startup_invocation: None,
+            script_exit_jump: false,
             one_shot: false,
         };
         shell.sync_executor_pwd_from_process_cwd();

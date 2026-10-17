@@ -555,6 +555,114 @@ fn norc_skips_interactive_rc() {
     assert_eq!(stdout_of(&output), "unset");
 }
 
+/// niubash#402: an `exit` executed while the startup rc is sourced ends the
+/// invocation with that status; the command line does not run (GNU
+/// jump_to_top_level unwinds reader_loop). Oracle: WSL GNU Bash 5.3.0,
+/// `bash --rcfile F -i -c 'echo AFTER'` with `F="echo RAN; exit 3"` prints
+/// RAN and exits 3, never running AFTER.
+#[test]
+fn issue402_exit_in_rcfile_terminates_before_command_line() {
+    let fixture = Fixture::new("issue402-rcfile-exit");
+    let rc = fixture.home.join("exit.rc");
+    std::fs::write(&rc, "echo RAN\nexit 3\n").unwrap();
+    let output = run_niu(
+        &["--rcfile", rc.to_str().unwrap(), "-i", "-c", "echo AFTER"],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    let stdout = stdout_of(&output);
+    assert!(stdout.contains("RAN"), "rc body should run: {stdout:?}");
+    assert!(
+        !stdout.contains("AFTER"),
+        "the -c command must not run after an rc exit: {stdout:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "the rc exit status must propagate: {stdout:?}"
+    );
+}
+
+/// niubash#402, the `-C` + default-rc shape from the report: `~/.niubashrc`
+/// containing `exit 5` ends the invocation before the REPL command runs.
+#[test]
+fn issue402_exit_in_default_rc_terminates_repl_command() {
+    let fixture = Fixture::new("issue402-default-rc-exit");
+    std::fs::write(fixture.home.join(".niubashrc"), "echo RAN\nexit 5\n").unwrap();
+    let output = run_niu(&["-C", "echo AFTER"], fixture.path(), &fixture.start, &[]);
+    let stdout = stdout_of(&output);
+    assert!(stdout.contains("RAN"), "rc body should run: {stdout:?}");
+    assert!(
+        !stdout.contains("AFTER"),
+        "the -C command must not run after an rc exit: {stdout:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "the rc exit status must propagate: {stdout:?}"
+    );
+}
+
+/// niubash#402 guards: the exit handling must not disturb the ordinary
+/// startup contracts.
+#[test]
+fn issue402_startup_rc_guards() {
+    // (a) An rc that does not exit: the command line still runs.
+    let fixture = Fixture::new("issue402-no-exit");
+    std::fs::write(fixture.home.join(".niubashrc"), "echo RAN\n").unwrap();
+    let output = run_niu(
+        &["-i", "-c", "echo AFTER"],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("RAN") && stdout.contains("AFTER"),
+        "an rc without exit must not abort the command line: {stdout:?}"
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    // (b) `exit 0` in the rc: clean status and the command line never runs.
+    let fixture = Fixture::new("issue402-exit-zero");
+    std::fs::write(fixture.home.join(".niubashrc"), "echo RAN\nexit 0\n").unwrap();
+    let output = run_niu(
+        &["-i", "-c", "echo AFTER"],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("RAN") && !stdout.contains("AFTER"),
+        "exit 0 is still an exit: {stdout:?}"
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    // (c) A failing (non-exit) rc command keeps GNU maybe_execute_file
+    // semantics: it is warned about, not treated as a jump, and the command
+    // line runs with its own status.
+    let fixture = Fixture::new("issue402-rc-failure");
+    std::fs::write(fixture.home.join(".niubashrc"), "false\n").unwrap();
+    let output = run_niu(
+        &["-i", "-c", "echo AFTER"],
+        fixture.path(),
+        &fixture.start,
+        &[],
+    );
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("AFTER"),
+        "a failing rc command must not abort the startup: {stdout:?}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the command line's own status must win: {stdout:?}"
+    );
+}
+
 /// Non-interactive `-c` sources $BASH_ENV (GNU shell.c:1218).
 #[test]
 fn bash_env_sourced_for_non_interactive_c() {

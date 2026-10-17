@@ -1965,7 +1965,18 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // iteration for the pre-prompt stretch.
     let mut typeahead = crate::typeahead_guard::TypeaheadGuard::disarmed();
     typeahead.arm();
-    shell.borrow_mut().run_startup_rc();
+    if let Some(status) = shell.borrow_mut().run_startup_rc() {
+        // niubash#402: the startup rc executed `exit` — end the session with
+        // its status before the first prompt, the same shape as the
+        // PROMPT_COMMAND jump handled in the loop below (GNU
+        // jump_to_top_level unwinds reader_loop; no prompt is rendered).
+        let code = shell
+            .borrow_mut()
+            .finish_with_exit_trap(status)
+            .unwrap_or(status);
+        flush_repl_output();
+        std::process::exit(code);
+    }
     let no_editing = shell.borrow().no_editing;
     if no_editing {
         typeahead.disarm_and_reinject();

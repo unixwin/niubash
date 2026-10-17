@@ -562,7 +562,9 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // shell.c:1156 sshd bashrc case is compiled out of the reference
         // build — see source_non_interactive_env).
         if invocation.interactive {
-            shell.run_interactive_startup_rc();
+            if let Some(status) = shell.run_interactive_startup_rc() {
+                finish_startup_exit(&mut shell, status);
+            }
         } else {
             shell.source_non_interactive_env();
         }
@@ -614,7 +616,9 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // and sources the rc file, not BASH_ENV (shell.c:1214 checks
         // interactive_shell == 0).
         if invocation.interactive {
-            shell.run_interactive_startup_rc();
+            if let Some(status) = shell.run_interactive_startup_rc() {
+                finish_startup_exit(&mut shell, status);
+            }
         } else {
             shell.source_non_interactive_env();
         }
@@ -645,7 +649,9 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // which the shell already carries — must therefore run on the piped
         // -i path too (niubash#146), still before the interactive history
         // setup, which shell.c:806-811 runs only after the startup files.
-        shell.run_startup_rc();
+        if let Some(status) = shell.run_startup_rc() {
+            finish_startup_exit(&mut shell, status);
+        }
         rubash::script_driver::prepare_interactive_history(&mut shell.executor);
         let code = rubash::script_driver::run_interactive_stdin(&mut shell.executor);
         piped_stdout::finish_and_exit(code);
@@ -1201,7 +1207,9 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
         shell.set_script_name(command_name);
         shell.executor.set_positional_params(rest[2..].to_vec());
     }
-    shell.run_startup_rc();
+    if let Some(status) = shell.run_startup_rc() {
+        finish_startup_exit(&mut shell, status);
+    }
     niubash_runtime::startup_trace::tick("-C: startup rc");
     shell.run_precmd_hooks();
     niubash_runtime::startup_trace::tick("-C: precmd hooks");
@@ -4030,7 +4038,7 @@ fn print_completion_probe(rest: &[String]) -> anyhow::Result<()> {
     // file must be visible to the probe; sourced before the interactive rc so
     // the rc stays the more specific override.
     shell.source_non_interactive_env();
-    shell.run_startup_rc();
+    let _ = shell.run_startup_rc();
     // The REPL loads the rc-declared completion functions (NIU_COMPDEFS)
     // after sourcing and installs the completion bridge before the line
     // editor runs (repl.rs); the probe mirrors that sequence so compdef and
@@ -4273,6 +4281,16 @@ fn read_cwd_state(state: &Path) -> Option<PathBuf> {
     }
     let path = PathBuf::from(content);
     path.is_dir().then_some(path)
+}
+
+/// niubash#402: the startup rc executed `exit`. Run the EXIT trap with the
+/// rc's status and terminate the invocation before the command line, script,
+/// or stdin driver runs (GNU jump_to_top_level unwinds reader_loop). `exit 0`
+/// also terminates, so this always exits — unlike [`finish_one_shot`].
+fn finish_startup_exit(shell: &mut niubash_runtime::Shell, status: i32) -> ! {
+    let code = shell.finish_with_exit_trap(status).unwrap_or(status);
+    record_cwd_state(shell);
+    piped_stdout::finish_and_exit(code);
 }
 
 /// Record the shell's final directory, then exit with `code`.
