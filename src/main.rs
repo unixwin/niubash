@@ -326,13 +326,71 @@ fn shell_face_name(args: &[String]) -> Option<String> {
     rubash::usage::invocation_help_name(invoked.as_deref())
 }
 
+/// How a leading `-`/`+` word interacts with the engine's option run while
+/// `launcher_dispatch_index` walks argv left to right.
+enum LeadingOptionWord {
+    /// The word starts command/stdin mode (`-c`, `-s`, an accepted cluster
+    /// containing `c`/`s`, `--`, or the first non-option operand): the rest
+    /// of the run belongs to the engine route, so stop scanning.
+    EngineRoute,
+    /// A leading option word that consumes this many extra argv words beyond
+    /// itself (0 for a boolean flag or a long option without a value).
+    Consumes(usize),
+}
+
+/// Classify a leading option word for the launcher's argv walk. This mirrors
+/// GNU `parse_shell_options` / `ShellInvocation::parse` (rubash#697): only
+/// `o`/`O` take the NEXT argv word, and they do so inside a clustered flag
+/// too, so `-eo pipefail` is `-e` plus `-o` whose value is the following
+/// word. A cluster containing `c`/`s` hands the next operand to the engine
+/// (`-lc 'cmd'`), and an unknown letter stays a single word the engine
+/// rejects (niubash#390).
+fn classify_leading_option_word(word: &str) -> LeadingOptionWord {
+    match word {
+        // End of options: the next word is the script operand.
+        "--" => return LeadingOptionWord::EngineRoute,
+        "--rcfile" | "--init-file" => return LeadingOptionWord::Consumes(1),
+        // Any other GNU long option takes no separate value.
+        _ if word.starts_with("--") => return LeadingOptionWord::Consumes(0),
+        _ => {}
+    }
+    let mut chars = word.chars();
+    match chars.next() {
+        Some('-' | '+') => {}
+        // Not an option word: engine route.
+        _ => return LeadingOptionWord::EngineRoute,
+    }
+    let letters: Vec<char> = chars.collect();
+    // A lone `-`/`+` is a single word; an accepted cluster is expanded by
+    // the engine. Only clusters made entirely of accepted letters consume
+    // anything here; an unknown-letter cluster is left for the engine to
+    // report, and it consumes no value word at this level.
+    if !letters.is_empty()
+        && letters
+            .iter()
+            .all(|letter| rubash::usage::is_short_option_letter(*letter))
+    {
+        if letters.contains(&'c') || letters.contains(&'s') {
+            return LeadingOptionWord::EngineRoute;
+        }
+        return LeadingOptionWord::Consumes(
+            letters
+                .iter()
+                .filter(|letter| **letter == 'o' || **letter == 'O')
+                .count(),
+        );
+    }
+    LeadingOptionWord::Consumes(0)
+}
+
 /// Index of the launcher-owned word among the leading option words of `args`
 /// (argv[1]..), honoring GNU parse_shell_options' single left-to-right walk:
 /// engine options that take a separate argument (`-o`, `-O`, `--rcfile`,
-/// `--init-file`) consume the following word, `-c`/`-s` and the first
-/// non-option word hand the rest to the engine route, and every other
-/// `-`/`+` word is engine shell-option syntax. Returns `None` when the whole
-/// leading option run belongs to the engine.
+/// `--init-file`, and accepted clusters containing `o`/`O`) consume the
+/// following word(s), command/stdin words and the first non-option word hand
+/// the rest to the engine route, and every other `-`/`+` word is engine
+/// shell-option syntax. Returns `None` when the whole leading option run
+/// belongs to the engine.
 fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
     const LAUNCHER_WORDS: &[&str] = &[
         "-h",
@@ -353,15 +411,9 @@ fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
         if LAUNCHER_WORDS.contains(&arg.as_str()) {
             return Some(index);
         }
-        match arg.as_str() {
-            // -c consumes the rest as the command string + operands, -s the
-            // remaining words as positional parameters; both belong to the
-            // engine route either way.
-            "-c" | "-s" => return None,
-            "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file" => index += 2,
-            word if word.starts_with('-') || word.starts_with('+') => index += 1,
-            // First non-option word is the script operand (engine route).
-            _ => return None,
+        match classify_leading_option_word(arg) {
+            LeadingOptionWord::EngineRoute => return None,
+            LeadingOptionWord::Consumes(consumed) => index += 1 + consumed,
         }
     }
     None
@@ -423,24 +475,32 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
         "--encoded-command" => {
             // Agent/CI channel: the payload arrives base64-encoded, so no
             // shell quoting, heredoc, or `base64.exe` subprocess is involved
-            // on the way in. Same non-interactive contract as `-c` (GNU bash
-            // sources BASH_ENV for -c shells; so does this route).
+            // on the way in. Decode it and re-enter the engine's `-c` route
+            // with the leading invocation flags kept in front, so `-e`,
+            // `-u`, `-o pipefail`, `-eu`, `--norc`, ... reach the shell
+            // exactly as they do for an unencoded `-c` (niubash#390). Words
+            // after the payload keep GNU `-c` operand meaning ($0 plus
+            // positional parameters), matching the unencoded form.
             let Some(payload) = rest.first() else {
                 anyhow::bail!("--encoded-command requires an argument");
             };
             let command = decode_base64_utf8(payload)?;
-            let mut shell = niubash_runtime::Shell::new_one_shot()?;
-            shell.executor.inherit_process_stdin();
-            shell.enable_process_stdin_pipeline_bridge();
-            shell.source_non_interactive_env();
-            shell.executor.set_env("BASH_EXECUTION_STRING", &command);
-            // Same -c diagnostic tag as the engine route (niubash#160):
-            // parser diagnostics take the `$0: -c: line N:` shape.
-            shell.executor.set_env("__RUBASH_IS_C", "1");
-            let code = shell.execute_script(&command)?;
-            let code = shell.finish_with_exit_trap(code)?;
-            finish_one_shot(&shell, code);
-            Ok(())
+            let mut invocation_args = Vec::with_capacity(leading_options.len() + rest.len() + 1);
+            invocation_args.extend(leading_options.iter().cloned());
+            invocation_args.push("-c".to_string());
+            invocation_args.push(command);
+            invocation_args.extend(rest[1..].iter().cloned());
+            // A rejected leading option must use the engine route's GNU
+            // surface (shell.c:874-881): "bash: <option>: invalid option"
+            // plus the usage block, rc 2 — not the launcher's "niu:" prefix.
+            if let Err(message) = ShellInvocation::parse(&invocation_args) {
+                eprintln!("bash: {message}");
+                if message.contains("invalid option") {
+                    show_shell_usage();
+                }
+                piped_stdout::finish_and_exit(2);
+            }
+            run_shell_invocation(&invocation_args)
         }
         "-C" | "--repl-command" => run_repl_command(word, leading_options, rest),
         // Only reachable for the legacy `niu -c -l <cmd>` shape: a plain
@@ -4367,6 +4427,66 @@ mod encoded_command_tests {
         assert!(decode_base64_utf8("ZWNoby*").is_err());
         // 0xFF 0xFF: never valid UTF-8, rejected with the payload diagnostic.
         assert!(decode_base64_utf8("//8=").is_err());
+    }
+}
+
+#[cfg(test)]
+mod launcher_dispatch_tests {
+    use super::*;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        let mut args = vec!["niu".to_string()];
+        args.extend(words.iter().map(|word| word.to_string()));
+        args
+    }
+
+    fn index_of(words: &[&str]) -> Option<usize> {
+        launcher_dispatch_index(&argv(words))
+    }
+
+    #[test]
+    fn finds_a_launcher_word_after_plain_flags() {
+        assert_eq!(index_of(&["-e", "--encoded-command", "payload"]), Some(2));
+        assert_eq!(index_of(&["--norc", "-u", "--encoded-command"]), Some(3));
+    }
+
+    #[test]
+    fn value_taking_clusters_consume_their_next_word() {
+        // `-eo pipefail` is `-e` plus `-o` whose value is the NEXT word
+        // (rubash#697): the launcher word after it is still findable.
+        assert_eq!(
+            index_of(&["-eo", "pipefail", "--encoded-command", "payload"]),
+            Some(3)
+        );
+        assert_eq!(
+            index_of(&["-euo", "pipefail", "--encoded-command"]),
+            Some(3)
+        );
+        // `-o`/`-O` take their value as before.
+        assert_eq!(index_of(&["-o", "pipefail", "--encoded-command"]), Some(3));
+        assert_eq!(index_of(&["-O", "extglob", "--encoded-command"]), Some(3));
+    }
+
+    #[test]
+    fn command_and_stdin_clusters_route_to_the_engine() {
+        // A cluster containing `c`/`s` hands the next operand to the engine,
+        // so a launcher-looking word after it is that command's argument.
+        assert_eq!(index_of(&["-lc", "--encoded-command", "x"]), None);
+        assert_eq!(index_of(&["-ec", "--encoded-command", "x"]), None);
+        assert_eq!(index_of(&["-s", "--encoded-command"]), None);
+    }
+
+    #[test]
+    fn operands_and_end_of_options_route_to_the_engine() {
+        assert_eq!(index_of(&["script.sh", "--encoded-command"]), None);
+        assert_eq!(index_of(&["--", "--encoded-command"]), None);
+    }
+
+    #[test]
+    fn unknown_option_words_still_let_the_launcher_word_through() {
+        // The engine route reports the invalid option; the launcher word is
+        // still found so the handler can surface the same usage error.
+        assert_eq!(index_of(&["-Z", "--encoded-command"]), Some(2));
     }
 }
 
