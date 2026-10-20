@@ -446,6 +446,32 @@ fn delete_entries_match_only_retired_shapes() {
     }
 }
 
+/// niubash#468: the upgrade path must reconcile the bundled package shims
+/// (`usr\bin\awk.exe`, `gawk.exe`) — `wpm links rebuild` cannot reach them on
+/// a state-free bundled install, which is exactly how 1.4.1 left 1.4.0-era
+/// copies behind. This test pins the `[Run]` step so the reconcile cannot be
+/// dropped silently from a later installer edit.
+#[test]
+fn run_steps_reconcile_bundled_package_shims() {
+    let lines = script_lines();
+    let relink_steps: Vec<(usize, String)> = section_entries(&lines, "Run", "Parameters")
+        .into_iter()
+        .filter(|(_, value)| value.contains("--relink-bundled-shims"))
+        .collect();
+    assert_eq!(
+        relink_steps.len(),
+        1,
+        "expected exactly one [Run] step invoking --relink-bundled-shims \
+         (the niubash#468 bundled-shim reconcile): {relink_steps:?}"
+    );
+    assert!(
+        relink_steps[0].1.contains("--force"),
+        "the bundled-shim reconcile must pass --force so stale pre-upgrade \
+         copies are parked and relinked, not just reported: {:?}",
+        relink_steps[0]
+    );
+}
+
 /// Every external process the installer launches comes from the app tree, so
 /// the [Run] steps execute the payload niu.exe (the #397 relink) and the
 /// bundled winuxcmd dispatcher — never a downloaded or foreign binary.

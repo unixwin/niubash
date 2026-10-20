@@ -123,6 +123,15 @@ Name: "{autodesktop}\Niubash"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{%U
 
 [Run]
 Filename: "{app}\winuxcmd\usr\bin\winuxcmd.exe"; Parameters: "wpm links rebuild --root ""{app}\winuxcmd"" --force"; WorkingDir: "{app}\winuxcmd\usr\bin"; StatusMsg: "Activating WinuxCmd command links..."; Flags: runhidden waituntilterminated
+; unixwin/niubash#468: `wpm links rebuild` reconciles only what `.wpm` state
+; and the builtin applet table declare, and the bundled install ships no
+; .wpm state — so the package shims (usr\bin\awk.exe, gawk.exe) are outside
+; its set. An upgrade replaces winuxcmd.exe under its own name and leaves
+; those links on the previous image's inode (1.4.1 shipped this as stale
+; 1.1.7-era awk.exe/gawk.exe). niu owns the bundled shim set: this step
+; parks and relinks every declared name that is not the current image, and
+; upgrades extracted copies to real hardlinks.
+Filename: "{app}\{#AppExeName}"; Parameters: "--relink-bundled-shims --force --quiet"; WorkingDir: "{app}"; StatusMsg: "Relinking bundled command shims..."; Flags: runhidden waituntilterminated
 ; unixwin/niubash#377: the shell faces become hardlinks to the real binary
 ; instead of the forwarding shims the package ships (one process saved per
 ; `bash -c`/`sh -c`). Idempotent; also refreshes names left on the previous

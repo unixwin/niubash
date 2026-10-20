@@ -2,6 +2,12 @@
 
 All notable changes to Niubash are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Upgrades now reconcile the bundled package shims (`winuxcmd\usr\bin\gawk.exe`, `awk.exe`): `wpm links rebuild` cannot reach them on a bundled install because the product ships no `.wpm` state, so replacing `winuxcmd.exe` left those names on the previous image — the 1.4.1 stale `awk.exe`/`gawk.exe` residue of #468. The installer runs `niu --relink-bundled-shims --force` after the wpm rebuild, and shell-startup activation runs the same reconcile: missing or stale declared names are parked and relinked to the current `winuxcmd.exe`, extracted copies are upgraded to real hardlinks, and names owned by the machine's own `.wpm` state (e.g. a user `wpm install awk`) are never touched.
+
 ## [1.4.2] - 2026-10-20
 
 Release addressing P0 transient console window pop-ups across WinuxCmd shims, rubash child spawns, and niubash runtime helpers, plus the v1.4.1 golden-journey release audit fixes.
