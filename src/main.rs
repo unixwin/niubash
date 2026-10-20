@@ -282,8 +282,8 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 | "--install-wt-profile"
                 | "--install-wt-shortcuts"
                 | "--self-update"
-                | "--encoded-command"
-        ) && !legacy_command_mode_has_post_c_login_flag(args)
+        ) && !is_encoded_command_word(first)
+            && !legacy_command_mode_has_post_c_login_flag(args)
         {
             // GNU shell.c parse_shell_options walks argv in one left-to-right
             // pass: option words may stand in any order before the first
@@ -458,6 +458,18 @@ fn classify_leading_option_word(word: &str) -> LeadingOptionWord {
     LeadingOptionWord::Consumes(0)
 }
 
+/// Whether `word` names the encoded-command verbatim handoff in any accepted
+/// spelling: `--encoded-command` (the canonical GNU-style spelling) or `--ec`
+/// (the short alias) matched exactly, plus the PowerShell spelling
+/// `-EncodedCommand` matched case-insensitively — like every PowerShell
+/// parameter name — so tooling that already emits `pwsh -EncodedCommand
+/// <b64>` command lines reaches the same route unchanged (niubash#474). The
+/// comparison is against the whole word only, so the single-dash cluster
+/// space is untouched: `-ec` keeps its GNU `-e -c` meaning.
+fn is_encoded_command_word(word: &str) -> bool {
+    word == "--encoded-command" || word == "--ec" || word.eq_ignore_ascii_case("-encodedcommand")
+}
+
 /// Index of the launcher-owned word among the leading option words of `args`
 /// (argv[1]..), honoring GNU parse_shell_options' single left-to-right walk:
 /// engine options that take a separate argument (`-o`, `-O`, `--rcfile`,
@@ -483,7 +495,7 @@ fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
     ];
     let mut index = 1usize;
     while let Some(arg) = args.get(index) {
-        if LAUNCHER_WORDS.contains(&arg.as_str()) {
+        if LAUNCHER_WORDS.contains(&arg.as_str()) || is_encoded_command_word(arg) {
             return Some(index);
         }
         match classify_leading_option_word(arg) {
@@ -547,7 +559,7 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(rest),
-        "--encoded-command" => {
+        _ if is_encoded_command_word(word) => {
             // Agent/CI channel: the payload arrives base64-encoded, so no
             // shell quoting, heredoc, or `base64.exe` subprocess is involved
             // on the way in. Decode it and re-enter the engine's `-c` route
@@ -1650,7 +1662,10 @@ fn print_usage() {
     println!("  -V, --version             Version and component info");
     println!("  -c <command>              Execute a command ad-hoc");
     println!("  -C, --repl-command <cmd>  Execute one non-interactive REPL command");
-    println!("      --encoded-command <b64>  Execute a base64-encoded command (no quoting);");
+    println!("  Verbatim handoff (execute a base64-encoded command, no quoting):");
+    println!("      --encoded-command <b64>  canonical spelling");
+    println!("      -EncodedCommand <b64>    PowerShell spelling, matched case-insensitively");
+    println!("      --ec <b64>               short alias for --encoded-command");
     println!(
         "                               optional `v1:` prefix guards against MSYS path rewrite"
     );
@@ -4755,6 +4770,23 @@ mod encoded_command_tests {
         // 0xFF 0xFF: never valid UTF-8, rejected with the payload diagnostic.
         assert!(decode_base64_utf8("//8=").is_err());
     }
+
+    #[test]
+    fn spelling_table_is_exactly_the_alias_family() {
+        assert!(is_encoded_command_word("--encoded-command"));
+        assert!(is_encoded_command_word("--ec"));
+        // The PowerShell spelling folds case like a PowerShell parameter.
+        assert!(is_encoded_command_word("-EncodedCommand"));
+        assert!(is_encoded_command_word("-encodedcommand"));
+        assert!(is_encoded_command_word("-ENCODEDCOMMAND"));
+        assert!(is_encoded_command_word("-EnCoDeDcOmMaNd"));
+        // The GNU-style spellings stay case-sensitive, and single-dash
+        // words are never the alias: `-ec` keeps its GNU `-e -c` meaning.
+        assert!(!is_encoded_command_word("--Encoded-Command"));
+        assert!(!is_encoded_command_word("--EC"));
+        assert!(!is_encoded_command_word("-ec"));
+        assert!(!is_encoded_command_word("-encoded-command"));
+    }
 }
 
 #[cfg(test)]
@@ -4775,6 +4807,32 @@ mod launcher_dispatch_tests {
     fn finds_a_launcher_word_after_plain_flags() {
         assert_eq!(index_of(&["-e", "--encoded-command", "payload"]), Some(2));
         assert_eq!(index_of(&["--norc", "-u", "--encoded-command"]), Some(3));
+    }
+
+    #[test]
+    fn encoded_command_aliases_are_launcher_words() {
+        // niubash#474: `-EncodedCommand` (PowerShell spelling,
+        // case-insensitive) and `--ec` resolve wherever the canonical
+        // spelling is found, including behind value-taking option words.
+        assert_eq!(index_of(&["--ec", "payload"]), Some(1));
+        assert_eq!(index_of(&["-EncodedCommand", "payload"]), Some(1));
+        assert_eq!(index_of(&["-encodedcommand", "payload"]), Some(1));
+        assert_eq!(index_of(&["-ENCODEDCOMMAND", "payload"]), Some(1));
+        assert_eq!(index_of(&["-e", "--ec", "payload"]), Some(2));
+        assert_eq!(index_of(&["-o", "pipefail", "-EncodedCommand"]), Some(3));
+    }
+
+    #[test]
+    fn encoded_command_aliases_keep_cluster_and_operand_boundaries() {
+        // `--ec` is the alias; single-dash `-ec` stays the GNU `-e -c`
+        // cluster and hands the next word to the engine as the command.
+        assert_eq!(index_of(&["-ec", "--ec", "x"]), None);
+        assert_eq!(index_of(&["-lc", "-EncodedCommand", "x"]), None);
+        assert_eq!(index_of(&["--", "--ec"]), None);
+        assert_eq!(index_of(&["script.sh", "-EncodedCommand"]), None);
+        // Double-dash GNU long spellings stay case-sensitive:
+        // `--Encoded-Command` is left for the engine to reject.
+        assert_eq!(index_of(&["--Encoded-Command", "x"]), None);
     }
 
     #[test]
