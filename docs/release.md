@@ -182,6 +182,22 @@ hard-verified in the staged package before upload (`--version` per shim
 plus a plugin-shaped `awk '{print $1}'` pipeline through the packaged
 niu.exe); a package that installed but does not run FAILS the job.
 
+niubash#467 adds a byte-level contract to that awk check: the bundled
+gawk payload is a text-mode mingw build whose CRT rewrote every `\n` as
+`\r\n` on write (and folded `\r\n` into `\n` on read), while every
+winuxcmd applet does binary stdio — `awk '{print}' > f` landed CRLF
+files and `ORS="\r\n"` doubled the CR. The shipped fix is not a rebuilt
+payload but the bundled WinuxCmd forwarder splicing `-v BINMODE=3`
+ahead of the forwarded argv for `awk`/`gawk` (the build honors the `-v`
+assignment — its only lever — and ignores the `BINMODE` environment
+variable), which flips stdin/stdout/stderr and the program's own opens
+to binary. Because a PowerShell native-command capture silently strips
+`\r`, string equality could never see the regression — the verify step
+instead lets the packaged `niu.exe` redirect the pipeline to a file and
+asserts the raw bytes (`a\nb\n`, plus the `a\r\nb\r\n` pass-through an
+explicit `ORS="\r\n"` must produce). A release whose bundled forwarder
+lacks the adapter fails the x64 gate.
+
 ## Dispatching a dry run (captain)
 
 The workflow validates `tag` against `^v\d+\.\d+\.\d+$` and against the

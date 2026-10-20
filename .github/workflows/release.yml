@@ -617,8 +617,11 @@ jobs:
       # step INSTALLED must work inside the staged package — `--version` on
       # every shim, and a bash-it plugin-shaped awk pipeline through the
       # PACKAGED niu.exe (the same `| awk '{print $1}'` shape the gradle
-      # completion pipes through). What failed to install only warns
-      # (fail-open); what installed but does not work fails the job.
+      # completion pipes through) plus a raw-byte line-ending assertion on
+      # that pipeline (niubash#467 — PowerShell's native capture strips \r,
+      # so string equality cannot see the CRLF regression; the probe reads
+      # back the file the shell itself redirects to). What failed to install
+      # only warns (fail-open); what installed but does not work fails the job.
       - name: Verify pre-installed packages in the staged release
         shell: pwsh
         run: |
@@ -675,6 +678,37 @@ jobs:
               throw "plugin-shaped awk pipeline through the packaged niu.exe printed '$out' instead of 'gradle-hash-input'"
             }
             Write-Host "awk pipeline through packaged niu.exe: $out"
+
+            # niubash#467 — the LF contract is on the BYTES, and a PowerShell
+            # native-command capture silently strips \r, so the string check
+            # above cannot see the regression (exactly how the text-mode
+            # mingw gawk shipped). The bundled payload's CRT rewrites \n as
+            # \r\n on write and folds \r\n into \n on read; the shipped fix
+            # is the WinuxCmd forwarder's adapted-command argv splice
+            # (-v BINMODE=3 for awk/gawk). Each probe lets niu redirect the
+            # pipeline to a file itself and asserts the raw bytes — LF output
+            # on both command faces (the wpm-made gawk shim and the manifest
+            # awk shim forward through the same dispatcher), and an explicit
+            # "\r\n" ORS landing exactly \r\n (not the \r\r\n doubling a
+            # text-mode stdout produces). On a forwarder without the adapter
+            # these fail the release — fail-closed, like the rest of this step.
+            $probeDir = ($env:RUNNER_TEMP -replace '\\', '/')
+            function Assert-AwkOutputBytes([string]$face, [string]$command, [byte[]]$expected, [string]$probe) {
+              & $niu -c ($command + " > '" + $probe + "'")
+              if ($LASTEXITCODE -ne 0) {
+                throw "$face byte probe exited $LASTEXITCODE"
+              }
+              $hex = (([System.IO.File]::ReadAllBytes($probe)) | ForEach-Object { $_.ToString('x2') }) -join ' '
+              $want = ($expected | ForEach-Object { $_.ToString('x2') }) -join ' '
+              Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+              if ($hex -ne $want) {
+                throw "$face stdout landed as [$hex], expected [$want] — the staged bundle ships a text-mode gawk (niubash#467); the bundled WinuxCmd must carry the adapted forwarder that splices -v BINMODE=3"
+              }
+              Write-Host "$face raw output bytes: $hex"
+            }
+            Assert-AwkOutputBytes "awk"  "printf 'a\nb\n' | awk '{print `$1}'"  ([byte[]](0x61, 0x0a, 0x62, 0x0a))             "$probeDir/niubash-awk-lf.bin"
+            Assert-AwkOutputBytes "gawk" "printf 'a\nb\n' | gawk '{print `$1}'" ([byte[]](0x61, 0x0a, 0x62, 0x0a))             "$probeDir/niubash-gawk-lf.bin"
+            Assert-AwkOutputBytes "awk"  ("printf 'a\nb\n' | awk '" + 'BEGIN{ORS="\r\n"}{print $1}' + "'") ([byte[]](0x61, 0x0d, 0x0a, 0x62, 0x0d, 0x0a)) "$probeDir/niubash-awk-ors.bin"
           }
 
       - name: Verify bash/sh invocation faces in the staged release
