@@ -58,25 +58,134 @@ fn section_headers(lines: &[(usize, String)]) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Expand Inno Setup's program-files / system-drive constants into their
-/// canonical absolute paths so constant-folded spellings like `{autopf}\Git`
-/// cannot sneak past the literal drive-path and `Program Files` scanners
-/// (niubash#442).
+/// Expand Inno Setup's directory constants into their canonical absolute
+/// paths so constant-folded spellings like `{autopf}\Git` or
+/// `{syswow64}\cmd.exe` cannot sneak past the literal drive-path and
+/// `Program Files` scanners (niubash#442). Every constant that resolves
+/// outside the sanctioned surface folds here — the exceptions are the
+/// sanctioned locations themselves ({app}, {localappdata}, the icon folders
+/// {group}/{autodesktop}/{userdesktop}, {%USERPROFILE}) and {sys}, which
+/// stays unfolded on purpose: the single sanctioned {sys} binary
+/// ({sys}\taskkill.exe) is owned by the run/binary allow-list below.
 fn expand_foreign_inno_constants(line: &str) -> String {
     let mut out = line.to_string();
     for (constant, expansion) in [
+        // Program Files — administrative, auto and per-user spellings.
         ("{autopf}", "C:\\Program Files"),
         ("{autopf32}", "C:\\Program Files (x86)"),
         ("{autopf64}", "C:\\Program Files"),
+        ("{commonpf}", "C:\\Program Files"),
+        ("{commonpf32}", "C:\\Program Files (x86)"),
+        ("{commonpf64}", "C:\\Program Files"),
         ("{pf}", "C:\\Program Files"),
         ("{pf32}", "C:\\Program Files (x86)"),
         ("{pf64}", "C:\\Program Files"),
-        ("{commonpf}", "C:\\Program Files\\Common Files"),
-        ("{commonpf32}", "C:\\Program Files (x86)\\Common Files"),
-        ("{commonpf64}", "C:\\Program Files\\Common Files"),
+        ("{userpf}", "C:\\Users\\user\\AppData\\Local\\Programs"),
+        // Common Files.
+        ("{autocf}", "C:\\Program Files\\Common Files"),
+        ("{autocf32}", "C:\\Program Files (x86)\\Common Files"),
+        ("{autocf64}", "C:\\Program Files\\Common Files"),
+        ("{commoncf}", "C:\\Program Files\\Common Files"),
+        ("{commoncf32}", "C:\\Program Files (x86)\\Common Files"),
+        ("{commoncf64}", "C:\\Program Files\\Common Files"),
+        ("{cf}", "C:\\Program Files\\Common Files"),
+        ("{cf32}", "C:\\Program Files (x86)\\Common Files"),
+        ("{cf64}", "C:\\Program Files\\Common Files"),
+        (
+            "{usercf}",
+            "C:\\Users\\user\\AppData\\Local\\Programs\\Common",
+        ),
+        (
+            "{dao}",
+            "C:\\Program Files\\Common Files\\Microsoft Shared\\DAO",
+        ),
+        // Windows and system directories.
         ("{sd}", "C:"),
         ("{win}", "C:\\Windows"),
+        ("{sysnative}", "C:\\Windows\\System32"),
+        ("{syswow64}", "C:\\Windows\\SysWOW64"),
         ("{cmd}", "C:\\Windows\\System32\\cmd.exe"),
+        ("{commonfonts}", "C:\\Windows\\Fonts"),
+        ("{fonts}", "C:\\Windows\\Fonts"),
+        ("{dotnet11}", "C:\\Windows\\Microsoft.NET"),
+        ("{dotnet20}", "C:\\Windows\\Microsoft.NET"),
+        ("{dotnet2032}", "C:\\Windows\\Microsoft.NET"),
+        ("{dotnet2064}", "C:\\Windows\\Microsoft.NET"),
+        ("{dotnet40}", "C:\\Windows\\Microsoft.NET"),
+        ("{dotnet4032}", "C:\\Windows\\Microsoft.NET"),
+        ("{dotnet4064}", "C:\\Windows\\Microsoft.NET"),
+        // Application data / all-users profile roots.
+        ("{commonappdata}", "C:\\ProgramData"),
+        ("{autoappdata}", "C:\\ProgramData"),
+        ("{userappdata}", "C:\\Users\\user\\AppData\\Roaming"),
+        // Shell folders outside the sanctioned icon set.
+        ("{commondesktop}", "C:\\Users\\Public\\Desktop"),
+        ("{userdocs}", "C:\\Users\\user\\Documents"),
+        ("{commondocs}", "C:\\Users\\Public\\Documents"),
+        ("{autodocs}", "C:\\Users\\user\\Documents"),
+        ("{userfavorites}", "C:\\Users\\user\\Favorites"),
+        (
+            "{userfonts}",
+            "C:\\Users\\user\\AppData\\Local\\Microsoft\\Windows\\Fonts",
+        ),
+        ("{autofonts}", "C:\\Windows\\Fonts"),
+        (
+            "{userprograms}",
+            "C:\\Users\\user\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+        ),
+        (
+            "{commonprograms}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+        ),
+        (
+            "{autoprograms}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+        ),
+        (
+            "{userstartmenu}",
+            "C:\\Users\\user\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu",
+        ),
+        (
+            "{commonstartmenu}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu",
+        ),
+        (
+            "{autostartmenu}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu",
+        ),
+        (
+            "{userstartup}",
+            "C:\\Users\\user\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+        ),
+        (
+            "{commonstartup}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+        ),
+        (
+            "{autostartup}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+        ),
+        (
+            "{usersendto}",
+            "C:\\Users\\user\\AppData\\Roaming\\Microsoft\\Windows\\SendTo",
+        ),
+        (
+            "{sendto}",
+            "C:\\Users\\user\\AppData\\Roaming\\Microsoft\\Windows\\SendTo",
+        ),
+        (
+            "{usertemplates}",
+            "C:\\Users\\user\\AppData\\Roaming\\Microsoft\\Windows\\Templates",
+        ),
+        (
+            "{commontemplates}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Templates",
+        ),
+        (
+            "{autotemplates}",
+            "C:\\ProgramData\\Microsoft\\Windows\\Templates",
+        ),
+        ("{usersavedgames}", "C:\\Users\\user\\Saved Games"),
     ] {
         // Case-insensitive replacement for Inno constants.
         let lower = out.to_lowercase();
@@ -363,6 +472,7 @@ fn check_run_and_sys_binaries(lines: &[(usize, String)]) -> Result<(), String> {
             ));
         }
     }
+    const SANCTIONED_SYS_BINARY: &str = "{sys}\\taskkill.exe";
     for (number, line) in lines {
         if line.trim_start().starts_with(';') {
             continue;
@@ -371,12 +481,23 @@ fn check_run_and_sys_binaries(lines: &[(usize, String)]) -> Result<(), String> {
         let mut rest = lower.as_str();
         while let Some(pos) = rest.find("{sys}") {
             let tail = &rest[pos..];
-            if !tail.starts_with("{sys}\\taskkill.exe") {
+            if !tail.starts_with(SANCTIONED_SYS_BINARY) {
                 return Err(format!(
-                    "line {number}: unsanctioned {{sys}} binary reference (only {{sys}}\\taskkill.exe is allowed): {line:?}"
+                    "line {number}: unsanctioned {{sys}} binary reference (only {SANCTIONED_SYS_BINARY} is allowed): {line:?}"
                 ));
             }
-            rest = &tail["{sys}\\taskkill.exe".len()..];
+            // The sanction ends at the binary name — `{sys}\taskkill.exe2`
+            // or `{sys}\taskkill.exe.old` is a different file, not taskkill.
+            let after = &tail[SANCTIONED_SYS_BINARY.len()..];
+            match after.chars().next() {
+                Some(c) if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') => {
+                    return Err(format!(
+                        "line {number}: {{sys}} reference continues past the sanctioned \
+                         binary name (only {SANCTIONED_SYS_BINARY} is allowed): {line:?}"
+                    ));
+                }
+                _ => rest = after,
+            }
         }
     }
     Ok(())
@@ -444,20 +565,31 @@ fn shortcuts_point_into_the_app_tree() {
     }
 }
 
-/// niubash#442 adversarial mutation suite: verify that all 7 CR mutation
-/// vectors against `installer/niubash.iss` are caught by the guards above.
+/// niubash#442 adversarial mutation suite: verify that the CR mutation
+/// vectors against `installer/niubash.iss` are caught by the guards above —
+/// and that each rejection names the surface that tripped it (the ticket's
+/// "guard failure message corresponds to the triggering section" clause).
+/// Vectors 8–10 extend the suite to the spelling variants the same
+/// experiment shape permits: the {syswow64} alias for the system directory,
+/// a suffix that continues past the sanctioned taskkill.exe name, and a
+/// non-Program-Files foreign root ({commonappdata}).
 #[test]
 fn cr_adversarial_mutations_are_rejected() {
     let base = script_lines();
 
-    // 1. [Registry] section writing HKLM
+    // 1. [Registry] section writing HKLM — the declarative form is invisible
+    // to the [Code] RegWrite grep, so the fail-closed section ban must fire.
     let mut m1 = base.clone();
     m1.push((999, "[Registry]".to_string()));
     m1.push((
         1000,
         r#"Root: HKLM; Subkey: "Software\Git"; ValueType: string; ValueData: "{app}""#.to_string(),
     ));
-    assert!(check_forbidden_sections(&m1).is_err());
+    let err = check_forbidden_sections(&m1).unwrap_err();
+    assert!(
+        err.contains("[registry]"),
+        "rejection must name the forbidden section: {err}"
+    );
 
     // 2. [INI] section writing {autopf}
     let mut m2 = base.clone();
@@ -466,23 +598,45 @@ fn cr_adversarial_mutations_are_rejected() {
         1000,
         r#"Filename: "{autopf}\Git\etc\gitconfig""#.to_string(),
     ));
-    assert!(check_forbidden_sections(&m2).is_err());
-    assert!(check_no_foreign_locations(&m2).is_err());
+    let err = check_forbidden_sections(&m2).unwrap_err();
+    assert!(
+        err.contains("[ini]"),
+        "rejection must name the forbidden section: {err}"
+    );
+    let err = check_no_foreign_locations(&m2).unwrap_err();
+    assert!(
+        err.contains("Program Files"),
+        "folded {{autopf}} must surface as a foreign location: {err}"
+    );
 
     // 3. [UninstallRun] + {autopf}
     let mut m3 = base.clone();
     m3.push((999, "[UninstallRun]".to_string()));
     m3.push((1000, r#"Filename: "{autopf}\Git\unins000.exe""#.to_string()));
-    assert!(check_forbidden_sections(&m3).is_err());
-    assert!(check_no_foreign_locations(&m3).is_err());
+    let err = check_forbidden_sections(&m3).unwrap_err();
+    assert!(
+        err.contains("[uninstallrun]"),
+        "rejection must name the forbidden section: {err}"
+    );
+    assert!(
+        check_no_foreign_locations(&m3)
+            .unwrap_err()
+            .contains("Program Files"),
+        "folded {{autopf}} must surface as a foreign location"
+    );
 
-    // 4. {autopf} constant folding bypassing literal drive / Program Files scan
+    // 4. {autopf} constant folding bypassing literal drive / Program Files
+    // scan — expansion must expose both signatures.
     let mut m4 = base.clone();
     m4.push((
         999,
         r#"Source: "x"; DestDir: "{autopf}\Git\bin""#.to_string(),
     ));
-    assert!(check_no_foreign_locations(&m4).is_err());
+    let err = check_no_foreign_locations(&m4).unwrap_err();
+    assert!(
+        err.contains("absolute path") && err.contains("Program Files"),
+        "folded {{autopf}} must trip the drive-letter and 'Program Files' scans: {err}"
+    );
 
     // 5. Commented-out `;PrivilegesRequired=lowest` (with or without admin override)
     let m5: Vec<(usize, String)> = base
@@ -495,7 +649,11 @@ fn cr_adversarial_mutations_are_rejected() {
             }
         })
         .collect();
-    assert!(check_lowest_privileges(&m5).is_err());
+    let err = check_lowest_privileges(&m5).unwrap_err();
+    assert!(
+        err.contains("non-comment PrivilegesRequired"),
+        "rejection must name the privileges directive: {err}"
+    );
 
     // 6. `{sys}\cmd.exe /c rd /s /q {autopf}\Git` in [Run]
     let mut m6 = base.clone();
@@ -510,11 +668,59 @@ fn cr_adversarial_mutations_are_rejected() {
             r#"Filename: "{sys}\cmd.exe"; Parameters: "/c rd /s /q {autopf}\Git""#.to_string(),
         ),
     );
-    assert!(check_run_and_sys_binaries(&m6).is_err());
-    assert!(check_no_foreign_locations(&m6).is_err());
+    let err = check_run_and_sys_binaries(&m6).unwrap_err();
+    assert!(
+        err.contains("{sys}\\taskkill.exe"),
+        "rejection must name the sanctioned {{sys}} binary: {err}"
+    );
+    assert!(
+        check_no_foreign_locations(&m6)
+            .unwrap_err()
+            .contains("Program Files"),
+        "folded {{autopf}} in Parameters must surface as a foreign location"
+    );
 
     // 7. Unsanctioned `{sys}\powershell.exe` in [Code]
-    let mut m7 = base;
+    let mut m7 = base.clone();
     m7.push((999, r#"  Exec(ExpandConstant('{sys}\powershell.exe'), '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);"#.to_string()));
-    assert!(check_run_and_sys_binaries(&m7).is_err());
+    let err = check_run_and_sys_binaries(&m7).unwrap_err();
+    assert!(
+        err.contains("{sys}") && err.contains("taskkill"),
+        "rejection must name the unsanctioned {{sys}} reference: {err}"
+    );
+
+    // 8. `{syswow64}\cmd.exe` — the {sys} allow-list only sees the literal
+    // `{sys}` spelling; the system-directory alias must fold into the
+    // foreign-location scan instead.
+    let mut m8 = base.clone();
+    m8.push((999, r#"  Exec(ExpandConstant('{syswow64}\cmd.exe'), '/c rd /s /q {app}\x', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);"#.to_string()));
+    let err = check_no_foreign_locations(&m8).unwrap_err();
+    assert!(
+        err.contains("absolute path"),
+        "folded {{syswow64}} must surface as a foreign absolute path: {err}"
+    );
+
+    // 9. `{sys}\taskkill.exe2` — a suffix continuing past the sanctioned
+    // binary name is a different file, not taskkill.exe.
+    let mut m9 = base.clone();
+    m9.push((999, r#"  Exec(ExpandConstant('{sys}\taskkill.exe2'), '/IM niu.exe /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);"#.to_string()));
+    let err = check_run_and_sys_binaries(&m9).unwrap_err();
+    assert!(
+        err.contains("{sys}"),
+        "rejection must name the {{sys}} reference: {err}"
+    );
+
+    // 10. `{commonappdata}` — a foreign root outside the Program Files
+    // family still folds to an absolute location.
+    let mut m10 = base;
+    m10.push((
+        999,
+        r#"  SaveStringToFile(ExpandConstant('{commonappdata}\Git\marker'), 'x', False);"#
+            .to_string(),
+    ));
+    let err = check_no_foreign_locations(&m10).unwrap_err();
+    assert!(
+        err.contains("absolute path"),
+        "folded {{commonappdata}} must surface as a foreign absolute path: {err}"
+    );
 }
