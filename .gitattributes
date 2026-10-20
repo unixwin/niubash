@@ -8,6 +8,9 @@
 *.py text eol=lf
 
 scripts/git-hooks/* text eol=lf
+# Generated residue baseline; byte-diffed by check-rename-clean.sh, so a
+# CRLF checkout must never silently change the gate (scripts/*.sh lesson).
+scripts/check-rename-clean.baseline text eol=lf
 # Smoke/verification shell scripts parse their own subprocess output; a
 # CRLF working copy would leak \r into those comparisons (same lesson as
 # the rubash repo's *.sh pin).

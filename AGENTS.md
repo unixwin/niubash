@@ -35,7 +35,7 @@
 ## Verification
 
 - Fast loop: `cargo fmt --check -p niubash; cargo build --locked; cargo test --workspace --locked`
-- Rename brand gate: `sh scripts/check-rename-clean.sh` must pass (no unexpected `winuxsh` residue; runs under Git Bash and `winuxsh -c` alike).
+- Rename brand gate: `sh scripts/check-rename-clean.sh` must pass (residue is an exact baseline diff; runs under Git Bash and `winuxsh -c` alike). Intentional residue change → regenerate `scripts/check-rename-clean.baseline` via `sh scripts/check-rename-clean.sh --regen` and review the diff.
 - Runtime library: `cargo test -p niubash-runtime --lib --locked`
 - Host contract requiring winuxcmd command links: ensure command links are in the Windows process `PATH`, then run `PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test host_contract --locked -- --ignored`
 - Compat suite: ensure command links are in the Windows process `PATH`, then run `PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test compat --locked -- --ignored`

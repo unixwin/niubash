@@ -1,0 +1,84 @@
+# winuxsh residue baseline for scripts/check-rename-clean.sh
+# GENERATED — do not edit by hand. Regenerate with:
+#     sh scripts/check-rename-clean.sh --regen
+# Format: <repo-relative path><TAB><verbatim line text of the hit>
+.gitattributes	# Shell scripts are executed by Git Bash / winuxsh, both of which treat CR
+AGENTS.md	- Rename brand gate: `sh scripts/check-rename-clean.sh` must pass (residue is an exact baseline diff; runs under Git Bash and `winuxsh -c` alike). Intentional residue change → regenerate `scripts/check-rename-clean.baseline` via `sh scripts/check-rename-clean.sh --regen` and review the diff.
+AGENTS.md	- Runtime environment variables use the `NIU_` prefix. During the transition, niubash also sets/reads the deprecated `WINUXSH_SHELL` and `WINUXSH_ROOT` names because current rubash upstream still reads them; these bridges are marked with comments and must be removed once rubash renames its readers. (The `*_SHELL_PATH_STYLE` pair was retired rubash-side in rubash#556 / rubash#537: the engine always renders `$PWD`/`pwd` in the POSIX persona form, and niubash no longer exports the variables.)
+AGENTS.md	- Use `~/.niubashrc` as the primary-only interactive user entry point for plugin lists, theme selection, exports, aliases, functions, and shell startup logic. Do not read, migrate, delete, or modify the legacy `~/.winuxshrc` and `~/.winshrc` startup files. An explicitly opted-in `~/.bashrc` fallback is a future plan only, not supported behavior. Startup must not automatically run setup or plugin sync, create the primary rc, or rewrite user rc files. Issue #359 case A (1.4.2): plugin management never writes the rc at all — the manifest (`plugins.toml` + `sources/registry.toml`) drives the generated loader `~/.niubash/generated/plugins.niu`, which the host sources read-only BEFORE the user rc; `niu setup` still writes the rc (create/whole-file) until its 1.4.3 create-only convergence. Never re-attach the retired managed-block writers (`assets::write_managed_block`/`remove_managed_block`) to any verb — the 359.12 structure ratchet fails the build's test suite if you do.
+crates/niubash-runtime/src/completion/path.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
+crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/shell.rs	                for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/shell.rs	            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/shell.rs	            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/shell.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
+crates/niubash-runtime/src/shell.rs	        // NIU_SHELL_PATH_STYLE / WINUXSH_SHELL_PATH_STYLE are no longer set
+crates/niubash-runtime/src/shell.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/shell.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/shell.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+crates/niubash-runtime/src/shell_links.rs	/// contract variables (`NIU_SHELL`, `WINUXSH_SHELL`) and the shim's own target
+crates/niubash-runtime/src/syntax_highlighting.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
+crates/niubash-runtime/tests/fixtures/skill-corpus/niu-help.txt	Configuration: ~/.niubashrc for interactive startup; a pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc
+docs/audit/AUDIT-PLAN.md	  (documented), winuxshrc → niubashrc migration once-only claim
+docs/audit/AUDIT-PLAN.md	  (winuxshrc migration claim, NIU_ENV precedence claim).
+docs/audit/AUDIT-PLAN.md	  Local/Programs/Winuxsh/niu.exe`) is first on PATH; `command -v niu`
+docs/audit/AUDIT-PLAN.md	  double-managed blocks, `winuxshrc`→`niubashrc` migration once-only
+docs/audit/AUDIT-PLAN.md	  rc + registry layout (old winuxsh dir on PATH — the V1 scenario), run
+docs/audit/AUDIT-PLAN.md	`NIU_COMPLETION_STYLE`), winuxshrc one-time migration, `NIU_ENV`/`BASH_ENV`.
+docs/audit/findings/wt82-L01.md	  (`C:/Users/Administrator/AppData/Local/Programs/Winuxsh/niu.exe`) is first on
+docs/audit/findings/wt82-L01.md	  (target written, `WINUXSH_*`→`NIU_*`, `winuxsh.exe`→`niu.exe`, `.winuxshrc`
+docs/audit/findings/wt82-L01.md	  ADVICE niu on PATH  C:/Users/Administrator/AppData/Local/Programs/Winuxsh/niu.exe
+docs/audit/findings/wt82-L01.md	  `NIU_SHELL` (and deprecated `WINUXSH_SHELL`) from `std::env::current_exe()`
+docs/audit/findings/wt82-L01.md	  nothing (`shell.rs migrate_legacy_winuxsh_rc`: skipped when target exists).
+docs/audit/findings/wt82-L01.md	- **`.winuxshrc` → `.niubashrc` migration once-only.** First `-C` contact migrates
+docs/planning/niugit-integration-study.md	- 生态接线：`D:\repo\niubash\crates\niubash-runtime\src\setup_wizard.rs`（NIUGIT_INSTALL_COMMAND）、`plugins/sources.rs:531`（Command::new("git")）、`D:\repo\unixwin-oh-my-winuxsh\lib\git.niu`、`D:\repo\wpm-source\index.json`（git/niugit 条目）
+docs/planning/oh-my-winuxsh-bundle-plan.md	    oh-my-winuxsh/
+docs/planning/oh-my-winuxsh-bundle-plan.md	%LOCALAPPDATA%/Niubash/bundles/oh-my-winuxsh/<version>/
+docs/planning/oh-my-winuxsh-bundle-plan.md	%LOCALAPPDATA%/Niubash/bundles/oh-my-winuxsh/current
+docs/planning/oh-my-winuxsh-bundle-plan.md	5. Add `oh-my-winuxsh` bundle update support.
+docs/planning/oh-my-winuxsh-bundle-plan.md	<niubash install dir>/bundles/oh-my-winuxsh
+docs/planning/oh-my-winuxsh-bundle-plan.md	C:\Users\caomengxuan\repo\oh-my-winuxsh
+docs/planning/oh-my-winuxsh-bundle-plan.md	The existing `unixwin/oh-my-winuxsh` repository is legacy content. Do not
+docs/planning/oh-my-winuxsh-bundle-plan.md	`oh-my-winuxsh` is the official Niubash plugin bundle.
+docs/planning/oh-my-winuxsh-bundle-plan.md	asset = "oh-my-winuxsh-{version}.zip"
+docs/planning/oh-my-winuxsh-bundle-plan.md	bundles = ["oh-my-winuxsh"]
+docs/planning/oh-my-winuxsh-bundle-plan.md	name = "oh-my-winuxsh"
+docs/planning/oh-my-winuxsh-bundle-plan.md	niu plugin rollback oh-my-winuxsh
+docs/planning/oh-my-winuxsh-bundle-plan.md	niu plugin update oh-my-winuxsh --from dist\oh-my-winuxsh-1.0.0.zip --checksum-file dist\oh-my-winuxsh-1.0.0.zip.sha256
+docs/planning/oh-my-winuxsh-bundle-plan.md	niu plugin update oh-my-winuxsh --github-release latest
+docs/planning/oh-my-winuxsh-bundle-plan.md	niu plugin update oh-my-winuxsh --github-release v1.0.0 --json
+docs/planning/oh-my-winuxsh-bundle-plan.md	oh-my-winuxsh/
+docs/planning/oh-my-winuxsh-bundle-plan.md	repo = "unixwin/oh-my-winuxsh"
+docs/planning/oh-my-winuxsh-bundle-plan.md	so `niu plugin update oh-my-winuxsh ...` can move independently of app
+docs/planning/oh-my-winuxsh-bundle-plan.md	tags: [niubash, plugins, oh-my-winuxsh, bundle, roadmap]
+docs/planning/user-rc-read-only.md	Decision update: retire both `~/.winuxshrc` and `~/.winshrc` as startup inputs.
+docs/planning/user-rc-read-only.md	The same protection applies to legacy `~/.winuxshrc` and `~/.winshrc`, symlink
+scripts/audit/l01-verb-sweep/sweep.sh	    STALE="/c/Users/Administrator/AppData/Local/Programs/Winuxsh/niu.exe"
+scripts/audit/l01-verb-sweep/sweep.sh	if [ -z "$STALE" ] && [ -f "/c/Users/Administrator/AppData/Local/Programs/Winuxsh/niu.exe" ]; then
+scripts/audit/l22-migration/migrate.sh	    ok s1-original-untouched || bad s1-original-untouched "original .winuxshrc modified"
+scripts/audit/l22-migration/migrate.sh	#   - optionally a pre-rename ~/.winuxshrc for the once-only migration.
+scripts/audit/l22-migration/migrate.sh	# reference: ~/.winuxshrc.self and the winuxsh.exe entry point
+scripts/audit/l22-migration/migrate.sh	# winuxsh interactive rc (pre-rename, ~0.x vintage)
+scripts/audit/l22-migration/migrate.sh	# ── Scenario 1: pre-rename ~/.winuxshrc migrates once ──────────────────────
+scripts/audit/l22-migration/migrate.sh	H1="$SB/home-winuxshrc"
+scripts/audit/l22-migration/migrate.sh	STALE="${STALE_NIU:-/c/Users/Administrator/AppData/Local/Programs/Winuxsh/niu.exe}"
+scripts/audit/l22-migration/migrate.sh	[ "$(cat "$H1/.winuxshrc")" = "$before" ] &&
+scripts/audit/l22-migration/migrate.sh	assert_file s1-winuxshrc-kept "$H1/.winuxshrc"
+scripts/audit/l22-migration/migrate.sh	assert_no_grep s1-migrated-no-winuxsh-stray "WINUXSH_LEGACY_MARKER" "$H1/.niubashrc"
+scripts/audit/l22-migration/migrate.sh	before=$(cat "$H1/.winuxshrc")
+scripts/audit/l22-migration/migrate.sh	cat >"$H1/.winuxshrc" <<'EOF'
+scripts/audit/l22-migration/migrate.sh	command grep -q "winuxshrc.migrat" "$OUT/s1-first.out" "$OUT/s1-first.err" 2>/dev/null &&
+scripts/audit/l22-migration/migrate.sh	export WINUXSH_LEGACY_MARKER=1
+scripts/audit/wt82-L02/conpty_lib.py	           "WINUXSH_ROOT", "NIU_THEME", "OSH_THEME", "BASH_IT_THEME",
+scripts/audit/wt82-L02/conpty_lib.py	        "compat_rc_exists": (home / ".winuxshrc").is_file(),
+scripts/harvest/eco-test.py	                    "NIU_REPL_STARTUP", "BASH_ENV", "WINUXSH_ROOT",
+scripts/harvest/snapshots/wt92-local-20261005/test-results.jsonl	{"ts": "2026-10-05T03:20:16Z", "content_hash": "ccdb6cdce47107a97c59fa8ec900f9623e662b25", "repo": "icy/pacapt", "path": "lib/zz_main.sh", "tier": "t3", "category": "framework", "bytes": 8357, "source_url": "https://raw.githubusercontent.com/icy/pacapt/94c4b2c2209659a0e0b745d7c9417033bd71a399/lib/zz_main.sh", "niu": "D:\\repo\\niubash-wt-hres\\target\\debug\\niu.exe", "rubash": "D:\\repo\\rubash\\target\\debug\\rubash.exe", "local_work": "E:\\eco-harvest\\tmp\\work-ccdb6cdce471\\asset.sh", "rubash_ok": true, "phases_ms": {"startup": 2301, "source_wall": 328, "enter1": 83, "enter2": 82}, "phase": null, "tail": [], "storm_lines": 9, "storm_head": ["niu: _sun_tools_init: command not found", "niu: _require_programs: command not found", "niu: _debug: command not found", "rams/Winuxsh/niu: cannot execute binary file", "niu: _PACMAN_detect: command not found", "niu: _die: command not found", "niu: _die: command not found", "niu: _validate_operation: command not found", "niu: _not_implemented: command not found"], "signature": "ok", "verdict": "OK", "ms": 5634}
+scripts/journey/golden-journey.py	                "WINUXSH_ROOT", "NIU_THEME", "OSH_THEME", "BASH_IT_THEME"):
+src/main.rs	            std::env::set_var("WINUXSH_SHELL", path);
+src/main.rs	    // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.
+tests/issue153_root_slash_arg.rs	        .env_remove("WINUXSH_ROOT")
+tests/issue153_root_slash_arg.rs	/// clean WINUXSH_ROOT so the root under test is exactly `root`.
+tests/startup_files.rs	    [".winuxshrc", ".winshrc", ".bashrc"]
