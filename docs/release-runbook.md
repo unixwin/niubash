@@ -7,16 +7,22 @@ rules and the failure catalog earned by the v1.4.0 ignition campaign
 
 ## Iron rules
 
-1. **The tag is cut LAST.** A tag-push release checks out the tree the
-   tag points at. Every product fix merged after the tag was cut is
-   silently absent from the build — runs 1-5 of v1.4.0 all died on this
-   one mistake in different costumes (missing tag, stale journey
-   scripts, stale pins, missing self-check file). Sequence: merge
-   everything → confirm `origin/master` SHA → delete and re-cut the tag
-   on that SHA → push.
-2. **Never move a tag while a run is in flight.** Cancel, cut, ignite
-   again. A run reading a moving tag produces a release that matches
-   nothing.
+1. **The tag is cut LAST — and it is one-shot.** A tag-push release
+   checks out the tree the tag points at. Every product fix merged after
+   the tag was cut is silently absent from the build — runs 1-5 of
+   v1.4.0 all died on this one mistake in different costumes (missing
+   tag, stale journey scripts, stale pins, missing self-check file).
+   Sequence: merge everything → confirm `origin/master` SHA → cut the
+   tag on that SHA → push. The `release-tags-are-immutable` ruleset
+   (#425, docs/release-tag-ruleset.md) rejects moving or deleting a
+   pushed `v*` tag for everyone except org admins, so the old
+   delete-and-re-cut loop is gone: get the SHA right before pushing.
+2. **Never move a tag while a run is in flight** — the ruleset now
+   rejects it outright, and a run reading a moving tag produces a
+   release that matches nothing anyway. To re-ignite a run against an
+   unchanged tag, dispatch the workflow (iron rule 5); a tag that
+   points at the wrong commit is corrected forward as the next patch
+   version, not rewritten.
 3. **The gate scripts ride `origin/master`, not the tag.** The journey
    job (`git checkout origin/master -- scripts/journey`) and the
    perfbudget job (`-- scripts/perf`) deliver their current scripts by
@@ -27,10 +33,12 @@ rules and the failure catalog earned by the v1.4.0 ignition campaign
    workflow template; nothing reads the annotation), but the tag NAME
    must match `^v\d+\.\d+\.\d+$` AND the `Cargo.toml` `version` at that
    commit.
-5. **`workflow_dispatch` is not the release trigger** — it requires
-   `winuxcmd_tag` and other inputs and is meant for dry runs from a
-   branch. Real releases go by tag-push (delete + re-push the tag to
-   re-trigger).
+5. **`workflow_dispatch` is not the release trigger, but it IS the
+   re-fly path** — it requires `winuxcmd_tag` and `winuxcmd_sha256`
+   inputs, checks out an existing tag, and publishes through the same
+   `release` job. Real releases go by tag-push; a failed run on a
+   correct tag is re-flown by dispatching that tag, because re-pushing
+   the tag is blocked by the ruleset (#425).
 
 ## Pre-flight checklist (all boxes before cutting the tag)
 
@@ -64,10 +72,15 @@ rules and the failure catalog earned by the v1.4.0 ignition campaign
 # 0. everything merged, origin/master = <sha>, CI green
 gh api repos/unixwin/niubash/commits/master --jq .sha   # note <sha>
 
-# 1. re-cut the tag (delete first — a moved tag needs force on both ends)
-git push origin :refs/tags/vX.Y.Z
-git tag -f vX.Y.Z <sha>
+# 1. cut the tag — one shot: the ruleset rejects moving a pushed v* tag
+git ls-remote --tags origin vX.Y.Z   # must be EMPTY before you push
+git tag vX.Y.Z <sha>
 git push origin vX.Y.Z        # this push IS the trigger
+
+#    re-fly a failed run on the same (correct) tag instead of re-pushing:
+#    gh workflow run release.yml -R unixwin/niubash -f tag=vX.Y.Z \
+#      -f winuxcmd_tag=vA.B.C \
+#      -f winuxcmd_sha256='{"windows-x64":"…","windows-arm64":"…"}'
 
 # 2. watch
 gh run list --repo unixwin/niubash --workflow=release.yml --limit 1
@@ -97,7 +110,7 @@ the extractor sample and compare block shape).
 
 | Symptom | Root cause | Fix |
 | --- | --- | --- |
-| checkout/journey fails on files that exist on master | tag cut before fixes merged (iron rule 1) | re-cut tag on master |
+| checkout/journey fails on files that exist on master | tag cut before fixes merged (iron rule 1) | cut the NEXT patch tag on master — the pushed tag is immutable (#425) |
 | `Required input 'winuxcmd_tag'` on dispatch | wrong trigger; releases go by tag-push | push the tag |
 | preinstall verify throw, niugit missing | wpm index updated, `preinstall.json` pin not | sync the pin |
 | crates publish "secret not found" | secret name mismatch | map `CRATES_IO_TOKEN` |

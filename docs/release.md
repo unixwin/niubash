@@ -8,6 +8,12 @@ first.**
 ## Trigger and pinning (all platforms)
 
 - Trigger: push of a `v*` tag, or `workflow_dispatch` with an explicit tag.
+- Pushed `v*` tags are protected by the `release-tags-are-immutable`
+  ruleset (niubash#425, [release-tag-ruleset.md](release-tag-ruleset.md)):
+  creation stays open to anyone with `write`, but moving or deleting a
+  tag requires an org-admin bypass. A tag push is therefore one-shot —
+  re-fly failures via `workflow_dispatch`, fix bad releases forward with
+  the next patch tag.
 - The tag must match `^v\d+\.\d+\.\d+$`, must exist as a git tag, and the
   `version` in `Cargo.toml` at that tag must equal the tag's version. Any
   mismatch fails the build.
