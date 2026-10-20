@@ -3547,7 +3547,7 @@ mod tests {
         // THE regression: a successful sync path's registry write must be
         // refused — the file, corrupt line and pin included, survives
         // byte-for-byte.
-        let err = write_source_registry(&[pinned.clone()])
+        let err = write_source_registry(std::slice::from_ref(&pinned))
             .expect_err("rewriting a corrupt registry must be refused");
         assert!(err.to_string().contains("refusing to rewrite"), "{err}");
         assert_eq!(
@@ -3564,7 +3564,8 @@ mod tests {
         };
         fs::write(&path, toml::to_string_pretty(&mut registry).unwrap()).unwrap();
         assert!(registry_corruption().is_none(), "repaired file parses");
-        write_source_registry(&[pinned.clone()]).expect("post-repair write must succeed");
+        write_source_registry(std::slice::from_ref(&pinned))
+            .expect("post-repair write must succeed");
         let records = read_source_registry();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].commit_sha.as_deref(), Some("abc123def456"));

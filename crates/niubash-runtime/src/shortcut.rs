@@ -699,7 +699,11 @@ mod tests {
         std::fs::write(&registry_alias, b"registry").unwrap();
 
         assert_eq!(
-            resolve_wt_exe_from(Some(&alias), &path_dirs, &[registry_alias.clone()]),
+            resolve_wt_exe_from(
+                Some(&alias),
+                &path_dirs,
+                std::slice::from_ref(&registry_alias)
+            ),
             Some(alias)
         );
     }
@@ -719,8 +723,8 @@ mod tests {
         assert_eq!(
             resolve_wt_exe_from(
                 Some(&absent_alias),
-                &[path_dir.clone()],
-                &[registry.clone()]
+                std::slice::from_ref(&path_dir),
+                std::slice::from_ref(&registry)
             ),
             Some(path_dir.join("wt.exe"))
         );
@@ -728,7 +732,11 @@ mod tests {
         let empty = temp.path().join("empty-bin");
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(
-            resolve_wt_exe_from(Some(&absent_alias), &[empty], &[registry.clone()]),
+            resolve_wt_exe_from(
+                Some(&absent_alias),
+                &[empty],
+                std::slice::from_ref(&registry)
+            ),
             Some(registry)
         );
     }
@@ -806,9 +814,9 @@ mod tests {
         let wt = Path::new("C:/Users/me/AppData/Local/Microsoft/WindowsApps/wt.exe");
 
         // Profile absent -> not eligible even though wt.exe resolved.
-        assert!(!crate::windows_terminal::niubash_profile_registered_in(&[
-            settings.clone()
-        ]));
+        assert!(!crate::windows_terminal::niubash_profile_registered_in(
+            std::slice::from_ref(&settings)
+        ));
         assert!(!wt_form_eligible(Some(wt), false));
 
         // Profile present in the settings file -> eligible.

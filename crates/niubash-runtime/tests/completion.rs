@@ -108,7 +108,7 @@ description = "fixture flag"
     let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
     {
         let mut s = state.lock().unwrap();
-        s.load_completion_dirs(&[temp_dir.clone()]);
+        s.load_completion_dirs(std::slice::from_ref(&temp_dir));
     }
 
     assert_not_suggests(&state, "grep -case", "--ignore-case");
@@ -163,7 +163,7 @@ complete -F _providertool providertool
     let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
     {
         let mut s = state.lock().unwrap();
-        s.load_completion_dirs(&[temp_dir.clone()]);
+        s.load_completion_dirs(std::slice::from_ref(&temp_dir));
     }
 
     assert_suggests(&state, "providertool --format ", "json");
@@ -193,7 +193,7 @@ description = "fixture override flag"
     let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
     {
         let mut s = state.lock().unwrap();
-        s.load_completion_dirs(&[temp_dir.clone()]);
+        s.load_completion_dirs(std::slice::from_ref(&temp_dir));
     }
 
     assert_suggests(&state, "ls -", "--custom-only");
@@ -286,7 +286,7 @@ description = "user override flag"
     let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
     {
         let mut s = state.lock().unwrap();
-        s.load_completion_dirs_with_definitions(&[temp_dir.clone()], vec![imported]);
+        s.load_completion_dirs_with_definitions(std::slice::from_ref(&temp_dir), vec![imported]);
     }
 
     assert_suggests(&state, "fixture-tool -", "--user-only");
