@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 /// Locate `winuxcmd.exe` by checking, in order:
 ///   1. `$WINUXCMD_PATH` env var (file or directory)
@@ -496,13 +496,6 @@ fn auto_activate_bundled_winuxcmd(exe: &Path) {
                     "winuxcmd activation completed via wpm links rebuild (root {})",
                     root.display()
                 );
-                if has_required_command_links(dir) {
-                    return;
-                }
-                log::debug!(
-                    "wpm links rebuild reported success but expected links are still missing in {}",
-                    dir.display()
-                );
             }
             Ok(output) => {
                 log::debug!(
@@ -516,6 +509,25 @@ fn auto_activate_bundled_winuxcmd(exe: &Path) {
                 );
             }
         }
+        // niubash#468: the bundled package shims (`usr\bin\awk.exe`,
+        // `gawk.exe`) sit outside wpm's reconcile set on a state-free
+        // install, so a successful `links rebuild` can still leave them on
+        // the previous winuxcmd.exe image. Heal them in-process before
+        // reporting the set complete.
+        let shims = reconcile_bundled_shims(&root, true);
+        if !shims.failed.is_empty() {
+            log::debug!(
+                "bundled shim reconcile left {} name(s) unresolved",
+                shims.failed.len()
+            );
+        }
+        if has_required_command_links(dir) {
+            return;
+        }
+        log::debug!(
+            "expected links are still missing in {}; falling back to activation script",
+            dir.display()
+        );
     }
 
     // Fallback for older WinuxCmd builds without the `wpm` subcommand: run
@@ -573,12 +585,259 @@ fn has_required_command_links(dir: &Path) -> bool {
     // `wpm links rebuild --force` when this returns false - repair the set on
     // the next shell start instead of waiting for someone to look.
     let engine = dir.join("winuxcmd.exe");
-    ["ls.exe", "cat.exe", "grep.exe", "ln.exe"]
+    let builtins_ready = ["ls.exe", "cat.exe", "grep.exe", "ln.exe"]
         .iter()
         .all(|name| {
             let link = dir.join(name);
             link.is_file() && super::shell_links::same_file(&engine, &link)
-        })
+        });
+    builtins_ready && bundled_shim_links_current(dir)
+}
+
+/// The bundled-shim half of `has_required_command_links` (niubash#468): a
+/// declared package-shim name that is missing or no longer the winuxcmd
+/// image counts as "activation needed", so a stale `awk.exe`/`gawk.exe`
+/// heals on the next shell start the way the builtins heal.
+///
+/// `dir` is the directory holding `winuxcmd.exe`; the bundled contract only
+/// exists for the `<root>\usr\bin` layout — a flat portable layout or the
+/// `bin` PATH-entry directory declares nothing and is always "current".
+/// Names the machine's own `.wpm` state claims are wpm's problem, not ours.
+fn bundled_shim_links_current(dir: &Path) -> bool {
+    let Some(usr) = dir.parent() else {
+        return true;
+    };
+    if usr.file_name().is_none_or(|name| name != "usr") {
+        return true;
+    }
+    let Some(root) = usr.parent() else {
+        return true;
+    };
+    let engine = dir.join("winuxcmd.exe");
+    let forwarder = dir.join("winuxcmd-shim.exe");
+    for component in crate::setup_wizard::bundled_link_shim_components() {
+        let opt = root.join("opt").join(component.opt_dir);
+        for shim in component.shims {
+            // A leg or machine without the payload declares nothing.
+            if !opt.join(shim).is_file() {
+                continue;
+            }
+            if wpm_declares_command(root, shim) {
+                continue;
+            }
+            let target = dir.join(shim);
+            if !bundled_shim_is_current(&target, &engine, &forwarder) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Whether `target` already carries the image it should: a real link to
+/// `winuxcmd.exe` (or to the `winuxcmd-shim.exe` forwarder — the shape wpm
+/// materializes on state-managed installs), or a byte-identical copy of
+/// either, which is the documented fallback on file systems without links.
+fn bundled_shim_is_current(target: &Path, engine: &Path, forwarder: &Path) -> bool {
+    if !target.is_file() {
+        return false;
+    }
+    for image in [engine, forwarder] {
+        if !image.is_file() {
+            continue;
+        }
+        if super::shell_links::same_file(image, target) || same_file_bytes(image, target) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the machine's own `.wpm` state claims `usr\bin\<name>`: a shim
+/// map entry (`<cmd>=<payload>`), or an install receipt listing that exact
+/// path among its destinations. wpm-owned names heal through `wpm links
+/// rebuild` and package upgrades, and the bundled reconcile must never
+/// touch them — on a real machine `wpm install awk` is a *flat* package
+/// whose `usr\bin\awk.exe` IS the GNU payload, not a shim at all
+/// (niubash#468).
+fn wpm_declares_command(root: &Path, name: &str) -> bool {
+    let stem = name.strip_suffix(".exe").unwrap_or(name);
+    let state = root.join(".wpm");
+
+    // The forwarder map: one `<cmd>=<payload>` line per shim command.
+    if let Ok(map) = std::fs::read_to_string(state.join("shims.map")) {
+        let declared = map.lines().any(|line| {
+            line.trim_start()
+                .split('=')
+                .next()
+                .is_some_and(|cmd| cmd.trim().eq_ignore_ascii_case(stem))
+        });
+        if declared {
+            return true;
+        }
+    }
+
+    // Install receipts: a `usr\bin\<name>` destination means the file is the
+    // package's own payload. Receipts store JSON-escaped Windows paths, so
+    // the backslash form appears doubled in the raw text.
+    let needle_escaped = format!("usr\\\\bin\\\\{name}").to_lowercase();
+    let needle_forward = format!("usr/bin/{name}").to_lowercase();
+    if let Ok(entries) = std::fs::read_dir(state.join("installed")) {
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let text = text.to_lowercase();
+            if text.contains(&needle_escaped) || text.contains(&needle_forward) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Byte-for-byte equality for the copy-fallback shape: two paths that are
+/// not the same file may still carry the same image (the Inno/zip payload
+/// lays every bundled name down as a copy). Sizes first so the common
+/// "different image" answer costs two stats instead of two 4 MB reads.
+fn same_file_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(a_meta), Ok(b_meta)) = (a.metadata(), b.metadata()) else {
+        return false;
+    };
+    if a_meta.len() != b_meta.len() {
+        return false;
+    }
+    let (Ok(a_bytes), Ok(b_bytes)) = (std::fs::read(a), std::fs::read(b)) else {
+        return false;
+    };
+    a_bytes == b_bytes
+}
+
+/// Create `target` as a hardlink of `source`, copying the bytes where the
+/// file system cannot link — the documented fallback shape for these shims
+/// (`preinstall.json`: "copies on file systems without hardlink support").
+fn materialize_link(source: &Path, target: &Path) -> Result<()> {
+    match std::fs::hard_link(source, target) {
+        Ok(()) => Ok(()),
+        Err(link_error) => std::fs::copy(source, target).map(|_| ()).with_context(|| {
+            format!(
+                "could not link or copy {} to {} ({link_error})",
+                source.display(),
+                target.display()
+            )
+        }),
+    }
+}
+
+/// Rebuild the bundled `layout: shim` command links under `<root>\usr\bin`
+/// (niubash#468).
+///
+/// `wpm links rebuild` only reconciles names it can enumerate — the builtin
+/// applet set plus package shims recorded in `.wpm` — and a bundled install
+/// ships no `.wpm` state, so `usr\bin\gawk.exe` / `awk.exe` fall outside
+/// every wpm reconcile. An upgrade that replaces `winuxcmd.exe` under its
+/// own name leaves those links on the previous image's inode: same name,
+/// old bytes, invisible to `wpm links verify` — exactly the 1.4.1 stale
+/// `awk.exe`/`gawk.exe` residue. This is the matching reconcile for the
+/// bundled set, driven by the same `BUNDLED_COMPONENTS` table `niu doctor`
+/// reports from:
+///
+/// - a missing declared name is materialized as a `winuxcmd.exe` link
+///   (payload-present names only — a leg without `opt\<pkg>` declares none);
+/// - a name already on the current image — real link or byte-identical
+///   copy, `winuxcmd.exe` or the `winuxcmd-shim.exe` forwarder — is left;
+/// - a byte-equal copy is upgraded to a real hardlink so the on-disk shape
+///   matches what `wpm install` produces;
+/// - anything else is stale residue: parked and relinked under `--force`,
+///   reported and left otherwise;
+/// - a name the machine's own `.wpm` state declares is never touched.
+pub fn reconcile_bundled_shims(root: &Path, force: bool) -> crate::shell_links::ShellLinkReport {
+    let mut report = crate::shell_links::ShellLinkReport::default();
+    let bin = root.join("usr").join("bin");
+    let engine = bin.join("winuxcmd.exe");
+    let forwarder = bin.join("winuxcmd-shim.exe");
+
+    for component in crate::setup_wizard::bundled_link_shim_components() {
+        let opt = root.join("opt").join(component.opt_dir);
+        for shim in component.shims {
+            let target = bin.join(shim);
+            let payload = opt.join(shim);
+            if !payload.is_file() {
+                if target.is_file() {
+                    // Not ours: with no bundled payload this name belongs to
+                    // something else (a user package, a manual file).
+                    continue;
+                }
+                report.skipped.push((
+                    target,
+                    format!("payload {} is not installed on this leg", payload.display()),
+                ));
+                continue;
+            }
+            if wpm_declares_command(root, shim) {
+                report
+                    .skipped
+                    .push((target, "declared by the machine's .wpm state".to_string()));
+                continue;
+            }
+            if !engine.is_file() {
+                report.failed.push((
+                    target,
+                    format!("{} is missing; nothing to link", engine.display()),
+                ));
+                continue;
+            }
+            if target.is_dir() {
+                report
+                    .failed
+                    .push((target, "is a directory; refusing to replace".to_string()));
+                continue;
+            }
+            if !target.exists() {
+                match materialize_link(&engine, &target) {
+                    Ok(()) => report.created.push(target),
+                    Err(error) => report.failed.push((target, error.to_string())),
+                }
+                continue;
+            }
+            if super::shell_links::same_file(&engine, &target)
+                || (forwarder.is_file() && super::shell_links::same_file(&forwarder, &target))
+            {
+                report.already_current.push(target);
+                continue;
+            }
+            // A byte-identical copy is the right image in the fallback
+            // shape; prefer the real hardlink where linking works so the
+            // on-disk state matches `wpm install` and staleness stays
+            // visible to identity checks.
+            let identical = [&engine, &forwarder]
+                .into_iter()
+                .find(|image| image.is_file() && same_file_bytes(image, &target));
+            if let Some(image) = identical {
+                match crate::shell_links::replace_with_link(image, &target) {
+                    Ok(()) => report.created.push(target),
+                    Err(_) => report.already_current.push(target),
+                }
+                continue;
+            }
+            if !force {
+                report.skipped.push((
+                    target,
+                    "exists and is not the bundled winuxcmd.exe image; pass --force to replace it"
+                        .to_string(),
+                ));
+                continue;
+            }
+            match crate::shell_links::replace_with_link(&engine, &target) {
+                Ok(()) => report.created.push(target),
+                Err(error) => report.failed.push((target, error.to_string())),
+            }
+        }
+    }
+    report
 }
 
 /// True when the resolved winuxcmd install already has its command links
@@ -966,6 +1225,190 @@ mod tests {
         assert!(!has_required_command_links(&dir));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A `<root>\usr\bin` layout with a fake engine image and, on request,
+    /// the gawk payload the bundled shim set forwards to (niubash#468).
+    fn fake_winuxcmd_root(tag: &str, with_gawk_payload: bool) -> PathBuf {
+        let root = unique_temp_dir(tag);
+        let bin = root.join("usr").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("winuxcmd.exe"), b"the installed engine").unwrap();
+        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
+            std::fs::hard_link(bin.join("winuxcmd.exe"), bin.join(name)).unwrap();
+        }
+        if with_gawk_payload {
+            let opt = root.join("opt").join("gawk");
+            std::fs::create_dir_all(&opt).unwrap();
+            std::fs::write(opt.join("gawk.exe"), b"gnu awk payload").unwrap();
+            std::fs::write(opt.join("awk.exe"), b"gnu awk payload").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn reconcile_materializes_missing_bundled_shims() {
+        let root = fake_winuxcmd_root("winuxcmd-shim-create", true);
+        let bin = root.join("usr").join("bin");
+
+        let report = reconcile_bundled_shims(&root, true);
+        assert_eq!(report.created.len(), 2, "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        for name in ["gawk.exe", "awk.exe"] {
+            assert!(
+                crate::shell_links::same_file(&bin.join("winuxcmd.exe"), &bin.join(name)),
+                "{} is not the engine image",
+                bin.join(name).display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_relinks_stale_copies_only_with_force() {
+        let root = fake_winuxcmd_root("winuxcmd-shim-stale", true);
+        let bin = root.join("usr").join("bin");
+        // The 1.4.1 shape: a detached copy of the PREVIOUS winuxcmd.exe.
+        let stale = bin.join("awk.exe");
+        std::fs::write(&stale, b"the previous engine image").unwrap();
+        let gawk = bin.join("gawk.exe");
+        std::fs::write(&gawk, b"the previous engine image").unwrap();
+
+        let kept = reconcile_bundled_shims(&root, false);
+        assert_eq!(kept.skipped.len(), 2, "{kept:?}");
+        assert!(kept.created.is_empty(), "{kept:?}");
+        assert_eq!(std::fs::read(&stale).unwrap(), b"the previous engine image");
+
+        let healed = reconcile_bundled_shims(&root, true);
+        assert_eq!(healed.created.len(), 2, "{healed:?}");
+        assert!(healed.failed.is_empty(), "{healed:?}");
+        assert!(crate::shell_links::same_file(
+            &bin.join("winuxcmd.exe"),
+            &stale
+        ));
+        // The parking step must not leave `.niu-old-*` shapes behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&bin)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".niu-old-"))
+            .collect();
+        assert!(leftovers.is_empty(), "parked names left: {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_upgrades_byte_equal_copies_to_links() {
+        let root = fake_winuxcmd_root("winuxcmd-shim-copy", true);
+        let bin = root.join("usr").join("bin");
+        // The Inno/zip extraction shape: correct bytes, independent inode.
+        std::fs::copy(bin.join("winuxcmd.exe"), bin.join("gawk.exe")).unwrap();
+        std::fs::copy(bin.join("winuxcmd.exe"), bin.join("awk.exe")).unwrap();
+
+        let report = reconcile_bundled_shims(&root, true);
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(
+            report.created.len() + report.already_current.len(),
+            2,
+            "{report:?}"
+        );
+        for name in ["gawk.exe", "awk.exe"] {
+            let target = bin.join(name);
+            assert!(
+                crate::shell_links::same_file(&bin.join("winuxcmd.exe"), &target)
+                    || std::fs::read(&target).unwrap() == b"the installed engine",
+                "{} carries neither the link nor the bytes",
+                target.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_never_touches_wpm_owned_names() {
+        let root = fake_winuxcmd_root("winuxcmd-shim-wpm", true);
+        let bin = root.join("usr").join("bin");
+        let installed = root.join(".wpm").join("installed");
+        std::fs::create_dir_all(&installed).unwrap();
+        // The observed real-machine shape (niubash#468): a flat `wpm install
+        // awk` whose receipt owns `usr\bin\awk.exe` — the real GNU binary,
+        // not a shim. The reconcile must leave it alone.
+        std::fs::write(
+            installed.join("awk.json"),
+            format!(
+                "{{\"destinations\":[\"{}\"],\"layout\":\"flat\",\"name\":\"awk\"}}",
+                bin.join("awk.exe")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let real_awk = bin.join("awk.exe");
+        std::fs::write(&real_awk, b"the real gnu awk binary").unwrap();
+        // ... and a forwarder-linked gawk.exe declared by the shim map.
+        std::fs::write(bin.join("winuxcmd-shim.exe"), b"the forwarder").unwrap();
+        std::fs::hard_link(bin.join("winuxcmd-shim.exe"), bin.join("gawk.exe")).unwrap();
+        std::fs::write(
+            root.join(".wpm").join("shims.map"),
+            "gawk=opt\\gawk\\gawk.exe\n",
+        )
+        .unwrap();
+
+        let report = reconcile_bundled_shims(&root, true);
+        assert!(report.created.is_empty(), "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(report.skipped.len(), 2, "{report:?}");
+        assert_eq!(
+            std::fs::read(&real_awk).unwrap(),
+            b"the real gnu awk binary"
+        );
+        assert!(crate::shell_links::same_file(
+            &bin.join("winuxcmd-shim.exe"),
+            &bin.join("gawk.exe")
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_declares_nothing_without_the_payload() {
+        // A leg without opt\gawk (arm64 ships no gawk): no shim is created,
+        // and a foreign file at the name is left alone.
+        let root = fake_winuxcmd_root("winuxcmd-shim-noleg", false);
+        let bin = root.join("usr").join("bin");
+        let foreign = bin.join("awk.exe");
+        std::fs::write(&foreign, b"someone else's awk").unwrap();
+
+        let report = reconcile_bundled_shims(&root, true);
+        assert!(report.created.is_empty(), "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"someone else's awk");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stale_bundled_shim_counts_as_activation_needed() {
+        let root = fake_winuxcmd_root("winuxcmd-shim-gate", true);
+        let bin = root.join("usr").join("bin");
+        std::fs::hard_link(bin.join("winuxcmd.exe"), bin.join("gawk.exe")).unwrap();
+        std::fs::hard_link(bin.join("winuxcmd.exe"), bin.join("awk.exe")).unwrap();
+        assert!(has_required_command_links(&bin));
+
+        // A shim left on the previous image reopens activation.
+        let stale = bin.join("awk.exe");
+        std::fs::remove_file(&stale).unwrap();
+        std::fs::write(&stale, b"the previous engine image").unwrap();
+        assert!(!has_required_command_links(&bin));
+
+        // ... and a missing name does too.
+        std::fs::remove_file(&stale).unwrap();
+        assert!(!has_required_command_links(&bin));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

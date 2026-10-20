@@ -68,6 +68,17 @@ WPM creates hard links to the installed `winuxcmd.exe`. The portable zip keeps t
 first-start fallback: if command links are missing, Niubash runs
 `winuxcmd/activate-winuxcmd.sh` once from the bundle.
 
+The bundled package shims (`usr\bin\gawk.exe`, `awk.exe`) sit outside that
+rebuild: wpm only reconciles names recorded in `.wpm` state, which the
+product deliberately does not ship, so an upgrade that replaces
+`winuxcmd.exe` under its own name would leave those links on the previous
+image (niubash#468). The installer therefore runs
+`niu --relink-bundled-shims --force --quiet` right after the rebuild, and
+startup activation runs the same reconcile: every declared shim name is
+brought back onto the current `winuxcmd.exe` image — relinked when stale or
+missing, hardlinked when the payload delivered only a copy, and never
+touched when the machine's own `.wpm` state owns the name.
+
 ## Updating WinuxCmd with WPM
 
 The Unix command set (`ls`, `cat`, `grep`, `sed`, ...) is delivered by

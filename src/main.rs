@@ -478,6 +478,7 @@ fn launcher_dispatch_index(args: &[String]) -> Option<usize> {
         "--install-wt-profile",
         "--install-wt-shortcuts",
         "--relink-shells",
+        "--relink-bundled-shims",
         "--self-update",
         "--encoded-command",
     ];
@@ -544,6 +545,15 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             // replaced niu.exe: the shell faces become hardlinks to the real
             // binary instead of forwarding shims (unixwin/niubash#377).
             relink_shell_faces(rest)?;
+            Ok(())
+        }
+        "--relink-bundled-shims" => {
+            // The installer runs this after `wpm links rebuild`: wpm only
+            // reconciles names recorded in `.wpm` state, which the bundled
+            // install deliberately does not ship, so the package shims
+            // (`usr\bin\awk.exe`, `gawk.exe`) would stay on the previous
+            // winuxcmd.exe image after an upgrade (unixwin/niubash#468).
+            relink_bundled_shims(rest)?;
             Ok(())
         }
         "--self-update" => self_update::run(rest),
@@ -5022,6 +5032,51 @@ fn relink_shell_faces(rest: &[String]) -> anyhow::Result<()> {
             eprintln!("niu: failed to link {}: {error}", path.display());
         }
         anyhow::bail!("{} shell link(s) could not be created", report.failed.len());
+    }
+    Ok(())
+}
+
+/// Point every bundled package-shim name (`usr\bin\awk.exe`, `gawk.exe`)
+/// back at the current `winuxcmd.exe`, the reconcile `wpm links rebuild`
+/// cannot reach on a state-free bundled install (niubash#468). The installer
+/// calls this from `[Run]`; startup activation calls the same function.
+fn relink_bundled_shims(rest: &[String]) -> anyhow::Result<()> {
+    let mut force = false;
+    let mut quiet = false;
+    for arg in rest {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--quiet" => quiet = true,
+            other => anyhow::bail!("--relink-bundled-shims: unknown argument '{other}'"),
+        }
+    }
+
+    let exe = niubash_runtime::winuxcmd::find_winuxcmd()
+        .ok_or_else(|| anyhow::anyhow!("winuxcmd.exe not found; cannot reconcile bundled shims"))?;
+    let root = niubash_runtime::winuxcmd::installation_root(&exe);
+    let report = niubash_runtime::winuxcmd::reconcile_bundled_shims(&root, force);
+
+    if !quiet {
+        println!(
+            "niu: bundled shims under {}: {} created, {} already current, {} skipped, {} failed",
+            root.join("usr").join("bin").display(),
+            report.created.len(),
+            report.already_current.len(),
+            report.skipped.len(),
+            report.failed.len()
+        );
+        for (path, reason) in &report.skipped {
+            println!("  skipped {}: {reason}", path.display());
+        }
+    }
+    if !report.failed.is_empty() {
+        for (path, error) in &report.failed {
+            eprintln!("niu: failed to link {}: {error}", path.display());
+        }
+        anyhow::bail!(
+            "{} bundled shim link(s) could not be created",
+            report.failed.len()
+        );
     }
     Ok(())
 }

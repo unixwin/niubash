@@ -248,23 +248,40 @@ const PLATFORM_PROBED_TOOLS: &[&str] = &["wpm"];
 #[cfg(not(windows))]
 const PLATFORM_PROBED_TOOLS: &[&str] = &[];
 
+/// How a bundled component's `<root>\usr\bin` entries relate to its payload.
+/// Only `Shim` entries are winuxcmd.exe link names — those are the names
+/// `wpm links rebuild` cannot reach on a state-free bundled install, so the
+/// installer/startup reconcile heals them itself (niubash#468).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BundledLayout {
+    /// `usr\bin\<name>.exe` is a winuxcmd.exe link that forwards into
+    /// `opt\<opt_dir>\` by argv[0] (the wpm `layout: shim` shape).
+    Shim,
+    /// `usr\bin\<name>.exe` IS the payload binary (the wpm `layout: flat`
+    /// shape) — the installer payload delivers its bytes, and relinking it
+    /// to winuxcmd.exe would be a downgrade, never a repair.
+    Flat,
+}
+
 /// One release-bundle component (niubash#230 preinstall manifest,
 /// `scripts/release/preinstall.json`): the release CI installs it into the
 /// staged WinuxCmd root as `<root>\opt\<opt_dir>\<exe>` plus a winuxcmd.exe
 /// hardlink shim in `<root>\usr\bin`. Detection treats an existing payload or
 /// shim as "already present" so the wizard never reports a bundled component
 /// as missing and never re-recommends installing it.
-struct BundledComponent {
+pub(crate) struct BundledComponent {
     /// The wpm package name (as in the manifest) — used for labeling.
-    package: &'static str,
+    pub package: &'static str,
     /// Subdirectory under `<root>\opt` carrying the payload.
-    opt_dir: &'static str,
+    pub opt_dir: &'static str,
     /// Executable file names inside the opt payload directory.
-    exes: &'static [&'static str],
+    pub exes: &'static [&'static str],
     /// Shim names (hardlinks) under `<root>\usr\bin`.
-    shims: &'static [&'static str],
+    pub shims: &'static [&'static str],
     /// `PROBED_TOOLS` names this component satisfies when present.
     tools: &'static [&'static str],
+    /// Whether `shims` are winuxcmd.exe link names or the payload itself.
+    pub layout: BundledLayout,
 }
 
 /// The components the release bundle ships (#230). Keep in sync with
@@ -277,6 +294,7 @@ const BUNDLED_COMPONENTS: &[BundledComponent] = &[
         exes: &["gawk.exe", "awk.exe"],
         shims: &["gawk.exe", "awk.exe"],
         tools: &["gawk", "awk"],
+        layout: BundledLayout::Shim,
     },
     BundledComponent {
         package: "niugit",
@@ -284,6 +302,7 @@ const BUNDLED_COMPONENTS: &[BundledComponent] = &[
         exes: &["git.exe"],
         shims: &["git.exe"],
         tools: &["git"],
+        layout: BundledLayout::Flat,
     },
     BundledComponent {
         package: "ripgrep",
@@ -291,6 +310,7 @@ const BUNDLED_COMPONENTS: &[BundledComponent] = &[
         exes: &["rg.exe"],
         shims: &["rg.exe"],
         tools: &["rg"],
+        layout: BundledLayout::Flat,
     },
     BundledComponent {
         package: "fd",
@@ -298,6 +318,7 @@ const BUNDLED_COMPONENTS: &[BundledComponent] = &[
         exes: &["fd.exe"],
         shims: &["fd.exe"],
         tools: &["fd"],
+        layout: BundledLayout::Flat,
     },
 ];
 
@@ -332,6 +353,18 @@ pub(crate) fn bundled_components() -> Vec<&'static str> {
             .map(crate::winuxcmd::installation_root)
             .as_deref(),
     )
+}
+
+/// The bundled components whose `usr\bin` entries must be the winuxcmd.exe
+/// image (`layout: shim` in wpm terms — gawk today). Their names sit outside
+/// `wpm links rebuild`'s reconcile set on a bundled install because the
+/// product ships no `.wpm` state, which is exactly how 1.4.1 left 1.4.0-era
+/// `awk.exe`/`gawk.exe` copies behind on upgrade (niubash#468). The winuxcmd
+/// module owns the reconcile; this just names the set.
+pub(crate) fn bundled_link_shim_components() -> impl Iterator<Item = &'static BundledComponent> {
+    BUNDLED_COMPONENTS
+        .iter()
+        .filter(|component| component.layout == BundledLayout::Shim)
 }
 
 // ── Wizard language ─────────────────────────────────────────────────────────

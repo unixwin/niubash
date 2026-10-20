@@ -170,7 +170,7 @@ pub fn link_shell_faces(root: &Path, niu: &Path, force: bool) -> ShellLinkReport
 
 /// Park `link`, point it at `source`, then drop the parked name (the parking
 /// step is what makes this safe while a process still runs from `link`).
-fn replace_with_link(source: &Path, link: &Path) -> Result<()> {
+pub(crate) fn replace_with_link(source: &Path, link: &Path) -> Result<()> {
     let mut parked_name = link
         .file_name()
         .map(|name| name.to_os_string())
