@@ -1141,6 +1141,7 @@ dependencies = [
  "libc",
  "os_pipe",
  "regex",
+ "sha2",
  "signal-hook",
  "windows-sys 0.61.2",
 ]
