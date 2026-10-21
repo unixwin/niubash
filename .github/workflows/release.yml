@@ -2130,9 +2130,20 @@ jobs:
   publish-crates:
     name: publish to crates.io
     runs-on: windows-latest
-    # rubash is not yet published to crates.io, so cargo publish refuses the
-    # bare path dependency. This job will start succeeding once rubash is on
-    # crates.io; until then it is best-effort and must not block the release.
+    # Ordering (v1.4.3 incident, run 39598031043): this job used to declare NO
+    # needs and published to crates.io in parallel with the build and gate
+    # jobs. A red gate then left the exact half-released state this repo hit:
+    # crates.io already carried niubash 1.4.3 while the GitHub Release page
+    # (the `release` job) had never run. The release job aggregates every
+    # platform build and both release gates, so listing it first pins this
+    # job behind the whole chain — build all platforms -> timing/journey gates
+    # -> GitHub Release with all assets -> and only then crates.io. A publish
+    # failure can still happen, but it can no longer race the gates or undo
+    # the release page that already exists.
+    needs: [release, build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
+    # Best-effort remains: with the ordering above a failure here no longer
+    # blocks or half-does a release (rubash 1.4.2 is on crates.io since the
+    # v1.4.3 era, so the version-annotated path deps now resolve).
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4.2.2
@@ -2195,11 +2206,58 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      # Publishing needs version-annotated path deps so cargo can swap the
-      # path for a registry dependency. The rubash dep carries no version yet
-      # because rubash 1.0.0 is not on crates.io; `cargo publish` refuses a
-      # bare path dependency. Re-add version = "1.0.0" once rubash 1.0.0 is
-      # published.
+      # Idempotent re-run guard: crates.io rejects a second upload of the same
+      # version, so a release re-run (the v1.4.3 recovery re-tag did exactly
+      # this) must not even reach `cargo publish` when the version already
+      # ships. Query the crates.io API up front: max_version == this release's
+      # version means the crate is live — emit a notice and skip. An API
+      # lookup failure is never a publish blocker: the flag stays false and
+      # cargo publish's own idempotency verdicts (below) remain the backstop.
+      - name: Guard - skip crates already published at this version
+        id: guard
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # crates.io requires a descriptive User-Agent on API traffic.
+          $ua = "niubash-release-workflow/1.0 (https://github.com/unixwin/niubash)"
+          foreach ($crate in @("niubash-runtime", "niubash")) {
+            $already = $false
+            $registryMax = "?"
+            try {
+              foreach ($attempt in 1..3) {
+                try {
+                  $json = Invoke-RestMethod -Uri "https://crates.io/api/v1/crates/$crate" `
+                    -Headers @{ "User-Agent" = $ua } -TimeoutSec 30 -ErrorAction Stop
+                  break
+                }
+                catch {
+                  if ($attempt -eq 3) { throw }
+                  Start-Sleep -Seconds (5 * $attempt)
+                }
+              }
+              $registryMax = $json.crate.max_version
+              $already = ($registryMax -eq $env:RELEASE_VERSION)
+            }
+            catch {
+              Write-Host "::warning::crates.io API lookup for $crate failed; falling back to cargo publish's own idempotency verdicts"
+            }
+            "$($crate -replace '-', '_')_published=$already" >> $env:GITHUB_OUTPUT
+            if ($already) {
+              Write-Host "::notice::$crate $env:RELEASE_VERSION is already on crates.io (max_version match) - skipping the publish; the re-run stays green"
+            }
+            else {
+              Write-Host "$crate $env:RELEASE_VERSION not live on crates.io yet (registry max_version=$registryMax); will publish"
+            }
+          }
+
+      # Publishing needs version-annotated deps so cargo can swap them for
+      # registry dependencies: `cargo publish` strips the [patch] section
+      # from Cargo.toml, and a dependency without a version requirement
+      # cannot resolve against the registry. rubash 1.4.2 is on crates.io
+      # since the v1.4.3 era (the dep in Cargo.toml carries
+      # version = "1.4.1"), so publish resolves fully offline of the pin.
       #
       # crates.io is idempotent per version: re-running a release (the
       # v1.4.0 run's crates job died on steps the first attempt had already
@@ -2214,8 +2272,11 @@ jobs:
       #     so the HTTP-400 text never appears).
       # Both steps grep for either phrasing and treat it as success; any
       # other failure still fails the step (loudly, under the job's
-      # continue-on-error).
+      # continue-on-error). The guard step above is the FIRST line of
+      # defense — a re-run whose version already ships skips these steps
+      # entirely via the `if:` conditions.
       - name: Publish niubash-runtime to crates.io
+        if: steps.guard.outputs.runtime_published != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
@@ -2229,6 +2290,7 @@ jobs:
           exit 1
 
       - name: Publish niubash to crates.io
+        if: steps.guard.outputs.niubash_published != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
