@@ -24,7 +24,9 @@ pub fn render_logo(target_cols: u16) {
 
     let pixels: Vec<(u8, u8, u8)> = match info.color_type {
         png::ColorType::Rgba => buf
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| {
                 let a = p[3] as u16;
                 let na = 255 - a;
@@ -35,9 +37,19 @@ pub fn render_logo(target_cols: u16) {
                 )
             })
             .collect(),
-        png::ColorType::Rgb => buf.chunks_exact(3).map(|p| (p[0], p[1], p[2])).collect(),
+        png::ColorType::Rgb => buf
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| (p[0], p[1], p[2]))
+            .collect(),
         png::ColorType::Grayscale => buf.iter().map(|&g| (g, g, g)).collect(),
-        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).map(|p| (p[0], p[0], p[0])).collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| (p[0], p[0], p[0]))
+            .collect(),
         _ => return,
     };
 
@@ -106,7 +118,9 @@ pub fn render_logo_to_string(target_cols: u16) -> String {
 
     let pixels: Vec<(u8, u8, u8)> = match info.color_type {
         png::ColorType::Rgba => buf
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| {
                 let a = p[3] as u16;
                 let na = 255 - a;
@@ -117,9 +131,19 @@ pub fn render_logo_to_string(target_cols: u16) -> String {
                 )
             })
             .collect(),
-        png::ColorType::Rgb => buf.chunks_exact(3).map(|p| (p[0], p[1], p[2])).collect(),
+        png::ColorType::Rgb => buf
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| (p[0], p[1], p[2]))
+            .collect(),
         png::ColorType::Grayscale => buf.iter().map(|&g| (g, g, g)).collect(),
-        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).map(|p| (p[0], p[0], p[0])).collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| (p[0], p[0], p[0]))
+            .collect(),
         _ => return String::new(),
     };
 
