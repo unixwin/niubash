@@ -1995,10 +1995,40 @@ enum ReplToken {
 enum BlockClose {
     Fi,
     Done,
-    Esac,
     Brace,
     Paren,
     FunctionBody,
+    /// niubash#482: an open `case` split by phase so the gather knows when
+    /// a `)` is a legal pattern-list terminator versus a stray close —
+    /// GNU reports `syntax error near unexpected token `)'' for the
+    /// latter the moment it is read, instead of waiting for the opener.
+    /// `case` seen, operand word pending.
+    CaseOperand,
+    /// Operand read, `in` pending.
+    CaseExpectIn,
+    /// Inside the pattern region, no pattern word yet (`)` here is a
+    /// syntax error in GNU).
+    CasePatternOpen,
+    /// Inside the pattern region after at least one pattern word — `)`
+    /// legally ends the pattern list.
+    CasePattern,
+    /// Inside a clause body; `;;`/`;&`/`;;;&` return to CasePatternOpen.
+    CaseBody,
+}
+
+impl BlockClose {
+    /// Any open-`case` frame variant — the `esac` closer matches all of
+    /// them (GNU's `esac` closes from pattern or body position).
+    fn is_case(self) -> bool {
+        matches!(
+            self,
+            BlockClose::CaseOperand
+                | BlockClose::CaseExpectIn
+                | BlockClose::CasePatternOpen
+                | BlockClose::CasePattern
+                | BlockClose::CaseBody
+        )
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2034,7 +2064,20 @@ fn is_repl_input_complete(input: &str) -> bool {
                         command_position = true;
                         trailing_list_operator = false;
                     }
-                    "|" | "&&" | "||" => {
+                    "|" => {
+                        // Inside a case pattern list `|` separates
+                        // alternatives rather than opening a pipeline.
+                        if matches!(
+                            stack.last(),
+                            Some(BlockClose::CasePatternOpen | BlockClose::CasePattern)
+                        ) {
+                            *stack.last_mut().expect("top checked") = BlockClose::CasePatternOpen;
+                        } else {
+                            command_position = true;
+                            trailing_list_operator = true;
+                        }
+                    }
+                    "&&" | "||" => {
                         command_position = true;
                         trailing_list_operator = true;
                     }
@@ -2044,8 +2087,53 @@ fn is_repl_input_complete(input: &str) -> bool {
                         trailing_list_operator = false;
                     }
                     ")" => {
-                        pop_if_matches(&mut stack, BlockClose::Paren);
+                        match stack.last() {
+                            Some(BlockClose::Paren) => {
+                                stack.pop();
+                                // A `(a|b)` pattern list close also ends
+                                // the case pattern — the clause body
+                                // follows.
+                                if matches!(
+                                    stack.last(),
+                                    Some(BlockClose::CasePatternOpen | BlockClose::CasePattern)
+                                ) {
+                                    *stack.last_mut().expect("top checked") = BlockClose::CaseBody;
+                                }
+                            }
+                            // `a)` legally ends a case pattern list.
+                            Some(BlockClose::CasePattern) => {
+                                *stack.last_mut().expect("top checked") = BlockClose::CaseBody;
+                            }
+                            _ => {
+                                // niubash#482: a `)` closing nothing is
+                                // GNU's `syntax error near unexpected
+                                // token `)'' — the group is abandoned NOW,
+                                // not when the opener eventually closes
+                                // (GNU never waits: `{ echo c\n)' errors
+                                // and drops back to PS1). Reporting the
+                                // buffer complete submits it so the
+                                // engine's armed parse prints the
+                                // diagnostic instead of PS2-wedging.
+                                return true;
+                            }
+                        }
                         command_position = false;
+                        trailing_list_operator = false;
+                    }
+                    ";;" | ";&" | ";;;&" => {
+                        // Legal after a case clause body (the next pattern
+                        // follows) or inside an arithmetic `( (` frame;
+                        // anywhere else GNU reports a syntax error at
+                        // the token — same terminal verdict as `)`.
+                        match stack.last() {
+                            Some(BlockClose::CaseBody) => {
+                                *stack.last_mut().expect("top checked") =
+                                    BlockClose::CasePatternOpen;
+                            }
+                            Some(BlockClose::Paren) => {}
+                            _ => return true,
+                        }
+                        command_position = true;
                         trailing_list_operator = false;
                     }
                     _ => {}
@@ -2054,6 +2142,30 @@ fn is_repl_input_complete(input: &str) -> bool {
             }
             ReplToken::Word(word) => {
                 trailing_list_operator = false;
+
+                // Words in case-pattern position are pattern text, never
+                // closers (`fi)`, `esac)`, `in` all name patterns).
+                // `esac` straight after `in`/`;;` is GNU's empty-case
+                // close (is_case_end_keyword), not a pattern.
+                match stack.last() {
+                    Some(BlockClose::CasePatternOpen) if word != "esac" => {
+                        *stack.last_mut().expect("top checked") = BlockClose::CasePattern;
+                        command_position = false;
+                        index += 1;
+                        continue;
+                    }
+                    Some(BlockClose::CasePattern) => {
+                        command_position = false;
+                        index += 1;
+                        continue;
+                    }
+                    Some(BlockClose::CaseOperand) => {
+                        *stack.last_mut().expect("top checked") = BlockClose::CaseExpectIn;
+                        // The operand is consumed below as an ordinary
+                        // word (`in` is legal operand text too).
+                    }
+                    _ => {}
+                }
 
                 if command_position && is_function_header(&scan.tokens, index) {
                     stack.push(BlockClose::FunctionBody);
@@ -2072,19 +2184,52 @@ fn is_repl_input_complete(input: &str) -> bool {
                         command_position = false;
                     }
                     "case" if command_position => {
-                        stack.push(BlockClose::Esac);
+                        stack.push(BlockClose::CaseOperand);
                         command_position = false;
                     }
-                    "fi" if command_position => {
-                        pop_if_matches(&mut stack, BlockClose::Fi);
+                    "in" if stack.last() == Some(&BlockClose::CaseExpectIn) => {
+                        *stack.last_mut().expect("top checked") = BlockClose::CasePatternOpen;
                         command_position = false;
                     }
-                    "done" if command_position => {
-                        pop_if_matches(&mut stack, BlockClose::Done);
+                    "fi" | "done" if command_position => {
+                        let want = if word == "fi" {
+                            BlockClose::Fi
+                        } else {
+                            BlockClose::Done
+                        };
+                        if stack.last() == Some(&want) {
+                            stack.pop();
+                        } else if matches!(
+                            stack.last(),
+                            Some(
+                                BlockClose::Fi
+                                    | BlockClose::Done
+                                    | BlockClose::Brace
+                                    | BlockClose::FunctionBody
+                            )
+                        ) {
+                            // Same foreign-closer family as `)`: GNU's
+                            // reader abandons the group at the token.
+                            // Under `(`/case frames these are legal words
+                            // (arithmetic text, patterns) — leave them be.
+                            return true;
+                        }
                         command_position = false;
                     }
                     "esac" if command_position => {
-                        pop_if_matches(&mut stack, BlockClose::Esac);
+                        if stack.last().is_some_and(|top| top.is_case()) {
+                            stack.pop();
+                        } else if matches!(
+                            stack.last(),
+                            Some(
+                                BlockClose::Fi
+                                    | BlockClose::Done
+                                    | BlockClose::Brace
+                                    | BlockClose::FunctionBody
+                            )
+                        ) {
+                            return true;
+                        }
                         command_position = false;
                     }
                     "{" => {
@@ -2095,7 +2240,19 @@ fn is_repl_input_complete(input: &str) -> bool {
                         command_position = true;
                     }
                     "}" => {
-                        pop_if_matches(&mut stack, BlockClose::Brace);
+                        if stack.last() == Some(&BlockClose::Brace) {
+                            stack.pop();
+                        } else if matches!(
+                            stack.last(),
+                            Some(
+                                BlockClose::Fi
+                                    | BlockClose::Done
+                                    | BlockClose::Brace
+                                    | BlockClose::FunctionBody
+                            )
+                        ) {
+                            return true;
+                        }
                         command_position = false;
                     }
                     "then" | "do" | "else" => {
@@ -2326,7 +2483,27 @@ fn scan_repl_input(input: &str) -> ReplInputScan {
                 flush_repl_word(&mut scan.tokens, &mut word);
                 index += 1;
             }
-            ';' | '(' | ')' => {
+            ';' => {
+                flush_repl_word(&mut scan.tokens, &mut word);
+                // Case-clause terminators are single operators: only
+                // adjacent bytes form them (`a ;;` is two `;`).
+                if chars.get(index + 1) == Some(&';') {
+                    if chars.get(index + 2) == Some(&'&') {
+                        scan.tokens.push(ReplToken::Operator(";;&".to_string()));
+                        index += 3;
+                    } else {
+                        scan.tokens.push(ReplToken::Operator(";;".to_string()));
+                        index += 2;
+                    }
+                } else if chars.get(index + 1) == Some(&'&') {
+                    scan.tokens.push(ReplToken::Operator(";&".to_string()));
+                    index += 2;
+                } else {
+                    scan.tokens.push(ReplToken::Operator(";".to_string()));
+                    index += 1;
+                }
+            }
+            '(' | ')' => {
                 flush_repl_word(&mut scan.tokens, &mut word);
                 scan.tokens.push(ReplToken::Operator(ch.to_string()));
                 index += 1;
@@ -2383,12 +2560,6 @@ fn is_shell_identifier(value: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn pop_if_matches(stack: &mut Vec<BlockClose>, expected: BlockClose) {
-    if stack.last() == Some(&expected) {
-        stack.pop();
-    }
 }
 
 fn has_unescaped_trailing_backslash(input: &str) -> bool {
