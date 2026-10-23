@@ -49,11 +49,22 @@ impl PathCompleter {
         };
 
         let mut completions: Vec<PathCandidate> = Vec::new();
+        // niubash#530: a word containing glob metacharacters (`*`, `@(a|b)`)
+        // is a pattern, not a literal prefix — GNU completes it against the
+        // directory entries the pattern matches. The plain prefix matcher
+        // could never match such a word, so Tab dead-ended at
+        // NO RECORDS FOUND even though plain filename completion worked.
+        let glob_pattern = prefix_is_glob_pattern(&query.prefix);
 
         for entry in entries.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
 
-            if behavior.matches(&file_name, &query.prefix) {
+            let matched = if glob_pattern {
+                glob_completion_matches(&query.prefix, &file_name, behavior)
+            } else {
+                behavior.matches(&file_name, &query.prefix)
+            };
+            if matched {
                 let file_type = match entry.file_type() {
                     Ok(ft) => ft,
                     Err(_) => continue,
@@ -351,4 +362,350 @@ fn is_windows_drive_only(value: &str) -> bool {
 
 fn is_directory_only_command(command: &str) -> bool {
     matches!(command, "cd" | "pushd")
+}
+
+// ─── Glob-pattern filename completion (niubash#530) ────────────────────────
+//
+// When the word being completed contains glob metacharacters, GNU bash
+// treats it as a pattern and offers the directory entries it matches
+// (glob completion). The functions below implement just the pattern
+// language completion needs: `*`, `?`, `[...]` classes, backslash
+// escapes, and the extglob groups `@()`, `?()`, `*()`, `+()`, `!()`.
+
+/// True when `prefix` contains an unescaped glob metacharacter that turns
+/// filename completion into pattern completion.
+fn prefix_is_glob_pattern(prefix: &str) -> bool {
+    let bytes = prefix.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'*' | b'?' | b'[' => return true,
+            b'@' | b'+' | b'!' if bytes.get(i + 1) == Some(&b'(') => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Match `name` against the typed glob `pattern`. Completion patterns are
+/// incremental — the user may still be typing — so a name also matches
+/// when the pattern matches a prefix of it (as if a `*` were appended).
+fn glob_completion_matches(pattern: &str, name: &str, behavior: CompletionBehavior) -> bool {
+    if behavior.case_sensitive {
+        let pat: Vec<char> = pattern.chars().collect();
+        let text: Vec<char> = name.chars().collect();
+        glob_match_prefix(&pat, &text)
+    } else {
+        let pat: Vec<char> = pattern.to_lowercase().chars().collect();
+        let text: Vec<char> = name.to_lowercase().chars().collect();
+        glob_match_prefix(&pat, &text)
+    }
+}
+
+fn glob_match_prefix(pat: &[char], text: &[char]) -> bool {
+    if pat.is_empty() {
+        return true; // pattern exhausted: it matched a prefix of the name
+    }
+    if pat.len() >= 2 && pat[1] == '(' && matches!(pat[0], '@' | '?' | '*' | '+' | '!') {
+        if let Some((alts, rest)) = parse_extglob_group(&pat[2..]) {
+            return match pat[0] {
+                '@' => alts
+                    .iter()
+                    .any(|alt| match_alt_then(alt, text, rest, false)),
+                '?' => {
+                    glob_match_prefix(rest, text)
+                        || alts
+                            .iter()
+                            .any(|alt| match_alt_then(alt, text, rest, false))
+                }
+                '*' => match_star_group(&alts, text, rest, true, false),
+                '+' => match_star_group(&alts, text, rest, false, false),
+                '!' => {
+                    (0..=text.len()).any(|take| {
+                        // When nothing follows the group, the group itself
+                        // must account for the whole remaining name —
+                        // otherwise `!(a|b)` would "match" `a` by consuming
+                        // zero characters and ignoring the rest.
+                        !(rest.is_empty() && take < text.len())
+                            && alts.iter().all(|alt| !glob_match_exact(alt, &text[..take]))
+                            && glob_match_prefix(rest, &text[take..])
+                    })
+                }
+                _ => unreachable!(),
+            };
+        }
+    }
+    match pat[0] {
+        '*' => (0..=text.len()).any(|take| glob_match_prefix(&pat[1..], &text[take..])),
+        '?' => !text.is_empty() && glob_match_prefix(&pat[1..], &text[1..]),
+        '[' => {
+            if text.is_empty() {
+                return false;
+            }
+            match parse_char_class(pat) {
+                Some((negated, ranges, consumed)) => {
+                    let inside = ranges
+                        .iter()
+                        .any(|(lo, hi)| text[0] >= *lo && text[0] <= *hi);
+                    inside != negated && glob_match_prefix(&pat[consumed..], &text[1..])
+                }
+                None => text[0] == '[' && glob_match_prefix(&pat[1..], &text[1..]),
+            }
+        }
+        '\\' if pat.len() >= 2 => {
+            !text.is_empty() && text[0] == pat[1] && glob_match_prefix(&pat[2..], &text[1..])
+        }
+        c => !text.is_empty() && text[0] == c && glob_match_prefix(&pat[1..], &text[1..]),
+    }
+}
+
+/// Full-string glob match (used for extglob alternatives, which must match
+/// the whole segment they consume).
+fn glob_match_exact(pat: &[char], text: &[char]) -> bool {
+    if pat.is_empty() {
+        return text.is_empty();
+    }
+    if pat.len() >= 2 && pat[1] == '(' && matches!(pat[0], '@' | '?' | '*' | '+' | '!') {
+        if let Some((alts, rest)) = parse_extglob_group(&pat[2..]) {
+            return match pat[0] {
+                '@' => alts.iter().any(|alt| match_alt_then(alt, text, rest, true)),
+                '?' => {
+                    glob_match_exact(rest, text)
+                        || alts.iter().any(|alt| match_alt_then(alt, text, rest, true))
+                }
+                '*' => match_star_group(&alts, text, rest, true, true),
+                '+' => match_star_group(&alts, text, rest, false, true),
+                '!' => (0..=text.len()).any(|take| {
+                    alts.iter().all(|alt| !glob_match_exact(alt, &text[..take]))
+                        && glob_match_exact(rest, &text[take..])
+                }),
+                _ => unreachable!(),
+            };
+        }
+    }
+    match pat[0] {
+        '*' => (0..=text.len()).any(|take| glob_match_exact(&pat[1..], &text[take..])),
+        '?' => !text.is_empty() && glob_match_exact(&pat[1..], &text[1..]),
+        '[' => {
+            if text.is_empty() {
+                return false;
+            }
+            match parse_char_class(pat) {
+                Some((negated, ranges, consumed)) => {
+                    let inside = ranges
+                        .iter()
+                        .any(|(lo, hi)| text[0] >= *lo && text[0] <= *hi);
+                    inside != negated && glob_match_exact(&pat[consumed..], &text[1..])
+                }
+                None => text[0] == '[' && glob_match_exact(&pat[1..], &text[1..]),
+            }
+        }
+        '\\' if pat.len() >= 2 => {
+            !text.is_empty() && text[0] == pat[1] && glob_match_exact(&pat[2..], &text[1..])
+        }
+        c => !text.is_empty() && text[0] == c && glob_match_exact(&pat[1..], &text[1..]),
+    }
+}
+
+/// Match one extglob alternative against a prefix of `text`, then continue
+/// matching `rest` against the remainder (exactly when `exact`, as a
+/// completion prefix otherwise).
+fn match_alt_then(alt: &[char], text: &[char], rest: &[char], exact: bool) -> bool {
+    (0..=text.len()).any(|take| {
+        glob_match_exact(alt, &text[..take])
+            && if exact {
+                glob_match_exact(rest, &text[take..])
+            } else {
+                glob_match_prefix(rest, &text[take..])
+            }
+    })
+}
+
+fn match_star_group(
+    alts: &[Vec<char>],
+    text: &[char],
+    rest: &[char],
+    allow_zero: bool,
+    exact: bool,
+) -> bool {
+    let rest_matches = if exact {
+        glob_match_exact(rest, text)
+    } else {
+        glob_match_prefix(rest, text)
+    };
+    if allow_zero && rest_matches {
+        return true;
+    }
+    alts.iter().any(|alt| {
+        (1..=text.len()).any(|take| {
+            glob_match_exact(alt, &text[..take])
+                && match_star_group(alts, &text[take..], rest, true, exact)
+        })
+    })
+}
+
+/// Parse the inside of an extglob group (the pattern slice just after
+/// `(`): returns the alternatives (split on unescaped `|` at nesting
+/// depth 0) and the pattern remainder after the closing `)`.
+fn parse_extglob_group(pat: &[char]) -> Option<(Vec<Vec<char>>, &[char])> {
+    let mut alts = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < pat.len() {
+        match pat[i] {
+            '\\' if i + 1 < pat.len() => {
+                current.push(pat[i]);
+                current.push(pat[i + 1]);
+                i += 2;
+            }
+            '(' => {
+                depth += 1;
+                current.push(pat[i]);
+                i += 1;
+            }
+            ')' => {
+                if depth == 0 {
+                    alts.push(current);
+                    return Some((alts, &pat[i + 1..]));
+                }
+                depth -= 1;
+                current.push(pat[i]);
+                i += 1;
+            }
+            '|' if depth == 0 => {
+                alts.push(std::mem::take(&mut current));
+                i += 1;
+            }
+            c => {
+                current.push(c);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Parse a `[...]` class at the start of `pat`: returns (negated, ranges,
+/// chars consumed including the brackets). An unterminated class is None
+/// (the `[` then matches literally).
+fn parse_char_class(pat: &[char]) -> Option<(bool, Vec<(char, char)>, usize)> {
+    let mut i = 1;
+    let mut negated = false;
+    if i < pat.len() && (pat[i] == '!' || pat[i] == '^') {
+        negated = true;
+        i += 1;
+    }
+    let mut ranges = Vec::new();
+    if i < pat.len() && pat[i] == ']' {
+        ranges.push((']', ']'));
+        i += 1;
+    }
+    while i < pat.len() && pat[i] != ']' {
+        if pat[i] == '\\' && i + 1 < pat.len() {
+            let lo = pat[i + 1];
+            if i + 3 < pat.len() && pat[i + 2] == '-' && pat[i + 3] != ']' {
+                ranges.push((lo, pat[i + 3]));
+                i += 4;
+            } else {
+                ranges.push((lo, lo));
+                i += 2;
+            }
+        } else if i + 2 < pat.len() && pat[i + 1] == '-' && pat[i + 2] != ']' {
+            ranges.push((pat[i], pat[i + 2]));
+            i += 3;
+        } else {
+            ranges.push((pat[i], pat[i]));
+            i += 1;
+        }
+    }
+    if i >= pat.len() {
+        return None;
+    }
+    Some((negated, ranges, i + 1))
+}
+
+#[cfg(test)]
+mod glob_completion_tests {
+    use super::*;
+
+    fn ctx(dir: &Path, input: &str) -> CompletionContext {
+        CompletionContext::new(dir.to_path_buf(), input.to_string(), input.len())
+    }
+
+    fn complete_values(dir: &Path, input: &str) -> Vec<String> {
+        let context = ctx(dir, input);
+        PathCompleter::complete(&context)
+            .unwrap()
+            .map(|result| result.completions)
+            .unwrap_or_default()
+    }
+
+    fn seed_dir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "niubash-glob-completion-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["alpha.txt", "alpha2.txt", "beta.txt", "gamma.log"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn star_word_completes_all_files() {
+        let dir = seed_dir();
+        let values = complete_values(&dir, "ls *");
+        assert!(values.contains(&"alpha.txt".to_string()), "{values:?}");
+        assert!(values.contains(&"beta.txt".to_string()), "{values:?}");
+        assert!(values.contains(&"gamma.log".to_string()), "{values:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extglob_word_completes_matching_files() {
+        let dir = seed_dir();
+        let values = complete_values(&dir, "ls @(a|b)");
+        assert!(values.contains(&"alpha.txt".to_string()), "{values:?}");
+        assert!(values.contains(&"alpha2.txt".to_string()), "{values:?}");
+        assert!(values.contains(&"beta.txt".to_string()), "{values:?}");
+        assert!(!values.contains(&"gamma.log".to_string()), "{values:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn glob_suffix_and_class_forms() {
+        let dir = seed_dir();
+        let txt = complete_values(&dir, "ls *.txt");
+        assert_eq!(txt.len(), 3, "{txt:?}");
+        let class = complete_values(&dir, "ls [ab]*");
+        assert!(class.contains(&"alpha.txt".to_string()), "{class:?}");
+        assert!(class.contains(&"beta.txt".to_string()), "{class:?}");
+        assert!(!class.contains(&"gamma.log".to_string()), "{class:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn glob_matcher_units() {
+        let ci = CompletionBehavior::default();
+        assert!(glob_completion_matches("*", "anything", ci));
+        assert!(glob_completion_matches("a*", "alpha", ci));
+        assert!(!glob_completion_matches("b*", "alpha", ci));
+        assert!(glob_completion_matches("@(a|b)", "beta", ci));
+        assert!(!glob_completion_matches("@(a|b)", "gamma", ci));
+        assert!(glob_completion_matches("+(a|b)", "abba", ci));
+        assert!(glob_completion_matches("!(a|b)", "gamma", ci));
+        assert!(!glob_completion_matches("!(a|b)", "a", ci));
+        assert!(glob_completion_matches("[a-c]?", "bx", ci));
+        assert!(!glob_completion_matches("[!a-c]?", "bx", ci));
+        assert!(glob_completion_matches("literal", "literal.txt", ci));
+    }
 }

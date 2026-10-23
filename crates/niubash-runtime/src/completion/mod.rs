@@ -302,29 +302,49 @@ fn last_command_separator(input: &str) -> Option<usize> {
     let mut quote = None;
     let mut escaped = false;
     let mut last = None;
+    // niubash#530: the `|` inside an extglob group (`@(a|b)`, `*(a|b)`, …)
+    // separates alternatives, not commands — track group depth so a word
+    // like `@(a|b)` stays one segment and the completer sees the whole
+    // pattern instead of the fragment after the last `|`.
+    let mut extglob_depth = 0usize;
+    let mut prev: Option<char> = None;
 
     for (idx, ch) in input.char_indices() {
         if escaped {
             escaped = false;
+            prev = Some(ch);
             continue;
         }
         if ch == '\\' && quote != Some('\'') {
             escaped = true;
+            prev = Some(ch);
             continue;
         }
         if let Some(q) = quote {
             if ch == q {
                 quote = None;
             }
+            prev = Some(ch);
             continue;
         }
         if ch == '\'' || ch == '"' {
             quote = Some(ch);
+            prev = Some(ch);
             continue;
         }
-        if matches!(ch, ';' | '|' | '&' | '\n') {
-            last = Some(idx);
+        match ch {
+            '(' if matches!(prev, Some('@' | '*' | '+' | '?' | '!')) => {
+                extglob_depth += 1;
+            }
+            ')' => {
+                extglob_depth = extglob_depth.saturating_sub(1);
+            }
+            ';' | '|' | '&' | '\n' if extglob_depth == 0 => {
+                last = Some(idx);
+            }
+            _ => {}
         }
+        prev = Some(ch);
     }
 
     last
@@ -535,6 +555,21 @@ mod tests {
             14,
         );
         assert!(quoted_pipe.is_command_position());
+    }
+
+    #[test]
+    fn test_extglob_pipe_is_not_a_command_separator() {
+        // niubash#530: in `ls @(a|b)` the `|` separates extglob
+        // alternatives, not commands; the current word is the whole
+        // pattern and the command name is still `ls`.
+        let ctx = CompletionContext::new(PathBuf::from("/home/user"), "ls @(a|b)".to_string(), 9);
+        assert_eq!(ctx.get_current_word(), Some("@(a|b)".to_string()));
+        assert_eq!(ctx.get_command_name(), Some("ls".to_string()));
+
+        // A real pipe still starts a new segment.
+        let piped = CompletionContext::new(PathBuf::from("/home/user"), "ls | gre".to_string(), 8);
+        assert!(piped.is_command_position());
+        assert_eq!(piped.get_command_name(), Some("gre".to_string()));
     }
 
     #[test]
