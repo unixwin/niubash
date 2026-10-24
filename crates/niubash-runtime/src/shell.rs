@@ -191,6 +191,17 @@ pub struct Shell {
     // `exit` in the rc terminates the invocation with that status instead of
     // being flattened to a plain status that lets the command line run.
     script_exit_jump: bool,
+    // niubash R1: set by the interactive submission paths when the engine
+    // unwound the submitted line/script with a top-level jump — the
+    // `ExecuteError::ExitCode` / `FatalFunctionError` unwind (a real
+    // `exit` inside a list, function, or alias expansion; the errexit
+    // break), or the grouped reader route reporting one. The REPL consumes
+    // it right after the submission finishes and ends the session with this
+    // status, the same shape as GNU's jump_to_top_level unwinding
+    // reader_loop (evalstring.c:618-619). A parse-abort `ExitCode(2)` is
+    // excluded at the set sites (`take_parse_error`), so an interactive
+    // syntax error still only discards its own group.
+    session_exit_jump: Option<i32>,
     // One-shot fast path (`Shell::new_one_shot`): the shell serves a single
     // non-interactive command, so REPL-only state is never initialized and
     // the prompt backend stays a bare placeholder. Bash renders no prompt and
@@ -594,6 +605,7 @@ impl Shell {
             startup_invocation: None,
             invoked_as_rbash,
             script_exit_jump: false,
+            session_exit_jump: None,
             one_shot,
         };
         crate::startup_trace::tick("completion + widgets");
@@ -821,16 +833,42 @@ impl Shell {
         if !needs_reader {
             return None;
         }
-        let code = rubash::script_driver::run_script_with_history_at_line_offset(
+        let (code, exit_shell) = rubash::script_driver::run_script_with_history_at_line_offset_tracked(
             &mut self.executor,
             script,
             line_offset,
             None,
         );
+        if exit_shell {
+            // The grouped reader already excluded the parse-abort discard
+            // (niubash R1): the engine unwound this submission for real —
+            // `true; exit 3`, an alias expanding to `exit`, errexit — so the
+            // REPL must end the session instead of prompting again.
+            self.session_exit_jump = Some(code);
+        }
         self.sync_process_cwd_from_executor_pwd();
         self.sync_process_path_from_executor_path();
         self.sync_alias_mirror_from_executor();
         Some(code)
+    }
+
+    /// Record that an execution surfaced a top-level exit jump, unless the
+    /// `ExitCode`/`FatalFunctionError` was raised by a parse abort
+    /// (niubash R1): interactive syntax errors print the diagnostic and
+    /// discard their own group only — GNU keeps prompting (eval.c:202-205),
+    /// and script_driver's grouped reader makes the same split via
+    /// `take_parse_error`.
+    fn note_session_exit_jump(&mut self, code: i32) {
+        if !self.executor.take_parse_error() {
+            self.session_exit_jump = Some(code);
+        }
+    }
+
+    /// Take the pending interactive exit jump (niubash R1): `Some(status)`
+    /// means the last submission ended in a top-level `exit`/errexit unwind
+    /// and the REPL must end the session with that status.
+    pub fn take_session_exit_jump(&mut self) -> Option<i32> {
+        self.session_exit_jump.take()
     }
 
     fn execute_line_with_options(
@@ -880,12 +918,18 @@ impl Shell {
             match execution {
                 Ok(code) => code,
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => {
+                    // Keep `$?` in sync (#542) and record the jump so the
+                    // REPL ends the session (#544 R1).
                     self.executor.set_last_exit_code(code);
+                    self.note_session_exit_jump(code);
                     code
                 }
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
                 Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
-                Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => code,
+                Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => {
+                    self.note_session_exit_jump(code);
+                    code
+                }
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                     eprintln!("niubash: {}: command not found", cmd);
                     self.print_command_not_found_hints(&cmd);
@@ -904,11 +948,15 @@ impl Shell {
                 Ok(()) => self.executor.last_exit_code(),
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => {
                     self.executor.set_last_exit_code(code);
+                    self.note_session_exit_jump(code);
                     code
                 }
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
                 Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
-                Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => code,
+                Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => {
+                    self.note_session_exit_jump(code);
+                    code
+                }
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                     eprintln!("niubash: {}: command not found", cmd);
                     self.print_command_not_found_hints(&cmd);
@@ -937,6 +985,10 @@ impl Shell {
     /// Execute a line as an interactive REPL command, including native hook
     /// points for prompt, command, and directory-change lifecycle behavior.
     pub fn execute_interactive_line(&mut self, line: &str) -> anyhow::Result<i32> {
+        // Drop any jump recorded outside this submission (a mid-session rc
+        // re-source, niubash#180) so only a jump raised below is consumed
+        // when the REPL checks right after this call (niubash R1).
+        self.session_exit_jump = None;
         let old_pwd = self.executor.get_env("PWD").map(str::to_owned);
         self.run_preexec_hooks(line);
         let line_offset = self.interactive_lines_read;
@@ -956,6 +1008,8 @@ impl Shell {
     /// Execute a complete multi-line interactive input block via rubash script
     /// execution while preserving REPL lifecycle hooks.
     pub fn execute_interactive_script(&mut self, script: &str) -> anyhow::Result<i32> {
+        // Same stale-jump drop as execute_interactive_line (niubash R1).
+        self.session_exit_jump = None;
         let old_pwd = self.executor.get_env("PWD").map(str::to_owned);
         self.run_preexec_hooks(script);
         let line_offset = self.interactive_lines_read;
@@ -2640,11 +2694,18 @@ impl Shell {
                 // sourcer ends the invocation with this status instead of
                 // reading it as an ordinary command result.
                 self.script_exit_jump = true;
+                // niubash R1: an interactive multi-line submission that
+                // unwound the same way must end the REPL session too —
+                // `execute_interactive_script` feeds straight through here.
+                self.note_session_exit_jump(code);
                 code
             }
             Err(rubash::executor::ExecuteError::Return(code)) => code,
             Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
-            Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => code,
+            Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => {
+                self.note_session_exit_jump(code);
+                code
+            }
             Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                 eprintln!("niubash: {}: command not found", cmd);
                 127
@@ -2713,7 +2774,14 @@ impl Shell {
                     self.sync_process_cwd_from_executor_pwd();
                     self.sync_process_path_from_executor_path();
                 }
-                Err(rubash::executor::ExecuteError::ExitCode(code)) => return Some(Ok(code)),
+                // Propagate the unwind instead of flattening it to a status:
+                // the callers' `ExitCode` arms record the jump (niubash#402
+                // for the script path, niubash R1 for the interactive line),
+                // which `cd /tmp; exit 3`-shaped host-synced sequences need
+                // exactly like every other list.
+                Err(rubash::executor::ExecuteError::ExitCode(code)) => {
+                    return Some(Err(rubash::executor::ExecuteError::ExitCode(code)))
+                }
                 Err(rubash::executor::ExecuteError::Return(code)) => return Some(Ok(code)),
                 Err(err) => return Some(Err(err)),
             }
@@ -6703,6 +6771,96 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(shell.executor.get_env("GREETING_RAN"), Some("42"));
     }
 
+    #[test]
+    fn interactive_list_and_alias_exits_record_session_jump() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        // `;`-bearing submissions take the engine's grouped reader route:
+        // the grouped driver reports the top-level unwind (niubash R1).
+        assert_eq!(shell.execute_interactive_line("true; exit 3").unwrap(), 3);
+        assert_eq!(shell.take_session_exit_jump(), Some(3));
+
+        // An alias expanding to `exit` reaches the same reader route.
+        shell.execute_interactive_line("alias bye=exit").unwrap();
+        assert_eq!(shell.take_session_exit_jump(), None);
+        assert_eq!(shell.execute_interactive_line("bye 3").unwrap(), 3);
+        assert_eq!(shell.take_session_exit_jump(), Some(3));
+
+        // A plain successful line leaves no jump behind.
+        assert_eq!(shell.execute_interactive_line("echo alive").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+    }
+
+    #[test]
+    fn interactive_function_exit_jumps_but_subshell_and_echo_do_not() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        // Two-line form: the definition carries no jump, the bare call runs
+        // through execute_ast and the body's `exit` unwinds to the top.
+        shell.execute_interactive_line("f(){ exit 4; }").unwrap();
+        assert_eq!(shell.take_session_exit_jump(), None);
+        assert_eq!(shell.execute_interactive_line("f").unwrap(), 4);
+        assert_eq!(shell.take_session_exit_jump(), Some(4));
+
+        // GNU's subshell boundary contains the jump (verified bash:
+        // `(exit 3)` leaves the interactive session running).
+        assert_eq!(shell.execute_interactive_line("(exit 5)").unwrap(), 5);
+        assert_eq!(shell.take_session_exit_jump(), None);
+
+        // `echo exit` is just a command whose argument happens to be the
+        // word `exit`.
+        assert_eq!(shell.execute_interactive_line("echo exit").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+    }
+
+    #[test]
+    fn interactive_diagnosed_and_parse_error_shapes_keep_the_session() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        // bash 5.3: `exit abc` reports `numeric argument required` and the
+        // command fails with 2 while the shell continues (rubash pins the
+        // 5.3 probe D semantics) — no unwind, no session end.
+        assert_eq!(shell.execute_interactive_line("exit abc").unwrap(), 2);
+        assert_eq!(shell.take_session_exit_jump(), None);
+
+        // GNU CHECK_HELPOPT: `exit --help` prints the help and reports the
+        // usage status from the builtin itself, without jumping.
+        let code = shell.execute_interactive_line("exit --help").unwrap();
+        assert_eq!(code, 2);
+        assert_eq!(shell.take_session_exit_jump(), None);
+
+        // An interactive syntax error discards its group only and the
+        // session keeps running (eval.c:202-205) — the parse-abort
+        // ExitCode(2) must not read as an exit jump.
+        let code = shell.execute_interactive_line("echo )bad").unwrap();
+        assert_eq!(code, 2);
+        assert_eq!(shell.take_session_exit_jump(), None);
+    }
+
+    #[test]
+    fn interactive_submission_drops_a_stale_session_jump() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        // A non-REPL script run (startup re-source shape, niubash#180) may
+        // record a jump; the next interactive submission must not inherit it.
+        assert_eq!(shell.execute_script("exit 9").unwrap(), 9);
+        assert_eq!(shell.session_exit_jump, Some(9));
+        assert_eq!(shell.execute_interactive_line("echo hi").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+    }
+
     fn test_shell(hooks: HookConfig) -> Shell {
         let mut executor = Executor::new();
         executor.set_shopt_option("expand_aliases", true);
@@ -6748,6 +6906,7 @@ complete -F _envtooldyn_hook envtooldyn
             startup_invocation: None,
             invoked_as_rbash: false,
             script_exit_jump: false,
+            session_exit_jump: None,
             one_shot: false,
         };
         shell.sync_executor_pwd_from_process_cwd();

@@ -2870,6 +2870,16 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                         flush_repl_output();
                         let _ = shell.borrow_mut().execute_interactive_line(buffer.trim());
                         flush_repl_output();
+                        // niubash R1: the widget's line can carry a top-level
+                        // `exit` too — end the session like any submission.
+                        // Take into a `let` first: an `if let` scrutinee's
+                        // `borrow_mut()` temporary would still be alive in the
+                        // body, and `end_repl_session`'s own `borrow_mut()`
+                        // would panic on the second mutable borrow.
+                        let jump = shell.borrow_mut().take_session_exit_jump();
+                        if let Some(status) = jump {
+                            end_repl_session(&mut shell.borrow_mut(), status);
+                        }
                     }
                     SentinelOutcome::Accept(None) => {}
                     SentinelOutcome::NotSentinel => {}
@@ -2925,6 +2935,20 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                     let _ = shell.borrow_mut().execute_interactive_line(script.trim());
                 }
                 flush_repl_output();
+                // niubash R1: the engine unwound this submission with a
+                // top-level `exit` (`true; exit 3`, an alias or function body
+                // running `exit`, errexit) — GNU's jump_to_top_level ends
+                // reader_loop (evalstring.c:618-619), so end the session
+                // with the jump's status instead of prompting again. A bare
+                // `exit N` never reaches here: the D1 intercept above ends
+                // the session before the engine runs. Taken into a `let` so
+                // the scrutinee's `borrow_mut()` temporary is dropped before
+                // end_repl_session borrows again (an `if let` would hold it
+                // through the body and panic with `RefCell already borrowed`).
+                let jump = shell.borrow_mut().take_session_exit_jump();
+                if let Some(status) = jump {
+                    end_repl_session(&mut shell.borrow_mut(), status);
+                }
             }
             Ok(Signal::CtrlD) => {
                 println!();
@@ -3012,6 +3036,10 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
             let _ = shell.execute_interactive_line(script.trim());
         }
         flush_repl_output();
+        // niubash R1: same exit-jump consumption as the line-editor loop.
+        if let Some(status) = shell.take_session_exit_jump() {
+            end_repl_session(shell, status);
+        }
     }
     let _ = shell.finish_with_exit_trap(0);
     Ok(())
