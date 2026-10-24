@@ -4247,6 +4247,9 @@ fn print_plugin_usage() {
     println!("                           (--orphans deletes them, niubash#299)");
     println!("  trust <id>               Review and activate a source's assets");
     println!("  discover [--verbose]     Dry ecosystem overview (read-only)");
+    println!("  migrate-rc [--diff]      Read-only diagnostic: scan the rc for legacy");
+    println!("                           `# >>> niu source` managed blocks that keep");
+    println!("                           the loader off; never edits the rc");
     println!("  ui                       Menu UI (sections by state, same verbs)");
     println!();
     println!("  recipe <command>         Recipe index: list [--category <c>]");
