@@ -787,6 +787,18 @@ impl Shell {
         // so HISTFILE cannot create a second, competing history stream.
         self.executor.set_shell_option("history", false);
         self.executor.unset_env("HISTFILE");
+        // rubash#1248: assert the other half of the interactive history
+        // contract. GNU init_interactive turns histexpand ON by default
+        // (bashhist.c:288 HISTEXPAND_DEFAULT), and the engine's per-line
+        // expansion entry (script_driver::pre_process_interactive_line,
+        // which execute_interactive_line drives) gates on it alone - the
+        // `history` flag above is deliberately not consulted there, because
+        // the host owns the list. Without this assertion the flag could be
+        // inherited off (a prior `set +H` in a shared executor, an
+        // invocation that pre-set it), and `!!` would stay dead even with
+        // the host driving expansion. A user's own `set +H` in rc or at
+        // the prompt still wins: it lands after this, in line order.
+        self.executor.set_shell_option("histexpand", true);
     }
 
     /// Route a one-command AST to an easter egg when this shell is
@@ -993,7 +1005,31 @@ impl Shell {
         self.run_preexec_hooks(line);
         let line_offset = self.interactive_lines_read;
         self.interactive_lines_read += line.split_inclusive('\n').count().max(1);
-        let code = self.execute_line_with_options(line, true, line_offset)?;
+        // rubash#1248: run the accepted line through the engine's
+        // interactive history expansion (bashhist.c pre_process_line, via
+        // script_driver::pre_process_interactive_line) before anything
+        // tokenizes it. Until now the host handed the engine the RAW line,
+        // so `!!` / `!n` / `!$` / `^a^b` reached the tokenizer literally
+        // and died as "command not found" - the engine-side state was
+        // always self-consistent; the host simply never drove the entry
+        // point built for reedline-style hosts. The expansion resolves
+        // against the history provider enter_interactive installed (the
+        // live list reedline records into), echoes the expanded line to
+        // stderr like GNU, and rewrites the recorded entry to the
+        // expansion. Hooks and bookkeeping keep receiving the RAW line,
+        // exactly as they did before; only execution sees the expansion.
+        // A Discard (failed expansion, or the `:p` print-only modifier)
+        // executes nothing and leaves `$?` untouched, which is GNU's
+        // behavior for both.
+        let code =
+            match rubash::script_driver::pre_process_interactive_line(&mut self.executor, line) {
+                rubash::script_driver::InteractiveExpansion::Execute(expanded) => {
+                    self.execute_line_with_options(&expanded, true, line_offset)?
+                }
+                rubash::script_driver::InteractiveExpansion::Discard => {
+                    self.executor.last_exit_code()
+                }
+            };
         self.run_postcmd_hooks(code);
         self.run_zshaddhistory_hooks(line);
         self.remember_interactive_command(line, code);
@@ -1007,6 +1043,13 @@ impl Shell {
 
     /// Execute a complete multi-line interactive input block via rubash script
     /// execution while preserving REPL lifecycle hooks.
+    ///
+    /// rubash#1248: history expansion is deliberately NOT applied to the
+    /// block as a whole. GNU expands per accepted LINE as it is read, and
+    /// never inside heredoc bodies or compound-command continuations the
+    /// reader has already grouped; a block-level pass here would rewrite
+    /// text GNU leaves literal. Single-line submissions (the overwhelming
+    /// interactive case) go through execute_interactive_line and expand.
     pub fn execute_interactive_script(&mut self, script: &str) -> anyhow::Result<i32> {
         // Same stale-jump drop as execute_interactive_line (niubash R1).
         self.session_exit_jump = None;
@@ -4326,6 +4369,103 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "interactive-entry\n"
         );
+    }
+
+    /// Simulate what reedline does with an accepted line in production:
+    /// record it into the shared history (the provider's list) BEFORE the
+    /// line executes. rubash#1248's expansion resolves against this list.
+    fn record_accepted_line(shell: &Shell, line: &str) {
+        use rubash::history::HistoryProvider;
+        let provider = shell.history_provider.as_ref().unwrap().clone();
+        provider.borrow_mut().append(line.to_string()).unwrap();
+    }
+
+    #[test]
+    fn interactive_bang_bang_reexecutes_the_previous_line() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = temp.path().join("history");
+        shell.enter_interactive();
+
+        // A non-idempotent first line makes re-execution observable.
+        assert_eq!(
+            shell
+                .execute_interactive_line("T1248=${T1248}alpha")
+                .unwrap(),
+            0
+        );
+        assert_eq!(shell.executor.get_env("T1248"), Some("alpha"));
+        record_accepted_line(&shell, "T1248=${T1248}alpha");
+
+        record_accepted_line(&shell, "!!");
+        assert_eq!(shell.execute_interactive_line("!!").unwrap(), 0);
+        assert_eq!(shell.executor.get_env("T1248"), Some("alphaalpha"));
+
+        // The recorded raw `!!` was rewritten to the expansion, GNU-style.
+        use rubash::history::HistoryProvider;
+        let provider = shell.history_provider.as_ref().unwrap().clone();
+        assert_eq!(
+            provider.borrow_mut().entries().unwrap(),
+            ["T1248=${T1248}alpha", "T1248=${T1248}alpha"]
+        );
+
+        // Quick substitution (^a^b) re-runs the previous line edited.
+        record_accepted_line(&shell, "^alpha^beta");
+        assert_eq!(shell.execute_interactive_line("^alpha^beta").unwrap(), 0);
+        assert_eq!(shell.executor.get_env("T1248"), Some("alphaalphabeta"));
+    }
+
+    #[test]
+    fn interactive_failed_expansion_keeps_the_previous_exit_code() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = temp.path().join("history");
+        shell.enter_interactive();
+
+        // GNU: a failed history expansion executes nothing and leaves $?
+        // exactly as it was (verified against bash 5.3.20).
+        assert_eq!(shell.execute_interactive_line("true").unwrap(), 0);
+        assert_eq!(
+            shell
+                .execute_interactive_line("!no_such_event_1248")
+                .unwrap(),
+            0
+        );
+        assert_eq!(shell.execute_interactive_line("false").unwrap(), 1);
+        assert_eq!(
+            shell
+                .execute_interactive_line("!no_such_event_1248")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn interactive_set_plus_h_turns_expansion_off() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = temp.path().join("history");
+        shell.enter_interactive();
+
+        assert_eq!(shell.execute_interactive_line("T1248=alpha").unwrap(), 0);
+        record_accepted_line(&shell, "T1248=alpha");
+        assert_eq!(shell.execute_interactive_line("set +H").unwrap(), 0);
+        record_accepted_line(&shell, "!!");
+        // With histexpand off, `!!` reaches the tokenizer literally and is
+        // just an unknown command - the user's later `set +H` must win over
+        // the default enter_interactive asserted.
+        assert_eq!(shell.execute_interactive_line("!!").unwrap(), 127);
+    }
+
+    #[test]
+    fn noninteractive_lines_never_expand_history() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shell = test_shell(HookConfig::default());
+        // No enter_interactive: script / -c lines keep the literal text.
+        assert_eq!(shell.execute_line("!!").unwrap(), 127);
     }
 
     #[test]
