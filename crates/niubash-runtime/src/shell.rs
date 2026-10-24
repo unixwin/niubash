@@ -3957,7 +3957,17 @@ fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
     // Normalize only when it is missing or Windows-shaped (backslashes,
     // slash-drive); an explicitly exported POSIX HOME is the caller's
     // choice and is honored verbatim (invocation.tests HOME=$TDIR).
-    let should_update = current.trim().is_empty()
+    // niubash#546: a missing/empty HOME must not be fabricated from the
+    // resolved home directory on a POSIX host — GNU leaves HOME unset
+    // when the caller never provided one (`env -i niu` showed
+    // HOME=/root; `cd` then silently landed there instead of failing
+    // with "HOME not set"). Filling stays for Windows hosts (their
+    // tools key off HOME) and when the caller did provide a home via
+    // HOME/USERPROFILE in some form this normalization only reshapes.
+    let caller_provided_home = ["HOME", "USERPROFILE"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    let should_update = (current.trim().is_empty() && (cfg!(windows) || caller_provided_home))
         || current.contains('\\')
         || (cfg!(windows) && is_slash_drive_path(current));
     if should_update && !home.is_empty() {
