@@ -366,6 +366,15 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             eprintln!("niu: {}: No such file or directory", first);
             piped_stdout::finish_and_exit(127);
         }
+        if script.is_dir() {
+            // niubash#547: a directory operand exists but is not an
+            // executable script — GNU answers `Is a directory` with
+            // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm).
+            // Without this arm the fs::read below leaks the raw io error
+            // (`Is a directory (os error 21)`) with rc 1.
+            eprintln!("niu: {}: Is a directory", first);
+            piped_stdout::finish_and_exit(126);
+        }
         // general.c:718-741 check_binary_file: NUL in the first line(s)
         // or an ELF image is refused with EX_BINARY_FILE (126).
         let bytes = std::fs::read(&script)?;
@@ -805,6 +814,20 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
                 }
                 std::io::ErrorKind::PermissionDenied => {
                     eprintln!("niu: {script_name}: Permission denied");
+                    piped_stdout::finish_and_exit(126);
+                }
+                // niubash#547: a directory operand is a found-but-not-
+                // executable script (GNU: `bash: /tmp: Is a directory`,
+                // rc 126), not the launcher's raw `(os error 21)` + rc 1
+                // with the operand name dropped. read_to_string on a
+                // directory surfaces as IsADirectory on Unix; the is_dir
+                // probe covers platforms whose error kind differs.
+                std::io::ErrorKind::IsADirectory => {
+                    eprintln!("niu: {script_name}: Is a directory");
+                    piped_stdout::finish_and_exit(126);
+                }
+                _ if path.is_dir() => {
+                    eprintln!("niu: {script_name}: Is a directory");
                     piped_stdout::finish_and_exit(126);
                 }
                 _ => return Err(error.into()),
@@ -1415,6 +1438,14 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
 fn run_stdin_script() -> anyhow::Result<()> {
     let mut shell = niubash_runtime::Shell::new_for_stdin_script()?;
     shell.executor.inherit_process_stdin();
+    // niubash#548: this reader is niu's own stdin driver, so it owes the
+    // marker the engine's driver arms in its run_stdin_script
+    // (shell.c:780-786 read_from_stdin): without it `$-` lacks `s` even
+    // though every command arrives on stdin (`printf 'echo $-' | niu`
+    // printed `hB` where GNU and standalone rubash print `hBs`).
+    shell
+        .executor
+        .set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
     // unixwin/niubash#431: bind the diagnostic/$0 name the way the engine's
     // own stdin driver does for `-s` (rubash script_driver run_stdin_script):
     // GNU never rebinds $0 for a stdin script (shell.c:1613 is the
