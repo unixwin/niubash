@@ -9,6 +9,13 @@ Niubash ships the Windows release in two package shapes:
   smaller than the `.zip`, and Windows 10+ untars it natively
   (`tar -xf ...`). The `.zip` stays for tooling that only speaks zip.
 
+All release binaries (the shell, the bundled winuxcmd applets, and niugit)
+are code-signed: this project uses the [SignPath Foundation](https://signpath.org)
+for code signing. If your antivirus flags or slows a Niubash binary, first
+check that you downloaded it from this page, then report the false positive —
+and consider adding the install directory to your AV exclusions as a
+stopgap.
+
 Or install with winget (same per-user Inno Setup installer, x64 and arm64):
 
 ```pwsh

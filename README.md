@@ -231,6 +231,8 @@ portable tarball, untar, run:
 tar -xzf niubash-v*-linux-x86_64.tar.gz && niubash-v*-linux-x86_64/niu
 ```
 
+Release binaries are code-signed via the [SignPath Foundation](https://signpath.org).
+
 From source (Rust 1.95+):
 `git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
 
