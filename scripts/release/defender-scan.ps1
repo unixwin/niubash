@@ -19,8 +19,10 @@
 #   pwsh scripts/release/defender-scan.ps1 dist\niubash-v1.4.5-win-x64-setup.exe
 #   pwsh scripts/release/defender-scan.ps1 dist\
 #
-# Not wired into .github/workflows/release.yml yet: adopting it as a
-# blocking release step (and the override policy) is a maintainer call.
+# Wired into .github/workflows/release.yml as a warn-only step (since the
+# #511 batch): scan results are reported but do not block the release.
+# Adopting it as a blocking step (and the override policy) remains a
+# maintainer call, pending the code-signing certificate.
 param(
     [Parameter(Mandatory = $true, Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Path,
