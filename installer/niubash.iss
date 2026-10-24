@@ -213,25 +213,6 @@ begin
   BroadcastEnvironmentChange();
 end;
 
-procedure CloseRunningNiubashForSilentUpdate();
-var
-  ResultCode: Longint;
-begin
-  if not WizardSilent then
-  begin
-    Exit;
-  end;
-
-  Exec(
-    ExpandConstant('{sys}\taskkill.exe'),
-    '/IM niu.exe /F',
-    '',
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  );
-end;
-
 procedure RemoveAppDirFromUserPath();
 var
   PathValue: string;
@@ -269,10 +250,15 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssInstall then
-  begin
-    CloseRunningNiubashForSilentUpdate();
-  end;
+  { niubash#511: silent updates used to pre-kill niu.exe with
+    `taskkill /IM niu.exe /F` at ssInstall. That force-kill shape is part
+    of the Behavior:Win32/DefenseEvasion.A!ml fingerprint audited in
+    #511, and it is redundant: [Setup] declares CloseApplications=yes
+    with CloseApplicationsFilter=niu.exe (Restart Manager graceful
+    close), and `niu --self-update` already passes /CLOSEAPPLICATIONS
+    /FORCECLOSEAPPLICATIONS. A silent install run WITHOUT those switches
+    now fails on locked files instead of force-killing the user's
+    shell. }
 
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('path') then
   begin
