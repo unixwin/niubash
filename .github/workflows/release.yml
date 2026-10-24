@@ -872,6 +872,25 @@ jobs:
             Write-Host "$(Split-Path -Leaf $file): $hash"
           }
 
+      # niubash#511 (§4.4): pre-release Defender scan of every *.exe/*.msix
+      # under dist/ (the staged tree's niu.exe and the installers — the
+      # bytes Defender convicted in 1.4.4). WARN-ONLY: the scan script
+      # itself fails closed (exit 1 on any conviction or scan error), but
+      # while releases ship unsigned, ML convictions are a standing risk
+      # and blocking here would dead-lock publication, so the verdict is
+      # converted to a warning annotation and the release proceeds.
+      # Precondition for flipping this step to blocking: the release
+      # binaries carry the code-signing certificate (Certum OV, #511
+      # §4.3). The script is invoked as a child process so its `exit 1`
+      # cannot end the step before the warning is emitted.
+      - name: Defender scan of release artifacts (warn-only, niubash#511)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File ./scripts/release/defender-scan.ps1 dist
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::Defender scan did not pass on the ${{ matrix.arch }} release artifacts (exit $LASTEXITCODE) — shipping under the warn-only policy (niubash#511); first SOP step is a WDSI false-positive submission with the exact artifact bytes"
+          }
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:

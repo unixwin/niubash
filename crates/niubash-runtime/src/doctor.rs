@@ -314,6 +314,32 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     };
     writeln!(out, "  {info} terminal            {terminal}")?;
 
+    // ── Advisory: elevation channel (niubash#429, decision A) ────────────
+    // Elevation is delegated, never built in: the Rubash `sudo` builtin
+    // stays disabled unless NIU_ENABLE_RUBASH_SUDO=1, and an external
+    // provider owns UAC — Microsoft sudo (in-box from Windows build
+    // 26045) or gsudo. The doctor names the provider this machine
+    // actually has so a user without either (the common Windows 10 case)
+    // learns why `sudo` does not elevate here instead of hitting a
+    // silently disabled builtin. Windows-only layer (#194): on other
+    // platforms the row is n/a and the probes never run.
+    let provider = if platform.checks_windows_command_layer() {
+        elevation_provider(
+            windows_build_number(),
+            find_exe_on_path("sudo").is_some(),
+            find_exe_on_path("gsudo").is_some(),
+        )
+    } else {
+        ElevationProvider::None
+    };
+    let (tone, row) = elevation_channel_row(provider, platform);
+    let mark = match tone {
+        RowTone::Ok => ok,
+        RowTone::Warn => warn,
+        RowTone::Info => info,
+    };
+    writeln!(out, "  {mark}{row}")?;
+
     // ── Advisory: TAB completion shape (2026-10-12 discovery surface) ─────
     // The completion style was invisible config before 1.4.1 — the wizard
     // never asked and the env variable was hidden knowledge. The doctor
@@ -588,18 +614,163 @@ fn bundled_tools_row(bundled: &[&str], platform: Platform) -> String {
     }
 }
 
-/// What `command -v niu` resolves to on this machine: the first PATH entry
-/// that carries an executable `niu` (`.exe`/`.bat`/`.cmd`/`.com`, plus the
-/// extension-less form some POSIX-side PATHs expose). `None` = nothing on
-/// PATH answers to `niu`.
+/// Severity of a doctor row that carries text produced by a helper (the
+/// report loop owns the colored/plain markers; helpers stay pure so the
+/// row wording is unit-testable without capturing stdout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowTone {
+    Ok,
+    Warn,
+    Info,
+}
+
+/// Which external provider answers elevation on this machine
+/// (niubash#429, decision A). Niubash itself never elevates: the Rubash
+/// `sudo` builtin is opt-in only and UAC belongs to one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ElevationProvider {
+    /// Microsoft sudo: in-box `sudo.exe`, ships from Windows build 26045
+    /// (Windows 11 24H2).
+    MsSudo,
+    /// gsudo on PATH (the WPM package).
+    Gsudo,
+    /// Neither provider detected.
+    None,
+}
+
+/// First Windows build carrying Microsoft sudo in-box (Windows 11 24H2).
+const MS_SUDO_MIN_BUILD: u32 = 26045;
+
+/// Classify the elevation channel from the raw probes. Microsoft sudo
+/// wins when both providers exist — it is the in-box channel, and gsudo
+/// stays reachable by its own name either way. The build floor is part
+/// of the test: a stray `sudo.exe` on an older build is not Microsoft
+/// sudo and must not be reported as one.
+fn elevation_provider(
+    build: Option<u32>,
+    ms_sudo_on_path: bool,
+    gsudo_on_path: bool,
+) -> ElevationProvider {
+    if ms_sudo_on_path && matches!(build, Some(b) if b >= MS_SUDO_MIN_BUILD) {
+        ElevationProvider::MsSudo
+    } else if gsudo_on_path {
+        ElevationProvider::Gsudo
+    } else {
+        ElevationProvider::None
+    }
+}
+
+/// The `elevation channel` advisory row (without the leading two-space
+/// indent; the caller prepends the tone marker). Non-Windows platforms
+/// reuse the shared n/a wording (#194): the MS-sudo/gsudo layer is a
+/// Windows component, and the row must never read as "no provider
+/// found" there.
+fn elevation_channel_row(provider: ElevationProvider, platform: Platform) -> (RowTone, String) {
+    if !platform.checks_windows_command_layer() {
+        return (
+            RowTone::Info,
+            format!(" elevation channel   {WINDOWS_COMPONENT_NA}"),
+        );
+    }
+    match provider {
+        ElevationProvider::MsSudo => (
+            RowTone::Ok,
+            " elevation channel   Microsoft sudo detected (build >= 26045, sudo.exe on PATH) \
+             — elevation is delegated to Windows; niu's builtin sudo stays off \
+             (opt-in: NIU_ENABLE_RUBASH_SUDO=1)"
+                .to_string(),
+        ),
+        ElevationProvider::Gsudo => (
+            RowTone::Ok,
+            " elevation channel   gsudo detected on PATH — elevation is delegated to \
+             gsudo; niu's builtin sudo stays off (opt-in: NIU_ENABLE_RUBASH_SUDO=1)"
+                .to_string(),
+        ),
+        ElevationProvider::None => (
+            RowTone::Warn,
+            " elevation channel   none found — install Microsoft sudo (Windows 11 24H2, \
+             build >= 26045) or gsudo (`wpm install gsudo`) for elevated commands; \
+             niu's builtin sudo is opt-in only (NIU_ENABLE_RUBASH_SUDO=1)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Windows OS build number, read from the registry
+/// (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber`).
+/// `None` when unreadable — callers treat an unknown build as below any
+/// floor rather than guessing.
+#[cfg(windows)]
+fn windows_build_number() -> Option<u32> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ,
+    };
+
+    fn to_wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    const KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+    let mut key: HKEY = std::ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            to_wide(KEY).as_ptr(),
+            0,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if opened != ERROR_SUCCESS {
+        return None;
+    }
+    let mut buf = vec![0u16; 64];
+    let mut len = (buf.len() * std::mem::size_of::<u16>()) as u32;
+    let mut ty = 0u32;
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            to_wide("CurrentBuildNumber").as_ptr(),
+            std::ptr::null(),
+            &mut ty,
+            buf.as_mut_ptr() as *mut u8,
+            &mut len,
+        )
+    };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if status != ERROR_SUCCESS || ty != REG_SZ {
+        return None;
+    }
+    let chars = (len as usize / 2).min(buf.len());
+    let text = String::from_utf16_lossy(&buf[..chars]);
+    text.trim_end_matches('\0').trim().parse().ok()
+}
+
+#[cfg(not(windows))]
+fn windows_build_number() -> Option<u32> {
+    None
+}
+
+/// What `command -v niu` resolves to on this machine. `None` = nothing
+/// on PATH answers to `niu`.
 fn find_niu_on_path() -> Option<PathBuf> {
+    find_exe_on_path("niu")
+}
+
+/// The first PATH entry that carries an executable `name` (`.exe`/
+/// `.bat`/`.cmd`/`.com`, plus the extension-less form some POSIX-side
+/// PATHs expose). `None` = nothing on PATH answers to `name`.
+fn find_exe_on_path(name: &str) -> Option<PathBuf> {
     const EXTS: &[&str] = &[".exe", ".bat", ".cmd", ".com", ""];
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .filter(|dir| !dir.as_os_str().is_empty())
         .find_map(|dir| {
             EXTS.iter()
-                .map(|ext| dir.join(format!("niu{ext}")))
+                .map(|ext| dir.join(format!("{name}{ext}")))
                 .find(|candidate| candidate.is_file())
         })
 }
@@ -684,5 +855,99 @@ mod tests {
         assert_ne!(Platform::Windows.label(), Platform::Unix.label());
         assert_eq!(Platform::Windows.label(), "windows");
         assert_eq!(Platform::Unix.label(), "unix");
+    }
+
+    // ── niubash#429 (decision A): the elevation-channel advisory ──────────
+
+    /// Microsoft sudo counts only at or above the 24H2 build floor, and
+    /// only with `sudo.exe` actually on PATH; an unknown build never
+    /// counts as new enough.
+    #[test]
+    fn ms_sudo_needs_the_build_floor_and_the_binary() {
+        assert_eq!(
+            elevation_provider(Some(MS_SUDO_MIN_BUILD), true, false),
+            ElevationProvider::MsSudo
+        );
+        assert_eq!(
+            elevation_provider(Some(MS_SUDO_MIN_BUILD - 1), true, false),
+            ElevationProvider::None
+        );
+        assert_eq!(
+            elevation_provider(Some(MS_SUDO_MIN_BUILD), false, false),
+            ElevationProvider::None
+        );
+        assert_eq!(
+            elevation_provider(None, true, false),
+            ElevationProvider::None
+        );
+    }
+
+    /// gsudo is the fallback channel; Microsoft sudo (the in-box one)
+    /// wins when both are present.
+    #[test]
+    fn gsudo_is_the_fallback_channel() {
+        assert_eq!(
+            elevation_provider(Some(MS_SUDO_MIN_BUILD - 1), true, true),
+            ElevationProvider::Gsudo
+        );
+        assert_eq!(
+            elevation_provider(None, false, true),
+            ElevationProvider::Gsudo
+        );
+        assert_eq!(
+            elevation_provider(Some(MS_SUDO_MIN_BUILD), true, true),
+            ElevationProvider::MsSudo
+        );
+        assert_eq!(
+            elevation_provider(None, false, false),
+            ElevationProvider::None
+        );
+    }
+
+    /// On Windows the row names the detected provider, and the
+    /// no-provider row is a warning that names both install routes and
+    /// the opt-in builtin variable.
+    #[test]
+    fn elevation_row_reports_the_windows_channel() {
+        let (tone, row) = elevation_channel_row(ElevationProvider::MsSudo, Platform::Windows);
+        assert_eq!(tone, RowTone::Ok);
+        assert!(row.contains("Microsoft sudo"), "{row}");
+
+        let (tone, row) = elevation_channel_row(ElevationProvider::Gsudo, Platform::Windows);
+        assert_eq!(tone, RowTone::Ok);
+        assert!(row.contains("gsudo"), "{row}");
+
+        let (tone, row) = elevation_channel_row(ElevationProvider::None, Platform::Windows);
+        assert_eq!(tone, RowTone::Warn);
+        assert!(row.contains("none found"), "{row}");
+        assert!(row.contains("26045"), "{row}");
+        assert!(row.contains("gsudo"), "{row}");
+        assert!(row.contains("NIU_ENABLE_RUBASH_SUDO"), "{row}");
+    }
+
+    /// Non-Windows platforms never report a missing provider: the layer
+    /// is a Windows component and the row reads n/a whatever the probes
+    /// would have said.
+    #[test]
+    fn elevation_row_is_na_off_windows() {
+        for provider in [
+            ElevationProvider::MsSudo,
+            ElevationProvider::Gsudo,
+            ElevationProvider::None,
+        ] {
+            let (tone, row) = elevation_channel_row(provider, Platform::Unix);
+            assert_eq!(tone, RowTone::Info);
+            assert!(row.contains(WINDOWS_COMPONENT_NA), "{row}");
+            assert!(!row.contains("none found"), "{row}");
+        }
+    }
+
+    /// The build probe is compile-time honest: off Windows it reports
+    /// unknown rather than inventing a build.
+    #[test]
+    fn windows_build_number_is_unknown_off_windows() {
+        if !cfg!(windows) {
+            assert_eq!(windows_build_number(), None);
+        }
     }
 }

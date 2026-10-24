@@ -438,23 +438,43 @@ executables and command links.
 
 ## Elevated Commands
 
-Niubash disables Rubash's experimental `sudo` builtin by default. Windows
-elevation is delegated to the WPM `gsudo` package, which owns UAC, process
-creation, environment forwarding, and console handling.
+Elevation is a three-layer delegation (niubash#429): Niubash never
+elevates by itself — one of the layers below owns UAC, process creation,
+environment forwarding, and console handling.
 
-```bash
-command -v gsudo
-gsudo --version
-gsudo your-command args
-```
+1. **The Rubash `sudo` builtin — off by default, opt-in only.** The
+   embedded engine's experimental elevation builtin stays disabled
+   unless `NIU_ENABLE_RUBASH_SUDO=1` is set before Niubash starts (or a
+   host runs `enable sudo` with an elevation handler installed). It
+   exists for host integrators and is not the recommended Windows path.
 
-Install or repair it through the active WPM provider when necessary:
+2. **Microsoft sudo — the in-box channel on current Windows.** Windows
+   ships `sudo.exe` from build 26045 onward (generally available with
+   Windows 11 24H2); enable it under Settings → System → For
+   developers → Sudo. Where present it is the preferred provider:
+   `sudo your-command` works with no extra install.
 
-```bash
-wpm search gsudo
-wpm install gsudo
-wpm links rebuild --force
-```
+3. **gsudo — the package channel, and the only one on Windows 10.**
+   The WPM `gsudo` package covers the machines Microsoft sudo never
+   reaches:
+
+   ```bash
+   command -v gsudo
+   gsudo --version
+   gsudo your-command args
+   ```
+
+   Install or repair it through the active WPM provider when necessary:
+
+   ```bash
+   wpm search gsudo
+   wpm install gsudo
+   wpm links rebuild --force
+   ```
+
+`niu doctor` reports which channel a machine actually has (the
+`elevation channel` row), so a missing provider is visible before a
+script depends on it.
 
 Do not alias `sudo` automatically in shared scripts. A user who wants the
 Unix spelling interactively can add this to `~/.niubashrc`:
@@ -462,11 +482,6 @@ Unix spelling interactively can add this to `~/.niubashrc`:
 ```bash
 alias sudo='gsudo'
 ```
-
-The embedded Rubash elevation builtin remains available only for host
-integrators. Set `NIU_ENABLE_RUBASH_SUDO=1` before starting Niubash, or run
-`enable sudo` in a shell that supports an elevation handler. This is not the
-recommended Windows path.
 
 ## Windows Paths And Home
 
@@ -481,6 +496,39 @@ cd ~
 Prompt display should normally render the home directory as `~` and descendants
 as `~/path`, but internal process paths remain native Windows paths. Treat
 `/c/Users/...` as compatibility input, not the primary model.
+
+### `$HOME` stays in Windows form (niubash#522)
+
+`$HOME` is deliberately the Windows-native form (`C:/Users/you`), not
+the POSIX-persona form (`/c/Users/you`) that `$PWD` renders in. The two
+spellings name the same directory, so inside your home directory
+`test "$HOME" = "$PWD"` is false — that inequality is expected, not a
+bug.
+
+The Windows form is a contract, not an oversight: `$HOME` is exported
+to every child process, and native Windows tools that receive it
+(editors, Git, language runtimes, anything outside the shell) expect a
+path they can open directly. The `/c/...` persona is a shell-side
+compatibility spelling for input and display; most other programs
+cannot resolve it.
+
+Scripts that need the POSIX form of home convert explicitly, at the
+point of use:
+
+```bash
+# $HOME (C:/Users/you) -> persona form (/c/Users/you)
+drive=$(printf '%s' "${HOME:0:1}" | tr '[:upper:]' '[:lower:]')
+home_posix="/$drive${HOME:2}"
+
+# and back: /c/Users/you -> c:/Users/you (drive-letter case is cosmetic
+# to Windows APIs)
+home_win="${home_posix:1:1}:${home_posix:2}"
+```
+
+If Git for Windows is installed, `cygpath -u "$HOME"` and
+`cygpath -w "$home_posix"` do the same conversions. Conversely, when
+handing a path to a native tool, pass `$HOME`-style Windows forms
+as-is — do not pre-convert them to the persona spelling.
 
 ## Updating
 
