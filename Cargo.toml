@@ -14,6 +14,15 @@ repository = "https://github.com/unixwin/niubash"
 name = "niu"
 path = "src/main.rs"
 
+# niubash#464: the forwarding shim is niu's own binary now (it used to be
+# built from the rubash repository and borrowed through the packager).
+# scripts/package-release.ps1 builds it from this tree and stages one
+# canonical copy as winuxcmd\usr\bin\niu-shim.exe; `niu --relink-shells`
+# copies that payload to a bash/sh face wherever a hardlink cannot exist.
+[[bin]]
+name = "bash"
+path = "src/bin/bash.rs"
+
 [workspace]
 members = [".", "crates/niubash-runtime"]
 resolver = "2"

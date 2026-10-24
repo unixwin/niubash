@@ -152,16 +152,17 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
     }
 
     fn replace(&mut self, entries: Vec<String>) -> io::Result<()> {
-        // Full rewrite (`history -d`, the interactive recording veto):
-        // memory AND file end up holding exactly `entries`. Unlike -c this
-        // deliberately truncates the file, so it uses the truncating clear.
+        // Full rewrite (`history -d`, the interactive recording veto, the
+        // rewrite of a recorded raw line to its history expansion):
+        // memory AND file end up holding exactly `entries`. This cannot be
+        // a clear plus per-entry appends — reedline's save drops an entry
+        // identical to the previous one, and the expansion rewrite
+        // records a text identical to the previous entry by definition
+        // (rubash#1248) — so it goes through the staging rebuild in
+        // `LiveFileBackedHistory::replace_all`.
         self.inner
-            .clear()
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        for entry in entries {
-            self.append(entry)?;
-        }
-        Ok(())
+            .replace_all(entries)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     fn write_history(&mut self, path: &str) -> io::Result<()> {
@@ -537,6 +538,70 @@ impl LiveFileBackedHistory {
         }
     }
 
+    /// Replace the whole list with exactly `entries` — the
+    /// `HistoryProvider::replace` contract (`history -d`, the interactive
+    /// recording veto, and pre_process_line's rewrite of a recorded raw
+    /// line to its history expansion).
+    ///
+    /// This cannot be built from per-entry saves: reedline's
+    /// `FileBackedHistory::save` drops an entry identical to the one
+    /// before it ("only saves a value if it's different than the last
+    /// value") — editor UX for typed lines, not list semantics. GNU's
+    /// history list holds consecutive duplicates, and the expansion
+    /// rewrite records a text that is by definition equal to the previous
+    /// entry (`!!` expands to it), so a clear-and-save rewrite silently
+    /// lost exactly that entry (rubash#1248). Reedline's load path
+    /// applies no such filter, so the exact list is staged through a
+    /// file and the reader rebuilt from it — the same rebuild
+    /// [`Self::reload_from_file`] performs. A degraded memory-only
+    /// session stages through a scratch file in the temp dir and keeps
+    /// the rebuilt reader bound to it (the wrapper still reports no
+    /// backing file); if even the staging fails there, fall back to the
+    /// clear-and-save rewrite rather than failing the caller.
+    pub(crate) fn replace_all(&mut self, entries: Vec<String>) -> Result<()> {
+        let capacity = self.capacity;
+        let state = self.lock_mut()?;
+        let staged_path = match state.path.clone() {
+            Some(path) => path,
+            None => std::env::temp_dir()
+                .join(format!("niubash-history-stage-{}.tmp", std::process::id())),
+        };
+        // Reedline's on-disk escaping (file_backed.rs `encode_entry`): an
+        // embedded newline is stored as the literal four characters
+        // `<\n>`, and the load path decodes it back.
+        let mut text = String::new();
+        for entry in &entries {
+            text.push_str(&entry.replace('\n', "<\\n>"));
+            text.push('\n');
+        }
+        let rebuilt = std::fs::write(&staged_path, text)
+            .map_err(ReedlineError::from)
+            .and_then(|()| FileBackedHistory::with_file(capacity, staged_path));
+        match rebuilt {
+            Ok(history) => {
+                state.history = history;
+                if let Some(path) = state.path.clone() {
+                    state.signature = file_signature_lossy(&path, state);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if state.path.is_some() {
+                    return Err(error);
+                }
+                // Memory-only staging failed: history is auxiliary state,
+                // so degrade to the clear-and-save rewrite (which cannot
+                // hold consecutive duplicates) instead of failing.
+                state.history.clear()?;
+                for entry in entries {
+                    let _ = state.history.save(HistoryItem::from_command_line(entry));
+                }
+                Self::sync_state(state)?;
+                Ok(())
+            }
+        }
+    }
+
     /// GNU `history -c`: empty the in-memory list WITHOUT touching the
     /// backing file (builtins/history.def:185 clears entries/timestamps
     /// only; the file is written by `-a`/`-w` explicitly).
@@ -853,6 +918,62 @@ mod tests {
         assert!(entries.is_empty());
         provider.append("memory only".to_string()).unwrap();
         assert_eq!(provider.entries().unwrap(), vec!["memory only"]);
+    }
+
+    #[test]
+    fn provider_replace_preserves_consecutive_duplicates() {
+        // rubash#1248: the provider `replace` contract is an exact list
+        // rewrite. The interactive expansion rewrite calls it with a list
+        // whose last two entries are identical (the expansion of `!!`
+        // replaces the recorded raw line) — reedline's save-level
+        // duplicate filter must not eat the second one.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        provider.append("T1248=${T1248}alpha".to_string()).unwrap();
+        provider.append("!!".to_string()).unwrap();
+        provider
+            .replace(vec![
+                "T1248=${T1248}alpha".to_string(),
+                "T1248=${T1248}alpha".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            ["T1248=${T1248}alpha", "T1248=${T1248}alpha"]
+        );
+        // A later append still lands after the rewritten pair.
+        provider.append("echo next".to_string()).unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            ["T1248=${T1248}alpha", "T1248=${T1248}alpha", "echo next"]
+        );
+        // And the backing file holds exactly the same three lines.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "T1248=${T1248}alpha\nT1248=${T1248}alpha\necho next\n"
+        );
+    }
+
+    #[test]
+    fn provider_replace_preserves_duplicates_when_memory_only() {
+        // The degraded memory-only provider stages its replace through a
+        // scratch file; the exact-list contract holds there too.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("blocker");
+        std::fs::write(&parent, "file, not a dir").unwrap();
+        let mut provider = RubashHistoryProvider::with_file(
+            100,
+            parent.join(".niubash_history"),
+            HistoryMode::Shared,
+        );
+        provider.append("same".to_string()).unwrap();
+        provider
+            .replace(vec!["same".to_string(), "same".to_string()])
+            .unwrap();
+        assert_eq!(provider.entries().unwrap(), ["same", "same"]);
     }
 
     #[test]

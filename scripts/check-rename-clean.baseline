@@ -6,6 +6,7 @@
 AGENTS.md	- Rename brand gate: `sh scripts/check-rename-clean.sh` must pass (residue is an exact baseline diff; runs under Git Bash and `winuxsh -c` alike). Intentional residue change → regenerate `scripts/check-rename-clean.baseline` via `sh scripts/check-rename-clean.sh --regen` and review the diff.
 AGENTS.md	- Runtime environment variables use the `NIU_` prefix. During the transition, niubash also sets/reads the deprecated `WINUXSH_SHELL` and `WINUXSH_ROOT` names because current rubash upstream still reads them; these bridges are marked with comments and must be removed once rubash renames its readers. (The `*_SHELL_PATH_STYLE` pair was retired rubash-side in rubash#556 / rubash#537: the engine always renders `$PWD`/`pwd` in the POSIX persona form, and niubash no longer exports the variables.)
 AGENTS.md	- Use `~/.niubashrc` as the primary-only interactive user entry point for plugin lists, theme selection, exports, aliases, functions, and shell startup logic. Do not read, migrate, delete, or modify the legacy `~/.winuxshrc` and `~/.winshrc` startup files. An explicitly opted-in `~/.bashrc` fallback is a future plan only, not supported behavior. Startup must not automatically run setup or plugin sync, create the primary rc, or rewrite user rc files. Issue #359 case A (1.4.2): plugin management never writes the rc at all — the manifest (`plugins.toml` + `sources/registry.toml`) drives the generated loader `~/.niubash/generated/plugins.niu`, which the host sources read-only BEFORE the user rc; `niu setup` still writes the rc (create/whole-file) until its 1.4.3 create-only convergence. Never re-attach the retired managed-block writers (`assets::write_managed_block`/`remove_managed_block`) to any verb — the 359.12 structure ratchet fails the build's test suite if you do.
+CHANGELOG.md	- **MSIX Store 版静默降级**（#504/#505）：旧 NSIS 安装残留的 `WINUXCMD_PATH`/`WINUXSH_ROOT` 环境变量会让 packaged 进程解析到旧安装树；package identity 下现按外来安装忽略。
 crates/niubash-runtime/src/completion/path.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
 crates/niubash-runtime/src/msix.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT"))
 crates/niubash-runtime/src/msix.rs	/// `NIU_ROOT`/`WINUXSH_ROOT` already present in the environment (the
@@ -58,7 +59,7 @@ docs/planning/oh-my-winuxsh-bundle-plan.md	so `niu plugin update oh-my-winuxsh .
 docs/planning/oh-my-winuxsh-bundle-plan.md	tags: [niubash, plugins, oh-my-winuxsh, bundle, roadmap]
 docs/planning/user-rc-read-only.md	Decision update: retire both `~/.winuxshrc` and `~/.winshrc` as startup inputs.
 docs/planning/user-rc-read-only.md	The same protection applies to legacy `~/.winuxshrc` and `~/.winshrc`, symlink
-docs/src/advanced-usage.md	`~/.niubashrc` is the only startup file: the legacy `~/.winuxshrc`,
+docs/src/advanced-usage.md	legacy `~/.winuxshrc` and `~/.winshrc` names are never read, migrated, or
 docs/src/architecture.md	- `~/.niubashrc` is also the **only** entry point: the legacy `~/.winuxshrc`,
 docs/src/getting-started.md	`~/.winuxshrc`, `~/.winshrc`, and `~/.bashrc` files are never sourced,
 docs/src/niubash-roadmap.md	  legacy `~/.winuxshrc`/`~/.winshrc`/`~/.bashrc` names are never read.
@@ -84,6 +85,12 @@ scripts/harvest/eco-test.py	                    "NIU_REPL_STARTUP", "BASH_ENV", 
 scripts/harvest/snapshots/wt92-local-20261005/test-results.jsonl	{"ts": "2026-10-05T03:20:16Z", "content_hash": "ccdb6cdce47107a97c59fa8ec900f9623e662b25", "repo": "icy/pacapt", "path": "lib/zz_main.sh", "tier": "t3", "category": "framework", "bytes": 8357, "source_url": "https://raw.githubusercontent.com/icy/pacapt/94c4b2c2209659a0e0b745d7c9417033bd71a399/lib/zz_main.sh", "niu": "D:\\repo\\niubash-wt-hres\\target\\debug\\niu.exe", "rubash": "D:\\repo\\rubash\\target\\debug\\rubash.exe", "local_work": "E:\\eco-harvest\\tmp\\work-ccdb6cdce471\\asset.sh", "rubash_ok": true, "phases_ms": {"startup": 2301, "source_wall": 328, "enter1": 83, "enter2": 82}, "phase": null, "tail": [], "storm_lines": 9, "storm_head": ["niu: _sun_tools_init: command not found", "niu: _require_programs: command not found", "niu: _debug: command not found", "rams/Winuxsh/niu: cannot execute binary file", "niu: _PACMAN_detect: command not found", "niu: _die: command not found", "niu: _die: command not found", "niu: _validate_operation: command not found", "niu: _not_implemented: command not found"], "signature": "ok", "verdict": "OK", "ms": 5634}
 scripts/journey/golden-journey.py	                "WINUXSH_ROOT", "NIU_THEME", "OSH_THEME", "BASH_IT_THEME"):
 skills/niubash/SKILL.md	  the shell through `NIU_SHELL`. `WINUXSH_SHELL` is a deprecated bridge
+src/bin/bash.rs	    for variable in ["NIU_SHELL", "WINUXSH_SHELL"] {
+src/bin/bash.rs	    for variable in ["WINUXSH", "SHELL"] {
+src/bin/bash.rs	//! `winuxsh.exe` / `WINUXSH_SHELL` names stay in the fallback chain so
+src/bin/bash.rs	/// The pre-rename `winuxsh` stays in the chain so layouts built by older
+src/bin/bash.rs	const SHELL_EXE_NAMES: [&str; 2] = ["niu", "winuxsh"];
+src/bin/bash.rs	const SHELL_EXE_NAMES: [&str; 2] = ["niu.exe", "winuxsh.exe"];
 src/main.rs	            std::env::set_var("WINUXSH_SHELL", path);
 src/main.rs	    // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.
 tests/issue153_root_slash_arg.rs	        .env_remove("WINUXSH_ROOT")
