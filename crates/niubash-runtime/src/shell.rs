@@ -833,12 +833,13 @@ impl Shell {
         if !needs_reader {
             return None;
         }
-        let (code, exit_shell) = rubash::script_driver::run_script_with_history_at_line_offset_tracked(
-            &mut self.executor,
-            script,
-            line_offset,
-            None,
-        );
+        let (code, exit_shell) =
+            rubash::script_driver::run_script_with_history_at_line_offset_tracked(
+                &mut self.executor,
+                script,
+                line_offset,
+                None,
+            );
         if exit_shell {
             // The grouped reader already excluded the parse-abort discard
             // (niubash R1): the engine unwound this submission for real —
