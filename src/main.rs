@@ -1415,6 +1415,14 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
 fn run_stdin_script() -> anyhow::Result<()> {
     let mut shell = niubash_runtime::Shell::new_for_stdin_script()?;
     shell.executor.inherit_process_stdin();
+    // niubash#548: this reader is niu's own stdin driver, so it owes the
+    // marker the engine's driver arms in its run_stdin_script
+    // (shell.c:780-786 read_from_stdin): without it `$-` lacks `s` even
+    // though every command arrives on stdin (`printf 'echo $-' | niu`
+    // printed `hB` where GNU and standalone rubash print `hBs`).
+    shell
+        .executor
+        .set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
     // unixwin/niubash#431: bind the diagnostic/$0 name the way the engine's
     // own stdin driver does for `-s` (rubash script_driver run_stdin_script):
     // GNU never rebinds $0 for a stdin script (shell.c:1613 is the
