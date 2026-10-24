@@ -366,6 +366,15 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             eprintln!("niu: {}: No such file or directory", first);
             piped_stdout::finish_and_exit(127);
         }
+        if script.is_dir() {
+            // niubash#547: a directory operand exists but is not an
+            // executable script — GNU answers `Is a directory` with
+            // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm).
+            // Without this arm the fs::read below leaks the raw io error
+            // (`Is a directory (os error 21)`) with rc 1.
+            eprintln!("niu: {}: Is a directory", first);
+            piped_stdout::finish_and_exit(126);
+        }
         // general.c:718-741 check_binary_file: NUL in the first line(s)
         // or an ELF image is refused with EX_BINARY_FILE (126).
         let bytes = std::fs::read(&script)?;
@@ -805,6 +814,20 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
                 }
                 std::io::ErrorKind::PermissionDenied => {
                     eprintln!("niu: {script_name}: Permission denied");
+                    piped_stdout::finish_and_exit(126);
+                }
+                // niubash#547: a directory operand is a found-but-not-
+                // executable script (GNU: `bash: /tmp: Is a directory`,
+                // rc 126), not the launcher's raw `(os error 21)` + rc 1
+                // with the operand name dropped. read_to_string on a
+                // directory surfaces as IsADirectory on Unix; the is_dir
+                // probe covers platforms whose error kind differs.
+                std::io::ErrorKind::IsADirectory => {
+                    eprintln!("niu: {script_name}: Is a directory");
+                    piped_stdout::finish_and_exit(126);
+                }
+                _ if path.is_dir() => {
+                    eprintln!("niu: {script_name}: Is a directory");
                     piped_stdout::finish_and_exit(126);
                 }
                 _ => return Err(error.into()),
