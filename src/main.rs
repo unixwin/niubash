@@ -5178,10 +5178,11 @@ fn relink_shell_faces(rest: &[String]) -> anyhow::Result<()> {
 
     if !quiet {
         println!(
-            "niu: shell links under {}: {} created, {} already current, {} skipped, {} failed",
+            "niu: shell links under {}: {} created, {} already current, {} on the forwarding shim, {} skipped, {} failed",
             root.display(),
             report.created.len(),
             report.already_current.len(),
+            report.shimmed.len(),
             report.skipped.len(),
             report.failed.len()
         );

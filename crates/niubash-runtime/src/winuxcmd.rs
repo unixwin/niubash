@@ -696,7 +696,7 @@ fn has_required_command_links(bin_dir: &Path, engine: &Path) -> bool {
     let materialized = bin_dir.join("winuxcmd.exe");
     let engine = if materialized.is_file() {
         if !super::shell_links::same_file(&materialized, engine)
-            && !same_file_bytes(&materialized, engine)
+            && !super::shell_links::same_file_bytes(&materialized, engine)
         {
             return false;
         }
@@ -765,7 +765,9 @@ fn bundled_shim_is_current(target: &Path, engine: &Path, forwarder: &Path) -> bo
         if !image.is_file() {
             continue;
         }
-        if super::shell_links::same_file(image, target) || same_file_bytes(image, target) {
+        if super::shell_links::same_file(image, target)
+            || super::shell_links::same_file_bytes(image, target)
+        {
             return true;
         }
     }
@@ -818,23 +820,6 @@ fn wpm_declares_command(root: &Path, name: &str) -> bool {
     false
 }
 
-/// Byte-for-byte equality for the copy-fallback shape: two paths that are
-/// not the same file may still carry the same image (the Inno/zip payload
-/// lays every bundled name down as a copy). Sizes first so the common
-/// "different image" answer costs two stats instead of two 4 MB reads.
-fn same_file_bytes(a: &Path, b: &Path) -> bool {
-    let (Ok(a_meta), Ok(b_meta)) = (a.metadata(), b.metadata()) else {
-        return false;
-    };
-    if a_meta.len() != b_meta.len() {
-        return false;
-    }
-    let (Ok(a_bytes), Ok(b_bytes)) = (std::fs::read(a), std::fs::read(b)) else {
-        return false;
-    };
-    a_bytes == b_bytes
-}
-
 /// Create `target` as a hardlink of `source`, copying the bytes where the
 /// file system cannot link — the documented fallback shape for these shims
 /// (`preinstall.json`: "copies on file systems without hardlink support").
@@ -877,7 +862,9 @@ fn prepare_packaged_links_root(links_root: &Path, install_root: &Path, exe: &Pat
     // package image (WindowsApps refuses the link), so activation falls
     // back to a copy — and a byte-equal copy IS the current image, not a
     // reason to re-materialize (and re-verify every link) each session.
-    if !super::shell_links::same_file(&engine_link, exe) && !same_file_bytes(&engine_link, exe) {
+    if !super::shell_links::same_file(&engine_link, exe)
+        && !super::shell_links::same_file_bytes(&engine_link, exe)
+    {
         if let Err(error) = materialize_link(exe, &engine_link) {
             log::debug!(
                 "msix engine link {} -> {} failed: {}",
@@ -1025,7 +1012,7 @@ fn ensure_opt_payload_copy(
         && component
             .exes
             .iter()
-            .all(|exe| same_file_bytes(&source.join(exe), &target.join(exe)));
+            .all(|exe| super::shell_links::same_file_bytes(&source.join(exe), &target.join(exe)));
     if current {
         return;
     }
@@ -1127,9 +1114,9 @@ pub fn reconcile_bundled_shims(root: &Path, force: bool) -> crate::shell_links::
             // shape; prefer the real hardlink where linking works so the
             // on-disk state matches `wpm install` and staleness stays
             // visible to identity checks.
-            let identical = [&engine, &forwarder]
-                .into_iter()
-                .find(|image| image.is_file() && same_file_bytes(image, &target));
+            let identical = [&engine, &forwarder].into_iter().find(|image| {
+                image.is_file() && super::shell_links::same_file_bytes(image, &target)
+            });
             if let Some(image) = identical {
                 match crate::shell_links::replace_with_link(image, &target) {
                     Ok(()) => report.created.push(target),
