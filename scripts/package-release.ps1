@@ -163,7 +163,63 @@ try {
         return $shimExe
     }
 
-    $bashShimExe = Resolve-RubashShim -Name "bash" -ExplicitPath $BashShimPath
+    function Resolve-ShellShim {
+        param(
+            [string]$ExplicitPath
+        )
+
+        if ($ExplicitPath) {
+            return Resolve-RubashShim -Name "bash" -ExplicitPath $ExplicitPath
+        }
+
+        # niubash#464: the forwarding shim is niu's own binary now (the
+        # `bash` bin in this repository). Build it from this tree; the
+        # borrowed rubash build above stays as the fallback, so a broken
+        # shim build can never block a release the old way still covers.
+        try {
+            if ($Target) {
+                $ownShimExe = Join-Path $RepoRoot "target\$Target\$Configuration\bash.exe"
+            }
+            else {
+                $ownShimExe = Join-Path $RepoRoot "target\$Configuration\bash.exe"
+            }
+            if (-not (Test-Path -LiteralPath $ownShimExe)) {
+                $buildArgs = @("build", "--manifest-path", (Join-Path $RepoRoot "Cargo.toml"), "--bin", "bash", "--locked")
+                if ($Configuration -eq "release") {
+                    $buildArgs += "--release"
+                }
+                if ($Target) {
+                    $buildArgs += @("--target", $Target)
+                }
+                $previousRustFlags = $env:RUSTFLAGS
+                try {
+                    $env:RUSTFLAGS = ""
+                    & cargo @buildArgs
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to build the niu bash shim."
+                    }
+                }
+                finally {
+                    if ($null -eq $previousRustFlags) {
+                        Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        $env:RUSTFLAGS = $previousRustFlags
+                    }
+                }
+            }
+            if (-not (Test-Path -LiteralPath $ownShimExe)) {
+                throw "bash.exe not found at $ownShimExe"
+            }
+            return $ownShimExe
+        }
+        catch {
+            Write-Warning "niubash#464: building the niu-owned bash shim failed ($($_.Exception.Message)); falling back to the rubash-built shim."
+            return Resolve-RubashShim -Name "bash" -ExplicitPath $null
+        }
+    }
+
+    $bashShimExe = Resolve-ShellShim -ExplicitPath $BashShimPath
     if ($ShShimPath) {
         $shShimExe = Resolve-RubashShim -Name "sh" -ExplicitPath $ShShimPath
     }
@@ -229,6 +285,11 @@ try {
     Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\sh.exe") -Force
     Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\bin\bash.exe") -Force
     Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\bin\sh.exe") -Force
+    # niubash#464: one canonical shim payload, staged under its own name.
+    # `niu --relink-shells` copies these bytes to a bash/sh face wherever a
+    # hardlink cannot exist (exFAT, network shares); the face copies above
+    # are the package layout for volumes that never run the relink.
+    Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\niu-shim.exe") -Force
     Copy-Item -LiteralPath $activationScript -Destination (Join-Path $stageDir "winuxcmd\usr\bin\activate-winuxcmd.sh") -Force
 
     # niubash#189: pre-installed wpm packages (see -PreinstallRoot above).

@@ -20,6 +20,17 @@
 //! `niu.exe` otherwise leaves the names pointing at the previous inode, exactly
 //! like package links after a while - see unixwin/WinuxCmd#1194 for the parking
 //! technique used here).
+//!
+//! niubash#464: the fallback above is implemented, not aspirational. Where a
+//! hardlink cannot be created (or an existing face cannot be re-linked), the
+//! face is materialized as a byte copy of the forwarding-shim payload the
+//! package stages at `<root>\winuxcmd\usr\bin\niu-shim.exe`
+//! ([`shim_payload_path`]), and the report counts such faces as `shimmed`
+//! rather than `created`: they work, at the old one-extra-process cost, until
+//! a later relink on a link-capable volume upgrades them to hardlinks. A face
+//! that already carries the payload's bytes (an earlier fallback, or the
+//! package's own layout) is upgraded the same way and only stays `shimmed`
+//! when the upgrade itself is refused by the filesystem.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -41,6 +52,10 @@ pub struct ShellLinkReport {
     pub created: Vec<PathBuf>,
     /// Links that already pointed at this `niu.exe`.
     pub already_current: Vec<PathBuf>,
+    /// Faces materialized as copies of the forwarding-shim payload because
+    /// a hardlink could not be created (niubash#464). Working faces, at the
+    /// shim's one-extra-process cost.
+    pub shimmed: Vec<PathBuf>,
     /// Names left alone, with the reason.
     pub skipped: Vec<(PathBuf, String)>,
     /// Names that could not be handled, with the error.
@@ -49,7 +64,7 @@ pub struct ShellLinkReport {
 
 impl ShellLinkReport {
     pub fn changed(&self) -> bool {
-        !self.created.is_empty()
+        !self.created.is_empty() || !self.shimmed.is_empty()
     }
 }
 
@@ -68,6 +83,23 @@ const MAX_ROOT_ANCESTORS: usize = 4;
 const SHELL_BIN_NAME: &str = "niu.exe";
 #[cfg(not(windows))]
 const SHELL_BIN_NAME: &str = "niu";
+
+/// The staged forwarding-shim payload's file name (niubash#464). The
+/// packager builds the `bash` bin from this repository and stages one
+/// canonical copy under `winuxcmd\usr\bin`; [`link_shell_faces`] copies
+/// those bytes to a face wherever a hardlink cannot exist.
+#[cfg(windows)]
+const SHIM_PAYLOAD_NAME: &str = "niu-shim.exe";
+#[cfg(not(windows))]
+const SHIM_PAYLOAD_NAME: &str = "niu-shim";
+
+/// Where the staged forwarding-shim payload lives inside an installation.
+pub fn shim_payload_path(root: &Path) -> PathBuf {
+    root.join("winuxcmd")
+        .join("usr")
+        .join("bin")
+        .join(SHIM_PAYLOAD_NAME)
+}
 
 /// The installation root of a running shell: the directory that holds
 /// the shell binary next to the bundled `winuxcmd` tree. Falls back to the
@@ -129,7 +161,31 @@ pub fn planned_shell_links(root: &Path, niu: &Path) -> Vec<PathBuf> {
 /// replacing it would be a surprise. With `force`, such a name is parked the
 /// way `wpm` parks a held payload file: renamed aside, replaced by the link,
 /// and only then dropped, so a shell that is running right now keeps its bytes.
+///
+/// Where a hardlink cannot exist at all (niubash#464: exFAT, a network
+/// share, a volume without link support), the face falls back to a byte
+/// copy of the staged forwarding-shim payload instead of failing - see the
+/// module docs.
 pub fn link_shell_faces(root: &Path, niu: &Path, force: bool) -> ShellLinkReport {
+    link_shell_faces_with_linker(root, niu, force, &hard_link)
+}
+
+/// `std::fs::hard_link` behind the concrete signature the relink worker
+/// injects (the generic std function does not coerce to `&dyn Fn`).
+fn hard_link(source: &Path, link: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(source, link)
+}
+
+/// The worker behind [`link_shell_faces`], with the link operation
+/// injected so tests can drive the niubash#464 fallback paths on a
+/// filesystem that would otherwise happily hardlink.
+fn link_shell_faces_with_linker(
+    root: &Path,
+    niu: &Path,
+    force: bool,
+    hard_link: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> ShellLinkReport {
+    let payload = shim_payload_path(root);
     let mut report = ShellLinkReport::default();
     for link in planned_shell_links(root, niu) {
         let Some(directory) = link.parent() else {
@@ -141,28 +197,61 @@ pub fn link_shell_faces(root: &Path, niu: &Path, force: bool) -> ShellLinkReport
                 .push((link, "directory is not present".to_string()));
             continue;
         }
+        if link.is_dir() {
+            report
+                .failed
+                .push((link, "is a directory; refusing to replace it".to_string()));
+            continue;
+        }
         if same_file(&link, niu) {
             report.already_current.push(link);
             continue;
         }
-        match std::fs::hard_link(niu, &link) {
-            Ok(()) => report.created.push(link),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !force {
-                    report.skipped.push((
-                        link,
-                        format!(
-                            "exists and is not this {SHELL_BIN_NAME}; pass --force to replace it"
-                        ),
-                    ));
-                    continue;
-                }
-                match replace_with_link(niu, &link) {
-                    Ok(()) => report.created.push(link),
-                    Err(error) => report.failed.push((link, error.to_string())),
-                }
+        let present = std::fs::symlink_metadata(&link).is_ok();
+        if present && same_file_bytes(&link, &payload) {
+            // Already a working face carrying the staged shim's bytes, laid
+            // down by an earlier fallback or by the package layout itself.
+            // Upgrade to a hardlink where the volume allows; where it does
+            // not, the face is honestly reported as shimmed, not failed.
+            match replace_with_link_using(niu, &link, hard_link) {
+                Ok(()) => report.created.push(link),
+                Err(_) => report.shimmed.push(link),
             }
-            Err(error) => report.failed.push((link, error.to_string())),
+            continue;
+        }
+        if present && same_file_bytes(&link, niu) {
+            // A byte copy of the shell itself (the zip/Inno payload shape):
+            // it IS this shell, so the same upgrade applies; a refused link
+            // leaves a working face that already points at the right bytes.
+            match replace_with_link_using(niu, &link, hard_link) {
+                Ok(()) => report.created.push(link),
+                Err(_) => report.already_current.push(link),
+            }
+            continue;
+        }
+        if present && !force {
+            report.skipped.push((
+                link,
+                format!("exists and is not this {SHELL_BIN_NAME}; pass --force to replace it"),
+            ));
+            continue;
+        }
+        if present {
+            match replace_with_link_using(niu, &link, hard_link) {
+                Ok(()) => report.created.push(link),
+                Err(_) => match replace_with_shim_copy(&payload, &link) {
+                    Ok(()) => report.shimmed.push(link),
+                    Err(error) => report.failed.push((link, error.to_string())),
+                },
+            }
+            continue;
+        }
+        match hard_link(niu, &link) {
+            Ok(()) => report.created.push(link),
+            Err(_) => match install_shim_copy(&payload, &link) {
+                Ok(()) => report.shimmed.push(link),
+                Err(error) => report.failed.push((link, error.to_string())),
+            },
         }
     }
     report
@@ -171,6 +260,32 @@ pub fn link_shell_faces(root: &Path, niu: &Path, force: bool) -> ShellLinkReport
 /// Park `link`, point it at `source`, then drop the parked name (the parking
 /// step is what makes this safe while a process still runs from `link`).
 pub(crate) fn replace_with_link(source: &Path, link: &Path) -> Result<()> {
+    replace_with_link_using(source, link, &hard_link)
+}
+
+fn replace_with_link_using(
+    source: &Path,
+    link: &Path,
+    hard_link: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let parked = park_existing(link)?;
+    match hard_link(source, link) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&parked);
+            Ok(())
+        }
+        Err(error) => {
+            // Put the original back rather than leaving the name missing.
+            let _ = std::fs::rename(&parked, link);
+            Err(error).with_context(|| format!("could not link '{}'", link.display()))
+        }
+    }
+}
+
+/// Move `link` aside under a sibling parking name and return the parked
+/// path (unixwin/WinuxCmd#1194: a process still running from `link` keeps
+/// its bytes under the parked name).
+fn park_existing(link: &Path) -> Result<PathBuf> {
     let mut parked_name = link
         .file_name()
         .map(|name| name.to_os_string())
@@ -185,7 +300,17 @@ pub(crate) fn replace_with_link(source: &Path, link: &Path) -> Result<()> {
             link.display()
         )
     })?;
-    match std::fs::hard_link(source, link) {
+    Ok(parked)
+}
+
+/// Replace `link` with a byte copy of the staged shim payload (niubash#464):
+/// the face keeps working - through the forwarding shim - on volumes where
+/// no hardlink can exist. Same parking discipline as [`replace_with_link`],
+/// so a shell running from the old face is not disturbed.
+fn replace_with_shim_copy(payload: &Path, link: &Path) -> Result<()> {
+    let bytes = read_shim_payload(payload)?;
+    let parked = park_existing(link)?;
+    match write_new_face(&bytes, link) {
         Ok(()) => {
             let _ = std::fs::remove_file(&parked);
             Ok(())
@@ -193,9 +318,40 @@ pub(crate) fn replace_with_link(source: &Path, link: &Path) -> Result<()> {
         Err(error) => {
             // Put the original back rather than leaving the name missing.
             let _ = std::fs::rename(&parked, link);
-            Err(error).with_context(|| format!("could not link '{}'", link.display()))
+            Err(error).with_context(|| format!("could not write '{}'", link.display()))
         }
     }
+}
+
+/// Lay the staged shim payload's bytes down as a new face at `link`
+/// (niubash#464 fallback for a face that does not exist yet).
+fn install_shim_copy(payload: &Path, link: &Path) -> Result<()> {
+    let bytes = read_shim_payload(payload)?;
+    write_new_face(&bytes, link).with_context(|| format!("could not write '{}'", link.display()))
+}
+
+fn read_shim_payload(payload: &Path) -> Result<Vec<u8>> {
+    std::fs::read(payload).with_context(|| {
+        format!(
+            "could not read the staged shim payload '{}'",
+            payload.display()
+        )
+    })
+}
+
+/// Write `bytes` as a brand-new file at `link` (`create_new`, so a face
+/// that raced into existence is never clobbered), executable on Unix.
+fn write_new_face(bytes: &[u8], link: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o755);
+    }
+    let mut file = options.open(link)?;
+    file.write_all(bytes)
 }
 
 /// Whether two names refer to the same file. Hardlinks share one identity per
@@ -255,6 +411,24 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
         return false;
     };
     meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino()
+}
+
+/// Byte-for-byte equality for the copy-fallback shape: two paths that are
+/// not the same file may still carry the same image (the Inno/zip payload
+/// lays every bundled name down as a copy, and the niubash#464 relink
+/// fallback lays faces down as shim copies). Sizes first so the common
+/// "different image" answer costs two stats instead of two full reads.
+pub(crate) fn same_file_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(a_meta), Ok(b_meta)) = (a.metadata(), b.metadata()) else {
+        return false;
+    };
+    if a_meta.len() != b_meta.len() {
+        return false;
+    }
+    let (Ok(a_bytes), Ok(b_bytes)) = (std::fs::read(a), std::fs::read(b)) else {
+        return false;
+    };
+    a_bytes == b_bytes
 }
 
 #[cfg(test)]
@@ -425,6 +599,99 @@ mod tests {
             .skipped
             .iter()
             .all(|(_, reason)| reason.contains("not present")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn fake_install_with_payload(tag: &str) -> (PathBuf, PathBuf) {
+        let (root, niu) = fake_install(tag);
+        std::fs::write(shim_payload_path(&root), b"shim payload").unwrap();
+        (root, niu)
+    }
+
+    /// A volume that refuses every hardlink (the exFAT / network-share
+    /// shape niubash#464 is about).
+    fn always_fail_link(_source: &Path, _link: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "hardlinks are not available on this volume",
+        ))
+    }
+
+    #[test]
+    fn faces_fall_back_to_shim_copies_where_hardlinks_fail() {
+        let (root, niu) = fake_install_with_payload("shim-fallback");
+
+        let report = link_shell_faces_with_linker(&root, &niu, false, &always_fail_link);
+        assert_eq!(report.shimmed.len(), 6, "{report:?}");
+        assert!(report.created.is_empty(), "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        for link in planned_shell_links(&root, &niu) {
+            assert_eq!(std::fs::read(&link).unwrap(), b"shim payload");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn faces_fail_honestly_where_links_fail_and_no_payload_is_staged() {
+        let (root, niu) = fake_install("shim-no-payload");
+
+        let report = link_shell_faces_with_linker(&root, &niu, false, &always_fail_link);
+        assert_eq!(report.failed.len(), 6, "{report:?}");
+        assert!(report.shimmed.is_empty(), "{report:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn existing_shim_faces_stay_shimmed_where_links_fail() {
+        let (root, niu) = fake_install_with_payload("shim-stays");
+        for link in planned_shell_links(&root, &niu) {
+            std::fs::write(&link, b"shim payload").unwrap();
+        }
+
+        let report = link_shell_faces_with_linker(&root, &niu, false, &always_fail_link);
+        assert_eq!(report.shimmed.len(), 6, "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        for link in planned_shell_links(&root, &niu) {
+            assert_eq!(std::fs::read(&link).unwrap(), b"shim payload");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn existing_shim_faces_upgrade_to_hardlinks_where_links_work() {
+        let (root, niu) = fake_install_with_payload("shim-upgrade");
+        for link in planned_shell_links(&root, &niu) {
+            std::fs::write(&link, b"shim payload").unwrap();
+        }
+
+        let report = link_shell_faces(&root, &niu, false);
+        assert_eq!(report.created.len(), 6, "{report:?}");
+        assert!(report.shimmed.is_empty(), "{report:?}");
+        for link in planned_shell_links(&root, &niu) {
+            assert!(
+                same_file(&link, &niu),
+                "{} is not the shell",
+                link.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_face_is_refused_not_replaced() {
+        let (root, niu) = fake_install("directory-face");
+        let face = root.join("bin").join(SHELL_FACES[0]);
+        std::fs::create_dir_all(&face).unwrap();
+
+        let report = link_shell_faces(&root, &niu, true);
+        assert!(face.is_dir(), "the directory face must survive relink");
+        assert_eq!(report.failed.len(), 1, "{report:?}");
+        assert!(report.failed[0].1.contains("directory"), "{report:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

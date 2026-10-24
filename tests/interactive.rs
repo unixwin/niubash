@@ -436,7 +436,6 @@ fn ctrl_z_at_prompt_is_ignored_but_shell_survives() {
 
 /// `!!` re-executes the previous command live.
 #[test]
-#[ignore = "rubash#286: pre-existing on 688f224+f7a5b69 (reproduced on a baseline clone, 8/9 runs red) - interactive history expansion is dead; unaffected by the niubash#145 retirement"]
 fn history_bang_bang_reexecutes_last_command() {
     if !require_pty_or_skip("history_bang_bang_reexecutes_last_command") {
         return;
@@ -455,7 +454,6 @@ fn history_bang_bang_reexecutes_last_command() {
 
 /// `!$` reuses the last argument of the previous command.
 #[test]
-#[ignore = "rubash#286: pre-existing on 688f224+f7a5b69 (reproduced on a baseline clone, 8/9 runs red) - interactive history expansion is dead; unaffected by the niubash#145 retirement"]
 fn history_bang_dollar_reuses_last_argument() {
     if !require_pty_or_skip("history_bang_dollar_reuses_last_argument") {
         return;
@@ -642,7 +640,6 @@ fn parser_level_alias_value_expands_across_prompts() {
 /// `set -H` re-enables it.
 #[test]
 #[allow(non_snake_case)]
-#[ignore = "rubash#286: pre-existing on 688f224+f7a5b69 (reproduced on a baseline clone) - interactive history expansion/recording is dead; unaffected by the niubash#145 retirement"]
 fn set_H_flips_history_expansion() {
     if !require_pty_or_skip("set_H_flips_history_expansion") {
         return;
@@ -947,7 +944,7 @@ fn history_file_persists_across_sessions() {
 
 /// `set +o history` stops recording new entries into the history file.
 #[test]
-#[ignore = "rubash#286: pre-existing on 688f224+f7a5b69 (reproduced on a baseline clone) - interactive history expansion/recording is dead; unaffected by the niubash#145 retirement"]
+#[ignore = "rubash#1248 follow-up: expansion is wired (execute_interactive_line drives pre_process_interactive_line), but the `set +o history` RECORDING veto is not - reedline owns the history instance and the engine's interactive_history_veto_recording is not consulted yet"]
 fn set_plus_o_history_stops_recording() {
     if !require_pty_or_skip("set_plus_o_history_stops_recording") {
         return;
