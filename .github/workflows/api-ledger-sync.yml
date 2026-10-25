@@ -1,0 +1,37 @@
+name: api-ledger-sync
+
+# rubash#595 (1.5.0 Session API RFC, step M-0): the API ledger
+# (docs/api-ledger.md) is one document checked into both this repo
+# and rubash. This job keeps the two copies from quietly becoming
+# two ledgers: the copy here must stay byte-identical to the copy
+# in rubash master. The engine-side enforcement (symbol tripwire +
+# pairing compile) lives in rubash's niu-canary workflow.
+#
+# This file only ADDS a job; no existing job's gates change.
+
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ledger-sync:
+    name: API ledger matches the rubash copy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout rubash master
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Ledger copies are identical
+        run: cmp docs/api-ledger.md ../rubash/docs/api-ledger.md

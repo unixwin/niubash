@@ -1,0 +1,309 @@
+# API Ledger — the engine surface niubash consumes
+
+> This file is checked into **both** repositories (rubash and niubash)
+> at `docs/api-ledger.md`. The two copies are one document: they must
+> stay byte-identical, and the pairing CI on both sides enforces it
+> (see §5). Edit one copy, mirror the edit to the other in the same
+> change, or the canary goes red.
+>
+> Status: M-0 ledger for the 1.5.0 Session API RFC (rubash#595;
+> in-repo design record: `docs/design/1.5.0-session-api.md` in rubash).
+> This ledger is the mechanical form of that RFC's §3.2 consumer census
+> and §9 step M-0. During the 1.5.0 workspace split, the surface listed
+> here is **frozen** in the RFC's terms: no listed symbol may be
+> removed, renamed, or re-signed without a ledger update in the same
+> change and a tier assignment for whatever replaces it (§4).
+
+## 0. Census basis and counting rules
+
+Measured on 2026-10-25 against:
+
+- rubash master `abd9be95b556556149ab44c45d0e80d27eefa8f6`
+- niubash master `b53e6bffcfa4abe25a1e2176b16b63cdc24f487b`
+
+Counting rules (so any future re-census is comparable):
+
+- **Path references**: occurrences of the token pattern
+  `rubash::[A-Za-z0-9_:]+` in `*.rs` under niubash `crates/` and `src/`
+  (all files, including in-file test modules), unioned with the items
+  named in `use rubash::{...}` lists. At the basis: **118 inline
+  occurrences, 59 distinct inline paths, 61 distinct paths after the
+  use-list union**, spread over exactly **6 files**:
+  `crates/niubash-runtime/src/{shell,repl,history,ctrl_c}.rs`,
+  `crates/niubash-runtime/src/completion/command.rs`, `src/main.rs`.
+- **Method calls**: occurrences of `executor.<name>(` where the
+  receiver is niubash's held `rubash::Executor` (the `Shell::executor`
+  field, locals, and `&mut Executor` parameters in the files above),
+  unioned with `Executor::<name>` associated calls.
+- **Engine surface**: counted from rubash `src/lib.rs` and `src/`
+  declarations at the basis commit (rules stated per figure below).
+
+## 1. The engine surface today (rubash side)
+
+At the basis commit, `src/lib.rs` declares **18 public modules**
+(`grep -c '^pub mod' src/lib.rs`):
+
+`build_info`, `builtins`, `console_readline`, `executor`, `expand`,
+`history`, `history_expand`, `invocation`, `jobs`, `lexer`, `locale`,
+`parser`, `posix_errors`, `proc_vfs`, `script_driver`, `shell`,
+`token_str`, `usage` — plus one `pub(crate)` module (`fd`). There is no
+`#[doc(hidden)]` separation and there are no feature gates.
+
+Root re-exports (8 unconditional): `Executor`, `ExecuteError`
+(from `executor`); `Token`, `TokenKind` (from `lexer`);
+`decode_to_visible_text` (from `locale`); `Ast`, `CommandNode`,
+`Redirect` (from `parser`). Windows-only root re-exports (3):
+`ElevationOutput`, `ElevationRequest`, `SudoMode`.
+
+`Executor`'s public methods are spread across the `src/executor/`
+tree: **121 distinct `pub fn` names / 125 declaration sites**
+(`grep -rhoE 'pub fn [a-z_0-9]+' src/executor/`), 61 of the declaration
+sites in `public_accessors.rs` alone. Nothing marks which of these are
+contract and which are plumbing — that is the problem this ledger and
+the 1.5.0 tiers exist to fix.
+
+> Census drift note: the RFC's §3.1 says "20 public modules". That
+> figure does not reproduce at the basis commit (18 `pub mod` + 1
+> `pub(crate)`). The ledger records the measured figure; the RFC text
+> is design record and is not rewritten retroactively.
+
+## 2. What niubash consumes (the compatibility baseline)
+
+### 2.1 Path references by family (distinct paths, with occurrences)
+
+| Family | Items (occurrences) |
+| --- | --- |
+| `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
+| root re-exports | `Executor` (1), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
+| `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today |
+| `script_driver` | `run_source_with_line_offset` (2), `run_stdin_script`, `run_script_with_history`, `run_script_with_history_at_line_offset_tracked`, `run_interactive_stdin`, `pre_process_interactive_line`, `prepare_interactive_history`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`, `InteractiveExpansion` + variants `Execute`, `Discard` (1 each unless noted) |
+| `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1) |
+| `lexer` | `tokenize` (2), `tokenize_with_initial_posix` (1), `has_unclosed_input_syntax` (1), `has_unclosed_input_syntax_posix` (1) |
+| `shell::bind_registry` | `BindEntry` (9), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 20 references in total |
+| `invocation` | `ShellInvocation` (3, + `parse`, §2.2), `materialize_command_file` (1) |
+| `usage` | `LONG_OPTIONS` (3), `SHORT_OPTIONS` (2), `LONG_OPTIONS_WITH_VALUE` (1), `show_shell_version` (1), `show_shell_help` (1), `is_short_option_letter` (1), `invocation_help_name` (1), plus 2 module-level references |
+| `builtins::kill` | `note_console_ctrl_c` (1), `consume_background_wrapper_handshake` (1) — internal hooks; one of these disappearing is what broke niubash master in the bulk-merge incident |
+
+### 2.2 `Executor` methods niubash calls (receiver-verified)
+
+38 distinct methods. Occurrence counts by the §0 rule; the RFC §3.2
+top set (`set_env` ×55, `set_shell_option` ×22, `last_exit_code` ×11,
+`set_shopt_option` ×7, `inherit_process_stdin` ×5,
+`set_history_provider` ×1, `complete_line` ×1, counted there as raw
+`.name(` occurrences across `crates/` + `src/`) reproduces exactly
+under that rule at the basis commit.
+
+| Method | Calls | Method | Calls |
+| --- | --- | --- | --- |
+| `get_env` | 84 | `set_positional_params` | 3 |
+| `set_env` | 49 | `has_compspec` | 3 |
+| `set_shell_option` | 22 (+1 assoc) | `execute_ast` | 3 |
+| `last_exit_code` | 11 | `bind_registry_generation` | 3 |
+| `set_shopt_option` | 6 | `functions_snapshot` | 2 |
+| `unset_env` | 6 | `export_env` | 2 |
+| `set_last_exit_code` | 6 | `env_vars_snapshot` | 2 |
+| `inherit_process_stdin` | 5 | `call_function_with_env` | 2 |
+| `resolve_shell_path` | 4 | `take_parse_error` | 1 |
+| `expand_prompt_string_mut` | 4 | `take_exit_jump_pending` | 1 |
+| `alias_expansion_enabled` | 4 | `set_winuxcmd_path` | 1 |
+| `resolve_shell_path_from_env` (assoc) | 3 | `set_shell_root` | 1 |
+| `builtin_command_names` (assoc) | 2 | `set_compatible_shell_path` | 1 |
+| `new` (assoc) | 2 | `set_builtin_disabled` | 1 |
+| `set_history_provider` | 1 | `run_exit_trap_with_status` | 1 |
+| `complete_line` | 1 (+1 assoc) | `has_function` | 1 |
+| `resolve_shell_path_process_entries_from_env` (assoc) | 1 | `find_script_on_path` | 1 |
+|  |  | `execute_prompt_command` | 1 |
+|  |  | `execute_command` | 1 |
+|  |  | `bind_registry_snapshot` | 1 |
+|  |  | `aliases_snapshot` | 1 |
+
+Two further non-`Executor` methods are consumed:
+`ShellInvocation::parse` (2) and `WordMetadata::literal` (1).
+
+Note what the receiver-verified count surfaces that the RFC's raw
+count did not: the single most-called `Executor` method is the read
+side, `get_env` (84). The RFC §8 mapping already assigns it to the
+Tier A variables view; the working set a designed API must put first
+is read *and* write, not write alone.
+
+## 3. Alignment with the RFC census (§3.2)
+
+Re-measured line by line at the basis commits, the RFC's §3.2 table
+holds: every family it lists is present with matching membership;
+the bind-registry family totals exactly the 20 references it claims;
+its seven method counts reproduce exactly under its counting rule.
+Additions this ledger makes, without contradicting it: the use-list
+union (brings in `Ast` and the `Executor` type itself), the
+receiver-verified full method set (§2.2), and the §1 drift note on
+the module count.
+
+## 4. Tier assignment and target homes
+
+Per RFC §8 (mapping) — recorded here so a frozen symbol's destination
+is a ledger fact, not a later guess. During the split (step S2 of the
+RFC), Tier C items niubash touches stay reachable through the facade
+or the gated internals feature until their migration step (§9 M-3 of
+the RFC) lands.
+
+| Consumed family | Tier | Target home |
+| --- | --- | --- |
+| `Executor` lifecycle + `new` | A | `Session::builder()` |
+| env methods (`get_env`, `set_env`, `unset_env`, `export_env`, `env_vars_snapshot`) | A | `Session::variables()` view |
+| option methods (`set_shell_option`, `set_shopt_option`) | A | `Session::options()` view |
+| `last_exit_code` / `set_last_exit_code` | A | `Session::last_status` + `RunOutcome` |
+| `complete_line`, `has_compspec` | A | `Session::complete` + compspec view |
+| `set_history_provider` + `HistoryProvider` | A | builder-injected capability (trait unchanged) |
+| `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` + functions view |
+| `inherit_process_stdin` | A | builder stream binding |
+| `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome` |
+| `script_driver` run family | A (driver wrappers B) | `Session::run`; thin wrappers stay in the driver crate |
+| `pre_process_interactive_line` + `InteractiveExpansion` | A | `Session::prepare_line` |
+| completeness (`has_unclosed_input_syntax*`, `script_uses_*`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`) | A / B | `Session::needs_more_input`; helpers in `api::syntax` |
+| `usage` printers and option tables | B | stay the shared host/engine bridge |
+| `parser` family (`parse*`, `CommandNode`, `ParseLoopOptions`, `WordMetadata`, `ast_print`) | B | `Session::parse` + `api::syntax` view types (no internal `Ast` in Tier A) |
+| `lexer` family (`tokenize*`) | B | `api::syntax` token view |
+| `shell::bind_registry` (`BindEntry`, `BindKind`) | C | interactive layer's own gated surface |
+| `invocation` (`ShellInvocation`, `materialize_command_file`) | C | bin/driver internal |
+| `builtins::kill` console hooks | C | replaced by `Session::interrupt` / `inject_signal` |
+| snapshots & misc accessors (`aliases_snapshot`, `bind_registry_snapshot`, `bind_registry_generation`, `alias_expansion_enabled`, `shell_pwd_display_path`, `resolve_shell_path*`, `find_script_on_path`, `set_winuxcmd_path`, `set_shell_root`, `set_compatible_shell_path`, `set_builtin_disabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals |
+
+## 5. The canary: how the freeze is enforced
+
+Two halves, by design — a fast tripwire and an authoritative compile:
+
+1. **Ledger tripwire** (`scripts/check-api-ledger.py` in rubash,
+   stdlib-only): parses §6's symbol block and verifies every recorded
+   symbol still exists in the rubash tree. Runs in rubash CI
+   (`.github/workflows/niu-canary.yml`, job `ledger`) and can be run
+   by hand: `python3 scripts/check-api-ledger.py`. It proves presence
+   by declaration patterns only — a tripwire, not a type checker.
+2. **Pairing compile** (same workflow, job `pairing`): checks out
+   niubash master beside this tree (the sibling layout niubash's
+   `[patch]` expects), and runs `cargo check --workspace --locked`
+   in niubash against this exact rubash tree. A symbol that vanishes
+   or changes signature fails the *engine's* CI, before merge — the
+   failure mode whose absence let the lost-kill-hook incident reach
+   the consumer's master.
+3. **Same-source check** (same job): the niubash copy of this ledger
+   must be byte-identical to this one (`cmp`), so "the ledger" can
+   never quietly become two ledgers. niubash carries the mirror check
+   in its own `.github/workflows/api-ledger-sync.yml`.
+
+Demonstration record (delete-a-symbol goes red, restore goes green):
+`docs/api-ledger-canary-demo.md` in rubash.
+
+## 6. Machine-checkable symbol block
+
+`scripts/check-api-ledger.py` parses exactly this block. Entry kinds:
+`item` (a `pub` item at the path), `variant` (an enum variant),
+`method` (a `pub fn` of that name on the named type). Keep it sorted
+by kind, then path; the census tables above are the human record of
+the same set.
+
+```api-ledger
+item rubash::Ast
+item rubash::Executor
+item rubash::Token
+item rubash::TokenKind
+item rubash::builtins::kill::consume_background_wrapper_handshake
+item rubash::builtins::kill::note_console_ctrl_c
+item rubash::decode_to_visible_text
+item rubash::executor::ExecuteError
+item rubash::executor::Executor
+item rubash::executor::shell_pwd_display_path
+item rubash::history::HistoryProvider
+item rubash::invocation::ShellInvocation
+item rubash::invocation::materialize_command_file
+item rubash::lexer::has_unclosed_input_syntax
+item rubash::lexer::has_unclosed_input_syntax_posix
+item rubash::lexer::tokenize
+item rubash::lexer::tokenize_with_initial_posix
+item rubash::parser::CommandNode
+item rubash::parser::ParseLoopOptions
+item rubash::parser::WordMetadata
+item rubash::parser::ast_print::pretty_print_command
+item rubash::parser::parse
+item rubash::parser::parse_with_options
+item rubash::script_driver::InteractiveExpansion
+item rubash::script_driver::READ_STDIN_MARKER
+item rubash::script_driver::check_binary_file
+item rubash::script_driver::heredoc_delimiter_unclosed_quote
+item rubash::script_driver::pre_process_interactive_line
+item rubash::script_driver::prepare_interactive_history
+item rubash::script_driver::run_interactive_stdin
+item rubash::script_driver::run_script_with_history
+item rubash::script_driver::run_script_with_history_at_line_offset_tracked
+item rubash::script_driver::run_source_with_line_offset
+item rubash::script_driver::run_stdin_script
+item rubash::script_driver::script_uses_aliases
+item rubash::script_driver::script_uses_history
+item rubash::shell::bind_registry::BindEntry
+item rubash::shell::bind_registry::BindKind
+item rubash::usage::LONG_OPTIONS
+item rubash::usage::LONG_OPTIONS_WITH_VALUE
+item rubash::usage::SHORT_OPTIONS
+item rubash::usage::invocation_help_name
+item rubash::usage::is_short_option_letter
+item rubash::usage::show_shell_help
+item rubash::usage::show_shell_version
+variant rubash::TokenKind::Assignment
+variant rubash::TokenKind::BraceExpand
+variant rubash::TokenKind::CommandSubst
+variant rubash::TokenKind::Word
+variant rubash::executor::ExecuteError::CommandNotFound
+variant rubash::executor::ExecuteError::ExitCode
+variant rubash::executor::ExecuteError::ExpansionFailure
+variant rubash::executor::ExecuteError::FatalFunctionError
+variant rubash::executor::ExecuteError::IoError
+variant rubash::executor::ExecuteError::Return
+variant rubash::script_driver::InteractiveExpansion::Discard
+variant rubash::script_driver::InteractiveExpansion::Execute
+variant rubash::shell::bind_registry::BindKind::Execute
+variant rubash::shell::bind_registry::BindKind::Function
+variant rubash::shell::bind_registry::BindKind::Macro
+method rubash::executor::Executor::alias_expansion_enabled
+method rubash::executor::Executor::aliases_snapshot
+method rubash::executor::Executor::bind_registry_generation
+method rubash::executor::Executor::bind_registry_snapshot
+method rubash::executor::Executor::builtin_command_names
+method rubash::executor::Executor::call_function_with_env
+method rubash::executor::Executor::complete_line
+method rubash::executor::Executor::env_vars_snapshot
+method rubash::executor::Executor::execute_ast
+method rubash::executor::Executor::execute_command
+method rubash::executor::Executor::execute_prompt_command
+method rubash::executor::Executor::expand_prompt_string_mut
+method rubash::executor::Executor::export_env
+method rubash::executor::Executor::find_script_on_path
+method rubash::executor::Executor::functions_snapshot
+method rubash::executor::Executor::get_env
+method rubash::executor::Executor::has_compspec
+method rubash::executor::Executor::has_function
+method rubash::executor::Executor::inherit_process_stdin
+method rubash::executor::Executor::last_exit_code
+method rubash::executor::Executor::new
+method rubash::executor::Executor::resolve_shell_path
+method rubash::executor::Executor::resolve_shell_path_from_env
+method rubash::executor::Executor::resolve_shell_path_process_entries_from_env
+method rubash::executor::Executor::run_exit_trap_with_status
+method rubash::executor::Executor::set_builtin_disabled
+method rubash::executor::Executor::set_compatible_shell_path
+method rubash::executor::Executor::set_env
+method rubash::executor::Executor::set_history_provider
+method rubash::executor::Executor::set_last_exit_code
+method rubash::executor::Executor::set_positional_params
+method rubash::executor::Executor::set_shell_option
+method rubash::executor::Executor::set_shell_root
+method rubash::executor::Executor::set_shopt_option
+method rubash::executor::Executor::set_winuxcmd_path
+method rubash::executor::Executor::take_exit_jump_pending
+method rubash::executor::Executor::take_parse_error
+method rubash::executor::Executor::unset_env
+method rubash::invocation::ShellInvocation::parse
+method rubash::parser::WordMetadata::literal
+```
+
+*Ledger v1, 2026-10-25. Update rule: any change to the consumed
+surface (a symbol appears, vanishes, or moves tiers) updates this
+file — both copies — in the same change that causes it, with the
+census basis in §0 re-stated.*
