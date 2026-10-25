@@ -3338,6 +3338,26 @@ mod tests {
         );
     }
 
+    /// niubash#132: the system-clipboard paste binding must be registered
+    /// in every keymap set `build_edit_mode` ships — Emacs, Vi insert and
+    /// Vi normal — not just the two sets the original fix's tests sampled.
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn issue132_system_clipboard_paste_bound_in_all_keymap_sets() {
+        let mut emacs = default_emacs_keybindings();
+        let mut vi_insert = default_vi_insert_keybindings();
+        let mut vi_normal = default_vi_normal_keybindings();
+        add_system_clipboard_keybindings(&mut emacs);
+        add_system_clipboard_keybindings(&mut vi_insert);
+        add_system_clipboard_keybindings(&mut vi_normal);
+        for keybindings in [emacs, vi_insert, vi_normal] {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('v')),
+                Some(ReedlineEvent::Edit(vec![EditCommand::PasteSystem]))
+            );
+        }
+    }
+
     #[test]
     fn native_widget_preset_adds_autosuggest_accept_binding() {
         let mut keybindings = default_emacs_keybindings();
