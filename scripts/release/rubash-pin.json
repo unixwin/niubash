@@ -1,10 +1,11 @@
 {
   "schema": 1,
-  "rubash_rev": "4c41e2c048c6a9f3b7498a7d59b2db792d5648b1",
+  "rubash_rev": "d15a02dfee71b4ad8285ef60ed4b49e425e16d49",
   "rubash_version": "1.4.3",
   "description": "Rubash source pin for niubash releases (rubash#827, conclusion B). Every release job fetches exactly this rubash commit into ../rubash -- where the [patch] path override in Cargo.toml deterministically picks it up -- and fails the release unless the checked-out HEAD equals rubash_rev. This is the source-level twin of winuxcmd-pin.json (niubash#312/#327): the bundled WinuxCmd was already pinned, but the compiled engine was \"whatever rubash master HEAD was at build time\".",
   "notes": [
     "Recorded from rubash master 4c41e2c0 (2026-10-23, Cargo.toml version 1.4.3) — adds the #1181 bulk GNU-parity wave (112 fixes: procsub/trap/env/pattern families), #1182 (helper-parity gate), #1176 (local declared-unset env residue), #1180 (wait -p / coproc unbind), #1155 (trap trio: EXIT in comsubst/pipeline, global RETURN), #1122 (procsub real pids + line numbers), #1185 (musl/ohos libc::time_t deprecation allow — the rev that unbreaks cross-target checks).",
+    "Bumped to rubash master d15a02df (2026-10-25, version still 1.4.3): niubash master requires rubash::script_driver::run_script_with_history_at_line_offset_tracked (R1 grouped-reader exit-jump verdict API), absent in 4c41e2c0 — building niubash master against the old pin fails (niubash-runtime E0425).",
     "NOTE: the rev includes #863-era lock self-entry discipline; rubash Cargo.toml version 1.4.3 must match this pin's rubash_version."
   ]
 }
