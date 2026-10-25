@@ -68,8 +68,9 @@ BASH_ENV=~/.opencode.env niu -c 'echo "$DOCKER_CONTEXT"'
 ```
 
 `NIU_ENV` takes precedence over `BASH_ENV` when both are set. A leading `~`
-expands to your home directory. If the file does not exist, niubash prints
-an error to stderr and continues — matching GNU bash's `BASH_ENV` behavior.
+expands to your home directory. If the file does not exist, it is silently
+skipped and the command runs without it — the same behavior as GNU bash's
+`BASH_ENV`.
 
 With neither variable set, `-c` stays zero-load and fast.
 
@@ -97,11 +98,15 @@ regenerate `~/.niubash/generated/plugins.niu`, which the host sources
 read-only *before* your rc — so rc lines always win
 (see [Plugin Workflow](#plugin-workflow)).
 
-Interactive shells read ONE startup file: `~/.niubashrc`. If it does not
-exist, niubash falls back to `~/.bashrc` (the migration path for existing
-bash configurations). The two never stack — one config file, one blast
-radius, no implicit double-sourcing. Want the bash layer under niu? Add
-one visible line to `~/.niubashrc`:
+Interactive shells read ONE startup file: `~/.niubashrc`. By default it
+is the only candidate: if it does not exist, the shell starts with no rc
+at all — `~/.bashrc` is not read. The single exception is opt-in: if you
+explicitly picked the `bashrc-fallback` rc policy during setup
+(`niu setup --rc-policy bashrc-fallback`), a genuinely absent
+`~/.niubashrc` lets `~/.bashrc` fill the slot instead (the migration path
+for existing bash configurations). Either way the two never stack — one
+config file, one blast radius, no implicit double-sourcing. Want the bash
+layer under niu? Add one visible line to `~/.niubashrc`:
 
 ```bash
 [[ -f ~/.bashrc ]] && source ~/.bashrc
