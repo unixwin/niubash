@@ -695,10 +695,21 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     // Single-command non-interactive invocation (unless -i forces the
     // interactive startup files): skip REPL-only initialization — the prompt
     // backend, the completion directory scan, and the completion snapshot.
-    // Script files and piped stdin keep the full constructor: their rc
-    // semantics are the plain ones and their startup is amortized.
+    // Script files keep the full constructor: their rc semantics are the
+    // plain ones and their startup is amortized. Piped stdin takes the fast
+    // constructor only when the invocation is provably non-interactive
+    // (niubash#562): no -i and a non-terminal stdio set are exactly the
+    // complement of the interactive routes below (the engine's interactive
+    // stdin driver keys on `invocation.interactive`, the REPL on
+    // `invocation.interactive || stdio_is_interactive()`), so a fast-built
+    // stdin shell can never be promoted to either. The login profile chain
+    // and BASH_ENV are sourced after construction either way.
     let mut shell = if invocation.read_stdin {
-        niubash_runtime::Shell::new_for_stdin_script()?
+        if !invocation.interactive && !niubash_runtime::terminal::stdio_is_interactive() {
+            niubash_runtime::Shell::new_for_stdin_script_fast()?
+        } else {
+            niubash_runtime::Shell::new_for_stdin_script()?
+        }
     } else if invocation.command.is_some() && !invocation.interactive {
         niubash_runtime::Shell::new_one_shot()?
     } else {
@@ -1436,7 +1447,12 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
 }
 
 fn run_stdin_script() -> anyhow::Result<()> {
-    let mut shell = niubash_runtime::Shell::new_for_stdin_script()?;
+    // niubash#562: this route is only entered with no arguments and a
+    // non-terminal stdio set (see run()), so the shell can never be
+    // promoted to the REPL — take the non-interactive fast constructor
+    // and skip the REPL-only initialization (prompt backend, completion
+    // directory scan, completion snapshot) the full constructor pays.
+    let mut shell = niubash_runtime::Shell::new_for_stdin_script_fast()?;
     shell.executor.inherit_process_stdin();
     // niubash#548: this reader is niu's own stdin driver, so it owes the
     // marker the engine's driver arms in its run_stdin_script

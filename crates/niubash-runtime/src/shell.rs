@@ -202,11 +202,13 @@ pub struct Shell {
     // excluded at the set sites (`take_parse_error`), so an interactive
     // syntax error still only discards its own group.
     session_exit_jump: Option<i32>,
-    // One-shot fast path (`Shell::new_one_shot`): the shell serves a single
-    // non-interactive command, so REPL-only state is never initialized and
-    // the prompt backend stays a bare placeholder. Bash renders no prompt and
-    // reads no completion state when non-interactive; the history provider
-    // and managed aliases still stay (both pinned by contract tests for -c).
+    // Non-interactive fast path (`Shell::new_one_shot`,
+    // `Shell::new_for_stdin_script_fast`): the shell serves a non-interactive
+    // run that can never reach the REPL, so REPL-only state is never
+    // initialized and the prompt backend stays a bare placeholder. Bash
+    // renders no prompt and reads no completion state when non-interactive;
+    // the history provider and managed aliases still stay (both pinned by
+    // contract tests for -c).
     pub one_shot: bool,
 }
 
@@ -281,8 +283,29 @@ impl Shell {
     }
 
     /// Construct a shell for scripts arriving on process stdin.
+    ///
+    /// This is the full constructor: a stdin shell built here can still be
+    /// promoted to the REPL by its caller (`-i`, or a terminal stdio set),
+    /// so the prompt backend and completion state are initialized eagerly.
     pub fn new_for_stdin_script() -> anyhow::Result<Self> {
         Self::new_with_script_name(None, false)
+    }
+
+    /// Construct a shell for scripts arriving on process stdin when the
+    /// invocation is provably non-interactive (niubash#562): no `-i`, and
+    /// the stdio set is not a terminal, so the caller will never promote
+    /// this shell to the REPL or the interactive stdin driver.
+    ///
+    /// Same stdin naming contract as [`Shell::new_for_stdin_script`] (no
+    /// script name is pre-bound; the caller binds argv\[0\] itself), but
+    /// the REPL-only initialization is skipped exactly as in
+    /// [`Shell::new_one_shot`] — the full prompt backend, the completion
+    /// directory scan, and the completion snapshot. The startup-file
+    /// behavior is untouched: the login profile chain and BASH_ENV are
+    /// sourced by the caller after construction, driven by executor marks
+    /// and shell fields both constructors produce identically.
+    pub fn new_for_stdin_script_fast() -> anyhow::Result<Self> {
+        Self::new_with_script_name(None, true)
     }
 
     /// Construct a minimal shell for non-interactive one-shot execution
@@ -6599,6 +6622,32 @@ complete -F _envtooldyn_hook envtooldyn
 
         assert!(shell.one_shot);
         assert!(matches!(shell.prompt, PromptBackend::Template(_)));
+    }
+
+    #[test]
+    fn issue562_stdin_fast_shell_skips_repl_only_init() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = Shell::new_for_stdin_script_fast().expect("stdin fast shell should initialize");
+
+        // The #562 fast path carries the same REPL-free construction as a
+        // one-shot shell: placeholder prompt backend, no completion scan.
+        assert!(shell.one_shot);
+        assert!(matches!(shell.prompt, PromptBackend::Template(_)));
+        // …but the stdin naming contract is the stdin one, not the -c one:
+        // no script name is pre-bound, so the caller binds argv[0] itself
+        // (see run_stdin_script's __RUBASH_SCRIPT_NAME binding).
+        assert!(shell.executor.get_env("__RUBASH_SCRIPT_NAME").is_none());
+    }
+
+    #[test]
+    fn issue562_stdin_full_shell_keeps_repl_capable_init() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = Shell::new_for_stdin_script().expect("stdin shell should initialize");
+
+        // The full stdin constructor stays promotable to the REPL (-i or a
+        // terminal stdio set), so it must NOT take the fast path.
+        assert!(!shell.one_shot);
+        assert!(shell.executor.get_env("__RUBASH_SCRIPT_NAME").is_none());
     }
 
     #[test]
