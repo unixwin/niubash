@@ -588,10 +588,13 @@ fn parse_extglob_group(pat: &[char]) -> Option<(Vec<Vec<char>>, &[char])> {
     None
 }
 
-/// Parse a `[...]` class at the start of `pat`: returns (negated, ranges,
-/// chars consumed including the brackets). An unterminated class is None
-/// (the `[` then matches literally).
-fn parse_char_class(pat: &[char]) -> Option<(bool, Vec<(char, char)>, usize)> {
+/// Parsed `[...]` class: (negated, ranges, chars consumed including the
+/// brackets).
+type ParsedCharClass = (bool, Vec<(char, char)>, usize);
+
+/// Parse a `[...]` class at the start of `pat`. An unterminated class is
+/// None (the `[` then matches literally).
+fn parse_char_class(pat: &[char]) -> Option<ParsedCharClass> {
     let mut i = 1;
     let mut negated = false;
     if i < pat.len() && (pat[i] == '!' || pat[i] == '^') {
