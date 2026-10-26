@@ -56,9 +56,7 @@ fn run_c(script: &str) -> (bool, String) {
 fn tool_identity_ok(tool: &str, probe: &str, expect: &str) -> bool {
     let (ok, out) = run_c(&format!("command -v {tool}"));
     if !ok || out.trim().is_empty() {
-        eprintln!(
-            "issue76_93 stand-down: `{tool}` is not resolvable from the shell's PATH"
-        );
+        eprintln!("issue76_93 stand-down: `{tool}` is not resolvable from the shell's PATH");
         return false;
     }
     let resolved = out.trim().to_string();
@@ -88,7 +86,11 @@ fn fixture() -> Option<PathBuf> {
     // `wc -l` so the check does not depend on how the resolved find
     // echoes the starting path back (path spelling is not identity).
     let checks: [(&str, String, String); 4] = [
-        ("wc", "printf 'x\\ny\\n' | wc -l".to_string(), "2".to_string()),
+        (
+            "wc",
+            "printf 'x\\ny\\n' | wc -l".to_string(),
+            "2".to_string(),
+        ),
         ("cat", "printf 'ok' | cat".to_string(), "ok".to_string()),
         (
             "sort",
