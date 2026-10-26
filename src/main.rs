@@ -654,6 +654,23 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
+            if command_mode.login {
+                // niubash#587: the legacy `-c -l` shape used to swallow
+                // the login flag whole — no login mark, no profile
+                // chain, no env file, silently diverging from the same
+                // spelling on the engine route (`-lc`). Converge: mark
+                // login (the carrier + login_shell shopt pair, so `$-`
+                // gains `l`) and run the same non-interactive startup
+                // chain (profile chain, then the env file, #399/#402)
+                // before the command string; an `exit` in a startup
+                // file ends the invocation with its status. The order
+                // matches the engine route: the startup chain runs
+                // before BASH_EXECUTION_STRING is set below.
+                shell.executor.mark_login_shell();
+                if let Some(status) = shell.source_non_interactive_env() {
+                    finish_startup_exit(&mut shell, status);
+                }
+            }
             shell
                 .executor
                 .set_env("BASH_EXECUTION_STRING", command_mode.command);
@@ -681,13 +698,16 @@ struct LegacyCommandMode<'a> {
     command: &'a str,
     command_name: Option<&'a str>,
     positional_params: &'a [String],
+    login: bool,
 }
 
 /// `niu -c [-l|--login] <command> [name [params...]]` — the legacy shape kept
 /// for the `-c -l` combination. `rest` starts right after the `-c` word.
 fn parse_legacy_command_mode(rest: &[String]) -> anyhow::Result<LegacyCommandMode<'_>> {
     let mut index = 0;
+    let mut login = false;
     while matches!(rest.get(index).map(String::as_str), Some("-l" | "--login")) {
+        login = true;
         index += 1;
     }
     let Some(command) = rest.get(index) else {
@@ -699,6 +719,7 @@ fn parse_legacy_command_mode(rest: &[String]) -> anyhow::Result<LegacyCommandMod
         command,
         command_name,
         positional_params,
+        login,
     })
 }
 
