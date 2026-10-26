@@ -1360,6 +1360,20 @@ impl Shell {
         if login {
             // The profile chain replaces the rc branch only (shell.c:1833);
             // the env files above are not part of that exchange.
+            // niubash#590: the generated plugin loader is niu's own
+            // activation plane, not the rc — the docs promise the host
+            // sources it with no login exception, and returning here
+            // silently disabled every plugin and theme for login shells.
+            // Load it after the profile, before the completion snapshot
+            // (so loader-provided definitions and NIU_* registrations
+            // reach the REPL like they do on the rc branch); an `exit`
+            // inside unwinds like any startup file. Nothing else is
+            // sourced on this branch, so the double-execution guard has
+            // no rc text to scan (None). The rc itself stays skipped —
+            // that half is GNU login parity.
+            if let Some(status) = self.load_generated_plugin_loader(None) {
+                return Some(status);
+            }
             self.update_completion_state();
             if repl {
                 self.finish_startup();
