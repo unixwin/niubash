@@ -13,7 +13,7 @@ pub mod runtime;
 pub mod variables;
 pub mod winuxcmd_assets;
 
-pub use completer::{CompletionState, NiubashCompleter};
+pub use completer::{CommandProbe, CompletionState, NiubashCompleter};
 
 use std::path::PathBuf;
 

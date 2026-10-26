@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
+use rubash::executor::Executor;
 
 use crate::autosuggest::parse_style;
-use crate::completion::{command::CommandCompleter, CompletionState};
+use crate::completion::{command::CommandCompleter, CommandProbe, CompletionState};
 use crate::config::SyntaxHighlightConfig;
-use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path, split_shell_path_list};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SyntaxKind {
@@ -62,6 +63,9 @@ pub struct NiubashSyntaxHighlighter {
     styles: HashMap<SyntaxKind, Style>,
     commands: HashSet<String>,
     completion_state: Option<Arc<Mutex<CompletionState>>>,
+    /// Live-probe memo for highlighters built without engine state; the
+    /// state-carrying path shares [`CompletionState::command_probe`] instead.
+    local_probe: Mutex<CommandProbe>,
     max_length: Option<usize>,
 }
 
@@ -126,6 +130,7 @@ impl NiubashSyntaxHighlighter {
             styles,
             commands: command_set,
             completion_state,
+            local_probe: Mutex::new(CommandProbe::default()),
             max_length: config.max_length,
         }
     }
@@ -525,18 +530,148 @@ impl NiubashSyntaxHighlighter {
             return true;
         }
 
-        self.completion_state
-            .as_ref()
-            .and_then(|state| state.lock().ok())
-            .is_some_and(|state| {
-                state
-                    .aliases
-                    .iter()
-                    .chain(state.functions.iter())
-                    .chain(state.plugin_command_names().iter())
-                    .any(|name| name.eq_ignore_ascii_case(command))
-            })
+        let Some(state) = &self.completion_state else {
+            return self.probe_process_env(command);
+        };
+
+        // Dynamic names and the memoized probe answers share the completion
+        // lock; a memo miss snapshots the env and re-locks only to record
+        // the outcome, so the filesystem walk never runs under the lock
+        // (niubash#574).
+        let (fingerprint, env_vars) = {
+            let Ok(mut state) = state.lock() else {
+                return false;
+            };
+            let dynamic = state
+                .aliases
+                .iter()
+                .chain(state.functions.iter())
+                .chain(state.plugin_command_names().iter())
+                .any(|name| name.eq_ignore_ascii_case(command));
+            if dynamic {
+                return true;
+            }
+            if !probe_eligible(command) {
+                return false;
+            }
+            let fingerprint = command_probe_fingerprint(&state.env_vars);
+            match state.command_probe.lookup(&fingerprint, command) {
+                Some(known) => return known,
+                None => (fingerprint, state.env_vars.clone()),
+            }
+        };
+
+        let known = command_on_path(
+            command,
+            &env_path_dirs(&env_vars),
+            &probe_extensions(env_vars.get("PATHEXT").map(String::as_str)),
+        );
+        if let Ok(mut state) = state.lock() {
+            state.command_probe.note_probe();
+            state.command_probe.store(&fingerprint, command, known);
+        }
+        known
     }
+
+    /// Highlighters built without engine state probe the process
+    /// environment instead; their memo sits on the highlighter itself.
+    fn probe_process_env(&self, command: &str) -> bool {
+        if !probe_eligible(command) {
+            return false;
+        }
+        let fingerprint = process_env_fingerprint();
+        let Ok(mut probe) = self.local_probe.lock() else {
+            return false;
+        };
+        if let Some(known) = probe.lookup(&fingerprint, command) {
+            return known;
+        }
+        let dirs: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default();
+        let known = command_on_path(
+            command,
+            &dirs,
+            &probe_extensions(std::env::var("PATHEXT").ok().as_deref()),
+        );
+        probe.note_probe();
+        probe.store(&fingerprint, command, known);
+        known
+    }
+}
+
+/// A name that could resolve through PATH: bare words only — anything with
+/// a path separator or drive colon is a path the `path_kind` arm handles.
+fn probe_eligible(command: &str) -> bool {
+    !command.is_empty() && !command.chars().any(|ch| matches!(ch, '/' | '\\' | ':'))
+}
+
+/// Fingerprint of the env a live probe ran under. PATH and PATHEXT are the
+/// probe inputs; the serialized `hash` table rides along so `hash -r/-d/-p`
+/// and per-command hashing retire remembered answers (niubash#574).
+fn command_probe_fingerprint(env_vars: &HashMap<String, String>) -> String {
+    let mut fingerprint = String::new();
+    for key in ["PATH", "PATHEXT", "__RUBASH_HASH_TABLE"] {
+        if let Some(value) = env_vars.get(key) {
+            fingerprint.push_str(value);
+        }
+        fingerprint.push('\u{1e}');
+    }
+    fingerprint
+}
+
+fn process_env_fingerprint() -> String {
+    let mut fingerprint = String::new();
+    for key in ["PATH", "PATHEXT"] {
+        if let Ok(value) = std::env::var(key) {
+            fingerprint.push_str(&value);
+        }
+        fingerprint.push('\u{1e}');
+    }
+    fingerprint
+}
+
+/// Native directories a shell PATH resolves to. On Windows each entry goes
+/// through the engine's translator so root-mapped logical directories
+/// (`/usr/bin` under the shell root) reach their real backing directory.
+fn env_path_dirs(env_vars: &HashMap<String, String>) -> Vec<PathBuf> {
+    let Some(path) = env_vars.get("PATH") else {
+        return Vec::new();
+    };
+    split_shell_path_list(path)
+        .iter()
+        .flat_map(|entry| {
+            if cfg!(windows) {
+                Executor::resolve_shell_path_process_entries_from_env(entry, env_vars)
+            } else {
+                vec![PathBuf::from(entry)]
+            }
+        })
+        .collect()
+}
+
+/// Candidate suffixes appended to a bare command name: every PATHEXT entry
+/// plus the extensionless name itself. Unix resolves only the bare name.
+fn probe_extensions(pathext: Option<&str>) -> Vec<String> {
+    if !cfg!(windows) {
+        return vec![String::new()];
+    }
+    let mut extensions: Vec<String> = pathext
+        .unwrap_or(".COM;.EXE;.BAT;.CMD")
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(str::to_string)
+        .collect();
+    extensions.push(String::new());
+    extensions
+}
+
+fn command_on_path(command: &str, dirs: &[PathBuf], extensions: &[String]) -> bool {
+    dirs.iter().any(|dir| {
+        extensions
+            .iter()
+            .any(|ext| dir.join(format!("{command}{ext}")).is_file())
+    })
 }
 
 fn contains_variable(word: &str) -> bool {
@@ -1012,6 +1147,234 @@ mod tests {
             style_for(&styled, "self-update"),
             highlighter.style(SyntaxKind::Default)
         );
+    }
+
+    /// Write a stand-in installed-command file for the live-probe tests.
+    /// On unix a PATH entry only counts as a command when it carries an
+    /// execute bit (GNU PATH lookup semantics), and `fs::write` creates
+    /// 0644 — which the probe correctly ignores there. Windows has no
+    /// execute bit; the `.exe` suffix matched via PATHEXT is what counts,
+    /// so the chmod is unix-only. (niubash#574)
+    fn write_probe_command(path: &std::path::Path) {
+        std::fs::write(path, "binary").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// On-disk file name for a live-probe fixture command. On Windows
+    /// the engine resolves a bare word through PATHEXT, so the fixture
+    /// file carries the `.exe` suffix there. On unix the engine
+    /// resolves only the exact file name — verified against the engine
+    /// (rubash@368353e via the niu binary): a PATH holding only
+    /// `probe574fresh.exe` (0755) leaves `command -v probe574fresh`
+    /// at rc=1 and execution at rc=127, even with PATHEXT set — so
+    /// the unix fixture file uses the bare name. (niubash#574)
+    #[cfg(unix)]
+    fn probe_command_file_name(base: &str) -> String {
+        base.to_string()
+    }
+
+    #[cfg(not(unix))]
+    fn probe_command_file_name(base: &str) -> String {
+        format!("{base}.exe")
+    }
+
+    /// niubash#574: a command installed mid-session is absent from the
+    /// startup command set, but the live probe finds it on PATH once the
+    /// memo is invalidated (the `wpm install` hook clears it).
+    #[test]
+    fn live_probe_renders_mid_session_install_known_after_invalidation() {
+        let temp = unique_temp_dir("niubash-highlight-probe");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state.lock().unwrap().env_vars =
+            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+
+        let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state.clone(),
+        );
+
+        let styled = highlighter.highlight("probe574fresh --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574fresh"),
+            highlighter.style(SyntaxKind::UnknownToken)
+        );
+
+        // Install mid-session: the memoized miss still answers, so the name
+        // keeps rendering unknown until the shell clears the memo.
+        write_probe_command(&temp.join(probe_command_file_name("probe574fresh")));
+        let styled = highlighter.highlight("probe574fresh --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574fresh"),
+            highlighter.style(SyntaxKind::UnknownToken)
+        );
+
+        state.lock().unwrap().command_probe.clear();
+        let styled = highlighter.highlight("probe574fresh --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574fresh"),
+            highlighter.style(SyntaxKind::Command)
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// The memo serves repeat paints: highlighting the same unknown name
+    /// must not re-walk PATH every keystroke (niubash#574 acceptance).
+    #[test]
+    fn live_probe_memo_prevents_repeated_path_walks() {
+        let temp = unique_temp_dir("niubash-highlight-probe-memo");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state.lock().unwrap().env_vars =
+            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+
+        let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state.clone(),
+        );
+
+        for flag in ["--help", "--version", "--flag"] {
+            let styled = highlighter.highlight(&format!("probe574memo {flag}"), 0);
+            assert_eq!(
+                style_for(&styled, "probe574memo"),
+                highlighter.style(SyntaxKind::UnknownToken)
+            );
+        }
+        assert_eq!(state.lock().unwrap().command_probe.probe_count(), 1);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// Gibberish still renders unknown through the probe path even after
+    /// invalidation — the probe answers what the filesystem says.
+    #[test]
+    fn live_probe_keeps_gibberish_unknown() {
+        let temp = unique_temp_dir("niubash-highlight-probe-gibberish");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state.lock().unwrap().env_vars =
+            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+
+        let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state.clone(),
+        );
+
+        state.lock().unwrap().command_probe.clear();
+        let styled = highlighter.highlight("probe574notreal --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574notreal"),
+            highlighter.style(SyntaxKind::UnknownToken)
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// A PATH assignment or a `hash` table mutation retires the memo
+    /// through the fingerprint — no explicit clear needed (niubash#574).
+    #[test]
+    fn live_probe_retires_memo_when_path_or_hash_table_moves() {
+        let temp_a = unique_temp_dir("niubash-highlight-probe-fp-a");
+        let temp_b = unique_temp_dir("niubash-highlight-probe-fp-b");
+        std::fs::create_dir_all(&temp_a).unwrap();
+        std::fs::create_dir_all(&temp_b).unwrap();
+        write_probe_command(&temp_b.join(probe_command_file_name("probe574fp")));
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state.lock().unwrap().env_vars =
+            HashMap::from([("PATH".to_string(), temp_a.display().to_string())]);
+
+        let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state.clone(),
+        );
+
+        let styled = highlighter.highlight("probe574fp --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574fp"),
+            highlighter.style(SyntaxKind::UnknownToken)
+        );
+
+        // PATH gained the install dir: the fingerprint moved, so the next
+        // paint re-probes and finds the command with no explicit clear.
+        let grown = format!("{};{}", temp_a.display(), temp_b.display());
+        state
+            .lock()
+            .unwrap()
+            .env_vars
+            .insert("PATH".to_string(), grown);
+        let styled = highlighter.highlight("probe574fp --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574fp"),
+            highlighter.style(SyntaxKind::Command)
+        );
+
+        // A `hash` table mutation also retires the memo: shrink PATH again
+        // so the miss is memoized under a new fingerprint, add the command
+        // where the new PATH can see it, then flip the serialized table
+        // the engine publishes on `hash -r`/`-d`/`-p`.
+        state
+            .lock()
+            .unwrap()
+            .env_vars
+            .insert("PATH".to_string(), temp_a.display().to_string());
+        let styled = highlighter.highlight("probe574fp --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574fp"),
+            highlighter.style(SyntaxKind::UnknownToken)
+        );
+        write_probe_command(&temp_a.join(probe_command_file_name("probe574fp")));
+        state.lock().unwrap().env_vars.insert(
+            "__RUBASH_HASH_TABLE".to_string(),
+            "probe574fp=D:/x$1$1".to_string(),
+        );
+        let styled = highlighter.highlight("probe574fp --help", 0);
+        assert_eq!(
+            style_for(&styled, "probe574fp"),
+            highlighter.style(SyntaxKind::Command)
+        );
+
+        let _ = std::fs::remove_dir_all(temp_a);
+        let _ = std::fs::remove_dir_all(temp_b);
+    }
+
+    /// Bare words only reach the PATH probe — names carrying a path
+    /// separator or drive colon stay path-kind candidates, never probes.
+    #[test]
+    fn live_probe_skips_path_shaped_words() {
+        let temp = unique_temp_dir("niubash-highlight-probe-skip");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        state.lock().unwrap().env_vars =
+            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+
+        let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
+            &SyntaxHighlightConfig::default(),
+            std::iter::empty::<String>(),
+            state.clone(),
+        );
+
+        let styled = highlighter.highlight("dir/probe574missing", 0);
+        assert_eq!(
+            style_for(&styled, "dir/probe574missing"),
+            highlighter.style(SyntaxKind::UnknownToken)
+        );
+        assert_eq!(state.lock().unwrap().command_probe.probe_count(), 0);
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     fn style_for(styled: &StyledText, fragment: &str) -> Style {
