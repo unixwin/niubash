@@ -785,8 +785,25 @@ impl Shell {
         // Reedline owns interactive history (see the construction-site note):
         // disable the engine's Bash history machinery only on the REPL path
         // so HISTFILE cannot create a second, competing history stream.
+        // The engine machinery stays off via the flag above; HISTFILE itself
+        // now defaults to the host history's backing file (niubash#571)
+        // instead of being unset. GNU interactive shells always have a
+        // HISTFILE default (~/.bash_history), and the bare `history -a/-w/
+        // -r/-n` forms resolve their filename from it — with HISTFILE unset
+        // the provider dispatch reported `filename not specified` and every
+        // bash-it-style per-prompt hook (`history -a; history -c; history
+        // -r`) broke at the first leg. Pointing HISTFILE at the provider's
+        // own backing file keeps exactly one stream: the builtins resolve
+        // to the file the provider already owns, and the provider's
+        // backing-file fast paths serve them. A HISTFILE the user exports
+        // before launch was already ignored by the old unset; that
+        // single-stream choice is unchanged — the configured history path
+        // (not an inherited HISTFILE) remains the file of record.
         self.executor.set_shell_option("history", false);
-        self.executor.unset_env("HISTFILE");
+        self.executor.set_env(
+            "HISTFILE",
+            &self.history_path.to_string_lossy().into_owned(),
+        );
         // rubash#1248: assert the other half of the interactive history
         // contract. GNU init_interactive turns histexpand ON by default
         // (bashhist.c:288 HISTEXPAND_DEFAULT), and the engine's per-line
@@ -4379,6 +4396,27 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "interactive-entry\n"
+        );
+    }
+
+    #[test]
+    fn interactive_histfile_defaults_to_the_host_history_backing_file() {
+        // niubash#571: a GNU interactive shell always has a HISTFILE
+        // default, and the bare `history -a/-w/-r/-n` forms resolve their
+        // filename from it. The REPL used to unset HISTFILE, so every bare
+        // form failed with `filename not specified` and bash-it-style
+        // per-prompt hooks broke at the first leg.
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = path.clone();
+
+        shell.enter_interactive();
+        assert_eq!(
+            shell.executor.get_env("HISTFILE").map(|v| v.to_string()),
+            Some(path.to_string_lossy().into_owned()),
+            "HISTFILE must name the provider's backing file, not be unset"
         );
     }
 

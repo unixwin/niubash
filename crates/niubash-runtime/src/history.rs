@@ -262,28 +262,24 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
         if missing.is_empty() {
             return Ok(());
         }
-        // Fast path (niubash#182): append the missing lines to the backing
-        // file directly, then rebuild the reader from disk. Routing them
-        // through per-entry saves made reedline re-append its whole unwritten
-        // buffer (the file's own content) on every save.
+        // Fast path (niubash#182, corrected niubash#571): the missing lines
+        // are, by construction, lines already in the backing file that this
+        // session's reader has not seen yet — so the only correct fast path
+        // is rebuilding the reader from disk, exactly like `read_history`'s
+        // fast path. Appending them to the file first (the pre-#571 shape)
+        // duplicated every one of them: a second session's line landed twice
+        // after a single `history -n`. Routing them through per-entry saves
+        // is still wrong for the original #182 reason (reedline re-appends
+        // its whole unwritten buffer on every save), so the reload is the
+        // whole fix, not an optimization on top of an append.
         let requested = std::path::Path::new(path);
         if self
             .inner
             .backing_file()
             .is_some_and(|backing| backing == requested)
+            && self.inner.reload_from_file().is_ok()
         {
-            use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            for line in &missing {
-                writeln!(file, "{line}")?;
-            }
-            drop(file);
-            if self.inner.reload_from_file().is_ok() {
-                return Ok(());
-            }
+            return Ok(());
         }
         // Fallback (memory-only degraded session, or a foreign path).
         for line in missing {
@@ -1101,6 +1097,33 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "loaded-one\nloaded-two\n",
             "repeated -a/-c/-r cycles must not grow the history"
+        );
+    }
+
+    #[test]
+    fn read_new_history_does_not_duplicate_lines_from_another_session() {
+        // niubash#571: `history -n` exists to pick up lines another session
+        // appended. Those lines are already in the backing file, so the
+        // backing-file fast path must only reload the reader — appending
+        // them first duplicated every picked-up line in the file.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "loaded-one\n").unwrap();
+
+        let mut first = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut second = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        second.append("from-second".to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "loaded-one\nfrom-second\n"
+        );
+
+        first.read_new_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(first.entries().unwrap(), vec!["loaded-one", "from-second"]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "loaded-one\nfrom-second\n",
+            "-n must not duplicate the line it just picked up"
         );
     }
 
