@@ -2515,6 +2515,18 @@ impl Shell {
         }
     }
 
+    /// The history ledger shared with the provider instance, if
+    /// interactive entry installed one (niubash#569). The editor history
+    /// instance adopts it so provider-side -c/-a/-w and the session-end
+    /// write account for lines the editor records. `None` when no
+    /// provider is installed (the editor then keeps its own ledger).
+    pub(crate) fn history_ledger(&self) -> Option<Arc<Mutex<crate::history::SessionLedger>>> {
+        self.history_provider
+            .as_ref()
+            .and_then(|provider| provider.try_borrow().ok())
+            .map(|provider| provider.ledger())
+    }
+
     /// Execute an entire script (multi-line) via rubash full AST execution.
     ///
     /// Unlike `execute_line` which tokenizes/parses/executes each line
