@@ -103,6 +103,15 @@ pub struct Shell {
     /// — the allow keeps the -D warnings unix lanes clean.
     #[cfg_attr(not(windows), allow(dead_code))]
     gitbash_prompt_active: bool,
+    /// niubash#592 (S2): sequence number of the most recent prompt pass
+    /// whose clone `prompt_for_display` stamped with a computed Vcs
+    /// value. Incremented only alongside a stamp; the number is
+    /// probe/debugging identity for "which pass computed this value",
+    /// never a freshness input — every pass recomputes unconditionally.
+    /// Written only on the Windows surface (the segments Vcs computation
+    /// is cfg'd there), like `gitbash_prompt_active` above.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    vcs_pass_seq: u64,
     pub home_dir: PathBuf,
     pub shell_root: Option<PathBuf>,
     pub history_path: PathBuf,
@@ -591,6 +600,7 @@ impl Shell {
             completion_state,
             prompt: prompt.clone(),
             gitbash_prompt_active,
+            vcs_pass_seq: 0,
             floor_prompt: prompt,
             home_dir,
             shell_root,
@@ -1763,6 +1773,14 @@ impl Shell {
     /// A PS1/theme claim (prompt_slot_claimed) always wins: the claim path
     /// rewrites `self.prompt`, so the flag check alone is not enough — an
     /// active flag with a live claim renders the claimed prompt untouched.
+    ///
+    /// On the segments face, the clone handed out here is stamped with
+    /// this pass's Vcs value (niubash#592, S2): computed in this call —
+    /// which the REPL makes after `run_precmd_hooks`, so a hook that
+    /// changes the repository is reflected in the same pass — exactly
+    /// once per pass, while the pass's repaints re-read the stamp
+    /// instead of spawning git per repaint. `self.prompt` itself is
+    /// never stamped, so no value can outlive its pass.
     pub(crate) fn prompt_for_display(&mut self) -> PromptBackend {
         #[cfg(windows)]
         if self.gitbash_prompt_active && !self.prompt_slot_claimed() {
@@ -1771,7 +1789,20 @@ impl Shell {
             );
             self.prompt = PromptBackend::Bash(BashPrompt::new(left, String::new()));
         }
-        self.prompt.clone()
+        let prompt = self.prompt.clone();
+        #[cfg(windows)]
+        let mut prompt = prompt;
+        #[cfg(windows)]
+        if let PromptBackend::Segments(adapter) = &mut prompt {
+            if adapter.inner.config_has_vcs() {
+                self.vcs_pass_seq += 1;
+                let seq = self.vcs_pass_seq;
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let value = crate::git_prompt::branch_segment(&cwd);
+                adapter.inner.stamp_vcs(seq, value);
+            }
+        }
+        prompt
     }
 
     fn sync_bash_prompt_from_env(&mut self) {
@@ -6804,6 +6835,288 @@ complete -F _envtooldyn_hook envtooldyn
         );
     }
 
+    // ---- niubash#592 (S2): per-pass Vcs computation gates ----
+    //
+    // The acceptance probe of the S2 design (its §6): integer spawn
+    // counts only, read off the `read_status` call counter — the
+    // prompt's single git spawn point, one call per spawn. Every probe
+    // eprintln!s its integers so the numbers land in the test log
+    // verbatim. The fixtures drive real git; under the cluster's Wine
+    // shim (a `git.exe` answering --version with a marker and serving
+    // `status` from a state file) the same tests run with the state
+    // file standing in for repository state.
+
+    /// Run `git` in `dir` (fixture plumbing, mirroring git_prompt's
+    /// test helper); `false` means git is unusable here and the
+    /// fixture must abort quietly.
+    #[cfg(windows)]
+    fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    /// A one-commit repository whose branch is `branch`.
+    #[cfg(windows)]
+    fn repo_on_branch(dir: &std::path::Path, branch: &str) -> bool {
+        let init = format!("--initial-branch={branch}");
+        git_ok(dir, &["init", "--quiet", &init, "."])
+            && git_ok(dir, &["commit", "--quiet", "--allow-empty", "-m", "init"])
+    }
+
+    /// True when PATH's git is the niubash#592 Wine shim: it answers
+    /// --version with a marker and serves `status` from the state file
+    /// named by `NIU592_GIT_STATE`.
+    #[cfg(windows)]
+    fn shim_git_in_use() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("niu592-shim"))
+            .unwrap_or(false)
+    }
+
+    /// Point the Wine shim's canned `status` at `branch` (clean tree).
+    /// A no-op outside shim runs (real git needs no state file).
+    #[cfg(windows)]
+    fn write_shim_state(branch: &str) {
+        if let Ok(state) = std::env::var("NIU592_GIT_STATE") {
+            let _ = std::fs::write(
+                state,
+                format!(
+                    "# branch.oid 1111111111111111111111111111111111111111\n\
+                     # branch.head {branch}\n"
+                ),
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    fn segments_shell_with_vcs() -> Shell {
+        let mut shell = test_shell(HookConfig::default());
+        shell.prompt = PromptBackend::Segments(SegmentPromptAdapter::new(SegmentPrompt::new(
+            SegmentPromptConfig {
+                left_elements: vec![SegmentId::Vcs],
+                right_elements: Vec::new(),
+                separator: " ".to_string(),
+                prompt_symbol: "$".to_string(),
+                preset: None,
+            },
+        )));
+        shell
+    }
+
+    #[cfg(windows)]
+    fn render_left_of(prompt: &PromptBackend) -> String {
+        reedline::Prompt::render_prompt_left(prompt).into_owned()
+    }
+
+    /// Probe cells 1+2 (§6) and the §5 rows they cover (first frame,
+    /// ordinary pass, repaint storm, completion/resize repaints — all
+    /// repaints of the handed-out prompt): one computation per pass,
+    /// repaints add zero spawns.
+    #[cfg(windows)]
+    #[test]
+    fn issue592_probe_repaint_storm_and_pass_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_on_branch(tmp.path(), "main") {
+            return;
+        }
+        write_shim_state("main");
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let mut shell = segments_shell_with_vcs();
+        crate::git_prompt::reset_read_status_call_count();
+
+        // Cell 1 / first frame: the first pass computes exactly once,
+        // then a repaint storm re-reads the stamp.
+        let prompt = shell.prompt_for_display();
+        let first_pass = crate::git_prompt::read_status_call_count();
+        for _ in 0..10 {
+            let _ = render_left_of(&prompt);
+            let _ = reedline::Prompt::render_prompt_right(&prompt);
+        }
+        let after_storm = crate::git_prompt::read_status_call_count();
+        eprintln!(
+            "issue592 probe cell1: first_pass_spawns={first_pass} \
+             after_10_repaints={after_storm}"
+        );
+        assert_eq!(first_pass, 1, "the first pass computes exactly once");
+        assert_eq!(after_storm, 1, "repaints of a stamped prompt never spawn");
+        assert!(render_left_of(&prompt).contains("main"));
+
+        // Cell 2: K further passes, each with its own repaint storm,
+        // cost exactly one spawn each.
+        for k in 2..=4usize {
+            let p = shell.prompt_for_display();
+            for _ in 0..5 {
+                let _ = render_left_of(&p);
+            }
+            let total = crate::git_prompt::read_status_call_count();
+            eprintln!("issue592 probe cell2: passes={k} total_spawns={total}");
+            assert_eq!(total, k, "pass {k} must add exactly one spawn");
+        }
+    }
+
+    /// Probe cell 5 (§6, the §3.4 ordering invariant): a hook that
+    /// changes the repository is reflected in the SAME pass's segment,
+    /// and the pass still costs exactly one spawn — the hook's change
+    /// is never bought with a second computation or a one-pass lag.
+    #[cfg(windows)]
+    #[test]
+    fn issue592_probe_hook_change_visible_same_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_on_branch(tmp.path(), "main") {
+            return;
+        }
+        write_shim_state("main");
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let mut shell = segments_shell_with_vcs();
+        shell.sync_executor_pwd_from_process_cwd();
+
+        let before = shell.prompt_for_display();
+        assert!(render_left_of(&before).contains("main"));
+
+        // REPL order: hooks first, prompt second. Under the Wine shim
+        // the "repository change" is the canned status flipping to the
+        // new branch (rewritten by the hook itself, via a builtin so
+        // the hook needs no external command); with real git the hook
+        // switches branch for real.
+        let hook = if shim_git_in_use() {
+            let state = std::env::var("NIU592_GIT_STATE").unwrap();
+            format!(
+                "printf '# branch.oid 1111111111111111111111111111111111111111\\n\
+                 # branch.head hooked\\n' > \"{state}\""
+            )
+        } else {
+            "git checkout --quiet -b hooked".to_string()
+        };
+        shell.executor.set_env("PROMPT_COMMAND", &hook);
+        shell.run_precmd_hooks();
+        crate::git_prompt::reset_read_status_call_count();
+        let prompt = shell.prompt_for_display();
+        let spawns = crate::git_prompt::read_status_call_count();
+        let left = render_left_of(&prompt);
+        eprintln!("issue592 probe cell5: pass_spawns={spawns} segment={left:?}");
+        assert_eq!(spawns, 1, "the pass after the hook computes exactly once");
+        assert!(
+            left.contains("hooked"),
+            "hook's branch must be visible in the same pass: {left:?}"
+        );
+    }
+
+    /// §5 rows "empty Enter" / "prompt Ctrl+C" / "interrupted command":
+    /// all three return to the loop top and take a fresh prompt with no
+    /// command in between (repl.rs: the empty-line `continue`, the
+    /// CtrlC branch's `continue`), so consecutive passes with nothing
+    /// between them are their exact shape — each costs one computation.
+    #[cfg(windows)]
+    #[test]
+    fn issue592_consecutive_passes_each_compute_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_on_branch(tmp.path(), "main") {
+            return;
+        }
+        write_shim_state("main");
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let mut shell = segments_shell_with_vcs();
+        crate::git_prompt::reset_read_status_call_count();
+        for m in 1..=3usize {
+            let p = shell.prompt_for_display();
+            let _ = render_left_of(&p);
+            let total = crate::git_prompt::read_status_call_count();
+            eprintln!("issue592 probe empty-enter shape: passes={m} total_spawns={total}");
+            assert_eq!(total, m, "each consecutive pass computes exactly once");
+        }
+    }
+
+    /// Probe cell 3 (§6) / §5 "outside a repository" row: no pass and
+    /// no repaint ever spawns, and the segment stays empty.
+    #[cfg(windows)]
+    #[test]
+    fn issue592_outside_repository_never_spawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let mut shell = segments_shell_with_vcs();
+        crate::git_prompt::reset_read_status_call_count();
+        for _ in 0..3 {
+            let p = shell.prompt_for_display();
+            for _ in 0..4 {
+                let _ = render_left_of(&p);
+            }
+            assert_eq!(render_left_of(&p), "");
+        }
+        let total = crate::git_prompt::read_status_call_count();
+        eprintln!("issue592 probe cell3: outside_repo_total_spawns={total}");
+        assert_eq!(total, 0, "outside a repository nothing may spawn");
+    }
+
+    /// Probe cell 4 (§6) and the §5 "cd" row: the root and a
+    /// subdirectory of one repository produce the identical segment at
+    /// one spawn per pass (no per-directory accounting), and moving to
+    /// another repository is picked up by the next pass — again one
+    /// spawn, no cross-pass reuse.
+    #[cfg(windows)]
+    #[test]
+    fn issue592_subdir_matches_root_and_cd_recomputes_next_pass() {
+        let repo_a = tempfile::tempdir().unwrap();
+        if !repo_on_branch(repo_a.path(), "main") {
+            return;
+        }
+        let repo_b = tempfile::tempdir().unwrap();
+        if !repo_on_branch(repo_b.path(), "other") {
+            return;
+        }
+        let sub = repo_a.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        write_shim_state("main");
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = segments_shell_with_vcs();
+        crate::git_prompt::reset_read_status_call_count();
+
+        std::env::set_current_dir(repo_a.path()).unwrap();
+        let at_root = render_left_of(&shell.prompt_for_display());
+        let after_root = crate::git_prompt::read_status_call_count();
+        std::env::set_current_dir(&sub).unwrap();
+        let at_sub = render_left_of(&shell.prompt_for_display());
+        let after_sub = crate::git_prompt::read_status_call_count();
+        eprintln!(
+            "issue592 probe cell4: root_spawns={after_root} subdir_spawns={after_sub} \
+             identical={}",
+            at_root == at_sub
+        );
+        assert_eq!(after_root, 1);
+        assert_eq!(after_sub, 2, "the subdirectory pass computes once more");
+        assert_eq!(at_root, at_sub, "same repository, same segment");
+        assert!(at_root.contains("main"));
+
+        write_shim_state("other");
+        std::env::set_current_dir(repo_b.path()).unwrap();
+        let at_b = render_left_of(&shell.prompt_for_display());
+        let total = crate::git_prompt::read_status_call_count();
+        eprintln!("issue592 probe cd row: total_spawns={total} segment_b={at_b:?}");
+        assert_eq!(total, 3, "the pass after cd computes exactly once");
+        assert!(at_b.contains("other"), "{at_b:?}");
+    }
+
     /// starship's claim shape (src/init/starship.bash): PROMPT_COMMAND names
     /// a precmd function that assigns PS1 itself. Because the hook runs
     /// before the backend sync, the PS1 claim is visible in the same render
@@ -7069,6 +7382,7 @@ complete -F _envtooldyn_hook envtooldyn
             completion_state: Arc::new(Mutex::new(CompletionState::new(PathBuf::from(".")))),
             prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             gitbash_prompt_active: false,
+            vcs_pass_seq: 0,
             floor_prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             home_dir: PathBuf::from("."),
             shell_root: None,
