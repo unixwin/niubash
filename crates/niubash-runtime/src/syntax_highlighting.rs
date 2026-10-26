@@ -1164,6 +1164,24 @@ mod tests {
         }
     }
 
+    /// On-disk file name for a live-probe fixture command. On Windows
+    /// the engine resolves a bare word through PATHEXT, so the fixture
+    /// file carries the `.exe` suffix there. On unix the engine
+    /// resolves only the exact file name — verified against the engine
+    /// (rubash@368353e via the niu binary): a PATH holding only
+    /// `probe574fresh.exe` (0755) leaves `command -v probe574fresh`
+    /// at rc=1 and execution at rc=127, even with PATHEXT set — so
+    /// the unix fixture file uses the bare name. (niubash#574)
+    #[cfg(unix)]
+    fn probe_command_file_name(base: &str) -> String {
+        base.to_string()
+    }
+
+    #[cfg(not(unix))]
+    fn probe_command_file_name(base: &str) -> String {
+        format!("{base}.exe")
+    }
+
     /// niubash#574: a command installed mid-session is absent from the
     /// startup command set, but the live probe finds it on PATH once the
     /// memo is invalidated (the `wpm install` hook clears it).
@@ -1190,7 +1208,7 @@ mod tests {
 
         // Install mid-session: the memoized miss still answers, so the name
         // keeps rendering unknown until the shell clears the memo.
-        write_probe_command(&temp.join("probe574fresh.exe"));
+        write_probe_command(&temp.join(probe_command_file_name("probe574fresh")));
         let styled = highlighter.highlight("probe574fresh --help", 0);
         assert_eq!(
             style_for(&styled, "probe574fresh"),
@@ -1271,7 +1289,7 @@ mod tests {
         let temp_b = unique_temp_dir("niubash-highlight-probe-fp-b");
         std::fs::create_dir_all(&temp_a).unwrap();
         std::fs::create_dir_all(&temp_b).unwrap();
-        write_probe_command(&temp_b.join("probe574fp.exe"));
+        write_probe_command(&temp_b.join(probe_command_file_name("probe574fp")));
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
         state.lock().unwrap().env_vars =
@@ -1317,7 +1335,7 @@ mod tests {
             style_for(&styled, "probe574fp"),
             highlighter.style(SyntaxKind::UnknownToken)
         );
-        write_probe_command(&temp_a.join("probe574fp.exe"));
+        write_probe_command(&temp_a.join(probe_command_file_name("probe574fp")));
         state.lock().unwrap().env_vars.insert(
             "__RUBASH_HASH_TABLE".to_string(),
             "probe574fp=D:/x$1$1".to_string(),
