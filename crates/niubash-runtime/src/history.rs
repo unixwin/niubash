@@ -709,11 +709,75 @@ impl LiveFileBackedHistory {
     }
 }
 
+/// Append one history line to the file using reedline's on-disk encoding
+/// (an embedded newline is stored as the literal four characters `<\n>`),
+/// without touching the reader. The reader's own accounting is rebuilt by
+/// the caller afterwards, so this never leaves a stale `len_on_disk`.
+fn append_line_to_file(path: &Path, text: &str) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{}", text.replace('\n', "<\\n>"))?;
+    Ok(())
+}
+
 impl History for LiveFileBackedHistory {
     fn save(&mut self, item: HistoryItem) -> Result<HistoryItem> {
         let capacity = self.capacity;
         let state = self.lock_mut()?;
         Self::refresh_if_stale(capacity, state);
+        let text = item.command_line.clone();
+        if text.is_empty() {
+            // Reedline drops empty saves, and GNU records no empty lines
+            // either — keep that one filter.
+            return Ok(item);
+        }
+        // niubash#570: reedline's save drops an entry identical to the
+        // previous one, but GNU history is positional — consecutive
+        // duplicates in one session, and the same line typed in two
+        // sessions, are all kept (dual-same probe: two sessions typing
+        // `echo SAMECMD` must leave two copies in the file). When the new
+        // line equals the last one, bypass reedline's filter: append the
+        // encoded line to the file and rebuild the reader from disk. The
+        // load path applies no duplicate filter, so the rebuilt list holds
+        // both copies, and the returned item carries the new entry's id
+        // (reedline's engine records it as `history_last_run_id`).
+        let last_is_same = state
+            .history
+            .search(SearchQuery::last_with_search(
+                reedline::SearchFilter::anything(None),
+            ))
+            .ok()
+            .and_then(|mut items| items.pop())
+            .is_some_and(|last| last.command_line == text);
+        if last_is_same {
+            if let Some(path) = state.path.clone() {
+                if append_line_to_file(&path, &text).is_ok() {
+                    if let Ok(history) = FileBackedHistory::with_file(capacity, path.clone()) {
+                        state.history = history;
+                        state.signature = file_signature_lossy(&path, state);
+                        let saved = state
+                            .history
+                            .search(SearchQuery::last_with_search(
+                                reedline::SearchFilter::anything(None),
+                            ))
+                            .ok()
+                            .and_then(|mut items| items.pop())
+                            .unwrap_or(item);
+                        return Ok(saved);
+                    }
+                }
+            }
+            // Degraded fallback (no backing file, or the file could not be
+            // appended/rebuilt): reedline's drop stands, exactly the
+            // pre-existing behavior for a session with no file to write.
+            // (The save takes the item by value and its result is dropped,
+            // so the original is cloned for it and returned as-is.)
+            let _ = state.history.save(item.clone());
+            Self::sync_state(state)?;
+            return Ok(item);
+        }
         let saved = state.history.save(item)?;
         Self::sync_state(state)?;
         Ok(saved)
@@ -966,6 +1030,71 @@ mod tests {
         assert_eq!(commands, vec!["cd second", "cd first"]);
     }
 
+    #[test]
+    fn consecutive_duplicate_saves_are_kept_positionally() {
+        // niubash#570: GNU history is positional — typing the same line
+        // twice in a row keeps both copies. Reedline's save drops an entry
+        // identical to the previous one, so the wrapper appends it to the
+        // file directly and rebuilds the reader instead.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut history = LiveFileBackedHistory::with_file(100, path.clone());
+
+        history
+            .save(HistoryItem::from_command_line("echo same"))
+            .unwrap();
+        history
+            .save(HistoryItem::from_command_line("echo same"))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "echo same\necho same\n",
+            "both consecutive copies must reach the file"
+        );
+        let commands = history
+            .search(SearchQuery::all_that_contain_rev(String::new()))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.command_line)
+            .collect::<Vec<_>>();
+        assert_eq!(commands, vec!["echo same", "echo same"]);
+    }
+    #[test]
+    fn same_line_from_two_instances_is_kept_twice() {
+        // niubash#570 (dual-same probe): two sessions typing the identical
+        // line must leave two copies in the shared file. Before the fix the
+        // second session's save saw the first session's line as its last
+        // entry and reedline dropped the second copy.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "SEEDONE\nSEEDTWO\n").unwrap();
+
+        let mut first = LiveFileBackedHistory::with_file(100, path.clone());
+        let mut second = LiveFileBackedHistory::with_file(100, path.clone());
+        first
+            .save(HistoryItem::from_command_line("echo SAMECMD"))
+            .unwrap();
+        second
+            .save(HistoryItem::from_command_line("echo SAMECMD"))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "SEEDONE\nSEEDTWO\necho SAMECMD\necho SAMECMD\n",
+            "the shared file must hold both sessions' copies"
+        );
+        let commands = second
+            .search(SearchQuery::all_that_contain_rev(String::new()))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.command_line)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commands,
+            vec!["echo SAMECMD", "echo SAMECMD", "SEEDTWO", "SEEDONE"]
+        );
+    }
     #[test]
     fn saving_history_updates_the_file_before_drop() {
         let temp = tempfile::tempdir().unwrap();
