@@ -114,7 +114,7 @@ functions — plus optional defaults and theme enablement:
 # Optional floor knobs: they only shape the built-in default prompt and
 # completion UI. An external theme claims PS1 and overrides the floor.
 # NIU_PROMPT_CWD_STYLE='home'      # home | full | basename
-# NIU_COMPLETION_STYLE='gnu'       # gnu (default) | ide | column | list | inline
+# NIU_COMPLETION_STYLE='column'    # column (default) | gnu | ide | list | inline
 
 if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
   HOME="$USERPROFILE"
