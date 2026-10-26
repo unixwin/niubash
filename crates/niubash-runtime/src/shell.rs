@@ -1360,6 +1360,20 @@ impl Shell {
         if login {
             // The profile chain replaces the rc branch only (shell.c:1833);
             // the env files above are not part of that exchange.
+            // niubash#590: the generated plugin loader is niu's own
+            // activation plane, not the rc — the docs promise the host
+            // sources it with no login exception, and returning here
+            // silently disabled every plugin and theme for login shells.
+            // Load it after the profile, before the completion snapshot
+            // (so loader-provided definitions and NIU_* registrations
+            // reach the REPL like they do on the rc branch); an `exit`
+            // inside unwinds like any startup file. Nothing else is
+            // sourced on this branch, so the double-execution guard has
+            // no rc text to scan (None). The rc itself stays skipped —
+            // that half is GNU login parity.
+            if let Some(status) = self.load_generated_plugin_loader(None) {
+                return Some(status);
+            }
             self.update_completion_state();
             if repl {
                 self.finish_startup();
@@ -1440,6 +1454,21 @@ impl Shell {
     fn load_generated_plugin_loader(&mut self, rc_path: Option<&Path>) -> Option<i32> {
         let rc_text = rc_path.and_then(|path| std::fs::read_to_string(path).ok());
         let loader_text = crate::plugins::loader::read_loader_text();
+        if loader_text.is_none() {
+            // niubash#586 (secondary face): read_loader_text folds an
+            // unreadable or non-UTF-8 loader into the same None as a
+            // missing one, so a corrupt loader failed silently. A file
+            // that exists but cannot be read as text is diagnosed, not
+            // loaded and not mistaken for "no plugins yet".
+            let path = crate::plugins::loader::loader_path();
+            if path.is_file() {
+                eprintln!(
+                    "niu: warning: the generated plugin loader exists but could not be read \
+                     as text, so it was not loaded: {}; regenerate it with `niu plugin sync`",
+                    path.display()
+                );
+            }
+        }
         match crate::plugins::loader::startup_decision(rc_text.as_deref(), loader_text.as_deref()) {
             crate::plugins::loader::StartupDecision::Missing
             | crate::plugins::loader::StartupDecision::OptedOut => None,
@@ -1458,6 +1487,18 @@ impl Shell {
                          niu plugin migrate-rc"
                     );
                 }
+                None
+            }
+            crate::plugins::loader::StartupDecision::Invalid(reason) => {
+                // niubash#586: a truncated or foreign loader is never
+                // sourced (the validate() gate in startup_decision).
+                // Warn with the path and the regeneration verb, and
+                // keep the shell fully usable without the loader.
+                eprintln!(
+                    "niu: warning: the generated plugin loader failed validation and was \
+                     not loaded ({reason}): {}; regenerate it with `niu plugin sync`",
+                    crate::plugins::loader::loader_path().display()
+                );
                 None
             }
             crate::plugins::loader::StartupDecision::Load => {
@@ -1620,8 +1661,19 @@ impl Shell {
     }
 
     fn source_non_interactive_startup_file(&mut self) -> Option<i32> {
-        let niu_raw = std::env::var(NIU_ENV_VAR)
-            .ok()
+        // niubash#588: GNU reads the shell variable table, which by the
+        // time the env file is considered already carries whatever the
+        // login profile exported (source_non_interactive_env runs the
+        // profile chain first, this gate second) — a profile that
+        // exports BASH_ENV points the shell at the file. Mirror the
+        // $ENV read in execute_env_file: executor table first, process
+        // environment as fallback. NIU_ENV keeps precedence over
+        // BASH_ENV in both sources.
+        let niu_raw = self
+            .executor
+            .get_env(NIU_ENV_VAR)
+            .map(str::to_owned)
+            .or_else(|| std::env::var(NIU_ENV_VAR).ok())
             .filter(|value| !value.trim().is_empty());
         // GNU shell.c:1216 gates BASH_ENV on posixly_correct == 0 and
         // act_like_sh == 0; NIU_ENV stays available as the niubash extension
@@ -1629,8 +1681,10 @@ impl Shell {
         let bash_raw = if self.posix_mode_active() {
             None
         } else {
-            std::env::var(BASH_ENV_VAR)
-                .ok()
+            self.executor
+                .get_env(BASH_ENV_VAR)
+                .map(str::to_owned)
+                .or_else(|| std::env::var(BASH_ENV_VAR).ok())
                 .filter(|value| !value.trim().is_empty())
         };
         let raw = niu_raw.or(bash_raw)?;
@@ -1662,15 +1716,69 @@ impl Shell {
     /// directory; the remainder goes through the executor's path resolver so
     /// /c/..., C:/..., and native backslash spellings all work.
     fn resolve_non_interactive_env_path(&self, raw: &str) -> PathBuf {
-        let expanded = if raw == "~" {
+        // niubash#589: GNU expands the env-file value before opening it
+        // (tilde + parameter expansion against the shell variable
+        // table); the old resolver expanded only "~" and "~/" and let
+        // `$HOME/...`, `${VAR}`, `~user` and `~\` fall through to the
+        // path resolver literally, where the missing file was then
+        // skipped silently — the startup file simply never ran.
+        let expanded = self.expand_env_file_value(raw);
+        let path = if expanded == "~" {
             self.home_dir.clone()
-        } else if let Some(rest) = raw.strip_prefix("~/") {
+        } else if let Some(rest) = expanded.strip_prefix("~/") {
+            self.home_dir.join(rest)
+        } else if let Some(rest) = expanded.strip_prefix("~\\") {
             self.home_dir.join(rest)
         } else {
-            PathBuf::from(shell_path_to_host_path(raw))
+            PathBuf::from(shell_path_to_host_path(&expanded))
         };
-        self.executor
-            .resolve_shell_path(&expanded.to_string_lossy())
+        self.executor.resolve_shell_path(&path.to_string_lossy())
+    }
+
+    /// Expand an env-file value (NIU_ENV / BASH_ENV / $ENV) the way GNU
+    /// expands it before maybe_execute_file: a leading `~user` resolves
+    /// against that user's home, then `$VAR` / `${VAR}` substitute from
+    /// the executor variable table (process environment as fallback —
+    /// the same read order as the variable lookup itself, niubash#588).
+    /// Only the plain forms are expanded; a braced form that is not a
+    /// plain name is left literal rather than half-expanded, and an
+    /// unresolvable `~user` stays literal too (GNU leaves the tilde in
+    /// place when no home can be found). Expansion is a single pass:
+    /// substituted values are data, never re-expanded.
+    fn expand_env_file_value(&self, raw: &str) -> String {
+        let after_tilde = self.expand_env_file_tilde_user(raw);
+        expand_env_file_params(&after_tilde, |name| {
+            self.executor
+                .get_env(name)
+                .map(str::to_owned)
+                .or_else(|| std::env::var(name).ok())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Resolve a leading `~user` prefix (niubash#589). The bare forms
+    /// ("~", "~/", "~\") name the shell's own home, which the caller
+    /// resolves against home_dir — leave those untouched here.
+    fn expand_env_file_tilde_user(&self, raw: &str) -> String {
+        let Some(rest) = raw.strip_prefix('~') else {
+            return raw.to_string();
+        };
+        // The tilde prefix runs to the first separator, '/' or '\'
+        // alike (the Windows-first spelling `~\` is a filed shape).
+        let sep = rest.find(['/', '\\']).unwrap_or(rest.len());
+        let user = &rest[..sep];
+        if user.is_empty() {
+            return raw.to_string();
+        }
+        let home = if current_login_user().as_deref() == Some(user) {
+            Some(self.home_dir.clone())
+        } else {
+            passwd_home_dir(user)
+        };
+        match home {
+            Some(home) => format!("{}{}", home.to_string_lossy(), &rest[sep..]),
+            None => raw.to_string(),
+        }
     }
 
     fn startup_rc_path(&self) -> Option<PathBuf> {
@@ -4014,6 +4122,100 @@ fn is_broken_pipe_execute_error(error: &rubash::executor::ExecuteError) -> bool 
 
 fn is_broken_pipe_io_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
+}
+
+/// The login name of the user running this process, for `~user`
+/// env-file expansion (niubash#589): USER on Unix-likes, USERNAME on
+/// Windows. `None` when neither is set — a named tilde then falls back
+/// to the passwd lookup and, failing that, stays literal.
+fn current_login_user() -> Option<String> {
+    std::env::var("USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+}
+
+/// Home directory of a named user from the passwd database, for
+/// `~user` env-file expansion (niubash#589). Platforms without a
+/// passwd database (Windows) resolve only the current user, which the
+/// caller handles before consulting this.
+#[cfg(unix)]
+fn passwd_home_dir(user: &str) -> Option<PathBuf> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in passwd.lines() {
+        let mut fields = line.split(':');
+        if fields.next() == Some(user) {
+            let home = fields.nth(4)?;
+            if !home.is_empty() {
+                return Some(PathBuf::from(home));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn passwd_home_dir(_user: &str) -> Option<PathBuf> {
+    None
+}
+
+/// A plain shell variable name (`[A-Za-z_][A-Za-z0-9_]*`) — the only
+/// braced form env-file expansion substitutes (niubash#589).
+fn is_plain_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Single-pass `$VAR` / `${VAR}` substitution for env-file values
+/// (niubash#589): `$` followed by anything that is not a plain name or
+/// a plain braced name is copied through literally, so a value can
+/// never be half-expanded into a different path than the user wrote.
+fn expand_env_file_params(value: &str, lookup: impl Fn(&str) -> String) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '$' || i + 1 >= chars.len() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if chars[i + 1] == '{' {
+            if let Some(close) = (i + 2..chars.len()).find(|&j| chars[j] == '}') {
+                let name: String = chars[i + 2..close].iter().collect();
+                if is_plain_env_var_name(&name) {
+                    out.push_str(&lookup(&name));
+                    i = close + 1;
+                    continue;
+                }
+            }
+            out.push('$');
+            i += 1;
+            continue;
+        }
+        let first = chars[i + 1];
+        if first.is_ascii_alphabetic() || first == '_' {
+            let mut end = i + 1;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[i + 1..end].iter().collect();
+            out.push_str(&lookup(&name));
+            i = end;
+            continue;
+        }
+        out.push('$');
+        i += 1;
+    }
+    out
 }
 
 fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
