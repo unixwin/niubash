@@ -69,15 +69,25 @@ jobs:
       # ENUM-ONLY (root-D enumeration branch, never merge): record which
       # `find`/`wc`/`cat`/`sort` identities the runner PATH actually
       # resolves, in the same process environment the tests inherit.
+      # Invokes the resolved exe by full path (bare `cat` in pwsh is the
+      # Get-Content alias) and can never fail the job.
       - name: ENUM tool identity probe
+        continue-on-error: true
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
           foreach ($t in 'find','wc','cat','sort') {
             Write-Host "== $t =="
-            where.exe $t 2>&1 | ForEach-Object { Write-Host "  path: $_" }
-            $v = (& $t --version 2>&1 | Select-Object -First 1)
-            Write-Host "  --version[0]: $v"
+            $paths = @(where.exe $t 2>$null)
+            foreach ($p in $paths) { Write-Host "  path: $p" }
+            if ($paths.Count -gt 0) {
+              $v = (& $paths[0] --version 2>&1 | Select-Object -First 1)
+              Write-Host "  --version[0]: $v"
+            } else {
+              Write-Host "  (not resolvable)"
+            }
           }
+          exit 0
 
       # ENUM-ONLY: --no-fail-fast so one red file cannot hide the rest;
       # continue-on-error so the steps below still run for enumeration.
