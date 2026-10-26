@@ -1586,23 +1586,39 @@ fn run_stdin_script() -> anyhow::Result<()> {
 }
 
 fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
-    let mut stdin = std::io::stdin().lock();
-    let mut bytes = [0_u8; 1];
+    // niubash#577: mirror of the engine's own reader of the same name
+    // (rubash script_driver::read_unbuffered_line), which this host copy
+    // had drifted from. Accumulate RAW BYTES and decode once per line:
+    // the old `output.push(bytes[0] as char)` widened every byte to its
+    // Latin-1 code point, so a UTF-8 script fed on bare stdin reached
+    // the engine mojibake'd (every multibyte character doubled). The
+    // engine's `bytes_to_shell_text` keeps valid UTF-8 and preserves
+    // undecodable bytes as raw-byte markers that round-trip byte-exact
+    // — the same decode the engine's fd-0 line path applies, so bare
+    // stdin, `-s`, and script-file routes hand the engine identical
+    // text. A b'\n' can never sit inside a UTF-8 sequence, so the line
+    // split is char-boundary safe.
+    //
+    // The read also goes through the raw OS handle, not io::stdin():
+    // the std stdin owns a process-wide BufReader whose fill would
+    // prefetch the stream, while GNU input.c reads fd 0 one byte at a
+    // time (zread) so a child sharing the descriptor continues at the
+    // exact offset this shell consumed.
+    let mut line: Vec<u8> = Vec::new();
     let mut read = 0;
-
     loop {
-        match stdin.read(&mut bytes)? {
-            0 => break,
-            count => {
-                read += count;
-                output.push(bytes[0] as char);
-                if bytes[0] == b'\n' {
+        match rubash::executor::read_process_stdin_bytes(1)? {
+            buf if buf.is_empty() => break,
+            buf => {
+                read += buf.len();
+                line.push(buf[0]);
+                if buf[0] == b'\n' {
                     break;
                 }
             }
         }
     }
-
+    output.push_str(&rubash::executor::bytes_to_shell_text(&line));
     Ok(read)
 }
 
