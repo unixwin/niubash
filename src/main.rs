@@ -160,12 +160,47 @@ fn interactive_launch_wanted(args: &[String]) -> bool {
     false
 }
 
+/// niubash#578: collect the process argv through `args_os`, never
+/// `env::args()`. `env::args()` PANICS on the first non-Unicode word —
+/// a `-c` string or script name carrying raw bytes outside UTF-8 (on
+/// Windows: an unpaired UTF-16 surrogate or legacy-code-page bytes from
+/// the invoking host) killed the shell at startup with a Rust panic
+/// banner and rc 101, before any shell error surface could engage. The
+/// bundled `bash` face forwards argv with `args_os` losslessly; the
+/// host honors that contract by collecting losslessly here and
+/// converting lossily ONLY at this boundary, per word, because the CLI
+/// parser below consumes `String`s. A non-UTF-8 word therefore reaches
+/// its consumer under its lossy rendering: a script name that does not
+/// decode is looked up under the lossy name and fails as an ordinary
+/// shell error (rc 127/2 class), and a non-UTF-8 argv[0] shows its
+/// lossy form in `$0` and diagnostics — the loss is silent but bounded
+/// to the affected word, and it can never crash the process.
+fn collect_process_argv() -> Vec<String> {
+    std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// niubash#578: argv[0] through the same lossless-first collection as
+/// [`collect_process_argv`] (a non-Unicode face name must not panic the
+/// `--dump-po-strings` source-name lookup either).
+fn process_argv0() -> String {
+    std::env::args_os()
+        .next()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "niu".to_string())
+}
+
 fn run_main() -> ExitCode {
+    // Collected once, through args_os (niubash#578 — see
+    // collect_process_argv), and shared by every consumer below.
+    let mut args: Vec<String> = collect_process_argv();
+
     // niubash#379: before anything else runs, drop a console Windows
     // auto-allocated for this process alone — a console-less invoker that
     // plainly spawns `niu -c`/`niu script.sh` gets a visible window that
     // outlives the whole command. Interactive launches keep theirs.
-    if !interactive_launch_wanted(&std::env::args().collect::<Vec<_>>()) {
+    if !interactive_launch_wanted(&args) {
         niubash_runtime::console_guard::release_orphan_console();
     }
 
@@ -174,7 +209,6 @@ fn run_main() -> ExitCode {
     // use, so the interposition must land first). A reader that closes
     // the pipe must terminate niu — one diagnostic, status 1 — instead
     // of letting an unbounded producer loop on per-write failures.
-    let mut args: Vec<String> = std::env::args().collect();
     // rubash#873 companion: consume the engine's background-wrapper spawn
     // handshake (`--internal-bg-wrapper=<nonce>` argv flag + the matching
     // __RUBASH_BACKGROUND_WRAPPER env nonce) before any launcher dispatch
@@ -951,7 +985,7 @@ fn invocation_source_name(invocation: &ShellInvocation) -> String {
     if let Some(script) = &invocation.script {
         return script.clone();
     }
-    std::env::args().next().unwrap_or_else(|| "niu".to_string())
+    process_argv0()
 }
 
 /// Collects `(line, raw body)` for every locale string in `input`, in source
@@ -5196,10 +5230,7 @@ mod tests {
     #[test]
     fn invocation_source_name_follows_gnu_convention() {
         let mut invocation = ShellInvocation::parse(&[]).unwrap();
-        assert_eq!(
-            invocation_source_name(&invocation),
-            std::env::args().next().unwrap_or_else(|| "niu".to_string())
-        );
+        assert_eq!(invocation_source_name(&invocation), process_argv0());
         invocation.command = Some("echo hi".to_string());
         assert_eq!(invocation_source_name(&invocation), "-c");
         invocation.command = None;

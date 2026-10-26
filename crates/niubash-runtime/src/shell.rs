@@ -394,7 +394,15 @@ impl Shell {
         if std::env::var("NIU_ENABLE_RUBASH_SUDO").as_deref() != Ok("1") {
             executor.set_builtin_disabled("sudo", true);
         }
-        let shell_name = invoked_as.or_else(|| std::env::args().next());
+        // niubash#578: argv[0] via args_os + lossy, never env::args() —
+        // a non-Unicode face name (byte-named link, unpaired surrogate)
+        // must not panic Shell construction; the lossy form is what the
+        // face/$0 contract can show for such a name.
+        let shell_name = invoked_as.or_else(|| {
+            std::env::args_os()
+                .next()
+                .map(|arg| arg.to_string_lossy().into_owned())
+        });
         let mut invoked_as_rbash = false;
         if let Some(shell_name) = shell_name {
             let invoked_name = shell_name
