@@ -1647,8 +1647,19 @@ impl Shell {
     }
 
     fn source_non_interactive_startup_file(&mut self) -> Option<i32> {
-        let niu_raw = std::env::var(NIU_ENV_VAR)
-            .ok()
+        // niubash#588: GNU reads the shell variable table, which by the
+        // time the env file is considered already carries whatever the
+        // login profile exported (source_non_interactive_env runs the
+        // profile chain first, this gate second) — a profile that
+        // exports BASH_ENV points the shell at the file. Mirror the
+        // $ENV read in execute_env_file: executor table first, process
+        // environment as fallback. NIU_ENV keeps precedence over
+        // BASH_ENV in both sources.
+        let niu_raw = self
+            .executor
+            .get_env(NIU_ENV_VAR)
+            .map(str::to_owned)
+            .or_else(|| std::env::var(NIU_ENV_VAR).ok())
             .filter(|value| !value.trim().is_empty());
         // GNU shell.c:1216 gates BASH_ENV on posixly_correct == 0 and
         // act_like_sh == 0; NIU_ENV stays available as the niubash extension
@@ -1656,8 +1667,10 @@ impl Shell {
         let bash_raw = if self.posix_mode_active() {
             None
         } else {
-            std::env::var(BASH_ENV_VAR)
-                .ok()
+            self.executor
+                .get_env(BASH_ENV_VAR)
+                .map(str::to_owned)
+                .or_else(|| std::env::var(BASH_ENV_VAR).ok())
                 .filter(|value| !value.trim().is_empty())
         };
         let raw = niu_raw.or(bash_raw)?;
