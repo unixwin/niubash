@@ -82,3 +82,26 @@
 
 - niubash#511(Defender 误杀主票)——本提案是它的系统性修复
 - niubash#800(SLOW 分诊清单)——本次性能税案例补入其数据
+
+## 7. 落地进度
+
+**2026-10-25:SignPath Foundation 申请获批(test-certificate 阶段)**
+
+- 2026-10-25 收到 SignPath Foundation(Phillip Deng)批准邮件:niubash 申请通过,当前为 **test-certificate(测试证书)阶段**;通过 setup review 后签发正式证书。申请以 GitHub 仓(https://github.com/unixwin/niubash)与下载页(https://unixwin.github.io/niubash/installer.html)为准。
+- 集成骨架已就绪(分支 `ci/signpath-skeleton`),**除凭证外全部完成,凭证到位前完全惰性**(release 路径行为与骨架合入前一致):
+  - `.signpath/artifact-configuration/artifact-configuration.xml` — SignPath artifact 声明:`setup.exe`、`niu.exe`、`winuxcmd/**/*.exe`(含 `**/*.dll`,opt\ 载荷在内)全部 Authenticode 签名;条目名由打包脚本归一化,配置与版本号零耦合
+  - `scripts/release/build-signpath-artifact-zip.ps1` — 从发布布局组装 SignPath 输入 zip + 回写契约(逐条目预签名 SHA-256)
+  - `scripts/release/apply-signpath-signatures.ps1` — 签名字节回写 + 硬链接族重建(wpm shim 布局的硬链接契约,§4.2 的落地答案)
+  - `.github/workflows/release.yml` — `signpath-gate`(四个密钥齐备才放行)+ `signpath-sign`(x64/arm64 双腿:组装输入 zip → GitHub artifact → `signpath/github-action-submit-signing-request@v3` 提交并等待 → 回写 → 重打包 zip/tar.gz/7z + 别名 + `.sha256` sidecar → `*-signpath-signed`);`release` 作业优先采用已签名产物,任一签名腿失败即 fail-closed 不发布
+- 凭证下发后的启用步骤(仅 repo settings,零代码改动):
+  1. SignPath org 内建 niubash project,上传上述 artifact configuration,记下 org id / project slug / signing policy slug
+  2. 建 CI user(submitter 权限)并生成 API token
+  3. repo secrets 填 `SIGNPATH_ORG_ID` / `SIGNPATH_PROJECT_ID` / `SIGNPATH_SIGNING_POLICY_SLUG` / `SIGNPATH_API_TOKEN`(四者齐备 `signpath-gate` 自动放行,缺任一则保持惰性)
+  4. 首次发版验证 test-certificate 签名;通过 setup review 后切正式证书
+- 已知待办(正式证书前必须解决,详见 `.signpath/artifact-configuration/README.md`):
+  1. **VERSIONINFO 元数据**:Foundation 条款要求签名二进制带版本元数据并在 artifact configuration 施加 metadata 限制(product name = 项目名、版本一致);`niu.exe`/`winuxcmd.exe` 目前无 VERSIONINFO 资源,需先补资源再收紧配置(骨架配置中已留占位注释)
+  2. **opt\ 上游载荷是否可签**:Foundation 条款"上游 OSS 二进制不得用本订阅签名",但 usr\bin shim 与 opt\ 载荷是同字节硬链接族,只签一半会撕裂族;已列入 setup review 待决
+  3. **审批等待**:Foundation 签名请求需人工审批;工作流等待上限 1 小时,超时 fail-closed,审批链接在 step 输出(`signing-request-web-url`)
+  4. **Defender 扫描时序**:#511 的 pre-release 扫描(`scripts/release/defender-scan.ps1`,warn-only)仍在 build-windows 打未签名字节;签名启用后考虑对签名后产物复扫
+  5. 下载页/首页按 Foundation 条款补 "Free code signing provided by SignPath.io, certificate by SignPath Foundation" 声明及团队角色/隐私说明(条款要求)
+- 备注:与申请同批的 WinuxCmd 是否需要单独申请,以批复邮件为准(§3);本骨架的 `winuxcmd/**/*.exe` 通配可直接覆盖 WinuxCmd 仓自身的发布物,复用成本低。
