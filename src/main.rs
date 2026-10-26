@@ -383,41 +383,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     // Treat as a script file to execute
     {
         let mut shell = niubash_runtime::Shell::new()?;
-        // GNU shell.c:1572-1601 (open_shell_script): the script name is
-        // tried as given; when that fails and the name has no path
-        // separator it is searched in $PATH (findcmd.c find_path_file) —
-        // that is how `bash ls` finds and then refuses the binary
-        // /usr/bin/ls.
-        let mut script = script_arg_to_host_path(first);
-        if !script.exists() && !first.contains('/') && !first.contains('\\') {
-            if let Some(found) = shell.executor.find_script_on_path(first) {
-                script = found;
-            }
-        }
-        if !script.exists() {
-            // shell.c shell_execve on a name that is neither option,
-            // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
-            eprintln!("niu: {}: No such file or directory", first);
-            piped_stdout::finish_and_exit(127);
-        }
-        if script.is_dir() {
-            // niubash#547: a directory operand exists but is not an
-            // executable script — GNU answers `Is a directory` with
-            // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm).
-            // Without this arm the fs::read below leaks the raw io error
-            // (`Is a directory (os error 21)`) with rc 1.
-            eprintln!("niu: {}: Is a directory", first);
-            piped_stdout::finish_and_exit(126);
-        }
-        // general.c:718-741 check_binary_file: NUL in the first line(s)
-        // or an ELF image is refused with EX_BINARY_FILE (126).
-        let bytes = std::fs::read(&script)?;
-        if rubash::script_driver::check_binary_file(&bytes) || std::str::from_utf8(&bytes).is_err()
-        {
-            eprintln!("cannot execute binary file");
-            piped_stdout::finish_and_exit(126);
-        }
-        let content = String::from_utf8(bytes).unwrap_or_default();
+        let content = read_script_operand(&shell, first)?;
         shell.set_script_name(first);
         shell.executor.inherit_process_stdin();
         shell.enable_process_stdin_pipeline_bridge();
@@ -433,6 +399,56 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         finish_one_shot(&shell, code);
         Ok(())
     }
+}
+
+/// Open a script operand the way GNU open_shell_script does — the ONE
+/// script-opening path shared by the direct route (`niu script`) and
+/// the ShellInvocation route (`niu -- script`, `niu -i script`), which
+/// used to diverge (niubash#591: the invocation route had no $PATH
+/// search and no binary refusal). Steps: try the name as given; when
+/// that fails and the name has no path separator, search $PATH
+/// (shell.c:1572-1601, findcmd.c find_path_file — that is how `bash ls`
+/// finds and then refuses the binary /usr/bin/ls); refuse a missing
+/// name with EX_NOTFOUND (127), a directory or an unreadable file with
+/// 126, and a binary / non-UTF-8 file with EX_BINARY_FILE (126,
+/// general.c:718-741 check_binary_file: NUL in the first line(s) or an
+/// ELF image). A missing/unreadable operand is the SHELL's diagnostic
+/// with the shell's statuses, never a raw `(os error N)` + rc 1
+/// (niubash#406, niubash#547). Refusals exit the process directly, as
+/// both routes always did inline.
+fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Result<String> {
+    let mut script = script_arg_to_host_path(name);
+    if !script.exists() && !name.contains('/') && !name.contains('\\') {
+        if let Some(found) = shell.executor.find_script_on_path(name) {
+            script = found;
+        }
+    }
+    if !script.exists() {
+        // shell.c shell_execve on a name that is neither option,
+        // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
+        eprintln!("niu: {name}: No such file or directory");
+        piped_stdout::finish_and_exit(127);
+    }
+    if script.is_dir() {
+        // niubash#547: a directory operand exists but is not an
+        // executable script — GNU answers `Is a directory` with
+        // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm).
+        eprintln!("niu: {name}: Is a directory");
+        piped_stdout::finish_and_exit(126);
+    }
+    let bytes = match std::fs::read(&script) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("niu: {name}: Permission denied");
+            piped_stdout::finish_and_exit(126);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if rubash::script_driver::check_binary_file(&bytes) || std::str::from_utf8(&bytes).is_err() {
+        eprintln!("cannot execute binary file");
+        piped_stdout::finish_and_exit(126);
+    }
+    Ok(String::from_utf8(bytes).unwrap_or_default())
 }
 
 /// The shell face of this invocation, when `argv[0]` (or the forwarding shim's
@@ -864,41 +880,13 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             finish_startup_exit(&mut shell, status);
         }
         shell.set_script_name(&script_name);
-        // niubash#406: a missing/unreadable script operand is the SHELL's
-        // diagnostic with the shell's statuses, not the launcher's raw
-        // `(os error 2)` + rc 1 — `niubash -- nosuch.sh` must answer like
-        // `bash -- nosuch.sh` (`bash: nosuch.sh: No such file or
-        // directory`, rc 127). The `_ =>` script branch below already does
-        // this; the `--`/ShellInvocation route reaches here instead.
-        let path = script_arg_to_host_path(&script_name);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) => match error.kind() {
-                std::io::ErrorKind::NotFound => {
-                    eprintln!("niu: {script_name}: No such file or directory");
-                    piped_stdout::finish_and_exit(127);
-                }
-                std::io::ErrorKind::PermissionDenied => {
-                    eprintln!("niu: {script_name}: Permission denied");
-                    piped_stdout::finish_and_exit(126);
-                }
-                // niubash#547: a directory operand is a found-but-not-
-                // executable script (GNU: `bash: /tmp: Is a directory`,
-                // rc 126), not the launcher's raw `(os error 21)` + rc 1
-                // with the operand name dropped. read_to_string on a
-                // directory surfaces as IsADirectory on Unix; the is_dir
-                // probe covers platforms whose error kind differs.
-                std::io::ErrorKind::IsADirectory => {
-                    eprintln!("niu: {script_name}: Is a directory");
-                    piped_stdout::finish_and_exit(126);
-                }
-                _ if path.is_dir() => {
-                    eprintln!("niu: {script_name}: Is a directory");
-                    piped_stdout::finish_and_exit(126);
-                }
-                _ => return Err(error.into()),
-            },
-        };
+        // niubash#591: the same script-opening path as the direct route
+        // (read_script_operand) — $PATH search for a slash-less name,
+        // and directory / permission / binary refusals with GNU's
+        // diagnostics and statuses (127 / 126), instead of this route's
+        // old read_to_string fall-through (no PATH search; an ELF file
+        // parsed as script text, rc 127).
+        let content = read_script_operand(&shell, &script_name)?;
         let code = shell.execute_script(&content)?;
         let code = shell.finish_with_exit_trap(code)?;
         finish_one_shot(&shell, code);
