@@ -160,12 +160,47 @@ fn interactive_launch_wanted(args: &[String]) -> bool {
     false
 }
 
+/// niubash#578: collect the process argv through `args_os`, never
+/// `env::args()`. `env::args()` PANICS on the first non-Unicode word —
+/// a `-c` string or script name carrying raw bytes outside UTF-8 (on
+/// Windows: an unpaired UTF-16 surrogate or legacy-code-page bytes from
+/// the invoking host) killed the shell at startup with a Rust panic
+/// banner and rc 101, before any shell error surface could engage. The
+/// bundled `bash` face forwards argv with `args_os` losslessly; the
+/// host honors that contract by collecting losslessly here and
+/// converting lossily ONLY at this boundary, per word, because the CLI
+/// parser below consumes `String`s. A non-UTF-8 word therefore reaches
+/// its consumer under its lossy rendering: a script name that does not
+/// decode is looked up under the lossy name and fails as an ordinary
+/// shell error (rc 127/2 class), and a non-UTF-8 argv[0] shows its
+/// lossy form in `$0` and diagnostics — the loss is silent but bounded
+/// to the affected word, and it can never crash the process.
+fn collect_process_argv() -> Vec<String> {
+    std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// niubash#578: argv[0] through the same lossless-first collection as
+/// [`collect_process_argv`] (a non-Unicode face name must not panic the
+/// `--dump-po-strings` source-name lookup either).
+fn process_argv0() -> String {
+    std::env::args_os()
+        .next()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "niu".to_string())
+}
+
 fn run_main() -> ExitCode {
+    // Collected once, through args_os (niubash#578 — see
+    // collect_process_argv), and shared by every consumer below.
+    let mut args: Vec<String> = collect_process_argv();
+
     // niubash#379: before anything else runs, drop a console Windows
     // auto-allocated for this process alone — a console-less invoker that
     // plainly spawns `niu -c`/`niu script.sh` gets a visible window that
     // outlives the whole command. Interactive launches keep theirs.
-    if !interactive_launch_wanted(&std::env::args().collect::<Vec<_>>()) {
+    if !interactive_launch_wanted(&args) {
         niubash_runtime::console_guard::release_orphan_console();
     }
 
@@ -174,7 +209,6 @@ fn run_main() -> ExitCode {
     // use, so the interposition must land first). A reader that closes
     // the pipe must terminate niu — one diagnostic, status 1 — instead
     // of letting an unbounded producer loop on per-write failures.
-    let mut args: Vec<String> = std::env::args().collect();
     // rubash#873 companion: consume the engine's background-wrapper spawn
     // handshake (`--internal-bg-wrapper=<nonce>` argv flag + the matching
     // __RUBASH_BACKGROUND_WRAPPER env nonce) before any launcher dispatch
@@ -951,7 +985,7 @@ fn invocation_source_name(invocation: &ShellInvocation) -> String {
     if let Some(script) = &invocation.script {
         return script.clone();
     }
-    std::env::args().next().unwrap_or_else(|| "niu".to_string())
+    process_argv0()
 }
 
 /// Collects `(line, raw body)` for every locale string in `input`, in source
@@ -1493,6 +1527,16 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // (unixwin/niubash#431: `cat f431.sh | niu` with `(printf a;\nprintf
     // b);\n)` must blame `line 3`, like `bash -s` on the same stream).
     let mut lines_read = 0usize;
+    // niubash#576: GNU's reader_loop does NOT stop at the first failing
+    // command. Without `-e` in force it reads the stream to EOF, the
+    // process status is the LAST batch's status, and the EXIT trap runs
+    // exactly once at the end (shell.c read_from_stdin / eval.c
+    // reader_loop). Only an unwind stops the stream early — a top-level
+    // `exit`, an errexit abort, or a read-time parse error. The previous
+    // driver exited the process on ANY nonzero batch: later input never
+    // ran and the EXIT trap fired at the failure point. Track the last
+    // batch's status and finish once, below.
+    let mut last_code = 0;
 
     loop {
         line.clear();
@@ -1508,11 +1552,11 @@ fn run_stdin_script() -> anyhow::Result<()> {
             .unwrap_or_else(|| read_unbuffered_line(&mut line))?
         {
             0 => {
+                // EOF: flush a gathered-but-incomplete tail as the final
+                // batch; its status is the stream's last status.
                 if !pending.is_empty() {
                     let offset = lines_read - pending.len();
-                    let code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
-                    let code = shell.finish_with_exit_trap(code)?;
-                    finish_one_shot(&shell, code);
+                    last_code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
                 }
                 break;
             }
@@ -1539,36 +1583,71 @@ fn run_stdin_script() -> anyhow::Result<()> {
             }
             None => shell.execute_script_at_line_offset(&script, offset)?,
         };
-        if code != 0 {
-            let code = shell.finish_with_exit_trap(code)?;
-            finish_one_shot(&shell, code);
+        last_code = code;
+
+        // Stop feeding the stream only when the batch UNWOUND — the
+        // same stop rule as the engine's own stdin driver (rubash
+        // script_driver::run_stdin_script): a recorded top-level jump
+        // (Shell::take_script_exit_jump for the batches this shell
+        // flattened itself, Executor::take_exit_jump_pending for the
+        // engine-driver-routed ones), a read-time parse error, or a
+        // nonzero status while errexit is armed (execute_cmd.c:652-656
+        // exempts a `!`-inverted command). An ordinary nonzero status
+        // just becomes the new last status and reading continues.
+        let jumped = shell.take_script_exit_jump();
+        let engine_jumped = shell.executor.take_exit_jump_pending();
+        let parse_error = shell.executor.take_parse_error();
+        if jumped
+            || engine_jumped
+            || parse_error
+            || (code != 0
+                && rubash::script_driver::stdin_script_errexit_enabled(&shell.executor)
+                && !shell.executor.last_command_inverted())
+        {
+            break;
         }
         pending.clear();
     }
 
-    let code = shell.finish_with_exit_trap(0)?;
+    let code = shell.finish_with_exit_trap(last_code)?;
     finish_one_shot(&shell, code);
     Ok(())
 }
 
 fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
-    let mut stdin = std::io::stdin().lock();
-    let mut bytes = [0_u8; 1];
+    // niubash#577: mirror of the engine's own reader of the same name
+    // (rubash script_driver::read_unbuffered_line), which this host copy
+    // had drifted from. Accumulate RAW BYTES and decode once per line:
+    // the old `output.push(bytes[0] as char)` widened every byte to its
+    // Latin-1 code point, so a UTF-8 script fed on bare stdin reached
+    // the engine mojibake'd (every multibyte character doubled). The
+    // engine's `bytes_to_shell_text` keeps valid UTF-8 and preserves
+    // undecodable bytes as raw-byte markers that round-trip byte-exact
+    // — the same decode the engine's fd-0 line path applies, so bare
+    // stdin, `-s`, and script-file routes hand the engine identical
+    // text. A b'\n' can never sit inside a UTF-8 sequence, so the line
+    // split is char-boundary safe.
+    //
+    // The read also goes through the raw OS handle, not io::stdin():
+    // the std stdin owns a process-wide BufReader whose fill would
+    // prefetch the stream, while GNU input.c reads fd 0 one byte at a
+    // time (zread) so a child sharing the descriptor continues at the
+    // exact offset this shell consumed.
+    let mut line: Vec<u8> = Vec::new();
     let mut read = 0;
-
     loop {
-        match stdin.read(&mut bytes)? {
-            0 => break,
-            count => {
-                read += count;
-                output.push(bytes[0] as char);
-                if bytes[0] == b'\n' {
+        match rubash::executor::read_process_stdin_bytes(1)? {
+            buf if buf.is_empty() => break,
+            buf => {
+                read += buf.len();
+                line.push(buf[0]);
+                if buf[0] == b'\n' {
                     break;
                 }
             }
         }
     }
-
+    output.push_str(&rubash::executor::bytes_to_shell_text(&line));
     Ok(read)
 }
 
@@ -5196,10 +5275,7 @@ mod tests {
     #[test]
     fn invocation_source_name_follows_gnu_convention() {
         let mut invocation = ShellInvocation::parse(&[]).unwrap();
-        assert_eq!(
-            invocation_source_name(&invocation),
-            std::env::args().next().unwrap_or_else(|| "niu".to_string())
-        );
+        assert_eq!(invocation_source_name(&invocation), process_argv0());
         invocation.command = Some("echo hi".to_string());
         assert_eq!(invocation_source_name(&invocation), "-c");
         invocation.command = None;
