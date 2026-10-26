@@ -104,6 +104,48 @@ The long version — including same-command-line side-by-sides of what
 actually reaches a native process — is
 [Why niubash](docs/src/why-niubash.md).
 
+## Why not Git Bash / MSYS2 / Cygwin — and why not a "lightweight replacement" shell
+
+**Git Bash** calls itself, verbatim, "a BASH emulation used to run Git from the
+command line" — an emulation built to run Git. The costs are structural: console
+device redirects such as `echo >/dev/tty` fail outright with `Invalid argument`
+in its MSYS layer (niubash matches GNU; project-measured); its bundled bash is on
+the 5.2 line, so bash 5.3's `${ cmd; }` nofork substitution doesn't exist; every
+prompt spawns git for the branch segment (~100–300 ms), while niu reads `.git/HEAD`
+directly and never spawns git (39 ms cold, p50 2.5 ms warm; project-measured, as
+of 2026-10-25); a real install is 440 MB plus a 20 MB simulation DLL, versus
+niu at ≈16 MB with zero DLLs.
+
+**MSYS2**'s own documentation concedes that arguments resembling Unix paths are
+automatically rewritten — and that the rewriting "also isn't perfect," hitting
+arguments that aren't paths at all. niubash keeps translation deliberately
+narrow: quoted arguments are never rewritten, and the only device translation is
+the exact token `/dev/null` → `nul`; every overreach ever found became a public
+issue and a pinned regression test. **Cygwin** states on its own site that apps
+must be rebuilt from source to run in its world — the simulation layer is its
+official definition. niubash is a native build: no simulation DLL.
+
+**The new "bash replacement" shells** (e.g. brush, in Rust) sell lightness.
+Lightweight is no excuse for missing limbs: complete bash semantics re-implemented
+path by path without fork, plus cross-platform itself, is what 474,985 lines
+(rubash 385,618 + niubash 89,367; static-audit caliber, 2026-10-25) buys. We
+measured brush's v0.4.0 release with a 306-case differential corpus
+(byte-compared against GNU bash 5.3.20): 181/306; a source build of its latest
+master commit re-measures at 183/306 — the same failure profile — a wrong alias timing model (6 substantive divergences in 20
+probes), `printf x y` looping forever and hanging the script, `wait $!`
+unimplemented in scripts, non-recursive globstar, and nameref `unset` reporting
+"not yet implemented." Such implementations can be neither a bash replacement
+nor a reliable login shell (support chain in the campaign evidence files).
+
+**niubash's ledger**: 244/246 byte-identical to GNU on our 246-case differential
+suite; measured against GNU's own 83-suite corpus; nvm / bats-core / bash-it /
+oh-my-bash run for real, with every divergence filed as a public issue and pinned
+as a regression test (as of 2026-10-25: rubash 1,050 issues filed, 1,039 closed;
+niubash 292 filed, 285 closed). The bundled command layer, WinuxCmd, carries
+176 commands / 1,924 options designed for shell use — against Microsoft
+coreutils' own README, which lists no `/dev/null`, no POSIX signals, and
+twenty-plus commands (`chmod`, `id`, `tty`, …) dropped wholesale.
+
 ## Built for AI agents
 
 Models are trained on Bash; on a Windows machine their commands deserve
