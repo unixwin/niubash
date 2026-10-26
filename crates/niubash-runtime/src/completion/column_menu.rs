@@ -26,6 +26,11 @@
 //! untouched, so in-menu navigation keeps working exactly as reedline
 //! defines it.
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use reedline::{
     ColumnarMenu, Completer, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion,
 };
@@ -33,6 +38,10 @@ use reedline::{
 /// [`ColumnarMenu`] wrapper enforcing the stop-after-splice rule.
 pub struct ColumnMenu {
     inner: ColumnarMenu,
+    /// Shared with the history autosuggest hinter: true while the grid is
+    /// on screen. The hinter stands down instead of painting a ghost over
+    /// the same word (fish parity).
+    menu_open: Arc<AtomicBool>,
     /// Set by `menu_event(Activate)`, cleared by any other menu event and
     /// after the first `can_partially_complete` call. While set, a
     /// successful splice deactivates the menu.
@@ -40,9 +49,10 @@ pub struct ColumnMenu {
 }
 
 impl ColumnMenu {
-    pub fn new(inner: ColumnarMenu) -> Self {
+    pub fn new(inner: ColumnarMenu, menu_open: Arc<AtomicBool>) -> Self {
         Self {
             inner,
+            menu_open,
             fresh_activation: false,
         }
     }
@@ -85,7 +95,9 @@ impl Menu for ColumnMenu {
         // Only a fresh Activate arms the one-shot stop rule; every other
         // event (navigation, edits, deactivation) disarms it so the
         // in-menu flows keep reedline's exact behavior.
-        self.fresh_activation = matches!(event, MenuEvent::Activate(_));
+        let fresh = matches!(event, MenuEvent::Activate(_));
+        self.fresh_activation = fresh;
+        self.menu_open.store(fresh, Ordering::Relaxed);
         self.inner.menu_event(event);
     }
 
@@ -109,7 +121,7 @@ impl Menu for ColumnMenu {
             // of lingering on the re-queried set. The next TAB re-activates
             // fresh and shows the grid. Full deactivation path, same as a
             // received `Deactivate`.
-            self.inner.menu_event(MenuEvent::Deactivate);
+            self.menu_event(MenuEvent::Deactivate);
         }
         spliced
     }
@@ -128,7 +140,8 @@ impl Menu for ColumnMenu {
         completer: &mut dyn Completer,
         painter: &Painter,
     ) {
-        self.inner.update_working_details(editor, completer, painter);
+        self.inner
+            .update_working_details(editor, completer, painter);
     }
 
     fn replace_in_buffer(&self, editor: &mut Editor) {
@@ -172,6 +185,11 @@ impl Menu for ColumnMenu {
 mod tests {
     use super::*;
     use reedline::{Completer, CompletionResult, LineBuffer, Span, Suggestion, UndoBehavior};
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    fn fresh_menu() -> ColumnMenu {
+        ColumnMenu::new(ColumnarMenu::default(), Arc::new(AtomicBool::new(false)))
+    }
 
     /// Prefix completer over a fixed candidate list (mirrors the shape
     /// niubash's real completer produces for path words).
@@ -233,7 +251,7 @@ mod tests {
         // lands and the menu closes — no children grid on the same TAB.
         // (Owner ruling 2026-10-26: zsh/bash parity, never skip the stop
         // window where the user may just want to `cd projects/`.)
-        let mut menu = ColumnMenu::new(ColumnarMenu::default());
+        let mut menu = fresh_menu();
         let mut completer = PrefixCompleter::new(&["projects/"]);
         let mut editor = editor_with("cd proj");
         activate(&mut menu, &mut editor, &mut completer);
@@ -250,7 +268,7 @@ mod tests {
     fn ambiguous_prefix_splice_deactivates_menu() {
         // `cd ruba<TAB>` over 20 `rubash*` dirs: the common prefix splices
         // and the menu closes — the grid is a second TAB away.
-        let mut menu = ColumnMenu::new(ColumnarMenu::default());
+        let mut menu = fresh_menu();
         let mut completer = PrefixCompleter::new(&["rubash/", "rubash-1013/", "rubash-1020/"]);
         let mut editor = editor_with("cd ruba");
         activate(&mut menu, &mut editor, &mut completer);
@@ -267,7 +285,7 @@ mod tests {
         // `cd r<TAB>` with genuinely ambiguous candidates and no common
         // prefix beyond the typed text: nothing splices, the grid stays up
         // as the disambiguation aid.
-        let mut menu = ColumnMenu::new(ColumnarMenu::default());
+        let mut menu = fresh_menu();
         let mut completer = PrefixCompleter::new(&["rubash/", "repro/"]);
         let mut editor = editor_with("cd r");
         activate(&mut menu, &mut editor, &mut completer);
@@ -281,7 +299,7 @@ mod tests {
         // Arrow-key navigation (`MenuNext`) also routes through
         // `can_partially_complete`; the stop rule must not fire there or
         // in-menu navigation would die mid-browse.
-        let mut menu = ColumnMenu::new(ColumnarMenu::default());
+        let mut menu = fresh_menu();
         let mut completer = PrefixCompleter::new(&["rubash/", "rubash-1013/"]);
         let mut editor = editor_with("cd ruba");
         activate(&mut menu, &mut editor, &mut completer);
@@ -294,5 +312,25 @@ mod tests {
             menu.is_active(),
             "navigation-flow splice must keep the menu alive"
         );
+    }
+
+    #[test]
+    fn menu_open_flag_tracks_visibility_for_the_hinter() {
+        // The shared flag mirrors what the painter asks: set while the
+        // grid is on screen so the history hinter stands down instead of
+        // painting a ghost over the same word.
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut menu = ColumnMenu::new(ColumnarMenu::default(), flag.clone());
+        let mut completer = PrefixCompleter::new(&["projects/"]);
+        let mut editor = editor_with("cd proj");
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        menu.menu_event(MenuEvent::Activate(false));
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+        menu.update_values(&mut editor, &mut completer);
+        assert!(menu.can_partially_complete(false, &mut editor, &mut completer));
+        // The stop-rule deactivation flows through our own handler, so the
+        // flag clears with the menu.
+        assert!(!menu.is_active());
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
