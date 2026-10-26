@@ -3600,11 +3600,11 @@ fn print_config_usage() {
     println!("      never recommended (niubash#249).");
     println!();
     println!("  {k}", k = niubash_runtime::config::COMPLETION_STYLE_KEY);
-    println!("      Shape of the TAB completion UI. gnu (default) — TAB completes");
-    println!("      the common prefix, a second TAB lists the candidates next to the");
-    println!("      prompt like GNU readline. Alternatives: ide (VS Code popup),");
-    println!("      column (zsh grid), list (fish vertical), inline (bash");
-    println!("      menu-complete). NIU_COMPLETION_STYLE overrides this file.");
+    println!("      Shape of the TAB completion UI. column (default) — TAB shows");
+    println!("      the candidates at once, several per row (GNU listing look).");
+    println!("      Alternatives: gnu (GNU readline literal), ide (VS Code popup),");
+    println!("      list (fish vertical), inline (bash menu-complete).");
+    println!("      NIU_COMPLETION_STYLE overrides this file.");
     println!();
     println!("  {k}", k = niubash_runtime::config::RC_POLICY_KEY);
     println!("      Personal-rc selection for interactive shells. primary-only");
