@@ -246,10 +246,9 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // Infallible since niubash#134: a history file that cannot be opened
     // (sandboxed restricted token, os error 5) degrades to an in-memory
     // history instead of aborting the interactive session.
-    let mut history = LiveFileBackedHistory::with_mode(
+    let mut history = LiveFileBackedHistory::with_file(
         shell_ref.history_max_size,
         shell_ref.history_path.clone(),
-        shell_ref.history_mode,
     );
     // Explicitly rebuild the editor history from disk at construction so a
     // fresh process starts with persisted cross-session entries.

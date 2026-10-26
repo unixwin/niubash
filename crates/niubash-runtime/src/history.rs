@@ -13,8 +13,6 @@ use reedline::{
     Result, SearchQuery,
 };
 
-use crate::config::HistoryMode;
-
 /// On Windows, reset the DACL of the history file to grant the current
 /// process full access. This handles the case where the file was created
 /// by a different security context (e.g., Codex sandbox) and has
@@ -107,9 +105,9 @@ impl RubashHistoryProvider {
     /// file only when `file_exists()` succeeds and tolerates every other
     /// I/O failure (it retries `read_history` only on `EINTR`), so an
     /// unreadable `HISTFILE` never stops the shell.
-    pub(crate) fn with_file(capacity: usize, path: PathBuf, mode: HistoryMode) -> Self {
+    pub(crate) fn with_file(capacity: usize, path: PathBuf) -> Self {
         Self {
-            inner: LiveFileBackedHistory::with_mode(capacity, path, mode),
+            inner: LiveFileBackedHistory::with_file(capacity, path),
         }
     }
 
@@ -326,7 +324,6 @@ struct HistoryState {
 pub(crate) struct LiveFileBackedHistory {
     capacity: usize,
     state: Mutex<HistoryState>,
-    mode: HistoryMode,
 }
 
 /// `FileBackedHistory::new` only rejects `capacity == usize::MAX`; clamp so
@@ -363,28 +360,22 @@ fn file_signature_lossy(path: &Path, state: &mut HistoryState) -> FileSignature 
 }
 
 impl LiveFileBackedHistory {
-    #[cfg(test)]
-    pub(crate) fn with_file(capacity: usize, path: PathBuf) -> Self {
-        Self::with_mode(capacity, path, HistoryMode::Shared)
-    }
-
     /// Build the live history. Infallible: a history file that cannot be
     /// opened degrades to an in-memory history (see the struct docs for the
     /// GNU citation). A file that opens but cannot be stat-ed (restricted
     /// token denying `metadata` while `CreateFileW` succeeded) degrades the
     /// same way instead of aborting shell startup with `os error 5`.
-    pub(crate) fn with_mode(capacity: usize, path: PathBuf, mode: HistoryMode) -> Self {
+    /// There is exactly one sharing semantics (niubash#572): every session
+    /// refreshes from the shared file, so cross-session lines are visible
+    /// to navigation and builtins alike — the retired NIU_HISTORY_MODE
+    /// switch and its private-mode capacity split are gone.
+    pub(crate) fn with_file(capacity: usize, path: PathBuf) -> Self {
         // On Windows, ensure the history file has accessible ACLs before opening.
         // Codex sandbox and similar environments may create files with restrictive
         // permissions that block read access (os error 5).
         ensure_history_file_accessible(&path);
 
-        let history_capacity = if mode == HistoryMode::Private {
-            usize::MAX - 1
-        } else {
-            capacity
-        };
-        let state = match FileBackedHistory::with_file(history_capacity, path.clone()) {
+        let state = match FileBackedHistory::with_file(capacity, path.clone()) {
             Ok(history) => {
                 let mut state = HistoryState {
                     history,
@@ -403,7 +394,7 @@ impl LiveFileBackedHistory {
                 // open or update the user's profile history file. Keep the
                 // shell usable with an in-memory history in that case.
                 let mut state = HistoryState {
-                    history: in_memory_history(history_capacity),
+                    history: in_memory_history(capacity),
                     signature: FileSignature::default(),
                     path: None,
                     warned_io_failure: true,
@@ -422,7 +413,6 @@ impl LiveFileBackedHistory {
         Self {
             capacity,
             state: Mutex::new(state),
-            mode,
         }
     }
 
@@ -438,13 +428,10 @@ impl LiveFileBackedHistory {
             .map_err(|_| ReedlineError::from(history_lock_error()))
     }
 
-    fn refresh_if_stale(capacity: usize, state: &mut HistoryState, mode: HistoryMode) {
+    fn refresh_if_stale(capacity: usize, state: &mut HistoryState) {
         let Some(path) = state.path.clone() else {
             return;
         };
-        if mode != HistoryMode::Shared {
-            return;
-        }
 
         // On Windows, fix ACLs before re-reading the file from disk.
         ensure_history_file_accessible(&path);
@@ -609,9 +596,8 @@ impl LiveFileBackedHistory {
     /// change and reload the list the theme just cleared.
     pub(crate) fn clear_memory(&mut self) -> Result<()> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, state, mode);
+        Self::refresh_if_stale(capacity, state);
         let snapshot = state
             .path
             .as_deref()
@@ -661,7 +647,6 @@ impl LiveFileBackedHistory {
     /// never reaches stderr (`-c` one-shot stderr stays byte-stable).
     pub(crate) fn flush_at_session_end(&mut self) {
         let capacity = self.capacity;
-        let mode = self.mode;
         let Ok(state) = self.state.get_mut() else {
             return;
         };
@@ -673,7 +658,7 @@ impl LiveFileBackedHistory {
         // See the file as it is now: another shell may have appended since
         // the last sync, and the empty-list decision below must not erase
         // those lines.
-        Self::refresh_if_stale(capacity, state, mode);
+        Self::refresh_if_stale(capacity, state);
         let entries: Vec<String> = match state
             .history
             .search(SearchQuery::all_that_contain_rev(String::new()))
@@ -727,9 +712,8 @@ impl LiveFileBackedHistory {
 impl History for LiveFileBackedHistory {
     fn save(&mut self, item: HistoryItem) -> Result<HistoryItem> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, state, mode);
+        Self::refresh_if_stale(capacity, state);
         let saved = state.history.save(item)?;
         Self::sync_state(state)?;
         Ok(saved)
@@ -737,25 +721,22 @@ impl History for LiveFileBackedHistory {
 
     fn load(&self, id: HistoryItemId) -> Result<HistoryItem> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &mut state, mode);
+        Self::refresh_if_stale(capacity, &mut state);
         state.history.load(id)
     }
 
     fn count(&self, query: SearchQuery) -> Result<i64> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &mut state, mode);
+        Self::refresh_if_stale(capacity, &mut state);
         state.history.count(query)
     }
 
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &mut state, mode);
+        Self::refresh_if_stale(capacity, &mut state);
         state.history.search(query)
     }
 
@@ -765,17 +746,15 @@ impl History for LiveFileBackedHistory {
         updater: &dyn Fn(HistoryItem) -> HistoryItem,
     ) -> Result<()> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, state, mode);
+        Self::refresh_if_stale(capacity, state);
         state.history.update(id, updater)
     }
 
     fn clear(&mut self) -> Result<()> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, state, mode);
+        Self::refresh_if_stale(capacity, state);
         state.history.clear()?;
         let path = state.path.clone();
         state.signature = match path.as_deref() {
@@ -787,9 +766,8 @@ impl History for LiveFileBackedHistory {
 
     fn delete(&mut self, id: HistoryItemId) -> Result<()> {
         let capacity = self.capacity;
-        let mode = self.mode;
         let state = self.lock_mut()?;
-        Self::refresh_if_stale(capacity, state, mode);
+        Self::refresh_if_stale(capacity, state);
         state.history.delete(id)
     }
 
@@ -858,7 +836,7 @@ mod tests {
         std::fs::write(&parent, "not a directory").unwrap();
         let path = parent.join("history");
 
-        let mut history = LiveFileBackedHistory::with_mode(100, path, HistoryMode::Shared);
+        let mut history = LiveFileBackedHistory::with_file(100, path);
         history
             .save(HistoryItem::from_command_line("echo fallback"))
             .unwrap();
@@ -883,7 +861,7 @@ mod tests {
         let path = temp.path().join("history-dir");
         std::fs::create_dir_all(&path).unwrap();
 
-        let mut history = LiveFileBackedHistory::with_mode(100, path.clone(), HistoryMode::Shared);
+        let mut history = LiveFileBackedHistory::with_file(100, path.clone());
         history
             .save(HistoryItem::from_command_line("echo dir"))
             .unwrap();
@@ -905,11 +883,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("blocker");
         std::fs::write(&parent, "file, not a dir").unwrap();
-        let mut provider = RubashHistoryProvider::with_file(
-            100,
-            parent.join(".niubash_history"),
-            HistoryMode::Shared,
-        );
+        let mut provider = RubashHistoryProvider::with_file(100, parent.join(".niubash_history"));
         let entries = provider.entries().unwrap();
         assert!(entries.is_empty());
         provider.append("memory only".to_string()).unwrap();
@@ -926,7 +900,7 @@ mod tests {
         use rubash::history::HistoryProvider as _;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("T1248=${T1248}alpha".to_string()).unwrap();
         provider.append("!!".to_string()).unwrap();
         provider
@@ -960,11 +934,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("blocker");
         std::fs::write(&parent, "file, not a dir").unwrap();
-        let mut provider = RubashHistoryProvider::with_file(
-            100,
-            parent.join(".niubash_history"),
-            HistoryMode::Shared,
-        );
+        let mut provider = RubashHistoryProvider::with_file(100, parent.join(".niubash_history"));
         provider.append("same".to_string()).unwrap();
         provider
             .replace(vec!["same".to_string(), "same".to_string()])
@@ -1010,14 +980,29 @@ mod tests {
     }
 
     #[test]
-    fn private_mode_loads_existing_history_but_ignores_later_external_writes() {
+    fn live_history_refreshes_from_later_external_writes() {
+        // niubash#572: there is exactly one sharing semantics now. The
+        // retired private mode used to ignore later external writes (its
+        // refresh short-circuited for every non-shared mode), and the
+        // retired session mode documented — but did not implement — that
+        // "builtins can observe later file updates". Both promises are
+        // replaced by the uniform rule: a query refreshes from the file,
+        // so another session's lines are visible here.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "old-one\nold-two\n").unwrap();
 
-        let mut first = LiveFileBackedHistory::with_mode(100, path, HistoryMode::Private);
+        let mut first = LiveFileBackedHistory::with_file(100, path.clone());
         first
             .save(HistoryItem::from_command_line("this-session"))
+            .unwrap();
+
+        // Another session appends after this one started.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"from-another-session\n")
             .unwrap();
 
         let commands = first
@@ -1029,7 +1014,10 @@ mod tests {
             .into_iter()
             .map(|item| item.command_line)
             .collect::<Vec<_>>();
-        assert_eq!(commands, vec!["old-one", "old-two", "this-session"]);
+        assert_eq!(
+            commands,
+            vec!["old-one", "old-two", "this-session", "from-another-session"]
+        );
     }
 
     #[test]
@@ -1044,7 +1032,7 @@ mod tests {
         let path = temp.path().join("history");
         std::fs::write(&path, "from-disk\n").unwrap();
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo one".to_string()).unwrap();
         provider.append("echo two".to_string()).unwrap();
 
@@ -1074,7 +1062,7 @@ mod tests {
         let path = temp.path().join("history");
         std::fs::write(&path, "loaded-one\nloaded-two\n").unwrap();
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.read_history(path.to_str().unwrap()).unwrap();
         assert_eq!(
             provider.entries().unwrap(),
@@ -1110,8 +1098,8 @@ mod tests {
         let path = temp.path().join("history");
         std::fs::write(&path, "loaded-one\n").unwrap();
 
-        let mut first = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
-        let mut second = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut first = RubashHistoryProvider::with_file(100, path.clone());
+        let mut second = RubashHistoryProvider::with_file(100, path.clone());
         second.append("from-second".to_string()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -1133,7 +1121,7 @@ mod tests {
         let path = temp.path().join("history");
         std::fs::write(&path, "loaded-one\nloaded-two\nloaded-three\n").unwrap();
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.read_new_history(path.to_str().unwrap()).unwrap();
         assert_eq!(
             provider.entries().unwrap(),
@@ -1153,7 +1141,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo gone".to_string()).unwrap();
         provider.clear().unwrap();
         assert_eq!(
@@ -1189,7 +1177,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo written".to_string()).unwrap();
         provider.write_history(path.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo written\n");
@@ -1214,7 +1202,7 @@ mod tests {
         let path = temp.path().join("history");
         std::fs::write(&path, "kept-one\nkept-two\n").unwrap();
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.clear().unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -1240,7 +1228,7 @@ mod tests {
         let path = temp.path().join("history");
         std::fs::write(&path, "kept-one\n").unwrap();
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.clear().unwrap();
         std::fs::write(&path, "kept-one\nfrom-another-shell\n").unwrap();
 
@@ -1262,7 +1250,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo synced".to_string()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo synced\n");
 
@@ -1295,7 +1283,7 @@ mod tests {
         std::fs::write(&blocker, "file, not a dir").unwrap();
         let path = blocker.join(".niubash_history");
 
-        let mut provider = RubashHistoryProvider::with_file(100, path.clone(), HistoryMode::Shared);
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo memory".to_string()).unwrap();
         drop(provider);
         assert!(
