@@ -423,12 +423,18 @@ fn configured_completion_menu(
             } else {
                 4
             };
-            Box::new(
+            // Owner ruling 2026-10-26 (zsh/bash parity): TAB #1 splices the
+            // common prefix and stops — the menu must not linger on the
+            // re-queried set (e.g. auto-listing a just-completed directory's
+            // children skips the window where the user may just want to
+            // stop). `ColumnMenu` wraps the stock grid with that stop rule;
+            // a TAB that splices nothing still shows the grid immediately.
+            Box::new(crate::completion::column_menu::ColumnMenu::new(
                 ColumnarMenu::default()
                     .with_name(name)
                     .with_columns(page_cols)
                     .with_only_buffer_difference(false),
-            )
+            ))
         }
         CompletionStyle::List => Box::new(configured_list_menu(
             name,
