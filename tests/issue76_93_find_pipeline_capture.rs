@@ -61,7 +61,11 @@ fn tool_identity_ok(tool: &str, probe: &str, expect: &str) -> bool {
     }
     let resolved = out.trim().to_string();
     let (pok, pout) = run_c(probe);
-    if !pok || pout.trim() != expect {
+    // Normalize CRLF before comparing: a Windows-native GNU-semantics
+    // tool may terminate its output lines with \r\n, and line endings
+    // are not identity either.
+    let got = pout.replace('\r', "");
+    if !pok || got.trim() != expect {
         eprintln!(
             "issue76_93 stand-down: `{tool}` resolved to {resolved} but failed the \
              GNU identity probe `{probe}` (expected stdout {expect:?}, got \
