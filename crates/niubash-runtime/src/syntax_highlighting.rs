@@ -1149,6 +1149,21 @@ mod tests {
         );
     }
 
+    /// Write a stand-in installed-command file for the live-probe tests.
+    /// On unix a PATH entry only counts as a command when it carries an
+    /// execute bit (GNU PATH lookup semantics), and `fs::write` creates
+    /// 0644 — which the probe correctly ignores there. Windows has no
+    /// execute bit; the `.exe` suffix matched via PATHEXT is what counts,
+    /// so the chmod is unix-only. (niubash#574)
+    fn write_probe_command(path: &std::path::Path) {
+        std::fs::write(path, "binary").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     /// niubash#574: a command installed mid-session is absent from the
     /// startup command set, but the live probe finds it on PATH once the
     /// memo is invalidated (the `wpm install` hook clears it).
@@ -1175,7 +1190,7 @@ mod tests {
 
         // Install mid-session: the memoized miss still answers, so the name
         // keeps rendering unknown until the shell clears the memo.
-        std::fs::write(temp.join("probe574fresh.exe"), "binary").unwrap();
+        write_probe_command(&temp.join("probe574fresh.exe"));
         let styled = highlighter.highlight("probe574fresh --help", 0);
         assert_eq!(
             style_for(&styled, "probe574fresh"),
@@ -1256,7 +1271,7 @@ mod tests {
         let temp_b = unique_temp_dir("niubash-highlight-probe-fp-b");
         std::fs::create_dir_all(&temp_a).unwrap();
         std::fs::create_dir_all(&temp_b).unwrap();
-        std::fs::write(temp_b.join("probe574fp.exe"), "binary").unwrap();
+        write_probe_command(&temp_b.join("probe574fp.exe"));
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
         state.lock().unwrap().env_vars =
@@ -1302,7 +1317,7 @@ mod tests {
             style_for(&styled, "probe574fp"),
             highlighter.style(SyntaxKind::UnknownToken)
         );
-        std::fs::write(temp_a.join("probe574fp.exe"), "binary").unwrap();
+        write_probe_command(&temp_a.join("probe574fp.exe"));
         state.lock().unwrap().env_vars.insert(
             "__RUBASH_HASH_TABLE".to_string(),
             "probe574fp=D:/x$1$1".to_string(),
