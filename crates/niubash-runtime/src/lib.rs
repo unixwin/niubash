@@ -91,6 +91,7 @@ pub mod syntax_highlighting;
 pub mod terminal;
 pub mod text_style;
 pub mod typeahead_guard;
+pub mod vcs_cache;
 #[cfg(windows)]
 pub mod windows_terminal;
 pub mod winuxcmd;
