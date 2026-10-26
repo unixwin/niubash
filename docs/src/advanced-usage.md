@@ -177,10 +177,12 @@ persisted value:
   every draw, and the presentation follows the candidate list: when any
   candidate in the list carries a description (e.g. flag completions
   such as `git checkout -<TAB>`), the whole list is presented as a
-  single vertical column, each description beside its value; when no
-  candidate carries a description, the list is presented as a grid of
-  as many columns as the terminal width fits, down to one column when
-  the width fits only one.
+  single vertical column, each description beside its value. That
+  single-column presentation is by design (owner ruling 2026-10-26):
+  it keeps the descriptions readable instead of squeezing them into
+  grid cells. When no candidate carries a description, the list is
+  presented as a grid of as many columns as the terminal width fits,
+  down to one column when the width fits only one.
 - `list` — vertical list with descriptions (like fish).
 - `inline` — first match inserted directly, Tab cycles (like bash
   `menu-complete`).
