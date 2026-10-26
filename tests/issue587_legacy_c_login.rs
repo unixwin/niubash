@@ -1,9 +1,18 @@
 //! niubash#587: the legacy `niu -c -l <cmd>` route must converge with
 //! the engine route (`niu -lc`): the login flag marks the shell login
-//! (`$-` gains `l`), the login profile chain runs, and the env file
-//! runs — instead of the flag being swallowed with all startup files
-//! silently dropped. An `exit` in the profile ends the invocation
-//! with its status (niubash#402), like every other route.
+//! (`shopt login_shell` on), the login profile chain runs, and the
+//! env file runs — instead of the flag being swallowed with all
+//! startup files silently dropped. An `exit` in the profile ends the
+//! invocation with its status (niubash#402), like every other route.
+//!
+//! GNU note: login state is NOT part of `$-`. GNU bash's
+//! `shell_flags[]` table (flags.c:165 in the 5.3 sources) has no `l`
+//! entry at all — its only `l` row is `#if 0`'d out for
+//! lexical_scoping — and the 5.3.20 oracle prints `flags=hBc` with
+//! `login_shell` on for `-lc`, `-lic`, and `-l <script>` alike. An
+//! earlier revision of this pin asserted `$-` contains `l`; that
+//! premise contradicts GNU and was corrected (the product already
+//! matched GNU: legacy route `$-` = `hBc`, same as the engine route).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -52,7 +61,9 @@ fn stdout_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-const PROBE: &str = "echo \"MAIN profile=${PROFILE_RAN:-unset} flags=$-\"";
+const PROBE: &str = "echo \"MAIN profile=${PROFILE_RAN:-unset} flags=$-\"; \
+                     if shopt -q login_shell; then echo LOGIN-SHELL-ON; \
+                     else echo LOGIN-SHELL-OFF; fi";
 
 fn seed_profile_and_envfile(home: &Path) -> PathBuf {
     std::fs::write(
@@ -84,14 +95,25 @@ fn legacy_c_l_sources_profile_and_env_file() {
         stdout.contains("profile=1"),
         "profile export must be visible: {stdout}"
     );
-    // `$-` must carry the login flag: "flags=hBlc" shape — check the
-    // flags segment contains an `l`.
+    // Login state is expressed by `shopt login_shell`, never by `$-`
+    // (see the GNU note in the header): the probe must report the
+    // login shell on, and `$-` must keep the GNU `-c` shape `hBc`
+    // with no `l` — identical to the engine route (`niu -lc`) and
+    // to the GNU oracle.
+    assert!(
+        stdout.contains("LOGIN-SHELL-ON"),
+        "login_shell must be on: {stdout}"
+    );
     let flags = stdout
         .split("flags=")
         .nth(1)
-        .map(|rest| rest.trim())
+        .map(|rest| rest.lines().next().unwrap_or("").trim())
         .unwrap_or("");
-    assert!(flags.contains('l'), "login flag missing from $-: {stdout}");
+    assert!(
+        !flags.contains('l'),
+        "$- must not gain an `l` (GNU never puts one there): {stdout}"
+    );
+    assert_eq!(flags, "hBc", "$- must match the GNU -c shape: {stdout}");
     let _ = std::fs::remove_dir_all(&home);
 }
 
