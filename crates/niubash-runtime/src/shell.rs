@@ -22,7 +22,7 @@ use crate::config::{
     load as load_config, AutosuggestConfig, CommandNotFoundHint, EditorMode, HookConfig,
     MenuConfig, NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
 };
-use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path, split_shell_path_list};
 use crate::prompt::{BashPrompt, NiubashPrompt, PromptBackend};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
@@ -1025,7 +1025,9 @@ impl Shell {
         let code =
             match rubash::script_driver::pre_process_interactive_line(&mut self.executor, line) {
                 rubash::script_driver::InteractiveExpansion::Execute(expanded) => {
-                    self.execute_line_with_options(&expanded, true, line_offset)?
+                    let code = self.execute_line_with_options(&expanded, true, line_offset)?;
+                    self.invalidate_command_probe_after_line(&expanded);
+                    code
                 }
                 rubash::script_driver::InteractiveExpansion::Discard => {
                     self.executor.last_exit_code()
@@ -1059,6 +1061,7 @@ impl Shell {
         let line_offset = self.interactive_lines_read;
         self.interactive_lines_read += script.split_inclusive('\n').count().max(1);
         let code = self.execute_script_with_options(script, true, line_offset)?;
+        self.invalidate_command_probe_after_line(script);
         self.remember_interactive_command(script, code);
         let new_pwd = self.executor.get_env("PWD").map(str::to_owned);
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
@@ -2339,6 +2342,23 @@ impl Shell {
         }
     }
 
+    /// niubash#574: forget the highlighter's memoized live-probe answers
+    /// after a submitted line that can move command resolution without
+    /// moving the probe fingerprint — `hash` (every form mutates or clears
+    /// the table) and `wpm` (install/remove/update change the filesystem
+    /// while PATH stays byte-identical). Per-command exit status is not
+    /// visible once a compound line runs, so the memo — only a cache — is
+    /// cleared unconditionally on detection; a spurious clear just means
+    /// the next paint re-probes.
+    fn invalidate_command_probe_after_line(&self, text: &str) {
+        if self.one_shot || !line_touches_command_resolution(&tokenize(text)) {
+            return;
+        }
+        if let Ok(mut state) = self.completion_state.lock() {
+            state.command_probe.clear();
+        }
+    }
+
     /// Update the shared completion state from the current env + cwd.
     pub fn update_completion_state(&self) {
         // One-shot shells have no REPL that reads completion state; the full
@@ -3234,6 +3254,41 @@ fn simple_command_word_index(tokens: &[Token], start: usize, end: usize) -> Opti
         }
     }
     None
+}
+
+/// True when a tokenized line runs `hash` or `wpm` at any command position
+/// (niubash#574's probe-memo invalidation trigger).
+fn line_touches_command_resolution(tokens: &[Token]) -> bool {
+    let mut start = 0;
+    while start < tokens.len() {
+        let end = find_command_separator(tokens, start).unwrap_or(tokens.len());
+        let mut stage_start = start;
+        while stage_start < end {
+            let stage_end = find_pipeline_separator(tokens, stage_start, end).unwrap_or(end);
+            if let Some(index) = simple_command_word_index(tokens, stage_start, stage_end) {
+                let name = decode_to_visible_text(&tokens[index].value);
+                if command_resolution_mutator(&name) {
+                    return true;
+                }
+            }
+            stage_start = stage_end + 1;
+        }
+        if end == tokens.len() {
+            break;
+        }
+        start = end + 1;
+    }
+    false
+}
+
+fn command_resolution_mutator(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let stem = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".cmd"))
+        .or_else(|| name.strip_suffix(".bat"))
+        .unwrap_or(&name);
+    matches!(stem, "hash" | "wpm")
 }
 
 enum WinuxCmdShim {
@@ -4190,38 +4245,6 @@ fn process_path_from_shell_path_list(value: &str, env: Option<&HashMap<String, S
         .flat_map(|entry| shell_path_entry_to_process_paths(&entry, env))
         .collect::<Vec<_>>()
         .join(";")
-}
-
-fn split_shell_path_list(value: &str) -> Vec<String> {
-    let bytes = value.as_bytes();
-    let mut entries = Vec::new();
-    let mut entry_start = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        let is_separator = match byte {
-            b';' => true,
-            b':' => !is_windows_drive_colon(bytes, entry_start, index),
-            _ => false,
-        };
-        if is_separator {
-            if entry_start < index {
-                entries.push(value[entry_start..index].to_string());
-            }
-            entry_start = index + 1;
-        }
-    }
-    if entry_start < value.len() {
-        entries.push(value[entry_start..].to_string());
-    }
-    entries
-}
-
-fn is_windows_drive_colon(bytes: &[u8], entry_start: usize, colon: usize) -> bool {
-    cfg!(windows)
-        && colon == entry_start + 1
-        && bytes[entry_start].is_ascii_alphabetic()
-        && bytes
-            .get(colon + 1)
-            .is_some_and(|next| matches!(next, b'\\' | b'/'))
 }
 
 fn shell_path_entry_to_process_paths(
@@ -6358,6 +6381,42 @@ complete -F _envtooldyn_hook envtooldyn
             .map(|command| niubash_builtin_words(command).map(|(name, _)| name))
             .collect();
         assert_eq!(names, vec![None, None]);
+    }
+
+    /// niubash#574: the probe-memo invalidation trigger sees `hash`/`wpm`
+    /// at any command position and ignores them elsewhere.
+    #[test]
+    fn probe_memo_invalidation_tracks_hash_and_wpm_words() {
+        for line in [
+            "hash -r",
+            "hash",
+            "hash -d ls",
+            "hash -p /x y",
+            "wpm install eza",
+            "wpm.exe remove eza",
+            "WPM update",
+            "ls; hash -d foo | cat",
+            "ls && wpm list",
+            "PATH=/tmp wpm index update",
+        ] {
+            assert!(
+                line_touches_command_resolution(&tokenize(line)),
+                "expected {line:?} to invalidate the probe memo"
+            );
+        }
+        for line in [
+            "echo hash",
+            "echo wpm install eza",
+            "hashish -r",
+            "pwpm install eza",
+            "ls -la",
+            "type hash",
+        ] {
+            assert!(
+                !line_touches_command_resolution(&tokenize(line)),
+                "expected {line:?} not to invalidate the probe memo"
+            );
+        }
     }
 
     #[test]
