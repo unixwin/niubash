@@ -187,7 +187,12 @@ fn render_list(
         }
         out.push_str(&line);
         if row + 1 < rows {
-            out.push('\n');
+            // CRLF, not bare LF: reedline's painter prints `menu_string`
+            // verbatim (upstream menus all emit "\r\n"); a bare '\n' drops
+            // one row down without returning to column 0 on POSIX terminals
+            // (the staircase), while Windows consoles coerce it — which is
+            // why this only reproduced off-Windows.
+            out.push_str("\r\n");
         }
     }
     out
@@ -711,7 +716,10 @@ mod tests {
         assert_eq!(render_list(&values, &widths, 21, 10), "alpha  beta   gamma");
 
         // Two rows, two columns: down first (alpha, beta | gamma).
-        assert_eq!(render_list(&values, &widths, 14, 10), "alpha  gamma\nbeta");
+        assert_eq!(
+            render_list(&values, &widths, 14, 10),
+            "alpha  gamma\r\nbeta"
+        );
 
         // Clipped to one available line: the grid refills at rows=1, so the
         // first row carries the first two candidates in order.
