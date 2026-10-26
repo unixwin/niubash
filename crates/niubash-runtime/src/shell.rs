@@ -1440,6 +1440,21 @@ impl Shell {
     fn load_generated_plugin_loader(&mut self, rc_path: Option<&Path>) -> Option<i32> {
         let rc_text = rc_path.and_then(|path| std::fs::read_to_string(path).ok());
         let loader_text = crate::plugins::loader::read_loader_text();
+        if loader_text.is_none() {
+            // niubash#586 (secondary face): read_loader_text folds an
+            // unreadable or non-UTF-8 loader into the same None as a
+            // missing one, so a corrupt loader failed silently. A file
+            // that exists but cannot be read as text is diagnosed, not
+            // loaded and not mistaken for "no plugins yet".
+            let path = crate::plugins::loader::loader_path();
+            if path.is_file() {
+                eprintln!(
+                    "niu: warning: the generated plugin loader exists but could not be read \
+                     as text, so it was not loaded: {}; regenerate it with `niu plugin sync`",
+                    path.display()
+                );
+            }
+        }
         match crate::plugins::loader::startup_decision(rc_text.as_deref(), loader_text.as_deref()) {
             crate::plugins::loader::StartupDecision::Missing
             | crate::plugins::loader::StartupDecision::OptedOut => None,
@@ -1458,6 +1473,18 @@ impl Shell {
                          niu plugin migrate-rc"
                     );
                 }
+                None
+            }
+            crate::plugins::loader::StartupDecision::Invalid(reason) => {
+                // niubash#586: a truncated or foreign loader is never
+                // sourced (the validate() gate in startup_decision).
+                // Warn with the path and the regeneration verb, and
+                // keep the shell fully usable without the loader.
+                eprintln!(
+                    "niu: warning: the generated plugin loader failed validation and was \
+                     not loaded ({reason}): {}; regenerate it with `niu plugin sync`",
+                    crate::plugins::loader::loader_path().display()
+                );
                 None
             }
             crate::plugins::loader::StartupDecision::Load => {
