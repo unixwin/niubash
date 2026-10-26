@@ -58,7 +58,14 @@ fn bash_env_exported_by_the_profile_is_honored() {
     std::fs::write(&envfile, "echo ENVFILE-RAN\n").unwrap();
     std::fs::write(
         home.join(".bash_profile"),
-        format!("echo PROFILE-RAN\nexport BASH_ENV={}\n", envfile.display()),
+        // Forward slashes: an unquoted backslash path in an export line
+        // loses its backslashes to shell lexing (GNU-faithful escape
+        // handling), so the stored value would name a nonexistent file
+        // on Windows. Assertions below are unchanged.
+        format!(
+            "echo PROFILE-RAN\nexport BASH_ENV={}\n",
+            envfile.display().to_string().replace('\\', "/")
+        ),
     )
     .unwrap();
     let output = run_niu(&home, &["-lc", "echo MAIN"], &[]);
@@ -85,7 +92,11 @@ fn niu_env_exported_by_the_profile_beats_process_bash_env() {
     std::fs::write(&bash_envfile, "echo BASHENV-RAN\n").unwrap();
     std::fs::write(
         home.join(".bash_profile"),
-        format!("export NIU_ENV={}\n", niu_envfile.display()),
+        // Forward slashes, same lexing reason as the BASH_ENV test above.
+        format!(
+            "export NIU_ENV={}\n",
+            niu_envfile.display().to_string().replace('\\', "/")
+        ),
     )
     .unwrap();
     let output = run_niu(
