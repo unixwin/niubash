@@ -194,20 +194,48 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
         .unwrap_or_default();
     let held_off = !guard_trips.is_empty();
     let legacy_seen = rc_legacy_blocks.is_some() || held_off;
+    // niubash#586: the doctor judges the loader by the SAME validate()
+    // the startup path gates on — a truncated or foreign loader is a
+    // warn (it will not be sourced), never an ok, and a file that exists
+    // but cannot be read as text is not reported as "none".
+    let loader_invalid: Option<String> = loader_text
+        .as_deref()
+        .and_then(|text| crate::plugins::loader::validate(text).err())
+        .map(|err| err.to_string());
+    let loader_unreadable =
+        loader_text.is_none() && crate::plugins::loader::loader_path().is_file();
     match (&loader_text, legacy_seen) {
         (None, false) => {
-            writeln!(
-                out,
-                "  {info} plugin loader      none — plugin sources activate through it once \
-                 a verb manages them"
-            )?;
+            if loader_unreadable {
+                writeln!(
+                    out,
+                    "  {warn} plugin loader      {} — exists but could not be read as text; \
+                     it is not sourced at startup; regenerate with `niu plugin sync`",
+                    display(&crate::plugins::loader::loader_path())
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "  {info} plugin loader      none — plugin sources activate through it once \
+                     a verb manages them"
+                )?;
+            }
         }
         (Some(_), false) => {
-            writeln!(
-                out,
-                "  {ok} plugin loader      {} (sourced before the rc; user overrides win)",
-                display(&crate::plugins::loader::loader_path())
-            )?;
+            if let Some(reason) = &loader_invalid {
+                writeln!(
+                    out,
+                    "  {warn} plugin loader      {} — failed validation ({reason}); \
+                     it is not sourced at startup; regenerate with `niu plugin sync`",
+                    display(&crate::plugins::loader::loader_path())
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "  {ok} plugin loader      {} (sourced before the rc; user overrides win)",
+                    display(&crate::plugins::loader::loader_path())
+                )?;
+            }
         }
         (loader, true) => {
             let mut lines: Vec<String> = rc_legacy_blocks
@@ -232,7 +260,21 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
                  reviewing: `niu plugin migrate-rc`",
                 lines.join(", ")
             )?;
-            if loader.is_none() {
+            if let Some(reason) = &loader_invalid {
+                writeln!(
+                    out,
+                    "  {warn} plugin loader      {} — failed validation ({reason}); \
+                     it is not sourced at startup; regenerate with `niu plugin sync`",
+                    display(&crate::plugins::loader::loader_path())
+                )?;
+            } else if loader_unreadable {
+                writeln!(
+                    out,
+                    "  {warn} plugin loader      {} — exists but could not be read as text; \
+                     it is not sourced at startup; regenerate with `niu plugin sync`",
+                    display(&crate::plugins::loader::loader_path())
+                )?;
+            } else if loader.is_none() {
                 writeln!(
                     out,
                     "  {info} plugin loader      none yet — `niu plugin migrate-rc` publishes \

@@ -187,9 +187,9 @@ impl Default for MenuConfig {
 
 impl MenuConfig {
     pub fn with_env_overrides(mut self) -> Self {
-        // Resolution order (owner ruling 2026-10-12): NIU_COMPLETION_STYLE env
+        // Resolution order (owner ruling 2026-10-14): NIU_COMPLETION_STYLE env
         // > persisted `completion.style` (config.toml) > the built-in default
-        // (gnu). `resolve_completion_style` warns once on a bad env value.
+        // (column). `resolve_completion_style` warns once on a bad env value.
         self.completion_style = resolve_completion_style().0;
         self
     }
@@ -582,8 +582,8 @@ const USER_CONFIG_NOTES: &str = "\
 #   \"command not found\". off (default) | wpm — wpm suggests one\n\
 #   `wpm search --name` line for high-confidence near-misses only;\n\
 #   third-party managers are never recommended (niubash#249).\n\
-# completion.style: TAB completion shape. gnu (default) | ide |\n\
-#   column | list | inline — `NIU_COMPLETION_STYLE` overrides this\n\
+# completion.style: TAB completion shape. column (default) | gnu |\n\
+#   ide | list | inline — `NIU_COMPLETION_STYLE` overrides this\n\
 #   file (env > config > default).\n\
 # startup.rc-policy: which file fills the interactive personal-rc slot\n\
 #   when ~/.niubashrc is absent. primary-only (default) |\n\
@@ -727,7 +727,7 @@ pub enum CompletionStyleSource {
 }
 
 /// Resolve the effective TAB completion style: `NIU_COMPLETION_STYLE` env >
-/// persisted `completion.style` (config.toml) > built-in default (gnu). An
+/// persisted `completion.style` (config.toml) > built-in default (column). An
 /// unparsable env value warns once (the shell's only completion-style
 /// diagnostic) and falls through to the lower-precedence source; an
 /// unparsable file value silently falls through like every other config
