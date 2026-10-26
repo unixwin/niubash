@@ -3376,6 +3376,31 @@ mod tests {
         assert!(cfg.aliases.iter().any(|(name, _)| name == "ll"));
     }
 
+    /// The minimal preset is the one non-interactive `niu setup` applies
+    /// (the scripted-install path), so its completion style is a behavior
+    /// commitment, not a preset detail: the #342 follow-up sweep
+    /// (2026-10-26) moved it from `gnu` — no menu, Enter always executes
+    /// the line — to `column`, the product default (owner ruling
+    /// 2026-10-14), which puts scripted installs in the menu family
+    /// (menu open + Enter commits the highlighted candidate, the
+    /// niubash#486 semantics). Pin the exact value on the preset itself
+    /// and on its expansion so the change cannot drift back silently.
+    #[test]
+    fn minimal_preset_completion_style_is_column() {
+        let minimal = Preset::builtin("minimal");
+        assert_eq!(minimal.completion_style, "column");
+        let probe = EnvProbe {
+            windows_terminal: false,
+            mintty_hint: false,
+            nerd_font: false,
+            command_links: true,
+            tools: BTreeSet::new(),
+            bundled: Vec::new(),
+        };
+        let cfg = minimal.to_config(&probe, &mut Vec::new(), Lang::En);
+        assert_eq!(cfg.completion_style, "column");
+    }
+
     #[test]
     fn zh_translations_cover_the_wizard_vocab() {
         // Every key here is asserted to translate so a renamed English literal
