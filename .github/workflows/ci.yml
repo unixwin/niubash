@@ -116,6 +116,23 @@ jobs:
         continue-on-error: true
         run: cargo test --test zz_enum_conhost_probe --locked -- --nocapture --test-threads=1
 
+      # ENUM-ONLY: reproduce the original D-1 failure conditions — the
+      # console gate binary running its 19 tests in parallel while the
+      # creation-time-instrumented probe observes its own sessions.
+      - name: ENUM conhost probe under parallel load x2
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          foreach ($i in 1..2) {
+            Write-Host "=== load round $i ==="
+            $gate = Start-Process cargo -ArgumentList 'test','--test','console_window_gate','--locked' -PassThru -NoNewWindow
+            cargo test --test zz_enum_conhost_probe --locked -- --nocapture --test-threads=1 2>&1 |
+              Select-String -Pattern 'PROBE' | ForEach-Object { Write-Host $_.Line }
+            $gate.WaitForExit()
+            Write-Host "=== load round $i gate exit: $($gate.ExitCode) ==="
+          }
+          exit 0
+
       # Skill bundle golden check (niubash#188): the generated regions in
       # skills/niubash/ must match the corpus transcripts + applet inventory,
       # and the launcher must embed the whole committed bundle. The

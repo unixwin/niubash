@@ -42,6 +42,38 @@ extern "system" {
     fn Process32FirstW(snap: *mut c_void, pe: *mut ProcessEntry) -> i32;
     fn Process32NextW(snap: *mut c_void, pe: *mut ProcessEntry) -> i32;
     fn CloseHandle(h: *mut c_void) -> i32;
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn GetProcessTimes(
+        h: *mut c_void,
+        creation: *mut u64,
+        exit: *mut u64,
+        kernel: *mut u64,
+        user: *mut u64,
+    ) -> i32;
+}
+
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+/// Process creation FILETIME (100 ns ticks since 1601) or 0 if unreadable.
+/// This is the discriminator between a conhost the observed session
+/// actually allocated (created at/after the root niu) and a lingering
+/// conhost from a dead process whose PID was reused by the root (created
+/// strictly before the root).
+fn creation_filetime(pid: u32) -> u64 {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return 0;
+        }
+        let (mut c, mut e, mut k, mut u) = (0u64, 0u64, 0u64, 0u64);
+        let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u);
+        CloseHandle(h);
+        if ok != 0 {
+            c
+        } else {
+            0
+        }
+    }
 }
 
 fn process_entries() -> Vec<(u32, u32, String)> {
@@ -98,6 +130,7 @@ fn in_tree(pid: u32, root: u32, tree: &HashMap<u32, u32>) -> bool {
 
 struct Sight {
     ppid: u32,
+    created_ft: u64,
     first_ms: u128,
     last_ms: u128,
     samples: u32,
@@ -115,6 +148,7 @@ fn observe(script: &str, flags: u32, label: &str, run: usize) {
         .spawn()
         .expect("spawn niu");
     let root = child.id();
+    let root_created_ft = creation_filetime(root);
     let t0 = Instant::now();
     let mut sights: HashMap<u32, Sight> = HashMap::new();
     let mut max_simultaneous = 0usize;
@@ -129,6 +163,7 @@ fn observe(script: &str, flags: u32, label: &str, run: usize) {
                 let now = t0.elapsed().as_millis();
                 let s = sights.entry(pid).or_insert(Sight {
                     ppid,
+                    created_ft: creation_filetime(pid),
                     first_ms: now,
                     last_ms: now,
                     samples: 0,
@@ -144,15 +179,19 @@ fn observe(script: &str, flags: u32, label: &str, run: usize) {
     let mut pids: Vec<u32> = sights.keys().copied().collect();
     pids.sort_unstable();
     println!(
-        "PROBE {label} run{run}: root_niu_pid={root} status={status} cumulative_distinct={} max_simultaneous={}",
+        "PROBE {label} run{run}: root_niu_pid={root} root_created_ft={root_created_ft} status={status} cumulative_distinct={} max_simultaneous={}",
         sights.len(),
         max_simultaneous
     );
     for pid in pids {
         let s = &sights[&pid];
+        // Signed delta in ms between the conhost's creation and the root
+        // niu's creation. Negative => conhost predates the root: it cannot
+        // have been allocated by this session (PID-reuse zombie).
+        let delta_ms = (s.created_ft as i128 - root_created_ft as i128) / 10_000;
         println!(
-            "PROBE {label} run{run}:   conhost pid={pid} ppid={} first={}ms last={}ms samples={}",
-            s.ppid, s.first_ms, s.last_ms, s.samples
+            "PROBE {label} run{run}:   conhost pid={pid} ppid={} created_ft={} delta_vs_root={}ms first={}ms last={}ms samples={}",
+            s.ppid, s.created_ft, delta_ms, s.first_ms, s.last_ms, s.samples
         );
     }
 }
