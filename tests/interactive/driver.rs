@@ -288,7 +288,19 @@ fn niu_command(
 ) -> CommandBuilder {
     let system_root = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                PathBuf::from(r"C:\Windows")
+            } else {
+                // Non-Windows hosts have no System32: the C:\Windows
+                // fallback breaks join_paths below ('C:' contains the
+                // Unix separator), so every pty test with default
+                // path_dirs failed before spawn. The spawned PATH is
+                // irrelevant to these tests (builtins only); use a
+                // colon-free placeholder. Windows behavior is unchanged.
+                PathBuf::from("/tmp")
+            }
+        });
     let system32 = system_root.join("System32");
 
     let mut command = CommandBuilder::new(binary);
