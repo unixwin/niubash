@@ -2511,6 +2511,20 @@ impl Shell {
         }
     }
 
+    /// niubash#576: whether the most recent script run through this
+    /// shell unwound via a top-level jump — GNU jump_to_top_level
+    /// (EXITPROG for `exit`, ERREXIT for an errexit abort) — rather
+    /// than ending on an ordinary command status.
+    /// `execute_script_inner` records the jump in `script_exit_jump`
+    /// when it flattens the engine's `ExitCode` unwind into a plain
+    /// status (niubash#402); batch-feeding drivers (the host's stdin
+    /// reader) must observe it to stop feeding, exactly as GNU's
+    /// reader_loop is unwound by the jump. Take-style: each check
+    /// clears the flag, like `Executor::take_exit_jump_pending`.
+    pub fn take_script_exit_jump(&mut self) -> bool {
+        std::mem::take(&mut self.script_exit_jump)
+    }
+
     /// Run the session-end history write on demand (GNU exit_shell ->
     /// write_history, bashhist.c).
     ///
@@ -2652,8 +2666,29 @@ impl Shell {
                     self.executor.alias_expansion_enabled(),
                 ))
         {
-            let code =
-                rubash::script_driver::run_script_with_history(&mut self.executor, &script, None);
+            // niubash#576: take the TRACKED grouped run and record an
+            // unwind in `script_exit_jump`, like the ExitCode arm below
+            // does for the tokenize+execute route. The untracked run
+            // drops the classification (the grouped driver takes the
+            // executor's exit-jump flag itself), so a batch feeder saw
+            // only a plain nonzero status for e.g. an alias that expands
+            // to `exit 3` and kept feeding the stream — GNU's
+            // jump_to_top_level unwinds reader_loop for good. The
+            // tracked entry is the engine's host-facing one (the REPL
+            // reader route uses it for the same reason); it also keeps
+            // a host-owned history provider authoritative instead of
+            // installing a scratch session over it (niubash#508).
+            let (code, unwound) =
+                rubash::script_driver::run_script_with_history_at_line_offset_tracked(
+                    &mut self.executor,
+                    &script,
+                    line_offset,
+                    None,
+                );
+            if unwound {
+                self.script_exit_jump = true;
+                self.note_session_exit_jump(code);
+            }
             self.sync_process_cwd_from_executor_pwd();
             self.sync_process_path_from_executor_path();
             self.sync_alias_mirror_from_executor();

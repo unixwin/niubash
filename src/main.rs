@@ -1527,6 +1527,16 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // (unixwin/niubash#431: `cat f431.sh | niu` with `(printf a;\nprintf
     // b);\n)` must blame `line 3`, like `bash -s` on the same stream).
     let mut lines_read = 0usize;
+    // niubash#576: GNU's reader_loop does NOT stop at the first failing
+    // command. Without `-e` in force it reads the stream to EOF, the
+    // process status is the LAST batch's status, and the EXIT trap runs
+    // exactly once at the end (shell.c read_from_stdin / eval.c
+    // reader_loop). Only an unwind stops the stream early — a top-level
+    // `exit`, an errexit abort, or a read-time parse error. The previous
+    // driver exited the process on ANY nonzero batch: later input never
+    // ran and the EXIT trap fired at the failure point. Track the last
+    // batch's status and finish once, below.
+    let mut last_code = 0;
 
     loop {
         line.clear();
@@ -1542,11 +1552,11 @@ fn run_stdin_script() -> anyhow::Result<()> {
             .unwrap_or_else(|| read_unbuffered_line(&mut line))?
         {
             0 => {
+                // EOF: flush a gathered-but-incomplete tail as the final
+                // batch; its status is the stream's last status.
                 if !pending.is_empty() {
                     let offset = lines_read - pending.len();
-                    let code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
-                    let code = shell.finish_with_exit_trap(code)?;
-                    finish_one_shot(&shell, code);
+                    last_code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
                 }
                 break;
             }
@@ -1573,14 +1583,33 @@ fn run_stdin_script() -> anyhow::Result<()> {
             }
             None => shell.execute_script_at_line_offset(&script, offset)?,
         };
-        if code != 0 {
-            let code = shell.finish_with_exit_trap(code)?;
-            finish_one_shot(&shell, code);
+        last_code = code;
+
+        // Stop feeding the stream only when the batch UNWOUND — the
+        // same stop rule as the engine's own stdin driver (rubash
+        // script_driver::run_stdin_script): a recorded top-level jump
+        // (Shell::take_script_exit_jump for the batches this shell
+        // flattened itself, Executor::take_exit_jump_pending for the
+        // engine-driver-routed ones), a read-time parse error, or a
+        // nonzero status while errexit is armed (execute_cmd.c:652-656
+        // exempts a `!`-inverted command). An ordinary nonzero status
+        // just becomes the new last status and reading continues.
+        let jumped = shell.take_script_exit_jump();
+        let engine_jumped = shell.executor.take_exit_jump_pending();
+        let parse_error = shell.executor.take_parse_error();
+        if jumped
+            || engine_jumped
+            || parse_error
+            || (code != 0
+                && rubash::script_driver::stdin_script_errexit_enabled(&shell.executor)
+                && !shell.executor.last_command_inverted())
+        {
+            break;
         }
         pending.clear();
     }
 
-    let code = shell.finish_with_exit_trap(0)?;
+    let code = shell.finish_with_exit_trap(last_code)?;
     finish_one_shot(&shell, code);
     Ok(())
 }
