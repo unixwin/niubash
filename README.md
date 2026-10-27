@@ -49,6 +49,131 @@ path-conversion heuristics. It is a from-scratch replacement for Git Bash: a nat
 honest status of every target, lives in
 [platform-support.md](docs/src/platform-support.md).
 
+## Quick start
+
+All downloads start at [unixwin.dev](https://unixwin.dev). Latest release:
+**v1.4.4**.
+
+Windows: grab `niubash-v*-win-*-setup.exe` from
+[Releases](https://github.com/unixwin/niubash/releases) and run it — no
+admin rights; PATH and a Windows Terminal profile are set up for you.
+Prefer portable? Take the `.7z` — it preserves the bundled git/awk
+payload's hardlinks, so it stays small. The `.tar.gz` works too
+(`tar -xf niubash-v*-win-x64.tar.gz`, built into Windows 10+). Avoid the
+`.zip`: it cannot represent hardlinks, so the payload is stored
+duplicated and the archive is much larger — it stays only for tooling
+that speaks nothing but zip.
+
+*winget:* the `Unixwin.Niubash` package is submitted and currently in
+Microsoft review ([microsoft/winget-pkgs#460976](https://github.com/microsoft/winget-pkgs/pull/460976))
+— until it clears, use the installer above.
+
+Linux (x86_64, aarch64; glibc 2.35+) and macOS (aarch64, x86_64): take the
+portable tarball, untar, run:
+
+```sh
+tar -xzf niubash-v*-linux-x86_64.tar.gz && niubash-v*-linux-x86_64/niu
+```
+
+Android (aarch64, armv7): release `.zip` assets ship since v1.4.3 and run
+on real devices (Termux) — see [Platforms](#platforms) for the honest
+per-platform status.
+
+From source (Rust 1.95+):
+`git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
+
+Configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — it is
+the **only** startup file niu reads (`~/.bashrc` is never sourced; run
+`niu plugin migrate-rc --diff` to see exactly what is worth carrying
+over) — start with
+[Getting started](docs/src/getting-started.md).
+
+## Niubash vs Git Bash
+
+| | **Niubash** | **Git Bash** |
+| --- | --- | --- |
+| Engine | Bash semantics reimplemented natively in Rust ([rubash](https://github.com/unixwin/rubash)); no emulation layer | GNU Bash ported onto the MSYS2 POSIX emulation runtime |
+| Bash language level | **GNU Bash 5.3** semantics — including 5.3-only syntax such as no-fork command substitution `${ cmd; }` ([rubash#195](https://github.com/unixwin/rubash/issues/195)) | GNU Bash **5.2** (the version Git for Windows bundles) |
+| Path handling | Windows paths are the native representation; argument translation is a deterministic, documented contract — no guessing | Heuristic path conversion of arguments, with `MSYS_NO_PATHCONV` as the documented opt-out |
+| `git` | Real git-for-windows C source built with MSVC ([niu-git](https://github.com/unixwin/niu-git)); `git --version` ~14 ms | `git` launched through the MSYS runtime; 45–103 ms for the same probe ([niu-git#12](https://github.com/unixwin/niu-git/pull/12), [niubash#374](https://github.com/unixwin/niubash/pull/374)) |
+| Cold start to prompt | **~170 ms** | ~1 s |
+| Subshells | In-process — `( )` and `$( )` create no processes | `fork()` emulation |
+| Console devices | `/dev/tty` redirects behave like GNU — the engine splits `CON` into `CONIN$`/`CONOUT$` (see [Quick answers](#quick-answers)) | Console device opens hit Windows' device restrictions |
+
+The long version — including same-command-line side-by-sides of what
+actually reaches a native process — is
+[Why niubash](docs/src/why-niubash.md).
+
+## Why not Git Bash / MSYS2 / Cygwin — and why not a "lightweight replacement" shell
+
+**Git Bash** calls itself, verbatim, "a BASH emulation used to run Git from the
+command line" — an emulation built to run Git. The costs are structural: console
+device redirects such as `echo >/dev/tty` fail outright with `Invalid argument`
+in its MSYS layer (niubash matches GNU; project-measured); its bundled bash is on
+the 5.2 line, so bash 5.3's `${ cmd; }` nofork substitution doesn't exist; every
+prompt spawns git for the branch segment (~100–300 ms), while niu reads `.git/HEAD`
+directly and never spawns git (39 ms cold, p50 2.5 ms warm; project-measured, as
+of 2026-10-25); a real install is 440 MB plus a 20 MB simulation DLL, versus
+niu at ≈16 MB with zero DLLs.
+
+**MSYS2**'s own documentation concedes that arguments resembling Unix paths are
+automatically rewritten — and that the rewriting "also isn't perfect," hitting
+arguments that aren't paths at all. niubash keeps translation deliberately
+narrow: quoted arguments are never rewritten, and the only device translation is
+the exact token `/dev/null` → `nul`; every overreach ever found became a public
+issue and a pinned regression test. **Cygwin** states on its own site that apps
+must be rebuilt from source to run in its world — the simulation layer is its
+official definition. niubash is a native build: no simulation DLL.
+
+**The new "bash replacement" shells** (e.g. brush, in Rust) sell lightness.
+Lightweight is no excuse for missing limbs: complete bash semantics re-implemented
+path by path without fork, plus cross-platform itself, is what 474,985 lines
+(rubash 385,618 + niubash 89,367; static-audit caliber, 2026-10-25) buys. We
+measured brush's v0.4.0 release with a 306-case differential corpus
+(byte-compared against GNU bash 5.3.20): 181/306; a source build of its latest
+master commit re-measures at 183/306 — the same failure profile — a wrong alias timing model (6 substantive divergences in 20
+probes), `printf x y` looping forever and hanging the script, `wait $!`
+unimplemented in scripts, non-recursive globstar, and nameref `unset` reporting
+"not yet implemented." Such implementations can be neither a bash replacement
+nor a reliable login shell (support chain in the campaign evidence files).
+
+**niubash's ledger**: 244/246 byte-identical to GNU on our 246-case differential
+suite; measured against GNU's own 83-suite corpus; nvm / bats-core / bash-it /
+oh-my-bash run for real, with every divergence filed as a public issue and pinned
+as a regression test (as of 2026-10-25: rubash 1,050 issues filed, 1,039 closed;
+niubash 292 filed, 285 closed). The bundled command layer, WinuxCmd, carries
+176 commands / 1,924 options designed for shell use — against Microsoft
+coreutils' own README, which lists no `/dev/null`, no POSIX signals, and
+twenty-plus commands (`chmod`, `id`, `tty`, …) dropped wholesale.
+
+## Built for AI agents
+
+Models are trained on Bash; on a Windows machine their commands deserve
+a shell that executes them the way they were written.
+
+- **Agents inherit niu as their shell.** Anything launched from a niu
+  session gets it through `SHELL`, and
+  [Coding agents on Windows](docs/src/agents.md) documents, agent by
+  agent, which shell each one runs and how to point the rest at niu.
+- **Deterministic non-interactive behavior.** `niu -c` and script runs
+  are quiet and stable: no banners, stable stdout/stderr, exact
+  exit-code propagation — the properties an agent's tool loop depends
+  on.
+- **No path roulette.** There is no `MSYS_NO_PATHCONV` to remember and
+  no heuristic rewriting arguments behind the child's back — `/flags`
+  stay `/flags`, and path-shaped operands are translated by one
+  documented contract ([windows-path-contract.md](docs/src/windows-path-contract.md)).
+- **An agent skill ships with every release**: the
+  `niubash-skill-v*.zip` asset on the
+  [Releases](https://github.com/unixwin/niubash/releases) page packages
+  the shell's documented behavior for agent consumption, and the engine
+  repo carries its own disclosure in `SKILL.md` (including the platform
+  identity semantics).
+
+The casualty list that motivates this — real agent failures on
+PowerShell and emulation shells, with receipts — is in
+[Why niubash](docs/src/why-niubash.md#agent-casualties-with-receipts).
+
 ## Platforms
 
 | Platform | Status | Ships as |
@@ -74,7 +199,7 @@ macOS only. The
 per-platform contract and the full status matrix live in
 [platform-support.md](docs/src/platform-support.md).
 
-Quick answers:
+## Quick answers
 
 - **Does niu require WSL?** No. niu is a native build on every platform it
   ships for: on Windows there is no Linux VM, no emulation layer, no
@@ -94,11 +219,37 @@ Quick answers:
   the console and splits `CON` into its `CONIN$`/`CONOUT$` halves instead
   of hitting Windows' device-open restrictions (`FILE_APPEND_DATA` and
   read-write opens are rejected on `CON`). This is what keeps `git`/`ssh`
-  askpass prompts working.
+  askpass prompts working. (Engine trail:
+  [rubash#1312](https://github.com/unixwin/rubash/issues/1312),
+  [rubash#1314](https://github.com/unixwin/rubash/issues/1314),
+  [niubash#519](https://github.com/unixwin/niubash/issues/519).)
 - **Can I install niu on Android or HarmonyOS today?** Android yes:
   release `.zip` assets ship since v1.4.3 and run on real devices
   (Termux aarch64/armv7). HarmonyOS not yet: it compiles in CI but has
   no installable artifact.
+
+## Compatibility & testing
+
+niu's language semantics are the rubash engine's, and they are gated
+mechanically, not anecdotally:
+
+- **GNU Bash's own 83-suite upstream corpus: 83/83 pass** (2026-10-12
+  full re-run; 62 suites byte-identical stdout on Windows, 20
+  environment-attributed, the one nameref residual proven to be GNU's
+  own race) — the ledger lives in the
+  [rubash README](https://github.com/unixwin/rubash#compatibility-at-a-glance),
+  and rubash CI replays the corpus on Linux on every push.
+- **An independent 246-case differential suite** against a locally built
+  GNU Bash 5.3.20: **244/246 byte-identical** on current master
+  (222/246 at the first audit, 2026-10-22).
+- **Every fixed issue lands with a regression test** named for the
+  issue, asserting the GNU behavior — on both the engine and the host
+  side (`tests/compat.rs`, `tests/host_contract.rs`, and the per-capability
+  fixtures in the
+  [compatibility matrix](docs/src/rubash-bash-compat-matrix.md)).
+- **Releases are smoke-gated and budget-gated**: no artifact ships
+  unless it runs on its own OS and stays inside the per-asset timing
+  budgets (see [Receipts](#receipts)).
 
 ## Receipts
 
@@ -208,36 +359,6 @@ original ~2.1x arithmetic/function datapoint. No post-fix re-measure on
 Android hardware exists yet — #352 stays open for that re-run, and the
 Android leg still ships build-verified only.
 
-## Quick start
-
-All downloads start at [unixwin.dev](https://unixwin.dev).
-
-Windows: grab `niubash-v*-win-*-setup.exe` from
-[Releases](https://github.com/unixwin/niubash/releases) and run it — no
-admin rights; PATH and a Windows Terminal profile are set up for you.
-Windows (winget): `winget install --id Unixwin.Niubash` — no admin
-rights; PATH and a Windows Terminal profile are set up for you.
-Prefer portable? Take the `.7z` — it preserves the bundled git/awk
-payload's hardlinks, so it stays small. The `.tar.gz` works too
-(`tar -xf niubash-v*-win-x64.tar.gz`, built into Windows 10+). Avoid the
-`.zip`: it cannot represent hardlinks, so the payload is stored
-duplicated and the archive is much larger — it stays only for tooling
-that speaks nothing but zip.
-
-Linux (x86_64, aarch64; glibc 2.35+) and macOS (aarch64, x86_64): take the
-portable tarball, untar, run:
-
-```sh
-tar -xzf niubash-v*-linux-x86_64.tar.gz && niubash-v*-linux-x86_64/niu
-```
-
-From source (Rust 1.95+):
-`git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
-
-Configuration is ONE file, `~/.niubashrc`, in plain Bash syntax (no
-`~/.niubashrc` yet? niubash falls back to your `~/.bashrc`) — start with
-[Getting started](docs/src/getting-started.md).
-
 ## Documentation
 
 [Docs site](https://unixwin.github.io/niubash/) ·
@@ -245,6 +366,14 @@ Configuration is ONE file, `~/.niubashrc`, in plain Bash syntax (no
 casualties) · [Platform support](docs/src/platform-support.md) ·
 [Bash compatibility matrix](docs/src/rubash-bash-compat-matrix.md) ·
 [Roadmap](docs/src/niubash-roadmap.md)
+
+On the engine side, two items are **in design** (not shipped): the
+**1.5.0 embeddable engine API**
+([rubash#595](https://github.com/unixwin/rubash/issues/595), RFC draft in
+the rubash repo) and a **native script debugger** — `rubash --debug` for
+humans and `--dap` for editors, two front ends over one debug session
+([rubash#497](https://github.com/unixwin/rubash/issues/497), M0 design in
+the rubash repo).
 
 ---
 

@@ -160,12 +160,47 @@ fn interactive_launch_wanted(args: &[String]) -> bool {
     false
 }
 
+/// niubash#578: collect the process argv through `args_os`, never
+/// `env::args()`. `env::args()` PANICS on the first non-Unicode word —
+/// a `-c` string or script name carrying raw bytes outside UTF-8 (on
+/// Windows: an unpaired UTF-16 surrogate or legacy-code-page bytes from
+/// the invoking host) killed the shell at startup with a Rust panic
+/// banner and rc 101, before any shell error surface could engage. The
+/// bundled `bash` face forwards argv with `args_os` losslessly; the
+/// host honors that contract by collecting losslessly here and
+/// converting lossily ONLY at this boundary, per word, because the CLI
+/// parser below consumes `String`s. A non-UTF-8 word therefore reaches
+/// its consumer under its lossy rendering: a script name that does not
+/// decode is looked up under the lossy name and fails as an ordinary
+/// shell error (rc 127/2 class), and a non-UTF-8 argv[0] shows its
+/// lossy form in `$0` and diagnostics — the loss is silent but bounded
+/// to the affected word, and it can never crash the process.
+fn collect_process_argv() -> Vec<String> {
+    std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// niubash#578: argv[0] through the same lossless-first collection as
+/// [`collect_process_argv`] (a non-Unicode face name must not panic the
+/// `--dump-po-strings` source-name lookup either).
+fn process_argv0() -> String {
+    std::env::args_os()
+        .next()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "niu".to_string())
+}
+
 fn run_main() -> ExitCode {
+    // Collected once, through args_os (niubash#578 — see
+    // collect_process_argv), and shared by every consumer below.
+    let mut args: Vec<String> = collect_process_argv();
+
     // niubash#379: before anything else runs, drop a console Windows
     // auto-allocated for this process alone — a console-less invoker that
     // plainly spawns `niu -c`/`niu script.sh` gets a visible window that
     // outlives the whole command. Interactive launches keep theirs.
-    if !interactive_launch_wanted(&std::env::args().collect::<Vec<_>>()) {
+    if !interactive_launch_wanted(&args) {
         niubash_runtime::console_guard::release_orphan_console();
     }
 
@@ -174,7 +209,6 @@ fn run_main() -> ExitCode {
     // use, so the interposition must land first). A reader that closes
     // the pipe must terminate niu — one diagnostic, status 1 — instead
     // of letting an unbounded producer loop on per-write failures.
-    let mut args: Vec<String> = std::env::args().collect();
     // rubash#873 companion: consume the engine's background-wrapper spawn
     // handshake (`--internal-bg-wrapper=<nonce>` argv flag + the matching
     // __RUBASH_BACKGROUND_WRAPPER env nonce) before any launcher dispatch
@@ -349,41 +383,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     // Treat as a script file to execute
     {
         let mut shell = niubash_runtime::Shell::new()?;
-        // GNU shell.c:1572-1601 (open_shell_script): the script name is
-        // tried as given; when that fails and the name has no path
-        // separator it is searched in $PATH (findcmd.c find_path_file) —
-        // that is how `bash ls` finds and then refuses the binary
-        // /usr/bin/ls.
-        let mut script = script_arg_to_host_path(first);
-        if !script.exists() && !first.contains('/') && !first.contains('\\') {
-            if let Some(found) = shell.executor.find_script_on_path(first) {
-                script = found;
-            }
-        }
-        if !script.exists() {
-            // shell.c shell_execve on a name that is neither option,
-            // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
-            eprintln!("niu: {}: No such file or directory", first);
-            piped_stdout::finish_and_exit(127);
-        }
-        if script.is_dir() {
-            // niubash#547: a directory operand exists but is not an
-            // executable script — GNU answers `Is a directory` with
-            // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm).
-            // Without this arm the fs::read below leaks the raw io error
-            // (`Is a directory (os error 21)`) with rc 1.
-            eprintln!("niu: {}: Is a directory", first);
-            piped_stdout::finish_and_exit(126);
-        }
-        // general.c:718-741 check_binary_file: NUL in the first line(s)
-        // or an ELF image is refused with EX_BINARY_FILE (126).
-        let bytes = std::fs::read(&script)?;
-        if rubash::script_driver::check_binary_file(&bytes) || std::str::from_utf8(&bytes).is_err()
-        {
-            eprintln!("cannot execute binary file");
-            piped_stdout::finish_and_exit(126);
-        }
-        let content = String::from_utf8(bytes).unwrap_or_default();
+        let content = read_script_operand(&shell, first)?;
         shell.set_script_name(first);
         shell.executor.inherit_process_stdin();
         shell.enable_process_stdin_pipeline_bridge();
@@ -399,6 +399,56 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         finish_one_shot(&shell, code);
         Ok(())
     }
+}
+
+/// Open a script operand the way GNU open_shell_script does — the ONE
+/// script-opening path shared by the direct route (`niu script`) and
+/// the ShellInvocation route (`niu -- script`, `niu -i script`), which
+/// used to diverge (niubash#591: the invocation route had no $PATH
+/// search and no binary refusal). Steps: try the name as given; when
+/// that fails and the name has no path separator, search $PATH
+/// (shell.c:1572-1601, findcmd.c find_path_file — that is how `bash ls`
+/// finds and then refuses the binary /usr/bin/ls); refuse a missing
+/// name with EX_NOTFOUND (127), a directory or an unreadable file with
+/// 126, and a binary / non-UTF-8 file with EX_BINARY_FILE (126,
+/// general.c:718-741 check_binary_file: NUL in the first line(s) or an
+/// ELF image). A missing/unreadable operand is the SHELL's diagnostic
+/// with the shell's statuses, never a raw `(os error N)` + rc 1
+/// (niubash#406, niubash#547). Refusals exit the process directly, as
+/// both routes always did inline.
+fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Result<String> {
+    let mut script = script_arg_to_host_path(name);
+    if !script.exists() && !name.contains('/') && !name.contains('\\') {
+        if let Some(found) = shell.executor.find_script_on_path(name) {
+            script = found;
+        }
+    }
+    if !script.exists() {
+        // shell.c shell_execve on a name that is neither option,
+        // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
+        eprintln!("niu: {name}: No such file or directory");
+        piped_stdout::finish_and_exit(127);
+    }
+    if script.is_dir() {
+        // niubash#547: a directory operand exists but is not an
+        // executable script — GNU answers `Is a directory` with
+        // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm).
+        eprintln!("niu: {name}: Is a directory");
+        piped_stdout::finish_and_exit(126);
+    }
+    let bytes = match std::fs::read(&script) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("niu: {name}: Permission denied");
+            piped_stdout::finish_and_exit(126);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if rubash::script_driver::check_binary_file(&bytes) || std::str::from_utf8(&bytes).is_err() {
+        eprintln!("cannot execute binary file");
+        piped_stdout::finish_and_exit(126);
+    }
+    Ok(String::from_utf8(bytes).unwrap_or_default())
 }
 
 /// The shell face of this invocation, when `argv[0]` (or the forwarding shim's
@@ -620,6 +670,23 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             niubash_runtime::startup_trace::tick("-c: Shell::new");
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
+            if command_mode.login {
+                // niubash#587: the legacy `-c -l` shape used to swallow
+                // the login flag whole — no login mark, no profile
+                // chain, no env file, silently diverging from the same
+                // spelling on the engine route (`-lc`). Converge: mark
+                // login (the carrier + login_shell shopt pair, so `$-`
+                // gains `l`) and run the same non-interactive startup
+                // chain (profile chain, then the env file, #399/#402)
+                // before the command string; an `exit` in a startup
+                // file ends the invocation with its status. The order
+                // matches the engine route: the startup chain runs
+                // before BASH_EXECUTION_STRING is set below.
+                shell.executor.mark_login_shell();
+                if let Some(status) = shell.source_non_interactive_env() {
+                    finish_startup_exit(&mut shell, status);
+                }
+            }
             shell
                 .executor
                 .set_env("BASH_EXECUTION_STRING", command_mode.command);
@@ -647,13 +714,16 @@ struct LegacyCommandMode<'a> {
     command: &'a str,
     command_name: Option<&'a str>,
     positional_params: &'a [String],
+    login: bool,
 }
 
 /// `niu -c [-l|--login] <command> [name [params...]]` — the legacy shape kept
 /// for the `-c -l` combination. `rest` starts right after the `-c` word.
 fn parse_legacy_command_mode(rest: &[String]) -> anyhow::Result<LegacyCommandMode<'_>> {
     let mut index = 0;
+    let mut login = false;
     while matches!(rest.get(index).map(String::as_str), Some("-l" | "--login")) {
+        login = true;
         index += 1;
     }
     let Some(command) = rest.get(index) else {
@@ -665,6 +735,7 @@ fn parse_legacy_command_mode(rest: &[String]) -> anyhow::Result<LegacyCommandMod
         command,
         command_name,
         positional_params,
+        login,
     })
 }
 
@@ -809,41 +880,13 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             finish_startup_exit(&mut shell, status);
         }
         shell.set_script_name(&script_name);
-        // niubash#406: a missing/unreadable script operand is the SHELL's
-        // diagnostic with the shell's statuses, not the launcher's raw
-        // `(os error 2)` + rc 1 — `niubash -- nosuch.sh` must answer like
-        // `bash -- nosuch.sh` (`bash: nosuch.sh: No such file or
-        // directory`, rc 127). The `_ =>` script branch below already does
-        // this; the `--`/ShellInvocation route reaches here instead.
-        let path = script_arg_to_host_path(&script_name);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) => match error.kind() {
-                std::io::ErrorKind::NotFound => {
-                    eprintln!("niu: {script_name}: No such file or directory");
-                    piped_stdout::finish_and_exit(127);
-                }
-                std::io::ErrorKind::PermissionDenied => {
-                    eprintln!("niu: {script_name}: Permission denied");
-                    piped_stdout::finish_and_exit(126);
-                }
-                // niubash#547: a directory operand is a found-but-not-
-                // executable script (GNU: `bash: /tmp: Is a directory`,
-                // rc 126), not the launcher's raw `(os error 21)` + rc 1
-                // with the operand name dropped. read_to_string on a
-                // directory surfaces as IsADirectory on Unix; the is_dir
-                // probe covers platforms whose error kind differs.
-                std::io::ErrorKind::IsADirectory => {
-                    eprintln!("niu: {script_name}: Is a directory");
-                    piped_stdout::finish_and_exit(126);
-                }
-                _ if path.is_dir() => {
-                    eprintln!("niu: {script_name}: Is a directory");
-                    piped_stdout::finish_and_exit(126);
-                }
-                _ => return Err(error.into()),
-            },
-        };
+        // niubash#591: the same script-opening path as the direct route
+        // (read_script_operand) — $PATH search for a slash-less name,
+        // and directory / permission / binary refusals with GNU's
+        // diagnostics and statuses (127 / 126), instead of this route's
+        // old read_to_string fall-through (no PATH search; an ELF file
+        // parsed as script text, rc 127).
+        let content = read_script_operand(&shell, &script_name)?;
         let code = shell.execute_script(&content)?;
         let code = shell.finish_with_exit_trap(code)?;
         finish_one_shot(&shell, code);
@@ -951,7 +994,7 @@ fn invocation_source_name(invocation: &ShellInvocation) -> String {
     if let Some(script) = &invocation.script {
         return script.clone();
     }
-    std::env::args().next().unwrap_or_else(|| "niu".to_string())
+    process_argv0()
 }
 
 /// Collects `(line, raw body)` for every locale string in `input`, in source
@@ -1493,6 +1536,16 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // (unixwin/niubash#431: `cat f431.sh | niu` with `(printf a;\nprintf
     // b);\n)` must blame `line 3`, like `bash -s` on the same stream).
     let mut lines_read = 0usize;
+    // niubash#576: GNU's reader_loop does NOT stop at the first failing
+    // command. Without `-e` in force it reads the stream to EOF, the
+    // process status is the LAST batch's status, and the EXIT trap runs
+    // exactly once at the end (shell.c read_from_stdin / eval.c
+    // reader_loop). Only an unwind stops the stream early — a top-level
+    // `exit`, an errexit abort, or a read-time parse error. The previous
+    // driver exited the process on ANY nonzero batch: later input never
+    // ran and the EXIT trap fired at the failure point. Track the last
+    // batch's status and finish once, below.
+    let mut last_code = 0;
 
     loop {
         line.clear();
@@ -1508,11 +1561,11 @@ fn run_stdin_script() -> anyhow::Result<()> {
             .unwrap_or_else(|| read_unbuffered_line(&mut line))?
         {
             0 => {
+                // EOF: flush a gathered-but-incomplete tail as the final
+                // batch; its status is the stream's last status.
                 if !pending.is_empty() {
                     let offset = lines_read - pending.len();
-                    let code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
-                    let code = shell.finish_with_exit_trap(code)?;
-                    finish_one_shot(&shell, code);
+                    last_code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
                 }
                 break;
             }
@@ -1539,36 +1592,71 @@ fn run_stdin_script() -> anyhow::Result<()> {
             }
             None => shell.execute_script_at_line_offset(&script, offset)?,
         };
-        if code != 0 {
-            let code = shell.finish_with_exit_trap(code)?;
-            finish_one_shot(&shell, code);
+        last_code = code;
+
+        // Stop feeding the stream only when the batch UNWOUND — the
+        // same stop rule as the engine's own stdin driver (rubash
+        // script_driver::run_stdin_script): a recorded top-level jump
+        // (Shell::take_script_exit_jump for the batches this shell
+        // flattened itself, Executor::take_exit_jump_pending for the
+        // engine-driver-routed ones), a read-time parse error, or a
+        // nonzero status while errexit is armed (execute_cmd.c:652-656
+        // exempts a `!`-inverted command). An ordinary nonzero status
+        // just becomes the new last status and reading continues.
+        let jumped = shell.take_script_exit_jump();
+        let engine_jumped = shell.executor.take_exit_jump_pending();
+        let parse_error = shell.executor.take_parse_error();
+        if jumped
+            || engine_jumped
+            || parse_error
+            || (code != 0
+                && rubash::script_driver::stdin_script_errexit_enabled(&shell.executor)
+                && !shell.executor.last_command_inverted())
+        {
+            break;
         }
         pending.clear();
     }
 
-    let code = shell.finish_with_exit_trap(0)?;
+    let code = shell.finish_with_exit_trap(last_code)?;
     finish_one_shot(&shell, code);
     Ok(())
 }
 
 fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
-    let mut stdin = std::io::stdin().lock();
-    let mut bytes = [0_u8; 1];
+    // niubash#577: mirror of the engine's own reader of the same name
+    // (rubash script_driver::read_unbuffered_line), which this host copy
+    // had drifted from. Accumulate RAW BYTES and decode once per line:
+    // the old `output.push(bytes[0] as char)` widened every byte to its
+    // Latin-1 code point, so a UTF-8 script fed on bare stdin reached
+    // the engine mojibake'd (every multibyte character doubled). The
+    // engine's `bytes_to_shell_text` keeps valid UTF-8 and preserves
+    // undecodable bytes as raw-byte markers that round-trip byte-exact
+    // — the same decode the engine's fd-0 line path applies, so bare
+    // stdin, `-s`, and script-file routes hand the engine identical
+    // text. A b'\n' can never sit inside a UTF-8 sequence, so the line
+    // split is char-boundary safe.
+    //
+    // The read also goes through the raw OS handle, not io::stdin():
+    // the std stdin owns a process-wide BufReader whose fill would
+    // prefetch the stream, while GNU input.c reads fd 0 one byte at a
+    // time (zread) so a child sharing the descriptor continues at the
+    // exact offset this shell consumed.
+    let mut line: Vec<u8> = Vec::new();
     let mut read = 0;
-
     loop {
-        match stdin.read(&mut bytes)? {
-            0 => break,
-            count => {
-                read += count;
-                output.push(bytes[0] as char);
-                if bytes[0] == b'\n' {
+        match rubash::executor::read_process_stdin_bytes(1)? {
+            buf if buf.is_empty() => break,
+            buf => {
+                read += buf.len();
+                line.push(buf[0]);
+                if buf[0] == b'\n' {
                     break;
                 }
             }
         }
     }
-
+    output.push_str(&rubash::executor::bytes_to_shell_text(&line));
     Ok(read)
 }
 
@@ -5196,10 +5284,7 @@ mod tests {
     #[test]
     fn invocation_source_name_follows_gnu_convention() {
         let mut invocation = ShellInvocation::parse(&[]).unwrap();
-        assert_eq!(
-            invocation_source_name(&invocation),
-            std::env::args().next().unwrap_or_else(|| "niu".to_string())
-        );
+        assert_eq!(invocation_source_name(&invocation), process_argv0());
         invocation.command = Some("echo hi".to_string());
         assert_eq!(invocation_source_name(&invocation), "-c");
         invocation.command = None;

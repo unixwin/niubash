@@ -71,6 +71,38 @@ v1.4.3 起随 release 发货 `.zip`，在真机上运行（Termux aarch64/armv7�
 - **niu 跑得了真 Bash 脚本吗？** 跑得了。rubash 引擎以 GNU Bash 官方上游测试套件作门禁，记录在[兼容性矩阵](docs/src/rubash-bash-compat-matrix.md)。
 - **现在能在 Android 或鸿蒙上装 niu 吗？** Android 能：v1.4.3 起 release 自带 `.zip`，真机（Termux aarch64/armv7）可运行。鸿蒙还不能：CI 能编译，但没有可安装产物。
 
+## 为什么不用 Git Bash / MSYS2 / Cygwin，也不用「轻量替代」shell
+
+**Git Bash** 官网自称是「a BASH emulation used to run Git from the command line」——
+为跑 Git 而设的模拟。代价是结构性的：`echo >/dev/tty` 等控制台设备重定向在 MSYS 层
+直接 `Invalid argument` 失败（niubash 与 GNU 一致，项目自测口径）；捆绑 bash 停在
+5.2 系，5.3 的 `${ cmd; }` 无 fork 命令替换不存在；提示符每轮 spawn git 取分支
+（约 100–300 ms），niu 直读 `.git/HEAD`、永不 spawn（冷 39 ms / 暖 p50 2.5 ms，
+project-measured, as of 2026-10-25）；真实安装 440 MB + 20 MB 模拟 DLL，
+niu 约 16 MB、零 DLL。
+
+**MSYS2** 的官方文档自承：参数只要像 Unix 路径就会被自动改写，且「并不完美」，
+会误伤不是路径的参数。niubash 的翻译面刻意收窄：引号参数永不改写，唯一设备翻译
+是精确 token `/dev/null` → `nul`；每次过度翻译都立公开 issue 并固化回归。
+**Cygwin** 官网自承要跑它的世界必须「从源码重编」应用——模拟层是它的官方定义。
+niubash 是原生构建，没有模拟 DLL。
+
+**新一代「bash 替代」shell**（如 Rust 写的 brush）主打轻量。轻量不是残疾的遮羞布：
+完整 bash 语义不用 fork 逐路径复刻 + 跨平台，是 474,985 行（rubash 385,618 +
+niubash 89,367，静态审计口径 2026-10-25）的完工价。我们用 306 例差分语料（对 GNU bash 5.3.20
+逐字节比对）实测其发行版 v0.4.0：181/306；其 master 最新提交
+源码构建复测 183/306，同一失败剖面——alias 时机模型错误（20 探针 6 条实质分歧）、
+`printf x y` 无限循环挂死脚本、脚本里 `wait $!` 未实现、globstar 不递归、
+nameref 的 `unset` 报「not yet implemented」。这类实现无法成为 bash 的替代产物，
+也无法成为可靠的登录态 shell（证据链见宣传线证据文件）。
+
+**niubash 的口径**：自研 246 例差分套件与 GNU 字节级一致 244/246；以 GNU 官方
+83 套测试集为一致性语料（measured against）；nvm/bats-core/bash-it/oh-my-bash
+等真实生态逐项跑，分歧全量立 issue 并固化回归（截至 2026-10-25：rubash
+1,050 个 issue 关 1,039；niubash 292 个关 285）。命令层捆绑 WinuxCmd：
+176 个命令 / 1,924 个选项，为 shell 而设计——对照微软 coreutils 的 README 自述：
+没有 `/dev/null`、没有 POSIX 信号、`chmod`/`id`/`tty` 等二十多个命令整批丢弃。
+
 ## 实证
 
 下面每条 claim 都链到产出它的工件：入仓日志、基线文件、CI 门禁。
