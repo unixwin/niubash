@@ -1401,6 +1401,25 @@ impl Shell {
         // concept and is ignored in this branch. An `exit` in the file ends
         // the invocation with its status (niubash#399).
         if self.posix_mode_active() {
+            // niubash#603: the generated plugin loader is niu's own
+            // activation plane, not a user file — posix mode governs the
+            // choice and order of USER files (the profile chain above,
+            // then $ENV), not whether the product integration loads; the
+            // mode flag must not silently strip it (the #590 defect
+            // class, which the login branch below already fixed for
+            // ordinary shells). The slot mirrors the ordinary branch's
+            // relative order: a login shell has just sourced the profile
+            // chain, so the loader lands after it — the #590 slot — and
+            // before $ENV, the posix rc face, which is where the loader
+            // sits relative to the rc on the non-login branch (loader
+            // first, so the user file's lines win). An `exit` inside
+            // unwinds like any startup file, before $ENV and the login
+            // tail run. No rc is sourced in this mode at all, so the
+            // double-execution guard has no rc text to scan (None), as
+            // on the login branch.
+            if let Some(status) = self.load_generated_plugin_loader(None) {
+                return Some(status);
+            }
             let exit = self.execute_env_file("ENV");
             if let Some(status) = exit {
                 // niubash#422: an ENV `exit` is a startup-file jump like any
