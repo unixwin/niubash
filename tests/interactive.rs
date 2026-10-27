@@ -264,6 +264,59 @@ fn ctrl_c_on_empty_line_returns_new_prompt() {
     s.expect_prompt();
 }
 
+/// niubash#611: Ctrl-C at the prompt must leave `$?` = 130 (GNU:
+/// 128+SIGINT), not whatever status the previous command left behind.
+/// Reedline swallows the ^C byte in raw mode, so no engine signal path
+/// ever records it.
+#[test]
+fn issue611_ctrl_c_at_prompt_sets_status_130() {
+    if !require_pty_or_skip("issue611_ctrl_c_at_prompt_sets_status_130") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-prompt-611",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send_line("true");
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:0");
+    s.expect_prompt();
+    s.send(CTRL_C);
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:130");
+    s.expect_prompt();
+}
+
+/// niubash#600: Ctrl-C at the prompt echoes a literal `^C` (GNU shows
+/// it via ECHOCTL/readline). Reedline's raw mode prints nothing for
+/// the byte, so the host must echo it itself.
+#[test]
+fn issue600_ctrl_c_at_prompt_echoes_caret_c() {
+    if !require_pty_or_skip("issue600_ctrl_c_at_prompt_echoes_caret_c") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-caret-600",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(CTRL_C);
+    s.expect("^C");
+    s.expect_prompt();
+    s.send_line("echo still-alive-600");
+    s.expect("still-alive-600");
+    s.expect_prompt();
+}
+
 /// Ctrl-C with text typed discards the line: it must not execute.
 #[test]
 fn ctrl_c_midtyped_discards_line() {
@@ -317,6 +370,51 @@ fn ctrl_c_interrupts_external_command() {
     s.send_line("echo st:$?");
     let window = s.expect("st:");
     eprintln!("ctrl_c_external status window: {window:?}");
+    s.expect_prompt();
+}
+
+/// niubash#610: Ctrl-C interrupting a PIPELINE must end the pipeline,
+/// not the session. GNU returns to the prompt with `$?` = 130, runs no
+/// EXIT trap, and prints no diagnostic. The host previously classified
+/// the engine's signal-discard `ExitCode(130)` unwind as a top-level
+/// exit jump, so the REPL ended the session (running the EXIT trap)
+/// with status 130.
+#[test]
+fn issue610_ctrl_c_pipeline_returns_to_prompt_with_130() {
+    if !require_pty_or_skip("issue610_ctrl_c_pipeline_returns_to_prompt_with_130") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-pipeline-610",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    // Arm an EXIT trap whose marker only the trap's own expansion can
+    // produce; if the session wrongly exits, the marker appears.
+    s.send_line("X610=TRAP610");
+    s.expect_prompt();
+    s.send_line("trap 'echo ${X610}FIRED' EXIT");
+    s.expect_prompt();
+    // Two long-running externals in a pipeline (absolute System32
+    // paths, same rationale as ctrl_c_interrupts_external_command).
+    s.send_line(
+        "/c/Windows/System32/ping.exe -n 20 127.0.0.1 | /c/Windows/System32/findstr.exe TTL",
+    );
+    // `TTL=` appears in the first reply in every ping locale.
+    s.expect("TTL=");
+    s.send(CTRL_C);
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:130");
+    s.expect_prompt();
+    // The discard unwind is silent: no engine diagnostic, no EXIT trap.
+    s.expect_absent("discarding current command line", ABSENT_WINDOW);
+    s.expect_absent("TRAP610FIRED", ABSENT_WINDOW);
+    s.send_line("echo still-alive-610");
+    s.expect("still-alive-610");
     s.expect_prompt();
 }
 
