@@ -247,11 +247,25 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // Infallible since niubash#134: a history file that cannot be opened
     // (sandboxed restricted token, os error 5) degrades to an in-memory
     // history instead of aborting the interactive session.
-    let mut history = LiveFileBackedHistory::with_mode(
-        shell_ref.history_max_size,
-        shell_ref.history_path.clone(),
-        shell_ref.history_mode,
-    );
+    // niubash#569: the editor history instance and the provider instance
+    // are distinct objects over one file. When the provider is installed
+    // (every interactive entry), the editor adopts its ledger, so lines
+    // the editor records are visible to the provider's -a/-c/-w and to
+    // the session-end write; without the shared ledger, -c could not
+    // account for lines the editor recorded. Edit-mode rebuilds re-adopt
+    // the same ledger, so the sharing survives refreshes.
+    let shared_ledger = shell_ref.history_ledger();
+    let mut history = match shared_ledger {
+        Some(ledger) => LiveFileBackedHistory::with_shared_ledger(
+            shell_ref.history_max_size,
+            shell_ref.history_path.clone(),
+            ledger,
+        ),
+        None => LiveFileBackedHistory::with_file(
+            shell_ref.history_max_size,
+            shell_ref.history_path.clone(),
+        ),
+    };
     // Explicitly rebuild the editor history from disk at construction so a
     // fresh process starts with persisted cross-session entries.
     let _ = history.reload_from_file();

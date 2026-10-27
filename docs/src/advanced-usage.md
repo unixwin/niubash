@@ -281,21 +281,27 @@ The floor itself is shaped by `NIU_PROMPT_CWD_STYLE` (`home`, `full`, or
 style themselves through the bash-compatible `PS1` channel — colors,
 powerline glyphs, and git segments come from the theme, not the shell.
 
-## History Modes
+## History
 
-Set `NIU_HISTORY_MODE` in `~/.niubashrc` when multiple shells share a
-history file:
+History lives in `~/.niubash_history` (or the configured history path) and
+follows GNU's model: every interactive session appends to the same file and
+refreshes from it, so lines typed in another shell are visible to navigation
+and to the `history` builtin. The explicit sync verbs are GNU's:
 
-```bash
-NIU_HISTORY_MODE=private
-export NIU_HISTORY_MODE
-```
+- `history -a` appends this session's new lines to the file;
+- `history -n` picks up lines other sessions appended;
+- `history -r` re-reads the file into memory;
+- `history -c` clears the in-memory list (the file keeps its lines until the
+  session ends, when lines cleared this way are reconciled out of it).
 
-- `shared` (default) refreshes navigation from other shells.
-- `session` keeps the startup snapshot stable for navigation while builtins can
-  observe later file updates.
-- `private` loads the complete history file at startup, then keeps later
-  navigation changes local to the current shell while appending its own commands.
+There is no sharing mode to pick. The former `NIU_HISTORY_MODE`
+shared/session/private switch was retired (niubash#572): it had no GNU
+counterpart, its documented behaviors did not match the implementation (a
+value set in `~/.niubashrc` could never take effect because it was read
+before the rc ran, and the session mode's "builtins can observe later file
+updates" promise was not implemented), and its private mode's near-unbounded
+capacity was silently truncated on reload. A `NIU_HISTORY_MODE` left in the
+environment is now silently ignored.
 
 ## Custom Key Widgets
 
