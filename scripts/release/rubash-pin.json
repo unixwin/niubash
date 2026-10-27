@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "rubash_rev": "0e9f8d45cfc03d1fe7feff861772a176c7eb9b9a",
+  "rubash_rev": "252ff19eea081ecbeabe3b3198ac14a0bc0dfdb6",
   "rubash_version": "1.4.3",
   "description": "Rubash source pin for niubash releases (rubash#827, conclusion B). Every release job fetches exactly this rubash commit into ../rubash -- where the [patch] path override in Cargo.toml deterministically picks it up -- and fails the release unless the checked-out HEAD equals rubash_rev. This is the source-level twin of winuxcmd-pin.json (niubash#312/#327): the bundled WinuxCmd was already pinned, but the compiled engine was \"whatever rubash master HEAD was at build time\".",
   "notes": [
@@ -9,6 +9,7 @@
     "NOTE: the rev includes #863-era lock self-entry discipline; rubash Cargo.toml version 1.4.3 must match this pin's rubash_version.",
     "Bumped to rubash master 368353ec (2026-10-26, version still 1.4.3): carries rubash#1772 -- #[allow(unused_imports)] on the debugger session-core facade re-exports. The d15a02df pin contains the un-annotated facade, so a release build under -D warnings (the CI toolchain action's default RUSTFLAGS) fails on 4 unused-imports errors in src/debugger/mod.rs; the rev also rolls up the rubash master wave merged since d15a02df (through the fix7 locale2 slice, #1752).",
     "Bumped to rubash master a9385b4c (2026-10-27, version still 1.4.3): integration refresh for the niubash PR integration round (this branch merged onto niubash master 4b164d34).",
-    "Bumped to rubash master 0e9f8d45 (2026-10-27, version still 1.4.3): baseline refresh for the niubash#603 posix-loader branch; rolls up the rubash clearance wave merged since 8fffc99e (through #1827), including the stacker dependency rubash#1836 added for the #1801 stack-growth fix — the root Cargo.lock gains stacker/psm with this bump."
+    "Bumped to rubash master 0e9f8d45 (2026-10-27, version still 1.4.3): baseline refresh for the niubash#603 posix-loader branch; rolls up the rubash clearance wave merged since 8fffc99e (through #1827), including the stacker dependency rubash#1836 added for the #1801 stack-growth fix — the root Cargo.lock gains stacker/psm with this bump.",
+    "Bumped to rubash master 252ff19e (2026-10-27, version still 1.4.3): integration refresh for niubash PR #617 (the #603 posix-loader branch merged onto niubash master d7dcce57, i.e. after #615 landed); rolls up the rubash wave merged since 0e9f8d45 (through #1850/#1851/#1855/#1857), including the stacker target-gate (rubash#1855) that unbreaks the aarch64-unknown-linux-ohos cross-target check."
   ]
 }
