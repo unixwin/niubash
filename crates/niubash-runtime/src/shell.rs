@@ -2481,6 +2481,29 @@ impl Shell {
         }
     }
 
+    /// Order-independent fingerprint of the engine's live env map
+    /// (niubash#594): the sum of per-entry hashes, so equal maps always
+    /// yield equal fingerprints regardless of iteration order, and any
+    /// name or value change moves the sum (short of a hash collision).
+    /// Never returns 0, which `CompletionState` reserves for "no
+    /// snapshot yet".
+    fn completion_env_fingerprint(env: &std::collections::HashMap<String, String>) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut acc = (env.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for (name, value) in env {
+            let mut hasher = DefaultHasher::new();
+            name.hash(&mut hasher);
+            value.hash(&mut hasher);
+            acc = acc.wrapping_add(hasher.finish());
+        }
+        if acc == 0 {
+            1
+        } else {
+            acc
+        }
+    }
+
     /// niubash#574: forget the highlighter's memoized live-probe answers
     /// after a submitted line that can move command resolution without
     /// moving the probe fingerprint — `hash` (every form mutates or clears
@@ -2505,14 +2528,47 @@ impl Shell {
         if self.one_shot {
             return;
         }
+        // niubash#594: this runs after every interactive line, and the
+        // snapshot used to re-clone the whole env map, the alias name set
+        // and the function name set unconditionally — a per-line tax that
+        // grows with session state although the state is only read by the
+        // completer (Tab) and the syntax highlighter. Gate each component
+        // on exactly what it stores: env name/value pairs via a
+        // fingerprint of the engine's live env map, function and alias
+        // name sets via exact comparison of the sorted names. A component
+        // whose stored content is unchanged keeps its existing
+        // allocation; readers observe the same state as a full rebuild
+        // would have produced.
+        //
+        // Bounded exception: `env_vars_snapshot` also renders the
+        // engine's attribute lists (EXPORTED_VARS, READONLY_VARS, ...)
+        // into the snapshot. A pure attribute toggle on an existing
+        // variable (e.g. `readonly x`) does not touch the live env map,
+        // so those rendered pseudo-entries refresh on the next real env
+        // change instead of immediately. They are engine storage keys,
+        // not user variables; the variable names and values completion
+        // actually consumes are always current.
+        let env_fingerprint = Self::completion_env_fingerprint(self.executor.env_vars());
+        let function_names = self.executor.functions_snapshot();
+        let mut alias_names: Vec<String> = self.aliases.keys().cloned().collect();
+        alias_names.sort_unstable();
         if let Ok(mut state) = self.completion_state.lock() {
             state.current_dir = self
                 .executor_pwd_host_path()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| state.current_dir.clone());
-            state.env_vars = self.executor.env_vars_snapshot();
-            state.aliases = self.aliases.keys().cloned().collect();
-            state.functions = self.executor.functions_snapshot().into_iter().collect();
+            if state.snapshot_env_fingerprint != env_fingerprint {
+                state.env_vars = self.executor.env_vars_snapshot();
+                state.snapshot_env_fingerprint = env_fingerprint;
+            }
+            if state.snapshot_function_names != function_names {
+                state.functions = function_names.iter().cloned().collect();
+                state.snapshot_function_names = function_names;
+            }
+            if state.snapshot_alias_names != alias_names {
+                state.aliases = alias_names.iter().cloned().collect();
+                state.snapshot_alias_names = alias_names;
+            }
         }
     }
 
@@ -6026,6 +6082,125 @@ complete -F _envtooldyn_hook envtooldyn
         assert!(shell
             .completion_probe("$SOURCE_COMPLETION", "$SOURCE_COMPLETION".len())
             .contains(&"$SOURCE_COMPLETION_VAR".to_string()));
+    }
+
+    #[test]
+    fn issue594_completion_state_skips_rebuild_when_nothing_changed() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        shell.execute_interactive_line("ISSUE594_VAR=one").unwrap();
+        // Plant sentinels in the shared state: a rebuild would replace
+        // all three components wholesale and wipe them, so their
+        // survival proves the niubash#594 gate skipped the re-clone.
+        {
+            let mut state = shell.completion_state.lock().unwrap();
+            state
+                .env_vars
+                .insert("ISSUE594_SENTINEL".to_string(), "keep".to_string());
+            state.functions.insert("issue594_sentinel_fn".to_string());
+            state.aliases.insert("issue594_sentinel_alias".to_string());
+        }
+        shell.update_completion_state();
+        let state = shell.completion_state.lock().unwrap();
+        assert!(state.env_vars.contains_key("ISSUE594_SENTINEL"));
+        assert!(state.functions.contains("issue594_sentinel_fn"));
+        assert!(state.aliases.contains("issue594_sentinel_alias"));
+        assert_eq!(
+            state.env_vars.get("ISSUE594_VAR").map(String::as_str),
+            Some("one")
+        );
+    }
+
+    #[test]
+    fn issue594_completion_state_tracks_function_define_and_unset() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        shell
+            .execute_interactive_line("issue594fn() { true; }")
+            .unwrap();
+        assert!(shell
+            .completion_probe("issue594f", "issue594f".len())
+            .contains(&"issue594fn".to_string()));
+
+        shell
+            .execute_interactive_line("unset -f issue594fn")
+            .unwrap();
+        assert!(!shell
+            .completion_probe("issue594f", "issue594f".len())
+            .contains(&"issue594fn".to_string()));
+    }
+
+    #[test]
+    fn issue594_completion_state_tracks_alias_and_env_value_changes() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        shell
+            .execute_interactive_line("alias i594ll='ls -la'")
+            .unwrap();
+        assert!(shell
+            .completion_probe("i594l", "i594l".len())
+            .contains(&"i594ll".to_string()));
+
+        shell.execute_interactive_line("unalias i594ll").unwrap();
+        assert!(!shell
+            .completion_probe("i594l", "i594l".len())
+            .contains(&"i594ll".to_string()));
+
+        shell.execute_interactive_line("ISSUE594_V=alpha").unwrap();
+        assert_eq!(
+            shell
+                .completion_state
+                .lock()
+                .unwrap()
+                .env_vars
+                .get("ISSUE594_V")
+                .map(String::as_str),
+            Some("alpha")
+        );
+        shell.execute_interactive_line("ISSUE594_V=beta").unwrap();
+        assert_eq!(
+            shell
+                .completion_state
+                .lock()
+                .unwrap()
+                .env_vars
+                .get("ISSUE594_V")
+                .map(String::as_str),
+            Some("beta")
+        );
+    }
+
+    #[test]
+    fn issue594_completion_env_fingerprint_is_stable_and_change_sensitive() {
+        let mut a = std::collections::HashMap::new();
+        a.insert("A".to_string(), "1".to_string());
+        a.insert("B".to_string(), "2".to_string());
+        let mut b = std::collections::HashMap::new();
+        b.insert("B".to_string(), "2".to_string());
+        b.insert("A".to_string(), "1".to_string());
+        // Insertion order must not matter, and 0 is the reserved
+        // "no snapshot yet" sentinel the helper must never emit.
+        assert_eq!(
+            Shell::completion_env_fingerprint(&a),
+            Shell::completion_env_fingerprint(&b)
+        );
+        assert_ne!(Shell::completion_env_fingerprint(&a), 0);
+        b.insert("B".to_string(), "changed".to_string());
+        assert_ne!(
+            Shell::completion_env_fingerprint(&a),
+            Shell::completion_env_fingerprint(&b)
+        );
+        b.remove("B");
+        assert_ne!(
+            Shell::completion_env_fingerprint(&a),
+            Shell::completion_env_fingerprint(&b)
+        );
     }
 
     #[test]
