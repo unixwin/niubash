@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "rubash_rev": "ab2372f6cbc08e1a1a4cc0fd173d0b7c1dadd823",
+  "rubash_rev": "a268db281f2c35b203891b34a685b17e4d330b1e",
   "rubash_version": "1.4.3",
   "description": "Rubash source pin for niubash releases (rubash#827, conclusion B). Every release job fetches exactly this rubash commit into ../rubash -- where the [patch] path override in Cargo.toml deterministically picks it up -- and fails the release unless the checked-out HEAD equals rubash_rev. This is the source-level twin of winuxcmd-pin.json (niubash#312/#327): the bundled WinuxCmd was already pinned, but the compiled engine was \"whatever rubash master HEAD was at build time\".",
   "notes": [
@@ -9,6 +9,7 @@
     "NOTE: the rev includes #863-era lock self-entry discipline; rubash Cargo.toml version 1.4.3 must match this pin's rubash_version.",
     "Bumped to rubash master 368353ec (2026-10-26, version still 1.4.3): carries rubash#1772 -- #[allow(unused_imports)] on the debugger session-core facade re-exports. The d15a02df pin contains the un-annotated facade, so a release build under -D warnings (the CI toolchain action's default RUSTFLAGS) fails on 4 unused-imports errors in src/debugger/mod.rs; the rev also rolls up the rubash master wave merged since d15a02df (through the fix7 locale2 slice, #1752).",
     "Bumped to rubash master a9385b4c (2026-10-27, version still 1.4.3): integration refresh for the niubash PR integration round (this branch merged onto niubash master 4b164d34).",
-    "Bumped to rubash master ab2372f6 (2026-10-27, version still 1.4.3): pin refresh on the namespace-bridge exclusion line (pathmatrix final ruling 2026-10-27 item (a)); rolls up the rubash master wave merged since 8fffc99e, through rubash#1855 (stacker target gate, which is what adds stacker/psm to the root lock). The bridge exclusion itself (rubash PR #1856) lands on rubash master separately and enters this pin with the next bump after it merges."
+    "Bumped to rubash master ab2372f6 (2026-10-27, version still 1.4.3): pin refresh on the namespace-bridge exclusion line (pathmatrix final ruling 2026-10-27 item (a)); rolls up the rubash master wave merged since 8fffc99e, through rubash#1855 (stacker target gate, which is what adds stacker/psm to the root lock). The bridge exclusion itself (rubash PR #1856) lands on rubash master separately and enters this pin with the next bump after it merges.",
+    "Bumped to rubash master a268db28 (2026-10-27, version still 1.4.3): integration refresh — this branch merged onto niubash master d7dcce57 (after niubash#615), superseding the 495cf86e pin that #615's own integration recorded. This rev carries rubash#1856, the namespace-bridge exclusion itself (spawn-boundary argv crosses verbatim for wsl/ssh/scp/sftp) whose entry the ab2372f6 note deferred to 'the next bump after it merges', plus the rubash master wave merged since ab2372f6: #1850 (exec seams: pipeline stage fd-1 rebind + tail SHLVL seam) and #1857 (history read silence + stale time pin correction). rubash Cargo.toml and Cargo.lock are unchanged across ab2372f6..a268db28, so the root Cargo.lock refresh from the ab2372f6 bump stands as-is."
   ]
 }
