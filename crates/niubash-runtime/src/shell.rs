@@ -840,10 +840,8 @@ impl Shell {
         // single-stream choice is unchanged — the configured history path
         // (not an inherited HISTFILE) remains the file of record.
         self.executor.set_shell_option("history", false);
-        self.executor.set_env(
-            "HISTFILE",
-            &self.history_path.to_string_lossy(),
-        );
+        self.executor
+            .set_env("HISTFILE", &self.history_path.to_string_lossy());
         // rubash#1248: assert the other half of the interactive history
         // contract. GNU init_interactive turns histexpand ON by default
         // (bashhist.c:288 HISTEXPAND_DEFAULT), and the engine's per-line
