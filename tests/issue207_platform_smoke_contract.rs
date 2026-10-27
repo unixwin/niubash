@@ -91,6 +91,34 @@ fn issue207_smoke_external_pipeline() {
     // `printf 'a\nb\n' | niu -c 'sort | head -1'` from the issue: the
     // pipeline members are external commands fed by the shell's stdin.
     let home = scratch_home();
+    // Premise guard (main-session ruling, 2026-10-27): this pin's
+    // oracle is GNU coreutils — it asserts the byte-exact output of a
+    // pipeline whose members resolve to GNU `sort`/`head`. Where the
+    // `sort` niu resolves does not identify as GNU coreutils, the
+    // premise is missing and the assertion cannot judge the product:
+    // on GitHub Windows runners `sort` resolves to System32 sort.exe
+    // and this pin failed byte-identically before the #585 integration
+    // (run 40346497601, 2026-10-26). Probe through niu itself; when
+    // GNU coreutils sort is present (dev machines, WSL, hosts with
+    // WinuxCmd links) the assertions below run at full strength,
+    // unchanged.
+    let probe = run(&["-c", "sort --version"], &home);
+    let probe_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&probe.stdout),
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    if !probe_text.contains("GNU coreutils") {
+        eprintln!(
+            "skip issue207_smoke_external_pipeline: premise missing — \
+             `sort --version` via niu did not identify as GNU coreutils \
+             (status: {}, output: {:?}); this pin requires GNU coreutils \
+             sort/head as the external pipeline members",
+            probe.status, probe_text
+        );
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
     let mut child = Command::new(niu_binary())
         .args(["-c", "sort | head -1"])
         .env("HOME", &home)
