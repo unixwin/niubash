@@ -832,29 +832,28 @@ impl LiveFileBackedHistory {
         // (a) Append pending lines the live sync never wrote (the
         // read-only-recovery shape: save succeeded in memory, sync
         // failed, and the file became writable again by exit time).
+        // Write them THROUGH the reader, not by raw appends: reedline's
+        // unwritten buffer holds exactly the lines whose live sync
+        // failed, and sync() advances its on-disk accounting as it
+        // writes them. A raw append leaves that accounting stale, so
+        // the reader's Drop-time sync writes the same lines a second
+        // time (reedline's FileBackedHistory syncs on drop) — the
+        // duplication
+        // session_end_write_appends_missing_entries_without_duplicates
+        // catches where the read-only leg behaves (Windows CI; the
+        // local uid-0 artifact masks the leg and hides this one).
         let mut appended_ok = unsynced.is_empty();
         let mut file_changed = false;
         if !unsynced.is_empty() {
-            let mut appended_any = false;
-            let mut append_error: Option<io::Error> = None;
-            for line in &unsynced {
-                match append_line_to_file(&path, line) {
-                    Ok(()) => appended_any = true,
-                    Err(error) => {
-                        append_error = Some(error);
-                        break;
-                    }
+            match state.history.sync() {
+                Ok(()) => {
+                    appended_ok = true;
+                    file_changed = true;
                 }
-            }
-            match append_error {
-                None => appended_ok = true,
-                Some(error) => {
+                Err(error) => {
                     warn_io_failure(state, "history file append at session end failed", error);
                 }
             }
-            // Even a partial append changed the file, so the reader
-            // still needs rebuilding below.
-            file_changed = file_changed || appended_any;
         }
         // (b) Remove exactly the lines this session cleared, as a
         // forward subsequence from the ledger base. Lines before the
@@ -901,12 +900,14 @@ impl LiveFileBackedHistory {
         }
         if file_changed {
             // Rebuild the reader from the reconciled file so its
-            // accounting is exact: otherwise the reader's Drop-time sync
-            // would re-append the raw-appended lines (the dedupe hazard
-            // `read_history`'s fast path exists for, niubash#182). The
-            // rebuild cannot resurrect cleared lines — they are already
-            // gone from the file — and seeds reappearing in memory are
-            // committed file lines, harmless at session end.
+            // in-memory list matches the file (step (b) may have removed
+            // lines the reader still holds). The replaced reader drops
+            // with an empty unwritten buffer — step (a) synced it, or
+            // there was nothing pending — so its Drop-time sync writes
+            // nothing. The rebuild cannot resurrect cleared lines —
+            // they are already gone from the file — and seeds
+            // reappearing in memory are committed file lines, harmless
+            // at session end.
             if let Ok(history) = FileBackedHistory::with_file(capacity, path.clone()) {
                 state.history = history;
             }
