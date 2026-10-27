@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "rubash_rev": "a9385b4c6334df0c175d62d42092327077a746ed",
+  "rubash_rev": "8fffc99eda25d4a7f8cb0369e08a4f7dd39255c4",
   "rubash_version": "1.4.3",
   "description": "Rubash source pin for niubash releases (rubash#827, conclusion B). Every release job fetches exactly this rubash commit into ../rubash -- where the [patch] path override in Cargo.toml deterministically picks it up -- and fails the release unless the checked-out HEAD equals rubash_rev. This is the source-level twin of winuxcmd-pin.json (niubash#312/#327): the bundled WinuxCmd was already pinned, but the compiled engine was \"whatever rubash master HEAD was at build time\".",
   "notes": [
