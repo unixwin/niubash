@@ -86,6 +86,18 @@ pub struct CompletionState {
     /// kept so the external plugin can be rebuilt when bundle definitions
     /// change without losing user overrides.
     completion_dirs: Vec<PathBuf>,
+    /// niubash#594: fingerprint of the engine's live env map that
+    /// `env_vars` was snapshotted from. `Shell::update_completion_state`
+    /// compares it against the current live map and skips the re-clone
+    /// when unchanged. 0 = no snapshot yet / invalidated by another
+    /// writer, which forces a rebuild on the next update.
+    pub snapshot_env_fingerprint: u64,
+    /// niubash#594: the sorted engine function names `functions` was
+    /// built from, kept so the next update can skip the rebuild when
+    /// the name set is unchanged.
+    pub snapshot_function_names: Vec<String>,
+    /// niubash#594: the sorted alias names `aliases` was built from.
+    pub snapshot_alias_names: Vec<String>,
 }
 
 impl CompletionState {
@@ -99,6 +111,9 @@ impl CompletionState {
             plugins: Vec::new(),
             command_probe: CommandProbe::default(),
             completion_dirs: Vec::new(),
+            snapshot_env_fingerprint: 0,
+            snapshot_function_names: Vec::new(),
+            snapshot_alias_names: Vec::new(),
         }
     }
 
@@ -227,6 +242,11 @@ impl NiubashCompleter {
         if let Ok(mut state) = self.state.lock() {
             state.current_dir = current_dir;
             state.env_vars = env_vars;
+            // niubash#594: this write bypasses the fingerprint gate, so
+            // invalidate it — the next `update_completion_state` rebuilds
+            // the env snapshot from the engine instead of trusting a
+            // fingerprint that no longer describes `env_vars`.
+            state.snapshot_env_fingerprint = 0;
         }
     }
 
