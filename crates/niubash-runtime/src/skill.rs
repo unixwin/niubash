@@ -12,7 +12,9 @@
 //!   bundle's `references/` and `agents/` files (same structure as the
 //!   released `niubash-skill-v*.zip`, so agents can consume either).
 //! - `--target <dir>` installs into `<dir>/niubash/` — the generic escape
-//!   hatch for hosts this product does not name.
+//!   hatch for hosts this product does not name. Only path-shaped values
+//!   (or the explicit `dir:<path>` form) are directories; an unknown bare
+//!   word is an error, never a silent relative directory (niubash#579).
 //! - "Outdated" means drifted bytes, decided per file; there is no manifest
 //!   file to get out of sync with the tree.
 
@@ -27,6 +29,7 @@ pub const SKILL_DIR_NAME: &str = "niubash";
 /// Named agent skill roots, in install/check order. Paths are relative to
 /// the user home (the `dirs` home, consistent with path_utils).
 pub const NAMED_TARGETS: &[(&str, &str)] = &[
+    ("codex", ".codex/skills"),
     ("claude", ".claude/skills"),
     ("zcode", ".zcode/skills"),
     ("cursor", ".cursor/skills"),
@@ -51,6 +54,16 @@ pub enum TargetSpec {
 }
 
 /// Parse a `--target` value: a named host, `all`, or a filesystem path.
+///
+/// The classification is by shape, not by per-word exceptions
+/// (niubash#579): a bare word is a *name* and must be one of the named
+/// hosts — an unknown bare word is an error that lists the legal names,
+/// never a silent relative directory (a typo used to "install" the
+/// bundle into `./<typo>/niubash/` under the current directory and
+/// report success). A value is a directory when it is path-shaped —
+/// it carries a path separator, is absolute, or starts with `./`,
+/// `../` or `~` — or when it uses the explicit `dir:<path>` form,
+/// which also covers bare directory names like `dir:skills`.
 pub fn resolve_target(spec: &str) -> anyhow::Result<TargetSpec> {
     if spec == "all" {
         return Ok(TargetSpec::All);
@@ -64,7 +77,32 @@ pub fn resolve_target(spec: &str) -> anyhow::Result<TargetSpec> {
             named_list()
         );
     }
-    Ok(TargetSpec::Dir(PathBuf::from(spec)))
+    if let Some(path) = spec.strip_prefix("dir:") {
+        if path.is_empty() {
+            anyhow::bail!("--target dir: requires a directory path after 'dir:'");
+        }
+        return Ok(TargetSpec::Dir(PathBuf::from(path)));
+    }
+    if is_path_shaped(spec) {
+        return Ok(TargetSpec::Dir(PathBuf::from(spec)));
+    }
+    anyhow::bail!(
+        "unknown --target '{spec}': not a named target ({}, all); \
+         pass a directory path (one containing a path separator) or dir:<path> \
+         for a custom skills root",
+        named_list()
+    )
+}
+
+/// Whether a `--target` value is shaped like a filesystem path rather
+/// than a bare name: it contains a path separator (`/` or `\`), is
+/// absolute, or opens with a `.`/`~` path component (`./`, `../`, `~`).
+fn is_path_shaped(spec: &str) -> bool {
+    spec.contains('/')
+        || spec.contains('\\')
+        || spec.starts_with('.')
+        || spec.starts_with('~')
+        || Path::new(spec).is_absolute()
 }
 
 /// Comma-separated named targets for usage text.
@@ -181,6 +219,57 @@ mod tests {
             TargetSpec::Dir(_)
         ));
         assert!(resolve_target("").is_err());
+    }
+
+    #[test]
+    fn issue579_codex_is_a_named_target() {
+        // Codex is the product's headline agent host; its skills root is
+        // the vendor convention ~/.codex/skills.
+        assert!(matches!(
+            resolve_target("codex").unwrap(),
+            TargetSpec::Named("codex")
+        ));
+        assert!(NAMED_TARGETS.contains(&("codex", ".codex/skills")));
+    }
+
+    #[test]
+    fn issue579_unknown_bare_word_errors_and_lists_names() {
+        // The regression shape: a typo'd name used to install silently
+        // into ./<typo>/niubash under the current directory.
+        for typo in ["cluade", "codexx", "skills", "agents"] {
+            let err = match resolve_target(typo) {
+                Ok(_) => panic!("{typo} must be rejected as an unknown bare word"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains(typo), "{err}");
+            assert!(err.contains("codex"), "{err}");
+            assert!(err.contains("claude"), "{err}");
+        }
+    }
+
+    #[test]
+    fn issue579_path_shaped_and_explicit_dir_forms_stay_directories() {
+        for spec in [
+            "./skills",
+            "../skills",
+            "a/b",
+            "a\\b",
+            "/abs/skills",
+            "C:\\skills",
+            "~/skills",
+            ".hidden/skills",
+        ] {
+            assert!(
+                matches!(resolve_target(spec).unwrap(), TargetSpec::Dir(_)),
+                "{spec}"
+            );
+        }
+        // The explicit form also covers a bare directory name.
+        match resolve_target("dir:skills").unwrap() {
+            TargetSpec::Dir(dir) => assert_eq!(dir, PathBuf::from("skills")),
+            _ => panic!("dir:skills must be a directory target"),
+        }
+        assert!(resolve_target("dir:").is_err());
     }
 
     #[test]

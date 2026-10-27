@@ -247,7 +247,7 @@ hunting for the zip:
 
 ```bash
 niu skill install                       # default: ~/.claude/skills/niubash/
-niu skill install --target all          # claude + zcode + cursor
+niu skill install --target all          # codex + claude + zcode + cursor
 niu skill install --target C:/agents/skills   # generic: <dir>/niubash/
 niu skill status                        # current / outdated per target (byte compare + sha256)
 ```

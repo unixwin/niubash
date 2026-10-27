@@ -8,7 +8,7 @@
 //! and installs them.
 //!
 //! Verbs:
-//! - `niu skill install [--target claude|zcode|cursor|all|<dir>]` — write the
+//! - `niu skill install [--target codex|claude|zcode|cursor|all|<dir>]` — write the
 //!   bundle into agent skill dirs (default: claude).
 //! - `niu skill status [--target ...]` — installed/outdated per target,
 //!   decided by per-file content comparison, with a sha256 bundle digest.
@@ -73,6 +73,9 @@ fn print_skill_usage() {
     println!("        Install the AI agent skill bundle (SKILL.md + references)");
     println!("        into agent skill dirs. Default target: claude.");
     println!("        <dir> is a skills root; the bundle lands in <dir>/niubash/.");
+    println!(
+        "        A bare word must be a named target; use dir:<path> for a plain directory name."
+    );
     println!("        Same structure as the released niubash-skill-v*.zip.");
     println!("Usage:  niu skill status [--target ...]");
     println!("        Show installed/outdated state per target (content compared");
