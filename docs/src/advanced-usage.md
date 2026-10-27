@@ -68,8 +68,9 @@ BASH_ENV=~/.opencode.env niu -c 'echo "$DOCKER_CONTEXT"'
 ```
 
 `NIU_ENV` takes precedence over `BASH_ENV` when both are set. A leading `~`
-expands to your home directory. If the file does not exist, niubash prints
-an error to stderr and continues — matching GNU bash's `BASH_ENV` behavior.
+expands to your home directory. If the file does not exist, it is silently
+skipped and the command runs without it — the same behavior as GNU bash's
+`BASH_ENV`.
 
 With neither variable set, `-c` stays zero-load and fast.
 
@@ -81,7 +82,7 @@ Use `~/.niubashrc` as the normal human-authored entry point:
 # Optional floor knobs — they only shape the built-in default prompt and
 # completion UI; an enabled external theme claims PS1 and wins.
 # NIU_PROMPT_CWD_STYLE='home'
-# NIU_COMPLETION_STYLE='gnu'   # gnu | ide | column | list | inline
+# NIU_COMPLETION_STYLE='column'   # column (default) | gnu | ide | list | inline
 
 alias ll='ls -la'
 export EDITOR=vim
@@ -97,11 +98,15 @@ regenerate `~/.niubash/generated/plugins.niu`, which the host sources
 read-only *before* your rc — so rc lines always win
 (see [Plugin Workflow](#plugin-workflow)).
 
-Interactive shells read ONE startup file: `~/.niubashrc`. If it does not
-exist, niubash falls back to `~/.bashrc` (the migration path for existing
-bash configurations). The two never stack — one config file, one blast
-radius, no implicit double-sourcing. Want the bash layer under niu? Add
-one visible line to `~/.niubashrc`:
+Interactive shells read ONE startup file: `~/.niubashrc`. By default it
+is the only candidate: if it does not exist, the shell starts with no rc
+at all — `~/.bashrc` is not read. The single exception is opt-in: if you
+explicitly picked the `bashrc-fallback` rc policy during setup
+(`niu setup --rc-policy bashrc-fallback`), a genuinely absent
+`~/.niubashrc` lets `~/.bashrc` fill the slot instead (the migration path
+for existing bash configurations). Either way the two never stack — one
+config file, one blast radius, no implicit double-sourcing. Want the bash
+layer under niu? Add one visible line to `~/.niubashrc`:
 
 ```bash
 [[ -f ~/.bashrc ]] && source ~/.bashrc
@@ -151,14 +156,15 @@ use `NIU_ENV` / `BASH_ENV` to source a dedicated one-shot init file (see
 
 ## Completion Styles
 
-TAB completion comes in five shapes. The default since 1.4.1 is `gnu`
-(GNU readline factory behavior); before that it was `ide`. Pick one with
-`niu config set completion.style <name>` (persisted in
-`~/.niubash/config.toml`) or `NIU_COMPLETION_STYLE=<name>` in
-`~/.niubashrc` or the environment — the env variable wins over the
+TAB completion comes in five shapes. The default since 1.4.0 is `column`
+(the GNU listing look, without GNU's two-TAB listing dance); before
+that it was `ide`. The literal GNU readline behavior is the opt-in `gnu`
+style below. Pick one with `niu config set completion.style <name>`
+(persisted in `~/.niubash/config.toml`) or `NIU_COMPLETION_STYLE=<name>`
+in `~/.niubashrc` or the environment — the env variable wins over the
 persisted value:
 
-- `gnu` (default) — GNU readline: TAB completes the longest common prefix
+- `gnu` — GNU readline: TAB completes the longest common prefix
   (a lone candidate completes outright); pressing TAB again on an unchanged
   line prints the candidates as width-adaptive columns next to the prompt
   and repaints it. The list is printed output, not a menu: nothing is
@@ -166,13 +172,17 @@ persisted value:
 - `ide` — multi-column popup with descriptions, VS Code style. Column count
   adapts to the terminal width; the description of the selected candidate
   renders beside it.
-- `column` — plain multi-column grid (like zsh `compinit`). Two intended
-  fallbacks collapse the grid to a single vertical column: any candidate
-  carrying a description (e.g. flag completions such as `git checkout
-  -<TAB>` — the description text needs the row width), and a terminal too
-  narrow to fit even one column of the widest candidate. Both are the
-  upstream menu's adaptive layout, not a style mix-up; commands whose
-  completions carry no descriptions always grid.
+- `column` (default) — plain multi-column grid (like zsh `compinit`),
+  drawn by reedline's `ColumnarMenu`. The menu recomputes its layout on
+  every draw, and the presentation follows the candidate list: when any
+  candidate in the list carries a description (e.g. flag completions
+  such as `git checkout -<TAB>`), the whole list is presented as a
+  single vertical column, each description beside its value. That
+  single-column presentation is by design (owner ruling 2026-10-26):
+  it keeps the descriptions readable instead of squeezing them into
+  grid cells. When no candidate carries a description, the list is
+  presented as a grid of as many columns as the terminal width fits,
+  down to one column when the width fits only one.
 - `list` — vertical list with descriptions (like fish).
 - `inline` — first match inserted directly, Tab cycles (like bash
   `menu-complete`).

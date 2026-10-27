@@ -2,6 +2,12 @@
 
 All notable changes to Niubash are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Setup minimal preset completion style `gnu` → `column`**: the minimal preset — the one non-interactive / scripted `niu setup` applies — now pins the product-default `column` completion style (owner ruling 2026-10-14) instead of `gnu`. This is a behavior change for scripted installs: they move from the no-menu GNU shape, where Enter always executes the line, into the menu family, where Enter with the completion menu open commits the highlighted candidate. Users who picked a completion style explicitly are unaffected. (#342 follow-up sweep, 2026-10-26.)
+
 ## [1.4.4] - 2026-10-22
 
 Release carrying the rubash 1.4.3 engine (command-stem case fold — `ping`/`netstat`/`tracert` reachable again — plus the interactive `${v^^}` crash fix), the WinuxCmd v1.1.20 pin, and the MSIX foreign-env hardening.

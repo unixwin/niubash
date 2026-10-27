@@ -159,6 +159,44 @@ jobs:
       # Same as the other jobs: no `cargo update -p rubash` under the
       # [patch] override -- the sibling clone is already latest master.
 
+      # Provision the target C compiler for cc-rs build scripts. rubash
+      # enables signal-hook's `extended-siginfo`, whose build script
+      # compiles a C file for the *target* via cc-rs; cc-rs's default
+      # tool names (`x86_64-linux-musl-gcc`, `aarch64-linux-android-clang`,
+      # `arm-linux-androideabi-clang`) exist nowhere on the runner, so the
+      # musl/android legs died with ToolNotFound before ever reaching
+      # rustc. The ohos leg needs nothing: Tier 2 with host tools, the
+      # host cc serves it.
+      - name: Provision target C compiler (cc-rs build scripts)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-musl)
+              sudo apt-get update
+              sudo apt-get install -y musl-tools
+              echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+              ;;
+            aarch64-linux-android|armv7-linux-androideabi)
+              ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+              bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+              if [ -z "$ndk" ] || [ ! -x "$bin/llvm-ar" ]; then
+                echo "Android NDK llvm toolchain not found under '$ndk'" >&2
+                exit 1
+              fi
+              if [ "${{ matrix.target }}" = "aarch64-linux-android" ]; then
+                echo "CC_aarch64_linux_android=$bin/aarch64-linux-android21-clang" >> "$GITHUB_ENV"
+                echo "AR_aarch64_linux_android=$bin/llvm-ar" >> "$GITHUB_ENV"
+              else
+                echo "CC_armv7_linux_androideabi=$bin/armv7a-linux-androideabi21-clang" >> "$GITHUB_ENV"
+                echo "AR_armv7_linux_androideabi=$bin/llvm-ar" >> "$GITHUB_ENV"
+              fi
+              ;;
+            *)
+              echo "no target C compiler provisioning needed for ${{ matrix.target }}"
+              ;;
+          esac
+
       - name: cargo check --target ${{ matrix.target }}
         run: cargo check --workspace --locked --target ${{ matrix.target }}
 
@@ -172,8 +210,13 @@ jobs:
   # full here: build --release, then run the exact four checks the release
   # pipeline runs (docs/release.md "The smoke gate"): --version banner,
   # one-shot `-c`, a pipeline through native coreutils, and the offline
-  # plugin stack. No `musl-tools` package is needed -- rustc links against
-  # the toolchain's own self-contained musl crt/libc via the host `cc`.
+  # plugin stack. Linking the final binary needs no `musl-tools` package
+  # -- rustc links against the toolchain's own self-contained musl
+  # crt/libc -- but compiling the dependency graph does: signal-hook's
+  # cc-rs build script (via rubash's `extended-siginfo`) compiles a C
+  # file for the musl target and looks for `x86_64-linux-musl-gcc`,
+  # which does not exist on the runner. The step below installs
+  # musl-tools and points cc-rs at `musl-gcc` via $GITHUB_ENV.
   cross-target-smoke:
     name: cross-target-smoke (x86_64-unknown-linux-musl)
     runs-on: ubuntu-22.04
@@ -191,6 +234,15 @@ jobs:
 
       # No `cargo update -p rubash` under the [patch] override, same as the
       # other jobs: the sibling clone is already latest master.
+
+      # Same cc-rs provisioning as cross-target-check (musl leg): without
+      # it, signal-hook's build script fails with ToolNotFound for
+      # `x86_64-linux-musl-gcc` before the release build starts.
+      - name: Provision musl C compiler (cc-rs build scripts)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
 
       - name: Pin rubash revision
         id: rubash

@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};
 use std::{borrow::Cow, io::Write};
 
@@ -288,8 +289,17 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         })
         .into_owned();
 
+    // Shared visibility flag between the completion grid and the history
+    // autosuggest hinter: while the grid is on screen the ghost stands
+    // down instead of painting over the same word (fish parity).
+    let menu_open = Arc::new(AtomicBool::new(false));
     let completion_menu = ReedlineMenu::WithCompleter {
-        menu: configured_completion_menu(COMPLETION_MENU, menu_config, &gnu_indicator),
+        menu: configured_completion_menu(
+            COMPLETION_MENU,
+            menu_config,
+            &gnu_indicator,
+            menu_open.clone(),
+        ),
         completer: Box::new(completer),
     };
     let history_menu = ReedlineMenu::HistoryMenu(Box::new(configured_list_menu(
@@ -365,6 +375,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     if shell_ref.autosuggest.history_strategy_enabled() {
         editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(
             &shell_ref.autosuggest,
+            menu_open,
         )));
     }
     if shell_ref.syntax_highlighting.main_highlighter_enabled() {
@@ -403,6 +414,7 @@ fn configured_completion_menu(
     name: &str,
     config: MenuConfig,
     gnu_indicator: &str,
+    menu_open: Arc<AtomicBool>,
 ) -> Box<dyn reedline::Menu> {
     match config.completion_style {
         CompletionStyle::Gnu => {
@@ -437,12 +449,19 @@ fn configured_completion_menu(
             } else {
                 4
             };
-            Box::new(
+            // Owner ruling 2026-10-26 (zsh/bash parity): TAB #1 splices the
+            // common prefix and stops — the menu must not linger on the
+            // re-queried set (e.g. auto-listing a just-completed directory's
+            // children skips the window where the user may just want to
+            // stop). `ColumnMenu` wraps the stock grid with that stop rule;
+            // a TAB that splices nothing still shows the grid immediately.
+            Box::new(crate::completion::column_menu::ColumnMenu::new(
                 ColumnarMenu::default()
                     .with_name(name)
                     .with_columns(page_cols)
                     .with_only_buffer_difference(false),
-            )
+                menu_open,
+            ))
         }
         CompletionStyle::List => Box::new(configured_list_menu(
             name,

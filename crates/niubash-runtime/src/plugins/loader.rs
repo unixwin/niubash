@@ -306,24 +306,39 @@ pub enum StartupDecision {
     SupersededBlockPresent,
     /// Source the loader (before the user rc).
     Load,
+    /// The loader text failed structural validation (niubash#586): a
+    /// truncated or foreign file. It is NOT sourced — the host warns
+    /// with the reason instead of executing unverified bytes.
+    Invalid(String),
 }
 
 /// The pure startup decision (gate cases 359.8/359.9): opt-out switch
-/// first, then the double-execution scan of the rc text, then plain
-/// loading. `rc_text` is the file about to be sourced (the only file whose
+/// first, then the double-execution scan of the rc text, then structural
+/// validation of the loader text (niubash#586), then plain loading.
+/// `rc_text` is the file about to be sourced (the only file whose
 /// execution could double with the loader); `None` = no rc file exists, so
 /// there is nothing to scan and nothing to double with.
 pub fn startup_decision(rc_text: Option<&str>, loader_text: Option<&str>) -> StartupDecision {
-    if loader_text.is_none() {
+    let Some(text) = loader_text else {
         return StartupDecision::Missing;
-    }
+    };
     if !loader_enabled_by_switch() {
         return StartupDecision::OptedOut;
     }
     if rc_text.is_some_and(rc_carries_superseded_markers) {
         return StartupDecision::SupersededBlockPresent;
     }
-    StartupDecision::Load
+    // niubash#586: the loading contract at the top of this module
+    // promises a truncated or foreign file is never sourced on the
+    // strength of its filename alone. The publish path has always
+    // gated on validate() (validate-then-atomic); the load path gates
+    // on the same validate() here, in the one decision every surface
+    // shares, so startup can never execute what publish would refuse
+    // to write.
+    match validate(text) {
+        Ok(_) => StartupDecision::Load,
+        Err(err) => StartupDecision::Invalid(err.to_string()),
+    }
 }
 
 /// The double-execution guard's verdict and evidence, in ONE predicate that
@@ -884,6 +899,21 @@ mod tests {
         );
         // Loader + no rc → load (nothing to double with).
         assert_eq!(startup_decision(None, Some(&loader)), StartupDecision::Load);
+        // niubash#586: a foreign file (no banner, no schema) is refused,
+        // never Load — startup may not source what publish would refuse
+        // to write. A truncated generation (banner lost) is refused the
+        // same way.
+        assert!(matches!(
+            startup_decision(Some(rc_clean), Some("export PWNED=1\n")),
+            StartupDecision::Invalid(_)
+        ));
+        assert!(matches!(
+            startup_decision(
+                None,
+                Some("# schema: niubash:plugin-loader@1\nexport X=1\n")
+            ),
+            StartupDecision::Invalid(_)
+        ));
         // Loader + legacy block in the rc → skip (double-execution guard).
         assert_eq!(
             startup_decision(Some(rc_legacy), Some(&loader)),

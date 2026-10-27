@@ -51,6 +51,41 @@ pub(crate) fn shell_path_to_host_path(value: &str) -> String {
     value.to_string()
 }
 
+/// Split a shell PATH list into entries. `;` always separates; `:` separates
+/// everywhere except right after a single ASCII letter at an entry start
+/// (a Windows drive prefix like `C:/...` or `C:\...`).
+pub(crate) fn split_shell_path_list(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let mut entries = Vec::new();
+    let mut entry_start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        let is_separator = match byte {
+            b';' => true,
+            b':' => !is_windows_drive_colon(bytes, entry_start, index),
+            _ => false,
+        };
+        if is_separator {
+            if entry_start < index {
+                entries.push(value[entry_start..index].to_string());
+            }
+            entry_start = index + 1;
+        }
+    }
+    if entry_start < value.len() {
+        entries.push(value[entry_start..].to_string());
+    }
+    entries
+}
+
+fn is_windows_drive_colon(bytes: &[u8], entry_start: usize, colon: usize) -> bool {
+    cfg!(windows)
+        && colon == entry_start + 1
+        && bytes[entry_start].is_ascii_alphabetic()
+        && bytes
+            .get(colon + 1)
+            .is_some_and(|next| matches!(next, b'\\' | b'/'))
+}
+
 pub(crate) fn normalize_existing_host_path(path: PathBuf) -> PathBuf {
     let Ok(canonical) = std::fs::canonicalize(&path) else {
         return path;

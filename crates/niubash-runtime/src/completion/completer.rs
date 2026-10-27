@@ -13,6 +13,64 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// Live-PATH probe memo shared with the syntax highlighter (niubash#574).
+///
+/// Command names absent from the highlighter's startup snapshot are probed
+/// against the session's current PATH and remembered here. Entries are keyed
+/// by an environment fingerprint (PATH + PATHEXT + the serialized `hash`
+/// table); a fingerprint change — a PATH assignment or any `hash` mutation —
+/// retires the memo instead of serving stale answers. The shell also clears
+/// the memo explicitly after `hash` / `wpm` command lines, since a package
+/// install changes the filesystem without touching any fingerprinted env.
+#[derive(Debug, Default)]
+pub struct CommandProbe {
+    fingerprint: Option<String>,
+    results: HashMap<String, bool>,
+    probes: usize,
+}
+
+impl CommandProbe {
+    /// The memoized answer for `command`, or `None` when the name was never
+    /// probed under the current fingerprint. A fingerprint mismatch retires
+    /// every remembered answer.
+    pub fn lookup(&mut self, fingerprint: &str, command: &str) -> Option<bool> {
+        self.retire_stale(fingerprint);
+        self.results.get(command).copied()
+    }
+
+    /// Record a probe outcome. The probe ran under this fingerprint, so a
+    /// fingerprint that moved between `lookup` and `store` drops the result
+    /// rather than memoizing an answer the current env never produced.
+    pub fn store(&mut self, fingerprint: &str, command: &str, known: bool) {
+        if self.fingerprint.as_deref() == Some(fingerprint) {
+            self.results.insert(command.to_string(), known);
+        }
+    }
+
+    /// Forget every remembered answer (explicit invalidation hook).
+    pub fn clear(&mut self) {
+        self.results.clear();
+    }
+
+    /// Number of live probes performed — memoization evidence for tests.
+    pub fn probe_count(&self) -> usize {
+        self.probes
+    }
+
+    /// Count one live probe (one filesystem walk for one command name).
+    pub fn note_probe(&mut self) {
+        self.probes += 1;
+    }
+
+    fn retire_stale(&mut self, fingerprint: &str) {
+        if self.fingerprint.as_deref() == Some(fingerprint) {
+            return;
+        }
+        self.fingerprint = Some(fingerprint.to_string());
+        self.results.clear();
+    }
+}
+
 /// State shared with completer
 pub struct CompletionState {
     pub current_dir: PathBuf,
@@ -22,10 +80,24 @@ pub struct CompletionState {
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
+    /// Live-probe memo consulted by the syntax highlighter (niubash#574).
+    pub command_probe: CommandProbe,
     /// User completion directories already loaded into the external plugin,
     /// kept so the external plugin can be rebuilt when bundle definitions
     /// change without losing user overrides.
     completion_dirs: Vec<PathBuf>,
+    /// niubash#594: fingerprint of the engine's live env map that
+    /// `env_vars` was snapshotted from. `Shell::update_completion_state`
+    /// compares it against the current live map and skips the re-clone
+    /// when unchanged. 0 = no snapshot yet / invalidated by another
+    /// writer, which forces a rebuild on the next update.
+    pub snapshot_env_fingerprint: u64,
+    /// niubash#594: the sorted engine function names `functions` was
+    /// built from, kept so the next update can skip the rebuild when
+    /// the name set is unchanged.
+    pub snapshot_function_names: Vec<String>,
+    /// niubash#594: the sorted alias names `aliases` was built from.
+    pub snapshot_alias_names: Vec<String>,
 }
 
 impl CompletionState {
@@ -37,7 +109,11 @@ impl CompletionState {
             functions: HashSet::new(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
+            command_probe: CommandProbe::default(),
             completion_dirs: Vec::new(),
+            snapshot_env_fingerprint: 0,
+            snapshot_function_names: Vec::new(),
+            snapshot_alias_names: Vec::new(),
         }
     }
 
@@ -166,6 +242,11 @@ impl NiubashCompleter {
         if let Ok(mut state) = self.state.lock() {
             state.current_dir = current_dir;
             state.env_vars = env_vars;
+            // niubash#594: this write bypasses the fingerprint gate, so
+            // invalidate it — the next `update_completion_state` rebuilds
+            // the env snapshot from the engine instead of trusting a
+            // fingerprint that no longer describes `env_vars`.
+            state.snapshot_env_fingerprint = 0;
         }
     }
 

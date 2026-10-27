@@ -832,10 +832,13 @@ fn tab_completes_command_name() {
 /// if the suffix stayed a menu preview, `cat uniqfix` would fail and the
 /// body could never print.
 ///
-/// niubash#486: the unique commit leaves the menu open on the re-queried
-/// set (`uniqfix.dat` answers its own completion), so the first Enter
-/// commits that highlighted candidate — the 1.1.0 menu semantics — and the
-/// second Enter submits the completed line.
+/// Column stop rule (owner ruling 2026-10-26, zsh/bash parity): the TAB
+/// splices `uniqfix.dat` and the menu deactivates instead of lingering, so
+/// the first Enter submits the completed line straight away — no commit
+/// step in between (that two-Enter dance was the pre-fix shape, where the
+/// menu stayed live on the re-queried set). The second Enter below is then
+/// just an empty submit; the assertions (body printed, prompt back, no
+/// `No such file`) hold either way.
 #[test]
 fn tab_completes_unique_file_path() {
     if !require_pty_or_skip("tab_completes_unique_file_path") {
@@ -915,6 +918,80 @@ fn completion_menu_enter_commits_highlighted_candidate() {
         s.expect("m486-body");
         s.expect_prompt();
     }
+}
+
+/// The built-in default completion style is `column` (owner ruling
+/// 2026-10-14, shipped since 1.4.0): with NO `NIU_COMPLETION_STYLE`
+/// override anywhere, a description-less candidate set renders as a
+/// multi-column grid — two candidate names share one rendered row —
+/// not as a one-per-line list. The #486 pin above sets every style
+/// explicitly, so the no-override default path gets its render-shape
+/// pin here.
+#[test]
+fn default_column_style_renders_candidates_as_grid() {
+    if !require_pty_or_skip("default_column_style_renders_candidates_as_grid") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "column-grid-default",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    // File candidates carry no descriptions, so the column menu grids
+    // them; three same-prefix files in the start dir are the candidate
+    // set for `cat gridpin-<TAB>`.
+    for name in ["gridpin-alpha.txt", "gridpin-beta.txt", "gridpin-gamma.txt"] {
+        std::fs::write(s.start().join(name), "gridpin-body\n").unwrap();
+    }
+    s.wait_ready();
+    s.send("cat gridpin-");
+    s.send(TAB);
+    // The menu is up: a candidate suffix is visible (the same settle
+    // signal as the #486 pin — styled cells split the names at the
+    // common prefix, so the contiguous needle is the suffix).
+    let mut seen = s.expect("alpha.txt");
+    seen.push_str(&s.drain_screen());
+    let plain = strip_ansi_escapes(&seen);
+    // Menu rows are \r\n-joined inside one paint; a paint boundary can
+    // only merge one paint's last row with the next paint's first, so
+    // in a one-per-line layout no chunk can hold both the first and
+    // the second candidate — co-occurrence on one chunk means the two
+    // names were rendered side by side, i.e. a grid row.
+    let grid_row = plain
+        .split(['\r', '\n'])
+        .find(|row| row.contains("alpha.txt") && row.contains("beta.txt"));
+    assert!(
+        grid_row.is_some(),
+        "default (column) menu must render two candidates on one row; \
+         stripped output:\n{plain}"
+    );
+}
+
+/// Minimal ANSI CSI stripper for screen-shape assertions: drops
+/// `ESC [ params final-byte` sequences so rendered menu rows can be
+/// compared as plain text.
+fn strip_ansi_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    for inner in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&inner) {
+                            break;
+                        }
+                    }
+                }
+                Some(_) | None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The session history survives into `~/.niubash_history` and `history`
