@@ -1570,15 +1570,150 @@ impl PasteChunkEditMode {
     }
 }
 
-/// One warning per sequence the editor cannot mirror (multi-key
-/// sequences are a reedline limitation — see the wt100/i185 matrix).
-fn warn_unusable_engine_bindings(unusable: Vec<String>) {
-    for keyseq in unusable {
-        eprintln!(
-            "niubash: bind: key sequence '{}' cannot be mirrored to the line editor",
-            keyseq
-        );
+/// A bind entry the editor cannot mirror, classified by *why*
+/// (niubash#612). Every unusable entry is recorded in this list — it
+/// is the bridge's diagnostic record — but only the actionable class
+/// is printed as a startup warning (see `warn_unusable_engine_bindings`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnusableBind {
+    keyseq: String,
+    reason: UnusableBindReason,
+}
+
+/// Why a bind entry cannot be mirrored. The first two classes are
+/// structural: the editor cannot express them *by design*, so the
+/// bridge drops them silently whoever emitted them — a per-startup
+/// warning about a design limitation is unactionable noise, and
+/// matching emitters or individual binds instead of the mechanism
+/// would never converge (any integration script can register such
+/// binds; fzf's `--bash` output, which registers one of each class,
+/// is the motivating instance, not the criterion). Everything else
+/// is new, actionable information and keeps the warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnusableBindReason {
+    /// Multi-key / chained sequence: reedline bindings are a single
+    /// (modifiers, key) pair, so a chain has no equivalent.
+    ChainedSequence,
+    /// A readline editing-mode toggle function: switching keymaps is
+    /// a session-level choice in niu (the configured `EditorMode`),
+    /// not a per-key widget the bridge can deliver.
+    ModeToggleFunction,
+    /// Anything else (unparseable sequence, unknown function, ...).
+    Other,
+}
+
+impl UnusableBindReason {
+    fn is_structural(self) -> bool {
+        matches!(
+            self,
+            UnusableBindReason::ChainedSequence | UnusableBindReason::ModeToggleFunction
+        )
     }
+}
+
+/// One warning per *actionable* unusable sequence. Structural entries
+/// (see `UnusableBindReason`) stay in the recorded list for
+/// diagnostics but are not printed.
+fn warn_unusable_engine_bindings(unusable: Vec<UnusableBind>) {
+    for bind in &unusable {
+        if !bind.reason.is_structural() {
+            eprintln!(
+                "niubash: bind: key sequence '{}' cannot be mirrored to the line editor",
+                bind.keyseq
+            );
+        }
+    }
+}
+
+/// Readline's editing-mode toggle functions are a closed class (the
+/// Bash manual's bindable-command list has exactly these two): each
+/// switches the editing keymap, which niu chooses per session, so the
+/// bridge can never mirror them — in any keymap, on any sequence,
+/// from any source.
+fn is_editing_mode_toggle_function(name: &str) -> bool {
+    matches!(name, "vi-editing-mode" | "emacs-editing-mode")
+}
+
+/// Classify an undeliverable readline function name (niubash#612):
+/// editing-mode toggles are structural; any other name (a real
+/// function niu does not mirror, a typo, ...) stays actionable.
+fn unusable_function_reason(name: &str) -> UnusableBindReason {
+    if is_editing_mode_toggle_function(name) {
+        UnusableBindReason::ModeToggleFunction
+    } else {
+        UnusableBindReason::Other
+    }
+}
+
+/// Whether a raw bind sequence is a chain of two or more key units
+/// (e.g. `\C-x\C-f`, `\C-\e(`). Lexical only: the string must split
+/// cleanly into units; a malformed sequence stalls the scan and is
+/// *not* a chain (it is reported as unparseable instead).
+fn is_chained_key_sequence(value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    let mut pos = 0;
+    let mut units = 0;
+    while pos < chars.len() {
+        match key_unit_len(&chars[pos..]) {
+            Some(len) if len > 0 => {
+                pos += len;
+                units += 1;
+            }
+            _ => return false,
+        }
+    }
+    units >= 2
+}
+
+/// Length in chars of the first key unit of a raw bind sequence:
+/// a `\C-`/`\M-` chord, an `\e` chord or CSI form, a caret-notation
+/// key, a backslash escape, or a single plain char.
+fn key_unit_len(chars: &[char]) -> Option<usize> {
+    match chars {
+        ['\\', 'C', '-', ..] | ['\\', 'M', '-', ..] => {
+            char_spec_len(&chars[3..]).map(|len| 3 + len)
+        }
+        ['\\', 'e', '[', ..] => {
+            // CSI form: consume through the final byte (letter or '~').
+            let mut i = 3;
+            while i < chars.len() {
+                let c = chars[i];
+                i += 1;
+                if c.is_ascii_alphabetic() || c == '~' {
+                    return Some(i);
+                }
+            }
+            None
+        }
+        ['\\', 'e', ..] => char_spec_len(&chars[1..]).map(|len| 1 + len),
+        ['^', _, ..] => Some(2),
+        ['\\', _, ..] => Some(2),
+        [_, ..] => Some(1),
+        [] => None,
+    }
+}
+
+/// Length of the char spec a modifier prefix applies to: an escaped
+/// char (`\e`, `\\`, ...) or one plain char.
+fn char_spec_len(chars: &[char]) -> Option<usize> {
+    match chars {
+        ['\\', _, ..] => Some(2),
+        [c, ..] if *c != '\\' => Some(1),
+        _ => None,
+    }
+}
+
+/// Record an entry the editor cannot mirror, classified by reason
+/// (niubash#612).
+fn note_unusable_bind(
+    unusable: &mut Vec<UnusableBind>,
+    entry: &rubash::shell::bind_registry::BindEntry,
+    reason: UnusableBindReason,
+) {
+    unusable.push(UnusableBind {
+        keyseq: entry.keyseq.clone(),
+        reason,
+    });
 }
 
 /// Apply user-declared widget bindings from `NIU_BINDKEYS`.
@@ -1607,21 +1742,30 @@ fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[Native
 /// triggers; function entries map through the native-widget table
 /// (unknown readline function names are skipped — GNU's
 /// rl_parse_and_bind silently drops them, wt100 probe); macro entries
-/// insert their translated text. Sequences reedline cannot represent
-/// (multi-key `\C-x\C-f`, unrecognized escapes) are reported back for a
-/// one-time warning.
+/// insert their translated text. Entries the editor cannot mirror
+/// are reported back classified by reason (niubash#612): structural
+/// classes (chained sequences, editing-mode toggle functions) are
+/// recorded but not warned about; the rest are warned about once.
 fn add_engine_bind_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
     entries: &[rubash::shell::bind_registry::BindEntry],
-) -> Vec<String> {
+) -> Vec<UnusableBind> {
     let mut unusable = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         if !engine_keymap_applies(entry.keymap.as_deref(), target) {
             continue;
         }
         let Some((modifiers, key_code)) = parse_key_sequence(&entry.keyseq) else {
-            unusable.push(entry.keyseq.clone());
+            // A clean chain of key units is structural (reedline binds
+            // single keys); anything else that fails to parse is
+            // malformed and stays actionable (niubash#612).
+            let reason = if is_chained_key_sequence(&entry.keyseq) {
+                UnusableBindReason::ChainedSequence
+            } else {
+                UnusableBindReason::Other
+            };
+            note_unusable_bind(&mut unusable, entry, reason);
             continue;
         };
         let event = match &entry.kind {
@@ -1643,12 +1787,12 @@ fn add_engine_bind_keybindings(
                     Some(ReedlineEvent::ExecuteHostCommand(payload))
                         if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
                     {
-                        unusable.push(entry.keyseq.clone());
+                        note_unusable_bind(&mut unusable, entry, unusable_function_reason(name));
                         continue;
                     }
                     Some(event) => event,
                     None => {
-                        unusable.push(entry.keyseq.clone());
+                        note_unusable_bind(&mut unusable, entry, unusable_function_reason(name));
                         continue;
                     }
                 }
@@ -3860,8 +4004,237 @@ mod tests {
         );
         assert_eq!(
             unusable,
-            vec![r#"\C-g"#.to_string(), r#"\C-x\C-f"#.to_string()]
+            vec![
+                UnusableBind {
+                    keyseq: r"\C-g".to_string(),
+                    reason: UnusableBindReason::Other,
+                },
+                // Multi-key sequences are recorded but, since
+                // niubash#612, classified structural (no warning).
+                UnusableBind {
+                    keyseq: r"\C-x\C-f".to_string(),
+                    reason: UnusableBindReason::ChainedSequence,
+                },
+            ]
         );
+    }
+
+    /// The keyseqs out of an unusable list that the bridge would
+    /// actually print as startup warnings (niubash#612).
+    fn warned_keyseqs(unusable: &[UnusableBind]) -> Vec<&str> {
+        unusable
+            .iter()
+            .filter(|bind| !bind.reason.is_structural())
+            .map(|bind| bind.keyseq.as_str())
+            .collect()
+    }
+
+    // niubash#612, motivating instance: the two workaround shapes in
+    // fzf's `--bash` script (a chained-sequence bind and the `\C-z`
+    // editing-mode toggles) are recorded with structural reasons and
+    // produce no warning, while the same script's working `bind -x`
+    // entries still mirror.
+    #[test]
+    fn issue612_fzf_workaround_binds_drop_silently() {
+        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        let function = |keyseq: &str, keymap: &str, name: &str| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: Some(keymap.to_string()),
+        };
+        // Verbatim from fzf 0.74.5 `shell/key-bindings.bash`.
+        let workarounds = vec![
+            function(r"\C-\e(", "emacs-standard", "redraw-current-line"),
+            function(r"\C-z", "vi-command", "emacs-editing-mode"),
+            function(r"\C-z", "vi-insert", "emacs-editing-mode"),
+            function(r"\C-z", "emacs-standard", "vi-editing-mode"),
+        ];
+        let chained = UnusableBind {
+            keyseq: r"\C-\e(".to_string(),
+            reason: UnusableBindReason::ChainedSequence,
+        };
+        let toggle = UnusableBind {
+            keyseq: r"\C-z".to_string(),
+            reason: UnusableBindReason::ModeToggleFunction,
+        };
+        for (target, mut keybindings, expected) in [
+            (
+                NativeKeymapTarget::Emacs,
+                default_emacs_keybindings(),
+                vec![chained.clone(), toggle.clone()],
+            ),
+            (
+                NativeKeymapTarget::ViInsert,
+                default_vi_insert_keybindings(),
+                vec![toggle.clone()],
+            ),
+            (
+                NativeKeymapTarget::ViNormal,
+                default_vi_normal_keybindings(),
+                vec![toggle.clone()],
+            ),
+        ] {
+            let unusable = add_engine_bind_keybindings(&mut keybindings, target, &workarounds);
+            assert_eq!(unusable, expected, "recorded list on {target:?}");
+            assert_eq!(
+                warned_keyseqs(&unusable),
+                Vec::<&str>::new(),
+                "no warnings on {target:?}"
+            );
+        }
+
+        // The same script's working binds are untouched: they land as
+        // bindx host-command triggers at their registry indices.
+        let mut keybindings = default_emacs_keybindings();
+        let mut entries = vec![
+            BindEntry {
+                keyseq: r"\C-t".to_string(),
+                kind: BindKind::Execute {
+                    command: "fzf-file-widget".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            BindEntry {
+                keyseq: r"\C-r".to_string(),
+                kind: BindKind::Execute {
+                    command: "__fzf_history__".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            BindEntry {
+                keyseq: r"\ec".to_string(),
+                kind: BindKind::Execute {
+                    command: "__fzf_cd__".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+        ];
+        entries.extend(workarounds);
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+        assert_eq!(warned_keyseqs(&unusable), Vec::<&str>::new());
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 0".to_string()
+            ))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 1".to_string()
+            ))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 2".to_string()
+            ))
+        );
+    }
+
+    // niubash#612: the structural classes are judged by the bind's own
+    // shape and function category, never by which tool emitted it.
+    // These entries are invented shapes (no tool's actual script):
+    // chained sequences and editing-mode toggles from a hypothetical
+    // third-party integration are just as silent, while an unknown
+    // function, a malformed sequence, and a real-but-unmirrored
+    // non-toggle function still warn.
+    #[test]
+    fn issue612_structural_silence_is_source_agnostic() {
+        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        let mut keybindings = default_emacs_keybindings();
+        let entries = vec![
+            // Invented chained Execute bind.
+            BindEntry {
+                keyseq: r"\C-x\C-a".to_string(),
+                kind: BindKind::Execute {
+                    command: "hypothetical-tool-cmd".to_string(),
+                },
+                keymap: None,
+            },
+            // Invented chained Macro bind.
+            BindEntry {
+                keyseq: r"\C-b\C-b".to_string(),
+                kind: BindKind::Macro {
+                    text: "xx".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            // Invented mode toggles: keys/keymaps no real script uses.
+            BindEntry {
+                keyseq: r"\C-q".to_string(),
+                kind: BindKind::Function {
+                    name: "vi-editing-mode".to_string(),
+                },
+                keymap: None,
+            },
+            BindEntry {
+                keyseq: r"\eg".to_string(),
+                kind: BindKind::Function {
+                    name: "emacs-editing-mode".to_string(),
+                },
+                keymap: None,
+            },
+            // Unknown function name: actionable, still warns.
+            BindEntry {
+                keyseq: r"\C-g".to_string(),
+                kind: BindKind::Function {
+                    name: "no-such-fn".to_string(),
+                },
+                keymap: None,
+            },
+            // Malformed sequence (dangling modifier): not a chain,
+            // still warns.
+            BindEntry {
+                keyseq: r"\C-".to_string(),
+                kind: BindKind::Execute {
+                    command: "broken".to_string(),
+                },
+                keymap: None,
+            },
+            // A real readline function niu does not mirror, but not a
+            // mode toggle: still warns (only the toggle class is
+            // structural on the function axis).
+            BindEntry {
+                keyseq: r"\C-y".to_string(),
+                kind: BindKind::Function {
+                    name: "redraw-current-line".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+        ];
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+        let reasons: Vec<UnusableBindReason> = unusable.iter().map(|bind| bind.reason).collect();
+        assert_eq!(
+            reasons,
+            vec![
+                UnusableBindReason::ChainedSequence,
+                UnusableBindReason::ChainedSequence,
+                UnusableBindReason::ModeToggleFunction,
+                UnusableBindReason::ModeToggleFunction,
+                UnusableBindReason::Other,
+                UnusableBindReason::Other,
+                UnusableBindReason::Other,
+            ]
+        );
+        assert_eq!(warned_keyseqs(&unusable), vec![r"\C-g", r"\C-", r"\C-y"]);
+    }
+
+    // niubash#612: the chain scan is lexical — a malformed sequence
+    // must not be misread as a chain (it warns as unparseable).
+    #[test]
+    fn issue612_chained_sequence_scan() {
+        assert!(is_chained_key_sequence(r"\C-x\C-f"));
+        assert!(is_chained_key_sequence(r"\C-\e("));
+        assert!(is_chained_key_sequence("ab"));
+        assert!(!is_chained_key_sequence(r"\C-z"));
+        assert!(!is_chained_key_sequence(r"\C-"));
+        assert!(!is_chained_key_sequence(r"\e[A"));
+        assert!(!is_chained_key_sequence(""));
     }
 
     #[test]

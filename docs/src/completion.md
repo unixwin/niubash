@@ -55,3 +55,24 @@ If the grid (or any interactive menu) is showing candidates, Enter
 commits the highlighted candidate into the line instead of submitting
 it. Press Enter again to run the completed line. With no menu open,
 Enter always submits what you see.
+
+## Key bindings from other tools
+
+niu mirrors GNU `bind` entries from your startup files into its line
+editor, but two classes of binding cannot be mirrored by design and
+are dropped silently (niubash#612):
+
+* **Multi-key sequences** (e.g. `"\C-x\C-f"`): the editor binds one
+  key (with modifiers) at a time, so a chained sequence has no
+  equivalent.
+* **Editing-mode toggles** (`vi-editing-mode` / `emacs-editing-mode`):
+  switching keymaps is a session-level choice in niu, not a per-key
+  action.
+
+This applies to bindings from any tool, and any other unusable `bind`
+entry — an unparseable sequence, an unknown function — still produces
+a startup warning. Example: `eval "$(fzf --bash)"` registers one
+binding of each class (a multi-key `redraw-current-line` binding and
+`"\C-z"` mode toggles for its fallback macros); both are dropped,
+and the rest of the integration works in full: Ctrl+T (file widget),
+Ctrl+R (history widget) and Alt+C (cd widget).
