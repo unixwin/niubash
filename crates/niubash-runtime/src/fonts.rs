@@ -81,9 +81,12 @@ fn install_lines(font: &NerdFont) -> Vec<String> {
 
 /// True when any installed font name or file looks like a Nerd Font.
 /// Checks the per-user and system font directories plus the registry
-/// font lists (HKCU and HKLM).
+/// font lists (HKCU and HKLM), and — on Termux — the single terminal
+/// font file, whose Nerd-ness lives in its name table, not its name.
 pub fn nerd_font_installed() -> bool {
-    font_dirs().iter().any(|dir| dir_has_nerd_font(dir)) || registry_has_nerd_font()
+    font_dirs().iter().any(|dir| dir_has_nerd_font(dir))
+        || registry_has_nerd_font()
+        || termux_font_is_nerd_font()
 }
 
 /// `niu font` — report Nerd Font detection and print per-font install
@@ -138,10 +141,13 @@ fn font_dirs() -> Vec<PathBuf> {
     if let Some(windir) = std::env::var_os("WINDIR") {
         dirs.push(PathBuf::from(windir).join("Fonts"));
     }
-    if let Some(local) = user_fonts_dir() {
-        dirs.push(local);
-    }
+    dirs.extend(user_font_dirs());
     dirs
+}
+
+#[cfg(windows)]
+fn user_font_dirs() -> Vec<PathBuf> {
+    user_fonts_dir().into_iter().collect()
 }
 
 #[cfg(windows)]
@@ -149,11 +155,98 @@ fn user_fonts_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("Microsoft").join("Windows").join("Fonts"))
 }
 
-/// Per-user font directory on Unix: the classic fontconfig `~/.fonts`,
-/// which desktop environments scan without any registration step.
+/// Per-user font directories on Unix (niubash#607): the classic
+/// fontconfig `~/.fonts`, the modern fontconfig home
+/// (`$XDG_DATA_HOME/fonts`, defaulting to `~/.local/share/fonts`),
+/// and a `$PREFIX/share/fonts` (Termux and other prefix toolchains).
+/// Missing directories are no-ops for the scan.
 #[cfg(not(windows))]
-fn user_fonts_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".fonts"))
+fn user_font_dirs() -> Vec<PathBuf> {
+    unix_font_dirs(
+        dirs::home_dir().as_deref(),
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .as_deref(),
+        std::env::var_os("PREFIX").map(PathBuf::from).as_deref(),
+    )
+}
+
+/// The pure path math behind [`user_font_dirs`], split out for tests.
+#[cfg(not(windows))]
+fn unix_font_dirs(
+    home: Option<&Path>,
+    xdg_data_home: Option<&Path>,
+    prefix: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        dirs.push(home.join(".fonts"));
+        dirs.push(home.join(".local/share/fonts"));
+    }
+    if let Some(xdg) = xdg_data_home {
+        let dir = xdg.join("fonts");
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    if let Some(prefix) = prefix {
+        dirs.push(prefix.join("share/fonts"));
+    }
+    dirs
+}
+
+/// Termux is a unix (Android) environment; there is no Windows form.
+#[cfg(windows)]
+fn termux_font_is_nerd_font() -> bool {
+    false
+}
+
+/// Termux probe (niubash#607): Termux sets the terminal font as one
+/// fixed file, `~/.termux/font.ttf`, outside every font directory —
+/// and the filename never carries the family name, so directory scans
+/// cannot see it. When a Termux signal is present (`TERMUX_VERSION`,
+/// or a `$PREFIX` under `com.termux/files/usr`), read that one file
+/// and judge it by its name table instead.
+#[cfg(not(windows))]
+fn termux_font_is_nerd_font() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    termux_font_file_is_nerd(
+        std::env::var_os("TERMUX_VERSION").is_some(),
+        std::env::var_os("PREFIX").map(PathBuf::from).as_deref(),
+        &home,
+    )
+}
+
+/// The gating behind [`termux_font_is_nerd_font`], split out for tests:
+/// without a Termux signal the file is never even read.
+#[cfg(not(windows))]
+fn termux_font_file_is_nerd(termux_env: bool, prefix: Option<&Path>, home: &Path) -> bool {
+    let termux_prefix = prefix
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .is_some_and(|p| p.contains("com.termux/files/usr"));
+    if !termux_env && !termux_prefix {
+        return false;
+    }
+    file_name_table_mentions_nerd_font(&home.join(".termux").join("font.ttf"))
+}
+
+/// Substring scan of a font file's bytes for the Nerd Font family
+/// marker. Name-table strings appear as plain ASCII (Macintosh
+/// records) and as UTF-16BE (Windows records); check both shapes.
+/// No TTF parser — the Nerd Fonts naming convention always embeds
+/// the words `Nerd Font` in the family name.
+#[cfg(not(windows))]
+fn file_name_table_mentions_nerd_font(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if bytes.windows(9).any(|w| w == b"Nerd Font") {
+        return true;
+    }
+    let utf16be: Vec<u8> = "Nerd Font".bytes().flat_map(|b| [0, b]).collect();
+    bytes.windows(utf16be.len()).any(|w| w == utf16be)
 }
 
 fn dir_has_nerd_font(dir: &Path) -> bool {
@@ -265,5 +358,83 @@ mod tests {
     #[test]
     fn menu_labels_cover_options() {
         assert_eq!(menu_labels().len(), FONT_OPTIONS.len());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn issue607_unix_font_dirs_cover_modern_fontconfig_and_prefix() {
+        let home = Path::new("/home/u");
+        let dirs = unix_font_dirs(Some(home), None, None);
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/home/u/.fonts"),
+                PathBuf::from("/home/u/.local/share/fonts"),
+            ]
+        );
+        // An explicit XDG_DATA_HOME replaces nothing but adds its fonts
+        // dir — unless it is the default, which must not duplicate.
+        let dirs = unix_font_dirs(
+            Some(home),
+            Some(Path::new("/xdg")),
+            Some(Path::new("/data/data/com.termux/files/usr")),
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/home/u/.fonts"),
+                PathBuf::from("/home/u/.local/share/fonts"),
+                PathBuf::from("/xdg/fonts"),
+                PathBuf::from("/data/data/com.termux/files/usr/share/fonts"),
+            ]
+        );
+        let dirs = unix_font_dirs(Some(home), Some(Path::new("/home/u/.local/share")), None);
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn issue607_termux_font_is_judged_by_name_table_not_filename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let termux_dir = home.join(".termux");
+        std::fs::create_dir_all(&termux_dir).unwrap();
+        // A realistic shape: binary padding around an ASCII name-table
+        // family string. The filename is font.ttf — no "nerd" in it.
+        let mut bytes = vec![0u8; 64];
+        bytes.extend_from_slice(b"Hack Nerd Font Mono Regular");
+        bytes.extend_from_slice(&[0u8; 16]);
+        std::fs::write(termux_dir.join("font.ttf"), &bytes).unwrap();
+
+        // Gated off without any Termux signal: the file is not read.
+        assert!(!termux_font_file_is_nerd(false, None, home));
+        assert!(!termux_font_file_is_nerd(
+            false,
+            Some(Path::new("/usr")),
+            home
+        ));
+        // Either signal opens the probe.
+        assert!(termux_font_file_is_nerd(true, None, home));
+        assert!(termux_font_file_is_nerd(
+            false,
+            Some(Path::new("/data/data/com.termux/files/usr")),
+            home
+        ));
+
+        // A non-Nerd family in the same file shape does not detect.
+        let mut bytes = vec![0u8; 32];
+        bytes.extend_from_slice(b"Hack Mono Regular");
+        std::fs::write(termux_dir.join("font.ttf"), &bytes).unwrap();
+        assert!(!termux_font_file_is_nerd(true, None, home));
+
+        // UTF-16BE name-table records (Windows platform) also detect.
+        let mut bytes = vec![0u8; 8];
+        bytes.extend(
+            "FiraCode Nerd Font"
+                .encode_utf16()
+                .flat_map(|u| u.to_be_bytes()),
+        );
+        std::fs::write(termux_dir.join("font.ttf"), &bytes).unwrap();
+        assert!(termux_font_file_is_nerd(true, None, home));
     }
 }
