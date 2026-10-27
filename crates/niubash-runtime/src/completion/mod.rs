@@ -2,6 +2,7 @@
 // Provides Tab completion for commands, paths, and variables
 
 pub mod bash_import;
+pub mod column_menu;
 pub mod command;
 pub mod common_assets;
 pub mod completer;
@@ -12,7 +13,7 @@ pub mod runtime;
 pub mod variables;
 pub mod winuxcmd_assets;
 
-pub use completer::{CompletionState, NiubashCompleter};
+pub use completer::{CommandProbe, CompletionState, NiubashCompleter};
 
 use std::path::PathBuf;
 
