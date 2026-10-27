@@ -2979,6 +2979,14 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 break;
             }
             Ok(Signal::CtrlC) => {
+                // niubash#600: GNU shows a literal `^C` where the line
+                // was abandoned (the kernel's ECHOCTL echoes it in
+                // cooked mode; readline echoes it in raw mode). Reedline
+                // prints nothing for the byte it swallows, so the host
+                // echoes it here — ahead of the newline below, the
+                // on-screen shape is `<partial line>^C` then a fresh
+                // prompt, like GNU.
+                print!("^C");
                 println!();
                 if crate::ctrl_c::consume_ctrl_c() {
                     flush_repl_output();

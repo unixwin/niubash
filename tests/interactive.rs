@@ -293,6 +293,30 @@ fn issue611_ctrl_c_at_prompt_sets_status_130() {
     s.expect_prompt();
 }
 
+/// niubash#600: Ctrl-C at the prompt echoes a literal `^C` (GNU shows
+/// it via ECHOCTL/readline). Reedline's raw mode prints nothing for
+/// the byte, so the host must echo it itself.
+#[test]
+fn issue600_ctrl_c_at_prompt_echoes_caret_c() {
+    if !require_pty_or_skip("issue600_ctrl_c_at_prompt_echoes_caret_c") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-caret-600",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(CTRL_C);
+    s.expect("^C");
+    s.expect_prompt();
+    s.send_line("echo still-alive-600");
+    s.expect("still-alive-600");
+    s.expect_prompt();
+}
+
 /// Ctrl-C with text typed discards the line: it must not execute.
 #[test]
 fn ctrl_c_midtyped_discards_line() {
