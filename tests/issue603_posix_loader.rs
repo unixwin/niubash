@@ -159,10 +159,7 @@ fn non_login_ordinary_keeps_loader_before_rc() {
 #[test]
 fn login_posix_loader_exit_unwinds_before_env() {
     let home = unique_home("login-posix-exit", "export LOADER_RAN=1\nexit 7\n");
-    let output = run_niu(
-        &home,
-        &["--posix", "-l", "-i", "-c", "echo SHOULD-NOT-RUN"],
-    );
+    let output = run_niu(&home, &["--posix", "-l", "-i", "-c", "echo SHOULD-NOT-RUN"]);
     let stdout = stdout_of(&output);
     assert_eq!(
         output.status.code(),
