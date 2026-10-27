@@ -167,13 +167,13 @@ pub fn branch_segment(cwd: &Path) -> Option<String> {
     Some(if dirty { format!("{name}*") } else { name })
 }
 
-/// Spawn counter for the niubash#592 acceptance probe (test builds only):
-/// `read_status` is the prompt's only git spawn point and runs exactly once
-/// per spawn, so counting its entries counts prompt git spawns exactly.
-/// The counter is thread-local on purpose: a probe drives its whole
-/// scenario (hooks, prompt passes, repaints) on its own test thread, so
-/// other tests running in parallel in the same binary can neither
-/// inflate nor drain its count. Production builds carry no counter.
+// Spawn counter for the niubash#592 acceptance probe (test builds only):
+// `read_status` is the prompt's only git spawn point and runs exactly once
+// per spawn, so counting its entries counts prompt git spawns exactly.
+// The counter is thread-local on purpose: a probe drives its whole
+// scenario (hooks, prompt passes, repaints) on its own test thread, so
+// other tests running in parallel in the same binary can neither
+// inflate nor drain its count. Production builds carry no counter.
 #[cfg(test)]
 thread_local! {
     static READ_STATUS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
