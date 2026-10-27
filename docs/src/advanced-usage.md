@@ -98,6 +98,16 @@ regenerate `~/.niubash/generated/plugins.niu`, which the host sources
 read-only *before* your rc — so rc lines always win
 (see [Plugin Workflow](#plugin-workflow)).
 
+POSIX mode is no exception (niubash#603): the generated loader is niu's own
+activation plane, not a user startup file, so interactive POSIX shells
+(`--posix`, or invoked as `sh`) load it too. POSIX mode still governs the
+user files exactly as GNU specifies — a login shell reads the profile
+chain, an interactive shell reads `$ENV` instead of the rc — and the
+loader takes the same relative seat it holds on the ordinary branch: a
+login POSIX shell loads it after the profile chain and before `$ENV`; a
+non-login POSIX shell loads it before `$ENV`. With `$ENV` in the rc's
+seat, your `$ENV` lines win over the loader just as rc lines do.
+
 Interactive shells read ONE startup file: `~/.niubashrc`. By default it
 is the only candidate: if it does not exist, the shell starts with no rc
 at all — `~/.bashrc` is not read. The single exception is opt-in: if you
