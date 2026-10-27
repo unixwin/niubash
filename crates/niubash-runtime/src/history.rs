@@ -10,7 +10,7 @@ use std::{
 
 use reedline::{
     FileBackedHistory, History, HistoryItem, HistoryItemId, HistorySessionId, ReedlineError,
-    Result, SearchQuery,
+    Result, SearchDirection, SearchQuery,
 };
 
 /// On Windows, reset the DACL of the history file to grant the current
@@ -288,8 +288,10 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
         if is_backing {
             // The backing file grew outside the reader's accounting:
             // rebuild it so a later reedline sync does not re-append
-            // these lines (the #182 dedupe hazard).
-            let _ = self.inner.reload_from_file();
+            // these lines (the #182 dedupe hazard). An accounting
+            // rebuild, not a re-read: a clear's view hide survives it
+            // (niubash#614).
+            let _ = self.inner.reload_from_file_keeping_view();
         }
         // Commit only after the append succeeded: on failure the lines
         // stay pending, so a later -a or the session-end write can still
@@ -364,6 +366,15 @@ struct HistoryState {
     /// backing, so a degraded session does not warn on every command. GNU
     /// bash stays silent about history file I/O failures.
     warned_io_failure: bool,
+    /// niubash#614: length of the raw reader prefix hidden from list
+    /// queries by this session's latest `history -c`. The raw entries
+    /// still hold the cleared lines (the file keeps them until the
+    /// session-end write, niubash#569); list queries answer from the
+    /// suffix past this prefix instead.
+    hidden_prefix: usize,
+    /// The ledger view generation `hidden_prefix` was taken from (see
+    /// [`SessionLedger::note_cleared`]).
+    applied_view_gen: u64,
 }
 
 /// A Reedline file history that is visible across concurrently running shells.
@@ -461,6 +472,8 @@ impl LiveFileBackedHistory {
                     signature: FileSignature::default(),
                     path: Some(path.clone()),
                     warned_io_failure: false,
+                    hidden_prefix: 0,
+                    applied_view_gen: 0,
                 };
                 // The file opened, but a restricted token can still deny the
                 // metadata read; never let that abort the shell.
@@ -477,6 +490,8 @@ impl LiveFileBackedHistory {
                     signature: FileSignature::default(),
                     path: None,
                     warned_io_failure: true,
+                    hidden_prefix: 0,
+                    applied_view_gen: 0,
                 };
                 warn_io_failure(
                     &mut state,
@@ -558,6 +573,104 @@ impl LiveFileBackedHistory {
         }
     }
 
+    /// Apply the ledger's latest list-view generation to this instance
+    /// (niubash#614). Reedline's sync/refresh always merges the whole
+    /// file back into the reader, and the file deliberately keeps a
+    /// cleared session's lines until the session-end write
+    /// (niubash#569) — so without a view filter, the first list query
+    /// after any later append rebuilt the reader from the file and the
+    /// whole pre-clear list resurrected. The filter is a prefix length,
+    /// not a text set: the live sync keeps the raw list equal to the
+    /// file, so everything the clear emptied is exactly the raw prefix
+    /// that predates it, in this instance and in the twin alike.
+    fn sync_view(state: &mut HistoryState, ledger: &Mutex<SessionLedger>) {
+        if let Ok(ledger) = ledger.lock() {
+            if ledger.view_gen != state.applied_view_gen {
+                state.hidden_prefix = ledger.view_hidden_len;
+                state.applied_view_gen = ledger.view_gen;
+            }
+        }
+    }
+
+    /// The hidden prefix clamped to the reader's current length, plus
+    /// that length. If the file shrank below the clear point (a foreign
+    /// rewrite), everything currently in the list predates the clear.
+    fn view_bounds(state: &HistoryState) -> (usize, usize) {
+        let raw_len = state
+            .history
+            .count(SearchQuery::all_that_contain_rev(String::new()))
+            .map(|count| count as usize)
+            .unwrap_or(0);
+        (state.hidden_prefix.min(raw_len), raw_len)
+    }
+
+    /// Answer a list query from the post-clear view (niubash#614). The
+    /// query runs as a full scan through the reader's own filter
+    /// machinery — so time and extra-info filters keep the reader's
+    /// exact behavior, including its unsupported-feature errors — then
+    /// the hidden prefix is dropped, ids are re-based onto the view,
+    /// and the original id window and limit are applied in view space
+    /// with the reader's own window arithmetic (file_backed.rs: bounds
+    /// are exclusive outside, inclusive inside; a non-positive limit
+    /// behaves as unbounded, matching its `as usize` wrap).
+    fn view_search(state: &HistoryState, query: SearchQuery) -> Result<Vec<HistoryItem>> {
+        let (hidden, raw_len) = Self::view_bounds(state);
+        let view_len = raw_len - hidden;
+        let direction = query.direction;
+        let (min_id, max_id) = {
+            let start = query.start_id.map(|id| id.0);
+            let end = query.end_id.map(|id| id.0);
+            if let SearchDirection::Backward = direction {
+                (end, start)
+            } else {
+                (start, end)
+            }
+        };
+        let min_id = min_id.map(|id| id + 1).unwrap_or(0);
+        let max_id = max_id.map(|id| id - 1).unwrap_or(view_len as i64 - 1);
+        let intrinsic_limit = max_id - min_id + 1;
+        let limit = match query.limit {
+            Some(given) => std::cmp::min(intrinsic_limit, given),
+            None => intrinsic_limit,
+        };
+        let scan = SearchQuery {
+            direction,
+            start_time: query.start_time,
+            end_time: query.end_time,
+            start_id: None,
+            end_id: None,
+            limit: None,
+            filter: query.filter,
+        };
+        let mut items: Vec<HistoryItem> = state
+            .history
+            .search(scan)?
+            .into_iter()
+            .filter_map(|mut item| {
+                let raw_id = item.id?.0;
+                if raw_id < hidden as i64 {
+                    return None;
+                }
+                item.id = Some(HistoryItemId::new(raw_id - hidden as i64));
+                Some(item)
+            })
+            .collect();
+        if max_id < 0 || min_id > view_len as i64 - 1 {
+            return Ok(Vec::new());
+        }
+        items.retain(|item| {
+            let id = item.id.map(|id| id.0).unwrap_or(-1);
+            id >= min_id && (intrinsic_limit <= 0 || id - min_id < intrinsic_limit)
+        });
+        let take = if limit < 0 {
+            usize::MAX
+        } else {
+            limit as usize
+        };
+        items.truncate(take);
+        Ok(items)
+    }
+
     /// Sync the reader to the file and report whether the file actually
     /// received the entries (niubash#569: the ledger needs this to know
     /// which saved lines are already in the file and which are still
@@ -602,7 +715,22 @@ impl LiveFileBackedHistory {
     /// memory-only history, so the caller can fall back to the in-memory
     /// replace path.
     pub(crate) fn reload_from_file(&mut self) -> Result<()> {
+        self.reload_from_file_inner(true)
+    }
+
+    /// Reader rebuild that is NOT an explicit re-read — the `history
+    /// -a` accounting rebuild in `append_history`, which only repairs
+    /// the reader's on-disk accounting after appending pending lines
+    /// itself. The list view is untouched, so a clear's hide survives
+    /// it (niubash#614): `-a` never loads lines into the list in GNU.
+    pub(crate) fn reload_from_file_keeping_view(&mut self) -> Result<()> {
+        self.reload_from_file_inner(false)
+    }
+
+    fn reload_from_file_inner(&mut self, consume_clear: bool) -> Result<()> {
         let capacity = self.capacity;
+        // Clone the ledger handle before taking the state lock (see save).
+        let ledger = Arc::clone(&self.ledger);
         let state = self.lock_mut()?;
         let Some(path) = state.path.clone() else {
             return Err(ReedlineError::from(history_lock_error()));
@@ -611,6 +739,16 @@ impl LiveFileBackedHistory {
             Ok(history) => {
                 state.history = history;
                 state.signature = file_signature_lossy(&path, state);
+                if consume_clear {
+                    // An explicit re-read (`history -r`/`-n`) loads the
+                    // file back into the list on purpose, so the clear's
+                    // view hide ends here — for both instances, via the
+                    // ledger generation (niubash#614).
+                    if let Ok(mut ledger) = ledger.lock() {
+                        ledger.note_view_reloaded();
+                    }
+                    Self::sync_view(state, &ledger);
+                }
                 Ok(())
             }
             Err(error) => Err(ReedlineError::from(io::Error::other(error.to_string()))),
@@ -667,9 +805,12 @@ impl LiveFileBackedHistory {
                 // niubash#569: the file now holds exactly `entries`, so
                 // this session's pending and cleared sets both reset and
                 // the base moves to the rewritten file's line count.
+                // niubash#614: the reset also ends any clear hide — the
+                // rewritten list is the view, in full.
                 if let Ok(mut ledger) = ledger.lock() {
                     ledger.reset(entries.len());
                 }
+                Self::sync_view(state, &ledger);
                 Ok(())
             }
             Err(error) => {
@@ -684,6 +825,11 @@ impl LiveFileBackedHistory {
                     let _ = state.history.save(HistoryItem::from_command_line(entry));
                 }
                 Self::sync_state(state);
+                // The rewrite is authoritative here too (niubash#614).
+                if let Ok(mut ledger) = ledger.lock() {
+                    ledger.note_view_reloaded();
+                }
+                Self::sync_view(state, &ledger);
                 Ok(())
             }
         }
@@ -704,6 +850,14 @@ impl LiveFileBackedHistory {
         let ledger = Arc::clone(&self.ledger);
         let state = self.lock_mut()?;
         Self::refresh_if_stale(capacity, state);
+        // niubash#614: the raw list length at clear time — post-refresh
+        // the reader equals the file — is the prefix the ledger records
+        // for the view hide (see SessionLedger::note_cleared).
+        let view_len_at_clear = state
+            .history
+            .count(SearchQuery::all_that_contain_rev(String::new()))
+            .map(|count| count as usize)
+            .unwrap_or(0);
         let snapshot = state
             .path
             .as_deref()
@@ -734,9 +888,12 @@ impl LiveFileBackedHistory {
         // #182 behavior); the session-end write removes exactly these
         // lines from the file instead of truncating it. Committed lines
         // (-a/-w already ran) are not in pending, so they survive.
+        // niubash#614: the same call records the view hide, applied to
+        // this instance now and to the editor twin at its next query.
         if let Ok(mut ledger) = ledger.lock() {
-            ledger.note_cleared();
+            ledger.note_cleared(view_len_at_clear);
         }
+        Self::sync_view(state, &ledger);
         outcome
     }
 
@@ -990,6 +1147,16 @@ pub(crate) struct SessionLedger {
     pending: Vec<PendingLine>,
     cleared: Vec<String>,
     base_lines: usize,
+    /// niubash#614: generation counter for the session's list view.
+    /// `-c` bumps it and records how many raw entries the clear hides
+    /// (`view_hidden_len`); an explicit re-read (`-r`/`-n`) or an
+    /// authoritative rewrite bumps it back to a zero hide. Each history
+    /// instance applies the latest generation to its own reader before
+    /// answering list queries, so lines this session cleared stay out
+    /// of the in-session list even though they remain in the file until
+    /// the session-end write removes them.
+    view_gen: u64,
+    view_hidden_len: usize,
 }
 
 impl SessionLedger {
@@ -998,6 +1165,8 @@ impl SessionLedger {
             pending: Vec::new(),
             cleared: Vec::new(),
             base_lines,
+            view_gen: 0,
+            view_hidden_len: 0,
         }
     }
 
@@ -1013,8 +1182,26 @@ impl SessionLedger {
 
     /// -c: pending lines leave the session's set and await removal from
     /// the file at session end. Committed lines are untouched.
-    fn note_cleared(&mut self) {
+    ///
+    /// niubash#614: the clear also hides the whole in-memory list from
+    /// this session's list view until an explicit re-read — GNU -c
+    /// empties the list, seeds included. `view_len` is the raw entry
+    /// count at clear time. The live sync keeps every instance's raw
+    /// list equal to the file, so that count is a prefix length in each
+    /// instance's raw list; lines appended afterwards (by any session)
+    /// land past the prefix and stay visible.
+    fn note_cleared(&mut self, view_len: usize) {
         self.cleared.extend(self.pending.drain(..).map(|p| p.text));
+        self.view_hidden_len = view_len;
+        self.view_gen += 1;
+    }
+
+    /// An explicit re-read (`history -r`/`-n`) loads file lines back
+    /// into the list on purpose — the bash-it `-c && -r` cycle depends
+    /// on it (niubash#182) — so the clear's view hide ends here.
+    fn note_view_reloaded(&mut self) {
+        self.view_hidden_len = 0;
+        self.view_gen += 1;
     }
 
     /// Authoritative rewrite (-w to the backing file, replace): the file
@@ -1024,6 +1211,10 @@ impl SessionLedger {
         self.pending.clear();
         self.cleared.clear();
         self.base_lines = base_lines;
+        // The rewritten file IS the list now; a stale clear hide would
+        // mask its first entries (niubash#614).
+        self.view_hidden_len = 0;
+        self.view_gen += 1;
     }
 
     /// Settle at session end: pending lines are committed when their file
@@ -1119,21 +1310,42 @@ impl History for LiveFileBackedHistory {
         let capacity = self.capacity;
         let mut state = self.lock()?;
         Self::refresh_if_stale(capacity, &mut state);
-        state.history.load(id)
+        Self::sync_view(&mut state, &self.ledger);
+        let (hidden, _) = Self::view_bounds(&state);
+        if hidden == 0 {
+            return state.history.load(id);
+        }
+        // niubash#614: view ids are raw ids shifted by the hidden
+        // prefix. The view is a suffix of the raw list, so an id
+        // outside the view is outside the raw list too and the
+        // reader's own "Item does not exist" error stands.
+        let mut item = state
+            .history
+            .load(HistoryItemId::new(id.0 + hidden as i64))?;
+        item.id = Some(id);
+        Ok(item)
     }
 
     fn count(&self, query: SearchQuery) -> Result<i64> {
         let capacity = self.capacity;
         let mut state = self.lock()?;
         Self::refresh_if_stale(capacity, &mut state);
-        state.history.count(query)
+        Self::sync_view(&mut state, &self.ledger);
+        if state.hidden_prefix == 0 {
+            return state.history.count(query);
+        }
+        Ok(Self::view_search(&state, query)?.len() as i64)
     }
 
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>> {
         let capacity = self.capacity;
         let mut state = self.lock()?;
         Self::refresh_if_stale(capacity, &mut state);
-        state.history.search(query)
+        Self::sync_view(&mut state, &self.ledger);
+        if state.hidden_prefix == 0 {
+            return state.history.search(query);
+        }
+        Self::view_search(&state, query)
     }
 
     fn update(
@@ -1152,6 +1364,9 @@ impl History for LiveFileBackedHistory {
         let state = self.lock_mut()?;
         Self::refresh_if_stale(capacity, state);
         state.history.clear()?;
+        // The reader is empty now; a stale view hide must not mask
+        // entries recorded after this clear (niubash#614).
+        state.hidden_prefix = 0;
         let path = state.path.clone();
         state.signature = match path.as_deref() {
             Some(path) => file_signature_lossy(path, state),
@@ -1833,6 +2048,135 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "echo synced\necho lost\n",
             "the session-end append restores only the missing entry"
+        );
+    }
+
+    #[test]
+    fn issue614_cleared_list_does_not_resurrect_on_later_queries() {
+        // niubash#614: after `history -c`, the in-session list must stay
+        // cleared even though the file keeps the cleared lines until the
+        // session-end write (niubash#569) and every later save/query
+        // refreshes the reader from that file. Before the fix, the
+        // first query after any later append rebuilt the reader from
+        // the file and the whole pre-clear list came back — GNU lists
+        // only the post-clear lines (oracle: bash 5.3.20 pty probe,
+        // seeds + `echo MARKER` + `history -c` + `history` lists just
+        // `history`).
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "SEEDONE\nSEEDTWO\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        let mut editor =
+            LiveFileBackedHistory::with_shared_ledger(100, path.clone(), provider.ledger());
+        // The editor records the typed lines; the provider runs -c.
+        editor
+            .save(HistoryItem::from_command_line("echo MARKER"))
+            .unwrap();
+        editor
+            .save(HistoryItem::from_command_line("history -c"))
+            .unwrap();
+        provider.clear().unwrap();
+        assert!(
+            provider.entries().unwrap().is_empty(),
+            "-c empties the list"
+        );
+
+        // The next typed line is live-synced to the file, which makes
+        // every later query refresh the reader from the file — the
+        // exact moment the cleared lines used to resurrect.
+        editor
+            .save(HistoryItem::from_command_line("history"))
+            .unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            vec!["history"],
+            "the cleared lines must not resurrect in the builtin list"
+        );
+        // The editor twin's own view (navigation) agrees.
+        let editor_view = editor
+            .search(SearchQuery::everything(
+                reedline::SearchDirection::Forward,
+                None,
+            ))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.command_line)
+            .collect::<Vec<_>>();
+        assert_eq!(editor_view, vec!["history"]);
+
+        editor
+            .save(HistoryItem::from_command_line("echo AFTER"))
+            .unwrap();
+        assert_eq!(provider.entries().unwrap(), vec!["history", "echo AFTER"]);
+
+        // Mid-session the file still holds the cleared lines: -c's
+        // file effect stays deferred to the session-end write (#569).
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "SEEDONE\nSEEDTWO\necho MARKER\nhistory -c\nhistory\necho AFTER\n"
+        );
+        drop(editor);
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "SEEDONE\nSEEDTWO\nhistory\necho AFTER\n",
+            "the session-end write still removes exactly the cleared lines"
+        );
+    }
+
+    #[test]
+    fn issue614_clear_hides_only_what_predates_the_clear() {
+        // niubash#614, dual-session interleave (the #583 report §5.1
+        // probe shape): lines another session appended BEFORE this
+        // session's -c are part of what the clear emptied and stay
+        // hidden; lines appended AFTER the clear are new history and
+        // show. The other session's own view is unaffected.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+
+        let mut a = RubashHistoryProvider::with_file(100, path.clone());
+        let mut b = RubashHistoryProvider::with_file(100, path.clone());
+        b.append("B-BEFORE".to_string()).unwrap();
+        a.append("A-OWN".to_string()).unwrap();
+        a.clear().unwrap();
+        b.append("B-AFTER".to_string()).unwrap();
+        a.append("A-AFTER".to_string()).unwrap();
+
+        assert_eq!(a.entries().unwrap(), vec!["B-AFTER", "A-AFTER"]);
+        assert_eq!(
+            b.entries().unwrap(),
+            vec!["B-BEFORE", "A-OWN", "B-AFTER", "A-AFTER"]
+        );
+    }
+
+    #[test]
+    fn issue614_explicit_reread_restores_the_cleared_list() {
+        // niubash#614: an explicit `history -r` after `-c` loads the
+        // file back into the list on purpose (GNU; the bash-it
+        // `-a && -c && -r` cycle depends on it, niubash#182), so the
+        // clear's view hide ends at the re-read.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "loaded-one\nloaded-two\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        provider.clear().unwrap();
+        assert!(provider.entries().unwrap().is_empty());
+
+        provider.read_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            vec!["loaded-one", "loaded-two"]
+        );
+        provider.append("echo new".to_string()).unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            vec!["loaded-one", "loaded-two", "echo new"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "loaded-one\nloaded-two\necho new\n"
         );
     }
 

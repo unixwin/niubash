@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "rubash_rev": "495cf86eb46411dff8e4a0f40010be4a5bf86856",
+  "rubash_rev": "252ff19eea081ecbeabe3b3198ac14a0bc0dfdb6",
   "rubash_version": "1.4.3",
   "description": "Rubash source pin for niubash releases (rubash#827, conclusion B). Every release job fetches exactly this rubash commit into ../rubash -- where the [patch] path override in Cargo.toml deterministically picks it up -- and fails the release unless the checked-out HEAD equals rubash_rev. This is the source-level twin of winuxcmd-pin.json (niubash#312/#327): the bundled WinuxCmd was already pinned, but the compiled engine was \"whatever rubash master HEAD was at build time\".",
   "notes": [
@@ -8,6 +8,8 @@
     "Bumped to rubash master d15a02df (2026-10-25, version still 1.4.3): niubash master requires rubash::script_driver::run_script_with_history_at_line_offset_tracked (R1 grouped-reader exit-jump verdict API), absent in 4c41e2c0 — building niubash master against the old pin fails (niubash-runtime E0425).",
     "NOTE: the rev includes #863-era lock self-entry discipline; rubash Cargo.toml version 1.4.3 must match this pin's rubash_version.",
     "Bumped to rubash master 368353ec (2026-10-26, version still 1.4.3): carries rubash#1772 -- #[allow(unused_imports)] on the debugger session-core facade re-exports. The d15a02df pin contains the un-annotated facade, so a release build under -D warnings (the CI toolchain action's default RUSTFLAGS) fails on 4 unused-imports errors in src/debugger/mod.rs; the rev also rolls up the rubash master wave merged since d15a02df (through the fix7 locale2 slice, #1752).",
-    "Bumped to rubash master a9385b4c (2026-10-27, version still 1.4.3): integration refresh for the niubash PR integration round (this branch merged onto niubash master 4b164d34)."
+    "Bumped to rubash master a9385b4c (2026-10-27, version still 1.4.3): integration refresh for the niubash PR integration round (this branch merged onto niubash master 4b164d34).",
+    "Bumped to rubash master 0e9f8d45 (2026-10-27, version still 1.4.3): rolls up the issue-clearance wave-1 merges through rubash#1827 (protocol carrier U+E31A) and rubash#1836, whose new stacker dependency also refreshes the root Cargo.lock in this bump.",
+    "Bumped to rubash master 252ff19e (2026-10-27, version still 1.4.3): integration refresh riding the niubash#618 merge-up onto niubash master d7dcce57 (after #615); rolls up rubash#1848 (unused-parens lint fix in job_builtins), rubash#1850 (exec-seam fixes #1807/#1832), rubash#1855 (stacker target gating — unbreaks the aarch64-unknown-linux-ohos cross-target check) and rubash#1857 (history read silence #1852 + stale time pin correction #1854); the root Cargo.lock is refreshed in this bump."
   ]
 }
