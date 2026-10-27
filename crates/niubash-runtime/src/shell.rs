@@ -842,7 +842,7 @@ impl Shell {
         self.executor.set_shell_option("history", false);
         self.executor.set_env(
             "HISTFILE",
-            &self.history_path.to_string_lossy().into_owned(),
+            &self.history_path.to_string_lossy(),
         );
         // rubash#1248: assert the other half of the interactive history
         // contract. GNU init_interactive turns histexpand ON by default
