@@ -31,16 +31,22 @@ pub struct ShellConfig {
     pub right_prompt_elements: Option<Vec<String>>,
 }
 
+/// Hook script lists, shared by reference (niubash#596): the prompt loop
+/// used to deep-clone a whole hook vector on every prompt only to satisfy
+/// the borrow checker (`run_hook_scripts` needs `&mut self`), even though
+/// hook lists are fixed at construction time and never mutated afterwards.
+/// `Rc<[String]>` keeps the snapshot semantics (a hook script cannot change
+/// the list mid-run) while making the per-prompt take O(1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookConfig {
-    pub precmd: Vec<String>,
-    pub preexec: Vec<String>,
-    pub chpwd: Vec<String>,
-    pub postcmd: Vec<String>,
-    pub zshaddhistory: Vec<String>,
-    pub zshexit: Vec<String>,
-    pub greeting: Vec<String>,
-    pub title: Vec<String>,
+    pub precmd: std::rc::Rc<[String]>,
+    pub preexec: std::rc::Rc<[String]>,
+    pub chpwd: std::rc::Rc<[String]>,
+    pub postcmd: std::rc::Rc<[String]>,
+    pub zshaddhistory: std::rc::Rc<[String]>,
+    pub zshexit: std::rc::Rc<[String]>,
+    pub greeting: std::rc::Rc<[String]>,
+    pub title: std::rc::Rc<[String]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

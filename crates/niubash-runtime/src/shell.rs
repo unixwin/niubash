@@ -1248,7 +1248,7 @@ impl Shell {
         let _ = self.load_generated_plugin_loader(Some(&path));
         self.executor.set_env("NIU_REPL_STARTUP", "1");
         let outcome = self.source_file_into_current_shell(&path);
-        let _ = self.execute_script("unset NIU_REPL_STARTUP");
+        self.executor.unset_env("NIU_REPL_STARTUP");
         match outcome {
             // GNU maybe_execute_file discipline (evalfile.c:339, the same
             // contract source_startup_file implements): a failed or
@@ -1389,7 +1389,7 @@ impl Shell {
                 return Some(status);
             }
             if repl {
-                let _ = self.execute_script("unset NIU_REPL_STARTUP");
+                self.executor.unset_env("NIU_REPL_STARTUP");
             }
         }
         // GNU shell.c:1241-1246 (bash --posix) and shell.c:1238-1239 (invoked
@@ -1518,7 +1518,7 @@ impl Shell {
             return Some(status);
         }
         if repl {
-            let _ = self.execute_script("unset NIU_REPL_STARTUP");
+            self.executor.unset_env("NIU_REPL_STARTUP");
         }
 
         self.update_completion_state();
@@ -2097,7 +2097,7 @@ impl Shell {
     /// `false` (the common case) means the session continues.
     pub fn run_precmd_hooks(&mut self) -> bool {
         let last_exit_code = self.executor.last_exit_code();
-        let hooks = self.hooks.precmd.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.precmd);
         let last_exit_code_string = last_exit_code.to_string();
         // Set in process env so segment prompt can read it via std::env::var.
         std::env::set_var("NIU_LAST_EXIT_CODE", &last_exit_code_string);
@@ -2393,7 +2393,9 @@ impl Shell {
         }
 
         let result = self.executor.get_env("NIU_COMP_RESULT").map(str::to_owned);
-        let _ = self.execute_script("unset NIU_COMP_WORDS NIU_COMP_CWORD NIU_COMP_RESULT");
+        self.executor.unset_env("NIU_COMP_WORDS");
+        self.executor.unset_env("NIU_COMP_CWORD");
+        self.executor.unset_env("NIU_COMP_RESULT");
 
         result
             .unwrap_or_default()
@@ -2448,8 +2450,9 @@ impl Shell {
             .get_env("NIU_WIDGET_CURSOR_RESULT")
             .and_then(|value| value.trim().parse::<usize>().ok());
 
-        let _ = self
-            .execute_script("unset NIU_WIDGET_RESULT NIU_WIDGET_ACCEPT NIU_WIDGET_CURSOR_RESULT");
+        self.executor.unset_env("NIU_WIDGET_RESULT");
+        self.executor.unset_env("NIU_WIDGET_ACCEPT");
+        self.executor.unset_env("NIU_WIDGET_CURSOR_RESULT");
 
         WidgetOutcome {
             buffer: result,
@@ -2464,7 +2467,7 @@ impl Shell {
         if command.is_empty() {
             return;
         }
-        let hooks = self.hooks.preexec.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.preexec);
         let context = [("NIU_PREEXEC_COMMAND", command.to_string())];
         self.run_hook_scripts(&hooks, &context);
         self.run_bash_ps0_preexec();
@@ -2475,7 +2478,7 @@ impl Shell {
         if same_shell_dir(old_pwd, new_pwd) {
             return;
         }
-        let hooks = self.hooks.chpwd.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.chpwd);
         let context = [
             ("NIU_OLDPWD", old_pwd.to_string()),
             ("NIU_PWD", new_pwd.to_string()),
@@ -2485,7 +2488,7 @@ impl Shell {
 
     /// Run postcmd hooks after command execution.
     pub fn run_postcmd_hooks(&mut self, exit_code: i32) {
-        let hooks = self.hooks.postcmd.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.postcmd);
         let exit_code_string = exit_code.to_string();
         let context = [("NIU_LAST_EXIT_CODE", exit_code_string)];
         self.run_hook_scripts(&hooks, &context);
@@ -2493,26 +2496,26 @@ impl Shell {
 
     /// Run zshaddhistory hooks after command is added to history.
     pub fn run_zshaddhistory_hooks(&mut self, command: &str) {
-        let hooks = self.hooks.zshaddhistory.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.zshaddhistory);
         let context = [("NIU_HISTORY_COMMAND", command.to_string())];
         self.run_hook_scripts(&hooks, &context);
     }
 
     /// Run zshexit hooks when shell exits.
     pub fn run_zshexit_hooks(&mut self) {
-        let hooks = self.hooks.zshexit.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.zshexit);
         self.run_hook_scripts(&hooks, &[]);
     }
 
     /// Run greeting hooks at startup.
     pub fn run_greeting_hooks(&mut self) {
-        let hooks = self.hooks.greeting.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.greeting);
         self.run_hook_scripts(&hooks, &[]);
     }
 
     /// Run title hooks to set terminal title.
     pub fn run_title_hooks(&mut self, title: &str) {
-        let hooks = self.hooks.title.clone();
+        let hooks = std::rc::Rc::clone(&self.hooks.title);
         let context = [("NIU_TITLE", title.to_string())];
         self.run_hook_scripts(&hooks, &context);
     }
@@ -2572,15 +2575,9 @@ impl Shell {
         }
 
         if !context.is_empty() {
-            let unset = format!(
-                "unset {}",
-                context
-                    .iter()
-                    .map(|(name, _)| *name)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            let _ = self.execute_script(&unset);
+            for (name, _) in context {
+                self.executor.unset_env(name);
+            }
         }
     }
 
@@ -5112,7 +5109,7 @@ mod tests {
         let _cwd_guard = CwdGuard::capture();
 
         let mut shell = test_shell(HookConfig {
-            title: vec!["HOOK_TITLE=\"$NIU_TITLE\"".to_string()],
+            title: std::rc::Rc::from(vec!["HOOK_TITLE=\"$NIU_TITLE\"".to_string()]),
             ..Default::default()
         });
         shell.executor.set_env("NIU_TITLE", "custom-title");
@@ -5131,6 +5128,36 @@ mod tests {
     }
 
     #[test]
+    fn issue596_hook_context_cleanup_uses_direct_unset() {
+        // niubash#596: hook context teardown used to run a full
+        // `execute_script("unset ...")` lex/parse/execute roundtrip on
+        // every prompt. The direct `unset_env` path must be observably
+        // identical: the hook sees the context vars set, and all of them
+        // are gone afterwards (no script roundtrip involved).
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+
+        let mut shell = test_shell(HookConfig::default());
+        let hooks = ["HOOK_SAW_A=\"$CTX_A\"; HOOK_SAW_B=\"$CTX_B\"".to_string()];
+        let context = [
+            ("CTX_A", "alpha".to_string()),
+            ("CTX_B", "beta".to_string()),
+        ];
+        shell.run_hook_scripts(&hooks, &context);
+
+        assert_eq!(shell.executor.get_env("HOOK_SAW_A"), Some("alpha"));
+        assert_eq!(shell.executor.get_env("HOOK_SAW_B"), Some("beta"));
+        assert!(
+            shell.executor.get_env("CTX_A").is_none(),
+            "context var CTX_A must be unset after the hook run"
+        );
+        assert!(
+            shell.executor.get_env("CTX_B").is_none(),
+            "context var CTX_B must be unset after the hook run"
+        );
+    }
+
+    #[test]
     fn precmd_invokes_title_hooks_with_pwd_fallback() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
@@ -5138,7 +5165,7 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
 
         let mut shell = test_shell(HookConfig {
-            title: vec!["HOOK_TITLE=\"$NIU_TITLE\"".to_string()],
+            title: std::rc::Rc::from(vec!["HOOK_TITLE=\"$NIU_TITLE\"".to_string()]),
             ..Default::default()
         });
         let target = shell_quote(&shell_display_path(&temp));
@@ -7803,8 +7830,8 @@ complete -F _envtooldyn_hook envtooldyn
         std::fs::create_dir_all(&temp).unwrap();
         std::fs::write(temp.join(NIU_RC_FILE), "cd .\nSTARTUP_CD=$?\n").unwrap();
         let mut shell = test_shell(HookConfig {
-            greeting: vec!["cd .; GREETING_CD=$?".into()],
-            precmd: vec!["cd .; PRECMD_CD=$?".into()],
+            greeting: std::rc::Rc::from(vec!["cd .; GREETING_CD=$?".into()]),
+            precmd: std::rc::Rc::from(vec!["cd .; PRECMD_CD=$?".into()]),
             ..HookConfig::default()
         });
         shell.home_dir = temp.clone();
@@ -7833,7 +7860,7 @@ complete -F _envtooldyn_hook envtooldyn
         let env_file = temp.path().join("env422.src");
         std::fs::write(&env_file, "export ENV_RAN=$((2+3))\nexit 7\n").unwrap();
         let mut shell = test_shell(HookConfig {
-            greeting: vec!["export GREETING_RAN=$((6*7))".into()],
+            greeting: std::rc::Rc::from(vec!["export GREETING_RAN=$((6*7))".into()]),
             ..HookConfig::default()
         });
         shell.home_dir = temp.path().to_path_buf();
@@ -7874,7 +7901,7 @@ complete -F _envtooldyn_hook envtooldyn
         let env_file = temp.path().join("env422ctl.src");
         std::fs::write(&env_file, "export ENV_RAN=$((2+3))\n").unwrap();
         let mut shell = test_shell(HookConfig {
-            greeting: vec!["export GREETING_RAN=$((6*7))".into()],
+            greeting: std::rc::Rc::from(vec!["export GREETING_RAN=$((6*7))".into()]),
             ..HookConfig::default()
         });
         shell.home_dir = temp.path().to_path_buf();
