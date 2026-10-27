@@ -788,12 +788,30 @@ impl LiveFileBackedHistory {
         // Reedline's on-disk escaping (file_backed.rs `encode_entry`): an
         // embedded newline is stored as the literal four characters
         // `<\n>`, and the load path decodes it back.
-        let mut text = String::new();
-        for entry in &entries {
-            text.push_str(&entry.replace('\n', "<\\n>"));
-            text.push('\n');
-        }
-        let rebuilt = std::fs::write(&staged_path, text)
+        //
+        // niubash#595: stream the staged file instead of building one
+        // giant String first — a 100k-entry list used to allocate the
+        // whole file twice over (the joined String, then the write).
+        // Byte-identical output: each entry's `\n` segments joined by
+        // `<\n>`, terminated by `\n` (so `""` writes a bare newline and
+        // `"\n"` writes `<\n>\n`, exactly as the old join did).
+        let entry_count = entries.len();
+        let staged: std::io::Result<()> = {
+            use std::io::{BufWriter, Write as _};
+            let file = std::fs::File::create(&staged_path)?;
+            let mut writer = BufWriter::new(file);
+            for entry in &entries {
+                for (i, segment) in entry.split('\n').enumerate() {
+                    if i > 0 {
+                        writer.write_all(b"<\\n>")?;
+                    }
+                    writer.write_all(segment.as_bytes())?;
+                }
+                writer.write_all(b"\n")?;
+            }
+            writer.flush()
+        };
+        let rebuilt = staged
             .map_err(ReedlineError::from)
             .and_then(|()| FileBackedHistory::with_file(capacity, staged_path));
         match rebuilt {
@@ -808,7 +826,7 @@ impl LiveFileBackedHistory {
                 // niubash#614: the reset also ends any clear hide — the
                 // rewritten list is the view, in full.
                 if let Ok(mut ledger) = ledger.lock() {
-                    ledger.reset(entries.len());
+                    ledger.reset(entry_count);
                 }
                 Self::sync_view(state, &ledger);
                 Ok(())
@@ -1535,6 +1553,38 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "T1248=${T1248}alpha\nT1248=${T1248}alpha\necho next\n"
+        );
+    }
+
+    #[test]
+    fn issue595_replace_all_streams_byte_identical_staging() {
+        // niubash#595: `replace_all` used to build the whole staged file
+        // as one giant String before writing it. The streaming writer
+        // must produce byte-identical staging, including the awkward
+        // shapes: embedded newlines escape to `<\n>`, empty entries are
+        // bare newlines, and consecutive duplicates survive (the
+        // reedline load path decodes `<\n>` back on read).
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        provider
+            .replace(vec![
+                "plain".to_string(),
+                "multi\nline".to_string(),
+                "".to_string(),
+                "dup".to_string(),
+                "dup".to_string(),
+                "\n".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "plain\nmulti<\\n>line\n\ndup\ndup\n<\\n>\n"
+        );
+        assert_eq!(
+            provider.entries().unwrap(),
+            ["plain", "multi\nline", "", "dup", "dup", "\n"]
         );
     }
 
