@@ -959,6 +959,48 @@ impl Shell {
         self.session_exit_jump.take()
     }
 
+    /// niubash#616: run the engine's pending-signal dispatch for a prompt
+    /// Ctrl+C. GNU runs a trapped INT at the prompt immediately (the trap
+    /// observes `$?` = 130 on entry and `$?` is 130 again afterwards);
+    /// reedline's raw mode produces no kernel SIGINT there, so the caller
+    /// first delivers one through `ctrl_c::queue_prompt_sigint` and this
+    /// method then gives the executor a single boundary poll — an empty
+    /// program, so nothing executes, nothing is recorded, and no DEBUG
+    /// trap or hook observes a synthetic command; only the poll at the
+    /// tail of `execute_ast` runs. The unwind classification mirrors a
+    /// real submission's (`note_exit_code_unwind`): an untrapped delivery
+    /// is a DISCARD (no jump, no diagnostic), while a trap action that
+    /// itself exits arms the session jump for the REPL to consume.
+    pub fn dispatch_prompt_interrupt(&mut self) {
+        self.session_exit_jump = None;
+        // The trap (and the post-interrupt state) observes 130, as for a
+        // command killed by SIGINT; the engine's dispatch preserves this
+        // value into the action (`saved_exit` in run_pending_signal_traps).
+        self.executor.set_last_exit_code(130);
+        let ast = rubash::parser::Ast {
+            commands: Vec::new(),
+        };
+        match self.executor.execute_ast(&ast) {
+            Ok(()) => {}
+            Err(rubash::executor::ExecuteError::ExitCode(code)) => {
+                self.executor.set_last_exit_code(code);
+                self.note_exit_code_unwind(code);
+            }
+            Err(rubash::executor::ExecuteError::SigintUnwind) => {
+                self.executor.set_last_exit_code(130);
+            }
+            Err(_) => {}
+        }
+        // GNU leaves `$?` = 128+SIGINT after a prompt interrupt whether or
+        // not a trap ran and whatever the trap's own last status was.
+        if self.session_exit_jump.is_none() {
+            self.executor.set_last_exit_code(130);
+        }
+        self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
+        self.sync_alias_mirror_from_executor();
+    }
+
     fn execute_line_with_options(
         &mut self,
         line: &str,

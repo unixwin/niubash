@@ -3146,18 +3146,32 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 // prompt, like GNU.
                 print!("^C");
                 println!();
-                if crate::ctrl_c::consume_ctrl_c() {
+                let handler_queued = crate::ctrl_c::consume_ctrl_c();
+                if handler_queued {
                     flush_repl_output();
                 }
-                // niubash#611: a prompt Ctrl-C discards the line, and
-                // GNU leaves $? = 130 (128+SIGINT) for it. Reedline runs
-                // the tty in raw mode, so no kernel SIGINT reaches the
-                // engine at the prompt and nothing else records the
-                // status — set it here, before the next loop iteration's
-                // PROMPT_COMMAND pass (which reads this value and then
-                // preserves it across the hook).
-                shell.borrow_mut().executor.set_last_exit_code(130);
+                // niubash#616: GNU runs a trapped INT at the prompt
+                // immediately, before the next prompt. Reedline runs the
+                // tty in raw mode, so no kernel SIGINT reaches the engine
+                // at the prompt — deliver exactly one through the queue
+                // helper and let the engine's own boundary dispatch
+                // adjudicate it: a trapped INT runs its action now, an
+                // untrapped one lands as the DISCARD classification
+                // (#610). The dispatch also settles the status half of
+                // this arm: $? = 130 (128+SIGINT) on trap entry and again
+                // after the trap, which is #611's bookkeeping for the
+                // untrapped case and GNU's rule for both.
+                crate::ctrl_c::queue_prompt_sigint(handler_queued);
+                shell.borrow_mut().dispatch_prompt_interrupt();
+                flush_repl_output();
                 pending.clear();
+                // A trap action that itself exits (`trap 'exit 3' INT`)
+                // ends the session with its status, like a submitted
+                // line's top-level exit (niubash R1).
+                let jump = shell.borrow_mut().take_session_exit_jump();
+                if let Some(status) = jump {
+                    end_repl_session(&mut shell.borrow_mut(), status);
+                }
                 continue;
             }
             Ok(_) => continue,

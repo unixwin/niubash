@@ -293,6 +293,43 @@ fn issue611_ctrl_c_at_prompt_sets_status_130() {
     s.expect_prompt();
 }
 
+/// niubash#616: Ctrl-C at the prompt runs a trapped INT immediately
+/// (GNU: the trap fires before the next prompt, observes `$?` = 130 on
+/// entry, and `$?` is 130 again after it; an `exit` inside the trap
+/// ends the session with the trap's status). The marker rides through
+/// a variable so the typed trap-definition line cannot satisfy the
+/// expectation by itself.
+#[test]
+fn issue616_ctrl_c_at_prompt_runs_int_trap() {
+    if !require_pty_or_skip("issue616_ctrl_c_at_prompt_runs_int_trap") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-prompt-trap-616",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send_line("M616=zap");
+    s.expect_prompt();
+    s.send_line("trap 'echo $M616-fired; echo entry:$?' INT");
+    s.expect_prompt();
+    s.send(CTRL_C);
+    s.expect("zap-fired");
+    s.expect("entry:130");
+    s.expect_prompt();
+    s.send_line("echo after:$?");
+    s.expect("after:130");
+    s.expect_prompt();
+    // An exit inside the trap ends the session with the trap's status.
+    s.send_line("trap 'exit 3' INT");
+    s.expect_prompt();
+    s.send(CTRL_C);
+    assert_eq!(s.wait_exit(), 3);
+}
+
 /// niubash#600: Ctrl-C at the prompt echoes a literal `^C` (GNU shows
 /// it via ECHOCTL/readline). Reedline's raw mode prints nothing for
 /// the byte, so the host must echo it itself.
