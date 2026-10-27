@@ -41,7 +41,28 @@ fn scratch_home() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("niu-522-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch home");
-    dir.canonicalize().expect("canonical home")
+    let canonical = dir.canonicalize().expect("canonical home");
+    // Fixture ruling (main session, 2026-10-27): canonicalize stays — it
+    // resolves the CI runner's 8.3 short names (RUNNER~1) in TEMP to long
+    // names, which the $PWD comparison below depends on. But on Windows
+    // canonicalize always spells its result in the verbatim form
+    // (`\\?\C:\...`), and no real $HOME source (USERPROFILE, an
+    // installer, a user export) ever carries that prefix. Feeding the
+    // verbatim form as HOME made the Windows arm test a fixture
+    // construction artifact ($HOME came back `//?/C:/...`) instead of
+    // the ruled #522 split, so strip the prefix here and hand niu a
+    // realistic drive-form HOME. Assertions below are unchanged.
+    #[cfg(windows)]
+    {
+        let s = canonical.as_os_str().to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest.to_string());
+        }
+    }
+    canonical
 }
 
 fn run_with_home(home: &std::path::Path, script: &str) -> Output {
