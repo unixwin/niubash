@@ -264,6 +264,35 @@ fn ctrl_c_on_empty_line_returns_new_prompt() {
     s.expect_prompt();
 }
 
+/// niubash#611: Ctrl-C at the prompt must leave `$?` = 130 (GNU:
+/// 128+SIGINT), not whatever status the previous command left behind.
+/// Reedline swallows the ^C byte in raw mode, so no engine signal path
+/// ever records it.
+#[test]
+fn issue611_ctrl_c_at_prompt_sets_status_130() {
+    if !require_pty_or_skip("issue611_ctrl_c_at_prompt_sets_status_130") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-prompt-611",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send_line("true");
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:0");
+    s.expect_prompt();
+    s.send(CTRL_C);
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:130");
+    s.expect_prompt();
+}
+
 /// Ctrl-C with text typed discards the line: it must not execute.
 #[test]
 fn ctrl_c_midtyped_discards_line() {

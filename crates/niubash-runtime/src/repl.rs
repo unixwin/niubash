@@ -2983,6 +2983,14 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 if crate::ctrl_c::consume_ctrl_c() {
                     flush_repl_output();
                 }
+                // niubash#611: a prompt Ctrl-C discards the line, and
+                // GNU leaves $? = 130 (128+SIGINT) for it. Reedline runs
+                // the tty in raw mode, so no kernel SIGINT reaches the
+                // engine at the prompt and nothing else records the
+                // status — set it here, before the next loop iteration's
+                // PROMPT_COMMAND pass (which reads this value and then
+                // preserves it across the hook).
+                shell.borrow_mut().executor.set_last_exit_code(130);
                 pending.clear();
                 continue;
             }
