@@ -1,12 +1,13 @@
 {
   "schema": 1,
-  "rubash_rev": "368353ecf6dec179d1e1e68571fa3e8f91d6d9e3",
+  "rubash_rev": "a9385b4c6334df0c175d62d42092327077a746ed",
   "rubash_version": "1.4.3",
   "description": "Rubash source pin for niubash releases (rubash#827, conclusion B). Every release job fetches exactly this rubash commit into ../rubash -- where the [patch] path override in Cargo.toml deterministically picks it up -- and fails the release unless the checked-out HEAD equals rubash_rev. This is the source-level twin of winuxcmd-pin.json (niubash#312/#327): the bundled WinuxCmd was already pinned, but the compiled engine was \"whatever rubash master HEAD was at build time\".",
   "notes": [
     "Recorded from rubash master 4c41e2c0 (2026-10-23, Cargo.toml version 1.4.3) — adds the #1181 bulk GNU-parity wave (112 fixes: procsub/trap/env/pattern families), #1182 (helper-parity gate), #1176 (local declared-unset env residue), #1180 (wait -p / coproc unbind), #1155 (trap trio: EXIT in comsubst/pipeline, global RETURN), #1122 (procsub real pids + line numbers), #1185 (musl/ohos libc::time_t deprecation allow — the rev that unbreaks cross-target checks).",
     "Bumped to rubash master d15a02df (2026-10-25, version still 1.4.3): niubash master requires rubash::script_driver::run_script_with_history_at_line_offset_tracked (R1 grouped-reader exit-jump verdict API), absent in 4c41e2c0 — building niubash master against the old pin fails (niubash-runtime E0425).",
     "NOTE: the rev includes #863-era lock self-entry discipline; rubash Cargo.toml version 1.4.3 must match this pin's rubash_version.",
-    "Bumped to rubash master 368353ec (2026-10-26, version still 1.4.3): carries rubash#1772 -- #[allow(unused_imports)] on the debugger session-core facade re-exports. The d15a02df pin contains the un-annotated facade, so a release build under -D warnings (the CI toolchain action's default RUSTFLAGS) fails on 4 unused-imports errors in src/debugger/mod.rs; the rev also rolls up the rubash master wave merged since d15a02df (through the fix7 locale2 slice, #1752)."
+    "Bumped to rubash master 368353ec (2026-10-26, version still 1.4.3): carries rubash#1772 -- #[allow(unused_imports)] on the debugger session-core facade re-exports. The d15a02df pin contains the un-annotated facade, so a release build under -D warnings (the CI toolchain action's default RUSTFLAGS) fails on 4 unused-imports errors in src/debugger/mod.rs; the rev also rolls up the rubash master wave merged since d15a02df (through the fix7 locale2 slice, #1752).",
+    "Bumped to rubash master a9385b4c (2026-10-27, version still 1.4.3): integration refresh for the niubash PR integration round (this branch merged onto niubash master 4b164d34)."
   ]
 }
