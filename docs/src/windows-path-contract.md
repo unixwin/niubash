@@ -96,6 +96,18 @@ paths — never both, and never a guess about the child's capabilities:
   `windows_cmd_switches_are_not_mapped_into_shell_root` test) and applies to
   `cmd.exe` alone: a native program that is not `cmd` receives `/d/repo` as
   `D:\repo`.
+- **Namespace bridges stand outside the translation boundary entirely:
+  `wsl` and the OpenSSH client family (`ssh`, `scp`, `sftp`).** Their
+  arguments are not paths on this machine at all — they are interpreted
+  inside another filesystem namespace (a WSL guest's tree, an SSH remote's
+  tree) — so the Rubash executor hands every argument to them byte-for-byte
+  verbatim: no root map, no home/temp map, no drive-form rewrite, no
+  `/dev/null` rewrite. Membership in the class is the platform property of
+  being a namespace bridge; the set is the platform's fixed bridges, pinned
+  in Rubash (`is_namespace_bridge_program` and the `pathmatrix_bridge_*`
+  tests). A bridge's remote words therefore survive exactly as typed:
+  `ssh host cat /var/log/x` and `wsl cat /home/user/file` name the
+  remote/guest files the user spelled, never local ones.
 
 The boundary is structural rather than a rename of the "MSYS NO CONV"
 problem: the shell never asks a child what it can understand. The shipped
