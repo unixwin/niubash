@@ -46,7 +46,7 @@ own parse tables), plus these host-level verbs:
 - `niu config get|set|list` — persisted user settings in
   `~/.niubash/config.toml` (e.g. `completion.style`,
   `command-not-found-hint`).
-- `niu skill install|status [--target claude|zcode|cursor|all|<dir>]` —
+- `niu skill install|status [--target codex|claude|zcode|cursor|all|<dir>]` —
   install or check this agent skill bundle itself.
 - `niu plugin migrate-rc [--diff]` — read-only migration report for
   legacy managed rc blocks (also in the plugin verb table below).

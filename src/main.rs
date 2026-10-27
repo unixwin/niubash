@@ -1875,7 +1875,7 @@ fn print_usage() {
     println!("  plugin ui                 Menu UI (sections by state, same verbs)");
     println!();
     println!("  skill install|status      Install/check the AI agent skill bundle");
-    println!("                            ([--target claude|zcode|cursor|all|<dir>])");
+    println!("                            ([--target codex|claude|zcode|cursor|all|<dir>])");
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
