@@ -832,10 +832,13 @@ fn tab_completes_command_name() {
 /// if the suffix stayed a menu preview, `cat uniqfix` would fail and the
 /// body could never print.
 ///
-/// niubash#486: the unique commit leaves the menu open on the re-queried
-/// set (`uniqfix.dat` answers its own completion), so the first Enter
-/// commits that highlighted candidate — the 1.1.0 menu semantics — and the
-/// second Enter submits the completed line.
+/// Column stop rule (owner ruling 2026-10-26, zsh/bash parity): the TAB
+/// splices `uniqfix.dat` and the menu deactivates instead of lingering, so
+/// the first Enter submits the completed line straight away — no commit
+/// step in between (that two-Enter dance was the pre-fix shape, where the
+/// menu stayed live on the re-queried set). The second Enter below is then
+/// just an empty submit; the assertions (body printed, prompt back, no
+/// `No such file`) hold either way.
 #[test]
 fn tab_completes_unique_file_path() {
     if !require_pty_or_skip("tab_completes_unique_file_path") {

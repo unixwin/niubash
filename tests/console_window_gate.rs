@@ -36,6 +36,47 @@ extern "system" {
     fn Process32FirstW(snap: *mut c_void, pe: *mut ProcessEntry) -> i32;
     fn Process32NextW(snap: *mut c_void, pe: *mut ProcessEntry) -> i32;
     fn CloseHandle(h: *mut c_void) -> i32;
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn GetProcessTimes(
+        h: *mut c_void,
+        creation: *mut u64,
+        exit: *mut u64,
+        kernel: *mut u64,
+        user: *mut u64,
+    ) -> i32;
+}
+
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+/// Process creation FILETIME (100 ns ticks since 1601), 0 if unreadable.
+///
+/// Root-D adjudication: the conhost counting in `run_and_observe_exe`
+/// originally attributed every `conhost.exe` whose ppid chain reached
+/// the root PID. A conhost *lingering* from an earlier, already-dead
+/// niu whose PID was recycled as the new root satisfies that walk
+/// while never having been allocated by the observed session — under
+/// full-suite parallel load this produced phantom counts (one observed
+/// "4 distinct conhost PIDs" failure that no instrumented rerun could
+/// reproduce: 32/32 probed sessions, idle and under parallel load,
+/// showed exactly one conhost per session, created 3–27 ms after the
+/// root and alive for the whole session). A conhost allocated by/for
+/// the observed session is necessarily created at or after the root
+/// process itself; anything older is not this session's console.
+fn creation_filetime(pid: u32) -> u64 {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return 0;
+        }
+        let (mut c, mut e, mut k, mut u) = (0u64, 0u64, 0u64, 0u64);
+        let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u);
+        CloseHandle(h);
+        if ok != 0 {
+            c
+        } else {
+            0
+        }
+    }
 }
 
 #[repr(C)]
@@ -320,7 +361,14 @@ fn run_and_observe_exe(
         }
     }
     let root_pid = child.id();
+    let root_created_ft = creation_filetime(root_pid);
     let mut conhost_pids = std::collections::HashSet::new();
+    // Creation FILETIME per sighted conhost pid, queried once. Only
+    // conhosts created at/after the root count toward the session's
+    // console budget (see `creation_filetime`); an unreadable timestamp
+    // (0) keeps the sighting, failing open toward the old behavior
+    // rather than hiding a real allocation.
+    let mut conhost_created_ft: HashMap<u32, u64> = HashMap::new();
     let mut offenders = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
@@ -328,7 +376,12 @@ fn run_and_observe_exe(
         let tree: HashMap<u32, u32> = entries.iter().map(|&(p, pp, _)| (p, pp)).collect();
         for &(pid, _ppid, ref name) in &entries {
             if name == "conhost.exe" && in_tree(pid, root_pid, &tree) {
-                conhost_pids.insert(pid);
+                let created = *conhost_created_ft
+                    .entry(pid)
+                    .or_insert_with(|| creation_filetime(pid));
+                if created == 0 || root_created_ft == 0 || created >= root_created_ft {
+                    conhost_pids.insert(pid);
+                }
             }
         }
         for owner in visible_console_window_owners() {
