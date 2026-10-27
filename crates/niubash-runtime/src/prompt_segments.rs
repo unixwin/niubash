@@ -172,7 +172,15 @@ fn preset_colour(preset: SegmentPreset, segment: &SegmentId) -> SegmentColour {
 // ---- Segment content rendering ----
 
 /// Produce the raw text content (no ANSI styling) for a segment.
-fn render_content(segment: &SegmentId, config: &SegmentPromptConfig) -> Option<String> {
+///
+/// `vcs_stamp` is the calling prompt's per-pass Vcs stamp (niubash#592,
+/// S2): a stamped prompt's Vcs segment re-reads the stamp, an unstamped
+/// prompt falls back to computing at render time.
+fn render_content(
+    segment: &SegmentId,
+    config: &SegmentPromptConfig,
+    vcs_stamp: Option<&VcsPassStamp>,
+) -> Option<String> {
     match segment {
         SegmentId::Dir => {
             let cwd = std::env::current_dir().ok()?;
@@ -210,7 +218,17 @@ fn render_content(segment: &SegmentId, config: &SegmentPromptConfig) -> Option<S
             let ms = std::env::var("NIU_CMD_EXEC_TIME_MS").ok();
             ms.filter(|m| !m.is_empty()).map(|m| format!("{}ms", m))
         }
-        SegmentId::Vcs => vcs_segment_content(),
+        // niubash#592 (S2): a stamped prompt re-reads its pass's computed
+        // value — repaints never spawn. `None` in the stamp is a computed
+        // result ("no segment this pass"), not a missing value, so it is
+        // re-read too. The compute-at-render fallback remains only for
+        // unstamped prompts; in production the one unstamped renderer is
+        // the --noediting loop's resident prompt, which renders once per
+        // pass exactly as it did before S2.
+        SegmentId::Vcs => match vcs_stamp {
+            Some(stamp) => stamp.value.clone(),
+            None => vcs_segment_content(),
+        },
         SegmentId::Newline => Some(String::new()),
         SegmentId::Custom(name) => {
             let env_name = format!("NIU_SEGMENT_{}", name.to_ascii_uppercase());
@@ -334,15 +352,68 @@ impl SegmentPromptConfig {
 
 // ---- Prompt engine ----
 
+/// The Vcs value one prompt pass computed for its prompt clone
+/// (niubash#592, S2). `seq` is the pass's monotonic sequence number —
+/// probe/debugging identity for "which pass computed this value", never
+/// a freshness input (every pass recomputes unconditionally). `value`
+/// is the segment body exactly as `git_prompt::branch_segment` returned
+/// it; `None` is a computed result — outside a repository, git
+/// unavailable, or the read failed — not the absence of a computation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VcsPassStamp {
+    pub seq: u64,
+    pub value: Option<String>,
+}
+
 /// The segment-based prompt engine.
 #[derive(Debug, Clone)]
 pub struct SegmentPrompt {
     config: SegmentPromptConfig,
+    /// The per-pass Vcs stamp (niubash#592, S2), tri-state: `None` =
+    /// unstamped (a prompt no pass has handed out — the shell's resident
+    /// prompt, whose renders fall back to computing at render time);
+    /// `Some(stamp)` = stamped by `Shell::prompt_for_display` for one
+    /// pass, and this clone's renders re-read `stamp.value` instead of
+    /// spawning. The resident prompt in `Shell` is never stamped, so a
+    /// stamp physically cannot outlive the pass that computed it: the
+    /// clone carrying it is dropped when the pass's read_line returns.
+    vcs_stamp: Option<VcsPassStamp>,
 }
 
 impl SegmentPrompt {
     pub fn new(config: SegmentPromptConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            vcs_stamp: None,
+        }
+    }
+
+    /// Whether this prompt's configuration draws the Vcs segment on
+    /// either side (niubash#592: the per-pass computation only runs for
+    /// prompts that can show it). The production caller is the
+    /// Windows-gated stamp in `Shell::prompt_for_display`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn config_has_vcs(&self) -> bool {
+        self.config
+            .left_elements
+            .iter()
+            .chain(self.config.right_elements.iter())
+            .any(|element| *element == SegmentId::Vcs)
+    }
+
+    /// Stamp this prompt (a per-pass clone) with the Vcs value its pass
+    /// computed (niubash#592, S2). Called exactly once per pass by
+    /// `Shell::prompt_for_display`, after the precmd hooks have run.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn stamp_vcs(&mut self, seq: u64, value: Option<String>) {
+        self.vcs_stamp = Some(VcsPassStamp { seq, value });
+    }
+
+    /// The per-pass Vcs stamp, if this prompt was stamped (niubash#592).
+    /// Test builds only: production renders read the stamp internally.
+    #[cfg(test)]
+    pub(crate) fn vcs_stamp(&self) -> Option<&VcsPassStamp> {
+        self.vcs_stamp.as_ref()
     }
 
     /// Render the full left prompt as an ANSI-coloured string.
@@ -381,7 +452,7 @@ impl SegmentPrompt {
             if *element == SegmentId::Newline {
                 break;
             }
-            if let Some(content) = render_content(element, &self.config) {
+            if let Some(content) = render_content(element, &self.config, self.vcs_stamp.as_ref()) {
                 let (fg, bg) = self.colour_for(element, &content);
                 segments.push(RenderedSegment { content, fg, bg });
             }
@@ -422,7 +493,7 @@ impl SegmentPrompt {
                 current = Vec::new();
                 continue;
             }
-            if let Some(content) = render_content(element, &self.config) {
+            if let Some(content) = render_content(element, &self.config, self.vcs_stamp.as_ref()) {
                 let (fg, bg) = self.colour_for(element, &content);
                 current.push(RenderedSegment { content, fg, bg });
             }
@@ -654,7 +725,7 @@ mod tests {
     #[test]
     fn time_content_renders_hhmm() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg);
+        let content = render_content(&SegmentId::Time, &cfg, None);
         assert!(content.is_some());
         let s = content.unwrap();
         assert_eq!(s.len(), 5);
@@ -664,7 +735,7 @@ mod tests {
     #[test]
     fn time_segment_renders_system_local_clock() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg).unwrap();
+        let content = render_content(&SegmentId::Time, &cfg, None).unwrap();
         let expected = format_local_time();
         if content != expected {
             let expected = format_local_time();
@@ -675,7 +746,7 @@ mod tests {
     #[test]
     fn prompt_char_is_symbol() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::PromptChar, &cfg);
+        let content = render_content(&SegmentId::PromptChar, &cfg, None);
         assert_eq!(content.as_deref(), Some("\u{276f}"));
     }
 
@@ -686,7 +757,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::remove_var("NIU_LAST_EXIT_CODE");
-        let content = render_content(&SegmentId::Status, &cfg);
+        let content = render_content(&SegmentId::Status, &cfg, None);
         assert!(content.is_none());
     }
 
@@ -695,7 +766,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::set_var("NIU_LAST_EXIT_CODE", "1");
-        let content = render_content(&SegmentId::Status, &cfg);
+        let content = render_content(&SegmentId::Status, &cfg, None);
         assert!(content.is_some());
         assert!(content.unwrap().contains("1"));
         std::env::remove_var("NIU_LAST_EXIT_CODE");
@@ -704,7 +775,7 @@ mod tests {
     #[test]
     fn newline_renders_empty() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Newline, &cfg);
+        let content = render_content(&SegmentId::Newline, &cfg, None);
         assert_eq!(content, Some(String::new()));
     }
 
@@ -774,6 +845,71 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
+    }
+
+    // ---- niubash#592 (S2): per-pass Vcs stamp ----
+    //
+    // The stamp machinery is platform-independent (only the computation
+    // behind it is Windows-only), so the tri-state contract is pinned
+    // here on every platform; the spawn-count gates live with the
+    // Windows prompt tests in shell.rs.
+
+    fn vcs_only_prompt() -> SegmentPrompt {
+        SegmentPrompt::new(SegmentPromptConfig {
+            left_elements: vec![SegmentId::Vcs],
+            right_elements: Vec::new(),
+            separator: " ".to_string(),
+            prompt_symbol: "$".to_string(),
+            preset: None,
+        })
+    }
+
+    #[test]
+    fn issue592_config_has_vcs_checks_both_sides() {
+        assert!(vcs_only_prompt().config_has_vcs());
+        let mut right_only = vcs_only_prompt();
+        right_only.config.left_elements.clear();
+        right_only.config.right_elements.push(SegmentId::Vcs);
+        assert!(right_only.config_has_vcs());
+        let no_vcs = SegmentPrompt::new(SegmentPromptConfig {
+            left_elements: vec![SegmentId::Dir],
+            right_elements: Vec::new(),
+            separator: " ".to_string(),
+            prompt_symbol: "$".to_string(),
+            preset: None,
+        });
+        assert!(!no_vcs.config_has_vcs());
+    }
+
+    #[test]
+    fn issue592_stamped_prompt_renders_its_pass_value() {
+        let mut prompt = vcs_only_prompt();
+        assert!(prompt.vcs_stamp().is_none(), "fresh prompt is unstamped");
+        prompt.stamp_vcs(7, Some("hooked*".to_string()));
+        let stamp = prompt.vcs_stamp().expect("stamped");
+        assert_eq!(stamp.seq, 7);
+        assert_eq!(stamp.value.as_deref(), Some("hooked*"));
+        let left = prompt.render_left();
+        assert!(left.contains("hooked"), "{left:?}");
+    }
+
+    #[test]
+    fn issue592_stamped_none_renders_no_segment() {
+        // A stamped `None` is a computed result ("no segment this
+        // pass"), not a missing value: the render must re-read it and
+        // stay empty rather than falling back to a fresh computation.
+        let mut prompt = vcs_only_prompt();
+        prompt.stamp_vcs(1, None);
+        assert_eq!(prompt.render_left(), "");
+        assert_eq!(prompt.render_right(), "");
+    }
+
+    /// Off-Windows the unstamped fallback is the empty segment (the Vcs
+    /// surface is Windows-only), so an unstamped prompt renders nothing.
+    #[cfg(not(windows))]
+    #[test]
+    fn issue592_unstamped_prompt_renders_empty_off_windows() {
+        assert_eq!(vcs_only_prompt().render_left(), "");
     }
 
     // ---- SegmentId::Vcs (niubash#331) ----
@@ -1052,7 +1188,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn vcs_segment_render_p50_within_the_render_budget() {
+    fn vcs_segment_per_pass_computation_p50_within_the_budget() {
         // Issue #331 scope 4 originally held p50 <= 10ms around the in-process
         // git2 read. The segment now runs the user's own git by design (see
         // git_prompt.rs: fidelity is the point): one bounded
@@ -1079,6 +1215,23 @@ mod tests {
         //      the ratio, so a hang or an unbounded sweep cannot hide behind
         //      an inflated baseline. VCS_BUDGET_SOFT_WARN_MS keeps the old
         //      budget visible as a warn only.
+        //
+        // niubash#592 (S2) premise change, stated openly: this gate used to
+        // sample `vcs_segment_content()` — the per-RENDER computation, back
+        // when every repaint re-ran it. Under S2 a render no longer
+        // computes at all: `Shell::prompt_for_display` computes the value
+        // once per prompt pass via `git_prompt::branch_segment` and the
+        // pass's repaints re-read the stamp. The gate's subject therefore
+        // moves to that per-pass computation, sampled here by calling
+        // `branch_segment` directly (the same call the stamp performs).
+        // The assertions are unchanged in form and value — segment p50
+        // <= 1.5x the bare-spawn baseline p50 (VCS_BUDGET_RELATIVE_MULT),
+        // the 45 ms soft warn, the 135 ms hard cap, and the
+        // `bare_status_spawn` baseline are all exactly as before; only
+        // the sampled entry point changed, from the render shim to the
+        // per-pass computation. (The gate's previous name,
+        // `vcs_segment_render_p50_within_the_render_budget`, changed with
+        // its subject.)
         let tmp = tempfile::tempdir().unwrap();
         if !init_clean_repo(tmp.path()) {
             return;
@@ -1087,7 +1240,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd = CwdGuard::enter(tmp.path());
         for _ in 0..3 {
-            let _ = vcs_segment_content(); // warm-up
+            let _ = crate::git_prompt::branch_segment(tmp.path()); // warm-up
         }
         const SAMPLES: usize = 21;
         let mut baseline: Vec<std::time::Duration> = Vec::with_capacity(SAMPLES);
@@ -1095,7 +1248,7 @@ mod tests {
         for _ in 0..SAMPLES {
             baseline.push(bare_status_spawn(tmp.path()));
             let start = std::time::Instant::now();
-            let _ = vcs_segment_content();
+            let _ = crate::git_prompt::branch_segment(tmp.path());
             samples.push(start.elapsed());
         }
         baseline.sort();
