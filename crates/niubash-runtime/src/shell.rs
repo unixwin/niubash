@@ -932,6 +932,26 @@ impl Shell {
         }
     }
 
+    /// Classify an `ExecuteError::ExitCode` unwind surfacing from an
+    /// interactive submission (niubash#610). The engine's grouped driver
+    /// makes this exact split (script_driver.rs, rubash#1662): a signal
+    /// DISCARD — an untrapped SIGINT delivered to an interactive shell,
+    /// marked by the boundary dispatch via `signal_discard_pending` —
+    /// is not a jump_to_top_level exit; the submission simply ends with
+    /// `$? = code` and the reader prompts again. Only a non-discard
+    /// unwind (a real top-level `exit`, errexit, ...) arms the session
+    /// jump, via [`Shell::note_session_exit_jump`] (which itself
+    /// excludes parse aborts, niubash R1).
+    fn note_exit_code_unwind(&mut self, code: i32) {
+        if self.executor.take_signal_discard_pending() {
+            // Consume the parse flag exactly as note_session_exit_jump
+            // would, so no stale flag leaks into the next submission.
+            let _ = self.executor.take_parse_error();
+            return;
+        }
+        self.note_session_exit_jump(code);
+    }
+
     /// Take the pending interactive exit jump (niubash R1): `Some(status)`
     /// means the last submission ended in a top-level `exit`/errexit unwind
     /// and the REPL must end the session with that status.
@@ -987,9 +1007,10 @@ impl Shell {
                 Ok(code) => code,
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => {
                     // Keep `$?` in sync (#542) and record the jump so the
-                    // REPL ends the session (#544 R1).
+                    // REPL ends the session (#544 R1) — unless the unwind
+                    // is a signal discard (#610).
                     self.executor.set_last_exit_code(code);
-                    self.note_session_exit_jump(code);
+                    self.note_exit_code_unwind(code);
                     code
                 }
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
@@ -997,6 +1018,15 @@ impl Shell {
                 Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => {
                     self.note_session_exit_jump(code);
                     code
+                }
+                Err(rubash::executor::ExecuteError::SigintUnwind) => {
+                    // rubash#1639 DISCARD verdict (the engine's grouped
+                    // driver maps it identically): the foreground job
+                    // died of SIGINT, the line is discarded, the reader
+                    // prompts again with $? = 130 — no diagnostic, no
+                    // session jump (niubash#610).
+                    self.executor.set_last_exit_code(130);
+                    130
                 }
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                     eprintln!("niubash: {}: command not found", cmd);
@@ -1016,7 +1046,7 @@ impl Shell {
                 Ok(()) => self.executor.last_exit_code(),
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => {
                     self.executor.set_last_exit_code(code);
-                    self.note_session_exit_jump(code);
+                    self.note_exit_code_unwind(code);
                     code
                 }
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
@@ -1024,6 +1054,15 @@ impl Shell {
                 Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => {
                     self.note_session_exit_jump(code);
                     code
+                }
+                Err(rubash::executor::ExecuteError::SigintUnwind) => {
+                    // rubash#1639 DISCARD verdict (the engine's grouped
+                    // driver maps it identically): the foreground job
+                    // died of SIGINT, the line is discarded, the reader
+                    // prompts again with $? = 130 — no diagnostic, no
+                    // session jump (niubash#610).
+                    self.executor.set_last_exit_code(130);
+                    130
                 }
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                     eprintln!("niubash: {}: command not found", cmd);
@@ -3057,17 +3096,29 @@ impl Shell {
         let code = match execution {
             Ok(code) => code,
             Err(rubash::executor::ExecuteError::ExitCode(code)) => {
-                // niubash#402: the script unwound with a top-level `exit`
-                // (GNU jump_to_top_level EXITPROG; the engine uses the same
-                // `ExitCode` classification for the errexit ERREXIT unwind —
-                // GNU terminates for both), so record it. The startup-file
-                // sourcer ends the invocation with this status instead of
-                // reading it as an ordinary command result.
-                self.script_exit_jump = true;
-                // niubash R1: an interactive multi-line submission that
-                // unwound the same way must end the REPL session too —
-                // `execute_interactive_script` feeds straight through here.
-                self.note_session_exit_jump(code);
+                if self.executor.take_signal_discard_pending() {
+                    // niubash#610: a signal DISCARD (rubash#1662 — an
+                    // untrapped SIGINT delivered to an interactive
+                    // shell, e.g. Ctrl-C interrupting a pipeline inside
+                    // a multi-line block) is not an exit for either jump
+                    // ledger: the block ends with `$? = code` and the
+                    // caller carries on. Consume the parse flag exactly
+                    // as note_session_exit_jump would, so no stale flag
+                    // leaks into the next submission.
+                    let _ = self.executor.take_parse_error();
+                } else {
+                    // niubash#402: the script unwound with a top-level `exit`
+                    // (GNU jump_to_top_level EXITPROG; the engine uses the same
+                    // `ExitCode` classification for the errexit ERREXIT unwind —
+                    // GNU terminates for both), so record it. The startup-file
+                    // sourcer ends the invocation with this status instead of
+                    // reading it as an ordinary command result.
+                    self.script_exit_jump = true;
+                    // niubash R1: an interactive multi-line submission that
+                    // unwound the same way must end the REPL session too —
+                    // `execute_interactive_script` feeds straight through here.
+                    self.note_session_exit_jump(code);
+                }
                 code
             }
             Err(rubash::executor::ExecuteError::Return(code)) => code,
@@ -3075,6 +3126,12 @@ impl Shell {
             Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => {
                 self.note_session_exit_jump(code);
                 code
+            }
+            Err(rubash::executor::ExecuteError::SigintUnwind) => {
+                // rubash#1639 DISCARD verdict, same split as the line
+                // route (niubash#610): no diagnostic, no jump ledgers.
+                self.executor.set_last_exit_code(130);
+                130
             }
             Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
                 eprintln!("niubash: {}: command not found", cmd);
