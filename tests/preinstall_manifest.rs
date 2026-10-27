@@ -420,3 +420,37 @@ fn string_list_of(manifest: &Value, key: &str) -> Vec<String> {
         })
         .unwrap_or_default()
 }
+
+/// niubash#545: the bundled niugit must not regress below the
+/// Git-for-Windows 2.56.0(3) security rebuild (CVE-2026-105803 /
+/// eMudhra CA refresh). The manifest's version floor is 2.56.0.2 —
+/// the niu-git build stamped from 2.56.0.windows.3. A future pin
+/// edit may move the version UP freely; silently dropping it below
+/// the security floor is what this pin refuses.
+#[test]
+fn niugit_pin_stays_at_or_above_security_floor() {
+    let manifest = load_manifest();
+    let packages = manifest
+        .get("packages")
+        .and_then(Value::as_array)
+        .expect("manifest packages must be an array");
+    let niugit = packages
+        .iter()
+        .find(|pkg| pkg.get("name").and_then(Value::as_str) == Some("niugit"))
+        .expect("manifest must pin a niugit package");
+    let version = niugit
+        .get("version")
+        .and_then(Value::as_str)
+        .expect("niugit pin must carry a version");
+    let parts: Vec<u64> = version
+        .split('.')
+        .map(|part| {
+            part.parse::<u64>()
+                .unwrap_or_else(|_| panic!("niugit version {version:?} must be dotted numbers"))
+        })
+        .collect();
+    assert!(
+        parts.as_slice() >= [2, 56, 0, 2].as_slice(),
+        "niugit {version} is below the niubash#545 security floor 2.56.0.2"
+    );
+}

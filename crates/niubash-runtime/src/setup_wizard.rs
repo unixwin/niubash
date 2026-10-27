@@ -769,9 +769,8 @@ fn builtin_presets() -> Vec<Preset> {
             summary: "safe everywhere: no extra aliases".into(),
             cwd_style: "home".into(),
             // The non-interactive fallback preset: it follows the product
-            // default (gnu, owner ruling 2026-10-12) instead of pinning the
-            // old column shape over scripted installs.
-            completion_style: "gnu".into(),
+            // default (column, owner ruling 2026-10-14).
+            completion_style: "column".into(),
             aliases: BTreeMap::new(),
             conditional_aliases: BTreeMap::new(),
         },

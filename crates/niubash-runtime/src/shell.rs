@@ -22,7 +22,7 @@ use crate::config::{
     load as load_config, AutosuggestConfig, CommandNotFoundHint, EditorMode, HookConfig,
     MenuConfig, NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
 };
-use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path, split_shell_path_list};
 use crate::prompt::{BashPrompt, NiubashPrompt, PromptBackend};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
@@ -202,11 +202,13 @@ pub struct Shell {
     // excluded at the set sites (`take_parse_error`), so an interactive
     // syntax error still only discards its own group.
     session_exit_jump: Option<i32>,
-    // One-shot fast path (`Shell::new_one_shot`): the shell serves a single
-    // non-interactive command, so REPL-only state is never initialized and
-    // the prompt backend stays a bare placeholder. Bash renders no prompt and
-    // reads no completion state when non-interactive; the history provider
-    // and managed aliases still stay (both pinned by contract tests for -c).
+    // Non-interactive fast path (`Shell::new_one_shot`,
+    // `Shell::new_for_stdin_script_fast`): the shell serves a non-interactive
+    // run that can never reach the REPL, so REPL-only state is never
+    // initialized and the prompt backend stays a bare placeholder. Bash
+    // renders no prompt and reads no completion state when non-interactive;
+    // the history provider and managed aliases still stay (both pinned by
+    // contract tests for -c).
     pub one_shot: bool,
 }
 
@@ -281,8 +283,29 @@ impl Shell {
     }
 
     /// Construct a shell for scripts arriving on process stdin.
+    ///
+    /// This is the full constructor: a stdin shell built here can still be
+    /// promoted to the REPL by its caller (`-i`, or a terminal stdio set),
+    /// so the prompt backend and completion state are initialized eagerly.
     pub fn new_for_stdin_script() -> anyhow::Result<Self> {
         Self::new_with_script_name(None, false)
+    }
+
+    /// Construct a shell for scripts arriving on process stdin when the
+    /// invocation is provably non-interactive (niubash#562): no `-i`, and
+    /// the stdio set is not a terminal, so the caller will never promote
+    /// this shell to the REPL or the interactive stdin driver.
+    ///
+    /// Same stdin naming contract as [`Shell::new_for_stdin_script`] (no
+    /// script name is pre-bound; the caller binds argv\[0\] itself), but
+    /// the REPL-only initialization is skipped exactly as in
+    /// [`Shell::new_one_shot`] — the full prompt backend, the completion
+    /// directory scan, and the completion snapshot. The startup-file
+    /// behavior is untouched: the login profile chain and BASH_ENV are
+    /// sourced by the caller after construction, driven by executor marks
+    /// and shell fields both constructors produce identically.
+    pub fn new_for_stdin_script_fast() -> anyhow::Result<Self> {
+        Self::new_with_script_name(None, true)
     }
 
     /// Construct a minimal shell for non-interactive one-shot execution
@@ -371,7 +394,15 @@ impl Shell {
         if std::env::var("NIU_ENABLE_RUBASH_SUDO").as_deref() != Ok("1") {
             executor.set_builtin_disabled("sudo", true);
         }
-        let shell_name = invoked_as.or_else(|| std::env::args().next());
+        // niubash#578: argv[0] via args_os + lossy, never env::args() —
+        // a non-Unicode face name (byte-named link, unpaired surrogate)
+        // must not panic Shell construction; the lossy form is what the
+        // face/$0 contract can show for such a name.
+        let shell_name = invoked_as.or_else(|| {
+            std::env::args_os()
+                .next()
+                .map(|arg| arg.to_string_lossy().into_owned())
+        });
         let mut invoked_as_rbash = false;
         if let Some(shell_name) = shell_name {
             let invoked_name = shell_name
@@ -1025,7 +1056,9 @@ impl Shell {
         let code =
             match rubash::script_driver::pre_process_interactive_line(&mut self.executor, line) {
                 rubash::script_driver::InteractiveExpansion::Execute(expanded) => {
-                    self.execute_line_with_options(&expanded, true, line_offset)?
+                    let code = self.execute_line_with_options(&expanded, true, line_offset)?;
+                    self.invalidate_command_probe_after_line(&expanded);
+                    code
                 }
                 rubash::script_driver::InteractiveExpansion::Discard => {
                     self.executor.last_exit_code()
@@ -1059,6 +1092,7 @@ impl Shell {
         let line_offset = self.interactive_lines_read;
         self.interactive_lines_read += script.split_inclusive('\n').count().max(1);
         let code = self.execute_script_with_options(script, true, line_offset)?;
+        self.invalidate_command_probe_after_line(script);
         self.remember_interactive_command(script, code);
         let new_pwd = self.executor.get_env("PWD").map(str::to_owned);
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
@@ -1329,6 +1363,20 @@ impl Shell {
         if login {
             // The profile chain replaces the rc branch only (shell.c:1833);
             // the env files above are not part of that exchange.
+            // niubash#590: the generated plugin loader is niu's own
+            // activation plane, not the rc — the docs promise the host
+            // sources it with no login exception, and returning here
+            // silently disabled every plugin and theme for login shells.
+            // Load it after the profile, before the completion snapshot
+            // (so loader-provided definitions and NIU_* registrations
+            // reach the REPL like they do on the rc branch); an `exit`
+            // inside unwinds like any startup file. Nothing else is
+            // sourced on this branch, so the double-execution guard has
+            // no rc text to scan (None). The rc itself stays skipped —
+            // that half is GNU login parity.
+            if let Some(status) = self.load_generated_plugin_loader(None) {
+                return Some(status);
+            }
             self.update_completion_state();
             if repl {
                 self.finish_startup();
@@ -1409,6 +1457,21 @@ impl Shell {
     fn load_generated_plugin_loader(&mut self, rc_path: Option<&Path>) -> Option<i32> {
         let rc_text = rc_path.and_then(|path| std::fs::read_to_string(path).ok());
         let loader_text = crate::plugins::loader::read_loader_text();
+        if loader_text.is_none() {
+            // niubash#586 (secondary face): read_loader_text folds an
+            // unreadable or non-UTF-8 loader into the same None as a
+            // missing one, so a corrupt loader failed silently. A file
+            // that exists but cannot be read as text is diagnosed, not
+            // loaded and not mistaken for "no plugins yet".
+            let path = crate::plugins::loader::loader_path();
+            if path.is_file() {
+                eprintln!(
+                    "niu: warning: the generated plugin loader exists but could not be read \
+                     as text, so it was not loaded: {}; regenerate it with `niu plugin sync`",
+                    path.display()
+                );
+            }
+        }
         match crate::plugins::loader::startup_decision(rc_text.as_deref(), loader_text.as_deref()) {
             crate::plugins::loader::StartupDecision::Missing
             | crate::plugins::loader::StartupDecision::OptedOut => None,
@@ -1427,6 +1490,18 @@ impl Shell {
                          niu plugin migrate-rc"
                     );
                 }
+                None
+            }
+            crate::plugins::loader::StartupDecision::Invalid(reason) => {
+                // niubash#586: a truncated or foreign loader is never
+                // sourced (the validate() gate in startup_decision).
+                // Warn with the path and the regeneration verb, and
+                // keep the shell fully usable without the loader.
+                eprintln!(
+                    "niu: warning: the generated plugin loader failed validation and was \
+                     not loaded ({reason}): {}; regenerate it with `niu plugin sync`",
+                    crate::plugins::loader::loader_path().display()
+                );
                 None
             }
             crate::plugins::loader::StartupDecision::Load => {
@@ -1589,8 +1664,19 @@ impl Shell {
     }
 
     fn source_non_interactive_startup_file(&mut self) -> Option<i32> {
-        let niu_raw = std::env::var(NIU_ENV_VAR)
-            .ok()
+        // niubash#588: GNU reads the shell variable table, which by the
+        // time the env file is considered already carries whatever the
+        // login profile exported (source_non_interactive_env runs the
+        // profile chain first, this gate second) — a profile that
+        // exports BASH_ENV points the shell at the file. Mirror the
+        // $ENV read in execute_env_file: executor table first, process
+        // environment as fallback. NIU_ENV keeps precedence over
+        // BASH_ENV in both sources.
+        let niu_raw = self
+            .executor
+            .get_env(NIU_ENV_VAR)
+            .map(str::to_owned)
+            .or_else(|| std::env::var(NIU_ENV_VAR).ok())
             .filter(|value| !value.trim().is_empty());
         // GNU shell.c:1216 gates BASH_ENV on posixly_correct == 0 and
         // act_like_sh == 0; NIU_ENV stays available as the niubash extension
@@ -1598,8 +1684,10 @@ impl Shell {
         let bash_raw = if self.posix_mode_active() {
             None
         } else {
-            std::env::var(BASH_ENV_VAR)
-                .ok()
+            self.executor
+                .get_env(BASH_ENV_VAR)
+                .map(str::to_owned)
+                .or_else(|| std::env::var(BASH_ENV_VAR).ok())
                 .filter(|value| !value.trim().is_empty())
         };
         let raw = niu_raw.or(bash_raw)?;
@@ -1631,15 +1719,69 @@ impl Shell {
     /// directory; the remainder goes through the executor's path resolver so
     /// /c/..., C:/..., and native backslash spellings all work.
     fn resolve_non_interactive_env_path(&self, raw: &str) -> PathBuf {
-        let expanded = if raw == "~" {
+        // niubash#589: GNU expands the env-file value before opening it
+        // (tilde + parameter expansion against the shell variable
+        // table); the old resolver expanded only "~" and "~/" and let
+        // `$HOME/...`, `${VAR}`, `~user` and `~\` fall through to the
+        // path resolver literally, where the missing file was then
+        // skipped silently — the startup file simply never ran.
+        let expanded = self.expand_env_file_value(raw);
+        let path = if expanded == "~" {
             self.home_dir.clone()
-        } else if let Some(rest) = raw.strip_prefix("~/") {
+        } else if let Some(rest) = expanded.strip_prefix("~/") {
+            self.home_dir.join(rest)
+        } else if let Some(rest) = expanded.strip_prefix("~\\") {
             self.home_dir.join(rest)
         } else {
-            PathBuf::from(shell_path_to_host_path(raw))
+            PathBuf::from(shell_path_to_host_path(&expanded))
         };
-        self.executor
-            .resolve_shell_path(&expanded.to_string_lossy())
+        self.executor.resolve_shell_path(&path.to_string_lossy())
+    }
+
+    /// Expand an env-file value (NIU_ENV / BASH_ENV / $ENV) the way GNU
+    /// expands it before maybe_execute_file: a leading `~user` resolves
+    /// against that user's home, then `$VAR` / `${VAR}` substitute from
+    /// the executor variable table (process environment as fallback —
+    /// the same read order as the variable lookup itself, niubash#588).
+    /// Only the plain forms are expanded; a braced form that is not a
+    /// plain name is left literal rather than half-expanded, and an
+    /// unresolvable `~user` stays literal too (GNU leaves the tilde in
+    /// place when no home can be found). Expansion is a single pass:
+    /// substituted values are data, never re-expanded.
+    fn expand_env_file_value(&self, raw: &str) -> String {
+        let after_tilde = self.expand_env_file_tilde_user(raw);
+        expand_env_file_params(&after_tilde, |name| {
+            self.executor
+                .get_env(name)
+                .map(str::to_owned)
+                .or_else(|| std::env::var(name).ok())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Resolve a leading `~user` prefix (niubash#589). The bare forms
+    /// ("~", "~/", "~\") name the shell's own home, which the caller
+    /// resolves against home_dir — leave those untouched here.
+    fn expand_env_file_tilde_user(&self, raw: &str) -> String {
+        let Some(rest) = raw.strip_prefix('~') else {
+            return raw.to_string();
+        };
+        // The tilde prefix runs to the first separator, '/' or '\'
+        // alike (the Windows-first spelling `~\` is a filed shape).
+        let sep = rest.find(['/', '\\']).unwrap_or(rest.len());
+        let user = &rest[..sep];
+        if user.is_empty() {
+            return raw.to_string();
+        }
+        let home = if current_login_user().as_deref() == Some(user) {
+            Some(self.home_dir.clone())
+        } else {
+            passwd_home_dir(user)
+        };
+        match home {
+            Some(home) => format!("{}{}", home.to_string_lossy(), &rest[sep..]),
+            None => raw.to_string(),
+        }
     }
 
     fn startup_rc_path(&self) -> Option<PathBuf> {
@@ -2362,6 +2504,23 @@ impl Shell {
         }
     }
 
+    /// niubash#574: forget the highlighter's memoized live-probe answers
+    /// after a submitted line that can move command resolution without
+    /// moving the probe fingerprint — `hash` (every form mutates or clears
+    /// the table) and `wpm` (install/remove/update change the filesystem
+    /// while PATH stays byte-identical). Per-command exit status is not
+    /// visible once a compound line runs, so the memo — only a cache — is
+    /// cleared unconditionally on detection; a spurious clear just means
+    /// the next paint re-probes.
+    fn invalidate_command_probe_after_line(&self, text: &str) {
+        if self.one_shot || !line_touches_command_resolution(&tokenize(text)) {
+            return;
+        }
+        if let Ok(mut state) = self.completion_state.lock() {
+            state.command_probe.clear();
+        }
+    }
+
     /// Update the shared completion state from the current env + cwd.
     pub fn update_completion_state(&self) {
         // One-shot shells have no REPL that reads completion state; the full
@@ -2536,6 +2695,20 @@ impl Shell {
         }
     }
 
+    /// niubash#576: whether the most recent script run through this
+    /// shell unwound via a top-level jump — GNU jump_to_top_level
+    /// (EXITPROG for `exit`, ERREXIT for an errexit abort) — rather
+    /// than ending on an ordinary command status.
+    /// `execute_script_inner` records the jump in `script_exit_jump`
+    /// when it flattens the engine's `ExitCode` unwind into a plain
+    /// status (niubash#402); batch-feeding drivers (the host's stdin
+    /// reader) must observe it to stop feeding, exactly as GNU's
+    /// reader_loop is unwound by the jump. Take-style: each check
+    /// clears the flag, like `Executor::take_exit_jump_pending`.
+    pub fn take_script_exit_jump(&mut self) -> bool {
+        std::mem::take(&mut self.script_exit_jump)
+    }
+
     /// Run the session-end history write on demand (GNU exit_shell ->
     /// write_history, bashhist.c).
     ///
@@ -2677,8 +2850,29 @@ impl Shell {
                     self.executor.alias_expansion_enabled(),
                 ))
         {
-            let code =
-                rubash::script_driver::run_script_with_history(&mut self.executor, &script, None);
+            // niubash#576: take the TRACKED grouped run and record an
+            // unwind in `script_exit_jump`, like the ExitCode arm below
+            // does for the tokenize+execute route. The untracked run
+            // drops the classification (the grouped driver takes the
+            // executor's exit-jump flag itself), so a batch feeder saw
+            // only a plain nonzero status for e.g. an alias that expands
+            // to `exit 3` and kept feeding the stream — GNU's
+            // jump_to_top_level unwinds reader_loop for good. The
+            // tracked entry is the engine's host-facing one (the REPL
+            // reader route uses it for the same reason); it also keeps
+            // a host-owned history provider authoritative instead of
+            // installing a scratch session over it (niubash#508).
+            let (code, unwound) =
+                rubash::script_driver::run_script_with_history_at_line_offset_tracked(
+                    &mut self.executor,
+                    &script,
+                    line_offset,
+                    None,
+                );
+            if unwound {
+                self.script_exit_jump = true;
+                self.note_session_exit_jump(code);
+            }
             self.sync_process_cwd_from_executor_pwd();
             self.sync_process_path_from_executor_path();
             self.sync_alias_mirror_from_executor();
@@ -3290,6 +3484,41 @@ fn simple_command_word_index(tokens: &[Token], start: usize, end: usize) -> Opti
         }
     }
     None
+}
+
+/// True when a tokenized line runs `hash` or `wpm` at any command position
+/// (niubash#574's probe-memo invalidation trigger).
+fn line_touches_command_resolution(tokens: &[Token]) -> bool {
+    let mut start = 0;
+    while start < tokens.len() {
+        let end = find_command_separator(tokens, start).unwrap_or(tokens.len());
+        let mut stage_start = start;
+        while stage_start < end {
+            let stage_end = find_pipeline_separator(tokens, stage_start, end).unwrap_or(end);
+            if let Some(index) = simple_command_word_index(tokens, stage_start, stage_end) {
+                let name = decode_to_visible_text(&tokens[index].value);
+                if command_resolution_mutator(&name) {
+                    return true;
+                }
+            }
+            stage_start = stage_end + 1;
+        }
+        if end == tokens.len() {
+            break;
+        }
+        start = end + 1;
+    }
+    false
+}
+
+fn command_resolution_mutator(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let stem = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".cmd"))
+        .or_else(|| name.strip_suffix(".bat"))
+        .unwrap_or(&name);
+    matches!(stem, "hash" | "wpm")
 }
 
 enum WinuxCmdShim {
@@ -4006,6 +4235,100 @@ fn is_broken_pipe_io_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
 }
 
+/// The login name of the user running this process, for `~user`
+/// env-file expansion (niubash#589): USER on Unix-likes, USERNAME on
+/// Windows. `None` when neither is set — a named tilde then falls back
+/// to the passwd lookup and, failing that, stays literal.
+fn current_login_user() -> Option<String> {
+    std::env::var("USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+}
+
+/// Home directory of a named user from the passwd database, for
+/// `~user` env-file expansion (niubash#589). Platforms without a
+/// passwd database (Windows) resolve only the current user, which the
+/// caller handles before consulting this.
+#[cfg(unix)]
+fn passwd_home_dir(user: &str) -> Option<PathBuf> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in passwd.lines() {
+        let mut fields = line.split(':');
+        if fields.next() == Some(user) {
+            let home = fields.nth(4)?;
+            if !home.is_empty() {
+                return Some(PathBuf::from(home));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn passwd_home_dir(_user: &str) -> Option<PathBuf> {
+    None
+}
+
+/// A plain shell variable name (`[A-Za-z_][A-Za-z0-9_]*`) — the only
+/// braced form env-file expansion substitutes (niubash#589).
+fn is_plain_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Single-pass `$VAR` / `${VAR}` substitution for env-file values
+/// (niubash#589): `$` followed by anything that is not a plain name or
+/// a plain braced name is copied through literally, so a value can
+/// never be half-expanded into a different path than the user wrote.
+fn expand_env_file_params(value: &str, lookup: impl Fn(&str) -> String) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '$' || i + 1 >= chars.len() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if chars[i + 1] == '{' {
+            if let Some(close) = (i + 2..chars.len()).find(|&j| chars[j] == '}') {
+                let name: String = chars[i + 2..close].iter().collect();
+                if is_plain_env_var_name(&name) {
+                    out.push_str(&lookup(&name));
+                    i = close + 1;
+                    continue;
+                }
+            }
+            out.push('$');
+            i += 1;
+            continue;
+        }
+        let first = chars[i + 1];
+        if first.is_ascii_alphabetic() || first == '_' {
+            let mut end = i + 1;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[i + 1..end].iter().collect();
+            out.push_str(&lookup(&name));
+            i = end;
+            continue;
+        }
+        out.push('$');
+        i += 1;
+    }
+    out
+}
+
 fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
     let home = host_path_to_shell_path(&home_dir.to_string_lossy());
     let current = executor.get_env("HOME").unwrap_or_default();
@@ -4246,38 +4569,6 @@ fn process_path_from_shell_path_list(value: &str, env: Option<&HashMap<String, S
         .flat_map(|entry| shell_path_entry_to_process_paths(&entry, env))
         .collect::<Vec<_>>()
         .join(";")
-}
-
-fn split_shell_path_list(value: &str) -> Vec<String> {
-    let bytes = value.as_bytes();
-    let mut entries = Vec::new();
-    let mut entry_start = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        let is_separator = match byte {
-            b';' => true,
-            b':' => !is_windows_drive_colon(bytes, entry_start, index),
-            _ => false,
-        };
-        if is_separator {
-            if entry_start < index {
-                entries.push(value[entry_start..index].to_string());
-            }
-            entry_start = index + 1;
-        }
-    }
-    if entry_start < value.len() {
-        entries.push(value[entry_start..].to_string());
-    }
-    entries
-}
-
-fn is_windows_drive_colon(bytes: &[u8], entry_start: usize, colon: usize) -> bool {
-    cfg!(windows)
-        && colon == entry_start + 1
-        && bytes[entry_start].is_ascii_alphabetic()
-        && bytes
-            .get(colon + 1)
-            .is_some_and(|next| matches!(next, b'\\' | b'/'))
 }
 
 fn shell_path_entry_to_process_paths(
@@ -6535,6 +6826,42 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(names, vec![None, None]);
     }
 
+    /// niubash#574: the probe-memo invalidation trigger sees `hash`/`wpm`
+    /// at any command position and ignores them elsewhere.
+    #[test]
+    fn probe_memo_invalidation_tracks_hash_and_wpm_words() {
+        for line in [
+            "hash -r",
+            "hash",
+            "hash -d ls",
+            "hash -p /x y",
+            "wpm install eza",
+            "wpm.exe remove eza",
+            "WPM update",
+            "ls; hash -d foo | cat",
+            "ls && wpm list",
+            "PATH=/tmp wpm index update",
+        ] {
+            assert!(
+                line_touches_command_resolution(&tokenize(line)),
+                "expected {line:?} to invalidate the probe memo"
+            );
+        }
+        for line in [
+            "echo hash",
+            "echo wpm install eza",
+            "hashish -r",
+            "pwpm install eza",
+            "ls -la",
+            "type hash",
+        ] {
+            assert!(
+                !line_touches_command_resolution(&tokenize(line)),
+                "expected {line:?} not to invalidate the probe memo"
+            );
+        }
+    }
+
     #[test]
     fn file_helpers_stay_on_path_resolution_surface() {
         if !cfg!(windows) {
@@ -6774,6 +7101,32 @@ complete -F _envtooldyn_hook envtooldyn
 
         assert!(shell.one_shot);
         assert!(matches!(shell.prompt, PromptBackend::Template(_)));
+    }
+
+    #[test]
+    fn issue562_stdin_fast_shell_skips_repl_only_init() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = Shell::new_for_stdin_script_fast().expect("stdin fast shell should initialize");
+
+        // The #562 fast path carries the same REPL-free construction as a
+        // one-shot shell: placeholder prompt backend, no completion scan.
+        assert!(shell.one_shot);
+        assert!(matches!(shell.prompt, PromptBackend::Template(_)));
+        // …but the stdin naming contract is the stdin one, not the -c one:
+        // no script name is pre-bound, so the caller binds argv[0] itself
+        // (see run_stdin_script's __RUBASH_SCRIPT_NAME binding).
+        assert!(shell.executor.get_env("__RUBASH_SCRIPT_NAME").is_none());
+    }
+
+    #[test]
+    fn issue562_stdin_full_shell_keeps_repl_capable_init() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = Shell::new_for_stdin_script().expect("stdin shell should initialize");
+
+        // The full stdin constructor stays promotable to the REPL (-i or a
+        // terminal stdio set), so it must NOT take the fast path.
+        assert!(!shell.one_shot);
+        assert!(shell.executor.get_env("__RUBASH_SCRIPT_NAME").is_none());
     }
 
     #[test]

@@ -9,14 +9,17 @@ Niubash ships the Windows release in two package shapes:
   smaller than the `.zip`, and Windows 10+ untars it natively
   (`tar -xf ...`). The `.zip` stays for tooling that only speaks zip.
 
-Or install with winget (same per-user Inno Setup installer, x64 and arm64):
+A winget package is on its way: manifests for 1.4.4 under
+`Unixwin.Niubash` have been submitted and are in Microsoft's review
+queue. Once they merge, the same per-user Inno Setup installer
+(x64 and arm64) will install with:
 
 ```pwsh
 winget install --id Unixwin.Niubash
 ```
 
-The winget manifest publishes 1.4.3 under `Unixwin.Niubash`,
-so `winget upgrade --id Unixwin.Niubash` follows new versions.
+and `winget upgrade --id Unixwin.Niubash` will follow new versions.
+Until then, use the setup.exe or portable archives above.
 
 Linux (x86_64, aarch64) and macOS (aarch64, x86_64) ship as portable
 `.tar.gz` archives that use the system's own tools — untar and run `niu`.
