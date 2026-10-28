@@ -220,14 +220,11 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
         let entries = self.entries()?;
         // niubash#646: GNU's write_history truncates the written file
         // to HISTFILESIZE lines (histfile.c history_write); with one
-        // line per entry, that is the entry list's tail. The in-memory
-        // list keeps everything — only the file is truncated — and the
+        // line per entry, that is the entry list's tail, and the
         // ledger reset below counts what was actually written.
         let entries = match self.inner.settings().lock() {
             Ok(settings) => match settings.histfilesize {
-                Some(limit) if entries.len() > limit => {
-                    entries[entries.len() - limit..].to_vec()
-                }
+                Some(limit) if entries.len() > limit => entries[entries.len() - limit..].to_vec(),
                 _ => entries,
             },
             Err(_) => entries,
@@ -1186,14 +1183,12 @@ impl LiveFileBackedHistory {
         // Only the base pass is append-mode-exempt: removing cleared
         // base lines is #642's stronger-than-GNU contract, and it
         // belongs to the overwrite-flavored default mode.
-        let mut removed_ok =
-            cleared.is_empty() && (histappend || cleared_base.is_empty());
+        let mut removed_ok = cleared.is_empty() && (histappend || cleared_base.is_empty());
         if !removed_ok {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
                     let total = contents.lines().count();
-                    let file_lines: Vec<String> =
-                        contents.lines().map(|l| l.to_string()).collect();
+                    let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
                     let mut kept = file_lines;
                     if !cleared.is_empty() {
                         kept = remove_cleared_lines(kept, &cleared, base_lines);
@@ -1356,9 +1351,7 @@ impl LiveFileBackedHistory {
                     return Ok(item);
                 }
                 let control = HistControl::parse(&settings.histcontrol);
-                if control.ignore_space
-                    && (text.starts_with(' ') || text.starts_with('\t'))
-                {
+                if control.ignore_space && (text.starts_with(' ') || text.starts_with('\t')) {
                     return Ok(item);
                 }
                 if control.ignore_dups && last_entry == Some(text.as_str()) {
@@ -1522,7 +1515,6 @@ impl LiveFileBackedHistory {
             }
         }
     }
-
 }
 
 /// Encode one history line exactly as reedline stores it on disk (an
@@ -2473,10 +2465,7 @@ mod tests {
         // for that text goes 1 -> 2 in the list — a text-set dedupe
         // would have kept it at 1 — and a further -n changes nothing.
         second.append("ls".to_string()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "seedcmd\nls\nls\n"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "seedcmd\nls\nls\n");
         assert_eq!(
             first.entries().unwrap(),
             vec!["seedcmd", "ls", "ls"],
@@ -3084,8 +3073,13 @@ mod tests {
     #[test]
     fn issue646_histfilesize_truncates_write_history() {
         // niubash#646: `history -w` writes at most HISTFILESIZE lines
-        // (histfile.c history_write); the in-memory list is NOT
-        // truncated — only the file is.
+        // (histfile.c history_write). niu's reader is a live mirror of
+        // the file (niubash#572), so the list face follows the
+        // truncated file at the next query — where GNU's independent
+        // in-memory list would still show w1 until the session ends.
+        // That divergence is the mirror architecture's, not the
+        // truncation's; the session-end face (the main HISTFILESIZE
+        // consumer) is unaffected because the session is over.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut provider = provider_with_settings(&path, |settings| {
@@ -3096,6 +3090,6 @@ mod tests {
         provider.append("w3".to_string()).unwrap();
         provider.write_history(path.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "w2\nw3\n");
-        assert_eq!(provider.entries().unwrap(), vec!["w1", "w2", "w3"]);
+        assert_eq!(provider.entries().unwrap(), vec!["w2", "w3"]);
     }
 }

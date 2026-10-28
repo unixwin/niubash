@@ -2972,9 +2972,7 @@ impl Shell {
     /// The HIST* settings cell shared with the provider instance, if
     /// interactive entry installed one (niubash#646). The editor
     /// history instance adopts it, mirroring `history_ledger`.
-    pub(crate) fn history_settings(
-        &self,
-    ) -> Option<Arc<Mutex<crate::history::HistorySettings>>> {
+    pub(crate) fn history_settings(&self) -> Option<Arc<Mutex<crate::history::HistorySettings>>> {
         self.history_provider
             .as_ref()
             .and_then(|provider| provider.try_borrow().ok())
@@ -3003,7 +3001,11 @@ impl Shell {
         let Some(settings) = self.history_settings() else {
             return;
         };
-        let histcontrol = self.executor.get_env("HISTCONTROL").unwrap_or("").to_owned();
+        let histcontrol = self
+            .executor
+            .get_env("HISTCONTROL")
+            .unwrap_or("")
+            .to_owned();
         let histignore = self.executor.get_env("HISTIGNORE").unwrap_or("").to_owned();
         let histsize =
             rubash::history::SessionHistory::size_limit(self.executor.get_env("HISTSIZE"));
