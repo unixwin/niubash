@@ -13,6 +13,15 @@
 > here is **frozen** in the RFC's terms: no listed symbol may be
 > removed, renamed, or re-signed without a ledger update in the same
 > change and a tier assignment for whatever replaces it (§4).
+>
+> Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
+> RFC's Tier A contract is now **published in-tree** as `rubash::api`
+> (full contract in 1.5.0; niubash migrates onto it inside the same
+> release; the workspace split stays post-release and will move the
+> module to the split core crate unchanged in shape). §5 gains the
+> completeness half of the tripwire: the recorded symbols' existence
+> is no longer the only check — everything niubash consumes must be
+> recorded here (§0 states the v3 census basis).
 
 ## 0. Census basis and counting rules
 
@@ -40,6 +49,28 @@ niubash gained since the basis — `ExecuteError::SigintUnwind`,
 as their basis. The row-11 dispositions (§4) move the
 `builtins::kill` hooks out of the consumed surface and add
 their replacements.
+
+Re-census for Ledger v3 (Session contract publication, 2026-10-28),
+same rules:
+
+- rubash master `45a0973f3e997c1f2c6591fc375d47086ffc39d2`
+  (the publication branch base)
+- niubash master `f34d6634652e0404acb9b74d2c5f9359e92bec20`
+
+Path references at the re-census: **76 distinct paths** after the
+use-list union. The v2 census missed two consumed families — the
+debugger front doors (the root re-exports `run_dap_stdio`,
+`run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) and the
+`builtins::bind` spec helpers niubash's bind surface calls — plus
+three single items (`shell::bind_registry::KEYMAP_NAMES`, `Ast`
+under its defining-module spelling `parser::Ast`, and the method
+`history::SessionHistory::size_limit`); all are recorded in §6
+with this census as their basis, and §5's completeness check now
+makes a fourth miss mechanically impossible to ship. One v2 entry
+is removed: `script_driver::run_script_with_history` is no longer
+referenced anywhere in niubash (the tracked driver carries that
+traffic, and `Session::run` above it), so it leaves the consumed
+surface; the symbol itself stays `pub` in the engine.
 
 Counting rules (so any future re-census is comparable):
 
@@ -95,11 +126,13 @@ the 1.5.0 tiers exist to fix.
 | --- | --- |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
-| `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today |
+| debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
+| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword` — the bind builtin's spec-parsing helpers, consumed inside niubash's gated bind surface (missed by the v2 census; recorded in v3) |
+| `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today; plus the `SessionHistory::size_limit` associated helper (recorded in v3) |
 | `script_driver` | `run_source_with_line_offset` (2), `run_stdin_script`, `run_script_with_history`, `run_script_with_history_at_line_offset_tracked`, `run_interactive_stdin`, `pre_process_interactive_line`, `prepare_interactive_history`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`, `InteractiveExpansion` + variants `Execute`, `Discard` (1 each unless noted) |
-| `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1) |
+| `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1); `Ast` is also consumed under this defining-module spelling (the root re-export above is the other spelling; both recorded in §6) |
 | `lexer` | `tokenize` (2), `tokenize_with_initial_posix` (1), `has_unclosed_input_syntax` (1), `has_unclosed_input_syntax_posix` (1) |
-| `shell::bind_registry` | `BindEntry` (10), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 23 references at the v2 re-census, all of them inside niubash's gated bind surface since row 11 (see §4) |
+| `shell::bind_registry` | `BindEntry` (10), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 23 references at the v2 re-census, all of them inside niubash's gated bind surface since row 11 (see §4); plus `KEYMAP_NAMES` (recorded in v3) |
 | `invocation` | `ShellInvocation` (3, + `parse`, §2.2), `materialize_command_file` (1) |
 | `usage` | `LONG_OPTIONS` (3), `SHORT_OPTIONS` (2), `LONG_OPTIONS_WITH_VALUE` (1), `show_shell_version` (1), `show_shell_help` (1), `is_short_option_letter` (1), `invocation_help_name` (1), plus 2 module-level references |
 | `builtins::kill` | **exited in row 11 (M-3)**: `note_console_ctrl_c` (2) and `consume_background_wrapper_handshake` (1) are no longer consumed — niubash calls the Tier B driver faces `script_driver::inject_console_ctrl_c` / `script_driver::consume_background_wrapper_handshake` instead, and the Tier A replacements are `Executor::inject_signal` / `Executor::interrupt`. The kill items remain `pub` in the engine only until niubash's migration is on master (the pairing compile builds niubash master against this tree); their demotion to `pub(crate)` is the recorded follow-up below. (One of these hooks disappearing is what broke niubash master in the bulk-merge incident — which is why the exit is staged, not abrupt.) |
@@ -165,6 +198,18 @@ RFC), Tier C items niubash touches stay reachable through the facade
 or the gated internals feature until their migration step (§9 M-3 of
 the RFC) lands.
 
+Publication status (Ledger v3, 1.5.0): the Tier A homes in this
+table have **landed** — `rubash::api` is a public module in-tree,
+carrying `Session` / `SessionBuilder`, `RunOptions` / `RunOutcome` /
+`Flow`, the §5.3 state views, the capability traits (the history
+provider among them, unchanged per the RFC), the observer trait,
+and the tier-B syntax views of design Q4. niubash's migration onto
+them is the release's second step and proceeds consumer-file by
+consumer-file against this ledger; until a consumer file migrates,
+its §6 symbols stay frozen exactly as recorded. The workspace
+split (PLAN row 4) remains post-release: it moves `rubash::api`
+to the split core crate without changing its shape.
+
 | Consumed family | Tier | Target home |
 | --- | --- | --- |
 | `Executor` lifecycle + `new` | A | `Session::builder()` |
@@ -189,6 +234,8 @@ the RFC) lands.
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
+| debugger front doors (`run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) | B | driver-layer front doors at the crate root — the design's §10 forms of the one debug session; they stay driver surface, not `Session` methods, and move with the driver layer at the split |
+| `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature |
 
 ## 5. The canary: how the freeze is enforced
 
@@ -212,6 +259,22 @@ Two halves, by design — a fast tripwire and an authoritative compile:
    never quietly become two ledgers. niubash carries the mirror check
    in its own `.github/workflows/api-ledger-sync.yml`.
 
+4. **Completeness check** (Ledger v3; same script, `--niu` mode):
+   the tripwire also scans the paired niubash tree's `crates/` and
+   `src/` for every `rubash::…` path token and verifies each one
+   is recorded in §6 — a consumed path is covered when an entry
+   names it exactly, or when it is a module prefix of a recorded
+   entry (a module is covered by the symbols recorded under it).
+   The pairing job runs it right after the same-source `cmp`, so
+   a newly consumed symbol that nobody recorded fails the
+   engine's CI the same way a vanished one does. Recorded-but-
+   unconsumed `item`/`variant` entries only warn: the ledger
+   legitimately carries staged exits (the `builtins::kill`
+   replacements were recorded before the consumer finished
+   moving). `method` entries are exempt from the warning —
+   receiver-form calls are invisible to a path scan, so an
+   unconsumed-looking method entry proves nothing either way.
+
 Demonstration record (delete-a-symbol goes red, restore goes green):
 `docs/api-ledger-canary-demo.md` in rubash.
 
@@ -225,9 +288,17 @@ the same set.
 
 ```api-ledger
 item rubash::Ast
+item rubash::DapLaunchPreset
+item rubash::DebugCliPreset
 item rubash::Executor
 item rubash::Token
 item rubash::TokenKind
+item rubash::builtins::bind::BindSpecError
+item rubash::builtins::bind::BindingSpec
+item rubash::builtins::bind::format_invalid_keymap
+item rubash::builtins::bind::parse_positional_binding
+item rubash::builtins::bind::parse_unix_command_spec
+item rubash::builtins::bind::strip_set_keyword
 item rubash::decode_to_visible_text
 item rubash::executor::ExecuteError
 item rubash::executor::bytes_to_shell_text
@@ -241,12 +312,15 @@ item rubash::lexer::has_unclosed_input_syntax
 item rubash::lexer::has_unclosed_input_syntax_posix
 item rubash::lexer::tokenize
 item rubash::lexer::tokenize_with_initial_posix
+item rubash::parser::Ast
 item rubash::parser::CommandNode
 item rubash::parser::ParseLoopOptions
 item rubash::parser::WordMetadata
 item rubash::parser::ast_print::pretty_print_command
 item rubash::parser::parse
 item rubash::parser::parse_with_options
+item rubash::run_dap_stdio
+item rubash::run_debug_cli
 item rubash::script_driver::InteractiveExpansion
 item rubash::script_driver::consume_background_wrapper_handshake
 item rubash::script_driver::inject_console_ctrl_c
@@ -257,7 +331,6 @@ item rubash::script_driver::heredoc_delimiter_unclosed_quote
 item rubash::script_driver::pre_process_interactive_line
 item rubash::script_driver::prepare_interactive_history
 item rubash::script_driver::run_interactive_stdin
-item rubash::script_driver::run_script_with_history
 item rubash::script_driver::run_script_with_history_at_line_offset_tracked
 item rubash::script_driver::run_source_with_line_offset
 item rubash::script_driver::run_stdin_script
@@ -265,6 +338,7 @@ item rubash::script_driver::script_uses_aliases
 item rubash::script_driver::script_uses_history
 item rubash::shell::bind_registry::BindEntry
 item rubash::shell::bind_registry::BindKind
+item rubash::shell::bind_registry::KEYMAP_NAMES
 item rubash::usage::LONG_OPTIONS
 item rubash::usage::LONG_OPTIONS_WITH_VALUE
 item rubash::usage::SHORT_OPTIONS
@@ -276,6 +350,8 @@ variant rubash::TokenKind::Assignment
 variant rubash::TokenKind::BraceExpand
 variant rubash::TokenKind::CommandSubst
 variant rubash::TokenKind::Word
+variant rubash::builtins::bind::BindingSpec::Function
+variant rubash::builtins::bind::BindingSpec::Macro
 variant rubash::executor::ExecuteError::CommandNotFound
 variant rubash::executor::ExecuteError::ExitCode
 variant rubash::executor::ExecuteError::ExpansionFailure
@@ -331,11 +407,19 @@ method rubash::executor::Executor::take_exit_jump_pending
 method rubash::executor::Executor::take_signal_discard_pending
 method rubash::executor::Executor::take_parse_error
 method rubash::executor::Executor::unset_env
+method rubash::history::SessionHistory::size_limit
 method rubash::invocation::ShellInvocation::parse
 method rubash::parser::WordMetadata::literal
 ```
 
-*Ledger v2, 2026-10-28 (PLAN row 11): §0 census basis
+*Ledger v3, 2026-10-28 (1.5.0 Session contract publication):
+the Tier A contract is published in-tree at `rubash::api` (§4
+status note); the debugger front doors and the `builtins::bind`
+helper family are recorded (§2.1/§6) after the v2 census missed
+them, and §5's completeness check now guards the census itself;
+`script_driver::run_script_with_history` leaves the consumed
+surface (unreferenced in niubash; the symbol stays `pub`).
+Ledger v2, 2026-10-28 (PLAN row 11): §0 census basis
 re-stated; the `builtins::kill` hooks exited the consumed
 surface (replacements recorded in §4/§6 — the items' demotion
 to `pub(crate)` follows once niubash's migration is on
