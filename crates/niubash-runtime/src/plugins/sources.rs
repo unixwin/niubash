@@ -57,33 +57,6 @@ pub const SOURCE_REGISTRY_SCHEMA: &str = "niubash:plugin-source-registry@0.4.0";
 /// Ref recorded for local-directory installs (no git ref exists).
 pub const LOCAL_ORIGIN_REF: &str = "local";
 
-/// Hard wall-clock budget for ONE startup fetch attempt (`niu plugin sync
-/// --bootstrap`; the 1.3.1 memo records the failure and later startups
-/// defer, so this caps the worst case a bad network day can impose on the
-/// interactive session). The owner's 2026-10-04 P0: one declared-but-
-/// unmatched spec entry burned 5.26s in a TLS-failing `git clone` at
-/// startup, and a silently blackholed network (SYN dropped, no RST) hangs
-/// git for minutes — a startup-destroying window. 3s stays under the
-/// "startup-destroying" bar, and the memo + `niu plugin sync` (unbudgeted,
-/// user-invoked) remain the path that actually completes big installs.
-pub const STARTUP_FETCH_BUDGET: Duration = Duration::from_secs(3);
-
-/// The effective startup fetch budget: `NIU_STARTUP_FETCH_BUDGET_MS`
-/// overrides the default (milliseconds; power users on peculiar networks,
-/// and tests). An invalid or zero value falls back to the default.
-pub fn startup_fetch_budget() -> Duration {
-    match std::env::var("NIU_STARTUP_FETCH_BUDGET_MS") {
-        Ok(raw) => raw
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .filter(|ms| *ms > 0)
-            .map(Duration::from_millis)
-            .unwrap_or(STARTUP_FETCH_BUDGET),
-        Err(_) => STARTUP_FETCH_BUDGET,
-    }
-}
-
 /// Wall-clock budget for ONE verb-invoked git transport phase (`niu plugin
 /// add` / `sync` / `update` / `restore` / `distro import`; niubash#293):
 /// before this cap an explicit verb cloned without any deadline — a bad

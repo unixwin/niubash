@@ -2908,7 +2908,6 @@ fn print_sync_rows(rows: &[niubash_runtime::plugins::sync::SyncRow]) {
                 niubash_runtime::text_style::yellow(&row.action)
             }
             "missing" => niubash_runtime::text_style::yellow(&row.action),
-            "deferred" => niubash_runtime::text_style::dim(&row.action),
             _ => niubash_runtime::text_style::red(&row.action),
         };
         println!("  {marker} {:<18} {}", row.id, row.detail);
@@ -4129,7 +4128,6 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
         niubash_runtime::plugins::sync::sync_spec(niubash_runtime::plugins::sync::SyncOptions {
             prune,
             adopt,
-            startup: false,
             checksum_pin: None,
             timeout,
         })?;

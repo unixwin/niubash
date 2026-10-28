@@ -35,7 +35,7 @@ oh-my-niu-ecosystem.md` §14.6. All verbs: `niu plugin --help`.
 | `list [--json]` | Sources, assets (`*` = enabled), tags for wild candidates | 0 |
 | `enable <id\|asset\|id/asset>` | Spec edit + sync; wild/bpkg assets are tree-relative paths | non-zero when the tree is missing/ambiguous/whole-source misuse |
 | `disable <target>` | Spec edit (entry removal for source targets) + sync; tree kept | 0 |
-| `sync [--prune] [--adopt] [--bootstrap]` | Reconcile; `--prune` deletes undeclared, `--adopt` declares installed-but-undeclared sources into the spec (snapshots live enable/theme), `--bootstrap` quiet startup form | 0 |
+| `sync [--prune] [--adopt] [--bootstrap]` | Reconcile; `--prune` deletes undeclared, `--adopt` declares installed-but-undeclared sources into the spec (snapshots live enable/theme), `--bootstrap` accepted as a silent no-op for legacy rc lines (startup never syncs) | 0 |
 | `update [<id>]` | Move lockfile pin(s) to ref tip (no id = all) | 0 |
 | `restore [<id>]` / `rollback <id>` / `clean` | Lockfile verbs | 0 |
 | `discover` | Read-only overview | 0 |
@@ -54,8 +54,7 @@ dropped, tree kept), `missing` (tree missing → `niu plugin restore`),
 ## Invariants (pinned by tests/plugin_spec_sync.rs, tests/plugin_anyplug.rs)
 
 1. **Idempotent materialization**: unchanged spec → byte-identical managed
-   rc block, all rows `unchanged`, report clean, `--bootstrap` prints
-   nothing.
+   rc block, all rows `unchanged`, report clean.
 2. **Hand-added survival**: `prev` records only the spec-owned selection;
    live-block entries outside `prev` survive every sync; spec-dropped
    entries (`prev − next`) are removed. Theme absent in spec = keep

@@ -151,24 +151,25 @@ semantics):
 - **installed, not declared** → suggested for cleanup, never auto-deleted.
   `niu plugin sync --prune` is the explicit confirm.
 
-`niu plugin sync --bootstrap` is the same reconciliation in its quiet
-startup form — wired into `~/.niubashrc` by the setup wizard as a single
-line, silent when everything is in sync. Disable it by setting
-`NIU_PLUGIN_BOOTSTRAP=off`. `niu doctor` carries an advisory line showing
-the spec reconciliation state (declared / missing / undeclared / no spec).
+Sync runs only as an explicit verb — startup never reconciles.
+`niu plugin sync --bootstrap` (the bootstrap line old setup wizards wrote
+into `~/.niubashrc`) is accepted as a silent compatibility no-op, so a
+legacy rc line costs nothing and prints nothing. `niu doctor` carries an
+advisory line showing the spec reconciliation state (declared / missing /
+undeclared / no spec).
 
-Two 1.3.1 guarantees for the startup form:
+Two consequences of the explicit-only design:
 
-- **No spec → no startup nag.** Imperative mode (no `plugins.toml`) means
-  *nothing to reconcile*: installed-but-undeclared sources are the legacy
-  state, not drift, and `sync --bootstrap` stays silent about them. The
-  interactive `niu plugin sync` still lists them — with the migration verb.
-- **Failed startup installs are memoized.** When a declared source cannot
-  install at startup (offline, a moved origin, a fingerprint the adapter
-  rejects), the failure is recorded under the sources root
-  (`bootstrap-failures.toml`) and later startups defer the retry with one
-  line instead of re-fetching on every terminal. An explicit
-  `niu plugin sync` / `niu plugin add` clears the memo and retries.
+- **No spec → nothing to reconcile.** Imperative mode (no `plugins.toml`)
+  means installed-but-undeclared sources are the legacy state, not drift.
+  An explicit `niu plugin sync` lists them — with the migration verb.
+- **Failed installs are reported by the verb that ran them.** Nothing
+  retries in the background: re-run `niu plugin sync` / `niu plugin add`
+  when the network or the origin is back. A `bootstrap-failures.toml`
+  left under the sources root by an old version is still honored in one
+  way: it marks the declarations that version stranded, so
+  `niu plugin sync --prune` can remove them, and an explicit retry clears
+  the entry it resolves.
 
 ### Imperative mode → spec adoption (`niu plugin sync --adopt`)
 
@@ -254,11 +255,8 @@ niu plugin enable <id>[/<asset>]   # declare + materialize
 - **`installed but not declared in the spec`** — an imperative install
   (`niu plugin source add`) with no spec entry; run `niu plugin sync
   --adopt` to declare everything installed (snapshots the live state), or
-  prune it explicitly. With no spec at all this is imperative mode and the
-  startup form stays silent about it.
-- **`deferred` rows at startup** — a declared source's install failed at a
-  previous startup and is not retried there; run `niu plugin sync` (the
-  explicit verb) to retry and see the failure.
+  prune it explicitly. With no spec at all this is imperative mode;
+  nothing runs at startup, so nothing nags about it there.
 - **`tree missing — repair with niu plugin restore <id>`** — the guarded
   loader no-ops silently at startup (the native fallback chain stays
   intact); restore rebuilds from the lockfile pin.
