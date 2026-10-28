@@ -875,8 +875,9 @@ pub fn how_to_change_block() -> String {
     format!(
         "How to change bindings\n  \
          session only : bind '\"\\C-x\": <function>'  ·  bind -x '\"\\C-x\": <command>'\n  \
-         persistent   : add the same bind spec under [keymap] in ~/.niubash/config.toml,\n                 \
-         or drive shell-function widgets with NIU_BINDKEYS in ~/.niubashrc\n  \
+         persistent   : niu config set keymap.bind '<bind spec>'   (writes [keymap] in ~/.niubash/config.toml)\n                 \
+         niu config set keymap.unbind '\"\\C-t\"' removes a key outright\n                 \
+         shell-function widgets can also ride NIU_BINDKEYS in ~/.niubashrc\n  \
          completion   : style = {} ({}) — change with: \
          niu config set completion.style <gnu|ide|column|list|inline>\n",
         style.as_str(),

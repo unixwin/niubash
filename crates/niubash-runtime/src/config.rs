@@ -422,6 +422,20 @@ pub const COMPLETION_STYLE_KEY: &str = "completion.style";
 /// environment-based implicit grant and no competing booleans.
 pub const RC_POLICY_KEY: &str = "startup.rc-policy";
 
+/// The persistent key-binding rules key (niubash#630, K4): in the file
+/// this is the `[keymap]` table's `bind` string array. Each element is
+/// the argument string of a GNU `bind` command (`'"\C-g": redisplay'`,
+/// `'-x "\C-t": my-cmd'`), parsed by the engine's own bind parsers
+/// at load — there is no second grammar. `niu config set keymap.bind`
+/// appends one validated rule.
+pub const KEYMAP_BIND_KEY: &str = "keymap.bind";
+
+/// The persistent key-removal key (niubash#630, K4): the `[keymap]`
+/// table's `unbind` string array. Each element names one key in bind
+/// spelling (`"\C-t"`); at editor build the slot is removed outright —
+/// the key goes back to unbound, not to a lower layer's binding.
+pub const KEYMAP_UNBIND_KEY: &str = "keymap.unbind";
+
 /// The `[completion]` section of config.toml.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct CompletionConfigSection {
@@ -434,6 +448,19 @@ struct CompletionConfigSection {
 struct StartupConfigSection {
     #[serde(rename = "rc-policy", default, skip_serializing_if = "Option::is_none")]
     rc_policy: Option<String>,
+}
+
+/// The `[keymap]` section of config.toml (niubash#630, K4): the user's
+/// persistent key-binding rules. `bind` elements are GNU bind argument
+/// strings; `unbind` elements are single keyseqs. Both are raw strings
+/// here — parsing happens in `crate::repl` against the engine's own
+/// bind parsers, so resolve stays a pure read.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct KeymapConfigSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bind: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unbind: Option<Vec<String>>,
 }
 
 /// Which file may fill the default interactive personal-rc slot
@@ -538,6 +565,8 @@ struct UserConfigFile {
     completion: Option<CompletionConfigSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     startup: Option<StartupConfigSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keymap: Option<KeymapConfigSection>,
 }
 
 /// Read and parse the persisted user settings. Any problem — missing file,
@@ -567,7 +596,13 @@ const USER_CONFIG_NOTES: &str = "\
 # startup.rc-policy: which file fills the interactive personal-rc slot\n\
 #   when ~/.niubashrc is absent. primary-only (default) |\n\
 #   bashrc-fallback — explicit `niu setup --rc-policy` owns this key;\n\
-#   it is preserved, never set, by `niu config` (niubash#359).\n";
+#   it is preserved, never set, by `niu config` (niubash#359).\n\
+# keymap.bind / keymap.unbind: persistent key-binding rules\n\
+#   (niubash#630). bind elements are GNU bind argument strings, e.g.\n\
+#   '\"\\C-g\": redisplay' or '-x \"\\C-t\": my-cmd'; unbind elements\n\
+#   name one key to remove outright, e.g. '\"\\C-t\"'. Rules apply at\n\
+#   editor build after scripts and NIU_BINDKEYS, so they win over\n\
+#   startup-file binds; add one with `niu config set keymap.bind`.\n";
 
 /// The document a first-time writer starts from (header notes + schema).
 fn fresh_user_config_doc() -> toml_edit::DocumentMut {
@@ -762,6 +797,110 @@ pub fn set_command_not_found_hint(hint: CommandNotFoundHint) -> anyhow::Result<P
             doc[COMMAND_NOT_FOUND_HINT_KEY] = toml_edit::value(hint.as_str());
         }
         Ok(())
+    })
+}
+
+/// The string array at `table.key` in a config document, in either
+/// section shape (a `[table]` header or an inline `table = {…}`); a
+/// missing or wrong-typed slot reads as empty — the write path never
+/// invents content it cannot see.
+fn table_string_array_in_doc(doc: &toml_edit::DocumentMut, table: &str, key: &str) -> Vec<String> {
+    let value = match doc.get(table) {
+        Some(toml_edit::Item::Table(section)) => section
+            .get(key)
+            .and_then(|item| item.as_value())
+            .and_then(|value| value.as_array()),
+        Some(toml_edit::Item::Value(toml_edit::Value::InlineTable(section))) => {
+            section.get(key).and_then(|value| value.as_array())
+        }
+        _ => None,
+    };
+    value
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Set `table.key` to a string array through [`set_table_key`], so the
+/// section's shape and siblings survive; an empty array removes the
+/// key again (the file never pins an empty rule list).
+fn set_table_string_array(
+    doc: &mut toml_edit::DocumentMut,
+    table: &str,
+    key: &str,
+    values: &[String],
+) -> anyhow::Result<()> {
+    if values.is_empty() {
+        remove_table_key(doc, table, key);
+        return Ok(());
+    }
+    let mut array = toml_edit::Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    set_table_key(
+        doc,
+        table,
+        key,
+        toml_edit::Item::Value(toml_edit::Value::Array(array)),
+    )
+}
+
+/// The raw `[keymap]` rule specs persisted in config.toml: the `bind`
+/// argument strings and the `unbind` keyseqs, in file order. Parsing
+/// is the loader's job (`crate::repl` against the engine's bind
+/// parsers); a file problem degrades to no rules, like every read here.
+pub fn resolve_keymap_rule_specs() -> (Vec<String>, Vec<String>) {
+    let keymap = read_user_config().keymap;
+    (
+        keymap
+            .as_ref()
+            .and_then(|section| section.bind.clone())
+            .unwrap_or_default(),
+        keymap
+            .and_then(|section| section.unbind)
+            .unwrap_or_default(),
+    )
+}
+
+/// Append one `[keymap].bind` rule (the `niu config set keymap.bind`
+/// writer, niubash#630). The spec is validated by the same parser the
+/// loader uses — a rule that can never apply is refused here, with the
+/// parser's reason, instead of erroring at every shell startup.
+/// Appending an already-present rule is a no-op; sibling keys and
+/// sections are preserved like every surgical write in this file.
+pub fn add_keymap_bind_rule(spec: &str) -> anyhow::Result<PathBuf> {
+    crate::repl::parse_keymap_bind_rule(spec)
+        .map_err(|reason| anyhow::anyhow!("invalid {KEYMAP_BIND_KEY} rule '{spec}': {reason}"))?;
+    write_user_config(|doc| {
+        ensure_schema(doc);
+        let mut rules = table_string_array_in_doc(doc, "keymap", "bind");
+        if !rules.iter().any(|rule| rule == spec) {
+            rules.push(spec.to_string());
+        }
+        set_table_string_array(doc, "keymap", "bind", &rules)
+    })
+}
+
+/// Append one `[keymap].unbind` entry (the `niu config set
+/// keymap.unbind` writer, niubash#630). The entry must name a single
+/// key the editor can bind — validated by the loader's parser, so a
+/// chained or unparseable keyseq is refused with its reason.
+pub fn add_keymap_unbind_rule(spec: &str) -> anyhow::Result<PathBuf> {
+    crate::repl::parse_keymap_unbind_key(spec).map_err(|reason| {
+        anyhow::anyhow!("invalid {KEYMAP_UNBIND_KEY} entry '{spec}': {reason}")
+    })?;
+    write_user_config(|doc| {
+        ensure_schema(doc);
+        let mut rules = table_string_array_in_doc(doc, "keymap", "unbind");
+        if !rules.iter().any(|rule| rule == spec) {
+            rules.push(spec.to_string());
+        }
+        set_table_string_array(doc, "keymap", "unbind", &rules)
     })
 }
 
@@ -975,6 +1114,104 @@ mod tests {
         );
         let _ = std::fs::remove_file(&temp);
         result.unwrap();
+    }
+
+    /// niubash#630, K4: `[keymap]` rules persist by validated append —
+    /// the specs round-trip through the typed read, duplicates are
+    /// ignored, and sibling keys written before/after survive.
+    #[test]
+    fn issue630_keymap_rules_persist_append_and_roundtrip() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join(format!(
+            "niu-config-keymap-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_config = std::env::var_os("NIU_CONFIG");
+        std::env::set_var("NIU_CONFIG", &temp);
+        let result = (|| {
+            std::fs::remove_file(&temp).ok();
+            assert_eq!(
+                resolve_keymap_rule_specs(),
+                (Vec::new(), Vec::new()),
+                "no file, no rules"
+            );
+            // A sibling key first: the keymap writes must preserve it.
+            set_completion_style(CompletionStyle::Ide)?;
+            add_keymap_bind_rule(r#""\C-g": redisplay"#)?;
+            assert_eq!(
+                resolve_keymap_rule_specs().0,
+                vec![r#""\C-g": redisplay"#.to_string()]
+            );
+            // Appending the same rule again is a no-op.
+            add_keymap_bind_rule(r#""\C-g": redisplay"#)?;
+            assert_eq!(resolve_keymap_rule_specs().0.len(), 1);
+            add_keymap_bind_rule(r#"-x "\C-t": my-cmd"#)?;
+            add_keymap_unbind_rule(r#""\C-a""#)?;
+            let (bind, unbind) = resolve_keymap_rule_specs();
+            assert_eq!(bind.len(), 2);
+            assert_eq!(unbind, vec![r#""\C-a""#.to_string()]);
+            // The typed view of the file: the section and the sibling
+            // are both present, spelled as the documented namespace.
+            let text = std::fs::read_to_string(&temp)?;
+            let parsed: UserConfigFile = toml::from_str(&text)?;
+            assert_eq!(
+                parsed.completion.and_then(|c| c.style).as_deref(),
+                Some("ide")
+            );
+            let keymap = parsed.keymap.expect("keymap section persisted");
+            assert_eq!(keymap.bind.as_ref().map(Vec::len), Some(2));
+            assert_eq!(keymap.unbind.as_ref().map(Vec::len), Some(1));
+            Ok::<(), anyhow::Error>(())
+        })();
+        match previous_config {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        let _ = std::fs::remove_file(&temp);
+        result.unwrap();
+    }
+
+    /// niubash#630, K4: the writers validate with the loader's parser —
+    /// a rule that can never apply is refused up front and nothing is
+    /// written at all (no half-created config file).
+    #[test]
+    fn issue630_keymap_writers_refuse_unusable_rules() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join(format!(
+            "niu-config-keymap-refuse-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_config = std::env::var_os("NIU_CONFIG");
+        std::env::set_var("NIU_CONFIG", &temp);
+        std::fs::remove_file(&temp).ok();
+        let refused = [
+            add_keymap_bind_rule("hello"),
+            add_keymap_bind_rule(r#"-r "\C-t""#),
+            add_keymap_bind_rule(r#""\C-g""#),
+            add_keymap_unbind_rule(r#""\C-x\C-f""#),
+            add_keymap_unbind_rule(""),
+        ];
+        match previous_config {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        assert!(
+            refused.iter().all(|result| result.is_err()),
+            "every unusable rule is refused: {refused:?}"
+        );
+        assert!(!temp.exists(), "a refused rule never creates the file");
     }
 
     #[test]

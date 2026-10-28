@@ -156,6 +156,18 @@ pub struct Shell {
     /// `bind` call rebuilds the mirrored keymaps (GNU takes effect
     /// immediately; reedline keymaps are baked at editor build time).
     pub engine_bind_generation: u64,
+    /// The user's persistent `[keymap].bind` rules from config.toml
+    /// (niubash#630, K4), parsed into engine bind entries by
+    /// [`Shell::load_user_keymap_rules`]. The editor build applies
+    /// them inside the user layer, after `NIU_BINDKEYS`; their
+    /// `bind -x` triggers resolve through [`Shell::run_bind_x_command`]
+    /// at indices offset past `engine_bindings`, so this list and the
+    /// snapshot together form the one resolution list.
+    pub user_keymap_rules: Vec<rubash::shell::bind_registry::BindEntry>,
+    /// The user's persistent `[keymap].unbind` keys from config.toml
+    /// (niubash#630, K4): slots the editor build removes outright at
+    /// the end of the user layer.
+    pub user_keymap_unbinds: Vec<(reedline::KeyModifiers, reedline::KeyCode)>,
     /// User-declared completion functions parsed from `NIU_COMPDEFS` in the
     /// startup rc: `(command, function)` pairs.
     pub compdefs: Vec<(String, String)>,
@@ -270,6 +282,20 @@ fn default_script_name_from(raw: Option<String>) -> String {
         stem.to_string()
     } else {
         "niu".to_string()
+    }
+}
+
+/// Report a `[keymap]` rule that cannot be used (niubash#630, K4):
+/// once per process per distinct message. The loader reruns whenever
+/// the engine bind generation forces an editor rebuild, and a config
+/// error must be *reported* (DESIGN §5.2) without becoming
+/// per-rebuild noise.
+fn report_keymap_rule_error(message: &str) {
+    static REPORTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+    let mut guard = REPORTED.lock().unwrap_or_else(|err| err.into_inner());
+    let seen = guard.get_or_insert_with(Default::default);
+    if seen.insert(message.to_string()) {
+        eprintln!("{message}");
     }
 }
 
@@ -627,6 +653,8 @@ impl Shell {
             native_widget_bindings: Vec::new(),
             user_widget_bindings: Vec::new(),
             engine_bindings: Vec::new(),
+            user_keymap_rules: Vec::new(),
+            user_keymap_unbinds: Vec::new(),
             engine_bind_generation: 0,
             compdefs: Vec::new(),
             config_completion_dirs: config.completion_dirs.clone(),
@@ -2298,6 +2326,40 @@ impl Shell {
         self.engine_bind_generation = self.executor.bind_registry_generation();
     }
 
+    /// Load the user's persistent keymap rules from config.toml's
+    /// `[keymap]` section (niubash#630, K4). Each `bind` element is a
+    /// GNU bind argument string, parsed by the engine's own bind
+    /// parsers (see `crate::repl::parse_keymap_bind_rule`); each
+    /// `unbind` element names one key. A rule that does not parse is
+    /// reported once per process — its exact text and the reason —
+    /// and skipped: it never breaks startup and never applies
+    /// silently. Called wherever the engine snapshot is (re)taken, so
+    /// a rebuild always adjudicates script registrations against the
+    /// current user rules.
+    pub fn load_user_keymap_rules(&mut self) {
+        let (bind_specs, unbind_specs) = crate::config::resolve_keymap_rule_specs();
+        let mut rules = Vec::new();
+        for spec in &bind_specs {
+            match crate::repl::parse_keymap_bind_rule(spec) {
+                Ok(entry) => rules.push(entry),
+                Err(reason) => report_keymap_rule_error(&format!(
+                    "niubash: [keymap].bind rule '{spec}' ignored: {reason}"
+                )),
+            }
+        }
+        let mut unbinds = Vec::new();
+        for spec in &unbind_specs {
+            match crate::repl::parse_keymap_unbind_key(spec) {
+                Ok(key) => unbinds.push(key),
+                Err(reason) => report_keymap_rule_error(&format!(
+                    "niubash: [keymap].unbind entry '{spec}' ignored: {reason}"
+                )),
+            }
+        }
+        self.user_keymap_rules = rules;
+        self.user_keymap_unbinds = unbinds;
+    }
+
     /// Run an engine `bind -x` command for a keypress and produce the
     /// editor outcome (niubash#185).
     ///
@@ -2319,7 +2381,15 @@ impl Shell {
         buffer: &str,
         cursor_byte: usize,
     ) -> WidgetOutcome {
-        let Some(entry) = self.engine_bindings.get(index) else {
+        // One resolution list (niubash#630, K4): the engine snapshot
+        // at its own indices, the `[keymap]` user rules right behind
+        // it — the indices the editor build baked into the triggers.
+        let entry = self.engine_bindings.get(index).or_else(|| {
+            index
+                .checked_sub(self.engine_bindings.len())
+                .and_then(|offset| self.user_keymap_rules.get(offset))
+        });
+        let Some(entry) = entry else {
             return WidgetOutcome::default();
         };
         let rubash::shell::bind_registry::BindKind::Execute { command } = &entry.kind else {
@@ -5716,6 +5786,66 @@ __fzf_history_stub() {
         let _ = std::fs::remove_dir_all(temp);
     }
 
+    // niubash#630, K4: the [keymap] loader parses config.toml's rules
+    // into the user layer (bad rules reported + skipped, never fatal),
+    // and a user rule's `bind -x` resolves behind the engine snapshot:
+    // index 0 is the engine's command, index 1 the user's.
+    #[test]
+    fn issue630_user_keymap_rules_load_and_bindx_resolves_behind_engine() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-keymap-rules");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            r#"
+bind -x '"\C-r": __engine_stub'
+__engine_stub() { READLINE_LINE="engine:$READLINE_LINE"; READLINE_POINT=${#READLINE_LINE}; }
+__user_stub() { READLINE_LINE="user:$READLINE_LINE"; READLINE_POINT=${#READLINE_LINE}; }
+"#,
+        )
+        .unwrap();
+        let config_path = temp.join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[keymap]\n\
+             bind = ['-x \"\\C-g\": __user_stub', '\"\\C-x\\C-f\": redisplay', 'bogus rule']\n\
+             unbind = ['\"\\C-a\"']\n",
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set_value(
+            "NIU_CONFIG",
+            config_path.to_str().expect("temp path is UTF-8"),
+        );
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.load_engine_bindings();
+        shell.load_user_keymap_rules();
+
+        assert_eq!(shell.engine_bindings.len(), 1);
+        // The chained rule parses (mirroring drops it later, by
+        // shape); the bogus rule was reported and skipped.
+        assert_eq!(shell.user_keymap_rules.len(), 2);
+        assert_eq!(shell.user_keymap_unbinds.len(), 1);
+
+        // Index 0 runs the engine's command…
+        let outcome = shell.run_bind_x_command(0, "buf", 3);
+        assert_eq!(outcome.buffer.as_deref(), Some("engine:buf"));
+        // …and index 1 — the offset the editor build bakes into a
+        // user rule's trigger — runs the USER command, never the
+        // engine entry's.
+        let outcome = shell.run_bind_x_command(1, "buf", 3);
+        assert_eq!(outcome.buffer.as_deref(), Some("user:buf"));
+        // Past the end of the combined list: a no-op.
+        let outcome = shell.run_bind_x_command(2, "buf", 3);
+        assert_eq!(outcome.buffer, None);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     #[test]
     fn user_compdefs_load_from_rc_and_run_in_engine() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -8071,6 +8201,8 @@ complete -F _envtooldyn_hook envtooldyn
             native_widget_bindings: Vec::new(),
             user_widget_bindings: Vec::new(),
             engine_bindings: Vec::new(),
+            user_keymap_rules: Vec::new(),
+            user_keymap_unbinds: Vec::new(),
             engine_bind_generation: 0,
             compdefs: Vec::new(),
             config_completion_dirs: Vec::new(),
