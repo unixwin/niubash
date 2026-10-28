@@ -386,7 +386,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         let mut shell = niubash_runtime::Shell::new()?;
         let content = read_script_operand(&shell, first)?;
         shell.set_script_name(first);
-        shell.executor_mut().inherit_process_stdin();
+        shell.session_mut().inherit_process_stdin();
         shell.enable_process_stdin_pipeline_bridge();
         // niubash#399: a login-marked argv[0] (`-niu script`) sources the
         // login profile chain here, and an `exit` in any sourced startup
@@ -394,9 +394,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         if let Some(status) = shell.source_non_interactive_env() {
             finish_startup_exit(&mut shell, status);
         }
-        shell
-            .executor_mut()
-            .set_positional_params(args[2..].to_vec());
+        shell.session_mut().set_positional(args[2..].to_vec());
         let code = shell.execute_script(&content)?;
         let code = shell.finish_with_engine_finish(code);
         finish_one_shot(&shell, code);
@@ -681,7 +679,7 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             let command_mode = parse_legacy_command_mode(rest)?;
             let mut shell = niubash_runtime::Shell::new_one_shot()?;
             niubash_runtime::startup_trace::tick("-c: Shell::new");
-            shell.executor_mut().inherit_process_stdin();
+            shell.session_mut().inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
             if command_mode.login {
                 // niubash#587: the legacy `-c -l` shape used to swallow
@@ -701,16 +699,17 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
                 }
             }
             shell
-                .executor_mut()
-                .set_env("BASH_EXECUTION_STRING", command_mode.command);
+                .session_mut()
+                .variables()
+                .set("BASH_EXECUTION_STRING", command_mode.command);
             // Same -c diagnostic tag as the plain invocation route
             // (niubash#160): `$0: -c: line N:` parser diagnostics.
-            shell.executor_mut().set_env("__RUBASH_IS_C", "1");
+            shell.session_mut().variables().set("__RUBASH_IS_C", "1");
             if let Some(command_name) = command_mode.command_name {
                 shell.set_script_name(command_name);
                 shell
-                    .executor_mut()
-                    .set_positional_params(command_mode.positional_params.to_vec());
+                    .session_mut()
+                    .set_positional(command_mode.positional_params.to_vec());
             }
             let code = shell.execute_script(command_mode.command)?;
             niubash_runtime::startup_trace::tick("-c: execute_script");
@@ -841,7 +840,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             }
             anyhow::anyhow!("niu: {error}")
         })?;
-    shell.executor_mut().inherit_process_stdin();
+    shell.session_mut().inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
 
     if let Some(command) = invocation.command {
@@ -870,8 +869,9 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             shell.set_script_name(&name);
         }
         shell
-            .executor_mut()
-            .set_env("BASH_EXECUTION_STRING", &command);
+            .session_mut()
+            .variables()
+            .set("BASH_EXECUTION_STRING", &command);
         // __RUBASH_IS_C is already live here: invocation.apply_to_executor_before_startup
         // (rubash invocation.rs:273-275) sets it for every command string,
         // so parser diagnostics take the `$0: -c: line N:` shape (error.c
@@ -892,7 +892,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         if std::env::var_os(niubash_runtime::plugins::theme_preview::PRINT_RENDERED_PS1_ENV)
             .is_some_and(|value| value == "1")
         {
-            shell.executor_mut().set_env("__RUBASH_INTERACTIVE", "1");
+            shell
+                .session_mut()
+                .variables()
+                .set("__RUBASH_INTERACTIVE", "1");
         }
         let code = shell.execute_script(&command)?;
         niubash_runtime::startup_trace::tick("invocation: execute_script");
@@ -940,7 +943,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     // without a terminal, so delegate to the engine's interactive stdin
     // driver instead of enter_interactive()/run_repl.
     if invocation.interactive && !niubash_runtime::terminal::stdio_is_interactive() {
-        shell.executor_mut().set_env("__RUBASH_INTERACTIVE", "1");
+        shell
+            .session_mut()
+            .variables()
+            .set("__RUBASH_INTERACTIVE", "1");
         // This path renders prompts through the engine's interactive stdin
         // driver (which expands executor-env PS1 itself), so the foreign
         // inherited PS1 must be discarded here too, before run_startup_rc
@@ -1510,13 +1516,11 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
             })?;
     }
     shell.enter_interactive();
-    shell.executor_mut().inherit_process_stdin();
+    shell.session_mut().inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
     if let Some(command_name) = rest.get(1) {
         shell.set_script_name(command_name);
-        shell
-            .executor_mut()
-            .set_positional_params(rest[2..].to_vec());
+        shell.session_mut().set_positional(rest[2..].to_vec());
     }
     if let Some(status) = shell.run_startup_rc() {
         finish_startup_exit(&mut shell, status);
@@ -1539,15 +1543,16 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // and skip the REPL-only initialization (prompt backend, completion
     // directory scan, completion snapshot) the full constructor pays.
     let mut shell = niubash_runtime::Shell::new_for_stdin_script_fast()?;
-    shell.executor_mut().inherit_process_stdin();
+    shell.session_mut().inherit_process_stdin();
     // niubash#548: this reader is niu's own stdin driver, so it owes the
     // marker the engine's driver arms in its run_stdin_script
     // (shell.c:780-786 read_from_stdin): without it `$-` lacks `s` even
     // though every command arrives on stdin (`printf 'echo $-' | niu`
     // printed `hB` where GNU and standalone rubash print `hBs`).
     shell
-        .executor_mut()
-        .set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
+        .session_mut()
+        .variables()
+        .set(rubash::script_driver::READ_STDIN_MARKER, "1");
     // unixwin/niubash#431: bind the diagnostic/$0 name the way the engine's
     // own stdin driver does for `-s` (rubash script_driver run_stdin_script):
     // GNU never rebinds $0 for a stdin script (shell.c:1613 is the
@@ -1557,8 +1562,9 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // bind when absent: internal respawns carry the parent's name through
     // init.rs exactly as for `-s`.
     if shell
-        .executor_mut()
-        .get_env("__RUBASH_SCRIPT_NAME")
+        .session_mut()
+        .variables()
+        .resolved_value("__RUBASH_SCRIPT_NAME")
         .is_none()
     {
         let argv0 = std::env::args_os()
@@ -1566,8 +1572,9 @@ fn run_stdin_script() -> anyhow::Result<()> {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "bash".to_string());
         shell
-            .executor_mut()
-            .set_env("__RUBASH_SCRIPT_NAME", argv0.as_str());
+            .session_mut()
+            .variables()
+            .set("__RUBASH_SCRIPT_NAME", argv0.as_str());
     }
     // niubash#399: a login-marked argv[0] (`-niu < script`) sources the
     // login profile chain; an `exit` in any sourced startup file ends the

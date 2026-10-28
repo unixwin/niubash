@@ -304,7 +304,7 @@ impl NiubashCompleter {
 
         // GNU programmable completion (rubash engine): when the command has a
         // compspec registered via the `complete` builtin, argument candidates
-        // come from `Executor::complete_line` through the shell bridge. The
+        // come from `Session::complete` through the shell bridge. The
         // completion *engine* lives in rubash while niubash keeps its
         // cwd-priority, common-command, and file overlays for everything else.
         // The `has_compspec` gate keeps this free for commands without a
@@ -314,12 +314,17 @@ impl NiubashCompleter {
             let first_word = input.split_whitespace().next().unwrap_or_default();
             let has_compspec = !first_word.is_empty()
                 && crate::shell::with_completion_bridge(|shell| {
-                    shell.executor_mut().has_compspec(first_word)
+                    shell.session().has_compspec(first_word)
                 })
                 .unwrap_or(false);
             if has_compspec {
                 if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
-                    shell.executor_mut().complete_line(input, cursor_pos)
+                    shell
+                        .session_mut()
+                        .complete(input, cursor_pos)
+                        .into_iter()
+                        .map(|candidate| candidate.text)
+                        .collect::<Vec<String>>()
                 }) {
                     if !cands.is_empty() {
                         let result = CompletionResult::new(cands);
