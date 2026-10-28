@@ -1,28 +1,40 @@
 name: SignPath integration smoke
 
 # Diagnostic lane for the SignPath signing chain (companion to the signing
-# stage in release.yml): dispatches a real signing request against the
-# current repo secrets using a real released installer as the payload.
-# Validates, in one shot: API token, organization id (both org-secret
-# candidates are tried), project slug, signing-policy slug, and the
-# artifact round-trip. Publishes nothing; the signed output stays inside
-# the run's artifacts.
+# stage in release.yml). Two modes:
+#
+#   1. Dispatch with no input: submits a real signing request against the
+#      current repo secrets using a real released installer as the payload,
+#      trying both org-secret candidates. One failure email per run —
+#      expected.
+#   2. Dispatch with `request_id`: INSPECT-ONLY. Queries an existing signing
+#      request through the SignPath REST API and prints its status/reason.
+#      No new signing request is created.
 #
 # This is a diagnostic, not a release gate — drop it or keep it dormant
 # (dispatch-only) as preferred.
 
 on:
   workflow_dispatch:
+    inputs:
+      request_id:
+        description: "Existing signing request id to inspect (skips submitting a new one)"
+        required: false
+        type: string
 
 permissions:
   actions: read
   contents: read
+
+env:
+  SIGNPATH_API_BASE: https://signpath.io/api/v1
 
 jobs:
   smoke:
     runs-on: windows-latest
     steps:
       - name: Fetch a real released installer as the signing payload
+        if: ${{ inputs.request_id == '' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,6 +49,7 @@ jobs:
           (Get-FileHash "payload/niubash-v1.4.4-win-x64-setup.exe" -Algorithm SHA256).Hash
 
       - name: Upload payload artifact
+        if: ${{ inputs.request_id == '' }}
         id: payload
         uses: actions/upload-artifact@v7
         with:
@@ -46,6 +59,7 @@ jobs:
           retention-days: 1
 
       - name: Submit signing request (SIGNPATH_ORGANIZATION_ID)
+        if: ${{ inputs.request_id == '' }}
         id: sign_primary
         uses: signpath/github-action-submit-signing-request@v3
         continue-on-error: true
@@ -59,8 +73,8 @@ jobs:
           output-artifact-directory: signpath-out-primary
 
       - name: Submit signing request (SIGNPATH_ORG_ID fallback)
+        if: ${{ inputs.request_id == '' && steps.sign_primary.outcome == 'failure' }}
         id: sign_fallback
-        if: steps.sign_primary.outcome == 'failure'
         uses: signpath/github-action-submit-signing-request@v3
         continue-on-error: true
         with:
@@ -72,34 +86,38 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: signpath-out-fallback
 
-      - name: Fetch failure details from the SignPath API
-        if: steps.sign_primary.outcome == 'failure' || steps.sign_fallback.outcome == 'failure'
+      - name: Query signing request details (SignPath REST API)
+        if: ${{ inputs.request_id != '' || steps.sign_primary.outcome == 'failure' || steps.sign_fallback.outcome == 'failure' }}
         shell: pwsh
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-          ORG_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          ORG_ID_A: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          ORG_ID_B: ${{ secrets.SIGNPATH_ORG_ID }}
           PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_ID }}
-          REQUEST_ID: ${{ steps.sign_primary.outputs.signing-request-id || steps.sign_fallback.outputs.signing-request-id }}
-          API_BASE: ${{ steps.sign_primary.outputs.signpath-api-url || steps.sign_fallback.outputs.signpath-api-url }}
+          REQUEST_ID: ${{ inputs.request_id || steps.sign_primary.outputs.signing-request-id || steps.sign_fallback.outputs.signing-request-id }}
         run: |
           $ErrorActionPreference = "Continue"
           Write-Host "signing request id: $env:REQUEST_ID"
-          Write-Host "api base: $env:API_BASE"
           $headers = @{ "X-API-Token" = $env:SIGNPATH_API_TOKEN }
 
-          $reqUrl = "$env:API_BASE/$env:ORG_ID/signing-requests/$env:REQUEST_ID"
-          Write-Host "--- signing request ---"
-          $resp = Invoke-WebRequest -Uri $reqUrl -Headers $headers -SkipHttpErrorCheck
-          Write-Host "HTTP $($resp.StatusCode)"
-          Write-Host $resp.Content
+          foreach ($org in @($env:ORG_ID_A, $env:ORG_ID_B) | Where-Object { $_ }) {
+            $reqUrl = "$env:SIGNPATH_API_BASE/$org/signing-requests/$env:REQUEST_ID"
+            Write-Host "--- GET $reqUrl (org secret candidate) ---"
+            $resp = Invoke-WebRequest -Uri $reqUrl -Headers $headers -SkipHttpErrorCheck
+            Write-Host "HTTP $($resp.StatusCode)"
+            Write-Host $resp.Content
+          }
 
-          $projUrl = "$env:API_BASE/$env:ORG_ID/projects/$env:PROJECT_SLUG"
-          Write-Host "--- project metadata (best effort) ---"
-          $resp2 = Invoke-WebRequest -Uri $projUrl -Headers $headers -SkipHttpErrorCheck
-          Write-Host "HTTP $($resp2.StatusCode)"
-          Write-Host $resp2.Content
+          foreach ($org in @($env:ORG_ID_A, $env:ORG_ID_B) | Where-Object { $_ }) {
+            $projUrl = "$env:SIGNPATH_API_BASE/$org/projects/$env:PROJECT_SLUG"
+            Write-Host "--- GET $projUrl (project metadata, best effort) ---"
+            $resp2 = Invoke-WebRequest -Uri $projUrl -Headers $headers -SkipHttpErrorCheck
+            Write-Host "HTTP $($resp2.StatusCode)"
+            Write-Host $resp2.Content
+          }
 
       - name: Verdict
+        if: ${{ inputs.request_id == '' }}
         shell: pwsh
         run: |
           $primary = "${{ steps.sign_primary.outcome }}"
