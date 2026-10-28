@@ -1,0 +1,89 @@
+name: SignPath integration smoke
+
+# Diagnostic lane for the SignPath signing chain (companion to the signing
+# stage in release.yml): dispatches a real signing request against the
+# current repo secrets using a real released installer as the payload.
+# Validates, in one shot: API token, organization id (both org-secret
+# candidates are tried), project slug, signing-policy slug, and the
+# artifact round-trip. Publishes nothing; the signed output stays inside
+# the run's artifacts.
+#
+# This is a diagnostic, not a release gate — drop it or keep it dormant
+# (dispatch-only) as preferred.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Fetch a real released installer as the signing payload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          gh release download v1.4.4 --repo unixwin/niubash `
+            --pattern "niubash-v1.4.4-win-x64-setup.exe" --dir payload --clobber
+          if (-not (Test-Path "payload/niubash-v1.4.4-win-x64-setup.exe")) {
+            throw "payload download failed"
+          }
+          (Get-FileHash "payload/niubash-v1.4.4-win-x64-setup.exe" -Algorithm SHA256).Hash
+
+      - name: Upload payload artifact
+        id: payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: signpath-smoke-payload
+          path: payload/niubash-v1.4.4-win-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Submit signing request (SIGNPATH_ORGANIZATION_ID)
+        id: sign_primary
+        uses: signpath/github-action-submit-signing-request@v3
+        continue-on-error: true
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.payload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signpath-out-primary
+
+      - name: Submit signing request (SIGNPATH_ORG_ID fallback)
+        id: sign_fallback
+        if: steps.sign_primary.outcome == 'failure'
+        uses: signpath/github-action-submit-signing-request@v3
+        continue-on-error: true
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.payload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signpath-out-fallback
+
+      - name: Verdict
+        shell: pwsh
+        run: |
+          $primary = "${{ steps.sign_primary.outcome }}"
+          $fallback = "${{ steps.sign_fallback.outcome }}"
+          if ($primary -eq "success") {
+            Write-Host "SMOKE PASS — SIGNPATH_ORGANIZATION_ID is the working org secret"
+          }
+          elseif ($fallback -eq "success") {
+            Write-Host "::warning::SMOKE PASS via SIGNPATH_ORG_ID — SIGNPATH_ORGANIZATION_ID holds the WRONG value; release.yml must use SIGNPATH_ORG_ID (or the secret should be renamed)"
+          }
+          else {
+            Write-Host "::error::SMOKE FAIL with both org secrets — read the two signing steps' logs for SignPath's error (401 = bad token, 404 = wrong org/project/policy slug)"
+            exit 1
+          }
