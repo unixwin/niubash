@@ -3,7 +3,6 @@
 
 use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
 use crate::completion::path::PathCompleter;
-use crate::completion::runtime::{command_words_before_cursor, comp_cword};
 use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
@@ -591,6 +590,81 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
         completions,
         descriptions,
     ))
+}
+
+/// Words of the current command segment before the cursor (the compdef
+/// bridge's COMP_WORDS/COMP_CWORD inputs). Moved here from the retired
+/// completion::runtime module — this file is their only consumer.
+fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String>> {
+    let pos = context.cursor_pos.min(context.input.len());
+    let pos = floor_char_boundary(&context.input, pos);
+    let before_cursor = &context.input[..pos];
+    let start = before_cursor
+        .rfind([';', '|', '&', '\n'])
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let segment = before_cursor[start..].trim_start();
+    let words = split_shell_words(segment);
+    (!words.is_empty()).then_some(words)
+}
+
+fn comp_cword(context: &CompletionContext) -> usize {
+    let Some(words) = command_words_before_cursor(context) else {
+        return 0;
+    };
+    if context
+        .input
+        .get(..context.cursor_pos.min(context.input.len()))
+        .and_then(|input| input.chars().last())
+        .is_some_and(char::is_whitespace)
+    {
+        words.len()
+    } else {
+        words.len().saturating_sub(1)
+    }
+}
+
+fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            ch if ch.is_whitespace() && !single && !double => {
+                if !current.is_empty() {
+                    words.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn floor_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut p = pos;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
 }
 
 #[derive(Debug, Eq, PartialEq)]
