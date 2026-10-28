@@ -1,0 +1,54 @@
+name: D05 spawn count (RC audit evidence)
+
+# RC audit phase 2, item D-05: end-to-end git-spawn counting for the
+# niubash#643 (#592 S2 completion) acceptance baseline. Manual dispatch
+# only, on the audit branch that carries tests/d05_spawn_count.rs. The
+# sibling rubash is checked out at the release pin (b95d28ae, see
+# scripts/release/rubash-pin.json) so the measured pairing is exactly
+# niubash master + pinned rubash, not whatever rubash master is today.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  d05-spawn-count:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency at the release pin
+        shell: bash
+        run: |
+          git clone https://github.com/unixwin/rubash.git ../rubash
+          git -C ../rubash checkout b95d28ae8a2fd004f065152008771fe1e91b5284
+          git -C ../rubash rev-parse HEAD
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: stable
+
+      - name: cargo build
+        run: cargo build --locked
+
+      - name: Run the D-05 spawn-count cell
+        env:
+          NIU_INTERACTIVE_TESTS: "1"
+          D05_CELL: "1"
+          D05_OUT: ${{ github.workspace }}/d05-results.txt
+        shell: pwsh
+        run: |
+          cargo test --test d05_spawn_count --locked -- --nocapture 2>&1 | Tee-Object -FilePath d05-test.log
+          exit $LASTEXITCODE
+
+      - name: Upload D-05 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d05-evidence
+          path: |
+            d05-test.log
+            d05-results.txt
+          if-no-files-found: warn
