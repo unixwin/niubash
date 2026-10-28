@@ -100,7 +100,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Continue"
           Write-Host "signing request id: $env:REQUEST_ID"
-          $headers = @{ "X-API-Token" = $env:SIGNPATH_API_TOKEN }
+          # Per docs.signpath.io/build-system-integration: bearer auth, not a
+          # custom token header.
+          $headers = @{ "Authorization" = "Bearer $env:SIGNPATH_API_TOKEN" }
 
           foreach ($org in @($env:ORG_ID_A, $env:ORG_ID_B) | Where-Object { $_ }) {
             $reqUrl = "$env:SIGNPATH_API_BASE/$org/signing-requests/$env:REQUEST_ID"
