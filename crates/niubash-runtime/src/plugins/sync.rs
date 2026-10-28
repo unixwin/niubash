@@ -2052,8 +2052,7 @@ mod tests {
         // Seed the legacy failure memo for the broken declaration (what
         // the retired startup form would have written when its install
         // failed); the memo is what marks the entry as stranded.
-        let (_, missing_origin) =
-            resolve_spec_origin(&missing.to_string_lossy().into_owned()).unwrap();
+        let (_, missing_origin) = resolve_spec_origin(&missing.to_string_lossy()).unwrap();
         write_bootstrap_failures(&[BootstrapFailure {
             target: missing_origin,
             ref_name: None,
