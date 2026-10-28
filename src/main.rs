@@ -396,7 +396,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
         shell.executor.set_positional_params(args[2..].to_vec());
         let code = shell.execute_script(&content)?;
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         finish_one_shot(&shell, code);
         Ok(())
     }
@@ -411,9 +411,13 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 /// (shell.c:1572-1601, findcmd.c find_path_file — that is how `bash ls`
 /// finds and then refuses the binary /usr/bin/ls); refuse a missing
 /// name with EX_NOTFOUND (127), a directory or an unreadable file with
-/// 126, and a binary / non-UTF-8 file with EX_BINARY_FILE (126,
+/// 126, and a binary file with EX_BINARY_FILE (126,
 /// general.c:718-741 check_binary_file: NUL in the first line(s) or an
-/// ELF image). A missing/unreadable operand is the SHELL's diagnostic
+/// ELF image). Non-UTF-8 bytes are NOT a refusal: check_binary_file is
+/// GNU's only script rejection gate, and the bytes then decode through
+/// the engine's script-text decoding (raw-byte markers, rubash#132),
+/// exactly as rubash's own main opens operands (niubash#654).
+/// A missing/unreadable operand is the SHELL's diagnostic
 /// with the shell's statuses, never a raw `(os error N)` + rc 1
 /// (niubash#406, niubash#547). Refusals exit the process directly, as
 /// both routes always did inline.
@@ -445,11 +449,17 @@ fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Re
         }
         Err(error) => return Err(error.into()),
     };
-    if rubash::script_driver::check_binary_file(&bytes) || std::str::from_utf8(&bytes).is_err() {
+    // niubash#654: the two GNU gates stay separate — binary
+    // determination (check_binary_file) is the only refusal; byte
+    // decoding goes through bytes_to_script_text, which carries
+    // invalid UTF-8 sequences as raw-byte markers the engine executes
+    // (rubash#132). Merging them refused every Latin-1 script with
+    // rc 126 while rubash and GNU ran it fine.
+    if rubash::script_driver::check_binary_file(&bytes) {
         eprintln!("cannot execute binary file");
         piped_stdout::finish_and_exit(126);
     }
-    Ok(String::from_utf8(bytes).unwrap_or_default())
+    Ok(rubash::script_driver::bytes_to_script_text(&bytes))
 }
 
 /// The shell face of this invocation, when `argv[0]` (or the forwarding shim's
@@ -702,7 +712,7 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             }
             let code = shell.execute_script(command_mode.command)?;
             niubash_runtime::startup_trace::tick("-c: execute_script");
-            let code = shell.finish_with_exit_trap(code)?;
+            let code = shell.finish_with_engine_finish(code);
             niubash_runtime::startup_trace::tick("-c: exit trap");
             finish_one_shot(&shell, code);
             Ok(())
@@ -887,7 +897,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         {
             shell.print_rendered_prompt_for_preview();
         }
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         niubash_runtime::startup_trace::tick("invocation: exit trap");
         finish_one_shot(&shell, code);
         return Ok(());
@@ -915,7 +925,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // parsed as script text, rc 127).
         let content = read_script_operand(&shell, &script_name)?;
         let code = shell.execute_script(&content)?;
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         finish_one_shot(&shell, code);
         return Ok(());
     }
@@ -1645,7 +1655,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
         pending.clear();
     }
 
-    let code = shell.finish_with_exit_trap(last_code)?;
+    let code = shell.finish_with_engine_finish(last_code);
     finish_one_shot(&shell, code);
     Ok(())
 }
