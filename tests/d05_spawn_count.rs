@@ -49,7 +49,11 @@ fn main() {
             .append(true)
             .open(&log)
         {
-            let _ = writeln!(f, "{}", args.join("\u{1f}"));
+            let millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(f, "{millis}\t{}", args.join("\u{1f}"));
         }
     }
     let status = std::process::Command::new(&real)
@@ -118,6 +122,10 @@ fn build_shim(shim_root: &Path) -> PathBuf {
 }
 
 /// Count (total, status) spawns recorded in the shim log so far.
+/// A spawn counts as a prompt-status spawn when its argv carries the
+/// standalone token `status` — the prompt's one call site runs
+/// `git -c core.fsmonitor=false --no-optional-locks status
+/// --porcelain=v2 --branch`, so `status` is not the first field.
 fn count_spawns(log: &Path) -> (usize, usize) {
     let text = std::fs::read_to_string(log).unwrap_or_default();
     let mut total = 0usize;
@@ -127,7 +135,8 @@ fn count_spawns(log: &Path) -> (usize, usize) {
             continue;
         }
         total += 1;
-        if line.split('\u{1f}').next() == Some("status") {
+        let argv = line.split('\t').nth(1).unwrap_or(line);
+        if argv.split('\u{1f}').any(|field| field == "status") {
             status += 1;
         }
     }
@@ -221,7 +230,12 @@ fn run_scenario(
     // First frame: in a repo the prompt carries "(main)"; outside, the
     // bare "$ " line appears with no branch segment.
     let marker = if in_repo { "(main)" } else { "$ " };
-    let first = soft_wait(&mut session, marker, Duration::from_secs(60));
+    let first_window = if in_repo {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(20)
+    };
+    let first = soft_wait(&mut session, marker, first_window);
     emit(format!(
         "D05_{tag} first_frame_marker_occurrences={first} (soft)"
     ));
@@ -236,6 +250,13 @@ fn run_scenario(
     emit(format!(
         "D05_{tag} passes={passes} total_git_spawns={total} status_spawns={status}"
     ));
+    // The raw argv log is the cell's primary evidence — mirror it into
+    // the result stream (unit separators rendered as |).
+    if let Ok(text) = std::fs::read_to_string(shim_log) {
+        for line in text.lines() {
+            emit(format!("D05_LOG_{tag}| {}", line.replace('\u{1f}', "|")));
+        }
+    }
     session.send_line("exit");
     let _ = session.wait_exit();
     (total, status)
