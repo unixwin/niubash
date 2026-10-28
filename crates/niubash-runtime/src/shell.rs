@@ -485,8 +485,12 @@ impl Shell {
         // Bash sets $BASH to the full pathname used to execute the current
         // instance (bash(1), BASH variable); scripts probe it to detect bash.
         // Forward-slash spelling matches rubash's own standalone main.rs.
+        // niubash#655: seed WITHOUT the export attribute, like GNU
+        // (variables.c: BASH is a plain shell variable) and rubash's own
+        // main (rubash#1325) — exporting it leaked BASH into every child
+        // process's environment.
         if let Ok(exe) = std::env::current_exe() {
-            executor.export_env("BASH", &exe.to_string_lossy().replace('\\', "/"));
+            executor.set_env("BASH", &exe.to_string_lossy().replace('\\', "/"));
         }
         // GNU bash defaults expand_aliases on only for interactive shells
         // (shell.c init_interactive()/init_interactive_script()); -c,
