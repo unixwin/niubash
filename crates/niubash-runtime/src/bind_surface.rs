@@ -86,6 +86,24 @@ pub fn current_generation(_executor: &rubash::Executor) -> u64 {
     0
 }
 
+/// Whether `name` is one of the engine registry's known keymap
+/// names (the `-m` targets a bind entry may name). The `[keymap]`
+/// rule parser consults this through the gate so a rule naming an
+/// unknown keymap is refused with the engine's own wording
+/// (niubash#630, K4). Outside the `internals` feature there is no
+/// registry table to consult, so the check does not fire — any
+/// name is accepted, and keymap targeting simply never matches an
+/// unknown name when the mirror is built.
+#[cfg(feature = "internals")]
+pub fn is_known_keymap(name: &str) -> bool {
+    rubash::shell::bind_registry::KEYMAP_NAMES.contains(&name)
+}
+
+#[cfg(not(feature = "internals"))]
+pub fn is_known_keymap(_name: &str) -> bool {
+    true
+}
+
 #[cfg(feature = "internals")]
 fn convert(entry: rubash::shell::bind_registry::BindEntry) -> EngineBindEntry {
     use rubash::shell::bind_registry::BindKind;
