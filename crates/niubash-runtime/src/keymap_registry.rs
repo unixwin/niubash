@@ -332,13 +332,13 @@ impl From<&KeymapRegistry> for KeymapState {
 /// response.
 pub fn is_response_sequence(keyseq: &str) -> bool {
     let chars: Vec<char> = keyseq.chars().collect();
-    let rest: &[char] = if chars.starts_with(&['\\', 'e', '[']) {
-        &chars[3..]
-    } else if chars.starts_with(&['^', '[', '[']) {
-        &chars[3..]
-    } else {
+    // CSI introducer, in either spelling: `\e[` or the caret form `^[[`.
+    let is_csi =
+        chars.starts_with(&['\\', 'e', '[']) || chars.starts_with(&['^', '[', '[']);
+    if !is_csi {
         return false;
-    };
+    }
+    let rest: &[char] = &chars[3..];
     !rest.is_empty()
         && rest[..rest.len() - 1]
             .iter()
@@ -588,14 +588,18 @@ fn edit_command_name(command: &EditCommand) -> String {
         .to_string()
 }
 
+/// One keymap's provenance stacks: for each `(modifiers, key code)`
+/// slot, the layers that wrote it, in build order (the last write is
+/// the effective one). Keyed by the pair because reedline 0.52 does
+/// not export its combination type name.
+pub type KeymapStacks = Vec<((KeyModifiers, KeyCode), Vec<(KeymapSource, ReedlineEvent)>)>;
+
 /// Turn one keymap's provenance stacks into registry entries: the
 /// winner of each slot is the last layer that wrote it; `shadowed`
 /// names the highest lower layer that had it bound differently.
-/// (Stacks are keyed by the `(modifiers, key code)` pair: reedline
-/// 0.52 does not export its combination type name.)
 pub fn entries_from_stacks(
     mode: KeymapMode,
-    stacks: Vec<((KeyModifiers, KeyCode), Vec<(KeymapSource, ReedlineEvent)>)>,
+    stacks: KeymapStacks,
     engine_bindings: &[rubash::shell::bind_registry::BindEntry],
 ) -> Vec<KeymapEntry> {
     let mut entries: Vec<KeymapEntry> = stacks

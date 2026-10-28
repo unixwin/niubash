@@ -615,15 +615,7 @@ impl LayeredKeymap {
         out
     }
 
-    fn finish(
-        self,
-    ) -> (
-        Keybindings,
-        Vec<(
-            (KeyModifiers, KeyCode),
-            Vec<(crate::keymap_registry::KeymapSource, ReedlineEvent)>,
-        )>,
-    ) {
+    fn finish(self) -> (Keybindings, crate::keymap_registry::KeymapStacks) {
         (self.keybindings, self.stacks.into_iter().collect())
     }
 }
