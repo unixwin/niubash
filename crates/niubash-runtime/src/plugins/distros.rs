@@ -146,7 +146,6 @@ pub struct DistroRecord {
     /// Where the tree was imported from (git url or local path).
     pub origin: String,
     pub path: PathBuf,
-    pub imported_at: String,
 }
 
 pub fn distros_root() -> PathBuf {
@@ -281,10 +280,6 @@ pub fn import(origin: &str) -> anyhow::Result<Collection> {
         name: collection.name.clone(),
         origin: normalized.clone(),
         path: dest.clone(),
-        imported_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_default(),
     });
     write_distro_registry(&registry)?;
     Ok(collection)
@@ -297,11 +292,10 @@ fn write_distro_registry(registry: &[DistroRecord]) -> anyhow::Result<()> {
     );
     for record in registry {
         body.push_str(&format!(
-            "\n[[distro]]\nname = {}\norigin = {}\npath = {}\nimported_at = {}\n",
+            "\n[[distro]]\nname = {}\norigin = {}\npath = {}\n",
             toml_quote(&record.name),
             toml_quote(&record.origin),
-            toml_quote(&record.path.display().to_string()),
-            toml_quote(&record.imported_at)
+            toml_quote(&record.path.display().to_string())
         ));
     }
     fs::write(distro_registry_path(), body)?;

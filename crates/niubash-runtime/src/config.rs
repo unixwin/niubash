@@ -226,23 +226,6 @@ impl MenuConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCompletionConfig {
-    pub enabled: bool,
-    pub commands: Vec<String>,
-    pub timeout_millis: u64,
-}
-
-impl Default for RuntimeCompletionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            commands: Vec::new(),
-            timeout_millis: 1000,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeWidgetConfig {
     pub enabled: bool,
     pub presets: Vec<String>,
@@ -1062,7 +1045,6 @@ pub struct FullConfig {
     pub hooks: HookConfig,
     pub autosuggest: AutosuggestConfig,
     pub syntax_highlighting: SyntaxHighlightConfig,
-    pub runtime_completions: RuntimeCompletionConfig,
     pub native_widgets: NativeWidgetConfig,
 }
 
@@ -1083,7 +1065,6 @@ impl Default for FullConfig {
             hooks: HookConfig::default(),
             autosuggest: AutosuggestConfig::default(),
             syntax_highlighting: SyntaxHighlightConfig::default(),
-            runtime_completions: RuntimeCompletionConfig::default(),
             native_widgets: NativeWidgetConfig::default(),
         }
     }

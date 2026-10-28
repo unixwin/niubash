@@ -3,7 +3,6 @@
 
 use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
 use crate::completion::path::PathCompleter;
-use crate::completion::runtime::{command_words_before_cursor, comp_cword};
 use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
@@ -166,36 +165,6 @@ impl CompletionState {
         // rc-declared NIU_COMPDEFS directories after Shell::new seeded the
         // config layer, issue #306) rebuilds the same slot instead of
         // stacking a duplicate plugin that would emit every candidate twice.
-        if let Some(slot) = self.plugins.iter_mut().rev().find(|p| {
-            p.as_any()
-                .downcast_ref::<ExternalCompletionPlugin>()
-                .is_some()
-        }) {
-            *slot = Arc::new(external);
-        } else {
-            self.add_plugin(Arc::new(external));
-        }
-    }
-
-    /// Replace the bundle-provided definitions inside the external
-    /// completion plugin.
-    ///
-    /// The initial definition set is installed at `Shell::new`, before any
-    /// startup rc runs — so packs enabled later by the rc (the
-    /// `NIU_PLUGINS=(...)` line the setup wizard writes) would never
-    /// contribute completions: aliases and functions load through the rc,
-    /// but completion TOMLs were snapshotted too early. Official pack names
-    /// are masked by the compiled-in fallback; third-party and newly added
-    /// packs are not. Rebuilding the external plugin from the recorded user
-    /// directories keeps overrides intact; callers recompute only when the
-    /// enabled-pack set changes, so steady-state prompt cost is unchanged.
-    pub fn refresh_bundle_definitions(&mut self, bundle_definitions: Vec<CommandDef>) {
-        let dirs = self.completion_dirs.clone();
-        let mut external = ExternalCompletionPlugin::new();
-        external.replace_definitions(bundle_definitions);
-        for dir in &dirs {
-            external.load_dir(dir);
-        }
         if let Some(slot) = self.plugins.iter_mut().rev().find(|p| {
             p.as_any()
                 .downcast_ref::<ExternalCompletionPlugin>()
@@ -621,6 +590,81 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
         completions,
         descriptions,
     ))
+}
+
+/// Words of the current command segment before the cursor (the compdef
+/// bridge's COMP_WORDS/COMP_CWORD inputs). Moved here from the retired
+/// completion::runtime module — this file is their only consumer.
+fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String>> {
+    let pos = context.cursor_pos.min(context.input.len());
+    let pos = floor_char_boundary(&context.input, pos);
+    let before_cursor = &context.input[..pos];
+    let start = before_cursor
+        .rfind([';', '|', '&', '\n'])
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let segment = before_cursor[start..].trim_start();
+    let words = split_shell_words(segment);
+    (!words.is_empty()).then_some(words)
+}
+
+fn comp_cword(context: &CompletionContext) -> usize {
+    let Some(words) = command_words_before_cursor(context) else {
+        return 0;
+    };
+    if context
+        .input
+        .get(..context.cursor_pos.min(context.input.len()))
+        .and_then(|input| input.chars().last())
+        .is_some_and(char::is_whitespace)
+    {
+        words.len()
+    } else {
+        words.len().saturating_sub(1)
+    }
+}
+
+fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            ch if ch.is_whitespace() && !single && !double => {
+                if !current.is_empty() {
+                    words.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn floor_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut p = pos;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
 }
 
 #[derive(Debug, Eq, PartialEq)]

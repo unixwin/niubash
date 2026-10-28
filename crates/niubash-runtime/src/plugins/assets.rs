@@ -116,15 +116,6 @@ pub fn near_marker_spans_public(
     near_marker_spans(lines, id, begin, end)
 }
 
-/// True when `id` has an activation anywhere the loader can see it: a
-/// section in the generated loader, or (pre-migration rcs) a managed
-/// block. One state read for listings and the plugin UI. The former tool
-/// PATH-block channel retired with the download driver (owner ruling
-/// 2026-10-04).
-pub fn managed_block_present(id: &str) -> bool {
-    live_block_present(id)
-}
-
 /// The primary interactive rc file asset activation edits.
 pub fn rc_file() -> PathBuf {
     shell_home_dir()
