@@ -27,7 +27,9 @@ permissions:
   contents: read
 
 env:
-  SIGNPATH_API_BASE: https://signpath.io/api/v1
+  # SaaS API host is app.signpath.io (signpath.io itself is the marketing
+  # site; a wrong host answers with its Framer 404 page).
+  SIGNPATH_API_BASE: https://app.signpath.io/api/v1
 
 jobs:
   smoke:
