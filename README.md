@@ -133,6 +133,8 @@ Every number below comes from one published protocol — the 2026-10-25 baseline
 
 **Windows process economics.** A console-less session used to pay a hidden-console allocation on *every* external spawn. The fix is one hidden console per session — pre-allocated windowless on Windows 11 24H2+/Server 2025, adopted from the first `CREATE_NO_WINDOW` child elsewhere — pinned by 14 regression tests (design in [#462](https://github.com/unixwin/niubash/issues/462), landed engine-side in [rubash#913](https://github.com/unixwin/rubash/pull/913)). And `$(tput …)` terminal queries are answered in-process for admitted TERM×capability shapes, byte-equal to GNU ncurses on a 269-row differential matrix, with zero spawns ([rubash#884](https://github.com/unixwin/rubash/pull/884)).
 
+**Loop scripts — one Windows machine, measured.** Same-machine Windows measurement (niubash 1.4.4): a 50-iteration loop over a `sed|grep|awk` pipeline — 150 external command launches in total — takes 1.502s in niubash and 27.256s in Git Bash, roughly 18×. The gap is not in the commands; it is Windows process-startup cost: no fork, no POSIX emulation layer, a startup surface more than an order of magnitude smaller. Original record: [niubash #567](https://github.com/unixwin/niubash/issues/567).
+
 **Android, stated plainly.** An on-device Android baseline exists ([#352](https://github.com/unixwin/niubash/issues/352)); its engine-side root causes were found and closed (rubash#607–#609), fork-bound workloads already ran faster there, and a post-fix on-device re-measure is still owed — we say so instead of quoting the stale pre-fix numbers.
 
 ## Platforms

@@ -133,6 +133,8 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 **Windows 进程经济学。** 无 console 会话过去每次外部 spawn 都要付一次隐藏 console 分配。修法是一个会话一个隐藏 console——Windows 11 24H2+/Server 2025 上预分配无窗 console，其他系统认领首个 `CREATE_NO_WINDOW` 子进程的——由 14 条回归测试钉死（设计见 [#462](https://github.com/unixwin/niubash/issues/462)，引擎侧落地于 [rubash#913](https://github.com/unixwin/rubash/pull/913)）。`$(tput …)` 终端查询对准入的 TERM×能力形状进程内作答，与 GNU ncurses 在 269 行差分矩阵上字节相等，零 spawn（[rubash#884](https://github.com/unixwin/rubash/pull/884)）。
 
+**循环脚本——Windows 同机实测。** Windows 同机实测（niubash 1.4.4）：50 次循环 × `sed|grep|awk` 管道、共 150 次外部命令启动，niubash 1.502s，Git Bash 27.256s——约 18 倍。差距不在命令，在 Windows 的进程启动成本：无 fork、无 POSIX 模拟层，启动面小一个数量级以上。原始记录：[niubash #567](https://github.com/unixwin/niubash/issues/567)。
+
 **Android，明说。** 机上实测基线存在（[#352](https://github.com/unixwin/niubash/issues/352)）；其引擎侧根因已被定位并关闭（rubash#607–#609），fork 受限负载在那份基线里本就更快；修后真机复测尚欠——我们如实说，而不是引用修前的旧数字。
 
 ## 平台支持
