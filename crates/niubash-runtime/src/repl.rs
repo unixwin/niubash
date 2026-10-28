@@ -445,7 +445,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         )));
     }
     if shell_ref.syntax_highlighting.main_highlighter_enabled() {
-        let functions = shell_ref.executor.functions_snapshot();
+        let functions = shell_ref.executor().functions_snapshot();
         let commands = shell_ref
             .aliases
             .keys()
@@ -3675,7 +3675,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // jump's status (last_exit_code, e.g. `exit 5`) is carried out
             // through the EXIT trap.
             if shell.borrow_mut().run_precmd_hooks() {
-                let status = shell.borrow().executor.last_exit_code();
+                let status = shell.borrow().executor().last_exit_code();
                 // The jump's status IS the session status (GNU's
                 // jump_to_top_level unwinds reader_loop and exit_shell
                 // carries it); the REPL's Ok(()) return otherwise always
@@ -3912,7 +3912,7 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         // niubash#642: through the shared funnel, so the session-end
         // history write runs on this path too (it used to skip it).
         if shell.run_precmd_hooks() {
-            let status = shell.executor.last_exit_code();
+            let status = shell.executor_mut().last_exit_code();
             end_repl_session(shell, status);
         }
         let prompt = if pending.is_empty() {

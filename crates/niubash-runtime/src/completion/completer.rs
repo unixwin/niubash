@@ -314,12 +314,12 @@ impl NiubashCompleter {
             let first_word = input.split_whitespace().next().unwrap_or_default();
             let has_compspec = !first_word.is_empty()
                 && crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.has_compspec(first_word)
+                    shell.executor_mut().has_compspec(first_word)
                 })
                 .unwrap_or(false);
             if has_compspec {
                 if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.complete_line(input, cursor_pos)
+                    shell.executor_mut().complete_line(input, cursor_pos)
                 }) {
                     if !cands.is_empty() {
                         let result = CompletionResult::new(cands);
