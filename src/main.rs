@@ -3559,10 +3559,11 @@ fn run_help_command(args: &[String]) -> anyhow::Result<()> {
 
 fn run_config_command(args: &[String]) -> anyhow::Result<()> {
     use niubash_runtime::config::{
-        resolve_command_not_found_hint, resolve_completion_style, resolve_rc_policy,
+        add_keymap_bind_rule, add_keymap_unbind_rule, resolve_command_not_found_hint,
+        resolve_completion_style, resolve_keymap_rule_specs, resolve_rc_policy,
         set_command_not_found_hint, set_completion_style, user_config_path, CommandNotFoundHint,
         CompletionStyle, CompletionStyleSource, COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_STYLE_KEY,
-        RC_POLICY_KEY,
+        KEYMAP_BIND_KEY, KEYMAP_UNBIND_KEY, RC_POLICY_KEY,
     };
     // One line describing where the effective completion style came from —
     // the precedence (env > config > default) is part of the contract, so
@@ -3593,6 +3594,15 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
             }
             println!("  {RC_POLICY_KEY} = {}", resolve_rc_policy().as_str());
             println!("    (owned by `niu setup --rc-policy`; `niu config` preserves it)");
+            let (bind_rules, unbind_rules) = resolve_keymap_rule_specs();
+            println!("  {KEYMAP_BIND_KEY} = {} rule(s)", bind_rules.len());
+            for rule in &bind_rules {
+                println!("    {rule}");
+            }
+            println!("  {KEYMAP_UNBIND_KEY} = {} rule(s)", unbind_rules.len());
+            for rule in &unbind_rules {
+                println!("    {rule}");
+            }
             Ok(())
         }
         Some("get") => {
@@ -3610,6 +3620,26 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                 }
                 RC_POLICY_KEY => {
                     println!("{}", resolve_rc_policy().as_str());
+                    Ok(())
+                }
+                KEYMAP_BIND_KEY => {
+                    let (rules, _) = resolve_keymap_rule_specs();
+                    for rule in &rules {
+                        println!("{rule}");
+                    }
+                    if rules.is_empty() {
+                        println!("(no rules)");
+                    }
+                    Ok(())
+                }
+                KEYMAP_UNBIND_KEY => {
+                    let (_, rules) = resolve_keymap_rule_specs();
+                    for rule in &rules {
+                        println!("{rule}");
+                    }
+                    if rules.is_empty() {
+                        println!("(no rules)");
+                    }
                     Ok(())
                 }
                 unknown => anyhow::bail!(
@@ -3693,6 +3723,36 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                     print_completion_style_outcome(effective, source);
                     Ok(())
                 }
+                KEYMAP_BIND_KEY => {
+                    // niubash#630: the value is ONE bind argument
+                    // string; it is validated by the loader's parser
+                    // before anything is written, then appended to
+                    // the [keymap].bind array (duplicates ignored).
+                    let path = add_keymap_bind_rule(value)?;
+                    println!(
+                        "{} {KEYMAP_BIND_KEY} += {value}",
+                        niubash_runtime::text_style::green("Set:")
+                    );
+                    println!(
+                        "  persisted in {}; applies at the next prompt rebuild, \
+                         over any script or NIU_BINDKEYS binding on the same key.",
+                        path.display()
+                    );
+                    Ok(())
+                }
+                KEYMAP_UNBIND_KEY => {
+                    let path = add_keymap_unbind_rule(value)?;
+                    println!(
+                        "{} {KEYMAP_UNBIND_KEY} += {value}",
+                        niubash_runtime::text_style::green("Set:")
+                    );
+                    println!(
+                        "  persisted in {}; the key is unbound outright at the next \
+                         prompt rebuild, whatever layer bound it.",
+                        path.display()
+                    );
+                    Ok(())
+                }
                 unknown => anyhow::bail!(
                     "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
                 ),
@@ -3736,6 +3796,20 @@ fn print_config_usage() {
     println!("      opt-in that lets ~/.bashrc fill the slot when ~/.niubashrc is");
     println!("      genuinely absent. Owned by `niu setup --rc-policy`; `niu config`");
     println!("      shows and preserves it but cannot set it (niubash#359).");
+    println!();
+    println!("  {k}", k = niubash_runtime::config::KEYMAP_BIND_KEY);
+    println!("      Persistent key-binding rules (niubash#630). The value is one");
+    println!("      GNU bind argument string — '\"\\C-g\": redisplay', or with -x:");
+    println!("      '-x \"\\C-t\": my-cmd' — validated, then appended to the");
+    println!("      [keymap] bind array. Rules apply after startup scripts and");
+    println!("      NIU_BINDKEYS, so they win on their key; a script rebinding");
+    println!("      the same key mid-session cannot override them. Remove a");
+    println!("      rule by editing ~/.niubash/config.toml.");
+    println!();
+    println!("  {k}", k = niubash_runtime::config::KEYMAP_UNBIND_KEY);
+    println!("      Persistent key removals (niubash#630). The value names one");
+    println!("      key in bind spelling ('\"\\C-t\"'); the key is unbound");
+    println!("      outright — it does not fall back to a lower layer's binding.");
 }
 
 fn print_plugin_mirror_usage() {
