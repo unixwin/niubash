@@ -21,6 +21,11 @@ on:
         description: "Existing signing request id to inspect (skips submitting a new one)"
         required: false
         type: string
+      fix_artifact_config:
+        description: "Write the corrected default artifact configuration XML (zip-file root)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -97,6 +102,7 @@ jobs:
           ORG_ID_B: ${{ secrets.SIGNPATH_ORG_ID }}
           PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_ID }}
           REQUEST_ID: ${{ inputs.request_id || steps.sign_primary.outputs.signing-request-id || steps.sign_fallback.outputs.signing-request-id }}
+          FIX_ARTIFACT_CONFIG: ${{ inputs.fix_artifact_config }}
         run: |
           $ErrorActionPreference = "Continue"
           Write-Host "signing request id: $env:REQUEST_ID"
@@ -124,14 +130,35 @@ jobs:
             # accepts.
             try {
               $proj = $resp2.Content | ConvertFrom-Json
-              $xmlLink = $proj.artifactConfigurations |
-                Where-Object { $_.isDefault } |
-                Select-Object -First 1 -ExpandProperty artifactConfigurationXmlLink
+              $default = $proj.artifactConfigurations | Where-Object { $_.isDefault } | Select-Object -First 1
+              $xmlLink = $default.artifactConfigurationXmlLink
               if ($xmlLink) {
                 Write-Host "--- GET artifact configuration XML ---"
                 $resp3 = Invoke-WebRequest -Uri $xmlLink -Headers $headers -SkipHttpErrorCheck
                 Write-Host "HTTP $($resp3.StatusCode)"
                 Write-Host $resp3.Content
+
+                if ($env:FIX_ARTIFACT_CONFIG -eq "true") {
+                  # The Foundation's placeholder declares a bare <pe-file> at
+                  # the root, but the GitHub connector submits a ZIP (the
+                  # upload-artifact default), which needs a <zip-file> root.
+                  # Match the versioned installer names via wildcard.
+                  $fixedXml = @(
+                    '<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">'
+                    '  <zip-file>'
+                    '    <pe-file path="niubash-v*-win-*-setup.exe">'
+                    '      <authenticode-sign />'
+                    '    </pe-file>'
+                    '  </zip-file>'
+                    '</artifact-configuration>'
+                  ) -join "`n"
+                  Write-Host "--- PUT corrected artifact configuration ---"
+                  $resp4 = Invoke-WebRequest -Uri $xmlLink -Method Put `
+                    -Headers $headers -ContentType "application/xml" `
+                    -Body $fixedXml -SkipHttpErrorCheck
+                  Write-Host "HTTP $($resp4.StatusCode)"
+                  Write-Host $resp4.Content
+                }
               }
             } catch {
               Write-Host "::warning::could not fetch artifact configuration XML: $($_.Exception.Message)"
