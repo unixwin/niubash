@@ -6,11 +6,17 @@
 //! name recorded in `excluded`. Since niubash#312 every package entry also
 //! pins its exact artifact SHA-256 per arch — the release refuses to
 //! install anything whose live-index digest differs from the pin, so a
-//! manifest edit cannot silently change what a release ships. These tests
+//! manifest edit cannot silently change what a release ships. Payload
+//! license hygiene additionally requires every package entry to declare
+//! its `license` (SPDX expression) and `source` (upstream project URL,
+//! with the Corresponding Source recipe pointer for niugit) — the fields
+//! the release body's Licenses & Source section and the packaged
+//! `licenses\` tree are generated from. These tests
 //! pin the schema and the owner-ordered exclusions so a manifest edit
 //! cannot silently re-admit a forbidden package (compression tools, goawk,
 //! `link`), drop the per-leg install-policy disclosure (fail-closed on
-//! x64, fail-open on other legs), or drop the pins. The workflow
+//! x64, fail-open on other legs), drop the pins, or drop a package's
+//! license disclosure. The workflow
 //! reads the same file; a schema break fails `cargo test` here before it
 //! can fail a release. `scripts/release/winuxcmd-pin.json` (the bundled
 //! WinuxCmd engine pin, same issue) is schema-checked here too.
@@ -67,6 +73,33 @@ fn assert_sha256_pin(hash: &str, context: &str) {
         hash.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
         "{context}: sha256 pin {hash:?} must be lowercase hex (Get-FileHash output is normalized at pin time)"
     );
+}
+
+/// Payload license hygiene: every package entry declares what its shipped
+/// payload (and private DLL closure) is licensed under (`license`, an SPDX
+/// expression) and where its upstream / Corresponding Source lives
+/// (`source`; for niugit the recipe pointer). The release body's
+/// Licenses & Source section is GENERATED from these two fields and
+/// package-release.ps1 stages `scripts/release/licenses/<name>/` off the
+/// same entries, so a missing or empty value would ship an undisclosed GPL
+/// bundle or a stale disclosure — it must fail here exactly like a dropped
+/// sha256 pin.
+fn assert_package_license(package: &Value) {
+    let name = package
+        .get("name")
+        .and_then(Value::as_str)
+        .expect("package entries always carry a name when license fields are checked");
+    for field in ["license", "source"] {
+        assert!(
+            package
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "package {name:?} needs a non-empty {field} field (payload license \
+             hygiene: the release discloses licenses and Corresponding Source \
+             straight from the manifest)"
+        );
+    }
 }
 
 /// niubash#312: every package entry pins `version` and a per-arch `sha256`
@@ -147,6 +180,7 @@ fn manifest_schema_is_complete() {
             "package {name:?} needs a non-empty purpose (why it ships)"
         );
         assert_package_pin(package);
+        assert_package_license(package);
         names.push(name.to_string());
     }
     let unique = names

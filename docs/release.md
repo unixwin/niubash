@@ -198,6 +198,33 @@ asserts the raw bytes (`a\nb\n`, plus the `a\r\nb\r\n` pass-through an
 explicit `ORS="\r\n"` must produce). A release whose bundled forwarder
 lacks the adapter fails the x64 gate.
 
+## Payload licenses & source
+
+The Windows archives are not just `niu.exe`: they bundle third-party
+payloads (gawk with its DLL closure, niugit, ripgrep, fd) and WinuxCmd.
+License texts and per-component provenance ship in the archive under
+`licenses\`, staged from `scripts/release/licenses/` — one directory per
+component, each carrying the canonical license text (`LICENSE`) and a
+`PROVENANCE.md` naming the upstream project, the exact version, the binary
+origin, and the Corresponding Source pointer. Repo-root `NOTICE` is the
+short attribution table; `scripts/gen-third-party-notices.mjs` inventories
+niubash's own Rust crates from Cargo.lock.
+
+- **niugit** — git-for-windows C source built with MSVC. The Corresponding
+  Source recipe is explicit: the upstream tarball (sha256-pinned in niu-git's
+  `scripts/build.py`) + `patches/0001-0006` + the build script, all in
+  `unixwin/niu-git`.
+- **gawk** — the wpm payload is a repackaged mirror of ezwinports
+  (`gawk-5.4.1-w32-bin.zip`), pinned by SHA-256 in `preinstall.json`; the
+  five DLLs in its import closure ship their own licenses under
+  `licenses\dll-closure\`.
+- **ripgrep / fd** — upstream release assets re-pinned by SHA-256; both are
+  dual-licensed (`MIT OR Unlicense` / `MIT OR Apache-2.0`) and both option
+  texts ship.
+- **WinuxCmd** — original MIT C++ of the unixwin team, not a port of another
+  codebase (previously asserted only in a planning note; the bundled
+  `licenses\winuxcmd\LICENSE` is now the durable record).
+
 ## Dispatching a dry run (captain)
 
 The workflow validates `tag` against `^v\d+\.\d+\.\d+$` and against the
