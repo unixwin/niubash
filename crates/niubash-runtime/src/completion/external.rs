@@ -975,4 +975,3 @@ fn is_executable_file(path: &Path) -> bool {
         Err(_) => false,
     }
 }
-

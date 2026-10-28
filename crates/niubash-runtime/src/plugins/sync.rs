@@ -432,9 +432,7 @@ fn sync_with_spec(
                     // killing niu. Per-entry (niubash#296): each source's
                     // fetch gets its own fresh budget, so one stalled
                     // origin never consumes the others' window.
-                    fetch_budget: Some(
-                        options.timeout.unwrap_or_else(sources::verb_fetch_budget),
-                    ),
+                    fetch_budget: Some(options.timeout.unwrap_or_else(sources::verb_fetch_budget)),
                     // Sync never guards credentials: an auth-demanding
                     // origin keeps git's prompting behavior, as on every
                     // other explicit verb.
