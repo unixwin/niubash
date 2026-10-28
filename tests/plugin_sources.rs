@@ -643,12 +643,12 @@ fn add_bare_path_forms_snapshot_local_trees() {
     let _ = fs::remove_dir_all(&temp);
 }
 
-/// niubash#298: the first fetch of an unpinned, non-catalog origin warns
-/// that nothing verified the first delivery (and the record carries
-/// `first_fetch_verified: false`); a `file://` origin keeps the test
-/// offline.
+/// A remote git origin (a `file://` URL keeps the test offline) installs
+/// like any other source. niubash#647: there is no #298 first-fetch
+/// warning and no `first_fetch_verified` record — the fetch notice is the
+/// only banner an add prints.
 #[test]
-fn unpinned_remote_first_fetch_warns_and_records() {
+fn remote_git_origin_adds_without_a_first_fetch_record() {
     let temp = temp_dir("plugin-first-fetch");
     let root = temp.join("sources");
     let home = temp.join("home");
@@ -687,12 +687,12 @@ fn unpinned_remote_first_fetch_warns_and_records() {
     assert_success(&add, "plugin add file:// origin");
     let text = stdout_text(&add);
     assert!(
-        text.contains("NOT integrity-verified"),
-        "the unpinned remote first fetch must warn: {text}"
+        !text.contains("NOT integrity-verified"),
+        "no first-fetch warning exists anymore: {text}"
     );
     let list = run_niu_with_env(&["plugin", "source", "list", "--json"], &envs);
     let json = stdout_text(&list);
-    assert!(json.contains("\"first_fetch_verified\": false"), "{json}");
+    assert!(!json.contains("first_fetch_verified"), "{json}");
 
     let _ = fs::remove_dir_all(&temp);
 }

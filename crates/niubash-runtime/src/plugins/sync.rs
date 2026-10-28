@@ -2338,9 +2338,9 @@ mod tests {
             }],
         })
         .unwrap();
-        sync_spec(SyncOptions::default()).unwrap();
-        // Materialize once, then confirm the steady state is reached (the
-        // second sync is the in-sync no-op the startup form must reproduce).
+        // niubash#647: the first sync installs AND materializes in one
+        // pass; the second reaches the steady state the startup form
+        // must reproduce.
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "activated", "{:?}", report.rows);
         let report = sync_spec(SyncOptions::default()).unwrap();
@@ -2604,12 +2604,13 @@ mod tests {
             report.rows
         );
 
-        // The healthy entry installed despite the failure above it.
+        // The healthy entry installed (and materialized) despite the
+        // failure above it.
         assert!(
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "healthy" && row.action == "unchanged"),
+                .any(|row| row.id == "healthy" && row.action == "activated"),
             "{:?}",
             report.rows
         );

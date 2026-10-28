@@ -3256,7 +3256,7 @@ mod tests {
              id = 'oh-my-bash'\n\
              adapter = 'oh-my-bash'\n\
              url = '{origin}'\n\
-             ref_name = 'local'\n\
+             ref = 'local'\n\
              version = 'local'\n\
              path = '{tree}'\n\
              trusted = true\n\
@@ -3273,7 +3273,7 @@ mod tests {
              \n\
              [sources.previous]\n\
              version = 'local'\n\
-             ref_name = 'local'\n\
+             ref = 'local'\n\
              checksum_sha256 = 'cafe'\n",
             origin = origin.display(),
             tree = tree.display()
