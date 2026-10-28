@@ -126,6 +126,20 @@ pub struct Shell {
     /// funnel does not own. `None` in test constructions that never touch
     /// history.
     history_provider: Option<Rc<RefCell<crate::history::RubashHistoryProvider>>>,
+    /// niubash#661: armed at the end of `enter_interactive`, once the
+    /// host has pointed `HISTFILE` at the configured history path.
+    /// While armed, `refresh_history_settings` treats a live `HISTFILE`
+    /// naming a different file as a redirect of the session stream.
+    /// Before arming, an inherited `HISTFILE` must NOT redirect
+    /// anything: the configured path is the file of record at startup
+    /// (niubash#571), and only an assignment made inside the session
+    /// counts as a redirect.
+    history_redirect_armed: bool,
+    /// niubash#661: a redirect was applied to the provider and
+    /// `history_path` by the last refresh; the REPL loop consumes this
+    /// to rebuild the line editor, whose history instance still backs
+    /// the old file. Taken by `take_history_redirect`.
+    history_redirect_pending_editor_rebuild: bool,
     pub menu_config: MenuConfig,
     pub editor_mode: EditorMode,
     /// Command-not-found package-search hint policy (niubash#249): off by
@@ -648,6 +662,8 @@ impl Shell {
             history_max_size: config.history.max_size,
             history_ignore_space_prefixed: config.history.ignore_space_prefixed,
             history_provider: None,
+            history_redirect_armed: false,
+            history_redirect_pending_editor_rebuild: false,
             menu_config: config.menus.with_env_overrides(),
             editor_mode: config.editor.edit_mode,
             command_not_found_hint,
@@ -818,6 +834,26 @@ impl Shell {
             self.executor.set_history_provider(provider.clone());
             self.history_provider = Some(provider);
         }
+        // niubash#660: GNU interactive shells default the `history`
+        // option ON (bashhist.c: remember_on_history starts enabled;
+        // rubash's own main.rs asserts the same initial value at its
+        // interactive entry). The engine table defaults it off because
+        // scripts must not record, so assert the interactive default
+        // here — but only when nothing has set the option yet: an
+        // explicit startup setting (`niu +o history`, an embedding
+        // host) is the user's word and stands. From here on the option
+        // is live user state: `set +o history` / `set -o history` at
+        // the prompt flip it, and `refresh_history_settings` snapshots
+        // it into the settings cell the editor's record funnel
+        // consults. (Entry used to force the option OFF so the
+        // engine's machinery stayed down; that also froze the toggle
+        // in the host's chosen position, which is the #660 bug. The
+        // machinery stays down without it: the executor never creates
+        // a session list while a provider is installed, so the option
+        // being on cannot start a second stream.)
+        if self.executor.get_env("__RUBASH_SETOPT_history").is_none() {
+            self.executor.set_shell_option("history", true);
+        }
         // niubash#646: snapshot the inherited HIST* values into the
         // settings cell; the REPL loops refresh it at every prompt
         // boundary, so values the startup files set land there before
@@ -861,10 +897,11 @@ impl Shell {
         self.executor
             .set_shopt_option("expand_aliases", expand_aliases);
         // Reedline owns interactive history (see the construction-site note):
-        // disable the engine's Bash history machinery only on the REPL path
-        // so HISTFILE cannot create a second, competing history stream.
-        // The engine machinery stays off via the flag above; HISTFILE itself
-        // now defaults to the host history's backing file (niubash#571)
+        // the engine's own list machinery stays off on the REPL path
+        // because the executor never creates a session list while a
+        // history provider is installed, so HISTFILE cannot create a
+        // second, competing history stream. HISTFILE itself now
+        // defaults to the host history's backing file (niubash#571)
         // instead of being unset. GNU interactive shells always have a
         // HISTFILE default (~/.bash_history), and the bare `history -a/-w/
         // -r/-n` forms resolve their filename from it — with HISTFILE unset
@@ -874,10 +911,10 @@ impl Shell {
         // own backing file keeps exactly one stream: the builtins resolve
         // to the file the provider already owns, and the provider's
         // backing-file fast paths serve them. A HISTFILE the user exports
-        // before launch was already ignored by the old unset; that
-        // single-stream choice is unchanged — the configured history path
-        // (not an inherited HISTFILE) remains the file of record.
-        self.executor.set_shell_option("history", false);
+        // before launch is still not the file of record — the configured
+        // history path (not an inherited HISTFILE) remains it; an
+        // assignment made inside the session is a different matter and
+        // does redirect the stream (niubash#661, armed below).
         self.executor
             .set_env("HISTFILE", &self.history_path.to_string_lossy());
         // rubash#1248: assert the other half of the interactive history
@@ -892,6 +929,11 @@ impl Shell {
         // the host driving expansion. A user's own `set +H` in rc or at
         // the prompt still wins: it lands after this, in line order.
         self.executor.set_shell_option("histexpand", true);
+        // niubash#661: HISTFILE now names the file of record, so a
+        // later in-session assignment is unambiguously a redirect of
+        // the history stream: arm the live-HISTFILE watch that
+        // `refresh_history_settings` runs at every prompt boundary.
+        self.history_redirect_armed = true;
     }
 
     /// Route a one-command AST to an easter egg when this shell is
@@ -3040,6 +3082,12 @@ impl Shell {
     /// read `resync_parse_extglob_gate` performs for extglob.
     /// HISTTIMEFORMAT is not snapshotted: it has no consumer on this
     /// side of the provider contract (see `HistorySettings`).
+    ///
+    /// Two live-state faces ride along (niubash#660/#661): the
+    /// `history` shell option is snapshotted into the same cell (the
+    /// editor's record funnel drops lines while it is off), and a
+    /// `HISTFILE` assignment made inside the session redirects the
+    /// history stream to the new file (see `apply_history_redirect`).
     pub fn refresh_history_settings(&mut self) {
         let Some(settings) = self.history_settings() else {
             return;
@@ -3058,13 +3106,79 @@ impl Shell {
             .executor
             .get_env("__RUBASH_SHOPT_STATE")
             .is_some_and(|state| state.split('\u{1f}').any(|entry| entry == "histappend"));
+        // niubash#660: the `history` shell option, read from the
+        // engine's own option store (the `__RUBASH_SETOPT_` carrier
+        // `refresh_edit_mode` reads for emacs/vi). An absent key counts
+        // as enabled: this cell exists only on the interactive path,
+        // where GNU's default is on and `enter_interactive` writes the
+        // key explicitly, so absence means a construction that never
+        // passed through interactive entry — fail open to recording
+        // rather than silently swallow a session's lines.
+        let history_enabled = self.executor.get_env("__RUBASH_SETOPT_history") != Some("0");
         if let Ok(mut settings) = settings.lock() {
             settings.histcontrol = histcontrol;
             settings.histignore = histignore;
             settings.histsize = histsize;
             settings.histfilesize = histfilesize;
             settings.histappend = histappend;
+            settings.history_enabled = history_enabled;
+        }
+        self.apply_history_redirect();
+    }
+
+    /// niubash#661: follow a live `HISTFILE` redirect. GNU reads
+    /// HISTFILE at the moment of each operation it governs, so an
+    /// in-session `export HISTFILE=<new>` moves the session's history
+    /// stream: the provider retargets its backing file (settling the
+    /// old file first), `history_path` follows, and the REPL loop is
+    /// signalled to rebuild the line editor, whose history instance
+    /// still backs the old file.
+    ///
+    /// Deliberate non-redirects: `HISTFILE` unset or empty keeps the
+    /// file of record (GNU's unset-erases-history-file face is not
+    /// part of this change; the host's single-stream doctrine needs a
+    /// backing file), and while the watch is unarmed (before
+    /// `enter_interactive` completes) an inherited value never
+    /// redirects — the configured path is the startup file of record
+    /// (niubash#571).
+    fn apply_history_redirect(&mut self) {
+        if !self.history_redirect_armed {
+            return;
+        }
+        let Some(live) = self.executor.get_env("HISTFILE") else {
+            return;
         };
+        if live.is_empty() {
+            return;
+        }
+        let live_path = PathBuf::from(live);
+        if live_path == self.history_path {
+            return;
+        }
+        let Some(provider) = self.history_provider.as_ref() else {
+            return;
+        };
+        if let Ok(mut provider) = provider.try_borrow_mut() {
+            provider.retarget(live_path.clone());
+        }
+        // Adopt the redirect only when the provider actually moved:
+        // its retarget is atomic on failure, and pointing
+        // `history_path` at a file the provider does not back would
+        // split the two instances onto different files.
+        let adopted = provider
+            .try_borrow()
+            .map(|provider| provider.backing_file() == Some(live_path.clone()))
+            .unwrap_or(false);
+        if adopted {
+            self.history_path = live_path;
+            self.history_redirect_pending_editor_rebuild = true;
+        }
+    }
+
+    /// niubash#661: consume the editor-rebuild signal a `HISTFILE`
+    /// redirect left for the REPL loop (see `apply_history_redirect`).
+    pub(crate) fn take_history_redirect(&mut self) -> bool {
+        std::mem::take(&mut self.history_redirect_pending_editor_rebuild)
     }
 
     /// Execute an entire script (multi-line) via rubash full AST execution.
@@ -5109,6 +5223,109 @@ mod tests {
             Some(path.to_string_lossy().into_owned()),
             "HISTFILE must name the provider's backing file, not be unset"
         );
+    }
+
+    #[test]
+    fn issue660_history_option_gates_editor_recording_live() {
+        // niubash#660: GNU `set +o history` stops recording until
+        // `set -o history` (bashhist.c remember_on_history; verified
+        // against bash 5.3.20 — including that the `set +o history`
+        // line itself is still recorded and the `set -o history` line
+        // is not, because the line is saved before it executes and
+        // the snapshot turns at the following prompt boundary; the
+        // sequence below mirrors that order).
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = path.clone();
+        shell.enter_interactive();
+
+        // The editor twin over the shell's shared cells, gated the
+        // way build_line_editor gates the instance it hands reedline.
+        use reedline::History as _;
+        let mut editor = crate::history::LiveFileBackedHistory::with_shared_ledger_and_settings(
+            shell.history_max_size,
+            shell.history_path.clone(),
+            shell.history_ledger().unwrap(),
+            shell.history_settings().unwrap(),
+        );
+        editor.set_history_option_gate();
+
+        editor
+            .save(reedline::HistoryItem::from_command_line("before-off"))
+            .unwrap();
+        shell.execute_line("set +o history").unwrap();
+        shell.refresh_history_settings();
+        editor
+            .save(reedline::HistoryItem::from_command_line("secret-while-off"))
+            .unwrap();
+        shell.execute_line("set -o history").unwrap();
+        shell.refresh_history_settings();
+        editor
+            .save(reedline::HistoryItem::from_command_line("after-on"))
+            .unwrap();
+
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(persisted.contains("before-off"), "{persisted:?}");
+        assert!(
+            !persisted.contains("secret-while-off"),
+            "line recorded despite `set +o history`: {persisted:?}"
+        );
+        assert!(persisted.contains("after-on"), "{persisted:?}");
+    }
+
+    #[test]
+    fn issue661_in_session_histfile_assignment_redirects_the_stream() {
+        // niubash#661: GNU reads HISTFILE at the moment of each
+        // operation it governs; an in-session `export HISTFILE=<new>`
+        // moves later saves and the session-end write to the new
+        // file, and the old file gains nothing after the switch.
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("histA");
+        let b = temp.path().join("histB");
+        std::fs::write(&a, "seedA\n").unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = a.clone();
+        shell.enter_interactive();
+        assert!(!shell.take_history_redirect());
+
+        let b_shell = b.to_string_lossy().replace('\\', "/");
+        shell
+            .execute_line(&format!("export HISTFILE='{b_shell}'"))
+            .unwrap();
+        shell.refresh_history_settings();
+        assert!(
+            shell.take_history_redirect(),
+            "the redirect must signal the editor rebuild"
+        );
+        assert!(
+            !shell.take_history_redirect(),
+            "the signal is consumed once"
+        );
+        assert_eq!(shell.history_path, b);
+        assert_eq!(
+            std::fs::read_to_string(&b).unwrap(),
+            "seedA\n",
+            "the new file holds the session list at switch time"
+        );
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "seedA\n");
+
+        record_accepted_line(&shell, "after-redirect-marker");
+        assert!(
+            std::fs::read_to_string(&b)
+                .unwrap()
+                .contains("after-redirect-marker"),
+            "later saves must land in the new file"
+        );
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "seedA\n");
+
+        shell.flush_session_history();
+        assert!(std::fs::read_to_string(&b)
+            .unwrap()
+            .contains("after-redirect-marker"));
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "seedA\n");
     }
 
     /// Simulate what reedline does with an accepted line in production:
@@ -8310,6 +8527,8 @@ complete -F _envtooldyn_hook envtooldyn
             history_max_size: 10000,
             history_ignore_space_prefixed: false,
             history_provider: None,
+            history_redirect_armed: false,
+            history_redirect_pending_editor_rebuild: false,
             menu_config: MenuConfig::default(),
             editor_mode: EditorMode::Emacs,
             command_not_found_hint: CommandNotFoundHint::Off,

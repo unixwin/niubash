@@ -118,6 +118,18 @@ impl RubashHistoryProvider {
         self.inner.flush_at_session_end();
     }
 
+    /// Move the session's backing file to `new_path` (niubash#661: a
+    /// mid-session `export HISTFILE=...`). See
+    /// [`LiveFileBackedHistory::retarget`].
+    pub(crate) fn retarget(&mut self, new_path: PathBuf) {
+        self.inner.retarget(new_path);
+    }
+
+    /// The file this provider's history is backed by, when it has one.
+    pub(crate) fn backing_file(&self) -> Option<PathBuf> {
+        self.inner.backing_file()
+    }
+
     /// The ledger shared with this provider's editor twin (niubash#569).
     pub(crate) fn ledger(&self) -> Arc<Mutex<SessionLedger>> {
         self.inner.ledger()
@@ -151,7 +163,7 @@ impl RubashHistoryProvider {
 /// cannot persist the `#<epoch>` side lines GNU writes — so a host-side
 /// value would be a write-only reader. The REPL timestamp face waits on
 /// the provider contract growing a stamp channel (niubash#622).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct HistorySettings {
     /// Raw `HISTCONTROL` value (colon-separated tokens).
     pub(crate) histcontrol: String,
@@ -169,6 +181,30 @@ pub(crate) struct HistorySettings {
     /// maybe_save_shell_history); the session-end flush does the same
     /// (see `LiveFileBackedHistory::flush_at_session_end`).
     pub(crate) histappend: bool,
+    /// The `history` shell option (`set -o history`) state
+    /// (niubash#660). GNU records a typed line only while the option is
+    /// on (bashhist.c: remember_on_history gates maybe_add_history);
+    /// the editor instance's record funnel consults this snapshot and
+    /// drops the line while it is off. `history -s` is NOT gated: GNU
+    /// pushes `-s` operands through add_history unconditionally
+    /// (builtins/history.def), verified against bash 5.3.20.
+    pub(crate) history_enabled: bool,
+}
+
+impl Default for HistorySettings {
+    fn default() -> Self {
+        Self {
+            histcontrol: String::new(),
+            histignore: String::new(),
+            histsize: None,
+            histfilesize: None,
+            histappend: false,
+            // GNU interactive shells default the option ON; a snapshot
+            // that was never refreshed must fail open to recording, not
+            // silently swallow a session's lines.
+            history_enabled: true,
+        }
+    }
 }
 
 impl rubash::history::HistoryProvider for RubashHistoryProvider {
@@ -811,6 +847,13 @@ pub(crate) struct LiveFileBackedHistory {
     /// Shared with the provider/editor twin over the same file
     /// (niubash#646): the HIST* settings snapshot the host refreshes.
     settings: Arc<Mutex<HistorySettings>>,
+    /// niubash#660: the editor instance (the one reedline records typed
+    /// lines into) carries this gate; its record funnel drops a line
+    /// while the settings snapshot says the `history` shell option is
+    /// off. The provider instance never carries it: `history -s`
+    /// reaches the list through the provider's `append`, and GNU adds
+    /// `-s` operands even with the option off.
+    gate_on_history_option: bool,
 }
 
 /// Clamp so the memory-only fallback is always constructible (the
@@ -945,7 +988,16 @@ impl LiveFileBackedHistory {
             state: Mutex::new(state),
             ledger,
             settings,
+            gate_on_history_option: false,
         }
+    }
+
+    /// Mark this instance as the editor's recording surface
+    /// (niubash#660): its saves are dropped while the `history` shell
+    /// option is off. Called by `build_line_editor` on the instance it
+    /// hands to reedline; provider instances are never marked.
+    pub(crate) fn set_history_option_gate(&mut self) {
+        self.gate_on_history_option = true;
     }
 
     /// The ledger shared with this history's twin instance, if any.
@@ -1425,6 +1477,80 @@ impl LiveFileBackedHistory {
         self.state.lock().ok().and_then(|state| state.path.clone())
     }
 
+    /// Move this history's backing file to `new_path` mid-session
+    /// (niubash#661: the user assigned `HISTFILE` a new value and the
+    /// host's prompt-boundary refresh noticed). GNU reads HISTFILE at
+    /// the moment of each operation it governs, so the session stream
+    /// follows the live value: lines recorded so far settle into the
+    /// old file (niu syncs live — they belong to the period it was the
+    /// file of record), and from here on saves and the session-end
+    /// write target the new file.
+    ///
+    /// The switch re-bases the store's on-disk accounting on the new
+    /// file by staging the current list view into it — the same
+    /// rebuild `replace_all` performs, ledger reset included — which
+    /// is what keeps the store's "file prefix == list prefix"
+    /// invariant true for the new path: merely repointing `path`
+    /// would make the flush fast path append only the tail past the
+    /// OLD file's line count and silently skip earlier session lines.
+    /// A side effect of staging is that the new file receives the list
+    /// at switch time rather than at exit; under niu's live-sync model
+    /// the end state is the one GNU's exit write produces. The switch
+    /// is atomic on failure: if the new file cannot be staged and
+    /// loaded back, the old backing stays in place and the failure is
+    /// reported once, like every history I/O failure.
+    pub(crate) fn retarget(&mut self, new_path: PathBuf) {
+        if self.backing_file().as_deref() == Some(new_path.as_path()) {
+            return;
+        }
+        ensure_history_file_accessible(&new_path);
+        let capacity = self.capacity;
+        // Clone the ledger handle before taking the state lock (see save).
+        let ledger = Arc::clone(&self.ledger);
+        // The list the new file must hold: the post-clear view, the
+        // same list the provider's `entries()` reports.
+        let entries: Vec<String> = self
+            .search(SearchQuery::all_that_contain_rev(String::new()))
+            .map(|items| {
+                items
+                    .into_iter()
+                    .rev()
+                    .map(|item| item.command_line)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Ok(state) = self.state.get_mut() else {
+            return;
+        };
+        // Settle the unwritten tail into the file of record so far.
+        Self::sync_state(state);
+        let staged = write_entries_staged(&new_path, &entries)
+            .and_then(|()| HistoryStore::load_from_file(capacity, &new_path));
+        match staged {
+            Ok(history) => {
+                state.history = history;
+                state.signature = file_signature_lossy(&new_path, state);
+                state.path = Some(new_path);
+                // The staged file IS the list now (niubash#614: the
+                // reset also ends any clear hide).
+                if let Ok(mut ledger) = ledger.lock() {
+                    ledger.reset(entries.len());
+                }
+                Self::sync_view(state, &ledger);
+            }
+            Err(error) => {
+                warn_io_failure(
+                    state,
+                    &format!(
+                        "history file {} could not be adopted; keeping the previous history file",
+                        new_path.display()
+                    ),
+                    error,
+                );
+            }
+        }
+    }
+
     /// Session-end history write: leave the backing file holding exactly
     /// what the session's final in-memory list holds (the file-side
     /// counterpart of bashhist.c exit_shell -> write_history).
@@ -1686,6 +1812,7 @@ impl LiveFileBackedHistory {
         // Clone the ledger handle before taking the state lock: the lock
         // borrows `self` mutably, so the handle must already be owned.
         let ledger = Arc::clone(&self.ledger);
+        let gate_on_history_option = self.gate_on_history_option;
         let state = self.lock_mut()?;
         Self::refresh_if_stale(capacity, state);
         let text = item.command_line.clone();
@@ -1708,6 +1835,25 @@ impl LiveFileBackedHistory {
         // bypass the filters (save_entry with apply_filters = false,
         // used by read_new_history's fallback), exactly like GNU's
         // read path.
+        if apply_filters && gate_on_history_option {
+            // niubash#660: GNU records a typed line only while the
+            // `history` shell option is on (bashhist.c:
+            // remember_on_history gates maybe_add_history, ahead of
+            // every HISTCONTROL/HISTIGNORE filter). Only the editor
+            // instance carries this gate; the provider instance does
+            // not, so `history -s` (provider append) keeps adding
+            // while the option is off, exactly as GNU's -s does. A
+            // gated line is not an error: it simply never reaches the
+            // list, the file, or the ledger.
+            let history_enabled = state
+                .settings
+                .lock()
+                .map(|settings| settings.history_enabled)
+                .unwrap_or(true);
+            if !history_enabled {
+                return Ok(item);
+            }
+        }
         if apply_filters {
             let settings = state
                 .settings
@@ -3516,5 +3662,107 @@ mod tests {
         provider.write_history(path.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "w2\nw3\n");
         assert_eq!(provider.entries().unwrap(), vec!["w2", "w3"]);
+    }
+
+    #[test]
+    fn issue660_editor_saves_drop_lines_while_history_option_off() {
+        // niubash#660: GNU records a typed line only while the
+        // `history` shell option is on (bashhist.c
+        // remember_on_history gates maybe_add_history). The editor
+        // instance carries the gate; the provider does not — GNU's
+        // `history -s` pushes its operand through add_history even
+        // while the option is off (verified against bash 5.3.20: the
+        // -s entry lands in the list and the file, the typed lines
+        // around it do not).
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        // The production sharing: the editor twin is built over the
+        // provider's ledger and settings cells (build_line_editor).
+        let mut editor = LiveFileBackedHistory::with_shared_ledger_and_settings(
+            100,
+            path.clone(),
+            provider.ledger(),
+            provider.settings(),
+        );
+        editor.set_history_option_gate();
+        provider.settings().lock().unwrap().history_enabled = false;
+
+        use reedline::History as _;
+        editor
+            .save(HistoryItem::from_command_line("secret-while-off"))
+            .unwrap();
+        assert!(
+            !path.exists() || std::fs::read_to_string(&path).unwrap().is_empty(),
+            "a line typed while the option is off must not reach the file"
+        );
+        assert!(provider.entries().unwrap().is_empty());
+
+        // `history -s` (provider append) is not gated.
+        provider.append("s-added-while-off".to_string()).unwrap();
+        assert_eq!(provider.entries().unwrap(), vec!["s-added-while-off"]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "s-added-while-off\n"
+        );
+
+        // The option back on: the editor records again.
+        provider.settings().lock().unwrap().history_enabled = true;
+        editor
+            .save(HistoryItem::from_command_line("visible-after-on"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "s-added-while-off\nvisible-after-on\n"
+        );
+    }
+
+    #[test]
+    fn issue661_retarget_moves_backing_and_later_saves_follow() {
+        // niubash#661: GNU reads HISTFILE at the moment of each
+        // operation, so a mid-session redirect moves the stream: the
+        // new file takes the session's list, later saves and the
+        // session-end write land there, and the old file gains
+        // nothing after the switch.
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("histA");
+        let b = temp.path().join("histB");
+        std::fs::write(&a, "seedA\n").unwrap();
+        let mut provider = RubashHistoryProvider::with_file(100, a.clone());
+        provider.append("session-line".to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "seedA\nsession-line\n"
+        );
+
+        provider.retarget(b.clone());
+        assert_eq!(provider.backing_file(), Some(b.clone()));
+        assert_eq!(
+            std::fs::read_to_string(&b).unwrap(),
+            "seedA\nsession-line\n",
+            "the new file holds the session list at switch time"
+        );
+
+        provider.append("after-redirect".to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&b).unwrap(),
+            "seedA\nsession-line\nafter-redirect\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "seedA\nsession-line\n",
+            "the old file gains nothing after the switch"
+        );
+
+        // The session-end write (provider Drop) settles in B too.
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&b).unwrap(),
+            "seedA\nsession-line\nafter-redirect\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "seedA\nsession-line\n"
+        );
     }
 }

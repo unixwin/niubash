@@ -265,7 +265,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // same way, so the lines it records are filtered/stifled by the
     // same HIST* snapshot the provider's builtins consult.
     let shared_settings = shell_ref.history_settings();
-    let history = match (shared_ledger, shared_settings) {
+    let mut history = match (shared_ledger, shared_settings) {
         (Some(ledger), Some(settings)) => LiveFileBackedHistory::with_shared_ledger_and_settings(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
@@ -282,6 +282,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             shell_ref.history_path.clone(),
         ),
     };
+    // niubash#660: this instance is the one reedline records typed
+    // lines into, so it carries the `history` option gate — its saves
+    // are dropped while `set +o history` is in effect. The provider
+    // instance is never gated, so `history -s` keeps adding, as in GNU.
+    history.set_history_option_gate();
     // No construction-time reload (audit item H-01): every constructor
     // above already loads the backing file into the store, so a second
     // full read here bought nothing — and on an editor rebuild after
@@ -3661,6 +3666,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // command (or PROMPT_COMMAND) left in the environment — GNU
         // reads each variable at the moment of its operation.
         shell.borrow_mut().refresh_history_settings();
+        // niubash#661: the refresh followed a live `HISTFILE` redirect
+        // on the provider side; the editor's history instance still
+        // backs the old file, so rebuild the editor over the new one —
+        // the same lossless construction path as the rebuilds below
+        // (the buffer is empty at this boundary and history state
+        // lives in the file and the shared ledger/settings cells).
+        if shell.borrow_mut().take_history_redirect() {
+            line_editor = build_line_editor(&shell)?;
+        }
         let signal = if pending.is_empty() {
             drain_pending_notices();
             // niubash#180: a finished `niu setup` run (a child process)
