@@ -2465,7 +2465,12 @@ fn run_plugin_source_add_command(args: &[String]) -> anyhow::Result<()> {
         niubash_runtime::text_style::dim(&record.version),
         niubash_runtime::text_style::dim(&record.path.display().to_string())
     );
-    println!("license {}", record.license);
+    println!(
+        "license {} | tree sha256 {}",
+        record.license,
+        niubash_runtime::plugins::sources::tree_pin_digest(&record)
+            .unwrap_or_else(|_| "unavailable".to_string())
+    );
     println!("browse its assets with `niu plugin list`; enable with:");
     println!("  niu plugin enable {}", record.id);
     Ok(())
@@ -2862,7 +2867,12 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
                     niubash_runtime::text_style::dim(&record.version),
                     niubash_runtime::text_style::dim(&record.path.display().to_string())
                 );
-                println!("license {}", record.license);
+                println!(
+                    "license {} | tree sha256 {}",
+                    record.license,
+                    niubash_runtime::plugins::sources::tree_pin_digest(&record)
+                        .unwrap_or_else(|_| "unavailable".to_string())
+                );
                 if let Some(commit) = &record.commit_sha {
                     println!(
                         "pinned commit {} ({})",

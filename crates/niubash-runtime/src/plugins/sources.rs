@@ -272,7 +272,7 @@ fn is_enabled_dir_model(record: &SourceRecord) -> bool {
 /// `enabled/` tree, every other manager hashes the whole tree. The
 /// registry records no tree digest of its own (niubash#647), so a pin
 /// supplied with an adopt is checked against this fresh computation.
-pub(crate) fn tree_pin_digest(record: &SourceRecord) -> anyhow::Result<String> {
+pub fn tree_pin_digest(record: &SourceRecord) -> anyhow::Result<String> {
     if is_enabled_dir_model(record) {
         tree_sha256_excluding(&record.path, &record.path.join("enabled"))
     } else {
