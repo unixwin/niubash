@@ -2748,6 +2748,11 @@ impl Shell {
         if let Ok(mut state) = self.completion_state.lock() {
             state.command_probe.clear();
         }
+        // Audit item C1: the completion PATH caches share the probe's
+        // blind spot — the filesystem changed while the env fingerprint
+        // (PATH + PATHEXT) stayed byte-identical — so they retire on
+        // the same lines.
+        crate::completion::command::CommandCompleter::invalidate_command_caches();
     }
 
     /// Update the shared completion state from the current env + cwd.

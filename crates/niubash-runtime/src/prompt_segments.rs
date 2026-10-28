@@ -9,7 +9,9 @@
 //! via TOML.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
@@ -175,16 +177,23 @@ fn preset_colour(preset: SegmentPreset, segment: &SegmentId) -> SegmentColour {
 ///
 /// `vcs_stamp` is the calling prompt's per-pass Vcs stamp (niubash#592,
 /// S2): a stamped prompt's Vcs segment re-reads the stamp, an unstamped
-/// prompt falls back to computing at render time.
+/// prompt falls back to computing at render time. `dir_memo` is the
+/// calling prompt's Dir memo (audit item A2), the same per-pass shape
+/// for the one other segment that touches the file system; `None`
+/// (direct callers in tests) computes uncached.
 fn render_content(
     segment: &SegmentId,
     config: &SegmentPromptConfig,
     vcs_stamp: Option<&VcsPassStamp>,
+    dir_memo: Option<&DirMemoCell>,
 ) -> Option<String> {
     match segment {
         SegmentId::Dir => {
             let cwd = std::env::current_dir().ok()?;
-            Some(short_dir(&cwd))
+            Some(match dir_memo {
+                Some(memo) => short_dir_memoized(&cwd, memo),
+                None => short_dir(&cwd),
+            })
         }
         SegmentId::Status => {
             let code = std::env::var("NIU_LAST_EXIT_CODE")
@@ -235,6 +244,51 @@ fn render_content(
             std::env::var(&env_name).ok()
         }
     }
+}
+
+/// The Dir segment's memo (audit item A2): the shortened cwd plus the
+/// inputs it was computed from — the cwd itself and the raw `HOME` /
+/// `USERPROFILE` values `shell_home_dir` resolves from (its
+/// `dirs::home_dir()` fallback when both are unset is process-stable
+/// and needs no key component). Keyed on all of them, a hit can never
+/// serve a value computed under different inputs.
+#[derive(Debug)]
+struct DirMemo {
+    cwd: PathBuf,
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    text: String,
+}
+
+/// Shared Dir memo cell, cloned with the prompt (like the template
+/// prompt's cwd memo): per-pass clones share it, and the key check is
+/// what keeps a shared cell honest across passes.
+type DirMemoCell = Arc<Mutex<Option<DirMemo>>>;
+
+/// `short_dir` through the prompt's Dir memo. Within a pass the cwd
+/// cannot move — it changes only when a command runs, which ends the
+/// pass — so repaints reuse the one `canonicalize(home)` result
+/// instead of paying it per repaint.
+fn short_dir_memoized(cwd: &Path, memo: &DirMemoCell) -> String {
+    let home = std::env::var_os("HOME");
+    let userprofile = std::env::var_os("USERPROFILE");
+    if let Ok(guard) = memo.lock() {
+        if let Some(memo) = guard.as_ref() {
+            if memo.cwd == cwd && memo.home == home && memo.userprofile == userprofile {
+                return memo.text.clone();
+            }
+        }
+    }
+    let text = short_dir(cwd);
+    if let Ok(mut guard) = memo.lock() {
+        *guard = Some(DirMemo {
+            cwd: cwd.to_path_buf(),
+            home,
+            userprofile,
+            text: text.clone(),
+        });
+    }
+    text
 }
 
 /// Shorten a directory path by replacing `$HOME` with `~`.
@@ -378,6 +432,12 @@ pub struct SegmentPrompt {
     /// stamp physically cannot outlive the pass that computed it: the
     /// clone carrying it is dropped when the pass's read_line returns.
     vcs_stamp: Option<VcsPassStamp>,
+    /// The Dir segment's memo (audit item A2), the Vcs stamp's sibling
+    /// for the one other file-system-touching segment: shared across
+    /// clones and keyed by (cwd, HOME, USERPROFILE), so repaints in a
+    /// pass reuse the shortened cwd instead of re-canonicalizing home
+    /// per repaint.
+    dir_memo: DirMemoCell,
 }
 
 impl SegmentPrompt {
@@ -385,6 +445,7 @@ impl SegmentPrompt {
         Self {
             config,
             vcs_stamp: None,
+            dir_memo: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -452,7 +513,12 @@ impl SegmentPrompt {
             if *element == SegmentId::Newline {
                 break;
             }
-            if let Some(content) = render_content(element, &self.config, self.vcs_stamp.as_ref()) {
+            if let Some(content) = render_content(
+                element,
+                &self.config,
+                self.vcs_stamp.as_ref(),
+                Some(&self.dir_memo),
+            ) {
                 let (fg, bg) = self.colour_for(element, &content);
                 segments.push(RenderedSegment { content, fg, bg });
             }
@@ -493,7 +559,12 @@ impl SegmentPrompt {
                 current = Vec::new();
                 continue;
             }
-            if let Some(content) = render_content(element, &self.config, self.vcs_stamp.as_ref()) {
+            if let Some(content) = render_content(
+                element,
+                &self.config,
+                self.vcs_stamp.as_ref(),
+                Some(&self.dir_memo),
+            ) {
                 let (fg, bg) = self.colour_for(element, &content);
                 current.push(RenderedSegment { content, fg, bg });
             }
@@ -700,6 +771,48 @@ mod tests {
     }
 
     #[test]
+    fn dir_segment_memo_misses_when_cwd_or_home_moves() {
+        // Audit item A2: the Dir memo must never serve a value computed
+        // under different inputs — moving cwd (same home) and moving
+        // HOME (same cwd) both have to miss and recompute.
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = unique_temp_dir("niubash-segment-memo-home");
+        let other_home = unique_temp_dir("niubash-segment-memo-other");
+        std::fs::create_dir_all(home.join("proj-a")).unwrap();
+        std::fs::create_dir_all(home.join("proj-b")).unwrap();
+        std::fs::create_dir_all(&other_home).unwrap();
+        let cfg = default_cfg();
+        let cell: DirMemoCell = Arc::new(Mutex::new(None));
+        let previous = std::env::current_dir().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let _home = EnvGuard::set("HOME", &home.to_string_lossy());
+        let _userprofile = EnvGuard::set("USERPROFILE", &home.to_string_lossy());
+        // short_dir compares against the canonicalized home.
+        let canonical_home = shell_home_dir().unwrap();
+        let canon_a = canonical_home.join("proj-a");
+        let canon_b = canonical_home.join("proj-b");
+
+        std::env::set_current_dir(&canon_a).unwrap();
+        let first = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        let again = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        std::env::set_current_dir(&canon_b).unwrap();
+        let moved = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        let foreign = {
+            let _home2 = EnvGuard::set("HOME", &other_home.to_string_lossy());
+            render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap()
+        };
+        std::env::set_current_dir(previous).unwrap();
+
+        assert_eq!(first, format!("~{sep}proj-a"));
+        assert_eq!(again, first);
+        assert_eq!(moved, format!("~{sep}proj-b"));
+        assert!(!foreign.starts_with('~'), "{foreign}");
+        assert!(foreign.ends_with("proj-b"), "{foreign}");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&other_home);
+    }
+
+    #[test]
     fn short_dir_preserves_non_home_paths() {
         let p = Path::new("C:\\");
         let s = short_dir(p);
@@ -725,7 +838,7 @@ mod tests {
     #[test]
     fn time_content_renders_hhmm() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg, None);
+        let content = render_content(&SegmentId::Time, &cfg, None, None);
         assert!(content.is_some());
         let s = content.unwrap();
         assert_eq!(s.len(), 5);
@@ -735,7 +848,7 @@ mod tests {
     #[test]
     fn time_segment_renders_system_local_clock() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg, None).unwrap();
+        let content = render_content(&SegmentId::Time, &cfg, None, None).unwrap();
         let expected = format_local_time();
         if content != expected {
             let expected = format_local_time();
@@ -746,7 +859,7 @@ mod tests {
     #[test]
     fn prompt_char_is_symbol() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::PromptChar, &cfg, None);
+        let content = render_content(&SegmentId::PromptChar, &cfg, None, None);
         assert_eq!(content.as_deref(), Some("\u{276f}"));
     }
 
@@ -757,7 +870,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::remove_var("NIU_LAST_EXIT_CODE");
-        let content = render_content(&SegmentId::Status, &cfg, None);
+        let content = render_content(&SegmentId::Status, &cfg, None, None);
         assert!(content.is_none());
     }
 
@@ -766,7 +879,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::set_var("NIU_LAST_EXIT_CODE", "1");
-        let content = render_content(&SegmentId::Status, &cfg, None);
+        let content = render_content(&SegmentId::Status, &cfg, None, None);
         assert!(content.is_some());
         assert!(content.unwrap().contains("1"));
         std::env::remove_var("NIU_LAST_EXIT_CODE");
@@ -775,7 +888,7 @@ mod tests {
     #[test]
     fn newline_renders_empty() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Newline, &cfg, None);
+        let content = render_content(&SegmentId::Newline, &cfg, None, None);
         assert_eq!(content, Some(String::new()));
     }
 
