@@ -205,10 +205,10 @@ STANDALONE = [
     ("niugit", "plugin",
      "native Windows git without MSYS (niu-git build); the setup wizard's git pick",
      "GPL-2.0-only", "https://github.com/unixwin/niu-git",
-     {"driver": "download", "version": "v2.56.0.2", "bins": ["git.exe"],
+     {"driver": "download", "version": "v2.56.0.3", "bins": ["git.exe"],
       "assets": {
-          "windows-x64": ("https://github.com/unixwin/niu-git/releases/download/v2.56.0.2/niu-git-2.56.0.windows.3-x64.zip",
-                          "zip", "fce603d3c9a3e8119a3df1c559322651e53185eecce4c90a8efe36844bd268dc", ["git.exe"]),
+          "windows-x64": ("https://github.com/unixwin/niu-git/releases/download/v2.56.0.3/niu-git-2.56.0.windows.4-x64.zip",
+                          "zip", "fc700ae92fb50209344ad7d18649e1fc1cb5cba21ffe75d95ec5668fd1e625a1", ["git.exe"]),
       }}),
     ("thefuck", "plugin",
      "fixes your previous command (thefuck); no binary release — install via pip or a package manager",

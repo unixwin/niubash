@@ -5252,12 +5252,12 @@ summary = "native Windows git without MSYS (niu-git build); the setup wizard's g
 license = "GPL-2.0-only"
 url = "https://github.com/unixwin/niu-git"
 driver = "download"
-version = "v2.56.0.2"
+version = "v2.56.0.3"
 bins = ["git.exe"]
 [recipe.downloads.windows-x64]
-url = "https://github.com/unixwin/niu-git/releases/download/v2.56.0.2/niu-git-2.56.0.windows.3-x64.zip"
+url = "https://github.com/unixwin/niu-git/releases/download/v2.56.0.3/niu-git-2.56.0.windows.4-x64.zip"
 archive = "zip"
-sha256 = "fce603d3c9a3e8119a3df1c559322651e53185eecce4c90a8efe36844bd268dc"
+sha256 = "fc700ae92fb50209344ad7d18649e1fc1cb5cba21ffe75d95ec5668fd1e625a1"
 bins = ["git.exe"]
 
 [[recipe]]
