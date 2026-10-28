@@ -50,7 +50,7 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         // waiting for it to finish. At the reedline prompt the console is
         // in raw mode so this handler rarely fires; the `0x03` keystroke
         // path is Signal::CtrlC + consume_ctrl_c.
-        rubash::builtins::kill::note_console_ctrl_c();
+        rubash::script_driver::inject_console_ctrl_c();
         return 1; // handled — don't terminate the shell
     }
     0 // pass through for other signals
@@ -98,4 +98,35 @@ pub fn install() {
         "ctrl_c: no host signal handler on unix; \
          rubash kernel_signals owns INT/TERM/HUP/QUIT/USR1/USR2"
     );
+}
+
+/// niubash#616: deliver exactly one SIGINT to the engine's pending-signal
+/// queue for a prompt Ctrl+C, so the REPL can run the engine's boundary
+/// dispatch (`Shell::dispatch_prompt_interrupt`) and a trapped INT fires
+/// at the prompt like GNU. `handler_already_queued` is the Windows
+/// `consume_ctrl_c()` result: when the console handler fired, it already
+/// queued the delivery via the engine note (script_driver::inject_console_ctrl_c), and a second one would
+/// dispatch twice. On unix there is no host handler, so nothing is ever
+/// pre-queued and the delivery is a real self-raise — it travels through
+/// the engine's own kernel disposition (signal-hook), which is a
+/// delivery, not a second registration (see the module header). When the
+/// user ignores SIGINT (`trap '' INT`), the kernel discards the raise
+/// before the engine ever sees it, matching GNU.
+pub fn queue_prompt_sigint(handler_already_queued: bool) {
+    if handler_already_queued {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        rubash::script_driver::inject_console_ctrl_c();
+    }
+    #[cfg(not(windows))]
+    {
+        // SAFETY: `raise` is async-signal-safe and merely delivers the
+        // signal to this process; the engine's installed handler records
+        // it in its queue for the boundary poll the caller runs next.
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+    }
 }

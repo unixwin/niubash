@@ -57,9 +57,11 @@ namespace resolved to the real Windows temp directory (`TMPDIR`, else
 external command arguments are translated by the Rubash executor with the same
 rules — including `/mnt/X` drive spellings — so there is
 exactly one path-semantics owner and no host-side AST rewrite. Device spellings
-such as `/dev/null` are not part of that set; as arguments they reach the child
-verbatim. One child class is exempt from the drive-form rewrite, described under
-Shell Namespace Ownership.
+are not part of that set either, and they split by spelling and child class
+(see Special Paths): the exact `/dev/null` token is rewritten for native
+children only, while the fd-bound spellings (`/dev/stdin`, `/dev/fd/N`) reach
+every child verbatim. One child class is exempt from the drive-form rewrite,
+described under Shell Namespace Ownership.
 
 Command lookup and native child `PATH` use these real directories directly.
 Rubash does not merge a second provider directory, and WinuxCmd coreutils do
@@ -96,6 +98,18 @@ paths — never both, and never a guess about the child's capabilities:
   `windows_cmd_switches_are_not_mapped_into_shell_root` test) and applies to
   `cmd.exe` alone: a native program that is not `cmd` receives `/d/repo` as
   `D:\repo`.
+- **Namespace bridges stand outside the translation boundary entirely:
+  `wsl` and the OpenSSH client family (`ssh`, `scp`, `sftp`).** Their
+  arguments are not paths on this machine at all — they are interpreted
+  inside another filesystem namespace (a WSL guest's tree, an SSH remote's
+  tree) — so the Rubash executor hands every argument to them byte-for-byte
+  verbatim: no root map, no home/temp map, no drive-form rewrite, no
+  `/dev/null` rewrite. Membership in the class is the platform property of
+  being a namespace bridge; the set is the platform's fixed bridges, pinned
+  in Rubash (`is_namespace_bridge_program` and the `pathmatrix_bridge_*`
+  tests). A bridge's remote words therefore survive exactly as typed:
+  `ssh host cat /var/log/x` and `wsl cat /home/user/file` name the
+  remote/guest files the user spelled, never local ones.
 
 The boundary is structural rather than a rename of the "MSYS NO CONV"
 problem: the shell never asks a child what it can understand. The shipped
@@ -119,6 +133,14 @@ It must not implement Rubash builtins such as `cd`, `export`, `set`, `read`,
 such as `C:/work/file` and `/c/work/file` remain host paths.
 
 The only device spelling currently supported is `/dev/null`. As a redirect
-target it is mapped to the native `NUL` endpoint; as an external-command
-argument it reaches the child verbatim, like the other `/dev` entries, which do
-not become ordinary files until their fd or terminal capability is implemented.
+target it is mapped to the native `NUL` endpoint. As an external-command
+argument it depends on the child class (Shell Namespace Ownership above):
+the bundled WinuxCmd applets receive it verbatim — `/dev` spellings are
+shell-namespace arguments their own layer resolves — and the namespace
+bridges receive it verbatim, since their words name files in another
+namespace; a native child instead receives `nul`, because the POSIX
+spelling names no Windows file it could open. The rewrite covers the
+exact token, the value position of `name=/dev/null`, and the attached
+short-option form `-o/dev/null` (rubash#1506). The other `/dev` entries
+reach every child verbatim; they do not become ordinary files until
+their fd or terminal capability is implemented.

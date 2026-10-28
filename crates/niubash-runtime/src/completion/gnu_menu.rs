@@ -1,7 +1,9 @@
-//! GNU readline-style TAB completion (the niubash default shape).
+//! GNU readline-style TAB completion (the opt-in `gnu` style).
 //!
-//! Behavior contract (owner ruling 2026-10-12) — GNU readline's factory
-//! semantics, not the interactive menus the other four styles draw:
+//! Behavior contract (owner ruling 2026-10-12; its default pick was
+//! superseded by the owner ruling of 2026-10-14, which made `column`
+//! the default from 1.4.0 on) — GNU readline's factory semantics, not
+//! the interactive menus the other four styles draw:
 //!
 //! * **TAB #1** completes the longest common prefix of the candidates into
 //!   the line (a lone candidate completes outright). Nothing is listed.

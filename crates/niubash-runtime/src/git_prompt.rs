@@ -14,10 +14,13 @@
 //!    linked worktrees, partial clones and fsmonitor state can only be
 //!    answered by the git the user actually runs (the libgit2 prompt silently
 //!    dropped the branch segment on old-owner repo trees once already);
-//!  - **cost**: a bounded `git status --porcelain=v2 --branch` (~20-35 ms
-//!    with our 14 ms git) happens only inside a repository — outside one the
-//!    segment costs a few `stat`s and spawns nothing at all, which is already
-//!    better than `__git_ps1`, that forks several times even in `$HOME`;
+//!  - **cost**: a bounded `git status --porcelain=v2 --branch` runs at
+//!    most once per prompt pass on each prompt face — computed when the
+//!    host prepares the prompt, after the precmd hooks — and repaints
+//!    within a pass re-read the string computed for that pass instead
+//!    of spawning again. Outside a repository the segment spawns
+//!    nothing at all, which is already better than `__git_ps1`, that
+//!    forks several times even in `$HOME`;
 //!  - **isolation**, one rule per incident: never through a shell (a missing
 //!    git is an OS error, not a "command not found" on the terminal), stdout
 //!    piped and stderr discarded (git warnings can never reach the screen),
@@ -41,9 +44,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// Hard bound for the prompt's git call; the child is killed past it. Two
-/// seconds is far above a warm `status` (~20-35 ms) and only reached by a
-/// pathological repository (a hook that hangs, a dead network share).
+/// Hard bound for the prompt's git call; the child is killed past it. The
+/// bound only bites on a pathological repository (a hook that hangs, a dead
+/// network share); a healthy `status` finishes far inside it.
 const STATUS_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// Read budget for the status call. Porcelain v2 prints the `# branch.*`
@@ -164,10 +167,37 @@ pub fn branch_segment(cwd: &Path) -> Option<String> {
     Some(if dirty { format!("{name}*") } else { name })
 }
 
+// Spawn counter for the niubash#592 acceptance probe (test builds only):
+// `read_status` is the prompt's only git spawn point and runs exactly once
+// per spawn, so counting its entries counts prompt git spawns exactly.
+// The counter is thread-local on purpose: a probe drives its whole
+// scenario (hooks, prompt passes, repaints) on its own test thread, so
+// other tests running in parallel in the same binary can neither
+// inflate nor drain its count. Production builds carry no counter.
+#[cfg(test)]
+thread_local! {
+    static READ_STATUS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of `read_status` calls on this thread since the last reset
+/// (test builds only).
+#[cfg(test)]
+pub(crate) fn read_status_call_count() -> usize {
+    READ_STATUS_CALLS.with(|calls| calls.get())
+}
+
+/// Reset this thread's `read_status` call counter (test builds only).
+#[cfg(test)]
+pub(crate) fn reset_read_status_call_count() {
+    READ_STATUS_CALLS.with(|calls| calls.set(0));
+}
+
 /// One read-only `git status` for the prompt, with every isolation rule from
 /// the module docs applied. Returns the branch name (or detached short SHA)
 /// plus whether anything is dirty.
 fn read_status(worktree: &Path) -> Option<(String, bool)> {
+    #[cfg(test)]
+    READ_STATUS_CALLS.with(|calls| calls.set(calls.get() + 1));
     // stdout goes to a scratch file, not a pipe: a pipe needs either a drain
     // thread (whose hand-off costs a scheduler quantum on Windows, ~15 ms,
     // which would double the segment) or risks wedging the child once it
@@ -529,9 +559,9 @@ mod tests {
     #[test]
     fn prompt_is_within_the_render_budget() {
         // 120ms budget (owner red line). The segment now spawns the user's
-        // git inside a repository (~20-35 ms warm with our own 14 ms git), so
-        // this catches a per-prompt regression that would blow the budget
-        // (a hanging child, an unbounded status sweep).
+        // git inside a repository, so this catches a per-prompt regression
+        // that would blow the budget (a hanging child, an unbounded status
+        // sweep).
         let tmp = tempfile::tempdir().unwrap();
         if !repo_with_commit(tmp.path()) {
             return;

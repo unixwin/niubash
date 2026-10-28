@@ -31,16 +31,22 @@ pub struct ShellConfig {
     pub right_prompt_elements: Option<Vec<String>>,
 }
 
+/// Hook script lists, shared by reference (niubash#596): the prompt loop
+/// used to deep-clone a whole hook vector on every prompt only to satisfy
+/// the borrow checker (`run_hook_scripts` needs `&mut self`), even though
+/// hook lists are fixed at construction time and never mutated afterwards.
+/// `Rc<[String]>` keeps the snapshot semantics (a hook script cannot change
+/// the list mid-run) while making the per-prompt take O(1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookConfig {
-    pub precmd: Vec<String>,
-    pub preexec: Vec<String>,
-    pub chpwd: Vec<String>,
-    pub postcmd: Vec<String>,
-    pub zshaddhistory: Vec<String>,
-    pub zshexit: Vec<String>,
-    pub greeting: Vec<String>,
-    pub title: Vec<String>,
+    pub precmd: std::rc::Rc<[String]>,
+    pub preexec: std::rc::Rc<[String]>,
+    pub chpwd: std::rc::Rc<[String]>,
+    pub postcmd: std::rc::Rc<[String]>,
+    pub zshaddhistory: std::rc::Rc<[String]>,
+    pub zshexit: std::rc::Rc<[String]>,
+    pub greeting: std::rc::Rc<[String]>,
+    pub title: std::rc::Rc<[String]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,34 +63,21 @@ pub struct EditorConfig {
     pub edit_mode: EditorMode,
 }
 
-/// History mode controlling how entries are shared across shell sessions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HistoryMode {
-    /// Live cross-session history, preserving the legacy behavior.
-    #[default]
-    Shared,
-    /// Startup snapshot for navigation; builtins can see live file updates.
-    Session,
-    /// Startup snapshot for navigation; this session's later entries stay local.
-    Private,
-}
-
-impl HistoryMode {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "shared" => Some(Self::Shared),
-            "session" => Some(Self::Session),
-            "private" => Some(Self::Private),
-            _ => None,
-        }
-    }
-}
-
+/// History configuration. There is deliberately no per-session sharing
+/// mode anymore (niubash#572): the retired `NIU_HISTORY_MODE`
+/// shared/session/private switch was a GNU-less invention whose documented
+/// behaviors did not match the implementation (an rc assignment could never
+/// take effect because the value was read before the rc ran, and the
+/// session mode's "builtins can observe later file updates" promise was
+/// false — refresh short-circuited for every non-shared mode). History now
+/// has exactly one semantics, GNU's: one live file every session appends
+/// to and refreshes from, with `history -a/-n/-r` as the explicit sync
+/// verbs. A `NIU_HISTORY_MODE` left in the environment is silently
+/// ignored (no startup diagnostic: `-c`/script stderr stays byte-stable).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryConfig {
     pub path: Option<PathBuf>,
     pub max_size: usize,
-    pub mode: HistoryMode,
     pub ignore_space_prefixed: bool,
 }
 
@@ -93,22 +86,8 @@ impl Default for HistoryConfig {
         Self {
             path: None,
             max_size: 10000,
-            mode: HistoryMode::default(),
             ignore_space_prefixed: false,
         }
-    }
-}
-
-impl HistoryConfig {
-    pub fn with_env_overrides(mut self) -> Self {
-        if let Ok(value) = std::env::var("NIU_HISTORY_MODE") {
-            if let Some(mode) = HistoryMode::parse(&value) {
-                self.mode = mode;
-            } else {
-                eprintln!("niubash: NIU_HISTORY_MODE must be one of: shared, session, private");
-            }
-        }
-        self
     }
 }
 
@@ -187,9 +166,9 @@ impl Default for MenuConfig {
 
 impl MenuConfig {
     pub fn with_env_overrides(mut self) -> Self {
-        // Resolution order (owner ruling 2026-10-12): NIU_COMPLETION_STYLE env
+        // Resolution order (owner ruling 2026-10-14): NIU_COMPLETION_STYLE env
         // > persisted `completion.style` (config.toml) > the built-in default
-        // (gnu). `resolve_completion_style` warns once on a bad env value.
+        // (column). `resolve_completion_style` warns once on a bad env value.
         self.completion_style = resolve_completion_style().0;
         self
     }
@@ -582,8 +561,8 @@ const USER_CONFIG_NOTES: &str = "\
 #   \"command not found\". off (default) | wpm — wpm suggests one\n\
 #   `wpm search --name` line for high-confidence near-misses only;\n\
 #   third-party managers are never recommended (niubash#249).\n\
-# completion.style: TAB completion shape. gnu (default) | ide |\n\
-#   column | list | inline — `NIU_COMPLETION_STYLE` overrides this\n\
+# completion.style: TAB completion shape. column (default) | gnu |\n\
+#   ide | list | inline — `NIU_COMPLETION_STYLE` overrides this\n\
 #   file (env > config > default).\n\
 # startup.rc-policy: which file fills the interactive personal-rc slot\n\
 #   when ~/.niubashrc is absent. primary-only (default) |\n\
@@ -727,7 +706,7 @@ pub enum CompletionStyleSource {
 }
 
 /// Resolve the effective TAB completion style: `NIU_COMPLETION_STYLE` env >
-/// persisted `completion.style` (config.toml) > built-in default (gnu). An
+/// persisted `completion.style` (config.toml) > built-in default (column). An
 /// unparsable env value warns once (the shell's only completion-style
 /// diagnostic) and falls through to the lower-precedence source; an
 /// unparsable file value silently falls through like every other config

@@ -1,5 +1,10 @@
 //! Native Niubash history autosuggestions.
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use nu_ansi_term::{Color, Style};
 use reedline::{Hinter, History, SearchQuery};
 
@@ -10,14 +15,19 @@ pub struct HistoryAutosuggestHinter {
     style: Style,
     current_hint: String,
     buffer_max_size: Option<usize>,
+    /// Shared with the completion menu: true while a grid is on screen.
+    /// The hinter stands down instead of painting a ghost over the same
+    /// word the menu is showing candidates for (fish parity).
+    menu_open: Arc<AtomicBool>,
 }
 
 impl HistoryAutosuggestHinter {
-    pub fn new(config: &AutosuggestConfig) -> Self {
+    pub fn new(config: &AutosuggestConfig, menu_open: Arc<AtomicBool>) -> Self {
         Self {
             style: parse_highlight_style(&config.highlight_style),
             current_hint: String::new(),
             buffer_max_size: config.buffer_max_size,
+            menu_open,
         }
     }
 }
@@ -32,6 +42,10 @@ impl Hinter for HistoryAutosuggestHinter {
         _cwd: &str,
     ) -> String {
         self.current_hint.clear();
+
+        if self.menu_open.load(Ordering::Relaxed) {
+            return String::new();
+        }
 
         if line.is_empty() || buffer_too_large(line, self.buffer_max_size) {
             return String::new();
@@ -176,7 +190,7 @@ mod tests {
             .unwrap();
 
         let config = AutosuggestConfig::default();
-        let mut hinter = HistoryAutosuggestHinter::new(&config);
+        let mut hinter = HistoryAutosuggestHinter::new(&config, Arc::new(AtomicBool::new(false)));
 
         assert_eq!(
             hinter.handle("git", 3, &history, false, ""),
@@ -197,7 +211,7 @@ mod tests {
             buffer_max_size: Some(2),
             ..Default::default()
         };
-        let mut hinter = HistoryAutosuggestHinter::new(&config);
+        let mut hinter = HistoryAutosuggestHinter::new(&config, Arc::new(AtomicBool::new(false)));
 
         assert_eq!(hinter.handle("git", 3, &history, false, ""), "");
         assert_eq!(hinter.complete_hint(), "");
@@ -229,7 +243,40 @@ mod tests {
             .save(HistoryItem::from_command_line("cd D:/projects"))
             .unwrap();
 
-        let mut hinter = HistoryAutosuggestHinter::new(&AutosuggestConfig::default());
+        let mut hinter = HistoryAutosuggestHinter::new(
+            &AutosuggestConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        );
         assert_eq!(hinter.handle("cd", 2, &reader, false, ""), " D:/projects");
+    }
+
+    #[test]
+    fn stands_down_while_completion_menu_open() {
+        // Ghost + grid must never paint over the same word: while the
+        // completion menu reports itself visible, the hinter yields no
+        // suggestion (fish parity). The flag clears with the menu and the
+        // hint comes back on the same line.
+        let mut history = FileBackedHistory::default();
+        history
+            .save(HistoryItem::from_command_line("git status --short"))
+            .unwrap();
+
+        let config = AutosuggestConfig::default();
+        let menu_open = Arc::new(AtomicBool::new(false));
+        let mut hinter = HistoryAutosuggestHinter::new(&config, menu_open.clone());
+        assert_eq!(
+            hinter.handle("git", 3, &history, false, ""),
+            " status --short"
+        );
+
+        menu_open.store(true, Ordering::Relaxed);
+        assert_eq!(hinter.handle("git", 3, &history, false, ""), "");
+        assert_eq!(hinter.complete_hint(), "");
+
+        menu_open.store(false, Ordering::Relaxed);
+        assert_eq!(
+            hinter.handle("git", 3, &history, false, ""),
+            " status --short"
+        );
     }
 }

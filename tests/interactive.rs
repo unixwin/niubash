@@ -264,6 +264,96 @@ fn ctrl_c_on_empty_line_returns_new_prompt() {
     s.expect_prompt();
 }
 
+/// niubash#611: Ctrl-C at the prompt must leave `$?` = 130 (GNU:
+/// 128+SIGINT), not whatever status the previous command left behind.
+/// Reedline swallows the ^C byte in raw mode, so no engine signal path
+/// ever records it.
+#[test]
+fn issue611_ctrl_c_at_prompt_sets_status_130() {
+    if !require_pty_or_skip("issue611_ctrl_c_at_prompt_sets_status_130") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-prompt-611",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send_line("true");
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:0");
+    s.expect_prompt();
+    s.send(CTRL_C);
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:130");
+    s.expect_prompt();
+}
+
+/// niubash#616: Ctrl-C at the prompt runs a trapped INT immediately
+/// (GNU: the trap fires before the next prompt, observes `$?` = 130 on
+/// entry, and `$?` is 130 again after it; an `exit` inside the trap
+/// ends the session with the trap's status). The marker rides through
+/// a variable so the typed trap-definition line cannot satisfy the
+/// expectation by itself.
+#[test]
+fn issue616_ctrl_c_at_prompt_runs_int_trap() {
+    if !require_pty_or_skip("issue616_ctrl_c_at_prompt_runs_int_trap") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-prompt-trap-616",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send_line("M616=zap");
+    s.expect_prompt();
+    s.send_line("trap 'echo $M616-fired; echo entry:$?' INT");
+    s.expect_prompt();
+    s.send(CTRL_C);
+    s.expect("zap-fired");
+    s.expect("entry:130");
+    s.expect_prompt();
+    s.send_line("echo after:$?");
+    s.expect("after:130");
+    s.expect_prompt();
+    // An exit inside the trap ends the session with the trap's status.
+    s.send_line("trap 'exit 3' INT");
+    s.expect_prompt();
+    s.send(CTRL_C);
+    assert_eq!(s.wait_exit(), 3);
+}
+
+/// niubash#600: Ctrl-C at the prompt echoes a literal `^C` (GNU shows
+/// it via ECHOCTL/readline). Reedline's raw mode prints nothing for
+/// the byte, so the host must echo it itself.
+#[test]
+fn issue600_ctrl_c_at_prompt_echoes_caret_c() {
+    if !require_pty_or_skip("issue600_ctrl_c_at_prompt_echoes_caret_c") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-caret-600",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send(CTRL_C);
+    s.expect("^C");
+    s.expect_prompt();
+    s.send_line("echo still-alive-600");
+    s.expect("still-alive-600");
+    s.expect_prompt();
+}
+
 /// Ctrl-C with text typed discards the line: it must not execute.
 #[test]
 fn ctrl_c_midtyped_discards_line() {
@@ -317,6 +407,51 @@ fn ctrl_c_interrupts_external_command() {
     s.send_line("echo st:$?");
     let window = s.expect("st:");
     eprintln!("ctrl_c_external status window: {window:?}");
+    s.expect_prompt();
+}
+
+/// niubash#610: Ctrl-C interrupting a PIPELINE must end the pipeline,
+/// not the session. GNU returns to the prompt with `$?` = 130, runs no
+/// EXIT trap, and prints no diagnostic. The host previously classified
+/// the engine's signal-discard `ExitCode(130)` unwind as a top-level
+/// exit jump, so the REPL ended the session (running the EXIT trap)
+/// with status 130.
+#[test]
+fn issue610_ctrl_c_pipeline_returns_to_prompt_with_130() {
+    if !require_pty_or_skip("issue610_ctrl_c_pipeline_returns_to_prompt_with_130") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-pipeline-610",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    // Arm an EXIT trap whose marker only the trap's own expansion can
+    // produce; if the session wrongly exits, the marker appears.
+    s.send_line("X610=TRAP610");
+    s.expect_prompt();
+    s.send_line("trap 'echo ${X610}FIRED' EXIT");
+    s.expect_prompt();
+    // Two long-running externals in a pipeline (absolute System32
+    // paths, same rationale as ctrl_c_interrupts_external_command).
+    s.send_line(
+        "/c/Windows/System32/ping.exe -n 20 127.0.0.1 | /c/Windows/System32/findstr.exe TTL",
+    );
+    // `TTL=` appears in the first reply in every ping locale.
+    s.expect("TTL=");
+    s.send(CTRL_C);
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:130");
+    s.expect_prompt();
+    // The discard unwind is silent: no engine diagnostic, no EXIT trap.
+    s.expect_absent("discarding current command line", ABSENT_WINDOW);
+    s.expect_absent("TRAP610FIRED", ABSENT_WINDOW);
+    s.send_line("echo still-alive-610");
+    s.expect("still-alive-610");
     s.expect_prompt();
 }
 
@@ -832,10 +967,13 @@ fn tab_completes_command_name() {
 /// if the suffix stayed a menu preview, `cat uniqfix` would fail and the
 /// body could never print.
 ///
-/// niubash#486: the unique commit leaves the menu open on the re-queried
-/// set (`uniqfix.dat` answers its own completion), so the first Enter
-/// commits that highlighted candidate — the 1.1.0 menu semantics — and the
-/// second Enter submits the completed line.
+/// Column stop rule (owner ruling 2026-10-26, zsh/bash parity): the TAB
+/// splices `uniqfix.dat` and the menu deactivates instead of lingering, so
+/// the first Enter submits the completed line straight away — no commit
+/// step in between (that two-Enter dance was the pre-fix shape, where the
+/// menu stayed live on the re-queried set). The second Enter below is then
+/// just an empty submit; the assertions (body printed, prompt back, no
+/// `No such file`) hold either way.
 #[test]
 fn tab_completes_unique_file_path() {
     if !require_pty_or_skip("tab_completes_unique_file_path") {
@@ -915,6 +1053,80 @@ fn completion_menu_enter_commits_highlighted_candidate() {
         s.expect("m486-body");
         s.expect_prompt();
     }
+}
+
+/// The built-in default completion style is `column` (owner ruling
+/// 2026-10-14, shipped since 1.4.0): with NO `NIU_COMPLETION_STYLE`
+/// override anywhere, a description-less candidate set renders as a
+/// multi-column grid — two candidate names share one rendered row —
+/// not as a one-per-line list. The #486 pin above sets every style
+/// explicitly, so the no-override default path gets its render-shape
+/// pin here.
+#[test]
+fn default_column_style_renders_candidates_as_grid() {
+    if !require_pty_or_skip("default_column_style_renders_candidates_as_grid") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "column-grid-default",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
+    // File candidates carry no descriptions, so the column menu grids
+    // them; three same-prefix files in the start dir are the candidate
+    // set for `cat gridpin-<TAB>`.
+    for name in ["gridpin-alpha.txt", "gridpin-beta.txt", "gridpin-gamma.txt"] {
+        std::fs::write(s.start().join(name), "gridpin-body\n").unwrap();
+    }
+    s.wait_ready();
+    s.send("cat gridpin-");
+    s.send(TAB);
+    // The menu is up: a candidate suffix is visible (the same settle
+    // signal as the #486 pin — styled cells split the names at the
+    // common prefix, so the contiguous needle is the suffix).
+    let mut seen = s.expect("alpha.txt");
+    seen.push_str(&s.drain_screen());
+    let plain = strip_ansi_escapes(&seen);
+    // Menu rows are \r\n-joined inside one paint; a paint boundary can
+    // only merge one paint's last row with the next paint's first, so
+    // in a one-per-line layout no chunk can hold both the first and
+    // the second candidate — co-occurrence on one chunk means the two
+    // names were rendered side by side, i.e. a grid row.
+    let grid_row = plain
+        .split(['\r', '\n'])
+        .find(|row| row.contains("alpha.txt") && row.contains("beta.txt"));
+    assert!(
+        grid_row.is_some(),
+        "default (column) menu must render two candidates on one row; \
+         stripped output:\n{plain}"
+    );
+}
+
+/// Minimal ANSI CSI stripper for screen-shape assertions: drops
+/// `ESC [ params final-byte` sequences so rendered menu rows can be
+/// compared as plain text.
+fn strip_ansi_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    for inner in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&inner) {
+                            break;
+                        }
+                    }
+                }
+                Some(_) | None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The session history survives into `~/.niubash_history` and `history`

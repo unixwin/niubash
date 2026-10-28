@@ -114,7 +114,7 @@ functions — plus optional defaults and theme enablement:
 # Optional floor knobs: they only shape the built-in default prompt and
 # completion UI. An external theme claims PS1 and overrides the floor.
 # NIU_PROMPT_CWD_STYLE='home'      # home | full | basename
-# NIU_COMPLETION_STYLE='gnu'       # gnu (default) | ide | column | list | inline
+# NIU_COMPLETION_STYLE='column'    # column (default) | gnu | ide | list | inline
 
 if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
   HOME="$USERPROFILE"
@@ -183,7 +183,9 @@ What `enable`/`disable` update is the manifest — `~/.niubash/plugins.toml`
 plus `~/.niubash/sources/registry.toml` — and every mutating verb regenerates
 `~/.niubash/generated/plugins.niu`, the derived activation plane the host
 sources *before* `~/.niubashrc` (so your own PS1/alias/function lines always
-win). A failed generation never replaces the last good loader, and
+win). POSIX-mode interactive shells load it too — after the profile chain
+and before `$ENV` for login shells, before `$ENV` otherwise
+(niubash#603). A failed generation never replaces the last good loader, and
 `NIU_PLUGIN_LOADER=off` disables loading entirely. If your rc still contains
 legacy `# >>> niu source <id>` managed blocks, the loader stays off until
 they are removed — `niu plugin migrate-rc --diff` shows exactly what to take
