@@ -3083,7 +3083,24 @@ impl Shell {
     /// end_repl_session (#642/#649), which must stay after the trap.
     pub fn finish_with_engine_finish(&mut self, status: i32) -> i32 {
         self.run_zshexit_hooks();
-        rubash::script_driver::finish_shell(self.executor_mut(), status, false)
+        // 1.5.0 migration: the tail is the Session contract's
+        // close() — the same finish_shell funnel (EXIT trap,
+        // history write, job terminal-state flush), with two
+        // shape adaptations: the caller's status is made the
+        // session's last status first (close reads the status
+        // from the session, where the direct call passed it),
+        // and the session's own interactive flag replaces the
+        // old hardcoded `false` — it is false on every route
+        // that reaches this funnel (the flag only turns true
+        // through prepare_line/run_line, and the REPL tail
+        // deliberately does not come through here; see the
+        // #642/#649 finish discipline). close() consumes the
+        // session, so `Shell::session` is None from here on;
+        // every calling route exits the process immediately
+        // afterwards.
+        self.session_mut().set_last_status(status);
+        let session = self.session.take().expect("shell session already closed");
+        session.close()
     }
 
     /// niubash#576: whether the most recent script run through this
