@@ -3,15 +3,13 @@
 //!
 //! The spec (`plugins::spec`, `~/.niubash/plugins.toml`) declares *what
 //! should exist*; the registry (`plugins::sources`) locks *what exists*
-//! (commit + tree checksum). Sync is the only thing that moves the two
+//! (commit pins). Sync is the only thing that moves the two
 //! towards each other:
 //!
-//! 1. **declared, not installed** → fetch through the add pipeline
-//!    (fetch gate only; the trust gate is never automatic — the new source
-//!    lands untrusted and sync prints the exact `niu plugin trust <id>`);
+//! 1. **declared, not installed** → fetch through the add pipeline;
 //!    an install identity that is already registered is adopted, not
 //!    refused;
-//! 2. **declared, installed, trusted** → materialize the generated loader
+//! 2. **declared, installed** → materialize the generated loader
 //!    section *from the spec*, idempotently (`plugins::assets::
 //!    compute_spec_selection`, hand-added entries preserved) and publish
 //!    ONE `generated/plugins.niu` generation for the whole pass
@@ -75,8 +73,8 @@ pub struct SyncOptions {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SyncRow {
     pub id: String,
-    /// installed | awaiting-trust | activated | unchanged | deactivated |
-    /// degraded | drift | failed | removed | unsupported | deferred | merged
+    /// installed | activated | unchanged | deactivated |
+    /// missing | failed | removed | unsupported | deferred | merged
     pub action: String,
     pub detail: String,
 }
@@ -97,7 +95,7 @@ pub struct SyncReport {
 
 impl SyncReport {
     /// True when the reconciler did (or would do) nothing: no installs, no
-    /// materialization changes, no drift, no undeclared sources.
+    /// materialization changes, no changes, no undeclared sources.
     fn compute_clean(&self) -> bool {
         self.rows.iter().all(|row| row.action == "unchanged") && self.undeclared.is_empty()
     }
@@ -378,7 +376,7 @@ fn sync_with_spec(
     // niubash#359: the pass COMPUTES every declared source's selection and
     // publishes ONE generated-loader generation at the end
     // (validate-then-atomic; the user rc is never written). Ids the pass
-    // skipped (awaiting-trust, degraded, drift, failures) keep their
+    // skipped (missing trees, failures) keep their
     // current section verbatim — a skip never deactivates anything.
     let mut computed: Vec<(String, assets::ComputedSelection)> = Vec::new();
     let mut keep_current: BTreeSet<String> = BTreeSet::new();
@@ -420,10 +418,9 @@ fn sync_with_spec(
                     });
                     continue;
                 }
-                // Declared but not installed: fetch (fetch gate only —
-                // trust is never automatic). An install identity that is
-                // already registered is ADOPTED, not refused — the spec
-                // declares what exists.
+                // Declared but not installed: fetch it. An install identity
+                // that is already registered is ADOPTED, not refused — the
+                // spec declares what exists.
                 if !options.startup {
                     clear_bootstrap_failure(&origin, &entry.ref_name);
                 }
@@ -475,25 +472,6 @@ fn sync_with_spec(
                         if already_installed {
                             adopted.push(record.id.clone());
                         }
-                        if !record.trusted {
-                            rows.push(SyncRow {
-                                id: record.id.clone(),
-                                action: "awaiting-trust".to_string(),
-                                detail: if already_installed {
-                                    format!(
-                                        "already installed (untrusted) — review, then \
-                                         `niu plugin trust {}`",
-                                        record.id
-                                    )
-                                } else {
-                                    format!(
-                                        "installed {} (untrusted) — review, then \
-                                         `niu plugin trust {}`",
-                                        record.version, record.id
-                                    )
-                                },
-                            });
-                        }
                         registry = read_source_registry();
                         record
                     }
@@ -544,77 +522,17 @@ fn sync_with_spec(
         }
         declared_ids.push(record.id.clone());
 
-        if !record.trusted {
-            if !rows.iter().any(|row| row.id == record.id) {
-                rows.push(SyncRow {
-                    id: record.id.clone(),
-                    action: "awaiting-trust".to_string(),
-                    detail: format!(
-                        "installed but untrusted — review, then `niu plugin trust {}`",
-                        record.id
-                    ),
-                });
-            }
-            // A skip never deactivates: the current loader section stays.
-            keep_current.insert(record.id.clone());
-            continue;
-        }
         if !record.path.is_dir() {
-            let _ = sources::clear_drifted_source(&record.id);
             keep_current.insert(record.id.clone());
             rows.push(SyncRow {
                 id: record.id.clone(),
-                action: "degraded".to_string(),
+                action: "missing".to_string(),
                 detail: format!(
                     "tree missing — repair with `niu plugin restore {}` (native fallback active)",
                     record.id
                 ),
             });
             continue;
-        }
-        // Runtime tamper gate (niubash#297): a trusted tree must still match
-        // its lockfile pin. A drifted tree used to sail through as
-        // "unchanged" — the very sync pass that would have caught it only
-        // diffed the rc block text. Now the pin check runs here, the row
-        // says `drift`, the drift ledger records the id (the rc blocks'
-        // STATIC guard reads it and warns at every startup), and nothing is
-        // materialized off the modified tree until it is repaired.
-        match sources::verify_record(&record) {
-            Ok(report) if report.verified => {
-                let _ = sources::clear_drifted_source(&record.id);
-            }
-            Ok(report) => {
-                let _ = sources::record_drifted_source(&record.id);
-                keep_current.insert(record.id.clone());
-                let short = |pin: &str| pin.chars().take(12).collect::<String>();
-                rows.push(SyncRow {
-                    id: record.id.clone(),
-                    action: "drift".to_string(),
-                    detail: format!(
-                        "tree drifted from the lockfile pin (recorded {}, actual {}) — \
-                         review with `niu plugin source verify {}`, repair with \
-                         `niu plugin restore {}`",
-                        short(&record.checksum_sha256),
-                        report
-                            .actual_checksum
-                            .as_deref()
-                            .map(short)
-                            .unwrap_or_else(|| "?".to_string()),
-                        record.id,
-                        record.id,
-                    ),
-                });
-                continue;
-            }
-            Err(err) => {
-                keep_current.insert(record.id.clone());
-                rows.push(SyncRow {
-                    id: record.id.clone(),
-                    action: "failed".to_string(),
-                    detail: format!("pin check failed: {err}"),
-                });
-                continue;
-            }
         }
 
         // Compute the spec selection (idempotent; hand-added entries
@@ -835,9 +753,9 @@ fn reconcile_theme_claims(
         let Some(record) = record_for_entry(entry, registry) else {
             continue;
         };
-        // The same gate materialization applies: only a trusted, healthy
-        // source has a meaningful live state.
-        if !record.trusted || !record.path.is_dir() {
+        // The same gate materialization applies: only a source whose tree
+        // is present has a meaningful live state.
+        if !record.path.is_dir() {
             continue;
         }
         let live_theme = assets::live_managed_theme(record);
@@ -1226,29 +1144,20 @@ mod tests {
         })
         .unwrap();
 
-        // Sync 1: installs (fetch gate), lands untrusted.
+        // Sync 1: installs AND materializes in the same pass — there is
+        // no trust step (niubash#647); the spec selection lands in the
+        // generated loader immediately (the rc stays untouched —
+        // niubash#359).
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows.len(), 1, "{:?}", report.rows);
-        assert_eq!(report.rows[0].action, "awaiting-trust", "{:?}", report.rows);
-        assert!(
-            report.rows[0].detail.contains("niu plugin trust"),
-            "{:?}",
-            report.rows
-        );
-        assert!(rc_text().is_empty(), "untrusted sources activate nothing");
-
-        sources::trust_source("oh-my-bash").unwrap();
-
-        // Sync 2: materializes the spec into the generated loader (the rc
-        // stays untouched -- niubash#359).
-        let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "activated", "{:?}", report.rows);
         let loader = loader_section("oh-my-bash");
         assert!(loader.contains("OSH_THEME='agnoster'"), "{loader}");
         assert!(loader.contains("plugins=('git' 'npm')"), "{loader}");
         assert!(!report.clean, "{:?}", report);
+        assert!(rc_text().is_empty(), "the rc is never written");
 
-        // Sync 3 (idempotency, pinned by integration too): byte-identical
+        // Sync 2 (idempotency, pinned by integration too): byte-identical
         // loader, unchanged rows, clean report.
         let before = loader_text();
         let report = sync_spec(SyncOptions::default()).unwrap();
@@ -1362,7 +1271,6 @@ mod tests {
         })
         .unwrap();
         sync_spec(SyncOptions::default()).unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         sync_spec(SyncOptions::default()).unwrap();
         assert!(
             loader_section("oh-my-bash").contains("plugins=('git')"),
@@ -1456,14 +1364,13 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("adopt");
 
-        // The wizard-shaped imperative state: installed + trusted + a live
+        // The wizard-shaped imperative state: installed + a live
         // managed block (theme pick + one enabled plugin), NO spec.
         sources::add_source(SourceInstallRequest {
             origin: origin.to_string_lossy().into_owned(),
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         let block = assets::build_theme_block("oh-my-bash", "agnoster").expect("theme block");
         let with_plugin = block.replacen(
             "OSH_THEME='agnoster'\n",
@@ -1530,17 +1437,18 @@ mod tests {
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
-    /// Untrusted imperative installs (the 1.3.0 wizard's bash-completion
-    /// state) adopt too: the declaration lands, the trust gate stays
-    /// visible, and plain syncs churn nothing.
+    /// Imperative installs (the 1.3.0 wizard's bash-completion state)
+    /// adopt too: the declaration lands, and plain syncs churn nothing
+    /// (nothing is enabled, so nothing materializes — there is no trust
+    /// gate to wait behind, niubash#647).
     #[test]
-    fn adopt_declares_untrusted_sources_without_activating() {
+    fn adopt_declares_sources_and_plain_syncs_churn_nothing() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let holder = unique_temp_dir("adopt-untrusted");
+        let holder = unique_temp_dir("adopt-undeclared");
         let origin = holder.join("wildy");
         fs::create_dir_all(&origin).unwrap();
         write_wild_fixture(&origin);
-        let box_ = sandbox("adopt-untrusted");
+        let box_ = sandbox("adopt-undeclared");
 
         sources::add_source(SourceInstallRequest {
             origin: origin.to_string_lossy().into_owned(),
@@ -1557,10 +1465,10 @@ mod tests {
         assert_eq!(declared[0].id.as_deref(), Some("wildy"));
         assert!(declared[0].enable.is_empty(), "nothing live to snapshot");
         assert!(declared[0].theme.is_none());
-        assert!(rc_text().is_empty(), "untrusted sources activate nothing");
+        assert!(rc_text().is_empty(), "the rc is never written");
 
-        // Plain sync: the awaiting-trust row stays honest (iron law 2), but
-        // the rc and the registry do not move.
+        // Plain sync: an "unchanged" row (nothing enabled, nothing to
+        // materialize), and the rc and the registry do not move.
         let registry_text =
             fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
@@ -1568,9 +1476,13 @@ mod tests {
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "wildy" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "wildy" && row.action == "unchanged"),
             "{:?}",
             report.rows
+        );
+        assert!(
+            loader_section("wildy").is_empty(),
+            "nothing enabled, no section"
         );
         assert!(rc_text().is_empty());
         assert_eq!(
@@ -1684,7 +1596,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         let alt = origin.to_string_lossy().replace('\\', "/");
         spec::save_spec(&PluginSpec {
             schema: None,
@@ -1734,7 +1645,7 @@ mod tests {
     /// niubash#178: a registry that fails to parse (one bad line among good
     /// pinned records) must never be silently rewritten by sync — the read
     /// gives an empty view, and a rewrite from that view would drop every
-    /// persisted pin/trust record. Sync's registry write is refused (a
+    /// persisted record. Sync's registry write is refused (a
     /// `failed` row, no data loss), the corrupt file survives byte-for-byte,
     /// and a human repair re-enables the normal sync.
     #[test]
@@ -1759,9 +1670,7 @@ mod tests {
                 "ref = \"local\"\n",
                 "version = \"git-abc123\"\n",
                 "path = \"{}\"\n",
-                "trusted = true\n",
                 "license = \"MIT\"\n",
-                "checksum_sha256 = \"cafe1234\"\n",
                 "installed_at = \"1700000000\"\n",
                 "commit_sha = \"abc123def456\"\n",
             ),
@@ -1808,7 +1717,7 @@ mod tests {
         );
 
         // Consent = a human repairs the file. The next sync proceeds
-        // normally (installs, lands untrusted) and the registry parses.
+        // normally (adopts the record) and the registry parses.
         let repaired = corrupt_text
             .split_once("\n[[sources]]\nid = \"broken-entry\"")
             .expect("the corrupt entry is present")
@@ -1817,20 +1726,11 @@ mod tests {
         assert!(repaired.contains("commit_sha"), "{repaired}");
         fs::write(&registry_path, &repaired).unwrap();
         // The pinned record points at a tree that was never fetched (the
-        // first sync refused before promotion), so restore it where the pin
-        // says it lives — then the repaired sync can adopt and activate it.
-        // (The record's checksum must be the REAL tree digest: since
-        // niubash#297 sync re-verifies a trusted record's pin, a synthetic
-        // fake would read as drift — honest, but not this test's point.)
+        // first sync refused before promotion), so restore it where the
+        // record says it lives — then the repaired sync can adopt and
+        // activate it.
         fs::create_dir_all(root.join("wildy")).unwrap();
         write_wild_fixture(&root.join("wildy"));
-        let real_checksum = sources::tree_sha256(&root.join("wildy")).unwrap();
-        let repaired = repaired.replace(
-            "checksum_sha256 = \"cafe1234\"",
-            &format!("checksum_sha256 = \"{real_checksum}\""),
-        );
-        assert!(repaired.contains(&real_checksum), "{repaired}");
-        fs::write(&registry_path, &repaired).unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert!(
             report
@@ -1878,8 +1778,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("bash-it").unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         spec::save_spec(&PluginSpec {
             schema: None,
             sources: vec![SpecSource {
@@ -2010,8 +1908,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("bash-it").unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         spec::save_spec(&PluginSpec {
             schema: None,
             sources: vec![
@@ -2094,8 +1990,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("bash-it").unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
 
         // The post-pick state: oh-my-bash owns the theme (rc block + spec
         // claim); bash-it stays declared but selection-less (no claim, no
@@ -2155,8 +2049,9 @@ mod tests {
 
     /// The `niu plugin add --checksum` hand-off (wt83 #173): the pin rides
     /// the options into the reconciler's install request. A mismatched tree
-    /// is refused and registers nothing, a matching one installs untrusted
-    /// (the fetch gate + trust flow unchanged), and the pin never leaks
+    /// is refused and registers nothing, a matching one installs (the
+    /// install-time pin is the only integrity check — niubash#647 kept
+    /// exactly this industry-standard shape), and the pin never leaks
     /// onto other pending declarations.
     #[test]
     fn checksum_pin_refuses_mismatch_honors_match_and_stays_scoped() {
@@ -2217,7 +2112,7 @@ mod tests {
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "unpinned" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "unpinned" && row.action == "unchanged"),
             "{:?}",
             report.rows
         );
@@ -2227,7 +2122,7 @@ mod tests {
             .collect();
         assert_eq!(registered, ["unpinned"], "refused fetch registers nothing");
 
-        // The correct pin installs — untrusted, fetch gate untouched.
+        // The correct pin installs.
         let good = sources::tree_sha256(&origin_a).unwrap();
         let report = sync_spec(SyncOptions {
             checksum_pin: Some((target_a, good)),
@@ -2238,7 +2133,7 @@ mod tests {
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "pinned" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "pinned" && row.action == "unchanged"),
             "{:?}",
             report.rows
         );
@@ -2246,8 +2141,8 @@ mod tests {
             .into_iter()
             .find(|record| record.id == "pinned")
             .expect("pinned installed");
-        assert!(!pinned.trusted, "fetch gate unchanged: lands untrusted");
-        assert!(rc_text().is_empty(), "untrusted sources activate nothing");
+        assert_eq!(pinned.id, "pinned");
+        assert!(rc_text().is_empty(), "nothing enabled, nothing in the rc");
 
         let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(&box_.temp);
@@ -2292,7 +2187,7 @@ mod tests {
         .unwrap();
 
         // Startup 1: the broken declaration fails and is memoized; the
-        // healthy one installs (untrusted).
+        // healthy one installs.
         let report = sync_spec(SyncOptions {
             startup: true,
             ..SyncOptions::default()
@@ -2417,8 +2312,8 @@ mod tests {
     }
 
     /// The slowsource P0 pin (owner report 2026-10-04): an IN-SYNC startup
-    /// must not notice airplane mode. Every declared source is installed,
-    /// trusted, and materialized; the network is dead (all proxies point at
+    /// must not notice airplane mode. Every declared source is installed
+    /// and materialized; the network is dead (all proxies point at
     /// a refused port, so any fetch attempt would fail loudly into the
     /// memo). The startup sync changes nothing, spawns no fetch, and stays
     /// fast — the wall is bounded well under a second in-process.
@@ -2444,7 +2339,6 @@ mod tests {
         })
         .unwrap();
         sync_spec(SyncOptions::default()).unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         // Materialize once, then confirm the steady state is reached (the
         // second sync is the in-sync no-op the startup form must reproduce).
         let report = sync_spec(SyncOptions::default()).unwrap();
@@ -2577,20 +2471,19 @@ mod tests {
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
-    /// THE #297 regression, sync side: a trusted tree modified after trust
-    /// used to sail through materialization as "unchanged" — the sync pass
-    /// only diffed rc block text. Now the pin check runs first: the row
-    /// says `drift`, the drift ledger records the id (the managed rc
-    /// blocks' STATIC guard reads it and warns at startup), nothing is
-    /// re-materialized, and a repaired tree clears the row and the ledger.
+    /// THE #647 reversal, sync side (audit D-01): a tree modified after
+    /// install is NOT drift to sync — the pass reports the byte-stable
+    /// "unchanged" row, stays clean, and writes no drift ledger (the
+    /// #297 ledger and its rc guard are gone). What is on disk is what
+    /// loads.
     #[test]
-    fn sync_reports_drift_for_a_modified_trusted_tree_and_records_the_ledger() {
+    fn sync_treats_a_modified_tree_as_unchanged_and_writes_no_ledger() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let holder = unique_temp_dir("omb-drift-holder");
+        let holder = unique_temp_dir("omb-modified-holder");
         let origin = holder.join("oh-my-fixture");
         fs::create_dir_all(&origin).unwrap();
         write_omb_fixture(&origin);
-        let box_ = sandbox("omb-drift");
+        let box_ = sandbox("omb-modified");
 
         spec::save_spec(&PluginSpec {
             schema: Some(spec::PLUGIN_SPEC_SCHEMA.to_string()),
@@ -2605,18 +2498,16 @@ mod tests {
         })
         .unwrap();
 
-        // Sync 1 installs; trust via the imperative gate; sync 2 is the
-        // FIRST materialization ("activated"); sync 3 is byte-stable
-        // "unchanged" — the baseline the tamper must break.
-        sync_spec(SyncOptions::default()).unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
+        // Sync 1 installs + materializes ("activated"); sync 2 is the
+        // byte-stable "unchanged" baseline.
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "activated", "{:?}", report.rows);
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
-        assert!(sources::drifted_source_ids().is_empty());
+        assert!(report.clean, "{:?}", report);
 
-        // Tamper the trusted tree, then sync: DRIFT, not "unchanged".
+        // Modify the installed tree, then sync: still "unchanged", still
+        // clean, and no drift ledger appears under the sources root.
         fs::write(
             sources::sources_root()
                 .join("oh-my-bash")
@@ -2625,44 +2516,23 @@ mod tests {
         )
         .unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
-        assert_eq!(report.rows[0].action, "drift", "{:?}", report.rows);
+        assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
         assert!(
-            report.rows[0].detail.contains("niu plugin source verify")
-                && report.rows[0].detail.contains("niu plugin restore"),
-            "the drift row must name the way out: {:?}",
-            report.rows[0]
+            report.clean,
+            "a modified tree is 'in sync' now: {:?}",
+            report
         );
-        assert!(!report.clean, "a drifted rc is not 'in sync'");
-        assert_eq!(
-            sources::drifted_source_ids(),
-            vec!["oh-my-bash".to_string()],
-            "the ledger entry is what the rc drift guard reads"
+        assert!(
+            !sources::sources_root().join("drifted-sources.txt").exists(),
+            "sync writes no drift ledger (niubash#647)"
         );
-        // The startup form surfaces it too (iron law 2: degraded is visible).
+        // The startup form agrees.
         let report = sync_spec(SyncOptions {
             startup: true,
             ..SyncOptions::default()
         })
         .unwrap();
-        assert_eq!(report.rows[0].action, "drift", "{:?}", report.rows);
-
-        // Repair the tree in place (the pristine bytes restored): the next
-        // sync re-passes the pin check, clears the ledger, and reports the
-        // byte-stable unchanged row again. (A git-origin repair through
-        // `restore` is covered in the sources-side #297 test.)
-        fs::write(
-            sources::sources_root()
-                .join("oh-my-bash")
-                .join("plugins/git/git.plugin.sh"),
-            "alias gg='git status'\n",
-        )
-        .unwrap();
-        let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
-        assert!(
-            sources::drifted_source_ids().is_empty(),
-            "a re-verified tree must clear the ledger"
-        );
 
         let _ = fs::remove_dir_all(&box_.temp);
         let _ = fs::remove_dir_all(&holder);
@@ -2739,7 +2609,7 @@ mod tests {
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "healthy" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "healthy" && row.action == "unchanged"),
             "{:?}",
             report.rows
         );

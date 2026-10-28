@@ -127,7 +127,7 @@ Explicit, visible, yours — the same shape as bash's own
 `--rcfile <file>` reads only the named file, exactly like GNU bash. The
 legacy `~/.winuxshrc` and `~/.winshrc` names are never read, migrated, or
 written. Machine state —
-the plugin manifest, source registry and trust records, the generated
+the plugin manifest and source registry, the generated
 loader, test isolation, completion directories — is maintained by Niubash
 itself and is not a user configuration entry point.
 
@@ -420,13 +420,11 @@ verbs for installed sources.
 
 Beyond the curated catalog (`oh-my-bash`, `bash-it`, `bash-completion`),
 niu can install any git repository or local path that follows a known
-plugin-manager layout. New sources are **untrusted by default**: nothing
-they ship runs until you explicitly trust them.
+plugin-manager layout. Installing is not activating: nothing a source
+ships runs until you explicitly enable it.
 
 ```sh
 niu plugin add https://github.com/someone/oh-my-bash-fork.git
-# review the cloned source under ~/.niubash/sources/<id>
-niu plugin trust oh-my-bash-fork
 niu plugin enable oh-my-bash-fork
 niu plugin source remove oh-my-bash-fork   # delete tree + registry entry
 ```
@@ -435,11 +433,9 @@ Notes:
 
 - Sources are cloned to `~/.niubash/sources/<id>` and registered in
   `~/.niubash/sources/registry.toml`; the registry records the origin, ref,
-  path, and trust state.
+  and path.
 - `niu plugin update <id>` re-fetches the registered origin;
   `niu plugin rollback <id>` returns to the previous version.
-- An untrusted source never activates: enable refuses until
-  `niu plugin trust <id>` passes the review gate.
 - A git ref can be pinned at add time with `niu plugin add <id> --ref <ref>`.
 - `NIU_PLUGIN_SOURCES_ROOT` overrides the sources root (portable setups and
   tests).

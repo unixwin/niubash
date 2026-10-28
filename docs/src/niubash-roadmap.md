@@ -24,7 +24,7 @@ niubash = rubash + winuxcmd + reedline + the external bash ecosystem
   legacy `~/.winuxshrc`/`~/.winshrc`/`~/.bashrc` names are never read.
 - The plugin system is the external bash ecosystem: real sources
   (oh-my-bash, bash-it, bash-completion, wild git repos) installed over
-  `git clone`, gated by an explicit trust protocol, driven by the declarative
+  `git clone`, driven by the declarative
   manifest `~/.niubash/plugins.toml`, and activated through the generated
   loader `~/.niubash/generated/plugins.niu` — no verb writes the user rc
   (niubash#359, v1.4.2).
@@ -87,5 +87,5 @@ niubash = rubash + winuxcmd + reedline + the external bash ecosystem
   only rc file the shell reads.
 - Machine-managed state is not a human-authored configuration surface.
 - The official plugin story is the upstream ecosystem itself — oh-my-bash,
-  bash-it, bash-completion — installed under the trust protocol, never
+  bash-it, bash-completion — installed on demand, never
   vendored into the product.

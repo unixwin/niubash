@@ -31,16 +31,15 @@ oh-my-niu-ecosystem.md` §14.6. All verbs: `niu plugin --help`.
 
 | Verb | Effect | Exit |
 |---|---|---|
-| `add <id\|owner/repo\|url\|path> [--id N] [--ref R] [--checksum S] [--path D]` | Append spec entry + sync (install untrusted). A recipe id for an executable tool (fzf, starship, …) prints a package-manager recommendation instead — niu downloads nothing (retraction 2026-10-04) | non-zero if the entry failed to install or is already declared; recipe recommendations exit 0 |
+| `add <id\|owner/repo\|url\|path> [--id N] [--ref R] [--checksum S] [--path D]` | Append spec entry + sync (install only; `--checksum` is an install-time pin checked against the fetch). A recipe id for an executable tool (fzf, starship, …) prints a package-manager recommendation instead — niu downloads nothing (retraction 2026-10-04) | non-zero if the entry failed to install or is already declared; recipe recommendations exit 0 |
 | `list [--json]` | Sources, assets (`*` = enabled), tags for wild candidates | 0 |
-| `enable <id\|asset\|id/asset>` | Spec edit + sync; wild/bpkg assets are tree-relative paths | non-zero when untrusted/degraded/ambiguous/whole-source misuse |
+| `enable <id\|asset\|id/asset>` | Spec edit + sync; wild/bpkg assets are tree-relative paths | non-zero when the tree is missing/ambiguous/whole-source misuse |
 | `disable <target>` | Spec edit (entry removal for source targets) + sync; tree kept | 0 |
-| `trust <id>` | Review + flip the trust gate (checksum tier) | 0 |
 | `sync [--prune] [--adopt] [--bootstrap]` | Reconcile; `--prune` deletes undeclared, `--adopt` declares installed-but-undeclared sources into the spec (snapshots live enable/theme), `--bootstrap` quiet startup form | 0 |
 | `update [<id>]` | Move lockfile pin(s) to ref tip (no id = all) | 0 |
 | `restore [<id>]` / `rollback <id>` / `clean` | Lockfile verbs | 0 |
 | `discover` | Read-only overview | 0 |
-| `source <sub>` | Full source protocol (add/trust/sign/verify/remove/update/rollback/list) | — |
+| `source <sub>` | Full source protocol (add/remove/update/rollback/list) | — |
 | `mirror <sub>` | Git-only mirroring: `list`, `set <url\|none>` (insteadOf rewrite of git fetches) | non-zero on garbage URL |
 | `recipe <sub>` / `distro <sub>` | Recipe index (list/show/add) / collections (list/import/remove/apply) | — |
 | `tool <sub>` | **Retired** (download retraction): fails with a pointer to the package-manager flow | non-zero |
@@ -48,10 +47,9 @@ oh-my-niu-ecosystem.md` §14.6. All verbs: `niu plugin --help`.
 
 ## Sync row actions
 
-`awaiting-trust` (installed untrusted — gate is never automatic),
 `activated`, `unchanged`, `deactivated` (spec no longer declares; block
-dropped, tree kept), `degraded` (tree missing → `niu plugin restore`),
-`drift`, `failed`, `removed` (--prune), `unsupported`.
+dropped, tree kept), `missing` (tree missing → `niu plugin restore`),
+`failed`, `removed` (--prune), `unsupported`.
 
 ## Invariants (pinned by tests/plugin_spec_sync.rs, tests/plugin_anyplug.rs)
 
@@ -67,8 +65,9 @@ dropped, tree kept), `degraded` (tree missing → `niu plugin restore`),
 4. **Cleanup honesty**: undeclared sources are suggested, never
    auto-deleted; `--prune` is the explicit confirm (removes tree +
    registry entry).
-5. **Trust never automatic**: sync installs through the fetch gate only;
-   activation requires `niu plugin trust <id>`.
+5. **Install is not activation**: sync installs and materializes the
+   declared selection; assets run only where the spec/rc selection
+   enables them (no trust gate exists — niubash#647).
 6. **Honest enumeration**: wild sources list every `*.sh`/`*.bash`
    (≤256, depth-first) with tags (`script`, `fragment`,
    `installer/test-like — review before sourcing`, `bpkg script`); no

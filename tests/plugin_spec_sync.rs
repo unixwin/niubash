@@ -166,25 +166,14 @@ fn sync_is_idempotent_bootstrap_quiet_and_merges_honestly() {
     )
     .unwrap();
 
-    // Sync 1: install (fetch gate only) — lands untrusted, nothing
-    // activated, and the exact trust command is printed.
+    // Sync 1: install + materialize in one pass (niubash#647: there is
+    // no trust step) — the spec lands in the generated loader immediately
+    // (the rc is never written -- niubash#359).
     let first = run_niu_with_env(&["plugin", "sync"], &sandbox.envs);
     assert_success(&first, "sync 1");
     let first_out = stdout_text(&first);
-    assert!(
-        first_out.contains("awaiting-trust") && first_out.contains("niu plugin trust oh-my-bash"),
-        "{first_out}"
-    );
-    assert!(sandbox.rc().is_empty(), "untrusted activates nothing");
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &sandbox.envs),
-        "trust",
-    );
-
-    // Sync 2: materialize from the spec into the generated loader (the rc
-    // is never written -- niubash#359).
-    let second = run_niu_with_env(&["plugin", "sync"], &sandbox.envs);
-    assert_success(&second, "sync 2");
+    assert!(first_out.contains("activated"), "{first_out}");
+    assert!(sandbox.rc().is_empty(), "the rc was never written");
     let loader_after = sandbox.loader();
     assert!(
         loader_after.contains("OSH_THEME='agnoster'"),
@@ -194,10 +183,10 @@ fn sync_is_idempotent_bootstrap_quiet_and_merges_honestly() {
     assert!(loader_after.contains("aliases=('cargo')"), "{loader_after}");
     assert!(sandbox.rc().is_empty(), "the rc was never written");
 
-    // Sync 3 (the idempotency pin): byte-identical loader, all rows
+    // Sync 2 (the idempotency pin): byte-identical loader, all rows
     // unchanged, report says in sync.
     let third = run_niu_with_env(&["plugin", "sync"], &sandbox.envs);
-    assert_success(&third, "sync 3");
+    assert_success(&third, "sync 2");
     assert_eq!(
         sandbox.loader(),
         loader_after,
@@ -293,10 +282,6 @@ fn cli_sugar_matches_the_handwritten_spec_byte_for_byte() {
         &cli.envs,
     );
     assert_success(&add, "cli add");
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &cli.envs),
-        "cli trust",
-    );
     for target in ["git", "agnoster"] {
         assert_success(
             &run_niu_with_env(&["plugin", "enable", target], &cli.envs),
@@ -321,12 +306,6 @@ fn cli_sugar_matches_the_handwritten_spec_byte_for_byte() {
     .unwrap();
     let sync1 = run_niu_with_env(&["plugin", "sync"], &hand.envs);
     assert_success(&sync1, "hand sync 1");
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &hand.envs),
-        "hand trust",
-    );
-    let sync2 = run_niu_with_env(&["plugin", "sync"], &hand.envs);
-    assert_success(&sync2, "hand sync 2");
 
     // The spec files match (the CLI path wrote the same declaration), and
     // the materialized rc blocks are byte-identical.
@@ -494,7 +473,7 @@ fn adopt_snapshots_the_live_state_and_round_trips() {
     let sandbox = Sandbox::new("spec-adopt");
     let origin = fixture("oh-my-bash");
 
-    // The owner-shaped state: imperative install, explicit trust, live
+    // The owner-shaped state: imperative install, live
     // theme + plugin — then the spec (written by the enable sugar) is gone,
     // as on every 1.3.0 wizard machine.
     let add = run_niu_with_env(
@@ -502,8 +481,6 @@ fn adopt_snapshots_the_live_state_and_round_trips() {
         &sandbox.envs,
     );
     assert_success(&add, "imperative install");
-    let trust = run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &sandbox.envs);
-    assert_success(&trust, "trust");
     let enable = run_niu_with_env(&["plugin", "enable", "oh-my-bash/git"], &sandbox.envs);
     assert_success(&enable, "enable plugin");
     let theme = run_niu_with_env(&["plugin", "enable", "agnoster"], &sandbox.envs);
@@ -581,7 +558,10 @@ fn plugin_add_on_an_installed_source_declares_it() {
     // Exactly one tree, untouched: the add declared, it did not fetch.
     let registry = fs::read_to_string(sandbox.sources_root.join("registry.toml")).unwrap();
     assert_eq!(registry.matches("[[sources]]").count(), 1, "{registry}");
-    assert!(registry.contains("trusted = false"), "{registry}");
+    assert!(
+        !registry.contains("trusted"),
+        "the registry carries no trust field at all (niubash#647): {registry}"
+    );
 
     let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
@@ -883,8 +863,8 @@ fn plugin_sync_timeout_flag_parses_and_validates() {
 
 /// The add's completion line must name the source the add declared, even
 /// when the post-#359 reconcile report carries bystander rows after it
-/// (trusted sources' `unchanged` materialization rows publish after the
-/// fresh entry's `awaiting-trust` row). Release run 39249382423's P8-S4
+/// (installed sources' `unchanged` materialization rows publish around
+/// the fresh entry's rows). Release run 39249382423's P8-S4
 /// red: the re-add's report ended on a bystander `unchanged` row, the
 /// verb printed a misleading `Declared source 'bash-completion'` and no
 /// `Installed source` line at all.
@@ -894,22 +874,18 @@ fn add_completion_line_names_the_added_source_not_a_bystander() {
     let omb_s = fixture("oh-my-bash").to_string_lossy().into_owned();
     let wild_s = fixture("bash-preexec").to_string_lossy().into_owned();
 
-    // A trusted bystander: installed, trusted, its loader section
+    // An installed bystander: its loader section
     // materialized — the shape that publishes an `unchanged` row late.
     let wild = run_niu_with_env(&["plugin", "add", &wild_s], &sandbox.envs);
     assert_success(&wild, "add the wild bystander");
-    let trust_wild = run_niu_with_env(&["plugin", "trust", "bash-preexec"], &sandbox.envs);
-    assert_success(&trust_wild, "trust the wild bystander");
 
-    // The source under test: installed + trusted, then removed entirely
+    // The source under test: installed, then removed entirely
     // (the P8-S4 remove), so the re-add is a fresh install.
     let omb = run_niu_with_env(
         &["plugin", "add", "oh-my-bash", "--path", &omb_s],
         &sandbox.envs,
     );
     assert_success(&omb, "add the framework source");
-    let trust_omb = run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &sandbox.envs);
-    assert_success(&trust_omb, "trust the framework source");
     let remove = run_niu_with_env(&["plugin", "source", "remove", "oh-my-bash"], &sandbox.envs);
     assert_success(&remove, "remove the framework source");
 

@@ -5,8 +5,7 @@
 //!
 //! The catalog is a *shorthand table*, the same role `owner/repo` plays for
 //! vim-plug/lazy.nvim: `niu plugin add oh-my-bash` resolves to the official
-//! origin and clones it. It confers no trust — every catalog install still
-//! lands untrusted and waits for `niu plugin trust`/`sign` (§12.2).
+//! origin and clones it.
 
 use super::sources::{builtin_source_adapters, PluginSourceAdapter};
 

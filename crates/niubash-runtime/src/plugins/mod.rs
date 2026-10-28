@@ -9,8 +9,7 @@
 //! The plugin system is the external bash ecosystem as first-class
 //! content (owner rulings 2026-10-02): oh-my-bash, bash-it and
 //! bash-completion install over git clone on explicit user command
-//! ([`sources`], curated by [`catalog`]), earn activation only through the
-//! graded trust protocol ([`trust`]), and expose their real themes /
+//! ([`sources`], curated by [`catalog`]), and expose their real themes /
 //! plugins / aliases / completions to `niu plugin enable/disable` through
 //! each manager's own selection mechanism ([`assets`]). No vendoring: the
 //! license stays between the user and upstream.
@@ -38,5 +37,4 @@ pub mod sources;
 pub mod spec;
 pub mod sync;
 pub mod theme_preview;
-pub mod trust;
 pub mod ui;

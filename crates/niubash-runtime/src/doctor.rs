@@ -1,6 +1,6 @@
 //! `niu doctor`: one-command health check for a Niubash installation.
 //!
-//! Reuses the same probes the setup wizard trusts (winuxcmd discovery,
+//! Reuses the same probes the setup wizard uses (winuxcmd discovery,
 //! command links, nerd font) and prints a compact report with fix hints.
 //! Critical checks decide the trailing count; advisory rows (font, shims,
 //! language) never fail the run.
@@ -286,9 +286,9 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     if crate::plugins::assets::rc_has_migrated_debris() {
         writeln!(
             out,
-            "  {warn} rc moved-out debris stale moved-out drift-guard remnants found in the rc \
-             (an older niu's write-era damage, niubash#324) — niu never repairs your rc; \
-             review the moved-out sections by hand"
+            "  {warn} rc moved-out debris stale moved-out remnants of the retired drift guard \
+             found in the rc (an older niu's write-era damage, niubash#324/#647) — niu never \
+             repairs your rc; review the moved-out sections by hand"
         )?;
     }
 
@@ -472,8 +472,9 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     )?;
 
     // ── Advisory: external plugin sources (iron law 2: fallback explicit) ──
-    // Degraded sources must be *visible*: the guarded loaders fell back to
-    // the niubash defaults at startup and the user deserves to know.
+    // Sources whose tree is gone must be *visible*: the guarded loaders
+    // fell back to the niubash defaults at startup and the user deserves
+    // to know.
     let sources = crate::plugins::sources::list_sources();
     // niubash#178: an unparsable registry silently reads as "none installed"
     // everywhere, so the doctor must call it out explicitly — naming the bad
@@ -482,7 +483,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     if let Some(corruption) = crate::plugins::sources::registry_corruption() {
         writeln!(
             out,
-            "  {warn} plugin registry     UNPARSABLE ({}) — every pin/trust \
+            "  {warn} plugin registry     UNPARSABLE ({}) — every registry \
              record in it is UNLOADED and sync/install are refused until you \
              fix or remove the file; the original is preserved at {}",
             corruption.error.lines().next().unwrap_or("parse error"),
@@ -495,42 +496,19 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
             "  {info} plugin sources      none installed — browse with `niu plugin discover`"
         )?;
     } else {
-        let ready = sources.iter().filter(|s| s.state == "ready").count();
-        let untrusted = sources.iter().filter(|s| s.state == "untrusted").count();
-        let degraded = sources.iter().filter(|s| s.state == "degraded").count();
+        let ready = sources.iter().filter(|s| !s.missing).count();
+        let missing = sources.iter().filter(|s| s.missing).count();
         writeln!(
             out,
-            "  {info} plugin sources      {ready} ready, {untrusted} untrusted, {degraded} degraded \
+            "  {info} plugin sources      {ready} ready, {missing} missing \
              (`niu plugin list` for assets)"
         )?;
-        for status in sources.iter().filter(|s| s.state == "degraded") {
-            // niubash#297: drift (a trusted tree that no longer matches its
-            // lockfile pin) is a different failure than a missing tree —
-            // name it, and point at the verify verb that reports the
-            // checksums before the repair.
-            let drifted = status.degraded_reason.as_deref()
-                == Some(crate::plugins::sources::DEGRADED_DRIFTED);
+        for status in sources.iter().filter(|s| s.missing) {
             writeln!(
                 out,
-                "  {warn} source degraded     '{}' {} — {}; {}",
-                status.record.id,
-                status
-                    .degraded_reason
-                    .as_deref()
-                    .unwrap_or(crate::plugins::sources::DEGRADED_MISSING),
-                if drifted {
-                    "its assets stay unloaded"
-                } else {
-                    "fallback active"
-                },
-                if drifted {
-                    format!(
-                        "review with `niu plugin source verify {}`; repair with `niu plugin restore {}`",
-                        status.record.id, status.record.id
-                    )
-                } else {
-                    format!("repair with `niu plugin restore {}`", status.record.id)
-                }
+                "  {warn} source missing      '{}' tree missing — its assets stay unloaded; \
+                 repair with `niu plugin restore {}`",
+                status.record.id, status.record.id
             )?;
         }
     }
@@ -584,7 +562,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
 
     // ── Advisory: git mirroring (§14.8, China-network comfort) ──
     // Report-only — the product never auto-switches a mirror; the user
-    // pastes the URL they trust (`niu plugin mirror set <url>`). niu has
+    // pastes their own mirror URL (`niu plugin mirror set <url>`). niu has
     // no HTTP transport to probe (download retraction 2026-10-04), so the
     // row states the active channel instead of probing GitHub.
     match crate::plugins::mirrors::load_mirror_config() {
@@ -615,7 +593,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
                 writeln!(
                     out,
                     "  {info}                     if GitHub fetches stall (e.g. mainland China), \
-                     set one you trust: `niu plugin mirror set <url>`"
+                     point git at a mirror of your choice: `niu plugin mirror set <url>`"
                 )?;
             }
         }

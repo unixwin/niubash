@@ -167,12 +167,11 @@ and its `PS1` takes over the prompt; disable it and the floor comes back.
 Themes and plugins come from external plugin managers, installed and
 enabled through `niu plugin`. The curated catalog has `oh-my-bash`,
 `bash-it`, and `bash-completion`; any git URL, `owner/repo` shorthand, or
-local path works too. New sources are **untrusted by default** — nothing
-they ship runs until you review and trust them:
+local path works too. Installing is not activating — nothing a source
+ships runs until you enable it:
 
 ```sh
-niu plugin add oh-my-bash     # install from the catalog (untrusted)
-niu plugin trust oh-my-bash   # review, then pass the execution gate
+niu plugin add oh-my-bash     # install from the catalog
 niu plugin enable oh-my-bash  # records the source in the manifest
 niu plugin enable agnoster    # a theme asset -> OSH_THEME in the loader
 niu plugin disable oh-my-bash # manifest updated; the built-in floor returns
