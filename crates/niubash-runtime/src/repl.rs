@@ -4642,6 +4642,14 @@ mod tests {
                     text: r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string(),
                 },
             ),
+            // The same macro in its stored form: the engine has
+            // already translated the escapes to raw control bytes.
+            entry(
+                r"\C-x",
+                BindKind::Macro {
+                    text: " \u{2}\u{b} __fzf_cd__".to_string(),
+                },
+            ),
         ];
         let (built, _entries, dropped) = build_keymap_for_target(
             default_emacs_keybindings(),
@@ -4664,6 +4672,7 @@ mod tests {
                 (r"\e[0n", DroppedReason::ResponseSequence),
                 (r"\C-g", DroppedReason::UnknownFunction),
                 (r"\ec", DroppedReason::ScriptMacro),
+                (r"\C-x", DroppedReason::ScriptMacro),
             ]
         );
         assert_eq!(dropped[2].kind, DroppedKind::Execute);

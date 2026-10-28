@@ -347,12 +347,22 @@ pub fn is_response_sequence(keyseq: &str) -> bool {
 }
 
 /// Whether a macro's text is a *key script* rather than literal text
-/// (DESIGN §4, classes T3 vs R1): it contains control-function escapes
-/// (`\C-`, `\M-`, `\e`) or substitution constructs (backquotes, `$(`) —
-/// its meaning is a sequence of key actions and evaluation, not text
-/// to insert. Plain backslash escapes (`\\`, `\"`) stay literal.
+/// (DESIGN §4, classes T3 vs R1): its meaning is a sequence of key
+/// actions and evaluation, not text to insert. Evidence, by shape:
+/// substitution constructs (backquotes, `$(`); control-function
+/// escapes in source notation (`\C-`, `\M-`, `\e`); or — the form the
+/// engine actually stores, escapes already translated — raw control
+/// characters other than tab/newline (a stored Ctrl-B byte is a key
+/// action, never text). Plain backslash escapes (`\\`, `\"`) and
+/// tab/newline stay literal.
 pub fn is_script_macro_text(text: &str) -> bool {
     if text.contains('`') || text.contains("$(") {
+        return true;
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
         return true;
     }
     let chars: Vec<char> = text.chars().collect();
@@ -896,7 +906,11 @@ mod tests {
         // fzf's Alt-C macro (DESIGN §3 #7): control escapes + backquotes.
         assert!(is_script_macro_text(r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e"));
         assert!(is_script_macro_text("echo $(date)"));
+        // The stored form: the engine translates `\C-` escapes to raw
+        // control bytes before the host ever sees the macro.
+        assert!(is_script_macro_text(" \u{2}\u{b} __fzf_cd__"));
         assert!(!is_script_macro_text("ins-macro"));
+        assert!(!is_script_macro_text("tab\tand newline\nstay literal"));
         assert!(!is_script_macro_text(r#"literal \\ and \" text"#));
     }
 
