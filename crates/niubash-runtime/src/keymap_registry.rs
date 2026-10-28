@@ -333,8 +333,7 @@ impl From<&KeymapRegistry> for KeymapState {
 pub fn is_response_sequence(keyseq: &str) -> bool {
     let chars: Vec<char> = keyseq.chars().collect();
     // CSI introducer, in either spelling: `\e[` or the caret form `^[[`.
-    let is_csi =
-        chars.starts_with(&['\\', 'e', '[']) || chars.starts_with(&['^', '[', '[']);
+    let is_csi = chars.starts_with(&['\\', 'e', '[']) || chars.starts_with(&['^', '[', '[']);
     if !is_csi {
         return false;
     }
