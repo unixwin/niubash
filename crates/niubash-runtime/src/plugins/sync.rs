@@ -847,9 +847,6 @@ struct BootstrapFailure {
     /// The entry's `ref`, when it declared one.
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     ref_name: Option<String>,
-    pub error: String,
-    #[serde(default)]
-    pub at: String,
 }
 
 fn bootstrap_failure_path() -> std::path::PathBuf {
@@ -878,7 +875,7 @@ fn write_bootstrap_failures(failures: &[BootstrapFailure]) {
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    let mut body = format!("# Startup install-failure memo (niu plugin sync --bootstrap).\n# Cleared by an explicit `niu plugin sync` / `niu plugin add` retry.\nschema = \"{BOOTSTRAP_FAILURE_SCHEMA}\"\n");
+    let mut body = format!("# Legacy startup install-failure memo (written by an old\n# niu version's startup sync; now read-only — entries are cleared by an\n# explicit `niu plugin sync` retry or by `sync --prune`).\nschema = \"{BOOTSTRAP_FAILURE_SCHEMA}\"\n");
     for failure in failures {
         let quote =
             |value: &str| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
@@ -889,11 +886,6 @@ fn write_bootstrap_failures(failures: &[BootstrapFailure]) {
         if let Some(ref_name) = &failure.ref_name {
             body.push_str(&format!("ref = {}\n", quote(ref_name)));
         }
-        body.push_str(&format!(
-            "error = {}\nat = {}\n",
-            quote(&failure.error),
-            quote(&failure.at)
-        ));
     }
     let _ = std::fs::write(path, body);
 }
@@ -2067,8 +2059,6 @@ mod tests {
         write_bootstrap_failures(&[BootstrapFailure {
             target: missing_origin,
             ref_name: None,
-            error: "seeded legacy failure".to_string(),
-            at: "0".to_string(),
         }]);
         assert!(
             fs::read_to_string(bootstrap_failure_path())
