@@ -17,13 +17,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use reedline::Reedline;
+use rubash::api::{Flow, PreparedLine, RunOptions, Session};
 use rubash::{
-    api::{Flow, PreparedLine, RunOptions, Session},
-    decode_to_visible_text,
-    executor::Executor,
-    lexer::tokenize,
-    parser::parse,
-    Ast, Token, TokenKind,
+    decode_to_visible_text, executor::Executor, lexer::tokenize, parser::parse, Ast, Token,
+    TokenKind,
 };
 
 use crate::completion::{CompletionState, NiubashCompleter};
@@ -3132,7 +3129,7 @@ impl Shell {
 
     /// niubash#652: teardown for the one-shot and host-driven stream
     /// routes (script file, -c, the host stdin driver) via the engine's
-    /// shared finish path, `rubash::script_driver::finish_shell` — the
+    /// shared finish path, `script_driver::finish_shell` — the
     /// same one rubash's own main runs at those route tails. In GNU
     /// exit_shell order it performs the session-history write (inert on
     /// these routes unless the script itself armed history, rubash#1049
