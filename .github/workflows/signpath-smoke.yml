@@ -118,6 +118,24 @@ jobs:
             $resp2 = Invoke-WebRequest -Uri $projUrl -Headers $headers -SkipHttpErrorCheck
             Write-Host "HTTP $($resp2.StatusCode)"
             Write-Host $resp2.Content
+
+            # Pull the default artifact configuration's XML — the structure
+            # contract between what the connector uploads and what SignPath
+            # accepts.
+            try {
+              $proj = $resp2.Content | ConvertFrom-Json
+              $xmlLink = $proj.artifactConfigurations |
+                Where-Object { $_.isDefault } |
+                Select-Object -First 1 -ExpandProperty artifactConfigurationXmlLink
+              if ($xmlLink) {
+                Write-Host "--- GET artifact configuration XML ---"
+                $resp3 = Invoke-WebRequest -Uri $xmlLink -Headers $headers -SkipHttpErrorCheck
+                Write-Host "HTTP $($resp3.StatusCode)"
+                Write-Host $resp3.Content
+              }
+            } catch {
+              Write-Host "::warning::could not fetch artifact configuration XML: $($_.Exception.Message)"
+            }
           }
 
       - name: Verdict
