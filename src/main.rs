@@ -374,6 +374,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             "font" => return niubash_runtime::fonts::run_font_command(),
             "doctor" => return niubash_runtime::doctor::run_doctor(skill::SKILL_FILES),
             "config" => return run_config_command(&args[2..]),
+            "help" => return run_help_command(&args[2..]),
             "plugin" => return run_plugin_command(args),
             "skill" => return skill::run_skill_command(args),
             // Anything else is a script name, for every face.
@@ -1894,6 +1895,13 @@ fn print_usage() {
     println!("  BASH_ENV=<file>         GNU bash compatible: same as NIU_ENV, lower precedence.");
     println!("  NIU_LANG=<lang>         Setup wizard language (zh / en). Falls back to the");
     println!("                          Windows UI language, then LC_ALL/LANG.");
+    println!();
+    // Host help topics (niubash#630): the section text is generated from
+    // the runtime's single topic table so this face cannot drift from
+    // the `niu help` verb or the keymap reminder text.
+    for line in niubash_runtime::keymap_registry::help_topics_section().lines() {
+        println!("{line}");
+    }
     println!();
     // GNU --help convention: the portal lines close the output (bash ends its
     // --help with "bash home page: <…>"). Kept identical to the --version
@@ -3521,6 +3529,34 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
 /// surface values as resolved (file, overridden by the `NIU_` env variable).
 /// `startup.rc-policy` is displayed but owned by `niu setup --rc-policy` —
 /// other config commands preserve it without changing its value.
+/// The `niu help` verb (niubash#630): host-side help topics, kept in a
+/// niu-side topic table — this is deliberately NOT the shell's `help`
+/// builtin (whose bytes are GNU's) and does not touch the engine's
+/// generated topic table. `niu help` lists the topics; `niu help
+/// <topic>` renders one. The topic name comes from the single
+/// constant in the runtime so the reminder text, the `--help` topics
+/// section and this dispatch can never disagree.
+fn run_help_command(args: &[String]) -> anyhow::Result<()> {
+    use niubash_runtime::keymap_registry;
+    match args.first().map(String::as_str) {
+        None => {
+            println!("Usage: niu help <topic>\n");
+            println!("{}", keymap_registry::help_topics_section());
+            Ok(())
+        }
+        Some(topic) if topic == keymap_registry::KEYMAP_HELP_TOPIC => {
+            let state = keymap_registry::load_state_from(&keymap_registry::state_path());
+            print!("{}", keymap_registry::render_keymap_help(state.as_ref()));
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("niu: help: no topic '{other}'\n");
+            eprintln!("{}", keymap_registry::help_topics_section());
+            std::process::exit(2);
+        }
+    }
+}
+
 fn run_config_command(args: &[String]) -> anyhow::Result<()> {
     use niubash_runtime::config::{
         resolve_command_not_found_hint, resolve_completion_style, resolve_rc_policy,
