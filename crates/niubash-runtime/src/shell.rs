@@ -150,20 +150,21 @@ pub struct Shell {
     /// rc sourcing / at the last keymap rebuild). The reedline keymaps
     /// mirror these; `bind -x` entries trigger through the `__niu_bindx`
     /// sentinel and run via [`Shell::run_bind_x_command`].
-    pub engine_bindings: Vec<rubash::shell::bind_registry::BindEntry>,
+    pub engine_bindings: Vec<crate::bind_surface::EngineBindEntry>,
     /// Registry generation at snapshot time; compared against
-    /// `executor.bind_registry_generation()` between prompts so a runtime
-    /// `bind` call rebuilds the mirrored keymaps (GNU takes effect
-    /// immediately; reedline keymaps are baked at editor build time).
+    /// the registry's live generation (through the bind surface)
+    /// between prompts so a runtime `bind` call rebuilds the
+    /// mirrored keymaps (GNU takes effect immediately; reedline
+    /// keymaps are baked at editor build time).
     pub engine_bind_generation: u64,
     /// The user's persistent `[keymap].bind` rules from config.toml
-    /// (niubash#630, K4), parsed into engine bind entries by
+    /// (niubash#630, K4), parsed into bind-surface mirror entries by
     /// [`Shell::load_user_keymap_rules`]. The editor build applies
     /// them inside the user layer, after `NIU_BINDKEYS`; their
     /// `bind -x` triggers resolve through [`Shell::run_bind_x_command`]
     /// at indices offset past `engine_bindings`, so this list and the
     /// snapshot together form the one resolution list.
-    pub user_keymap_rules: Vec<rubash::shell::bind_registry::BindEntry>,
+    pub user_keymap_rules: Vec<crate::bind_surface::EngineBindEntry>,
     /// The user's persistent `[keymap].unbind` keys from config.toml
     /// (niubash#630, K4): slots the editor build removes outright at
     /// the end of the user layer.
@@ -2322,8 +2323,19 @@ impl Shell {
     /// line editor is built, and again whenever the registry generation
     /// moved so a runtime `bind` call mirrors into the next prompt.
     pub fn load_engine_bindings(&mut self) {
-        self.engine_bindings = self.executor.bind_registry_snapshot();
-        self.engine_bind_generation = self.executor.bind_registry_generation();
+        // The registry itself is Tier C: the snapshot arrives
+        // through the gated bind surface, already converted to
+        // niu-owned mirror types (PLAN row 11, M-3).
+        let (entries, generation) = crate::bind_surface::load_engine_bindings(&self.executor);
+        self.engine_bindings = entries;
+        self.engine_bind_generation = generation;
+    }
+
+    /// Whether the engine's bind registry has moved since the
+    /// last snapshot (the REPL's between-prompts staleness
+    /// probe, routed through the same gated surface).
+    pub fn engine_bindings_stale(&self) -> bool {
+        crate::bind_surface::current_generation(&self.executor) != self.engine_bind_generation
     }
 
     /// Load the user's persistent keymap rules from config.toml's
@@ -2392,7 +2404,7 @@ impl Shell {
         let Some(entry) = entry else {
             return WidgetOutcome::default();
         };
-        let rubash::shell::bind_registry::BindKind::Execute { command } = &entry.kind else {
+        let crate::bind_surface::EngineBindKind::Execute { command } = &entry.kind else {
             return WidgetOutcome::default();
         };
         let command = command.clone();
@@ -5758,7 +5770,7 @@ __fzf_history_stub() {
         assert_eq!(shell.engine_bindings[0].keyseq, r#"\C-r"#);
         assert!(matches!(
             &shell.engine_bindings[0].kind,
-            rubash::shell::bind_registry::BindKind::Execute { command }
+            crate::bind_surface::EngineBindKind::Execute { command }
                 if command == "__fzf_history_stub"
         ));
 

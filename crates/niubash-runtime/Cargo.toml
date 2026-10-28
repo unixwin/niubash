@@ -6,8 +6,18 @@ rust-version = "1.95"
 license = "MIT"
 description = "Runtime crate for niubash: rubash-backed shell REPL on Windows"
 
+[features]
+# The gated Tier C internals surface (1.5.0 PLAN row 11, M-3):
+# the engine bind registry is consumed only through
+# `src/bind_surface.rs`, behind this feature. The default build
+# enables it (the editor mirrors runtime `bind` entries); a
+# `--no-default-features` build compiles and runs without any
+# Tier C reference, on the built-in keybindings alone.
+default = ["internals"]
+internals = []
+
 [dependencies]
-rubash = { version = "1.3.4", git = "https://github.com/unixwin/rubash.git", branch = "master" }
+rubash = { version = "1.4.3", git = "https://github.com/unixwin/rubash.git", branch = "master" }
 # niubash#373: 0.52 anchors the prompt without turning a missing
 # cursor-position reply into a read_line abort — a DSR-silent terminal
 # (dumb terminals, script(1) recordings, some serial/tmux links) gets its

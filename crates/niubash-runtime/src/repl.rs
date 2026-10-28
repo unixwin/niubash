@@ -662,8 +662,8 @@ fn build_keymap_for_target(
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
-    engine_bindings: &[rubash::shell::bind_registry::BindEntry],
-    user_keymap_rules: &[rubash::shell::bind_registry::BindEntry],
+    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    user_keymap_rules: &[crate::bind_surface::EngineBindEntry],
     user_keymap_unbinds: &[(KeyModifiers, KeyCode)],
 ) -> (
     Keybindings,
@@ -739,7 +739,7 @@ fn build_keymap_for_target(
     // The action column resolves `bind -x` triggers against the
     // combined resolution list (engine snapshot, then user rules) —
     // the same list the shell resolves indices against at keypress.
-    let resolution: Vec<rubash::shell::bind_registry::BindEntry> = engine_bindings
+    let resolution: Vec<crate::bind_surface::EngineBindEntry> = engine_bindings
         .iter()
         .chain(user_keymap_rules.iter())
         .cloned()
@@ -757,8 +757,8 @@ fn build_edit_mode(
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
-    engine_bindings: &[rubash::shell::bind_registry::BindEntry],
-    user_keymap_rules: &[rubash::shell::bind_registry::BindEntry],
+    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    user_keymap_rules: &[crate::bind_surface::EngineBindEntry],
     user_keymap_unbinds: &[(KeyModifiers, KeyCode)],
     engine_bind_generation: u64,
 ) -> (Box<dyn EditMode>, crate::keymap_registry::KeymapRegistry) {
@@ -1912,7 +1912,7 @@ fn char_spec_len(chars: &[char]) -> Option<usize> {
 fn note_unusable_bind(
     unusable: &mut Vec<UnusableBind>,
     dropped: &mut Vec<crate::keymap_registry::DroppedBind>,
-    entry: &rubash::shell::bind_registry::BindEntry,
+    entry: &crate::bind_surface::EngineBindEntry,
     reason: UnusableBindReason,
 ) {
     unusable.push(UnusableBind {
@@ -1972,7 +1972,7 @@ fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[Native
 fn add_engine_bind_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
-    entries: &[rubash::shell::bind_registry::BindEntry],
+    entries: &[crate::bind_surface::EngineBindEntry],
 ) -> Vec<UnusableBind> {
     add_engine_bind_keybindings_recorded(keybindings, target, entries, 0).0
 }
@@ -1994,7 +1994,7 @@ fn add_engine_bind_keybindings(
 fn add_engine_bind_keybindings_recorded(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
-    entries: &[rubash::shell::bind_registry::BindEntry],
+    entries: &[crate::bind_surface::EngineBindEntry],
     index_base: usize,
 ) -> (Vec<UnusableBind>, Vec<crate::keymap_registry::DroppedBind>) {
     let mut unusable = Vec::new();
@@ -2016,13 +2016,13 @@ fn add_engine_bind_keybindings_recorded(
             continue;
         };
         let event = match &entry.kind {
-            rubash::shell::bind_registry::BindKind::Execute { .. } => {
+            crate::bind_surface::EngineBindKind::Execute { .. } => {
                 ReedlineEvent::ExecuteHostCommand(format!(
                     "{BINDX_HOST_COMMAND_PREFIX}{}",
                     index_base + index
                 ))
             }
-            rubash::shell::bind_registry::BindKind::Macro { text } => {
+            crate::bind_surface::EngineBindKind::Macro { text } => {
                 if crate::keymap_registry::is_script_macro_text(text) {
                     dropped.push(crate::keymap_registry::dropped_bind_for(
                         entry,
@@ -2035,7 +2035,7 @@ fn add_engine_bind_keybindings_recorded(
             // skipped; the sentinel fallthrough of native_widget_event is
             // for zsh-style shell-function widgets, which `bind` to a
             // readline function position has no meaning for.
-            rubash::shell::bind_registry::BindKind::Function { name } => {
+            crate::bind_surface::EngineBindKind::Function { name } => {
                 match native_widget_event(name) {
                     // native_widget_event's sentinel fallthrough means
                     // "unknown readline function": skipped, like GNU's
@@ -2296,8 +2296,8 @@ fn completion_event() -> ReedlineEvent {
 /// silently).
 pub(crate) fn parse_keymap_bind_rule(
     spec: &str,
-) -> Result<rubash::shell::bind_registry::BindEntry, String> {
-    use rubash::shell::bind_registry::{BindEntry, BindKind};
+) -> Result<crate::bind_surface::EngineBindEntry, String> {
+    use crate::bind_surface::{EngineBindEntry, EngineBindKind};
     let mut rest = spec.trim();
     if rest.is_empty() {
         return Err("the rule is empty".to_string());
@@ -2348,7 +2348,7 @@ pub(crate) fn parse_keymap_bind_rule(
         break;
     }
     if let Some(name) = &keymap {
-        if !rubash::shell::bind_registry::KEYMAP_NAMES.contains(&name.as_str()) {
+        if !crate::bind_surface::is_known_keymap(name) {
             return Err(rubash::builtins::bind::format_invalid_keymap(name));
         }
     }
@@ -2360,9 +2360,9 @@ pub(crate) fn parse_keymap_bind_rule(
     if execute {
         let (keyseq, command) =
             rubash::builtins::bind::parse_unix_command_spec(rest).map_err(reason)?;
-        return Ok(BindEntry {
+        return Ok(EngineBindEntry {
             keyseq,
-            kind: BindKind::Execute { command },
+            kind: EngineBindKind::Execute { command },
             keymap,
         });
     }
@@ -2373,10 +2373,10 @@ pub(crate) fn parse_keymap_bind_rule(
     }
     let parsed = rubash::builtins::bind::parse_positional_binding(rest).map_err(reason)?;
     let kind = match parsed.spec {
-        rubash::builtins::bind::BindingSpec::Function { name } => BindKind::Function { name },
-        rubash::builtins::bind::BindingSpec::Macro { text } => BindKind::Macro { text },
+        rubash::builtins::bind::BindingSpec::Function { name } => EngineBindKind::Function { name },
+        rubash::builtins::bind::BindingSpec::Macro { text } => EngineBindKind::Macro { text },
     };
-    Ok(BindEntry {
+    Ok(EngineBindEntry {
         keyseq: parsed.keyseq,
         kind,
         keymap,
@@ -3343,7 +3343,10 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // the field.
     shell.borrow_mut().refresh_edit_mode();
     let mut line_editor = build_line_editor(&shell)?;
-    let mut engine_bind_generation = shell.borrow().engine_bind_generation;
+    // (The loop used to snapshot the engine-bind generation here
+    // and compare it against the executor between prompts; it
+    // now asks Shell::engine_bindings_stale, which reads the
+    // generation through the bind surface — row 11.)
     let mut pending = PendingReplInput::default();
 
     loop {
@@ -3356,7 +3359,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // editor before the next prompt. The buffer is empty at this
         // boundary (the previous line was submitted or interrupted) and
         // history writes through to the file, so the rebuild is lossless.
-        if shell.borrow().executor.bind_registry_generation() != engine_bind_generation {
+        if shell.borrow().engine_bindings_stale() {
             shell.borrow_mut().load_engine_bindings();
             // The user rules reload with the snapshot: the rebuild
             // below reapplies them over whatever the script layer just
@@ -3364,7 +3367,6 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // rebind from ever covering a user-ruled key (niubash#630).
             shell.borrow_mut().load_user_keymap_rules();
             line_editor = build_line_editor(&shell)?;
-            engine_bind_generation = shell.borrow().engine_bind_generation;
         }
         let signal = if pending.is_empty() {
             drain_pending_notices();
@@ -4381,40 +4383,40 @@ mod tests {
     fn engine_bind_entries_mirror_into_reedline_keybindings() {
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-r"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Execute {
+                kind: crate::bind_surface::EngineBindKind::Execute {
                     command: "__fzf_history__".to_string(),
                 },
                 keymap: Some("emacs-standard".to_string()),
             },
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-t"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Macro {
+                kind: crate::bind_surface::EngineBindKind::Macro {
                     text: "ins-macro".to_string(),
                 },
                 keymap: None,
             },
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-o"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Function {
+                kind: crate::bind_surface::EngineBindKind::Function {
                     name: "accept-line".to_string(),
                 },
                 keymap: None,
             },
             // Unknown readline function name: GNU silently drops it
             // (wt100 probe), so the bridge reports it unusable.
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-g"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Function {
+                kind: crate::bind_surface::EngineBindKind::Function {
                     name: "no-such-fn".to_string(),
                 },
                 keymap: None,
             },
             // Multi-key sequence: reedline cannot represent it.
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-x\C-f"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Execute {
+                kind: crate::bind_surface::EngineBindKind::Execute {
                     command: "multi".to_string(),
                 },
                 keymap: None,
@@ -4422,9 +4424,9 @@ mod tests {
             // vi-insert keymap entry must not land on the emacs keymap
             // (\C-6 is unbound in the emacs defaults, so a hit would be
             // ours and ours alone).
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-6"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Execute {
+                kind: crate::bind_surface::EngineBindKind::Execute {
                     command: "vi-only".to_string(),
                 },
                 keymap: Some("vi-insert".to_string()),
@@ -4489,7 +4491,7 @@ mod tests {
     // entries still mirror.
     #[test]
     fn issue612_fzf_workaround_binds_drop_silently() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let function = |keyseq: &str, keymap: &str, name: &str| BindEntry {
             keyseq: keyseq.to_string(),
             kind: BindKind::Function {
@@ -4597,7 +4599,7 @@ mod tests {
     // non-toggle function still warn.
     #[test]
     fn issue612_structural_silence_is_source_agnostic() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
             // Invented chained Execute bind.
@@ -4787,7 +4789,7 @@ mod tests {
     // and what it shadowed.
     #[test]
     fn issue630_user_binding_beats_script_binding() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let config = NativeWidgetConfig::default();
         let engine = vec![BindEntry {
             keyseq: r"\C-g".to_string(),
@@ -4837,8 +4839,8 @@ mod tests {
     // pre-K3 literal insert.
     #[test]
     fn issue630_dropped_records_classify_by_shape() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         use crate::keymap_registry::{DroppedKind, DroppedReason};
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
         let entry = |keyseq: &str, kind: BindKind| BindEntry {
             keyseq: keyseq.to_string(),
             kind,
@@ -4933,7 +4935,7 @@ mod tests {
     // everything that cannot register a binding, with the reason.
     #[test]
     fn issue630_keymap_bind_rule_parser_forms() {
-        use rubash::shell::bind_registry::BindKind;
+        use crate::bind_surface::EngineBindKind as BindKind;
         let entry = parse_keymap_bind_rule(r#""\C-g": redisplay"#).expect("function form");
         assert_eq!(entry.keyseq, r"\C-g");
         assert_eq!(
@@ -5013,7 +5015,7 @@ mod tests {
     // `[user: config.toml]`, and beats a script bind on the same key.
     #[test]
     fn issue630_config_rule_binds_and_beats_script() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let engine = vec![BindEntry {
             keyseq: r"\C-g".to_string(),
             kind: BindKind::Execute {
@@ -5064,7 +5066,7 @@ mod tests {
     // function on a working key, attributed to their rule.
     #[test]
     fn issue630_config_rule_rescues_chained_target() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         // fzf's shape (DESIGN §3 #1/#2): the chain and the mode toggle.
         let engine = vec![
             BindEntry {
@@ -5145,7 +5147,7 @@ mod tests {
     // command, so a keypress can never run an engine entry's command.
     #[test]
     fn issue630_config_execute_rule_resolves_behind_engine_snapshot() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let engine = vec![BindEntry {
             keyseq: r"\C-t".to_string(),
             kind: BindKind::Execute {
@@ -5192,7 +5194,7 @@ mod tests {
     // the user's event is what the editor holds throughout.
     #[test]
     fn issue630_script_rebind_cannot_override_user_rule() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let execute = |keyseq: &str, command: &str| BindEntry {
             keyseq: keyseq.to_string(),
             kind: BindKind::Execute {
@@ -5260,7 +5262,7 @@ mod tests {
     // clean; the key does not fall back to a lower layer).
     #[test]
     fn issue630_unbind_removes_slots_outright() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let engine = vec![BindEntry {
             keyseq: r"\C-t".to_string(),
             kind: BindKind::Execute {

@@ -223,7 +223,7 @@ fn run_main() -> ExitCode {
     // wrapper role when both channels agree, keeping the #737
     // dies-with-the-wrapper cascade live for niu the way rubash's own
     // main() has it. For plain invocations this is just the env scrub.
-    rubash::builtins::kill::consume_background_wrapper_handshake(&mut args);
+    rubash::script_driver::consume_background_wrapper_handshake(&mut args);
     piped_stdout::install_for_argv(&args);
 
     // Initialize logging (only error level by default)
@@ -751,6 +751,32 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     let inherited_argv0 = std::env::var("BASH_ARGV0").ok().filter(|v| !v.is_empty());
     let invocation =
         ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("niu: {}", error))?;
+
+    // 1.5.0 PLAN row 11 (niu host wiring for the debugger
+    // faces): the invocation layer registers both flags, and
+    // this host dispatches them to the engine's frontends —
+    // the same session core the rubash binary fronts, so the
+    // two binaries cannot drift into two debugger behaviors.
+    // `--dap` hands the process stdio to the adapter (the
+    // editor launch form); `--debug` with a script operand and
+    // no `-c`/interactive form opens the interactive CLI
+    // frontend. Every other `--debug` form keeps the
+    // recorded-flag + extdebug behavior of the normal route
+    // below.
+    if invocation.dap {
+        piped_stdout::finish_and_exit(rubash::run_dap_stdio(rubash::DapLaunchPreset {
+            program: invocation.script.clone(),
+            args: invocation.positional_params.clone(),
+        }));
+    }
+    if invocation.debug && invocation.command.is_none() && !invocation.interactive {
+        if let Some(script) = &invocation.script {
+            piped_stdout::finish_and_exit(rubash::run_debug_cli(rubash::DebugCliPreset {
+                program: Some(script.clone()),
+                args: invocation.positional_params.clone(),
+            }));
+        }
+    }
 
     if invocation.dump_strings {
         let input = invocation_input(&invocation)?;
