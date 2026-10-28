@@ -1,0 +1,50 @@
+Niubash
+Copyright (c) 2026 unixwin team
+Licensed under the MIT License (LICENSE).
+
+This product is MIT-licensed software of the unixwin team. The Windows
+release archives additionally bundle the following third-party payloads and
+components. Complete license texts and per-component provenance (upstream
+project, exact version, binary origin, Corresponding Source pointer) ship in
+the archive under `licenses\` and live in the repository at
+`scripts/release/licenses/`. Versions and SHA-256 pins are recorded in
+`scripts/release/preinstall.json` and `scripts/release/winuxcmd-pin.json`.
+
+Bundled payload components (Windows archives):
+
+- gawk 5.4.1-unixwin2 (GNU Awk) -- GPL-3.0-or-later
+  Upstream: https://www.gnu.org/software/gawk/
+  Binary: mirror of ezwinports gawk-5.4.1-w32-bin.zip, repackaged and
+  distributed via https://github.com/unixwin/wpm-artifacts
+
+- gawk DLL closure (ships inside the gawk payload, `opt\gawk`) --
+  libreadline8.dll   GNU Readline        GPL-3.0-or-later
+  libgmp-10.dll      GMP                 LGPL-3.0 / GPL-2.0 (dual)
+  libmpfr-6.dll      GNU MPFR            LGPL-3.0
+  libncurses6.dll    ncurses             MIT-style (ncurses COPYRIGHT NOTICE)
+  libgcc_s_dw2-1.dll GCC runtime (libgcc) GPL-3.0 + GCC Runtime Library
+                                          Exception 3.1
+  Delivered as the exact bytes of the pinned gawk artifact (see above).
+
+- niugit 2.56.0.3 -- GPL-2.0-only
+  Upstream: git / Git for Windows, https://github.com/git-for-windows/git
+  Binary: https://github.com/unixwin/niu-git (git-for-windows C source built
+  with MSVC; Corresponding Source = upstream tarball + niu-git patches, see
+  `licenses\niugit\PROVENANCE.md`)
+
+- ripgrep 15.2.0 -- MIT OR Unlicense
+  Upstream: https://github.com/BurntSushi/ripgrep
+  Binary: upstream release assets (windows-x64, windows-arm64)
+
+- fd 10.4.2 -- MIT OR Apache-2.0
+  Upstream: https://github.com/sharkdp/fd
+  Binary: upstream release assets (windows-x64, windows-arm64)
+
+- WinuxCmd v1.1.20 -- MIT (original C++ software of the unixwin team, not a
+  redistribution of another codebase)
+  Upstream: https://github.com/unixwin/WinuxCmd
+
+Niubash's own Rust dependency tree (crates) is enumerated by
+`scripts/gen-third-party-notices.mjs` from Cargo.lock; see
+`THIRD-PARTY-NOTICES.md`. Their license texts are available in each crate's
+source distribution.

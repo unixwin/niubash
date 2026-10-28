@@ -35,6 +35,12 @@ PrivilegesRequired=lowest
 OutputDir={#OutputDir}
 OutputBaseFilename=niubash-v{#AppVersion}-win-{#AppArch}-setup
 SetupIconFile=..\assets\niubash-icon.ico
+; Payload license hygiene: surface niubash's own MIT license at install
+; time. Inno reads LicenseFile from the staged tree at compile time (same
+; {#SourceDir} shape the [Files] sweep below copies), so the wizard shows
+; the exact LICENSE that ships inside {app}; the bundled third-party
+; payload licenses live beside it under {app}\licenses.
+LicenseFile={#SourceDir}\LICENSE
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2/ultra64
 SolidCompression=yes

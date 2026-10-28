@@ -2192,6 +2192,57 @@ jobs:
           echo "hashed $count artifacts:"
           cat SHA256SUMS
 
+      # Payload license hygiene: the Windows packages bundle GPL payloads via
+      # the pre-install step (gawk GPL-3.0-or-later incl. its libreadline8 DLL
+      # closure, niugit GPL-2.0-only) beside permissive ones (ripgrep, fd,
+      # WinuxCmd), and the release page must disclose each bundled
+      # component's license and where its Corresponding Source lives. The
+      # section below is GENERATED from scripts/release/preinstall.json's
+      # per-package `license` and `source` fields — the same entries
+      # tests/preinstall_manifest.rs pins — so a future payload change stays
+      # in sync by construction instead of editing hardcoded prose. When the
+      # per-component provenance sheet exists
+      # (scripts/release/licenses/<name>/PROVENANCE.md, staged into every
+      # package root as licenses\<name>\ by package-release.ps1 alongside the
+      # canonical LICENSE), the section points at it rather than restating
+      # the recipe here. Fail-closed, matching the packaging gate that
+      # already refuses to stage a package without its license text: a
+      # manifest entry with an empty license/source field, or without its
+      # licenses/<name>/ directory, fails the release instead of shrinking
+      # the disclosure to manifest-only prose.
+      - name: Generate the Licenses & Source release-body section
+        id: licenses
+        run: |
+          set -euo pipefail
+          manifest="scripts/release/preinstall.json"
+          licenses_dir="scripts/release/licenses"
+          section_file="$(mktemp)"
+          {
+            echo "## Licenses & Source"
+            echo
+            echo "Niubash itself is MIT (\`LICENSE\` in this repository and at the root of every package). The Windows packages bundle third-party payloads pre-installed from \`scripts/release/preinstall.json\`; each component ships its canonical license text under \`licenses\\<component>\\\` in the package tree, and the installer wizard surfaces niubash's own license at install time:"
+            echo
+            while IFS=$'\t' read -r name license source; do
+              if [ -z "$license" ] || [ -z "$source" ]; then
+                echo "preinstall package '$name' is missing a non-empty license or source field; the Licenses & Source section is generated from the manifest and cannot ship a gap" >&2
+                exit 1
+              fi
+              if [ ! -f "$licenses_dir/$name/LICENSE" ] || [ ! -f "$licenses_dir/$name/PROVENANCE.md" ]; then
+                echo "preinstall package '$name' has no $licenses_dir/$name/ (LICENSE + PROVENANCE.md); the packaging gate fails closed on the same requirement, so the release cannot disclose a component whose license text does not exist" >&2
+                exit 1
+              fi
+              echo "- **$name** — \`$license\`; upstream & Corresponding Source: $source. Provenance sheet: \`scripts/release/licenses/$name/PROVENANCE.md\` (staged as \`licenses\\$name\\\` in every Windows package)."
+            done < <(jq -r '.packages[] | [.name, (.license // ""), (.source // "")] | @tsv' "$manifest")
+            echo
+            echo "The pre-install caveat above applies per leg: a build that shipped without a given entry (no matching artifact for that architecture) also shipped without that entry's payload — the component and its license directory are simply absent from that package."
+          } > "$section_file"
+          {
+            echo "section<<LICENSES_SECTION_EOF"
+            cat "$section_file"
+            echo "LICENSES_SECTION_EOF"
+          } >> "$GITHUB_OUTPUT"
+          cat "$section_file"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -2218,6 +2269,8 @@ jobs:
             Every artifact was smoke-verified on the build OS of the job that produced it, before upload: `niu -c 'echo ok'`, `printf 'a\nb\n' | niu -c 'sort | head -1'`, an offline `NIU_PLUGIN_SPEC=<empty> niu plugin sync --bootstrap` (exit 0, no output, no network), and a `niu --version` check against this tag and the engine revision.
 
             Integrity (niubash#311): `SHA256SUMS` lists the SHA-256 of every shipped artifact, and each Windows installer has a `.sha256` sidecar beside it. `niu --self-update` verifies the installer against the sidecar before running it and aborts rather than execute anything it cannot verify. The same digests feed the winget manifest `InstallerSha256`.
+
+            ${{ steps.licenses.outputs.section }}
           files: |
             artifacts/**/*.zip
             artifacts/**/*.exe
