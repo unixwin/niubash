@@ -51,11 +51,19 @@ run_cell() {
     mkdir -p "$dir"
     cp "$CELLS_DIR/$cell" "$dir/cell.sh"
     local bin="${shell_bin[$name]}"
+    echo "RUN $name $cell"
     (
         cd "$dir" || exit 97
+        # stdin is /dev/null at the harness level: no cell reads the
+        # script's inherited stdin (the /dev/stdin cell pipes its own),
+        # and a shell whose device face resolves to the console must
+        # see EOF, not block on a keyboard that does not exist.
+        # timeout -k: SIGTERM first, SIGKILL 3s later — a shell that
+        # defers SIGTERM while blocked in a read cannot wedge the run
+        # (first dispatch of this harness hung >30 min exactly there).
         case "$name" in
-            msys2) MSYSTEM=MINGW64 timeout 15 "$bin" cell.sh >stdout.txt 2>stderr.txt ;;
-            *) timeout 15 "$bin" cell.sh >stdout.txt 2>stderr.txt ;;
+            msys2) MSYSTEM=MINGW64 timeout -k 3 10 "$bin" cell.sh </dev/null >stdout.txt 2>stderr.txt ;;
+            *) timeout -k 3 10 "$bin" cell.sh </dev/null >stdout.txt 2>stderr.txt ;;
         esac
         echo $? >rc.txt
     )

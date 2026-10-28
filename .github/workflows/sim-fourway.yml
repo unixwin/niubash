@@ -110,7 +110,9 @@ jobs:
           MSYS2_EXE: C:/msys64/usr/bin/bash.exe
           CYGWIN_EXE: C:/cygwin64/bin/bash.exe
           SIM_OUT: ${{ github.workspace }}/sim-out
-        run: bash scripts/audit2-sim/run.sh
+        run: |
+          set -o pipefail
+          bash scripts/audit2-sim/run.sh 2>&1 | tee harness.log
 
       - name: Upload differential evidence
         if: always()
@@ -121,5 +123,6 @@ jobs:
             probes-before.txt
             probes-after.txt
             cygwin-setup.log
+            harness.log
             sim-out/
           if-no-files-found: warn
