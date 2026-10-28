@@ -16,15 +16,15 @@
     },
     {
       "name": "niugit",
-      "version": "2.56.0.2",
+      "version": "2.56.0.3",
       "commands": [
         "git"
       ],
       "sha256": {
-        "windows-x64": "fce603d3c9a3e8119a3df1c559322651e53185eecce4c90a8efe36844bd268dc",
-        "windows-arm64": "e2fb43b0ec80e427e4e7268fd72ea54851ab3558090bddf107ffc8eebf11de5a"
+        "windows-x64": "fc700ae92fb50209344ad7d18649e1fc1cb5cba21ffe75d95ec5668fd1e625a1",
+        "windows-arm64": "490fc3c2abf5da6b5441b8717ce8f22d187b74cd7f04aed6abc4ed50f9f4b12f"
       },
-      "purpose": "Niu-git 2.56.0.2 (native Windows git without MSYS; real git-for-windows C source built with MSVC, no POSIX layer). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. 2.56.0.2 is layout=flat: the payload lands under <root>\\opt\\niugit (mingw64/ + etc/) and mingw64/bin/git.exe is mapped straight onto usr\\bin\\git.exe, so the git on PATH IS the git binary - no launcher, no winuxcmd dispatch hop, and git --version drops from 72-83 ms to ~14 ms (Git Bash: 45-103 ms). Requires WinuxCmd 1.1.9 or newer in the same release (wpm#1183: POSIX-unlink hardlink break, without which the flat mapping cannot replace the usr\\bin hardlink). It is schannel-only TLS with no bundled shell/perl (shell-script parts of git run on niubash's sh) and accepts POSIX-shaped (/d/...) path args."
+      "purpose": "Niu-git 2.56.0.3 (native Windows git without MSYS; real git-for-windows C source built with MSVC, no POSIX layer). 2.56.0.3 is the Git for Windows 2.56.0.windows.4 security rebuild (brotli 1.2.1, fixing CVE-2026-111497). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. 2.56.0.3 is layout=flat: the payload lands under <root>\\opt\\niugit (mingw64/ + etc/) and mingw64/bin/git.exe is mapped straight onto usr\\bin\\git.exe, so the git on PATH IS the git binary - no launcher, no winuxcmd dispatch hop, and git --version drops from 72-83 ms to ~14 ms (Git Bash: 45-103 ms). Requires WinuxCmd 1.1.9 or newer in the same release (wpm#1183: POSIX-unlink hardlink break, without which the flat mapping cannot replace the usr\\bin hardlink). It is schannel-only TLS with no bundled shell/perl (shell-script parts of git run on niubash's sh) and accepts POSIX-shaped (/d/...) path args."
     },
     {
       "name": "ripgrep",
