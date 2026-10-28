@@ -1,0 +1,125 @@
+name: Sim four-way differential (RC audit evidence)
+
+# RC audit phase 2, item 3: feasibility proof + first run of a four-way
+# same-machine differential (niu vs Git Bash vs MSYS2 vs Cygwin) over
+# special-path / redirect shapes, on one windows-latest runner.
+# Manual dispatch; while the harness lives on its audit branch, a push
+# to that branch (scoped to the harness files) is the trigger, because
+# workflow_dispatch only registers from the default branch.
+# The rubash sibling is checked out at the release pin (b95d28ae).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["audit2/sim-fourway"]
+    paths:
+      - ".github/workflows/sim-fourway.yml"
+      - "scripts/audit2-sim/**"
+
+jobs:
+  sim-fourway:
+    runs-on: windows-latest
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency at the release pin
+        shell: bash
+        run: |
+          git clone https://github.com/unixwin/rubash.git ../rubash
+          git -C ../rubash checkout b95d28ae8a2fd004f065152008771fe1e91b5284
+          git -C ../rubash rev-parse HEAD
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: stable
+
+      - name: cargo build
+        run: cargo build --locked
+
+      - name: Probe preinstalled shells
+        id: probe
+        shell: bash
+        run: |
+          {
+            echo "== gitbash =="
+            if [ -f "/c/Program Files/Git/bin/bash.exe" ]; then
+              "/c/Program Files/Git/bin/bash.exe" --version | head -1
+              echo "gitbash_present=true"
+            else
+              echo "gitbash_present=false"
+            fi
+            echo "== msys2 (preinstalled?) =="
+            if [ -f /c/msys64/usr/bin/bash.exe ]; then
+              /c/msys64/usr/bin/bash.exe --version | head -1
+              echo "msys2_present=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "no C:/msys64"
+              echo "msys2_present=false" >> "$GITHUB_OUTPUT"
+            fi
+            echo "== cygwin (preinstalled?) =="
+            if [ -f /c/cygwin64/bin/bash.exe ]; then
+              /c/cygwin64/bin/bash.exe --version | head -1
+              echo "cygwin_present=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "no C:/cygwin64"
+              echo "cygwin_present=false" >> "$GITHUB_OUTPUT"
+            fi
+          } 2>&1 | tee probes-before.txt
+
+      - name: Install MSYS2 (setup-msys2) if absent
+        if: steps.probe.outputs.msys2_present == 'false'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: bash coreutils
+
+      - name: Install Cygwin if absent
+        if: steps.probe.outputs.cygwin_present == 'false'
+        shell: bash
+        timeout-minutes: 25
+        run: |
+          curl -L -o setup-x86_64.exe https://cygwin.com/setup-x86_64.exe
+          ./setup-x86_64.exe -q -n -N -R 'C:\cygwin64' -l 'C:\cygwin-packages' \
+            -s https://mirrors.kernel.org/sourceware/cygwin/ \
+            -P bash,coreutils > cygwin-setup.log 2>&1 || true
+          tail -5 cygwin-setup.log
+
+      - name: Probe shells after installs
+        shell: bash
+        run: |
+          {
+            echo "== niu =="
+            ./target/debug/niu.exe --version || true
+            echo "== gitbash =="
+            "/c/Program Files/Git/bin/bash.exe" --version | head -1 || echo MISSING
+            echo "== msys2 =="
+            /c/msys64/usr/bin/bash.exe --version | head -1 || echo MISSING
+            echo "== cygwin =="
+            /c/cygwin64/bin/bash.exe --version | head -1 || echo MISSING
+          } 2>&1 | tee probes-after.txt
+
+      - name: Run the four-way differential harness
+        shell: bash
+        env:
+          NIU_EXE: ${{ github.workspace }}/target/debug/niu.exe
+          GITBASH_EXE: C:/Program Files/Git/bin/bash.exe
+          MSYS2_EXE: C:/msys64/usr/bin/bash.exe
+          CYGWIN_EXE: C:/cygwin64/bin/bash.exe
+          SIM_OUT: ${{ github.workspace }}/sim-out
+        run: bash scripts/audit2-sim/run.sh
+
+      - name: Upload differential evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-fourway-evidence
+          path: |
+            probes-before.txt
+            probes-after.txt
+            cygwin-setup.log
+            sim-out/
+          if-no-files-found: warn
