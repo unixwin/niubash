@@ -3154,11 +3154,15 @@ impl Shell {
                 || (rubash::lexer::has_unclosed_input_syntax_posix(&script, parse_posix)
                     && !script.contains("<<")))
         {
+            // niubash#653: pass the batch's real line_offset through —
+            // this arm used to hardcode 0, so a host stdin batch whose
+            // unclosed quote sat on physical line 3 reported line 1
+            // (the tracked history arm below passes it correctly).
             let code = rubash::script_driver::run_source_with_line_offset(
                 &mut self.executor,
                 &script,
                 false,
-                0,
+                line_offset,
                 None,
                 None,
             );
