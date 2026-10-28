@@ -962,9 +962,14 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         if let Some(status) = shell.run_startup_rc() {
             finish_startup_exit(&mut shell, status);
         }
-        rubash::script_driver::prepare_interactive_history(shell.executor_mut());
-        let code = rubash::script_driver::run_interactive_stdin(shell.executor_mut());
-        piped_stdout::finish_and_exit(code);
+        // 1.5.0 migration: the Session contract's interactive
+        // stdin route (it runs the driver's interactive-history
+        // preparation itself, then the same driver).
+        let outcome = shell
+            .session_mut()
+            .run_interactive_stdin()
+            .map_err(|error| anyhow::anyhow!("session stdin run failed: {error:?}"))?;
+        piped_stdout::finish_and_exit(outcome.status);
     }
     // Bash -i forces an interactive shell even when stdin is not a terminal;
     // with no command or script, a terminal (or -i) means the REPL.
@@ -983,7 +988,14 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     // parser buffer). A read_to_string slurp here feeds every later
     // consumer (exec cat / read / a top-level exec) EOF and pushes the
     // unconsumed tail back as code - data-as-code.
-    let code = rubash::script_driver::run_stdin_script(shell.executor_mut());
+    // 1.5.0 migration: the Session contract's stdin route (the same
+    // driver, with the contract's exit/errexit flow classification
+    // folded into the returned status).
+    let code = shell
+        .session_mut()
+        .run_stdin()
+        .map_err(|error| anyhow::anyhow!("session stdin run failed: {error:?}"))?
+        .status;
     let code = shell.finish_with_exit_trap(code)?;
     if code != 0 {
         finish_one_shot(&shell, code);
