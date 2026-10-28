@@ -2912,7 +2912,7 @@ impl Shell {
     /// Run shell process teardown semantics that live in rubash's binary entry.
     pub fn finish_with_exit_trap(&mut self, status: i32) -> anyhow::Result<i32> {
         self.run_zshexit_hooks();
-        match self.executor.run_exit_trap_with_status(status) {
+        let result = match self.executor.run_exit_trap_with_status(status) {
             Ok(code) => Ok(code),
             Err(rubash::executor::ExecuteError::ExitCode(code)) => Ok(code),
             Err(e) => {
@@ -2921,7 +2921,41 @@ impl Shell {
                 }
                 Ok(1)
             }
-        }
+        };
+        // niubash#652: after the EXIT trap (whose writes still belong to
+        // the streams), close every still-open persistent output process
+        // substitution so its deferred body runs with the accumulated
+        // input — the `finish_shell` step rubash's own main always runs
+        // (rubash#1336: `exec > >(tee log)` lost the whole log when the
+        // shell simply ended). This funnel is shared by the REPL exit
+        // (#649's end_repl_session), startup-file exits, and the engine
+        // stdin route, so the close lives here; it is idempotent (closed
+        // entries are skipped), so routes whose engine driver already
+        // finished internally are unaffected.
+        self.executor
+            .close_all_persistent_output_process_substitutions();
+        result
+    }
+
+    /// niubash#652: teardown for the one-shot and host-driven stream
+    /// routes (script file, -c, the host stdin driver) via the engine's
+    /// shared finish path, `rubash::script_driver::finish_shell` — the
+    /// same one rubash's own main runs at those route tails. In GNU
+    /// exit_shell order it performs the session-history write (inert on
+    /// these routes unless the script itself armed history, rubash#1049
+    /// parity), the end-of-stream job-notification flush (rubash#1853),
+    /// the EXIT trap, the debugger exit note, and the persistent output
+    /// procsub close (rubash#1336). These routes previously ran only the
+    /// trap (finish_with_exit_trap), so the flush and the close never
+    /// happened: a signal death reaped during the last command stayed
+    /// silent, and `exec > >(cat > LOG)` lost the whole log. The
+    /// zshexit hooks are a host-only step and run first, exactly as in
+    /// finish_with_exit_trap. REPL exits do NOT come here: the REPL's
+    /// history write is the ledger-reconciled provider flush in
+    /// end_repl_session (#642/#649), which must stay after the trap.
+    pub fn finish_with_engine_finish(&mut self, status: i32) -> i32 {
+        self.run_zshexit_hooks();
+        rubash::script_driver::finish_shell(&mut self.executor, status, false)
     }
 
     /// niubash#576: whether the most recent script run through this

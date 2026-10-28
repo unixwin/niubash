@@ -396,7 +396,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
         shell.executor.set_positional_params(args[2..].to_vec());
         let code = shell.execute_script(&content)?;
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         finish_one_shot(&shell, code);
         Ok(())
     }
@@ -702,7 +702,7 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             }
             let code = shell.execute_script(command_mode.command)?;
             niubash_runtime::startup_trace::tick("-c: execute_script");
-            let code = shell.finish_with_exit_trap(code)?;
+            let code = shell.finish_with_engine_finish(code);
             niubash_runtime::startup_trace::tick("-c: exit trap");
             finish_one_shot(&shell, code);
             Ok(())
@@ -887,7 +887,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         {
             shell.print_rendered_prompt_for_preview();
         }
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         niubash_runtime::startup_trace::tick("invocation: exit trap");
         finish_one_shot(&shell, code);
         return Ok(());
@@ -915,7 +915,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // parsed as script text, rc 127).
         let content = read_script_operand(&shell, &script_name)?;
         let code = shell.execute_script(&content)?;
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         finish_one_shot(&shell, code);
         return Ok(());
     }
@@ -1645,7 +1645,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
         pending.clear();
     }
 
-    let code = shell.finish_with_exit_trap(last_code)?;
+    let code = shell.finish_with_engine_finish(last_code);
     finish_one_shot(&shell, code);
     Ok(())
 }
