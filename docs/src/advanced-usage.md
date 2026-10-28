@@ -384,16 +384,25 @@ compose the two contracts freely.
 
 ## Git Prompt Performance
 
-Git status should be consumed as a coherent prompt snapshot, not rendered by
-blocking every prompt draw with fresh Git processes. The intended shape is:
+The host computes the git segment once per prompt pass and hands themes the
+finished string; rendering never runs git. How the value is produced:
 
-- prompt/theme plugins render the latest available snapshot;
-- the host keeps git status work warm in the background;
-- late git work updates the next prompt instead of repainting the active input
-  line.
+- inside a repository, one bounded spawn of the user's own git per pass
+  (`git status --porcelain=v2 --branch`, 2 s timeout with the child killed,
+  `--no-optional-locks`, stderr discarded). The user's git is a deliberate
+  choice: sparse checkouts, submodules, linked worktrees and partial clones
+  are only answered correctly by the git the user actually runs — an
+  in-process library silently dropped the branch segment on old-owner
+  repository trees before;
+- repaints within the same pass re-read that pass's computed value and spawn
+  nothing;
+- outside a repository nothing is spawned at all — the host only walks up
+  from the cwd looking for a `.git` marker.
 
-If the prompt flickers or repaints the current line, debug the lifecycle and
-git snapshot path rather than adding more inline Git calls to the theme.
+Prompt and theme plugins render the snapshot the host computed for the pass;
+they must not shell out to git themselves. If the prompt flickers or
+repaints the current line, debug the segment lifecycle rather than adding
+more inline Git calls to the theme.
 
 ## Plugin Workflow
 
