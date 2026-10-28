@@ -18,8 +18,12 @@ use std::sync::{Arc, Mutex};
 
 use reedline::Reedline;
 use rubash::{
-    api::Session, decode_to_visible_text, executor::Executor, lexer::tokenize, parser::parse, Ast,
-    Token, TokenKind,
+    api::{Flow, PreparedLine, RunOptions, Session},
+    decode_to_visible_text,
+    executor::Executor,
+    lexer::tokenize,
+    parser::parse,
+    Ast, Token, TokenKind,
 };
 
 use crate::completion::{CompletionState, NiubashCompleter};
@@ -1263,32 +1267,37 @@ impl Shell {
         let line_offset = self.interactive_lines_read;
         self.interactive_lines_read += line.split_inclusive('\n').count().max(1);
         // rubash#1248: run the accepted line through the engine's
-        // interactive history expansion (bashhist.c pre_process_line, via
-        // script_driver::pre_process_interactive_line) before anything
-        // tokenizes it. Until now the host handed the engine the RAW line,
-        // so `!!` / `!n` / `!$` / `^a^b` reached the tokenizer literally
-        // and died as "command not found" - the engine-side state was
-        // always self-consistent; the host simply never drove the entry
-        // point built for reedline-style hosts. The expansion resolves
-        // against the history provider enter_interactive installed (the
-        // live list reedline records into), echoes the expanded line to
-        // stderr like GNU, and rewrites the recorded entry to the
-        // expansion. Hooks and bookkeeping keep receiving the RAW line,
-        // exactly as they did before; only execution sees the expansion.
-        // A Discard (failed expansion, or the `:p` print-only modifier)
+        // interactive history expansion (bashhist.c pre_process_line)
+        // before anything tokenizes it. Until now the host handed the
+        // engine the RAW line, so `!!` / `!n` / `!$` / `^a^b` reached
+        // the tokenizer literally and died as "command not found" -
+        // the engine-side state was always self-consistent; the host
+        // simply never drove the entry point built for reedline-style
+        // hosts. The expansion resolves against the history provider
+        // enter_interactive installed (the live list reedline records
+        // into), echoes the expanded line to stderr like GNU, and
+        // rewrites the recorded entry to the expansion. Hooks and
+        // bookkeeping keep receiving the RAW line, exactly as they
+        // did before; only execution sees the expansion. A Discard
+        // (failed expansion, or the `:p` print-only modifier)
         // executes nothing and leaves `$?` untouched, which is GNU's
         // behavior for both.
-        let code =
-            match rubash::script_driver::pre_process_interactive_line(self.executor_mut(), line) {
-                rubash::script_driver::InteractiveExpansion::Execute(expanded) => {
-                    let code = self.execute_line_with_options(&expanded, true, line_offset)?;
-                    self.invalidate_command_probe_after_line(&expanded);
-                    code
-                }
-                rubash::script_driver::InteractiveExpansion::Discard => {
-                    self.session().last_status()
-                }
-            };
+        //
+        // 1.5.0 migration: the entry point is the Session contract's
+        // prepare_line (the tier-A form of the script_driver entry
+        // this used to call directly; same funnel, same outcomes).
+        let code = match self.session_mut().prepare_line(line) {
+            PreparedLine::Execute(expanded) => {
+                let code = self.execute_line_with_options(&expanded, true, line_offset)?;
+                self.invalidate_command_probe_after_line(&expanded);
+                code
+            }
+            PreparedLine::Discard => self.session().last_status(),
+            // PreparedLine is non_exhaustive; an unknown future
+            // outcome is treated as Discard (execute nothing,
+            // leave `$?` untouched) until the host adopts it.
+            _ => self.session().last_status(),
+        };
         self.run_postcmd_hooks(code);
         self.run_zshaddhistory_hooks(line);
         self.remember_interactive_command(line, code);
@@ -3294,6 +3303,18 @@ impl Shell {
             // this arm used to hardcode 0, so a host stdin batch whose
             // unclosed quote sat on physical line 3 reported line 1
             // (the tracked history arm below passes it correctly).
+            //
+            // 1.5.0 migration note: this arm stays on the direct
+            // driver call instead of following the tracked arm into
+            // Session::run. The contract's line-offset route consumes
+            // the executor's parse-error pending into its Flow, and
+            // Flow has no parse-error variant in this publication
+            // step (run() diagnostics are the contract's recorded
+            // out-of-scope remainder) — the host batch feeder's stop
+            // rule reads that pending itself, so routing this arm
+            // through run() would silently keep feeding a stream
+            // after a mid-stream syntax error. Revisit when the
+            // contract surfaces run diagnostics.
             let code = rubash::script_driver::run_source_with_line_offset(
                 self.executor_mut(),
                 &script,
@@ -3332,21 +3353,36 @@ impl Shell {
             // reader route uses it for the same reason); it also keeps
             // a host-owned history provider authoritative instead of
             // installing a scratch session over it (niubash#508).
-            let (code, unwound) =
-                rubash::script_driver::run_script_with_history_at_line_offset_tracked(
-                    self.executor_mut(),
-                    &script,
-                    line_offset,
-                    None,
-                );
-            if unwound {
+            //
+            // 1.5.0 migration: this arm runs through the Session
+            // contract's run(), whose tracked route is this same
+            // driver. The contract's Flow separates a real exit
+            // (ExitRequested) from the errexit break the driver's
+            // stop bool conflates; the batch feeder's stop rule
+            // already handles the errexit break through its own
+            // predicate, so recording the jump on ExitRequested
+            // alone preserves the stop behavior. Admission above
+            // stays the host's (#414 live-flag form); the
+            // contract's internal alias liveness additionally
+            // requires a non-empty alias table, so an alias-shaped
+            // script with an empty table takes the contract's
+            // line-offset route inside run() — with no aliases to
+            // expand and no history use admitted, the routes agree
+            // on the outcome.
+            let mut options = RunOptions::default();
+            options.line_offset = line_offset;
+            let outcome = self
+                .session_mut()
+                .run(&script, &options)
+                .map_err(|error| anyhow::anyhow!("session run failed: {error:?}"))?;
+            if let Flow::ExitRequested(status) = outcome.flow {
                 self.script_exit_jump = true;
-                self.note_session_exit_jump(code);
+                self.note_session_exit_jump(status);
             }
             self.sync_process_cwd_from_executor_pwd();
             self.sync_process_path_from_executor_path();
             self.sync_alias_mirror_from_executor();
-            return Ok(code);
+            return Ok(outcome.status);
         }
         let mut tokens = tokenize(&script);
         // niubash#513: tokenize's shopt simulation leaves the parse-time
