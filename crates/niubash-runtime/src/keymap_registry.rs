@@ -664,8 +664,15 @@ pub fn startup_notices(new_dropped: &[DroppedBind]) -> Vec<String> {
             (DroppedKind::Macro, _) => " (macro)".to_string(),
             _ => String::new(),
         };
+        // A key-script macro is *mirrored with loss*, not unapplied —
+        // the wording must not claim otherwise.
+        let headline = if bind.reason == DroppedReason::ScriptMacro {
+            "mirrored with loss"
+        } else {
+            "not applied"
+        };
         lines.push(format!(
-            "niubash: bind: '{}'{target} not applied — {}",
+            "niubash: bind: '{}'{target} {headline} — {}",
             bind.keyseq,
             bind.reason.why()
         ));
@@ -1038,6 +1045,10 @@ mod tests {
             "script macros are mirrored (lossily), not unapplied: {lines:?}"
         );
         assert!(lines.iter().any(|line| line.contains("key-script macro")));
+        assert!(
+            lines.iter().any(|line| line.contains("mirrored with loss")),
+            "the headline says what actually happened: {lines:?}"
+        );
     }
 
     #[test]
