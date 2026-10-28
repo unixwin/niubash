@@ -1166,8 +1166,10 @@ fn history_file_persists_across_sessions() {
 }
 
 /// `set +o history` stops recording new entries into the history file.
+/// (The recording veto was wired by niubash#660: the editor history
+/// instance consults the `history` option snapshot the host refreshes
+/// at every prompt boundary.)
 #[test]
-#[ignore = "rubash#1248 follow-up: expansion is wired (execute_interactive_line drives pre_process_interactive_line), but the `set +o history` RECORDING veto is not - reedline owns the history instance and the engine's interactive_history_veto_recording is not consulted yet"]
 fn set_plus_o_history_stops_recording() {
     if !require_pty_or_skip("set_plus_o_history_stops_recording") {
         return;
