@@ -1,6 +1,7 @@
 //! Live, file-backed history for the interactive Reedline session.
 
 use std::{
+    collections::VecDeque,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -9,8 +10,8 @@ use std::{
 };
 
 use reedline::{
-    FileBackedHistory, History, HistoryItem, HistoryItemId, HistorySessionId, ReedlineError,
-    Result, SearchDirection, SearchQuery,
+    CommandLineSearch, History, HistoryItem, HistoryItemId, HistorySessionId, ReedlineError,
+    ReedlineErrorVariants, Result, SearchDirection, SearchQuery,
 };
 
 /// On Windows, reset the DACL of the history file to grant the current
@@ -420,7 +421,7 @@ struct FileSignature {
 }
 
 struct HistoryState {
-    history: FileBackedHistory,
+    history: HistoryStore,
     signature: FileSignature,
     /// File backing for this history. `None` once the shell degraded to a
     /// memory-only history because the file was or became inaccessible.
@@ -449,12 +450,352 @@ struct HistoryState {
     view_histsize: Option<usize>,
 }
 
+/// Host-owned history entry store: the entry list and its on-disk
+/// accounting, held inside `HistoryState` in place of reedline's
+/// `FileBackedHistory`.
+///
+/// Why this exists (niubash redundancy cleanup, audit item H-04):
+/// reedline's only write path is `sync()`, which re-reads and re-merges
+/// the WHOLE history file on every call — so every recorded line cost a
+/// full-file read even though the wrapper already tracks the file with
+/// its own signature gate and session ledger. The store keeps reedline's
+/// exact entry semantics — the same record filter, capacity rule,
+/// search-window arithmetic, unsupported-feature errors, and merge
+/// shape, transcribed from reedline 0.52.1's `file_backed.rs` — but owns
+/// `len_on_disk` itself, so the save path appends just the unwritten
+/// tail (`flush`) and the file is re-read only where the wrapper's
+/// signature gate saw it change (`merge_from_disk`, and the reloads
+/// that rebuild the store from the file).
+///
+/// Invariant the flush fast path relies on: the file's first
+/// `len_on_disk` lines are exactly `entries[..len_on_disk]`; foreign
+/// appends land after them and are folded in by the next merge, which
+/// re-derives the list from the file. The one event that breaks the
+/// prefix is the capacity pop retiring a head entry that is already on
+/// disk; `save` flags it (`disk_prefix_stale`) and the next flush takes
+/// the merge path instead, exactly as reedline's sync would have.
+struct HistoryStore {
+    capacity: usize,
+    entries: VecDeque<String>,
+    /// How many leading entries the backing file already holds.
+    len_on_disk: usize,
+    /// A capacity pop retired an on-disk head entry: the file's prefix
+    /// no longer matches `entries`, so the next flush must merge rather
+    /// than append.
+    disk_prefix_stale: bool,
+}
+
+impl HistoryStore {
+    /// In-memory store (no backing file). Callers clamp `capacity` the
+    /// way `in_memory_history` does.
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: VecDeque::new(),
+            len_on_disk: 0,
+            disk_prefix_stale: false,
+        }
+    }
+
+    /// Load the backing file the way `FileBackedHistory::with_file`
+    /// does: a fresh store merged against the file. Construction fails
+    /// exactly where reedline's does (capacity overflow, unreadable or
+    /// undecodable file), so the caller's degrade-to-memory fallback
+    /// keeps its current shape.
+    fn load_from_file(capacity: usize, path: &Path) -> io::Result<Self> {
+        if capacity == usize::MAX {
+            return Err(io::Error::other(
+                "History capacity too large to be addressed safely",
+            ));
+        }
+        let mut store = Self::new(capacity);
+        store.merge_from_disk(path)?;
+        Ok(store)
+    }
+
+    /// Reedline's entry construction: this history stores no info
+    /// except the command line (file_backed.rs `construct_entry`).
+    fn construct_entry(id: Option<HistoryItemId>, command_line: String) -> HistoryItem {
+        HistoryItem {
+            id,
+            start_timestamp: None,
+            command_line,
+            session_id: None,
+            hostname: None,
+            cwd: None,
+            duration: None,
+            exit_status: None,
+            more_info: None,
+        }
+    }
+
+    /// Record one entry (file_backed.rs `save`): an entry identical to
+    /// the previous one, an empty entry, or any entry at capacity zero
+    /// is not appended; at capacity the oldest entry is retired first
+    /// (and the on-disk accounting follows it — see the struct docs).
+    fn save(&mut self, item: HistoryItem) -> HistoryItem {
+        let entry = item.command_line;
+        let entry_id =
+            if (self.entries.back() != Some(&entry)) && !entry.is_empty() && self.capacity > 0 {
+                if self.entries.len() == self.capacity {
+                    self.entries.pop_front();
+                    if self.len_on_disk > 0 {
+                        // The retired head was already on disk: the
+                        // file's prefix no longer matches `entries`.
+                        self.disk_prefix_stale = true;
+                    }
+                    self.len_on_disk = self.len_on_disk.saturating_sub(1);
+                }
+                self.entries.push_back(entry.clone());
+                Some(HistoryItemId::new((self.entries.len() - 1) as i64))
+            } else {
+                None
+            };
+        Self::construct_entry(entry_id, entry)
+    }
+
+    fn load(&self, id: HistoryItemId) -> Result<HistoryItem> {
+        Ok(Self::construct_entry(
+            Some(id),
+            self.entries
+                .get(id.0 as usize)
+                .ok_or(ReedlineError(ReedlineErrorVariants::OtherHistoryError(
+                    "Item does not exist",
+                )))?
+                .clone(),
+        ))
+    }
+
+    fn count(&self, query: SearchQuery) -> Result<i64> {
+        // file_backed.rs: "todo: this could be done cheaper"
+        Ok(self.search(query)?.len() as i64)
+    }
+
+    /// The reader's own filter machinery (file_backed.rs `search`),
+    /// transcribed: time filters and extra-info filters are unsupported
+    /// and error, id bounds are exclusive outside / inclusive inside,
+    /// and the command-line filter is Prefix/Substring/Exact plus the
+    /// `not_command_line` exclusion.
+    fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>> {
+        self.search_filtered(query, None)
+    }
+
+    /// [`Self::search`] with the query's `not_command_line` exclusion
+    /// supplied out of band. The field is `pub(crate)` to reedline, so
+    /// a query that carries it (only reedline's own `HistoryCursor`
+    /// builds one) cannot be read back from outside the crate; the
+    /// wrapper reconstructs the value from the cursor's closed query
+    /// shape instead (see `LiveFileBackedHistory::cursor_not_command_line`).
+    fn search_filtered(
+        &self,
+        query: SearchQuery,
+        not_command_line: Option<&str>,
+    ) -> Result<Vec<HistoryItem>> {
+        if query.start_time.is_some() || query.end_time.is_some() {
+            return Err(ReedlineError(
+                ReedlineErrorVariants::HistoryFeatureUnsupported {
+                    history: "FileBackedHistory",
+                    feature: "filtering by time",
+                },
+            ));
+        }
+
+        if query.filter.hostname.is_some()
+            || query.filter.cwd_exact.is_some()
+            || query.filter.cwd_prefix.is_some()
+            || query.filter.exit_successful.is_some()
+        {
+            return Err(ReedlineError(
+                ReedlineErrorVariants::HistoryFeatureUnsupported {
+                    history: "FileBackedHistory",
+                    feature: "filtering by extra info",
+                },
+            ));
+        }
+        let (min_id, max_id) = {
+            let start = query.start_id.map(|e| e.0);
+            let end = query.end_id.map(|e| e.0);
+            if let SearchDirection::Backward = query.direction {
+                (end, start)
+            } else {
+                (start, end)
+            }
+        };
+        // add one to make it inclusive
+        let min_id = min_id.map(|e| e + 1).unwrap_or(0);
+        // subtract one to make it inclusive
+        let max_id = max_id
+            .map(|e| e - 1)
+            .unwrap_or(self.entries.len() as i64 - 1);
+        if max_id < 0 || min_id > self.entries.len() as i64 - 1 {
+            return Ok(vec![]);
+        }
+        let intrinsic_limit = max_id - min_id + 1;
+        let limit = if let Some(given_limit) = query.limit {
+            std::cmp::min(intrinsic_limit, given_limit) as usize
+        } else {
+            intrinsic_limit as usize
+        };
+        let filter = |(idx, cmd): (usize, &String)| {
+            if !match &query.filter.command_line {
+                Some(CommandLineSearch::Prefix(p)) => cmd.starts_with(p),
+                Some(CommandLineSearch::Substring(p)) => cmd.contains(p),
+                Some(CommandLineSearch::Exact(p)) => cmd == p,
+                None => true,
+            } {
+                return None;
+            }
+            if let Some(str) = not_command_line {
+                if cmd == str {
+                    return None;
+                }
+            }
+            Some(Self::construct_entry(
+                Some(HistoryItemId::new(idx as i64)),
+                cmd.to_string(),
+            ))
+        };
+
+        let iter = self
+            .entries
+            .iter()
+            .enumerate()
+            .skip(min_id as usize)
+            .take(intrinsic_limit as usize);
+        if let SearchDirection::Backward = query.direction {
+            Ok(iter.rev().filter_map(filter).take(limit).collect())
+        } else {
+            Ok(iter.filter_map(filter).take(limit).collect())
+        }
+    }
+
+    fn update(&self) -> Result<()> {
+        Err(ReedlineError(
+            ReedlineErrorVariants::HistoryFeatureUnsupported {
+                history: "FileBackedHistory",
+                feature: "updating entries",
+            },
+        ))
+    }
+
+    fn delete(&self) -> Result<()> {
+        Err(ReedlineError(
+            ReedlineErrorVariants::HistoryFeatureUnsupported {
+                history: "FileBackedHistory",
+                feature: "removing entries",
+            },
+        ))
+    }
+
+    /// Empty the in-memory list and reset the on-disk accounting
+    /// (file_backed.rs `clear`'s memory half). The file side effect
+    /// reedline's `clear` also has — removing the backing file — is the
+    /// callers' own step, in the same order (see `clear_memory` and
+    /// the `History::clear` impl).
+    fn clear_entries(&mut self) {
+        self.entries.clear();
+        self.len_on_disk = 0;
+        self.disk_prefix_stale = false;
+    }
+
+    /// Write the unwritten tail to the backing file — reedline `sync`'s
+    /// write half with its read half removed. In the steady state the
+    /// file gains exactly `entries[len_on_disk..]`, appended; when the
+    /// on-disk prefix may no longer match (capacity pop), this takes
+    /// the merge path, which is reedline's sync in full.
+    fn flush(&mut self, path: &Path) -> io::Result<()> {
+        if self.disk_prefix_stale {
+            return self.merge_from_disk(path);
+        }
+        if let Some(base_dir) = path.parent() {
+            fs::create_dir_all(base_dir)?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        for line in self.entries.range(self.len_on_disk..) {
+            writeln!(file, "{}", encode_history_line(line))?;
+        }
+        file.flush()?;
+        self.len_on_disk = self.entries.len();
+        Ok(())
+    }
+
+    /// Reedline `sync`'s merge, transcribed (file_backed.rs:199-287):
+    /// read the whole file, fold this store's unwritten tail onto it,
+    /// drop the foreign head when the total exceeds capacity (the file
+    /// is rewritten to the kept lines), otherwise append the tail.
+    /// Afterwards the file holds exactly `entries` and
+    /// `len_on_disk == entries.len()`. This is the only store operation
+    /// that reads the file; it runs where reedline's sync used to run
+    /// for a merge (construction, the session-end flush's stale-prefix
+    /// fallback) — the per-operation refresh goes through the
+    /// signature gate and rebuilds from the file instead (see
+    /// `refresh_if_stale`).
+    fn merge_from_disk(&mut self, path: &Path) -> io::Result<()> {
+        use std::io::{BufRead, BufReader};
+
+        // The unwritten entries
+        let start = self.len_on_disk.min(self.entries.len());
+        let own_entries: Vec<String> = self.entries.range(start..).cloned().collect();
+
+        if let Some(base_dir) = path.parent() {
+            fs::create_dir_all(base_dir)?;
+        }
+
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .truncate(false)
+            .open(path)?;
+        let mut foreign_entries: VecDeque<String> = BufReader::new(&file)
+            .lines()
+            .map(|line| line.map(|l| decode_history_line(&l)))
+            .collect::<io::Result<VecDeque<_>>>()?;
+        drop(file);
+
+        let truncate = if foreign_entries.len() + own_entries.len() > self.capacity {
+            foreign_entries = foreign_entries.split_off(
+                foreign_entries
+                    .len()
+                    .saturating_sub(self.capacity.saturating_sub(own_entries.len())),
+            );
+            true
+        } else {
+            false
+        };
+
+        if truncate {
+            let mut kept: Vec<String> = foreign_entries.iter().cloned().collect();
+            kept.extend(own_entries.iter().cloned());
+            write_entries_staged(path, &kept)?;
+        } else if !own_entries.is_empty() {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            for line in &own_entries {
+                writeln!(file, "{}", encode_history_line(line))?;
+            }
+            file.flush()?;
+        }
+
+        foreign_entries.extend(own_entries);
+        self.entries = foreign_entries;
+        self.len_on_disk = self.entries.len();
+        self.disk_prefix_stale = false;
+        Ok(())
+    }
+}
+
 /// A Reedline file history that is visible across concurrently running shells.
 ///
-/// Reedline's `FileBackedHistory` reads the file once and only syncs on drop.
-/// That is fine for a single process, but makes another terminal invisible
-/// until one of the shells exits. This wrapper syncs after saves and reloads
-/// the file before queries when another process has changed it.
+/// The entry store (`HistoryStore`) is host-owned: saves append their
+/// line to the file immediately, and the wrapper reloads the file
+/// before queries when another process has changed it, so concurrently
+/// running shells see each other's lines without waiting for an exit.
 ///
 /// The history file is auxiliary state: a sandboxed restricted token may be
 /// able to execute commands while being unable to open, stat, or update the
@@ -472,12 +813,10 @@ pub(crate) struct LiveFileBackedHistory {
     settings: Arc<Mutex<HistorySettings>>,
 }
 
-/// `FileBackedHistory::new` only rejects `capacity == usize::MAX`; clamp so
-/// the memory-only fallback is always constructible.
-fn in_memory_history(capacity: usize) -> FileBackedHistory {
-    let clamped = capacity.min(usize::MAX - 1);
-    FileBackedHistory::new(clamped)
-        .unwrap_or_else(|_| FileBackedHistory::new(reedline::HISTORY_SIZE).expect("history"))
+/// Clamp so the memory-only fallback is always constructible (the
+/// file-backed constructor rejects `capacity == usize::MAX`).
+fn in_memory_history(capacity: usize) -> HistoryStore {
+    HistoryStore::new(capacity.min(usize::MAX - 1))
 }
 
 /// Report a history-file I/O failure once per file backing. The message goes
@@ -558,7 +897,7 @@ impl LiveFileBackedHistory {
         // permissions that block read access (os error 5).
         ensure_history_file_accessible(&path);
 
-        let state = match FileBackedHistory::with_file(capacity, path.clone()) {
+        let state = match HistoryStore::load_from_file(capacity, &path) {
             Ok(history) => {
                 let mut state = HistoryState {
                     history,
@@ -656,11 +995,16 @@ impl LiveFileBackedHistory {
         }
 
         // Preserve commands submitted by this process before replacing the
-        // in-memory view with the latest file contents.
-        if let Err(error) = state.history.sync() {
+        // in-memory view with the latest file contents. The flush is the
+        // store's append-only write (no read); the reload below is the
+        // single full read this refresh pays — reedline's sync used to
+        // read the whole file for the flush as well, and its merge
+        // result was then discarded for this same reload (audit item
+        // H-03).
+        if let Err(error) = state.history.flush(&path) {
             warn_io_failure(state, "history flush before reload failed", error);
         }
-        match FileBackedHistory::with_file(capacity, path.clone()) {
+        match HistoryStore::load_from_file(capacity, &path) {
             Ok(history) => {
                 state.history = history;
                 state.signature = file_signature_lossy(&path, state);
@@ -735,7 +1079,11 @@ impl LiveFileBackedHistory {
     /// with the reader's own window arithmetic (file_backed.rs: bounds
     /// are exclusive outside, inclusive inside; a non-positive limit
     /// behaves as unbounded, matching its `as usize` wrap).
-    fn view_search(state: &HistoryState, query: SearchQuery) -> Result<Vec<HistoryItem>> {
+    fn view_search(
+        state: &HistoryState,
+        query: SearchQuery,
+        not_command_line: Option<&str>,
+    ) -> Result<Vec<HistoryItem>> {
         let (hidden, raw_len) = Self::view_bounds(state);
         let view_len = raw_len - hidden;
         let direction = query.direction;
@@ -766,7 +1114,7 @@ impl LiveFileBackedHistory {
         };
         let mut items: Vec<HistoryItem> = state
             .history
-            .search(scan)?
+            .search_filtered(scan, not_command_line)?
             .into_iter()
             .filter_map(|mut item| {
                 let raw_id = item.id?.0;
@@ -793,6 +1141,35 @@ impl LiveFileBackedHistory {
         Ok(items)
     }
 
+    /// Reconstruct a query's `not_command_line` exclusion, which the
+    /// store cannot read off the query itself (the field is
+    /// `pub(crate)` to reedline). reedline's `HistoryCursor` is the
+    /// only producer of such queries (cursor.rs `get_search_filter`,
+    /// with `skip_dupes` hardcoded on): its shape is closed — limit 1,
+    /// `start_id` set to the entry it is currently showing, no end id
+    /// and no time bounds — and the excluded value is by construction
+    /// that entry's command line, so it can be re-derived from the
+    /// store at the same id (view ids re-based by the hidden prefix,
+    /// the same shift `History::load` applies). Every other query
+    /// shape maps to `None`, which is exactly what every public
+    /// `SearchFilter` constructor produces.
+    fn cursor_not_command_line(state: &HistoryState, query: &SearchQuery) -> Option<String> {
+        if query.limit != Some(1)
+            || query.end_id.is_some()
+            || query.start_time.is_some()
+            || query.end_time.is_some()
+        {
+            return None;
+        }
+        let start_id = query.start_id?;
+        let (hidden, _) = Self::view_bounds(state);
+        state
+            .history
+            .load(HistoryItemId::new(start_id.0 + hidden as i64))
+            .ok()
+            .map(|item| item.command_line)
+    }
+
     /// Sync the reader to the file and report whether the file actually
     /// received the entries (niubash#569: the ledger needs this to know
     /// which saved lines are already in the file and which are still
@@ -803,8 +1180,8 @@ impl LiveFileBackedHistory {
     /// `history -w`/`-a` builtins surface I/O errors. Keep the entries in
     /// memory, warn once, and let later reads still see them.
     fn sync_state(state: &mut HistoryState) -> bool {
-        let synced = match state.path {
-            Some(_) => match state.history.sync() {
+        let synced = match state.path.clone() {
+            Some(path) => match state.history.flush(&path) {
                 Ok(()) => true,
                 Err(error) => {
                     warn_io_failure(state, "history file sync failed", error);
@@ -857,7 +1234,7 @@ impl LiveFileBackedHistory {
         let Some(path) = state.path.clone() else {
             return Err(ReedlineError::from(history_lock_error()));
         };
-        match FileBackedHistory::with_file(capacity, path.clone()) {
+        match HistoryStore::load_from_file(capacity, &path) {
             Ok(history) => {
                 state.history = history;
                 state.signature = file_signature_lossy(&path, state);
@@ -882,9 +1259,9 @@ impl LiveFileBackedHistory {
     /// recording veto, and pre_process_line's rewrite of a recorded raw
     /// line to its history expansion).
     ///
-    /// This cannot be built from per-entry saves: reedline's
-    /// `FileBackedHistory::save` drops an entry identical to the one
-    /// before it ("only saves a value if it's different than the last
+    /// This cannot be built from per-entry saves: the store's `save`
+    /// (reedline's record filter, transcribed) drops an entry identical
+    /// to the one before it ("only saves a value if it's different than the last
     /// value") — editor UX for typed lines, not list semantics. GNU's
     /// history list holds consecutive duplicates, and the expansion
     /// rewrite records a text that is by definition equal to the previous
@@ -919,9 +1296,7 @@ impl LiveFileBackedHistory {
         // `"\n"` writes `<\n>\n`, exactly as the old join did).
         let entry_count = entries.len();
         let staged = write_entries_staged(&staged_path, &entries);
-        let rebuilt = staged
-            .map_err(ReedlineError::from)
-            .and_then(|()| FileBackedHistory::with_file(capacity, staged_path));
+        let rebuilt = staged.and_then(|()| HistoryStore::load_from_file(capacity, &staged_path));
         match rebuilt {
             Ok(history) => {
                 state.history = history;
@@ -941,12 +1316,14 @@ impl LiveFileBackedHistory {
             }
             Err(error) => {
                 if state.path.is_some() {
-                    return Err(error);
+                    return Err(ReedlineError::from(error));
                 }
                 // Memory-only staging failed: history is auxiliary state,
                 // so degrade to the clear-and-save rewrite (which cannot
-                // hold consecutive duplicates) instead of failing.
-                state.history.clear()?;
+                // hold consecutive duplicates) instead of failing. (The
+                // store is memory-only here, so clearing it has no file
+                // side effect to reproduce.)
+                state.history.clear_entries();
                 for entry in entries {
                     let _ = state.history.save(HistoryItem::from_command_line(entry));
                 }
@@ -965,8 +1342,9 @@ impl LiveFileBackedHistory {
     /// backing file (builtins/history.def:185 clears entries/timestamps
     /// only; the file is written by `-a`/`-w` explicitly).
     ///
-    /// Reedline's `FileBackedHistory::clear` also truncates the file, so
-    /// the file bytes are snapshotted and restored around it
+    /// The store's clear only empties the list; the wrapper removes the
+    /// backing file itself (reedline's clear did both in one call), so
+    /// the file bytes are snapshotted and restored around that removal
     /// (niubash#182). The signature is refreshed either way so
     /// `refresh_if_stale` does not mistake the restore for an external
     /// change and reload the list the theme just cleared.
@@ -1000,7 +1378,14 @@ impl LiveFileBackedHistory {
                     .collect()
             })
             .unwrap_or_default();
-        state.history.clear()?;
+        // Reedline's `clear` emptied the list AND removed the backing
+        // file; the store only owns the list, so the removal is spelled
+        // out here — the snapshot restore below recreates the file with
+        // its original bytes, exactly as it did around reedline's clear.
+        state.history.clear_entries();
+        if let Some(path) = state.path.clone() {
+            std::fs::remove_file(&path).map_err(ReedlineError::from)?;
+        }
         let outcome = match (state.path.clone(), snapshot) {
             (Some(path), Some(bytes)) => {
                 if std::fs::write(&path, &bytes).is_ok() {
@@ -1137,20 +1522,18 @@ impl LiveFileBackedHistory {
         // (a) Append pending lines the live sync never wrote (the
         // read-only-recovery shape: save succeeded in memory, sync
         // failed, and the file became writable again by exit time).
-        // Write them THROUGH the reader, not by raw appends: reedline's
-        // unwritten buffer holds exactly the lines whose live sync
-        // failed, and sync() advances its on-disk accounting as it
-        // writes them. A raw append leaves that accounting stale, so
-        // the reader's Drop-time sync writes the same lines a second
-        // time (reedline's FileBackedHistory syncs on drop) — the
-        // duplication
+        // Write them THROUGH the store, not by raw appends: the store's
+        // unwritten tail (entries past its on-disk accounting) holds
+        // exactly the lines whose live sync failed, and its flush
+        // advances that accounting as it writes them, so no later write
+        // can place the same lines a second time — the duplication
         // session_end_write_appends_missing_entries_without_duplicates
         // catches where the read-only leg behaves (Windows CI; the
         // local uid-0 artifact masks the leg and hides this one).
         let mut appended_ok = unsynced.is_empty();
         let mut file_changed = false;
         if !unsynced.is_empty() {
-            match state.history.sync() {
+            match state.history.flush(&path) {
                 Ok(()) => {
                     appended_ok = true;
                     file_changed = true;
@@ -1273,14 +1656,14 @@ impl LiveFileBackedHistory {
         if file_changed {
             // Rebuild the reader from the reconciled file so its
             // in-memory list matches the file (step (b) may have removed
-            // lines the reader still holds). The replaced reader drops
-            // with an empty unwritten buffer — step (a) synced it, or
-            // there was nothing pending — so its Drop-time sync writes
-            // nothing. The rebuild cannot resurrect cleared lines —
-            // they are already gone from the file — and seeds
-            // reappearing in memory are committed file lines, harmless
-            // at session end.
-            if let Ok(history) = FileBackedHistory::with_file(capacity, path.clone()) {
+            // lines the reader still holds). The rebuilt store's
+            // on-disk accounting covers its whole list — step (a)
+            // flushed it, or there was nothing pending — so no later
+            // write can re-place those lines. The rebuild cannot
+            // resurrect cleared lines — they are already gone from the
+            // file — and seeds reappearing in memory are committed file
+            // lines, harmless at session end.
+            if let Ok(history) = HistoryStore::load_from_file(capacity, &path) {
                 state.history = history;
             }
         }
@@ -1367,12 +1750,13 @@ impl LiveFileBackedHistory {
                 }
             }
         }
-        // niubash#570: reedline's save drops an entry identical to the
-        // previous one, but GNU history is positional — consecutive
-        // duplicates in one session, and the same line typed in two
-        // sessions, are all kept (dual-same probe: two sessions typing
-        // `echo SAMECMD` must leave two copies in the file). When the new
-        // line equals the last one, bypass reedline's filter: append the
+        // niubash#570: the store's save (reedline's record filter) drops
+        // an entry identical to the previous one, but GNU history is
+        // positional — consecutive duplicates in one session, and the
+        // same line typed in two sessions, are all kept (dual-same probe:
+        // two sessions typing `echo SAMECMD` must leave two copies in the
+        // file). When the new line equals the last one, bypass the
+        // filter: append the
         // encoded line to the file and rebuild the reader from disk. The
         // load path applies no duplicate filter, so the rebuilt list holds
         // both copies, and the returned item carries the new entry's id
@@ -1388,7 +1772,7 @@ impl LiveFileBackedHistory {
         if last_is_same {
             if let Some(path) = state.path.clone() {
                 if append_line_to_file(&path, &text).is_ok() {
-                    if let Ok(history) = FileBackedHistory::with_file(capacity, path.clone()) {
+                    if let Ok(history) = HistoryStore::load_from_file(capacity, &path) {
                         state.history = history;
                         state.signature = file_signature_lossy(&path, state);
                         // The line is in the file now, by construction.
@@ -1408,7 +1792,7 @@ impl LiveFileBackedHistory {
                 }
             }
             // Degraded fallback (no backing file, or the file could not be
-            // appended/rebuilt): reedline's drop stands, exactly the
+            // appended/rebuilt): the store's drop stands, exactly the
             // pre-existing behavior for a session with no file to write.
             // Nothing is recorded: the line is in neither memory nor file.
             // (The save takes the item by value and its result is dropped,
@@ -1417,7 +1801,7 @@ impl LiveFileBackedHistory {
             Self::sync_state(state);
             return Ok(item);
         }
-        let saved = state.history.save(item)?;
+        let saved = state.history.save(item);
         let synced = Self::sync_state(state);
         if let Ok(mut ledger) = ledger.lock() {
             ledger.note_saved(text, synced);
@@ -1485,10 +1869,7 @@ impl LiveFileBackedHistory {
                 .join(format!("niubash-history-stage-{}.tmp", std::process::id())),
         };
         let staged = write_entries_staged(&staged_path, &kept);
-        let rebuilt = staged.and_then(|()| {
-            FileBackedHistory::with_file(capacity, staged_path)
-                .map_err(|error| io::Error::other(error.to_string()))
-        });
+        let rebuilt = staged.and_then(|()| HistoryStore::load_from_file(capacity, &staged_path));
         match rebuilt {
             Ok(history) => {
                 state.history = history;
@@ -1943,7 +2324,7 @@ impl History for LiveFileBackedHistory {
         if hidden == 0 {
             return state.history.count(query);
         }
-        Ok(Self::view_search(&state, query)?.len() as i64)
+        Ok(Self::view_search(&state, query, None)?.len() as i64)
     }
 
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>> {
@@ -1952,10 +2333,13 @@ impl History for LiveFileBackedHistory {
         Self::refresh_if_stale(capacity, &mut state);
         Self::sync_view(&mut state, &self.ledger);
         let (hidden, _) = Self::view_bounds(&state);
+        let not_command_line = Self::cursor_not_command_line(&state, &query);
         if hidden == 0 {
-            return state.history.search(query);
+            return state
+                .history
+                .search_filtered(query, not_command_line.as_deref());
         }
-        Self::view_search(&state, query)
+        Self::view_search(&state, query, not_command_line.as_deref())
     }
 
     fn update(
@@ -1966,14 +2350,23 @@ impl History for LiveFileBackedHistory {
         let capacity = self.capacity;
         let state = self.lock_mut()?;
         Self::refresh_if_stale(capacity, state);
-        state.history.update(id, updater)
+        // The store keeps reedline's answer verbatim: file-backed
+        // histories do not support update.
+        let _ = (id, updater);
+        state.history.update()
     }
 
     fn clear(&mut self) -> Result<()> {
         let capacity = self.capacity;
         let state = self.lock_mut()?;
         Self::refresh_if_stale(capacity, state);
-        state.history.clear()?;
+        // Reedline's clear emptied the list AND removed the backing
+        // file; the store only owns the list, so the removal is spelled
+        // out here, in the same order (entries first, then the file).
+        state.history.clear_entries();
+        if let Some(path) = state.path.clone() {
+            std::fs::remove_file(path)?;
+        }
         // The reader is empty now; a stale view hide must not mask
         // entries recorded after this clear (niubash#614).
         state.hidden_prefix = 0;
@@ -1989,7 +2382,10 @@ impl History for LiveFileBackedHistory {
         let capacity = self.capacity;
         let state = self.lock_mut()?;
         Self::refresh_if_stale(capacity, state);
-        state.history.delete(id)
+        // The store keeps reedline's answer verbatim: file-backed
+        // histories do not support delete.
+        let _ = id;
+        state.history.delete()
     }
 
     fn sync(&mut self) -> io::Result<()> {
@@ -1999,11 +2395,9 @@ impl History for LiveFileBackedHistory {
     }
 
     fn session(&self) -> Option<HistorySessionId> {
-        self.state
-            .lock()
-            .ok()
-            .map(|state| state.history.session())
-            .unwrap_or(None)
+        // Reedline's file-backed history never carries a session id
+        // (its `session` is a constant `None`); the store keeps that.
+        None
     }
 }
 
@@ -2071,6 +2465,37 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(commands, vec!["echo fallback"]);
         assert_eq!(std::fs::read_to_string(parent).unwrap(), "not a directory");
+    }
+
+    #[test]
+    fn cursor_shaped_search_skips_entries_equal_to_the_shown_one() {
+        // reedline's HistoryCursor (skip_dupes hardcoded on) navigates
+        // with limit 1 and start_id = the entry it is showing, carrying
+        // its skip value in the filter's `not_command_line` field —
+        // `pub(crate)` in reedline, so outside code can neither set nor
+        // read it (this test's query physically carries None). The
+        // wrapper rebuilds the exclusion from that closed shape:
+        // stepping back from the second "echo dup" must land on
+        // "echo other", not on the first "echo dup".
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut history = LiveFileBackedHistory::with_file(100, path);
+        for line in ["echo other", "echo dup", "echo dup"] {
+            history.save(HistoryItem::from_command_line(line)).unwrap();
+        }
+        let query = SearchQuery {
+            direction: SearchDirection::Backward,
+            start_time: None,
+            end_time: None,
+            start_id: Some(HistoryItemId::new(2)),
+            end_id: None,
+            limit: Some(1),
+            filter: reedline::SearchFilter::anything(None),
+        };
+        let found = history.search(query).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].command_line, "echo other");
+        assert_eq!(found[0].id, Some(HistoryItemId::new(0)));
     }
 
     #[test]

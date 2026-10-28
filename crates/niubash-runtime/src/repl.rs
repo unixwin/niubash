@@ -265,7 +265,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // same way, so the lines it records are filtered/stifled by the
     // same HIST* snapshot the provider's builtins consult.
     let shared_settings = shell_ref.history_settings();
-    let mut history = match (shared_ledger, shared_settings) {
+    let history = match (shared_ledger, shared_settings) {
         (Some(ledger), Some(settings)) => LiveFileBackedHistory::with_shared_ledger_and_settings(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
@@ -282,9 +282,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             shell_ref.history_path.clone(),
         ),
     };
-    // Explicitly rebuild the editor history from disk at construction so a
-    // fresh process starts with persisted cross-session entries.
-    let _ = history.reload_from_file();
+    // No construction-time reload (audit item H-01): every constructor
+    // above already loads the backing file into the store, so a second
+    // full read here bought nothing — and on an editor rebuild after
+    // `history -c` it silently undid the ledger's view hide (#614) and
+    // cleared-base accounting (#642) that the provider twin maintains.
 
     let completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     // Shell-function completions reach the engine through the main-thread
