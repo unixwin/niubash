@@ -9,6 +9,14 @@ name: D05 spawn count (RC audit evidence)
 
 on:
   workflow_dispatch:
+  # workflow_dispatch only registers once a workflow reaches the
+  # default branch; while this cell lives on its audit branch, a push
+  # to that branch (scoped to the cell's own files) is the trigger.
+  push:
+    branches: ["audit2/d05-spawn-count"]
+    paths:
+      - ".github/workflows/d05-spawn-count.yml"
+      - "tests/d05_spawn_count.rs"
 
 jobs:
   d05-spawn-count:
