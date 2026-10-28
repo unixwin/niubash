@@ -211,6 +211,10 @@ fn repl_exit_status(line: &str) -> Option<i32> {
 /// provider's `Drop`), and leave with the trap's status as the process code.
 fn end_repl_session(shell: &mut Shell, status: i32) -> ! {
     let code = shell.finish_with_exit_trap(status).unwrap_or(status);
+    // niubash#646: the session-end write consults the HIST* values as
+    // the EXIT trap left them — GNU reads HISTFILESIZE/histappend at
+    // the write itself (bashhist.c maybe_save_shell_history).
+    shell.refresh_history_settings();
     shell.flush_session_history();
     flush_repl_output();
     std::process::exit(code);
@@ -257,13 +261,23 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // account for lines the editor recorded. Edit-mode rebuilds re-adopt
     // the same ledger, so the sharing survives refreshes.
     let shared_ledger = shell_ref.history_ledger();
-    let mut history = match shared_ledger {
-        Some(ledger) => LiveFileBackedHistory::with_shared_ledger(
+    // niubash#646: the editor adopts the provider's settings cell the
+    // same way, so the lines it records are filtered/stifled by the
+    // same HIST* snapshot the provider's builtins consult.
+    let shared_settings = shell_ref.history_settings();
+    let mut history = match (shared_ledger, shared_settings) {
+        (Some(ledger), Some(settings)) => LiveFileBackedHistory::with_shared_ledger_and_settings(
+            shell_ref.history_max_size,
+            shell_ref.history_path.clone(),
+            ledger,
+            settings,
+        ),
+        (Some(ledger), None) => LiveFileBackedHistory::with_shared_ledger(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
             ledger,
         ),
-        None => LiveFileBackedHistory::with_file(
+        _ => LiveFileBackedHistory::with_file(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
         ),
@@ -3587,12 +3601,9 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // its status before the first prompt, the same shape as the
         // PROMPT_COMMAND jump handled in the loop below (GNU
         // jump_to_top_level unwinds reader_loop; no prompt is rendered).
-        let code = shell
-            .borrow_mut()
-            .finish_with_exit_trap(status)
-            .unwrap_or(status);
-        flush_repl_output();
-        std::process::exit(code);
+        // niubash#642: through the shared funnel, so the session-end
+        // history write runs on this path too (it used to skip it).
+        end_repl_session(&mut shell.borrow_mut(), status);
     }
     let no_editing = shell.borrow().no_editing;
     if no_editing {
@@ -3642,6 +3653,12 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             shell.borrow_mut().load_user_keymap_rules();
             line_editor = build_line_editor(&shell)?;
         }
+        // niubash#646: refresh the HIST* settings snapshot before the
+        // line is read, so the record-time filters, the list stifle,
+        // and the session-end write all see the values the previous
+        // command (or PROMPT_COMMAND) left in the environment — GNU
+        // reads each variable at the moment of its operation.
+        shell.borrow_mut().refresh_history_settings();
         let signal = if pending.is_empty() {
             drain_pending_notices();
             // niubash#180: a finished `niu setup` run (a child process)
@@ -3657,18 +3674,16 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // through the EXIT trap.
             if shell.borrow_mut().run_precmd_hooks() {
                 let status = shell.borrow().executor.last_exit_code();
-                let code = shell
-                    .borrow_mut()
-                    .finish_with_exit_trap(status)
-                    .unwrap_or(status);
                 // The jump's status IS the session status (GNU's
                 // jump_to_top_level unwinds reader_loop and exit_shell
                 // carries it); the REPL's Ok(()) return otherwise always
                 // maps to rc 0 in main, so carry the status out directly —
                 // the same shape as the engine's piped `-i` route
                 // (src/main.rs run_interactive_stdin).
-                flush_repl_output();
-                std::process::exit(code);
+                // niubash#642: through the shared funnel, so the
+                // session-end history write runs on this path too (it
+                // used to skip it, resurrecting every cleared line).
+                end_repl_session(&mut shell.borrow_mut(), status);
             }
             // GNU readline starts every fresh line in insert mode, even in
             // vi editing mode (lib/readline/readline.c:1243-1249: "Each
@@ -3779,7 +3794,11 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 if pending.is_empty() {
                     if let Some(args) = self_update_command_args(line) {
                         if let Some(code) = spawn_self_update(&args) {
-                            std::process::exit(code);
+                            // niubash#642: self-update ends the session
+                            // like any other exit — EXIT trap and the
+                            // session-end history write included (this
+                            // path used to skip both).
+                            end_repl_session(&mut shell.borrow_mut(), code);
                         }
                     }
                 }
@@ -3884,13 +3903,15 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         crate::console_guard::restore(&console_baseline);
         // niubash#180: same live-session apply as the line-editor loop.
         shell.apply_setup_config_if_pending();
+        // niubash#646: same settings refresh as the line-editor loop.
+        shell.refresh_history_settings();
         // niubash#191: same exit-jump consumption as the line-editor loop —
         // a PC `exit` ends the session before the next prompt is printed.
+        // niubash#642: through the shared funnel, so the session-end
+        // history write runs on this path too (it used to skip it).
         if shell.run_precmd_hooks() {
             let status = shell.executor.last_exit_code();
-            let code = shell.finish_with_exit_trap(status).unwrap_or(status);
-            flush_repl_output();
-            std::process::exit(code);
+            end_repl_session(shell, status);
         }
         let prompt = if pending.is_empty() {
             shell.prompt.render_prompt_left().to_string()
