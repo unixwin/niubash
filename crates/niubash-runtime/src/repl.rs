@@ -308,6 +308,23 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         menu_config,
     )));
 
+    let (edit_mode, keymap_registry) = build_edit_mode(
+        shell_ref.editor_mode,
+        &shell_ref.native_widgets,
+        &shell_ref.native_widget_bindings,
+        &shell_ref.user_widget_bindings,
+        &shell_ref.engine_bindings,
+        shell_ref.engine_bind_generation,
+    );
+    // Publish the unified keymap registry (niubash#630): this build's
+    // effective table and dropped records become the one snapshot the
+    // viewing faces read, and the reminder pass surfaces the binds
+    // this build newly failed to mirror, with their fixes (DESIGN §8 —
+    // it replaces the old per-build warning pass).
+    for notice in crate::keymap_registry::publish(keymap_registry) {
+        eprintln!("{notice}");
+    }
+
     let mut editor = Reedline::create()
         .with_validator(Box::new(ReplValidator))
         .with_history(Box::new(history))
@@ -362,13 +379,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         // remains the one-shot clipboard path.
         .use_bracketed_paste(cfg!(not(target_os = "windows")))
         .with_edit_mode(Box::new(PasteChunkEditMode::new(
-            build_edit_mode(
-                shell_ref.editor_mode,
-                &shell_ref.native_widgets,
-                &shell_ref.native_widget_bindings,
-                &shell_ref.user_widget_bindings,
-                &shell_ref.engine_bindings,
-            ),
+            edit_mode,
             menu_config.completion_style,
         )));
 
@@ -552,89 +563,200 @@ fn run_host_sentinel(
     }
 }
 
+/// One editor keymap under construction, remembering which registry
+/// layer last wrote each slot (niubash#630). The layer closures are the
+/// same `add_*_keybindings` passes the editor was always built with;
+/// the wrapper only observes their effects, diffing the map around
+/// each pass so the registry can attribute every slot's winner (and
+/// the layer it shadowed) without the passes changing shape.
+struct LayeredKeymap {
+    keybindings: Keybindings,
+    // Keyed by the (modifiers, key code) pair: reedline 0.52 does not
+    // export its combination type name.
+    stacks: std::collections::HashMap<
+        (KeyModifiers, KeyCode),
+        Vec<(crate::keymap_registry::KeymapSource, ReedlineEvent)>,
+    >,
+}
+
+impl LayeredKeymap {
+    fn new(defaults: Keybindings) -> Self {
+        let stacks = defaults
+            .bindings
+            .iter()
+            .map(|(combo, event)| {
+                (
+                    (combo.modifier, combo.key_code),
+                    vec![(crate::keymap_registry::KeymapSource::Default, event.clone())],
+                )
+            })
+            .collect();
+        Self {
+            keybindings: defaults,
+            stacks,
+        }
+    }
+
+    fn layer<R>(
+        &mut self,
+        source: crate::keymap_registry::KeymapSource,
+        apply: impl FnOnce(&mut Keybindings) -> R,
+    ) -> R {
+        let before = self.keybindings.bindings.clone();
+        let out = apply(&mut self.keybindings);
+        for (combo, event) in &self.keybindings.bindings {
+            if before.get(combo) != Some(event) {
+                self.stacks
+                    .entry((combo.modifier, combo.key_code))
+                    .or_default()
+                    .push((source.clone(), event.clone()));
+            }
+        }
+        out
+    }
+
+    fn finish(self) -> (Keybindings, crate::keymap_registry::KeymapStacks) {
+        (self.keybindings, self.stacks.into_iter().collect())
+    }
+}
+
+/// Build one target keymap in the registry's precedence order
+/// (niubash#630, DESIGN §5.3): reedline defaults < host baseline
+/// (menus, clipboard, native-widget presets) < bundle < script
+/// (engine `bind`) < user. User bindings used to be applied *before*
+/// the engine pass, so a startup script silently overrode the user's
+/// own `NIU_BINDKEYS` — that inversion was a defect, not a baseline,
+/// and this order is the fix. Returns the map plus the registry rows
+/// and dropped-bind records the build produced.
+#[allow(clippy::too_many_arguments)]
+fn build_keymap_for_target(
+    defaults: Keybindings,
+    target: NativeKeymapTarget,
+    mode: crate::keymap_registry::KeymapMode,
+    native_widgets: &NativeWidgetConfig,
+    native_widget_bindings: &[NativeWidgetBinding],
+    user_widget_bindings: &[NativeWidgetBinding],
+    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+) -> (
+    Keybindings,
+    Vec<crate::keymap_registry::KeymapEntry>,
+    Vec<crate::keymap_registry::DroppedBind>,
+) {
+    use crate::keymap_registry::{entries_from_stacks, KeymapSource, UserBindingVia};
+    let mut builder = LayeredKeymap::new(defaults);
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_menu_keybindings(keybindings)
+    });
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_system_clipboard_keybindings(keybindings)
+    });
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_native_widget_keybindings(keybindings, target, native_widgets, native_widget_bindings)
+    });
+    if native_widgets.import_bindkeys {
+        for binding in native_widget_bindings {
+            let source = KeymapSource::Bundle {
+                file: binding
+                    .source_file
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                line: binding.line,
+            };
+            builder.layer(source, |keybindings| {
+                apply_bundle_widget_binding(keybindings, target, binding)
+            });
+        }
+    }
+    let dropped = builder
+        .layer(KeymapSource::Script, |keybindings| {
+            add_engine_bind_keybindings_recorded(keybindings, target, engine_bindings)
+        })
+        .1;
+    builder.layer(
+        KeymapSource::User {
+            via: UserBindingVia::NiuBindkeys,
+        },
+        |keybindings| add_user_widget_keybindings(keybindings, user_widget_bindings),
+    );
+    let (keybindings, stacks) = builder.finish();
+    (
+        keybindings,
+        entries_from_stacks(mode, stacks, engine_bindings),
+        dropped,
+    )
+}
+
 fn build_edit_mode(
     mode: EditorMode,
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
     engine_bindings: &[crate::bind_surface::EngineBindEntry],
-) -> Box<dyn EditMode> {
+    engine_bind_generation: u64,
+) -> (Box<dyn EditMode>, crate::keymap_registry::KeymapRegistry) {
+    use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
         EditorMode::Emacs => {
-            let mut keybindings = default_emacs_keybindings();
-            add_menu_keybindings(&mut keybindings);
-            add_system_clipboard_keybindings(&mut keybindings);
-            add_native_widget_keybindings(
-                &mut keybindings,
+            let (keybindings, entries, dropped) = build_keymap_for_target(
+                default_emacs_keybindings(),
                 NativeKeymapTarget::Emacs,
+                KeymapMode::Emacs,
                 native_widgets,
                 native_widget_bindings,
-            );
-            add_bundle_widget_keybindings(
-                &mut keybindings,
-                NativeKeymapTarget::Emacs,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_user_widget_keybindings(&mut keybindings, user_widget_bindings);
-            warn_unusable_engine_bindings(add_engine_bind_keybindings(
-                &mut keybindings,
-                NativeKeymapTarget::Emacs,
+                user_widget_bindings,
                 engine_bindings,
-            ));
-            Box::new(Emacs::new(keybindings))
+            );
+            (
+                Box::new(Emacs::new(keybindings)),
+                KeymapRegistry {
+                    generation: engine_bind_generation,
+                    editor_mode: "emacs".to_string(),
+                    entries,
+                    dropped,
+                },
+            )
         }
         EditorMode::Vi => {
-            let mut insert_keybindings = default_vi_insert_keybindings();
-            let mut normal_keybindings = default_vi_normal_keybindings();
-            add_menu_keybindings(&mut insert_keybindings);
-            add_menu_keybindings(&mut normal_keybindings);
-            add_system_clipboard_keybindings(&mut insert_keybindings);
-            add_system_clipboard_keybindings(&mut normal_keybindings);
-            add_native_widget_keybindings(
-                &mut insert_keybindings,
+            let (insert_keybindings, mut entries, mut dropped) = build_keymap_for_target(
+                default_vi_insert_keybindings(),
                 NativeKeymapTarget::ViInsert,
+                KeymapMode::ViInsert,
                 native_widgets,
                 native_widget_bindings,
-            );
-            add_native_widget_keybindings(
-                &mut normal_keybindings,
-                NativeKeymapTarget::ViNormal,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_bundle_widget_keybindings(
-                &mut insert_keybindings,
-                NativeKeymapTarget::ViInsert,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_bundle_widget_keybindings(
-                &mut normal_keybindings,
-                NativeKeymapTarget::ViNormal,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_user_widget_keybindings(&mut insert_keybindings, user_widget_bindings);
-            add_user_widget_keybindings(&mut normal_keybindings, user_widget_bindings);
-            warn_unusable_engine_bindings(add_engine_bind_keybindings(
-                &mut insert_keybindings,
-                NativeKeymapTarget::ViInsert,
+                user_widget_bindings,
                 engine_bindings,
-            ));
-            warn_unusable_engine_bindings(add_engine_bind_keybindings(
-                &mut normal_keybindings,
+            );
+            let (normal_keybindings, normal_entries, normal_dropped) = build_keymap_for_target(
+                default_vi_normal_keybindings(),
                 NativeKeymapTarget::ViNormal,
+                KeymapMode::ViNormal,
+                native_widgets,
+                native_widget_bindings,
+                user_widget_bindings,
                 engine_bindings,
-            ));
-            Box::new(Vi::new(
-                insert_keybindings,
-                normal_keybindings,
-                // reedline 0.52 added visual mode with its own keybinding
-                // set; niubash has never bound visual keys of its own, so
-                // the upstream defaults are the faithful choice.
-                default_vi_visual_keybindings(),
-            ))
+            );
+            entries.extend(normal_entries);
+            for bind in normal_dropped {
+                if !dropped.contains(&bind) {
+                    dropped.push(bind);
+                }
+            }
+            (
+                Box::new(Vi::new(
+                    insert_keybindings,
+                    normal_keybindings,
+                    // reedline 0.52 added visual mode with its own keybinding
+                    // set; niubash has never bound visual keys of its own, so
+                    // the upstream defaults are the faithful choice.
+                    default_vi_visual_keybindings(),
+                )),
+                KeymapRegistry {
+                    generation: engine_bind_generation,
+                    editor_mode: "vi".to_string(),
+                    entries,
+                    dropped,
+                },
+            )
         }
     }
 }
@@ -1586,8 +1708,10 @@ impl PasteChunkEditMode {
 
 /// A bind entry the editor cannot mirror, classified by *why*
 /// (niubash#612). Every unusable entry is recorded in this list — it
-/// is the bridge's diagnostic record — but only the actionable class
-/// is printed as a startup warning (see `warn_unusable_engine_bindings`).
+/// is the bridge's diagnostic record — and, since niubash#630, also
+/// lands as a persistent record in the unified keymap registry
+/// (see `crate::keymap_registry`), whose reminder pass decides what
+/// is surfaced at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnusableBind {
     keyseq: String,
@@ -1617,25 +1741,14 @@ enum UnusableBindReason {
 }
 
 impl UnusableBindReason {
+    /// Retained for the #612 test surface (the production surfacing
+    /// decision lives in the registry's reminder pass, niubash#630).
+    #[cfg(test)]
     fn is_structural(self) -> bool {
         matches!(
             self,
             UnusableBindReason::ChainedSequence | UnusableBindReason::ModeToggleFunction
         )
-    }
-}
-
-/// One warning per *actionable* unusable sequence. Structural entries
-/// (see `UnusableBindReason`) stay in the recorded list for
-/// diagnostics but are not printed.
-fn warn_unusable_engine_bindings(unusable: Vec<UnusableBind>) {
-    for bind in &unusable {
-        if !bind.reason.is_structural() {
-            eprintln!(
-                "niubash: bind: key sequence '{}' cannot be mirrored to the line editor",
-                bind.keyseq
-            );
-        }
     }
 }
 
@@ -1718,9 +1831,13 @@ fn char_spec_len(chars: &[char]) -> Option<usize> {
 }
 
 /// Record an entry the editor cannot mirror, classified by reason
-/// (niubash#612).
+/// (niubash#612). The entry also lands in the unified keymap
+/// registry's dropped records (niubash#630), with the coarse reason
+/// refined by payload shape (DESIGN §6.1: a response sequence, an
+/// unknown function, an undeliverable sequence shape).
 fn note_unusable_bind(
     unusable: &mut Vec<UnusableBind>,
+    dropped: &mut Vec<crate::keymap_registry::DroppedBind>,
     entry: &crate::bind_surface::EngineBindEntry,
     reason: UnusableBindReason,
 ) {
@@ -1728,6 +1845,19 @@ fn note_unusable_bind(
         keyseq: entry.keyseq.clone(),
         reason,
     });
+    let structural = match reason {
+        UnusableBindReason::ChainedSequence => {
+            Some(crate::keymap_registry::DroppedReason::ChainedSequence)
+        }
+        UnusableBindReason::ModeToggleFunction => {
+            Some(crate::keymap_registry::DroppedReason::ModeToggleFunction)
+        }
+        UnusableBindReason::Other => None,
+    };
+    dropped.push(crate::keymap_registry::dropped_bind_for(
+        entry,
+        crate::keymap_registry::dropped_reason(structural, &entry.keyseq, &entry.kind),
+    ));
 }
 
 /// Apply user-declared widget bindings from `NIU_BINDKEYS`.
@@ -1759,13 +1889,35 @@ fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[Native
 /// insert their translated text. Entries the editor cannot mirror
 /// are reported back classified by reason (niubash#612): structural
 /// classes (chained sequences, editing-mode toggle functions) are
-/// recorded but not warned about; the rest are warned about once.
+/// recorded silently; the records feed the keymap registry's
+/// reminder pass (niubash#630).
+///
+/// This coarse view is retained for the #612 test surface; production
+/// builds go through [`add_engine_bind_keybindings_recorded`].
+#[cfg(test)]
 fn add_engine_bind_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
     entries: &[crate::bind_surface::EngineBindEntry],
 ) -> Vec<UnusableBind> {
+    add_engine_bind_keybindings_recorded(keybindings, target, entries).0
+}
+
+/// [`add_engine_bind_keybindings`], additionally returning the
+/// dropped-bind records for the unified keymap registry
+/// (niubash#630): every unusable entry, refined by shape, plus
+/// key-script macros — mirrored today (their text inserts literally)
+/// but recorded as *mirrored with loss*, since the host has no
+/// key-script executor (DESIGN §4 R1). Recording a macro does not
+/// change its translation here; the translation widening is the K3
+/// slice's business.
+fn add_engine_bind_keybindings_recorded(
+    keybindings: &mut Keybindings,
+    target: NativeKeymapTarget,
+    entries: &[crate::bind_surface::EngineBindEntry],
+) -> (Vec<UnusableBind>, Vec<crate::keymap_registry::DroppedBind>) {
     let mut unusable = Vec::new();
+    let mut dropped = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         if !engine_keymap_applies(entry.keymap.as_deref(), target) {
             continue;
@@ -1779,7 +1931,7 @@ fn add_engine_bind_keybindings(
             } else {
                 UnusableBindReason::Other
             };
-            note_unusable_bind(&mut unusable, entry, reason);
+            note_unusable_bind(&mut unusable, &mut dropped, entry, reason);
             continue;
         };
         let event = match &entry.kind {
@@ -1787,6 +1939,12 @@ fn add_engine_bind_keybindings(
                 ReedlineEvent::ExecuteHostCommand(format!("{BINDX_HOST_COMMAND_PREFIX}{index}"))
             }
             crate::bind_surface::EngineBindKind::Macro { text } => {
+                if crate::keymap_registry::is_script_macro_text(text) {
+                    dropped.push(crate::keymap_registry::dropped_bind_for(
+                        entry,
+                        crate::keymap_registry::DroppedReason::ScriptMacro,
+                    ));
+                }
                 edit_event(EditCommand::InsertString(text.clone()))
             }
             // A readline function name the editor cannot deliver is
@@ -1801,12 +1959,22 @@ fn add_engine_bind_keybindings(
                     Some(ReedlineEvent::ExecuteHostCommand(payload))
                         if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
                     {
-                        note_unusable_bind(&mut unusable, entry, unusable_function_reason(name));
+                        note_unusable_bind(
+                            &mut unusable,
+                            &mut dropped,
+                            entry,
+                            unusable_function_reason(name),
+                        );
                         continue;
                     }
                     Some(event) => event,
                     None => {
-                        note_unusable_bind(&mut unusable, entry, unusable_function_reason(name));
+                        note_unusable_bind(
+                            &mut unusable,
+                            &mut dropped,
+                            entry,
+                            unusable_function_reason(name),
+                        );
                         continue;
                     }
                 }
@@ -1814,7 +1982,7 @@ fn add_engine_bind_keybindings(
         };
         keybindings.add_binding(modifiers, key_code, event);
     }
-    unusable
+    (unusable, dropped)
 }
 
 /// Keymap targeting for engine bind entries: GNU's emacs maps land on the
@@ -1901,6 +2069,11 @@ fn add_native_widget_keybindings(
 /// Apply bundle-declared widget bindings (from pack `keybindings/*.toml`
 /// assets). Gated only by `import_bindkeys`; the pack-level decision gate
 /// happens when the bindings are loaded into the shell.
+///
+/// The batch form is retained for the test surface; the registry
+/// build applies bindings one by one through
+/// [`apply_bundle_widget_binding`] for per-binding attribution.
+#[cfg(test)]
 fn add_bundle_widget_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
@@ -1912,17 +2085,28 @@ fn add_bundle_widget_keybindings(
     }
 
     for binding in bindings {
-        if !native_widget_keymap_applies(binding.keymap.as_deref(), target) {
-            continue;
-        }
-        let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
-            continue;
-        };
-        let Some(event) = native_widget_event(&binding.widget) else {
-            continue;
-        };
-        keybindings.add_binding(key.0, key.1, event);
+        apply_bundle_widget_binding(keybindings, target, binding);
     }
+}
+
+/// Apply one bundle-declared widget binding (the per-binding form of
+/// [`add_bundle_widget_keybindings`], so the keymap registry build
+/// can attribute each slot to its declaring file and line).
+fn apply_bundle_widget_binding(
+    keybindings: &mut Keybindings,
+    target: NativeKeymapTarget,
+    binding: &NativeWidgetBinding,
+) {
+    if !native_widget_keymap_applies(binding.keymap.as_deref(), target) {
+        return;
+    }
+    let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
+        return;
+    };
+    let Some(event) = native_widget_event(&binding.widget) else {
+        return;
+    };
+    keybindings.add_binding(key.0, key.1, event);
 }
 
 fn add_native_widget_preset_keybindings(keybindings: &mut Keybindings, presets: &[String]) {
@@ -4307,6 +4491,204 @@ mod tests {
             Some("emacs-meta"),
             NativeKeymapTarget::Emacs
         ));
+    }
+
+    // niubash#630, Appendix A snapshot-equivalence pin: with no
+    // engine binds and no precedence overlap, the layered registry
+    // build must produce exactly the keymap the pre-registry build
+    // order produced — the refactor is a move, not a behavior change.
+    #[test]
+    fn issue630_layered_build_matches_legacy_order() {
+        let config = NativeWidgetConfig {
+            enabled: true,
+            presets: vec!["autosuggestions".to_string()],
+            import_bindkeys: true,
+        };
+        let bundle = vec![native_widget_binding("^ ", None, "autosuggest-accept")];
+        let user = vec![native_widget_binding("^F", None, "autosuggest-accept")];
+        for (defaults, target, mode) in [
+            (
+                default_emacs_keybindings(),
+                NativeKeymapTarget::Emacs,
+                crate::keymap_registry::KeymapMode::Emacs,
+            ),
+            (
+                default_vi_insert_keybindings(),
+                NativeKeymapTarget::ViInsert,
+                crate::keymap_registry::KeymapMode::ViInsert,
+            ),
+            (
+                default_vi_normal_keybindings(),
+                NativeKeymapTarget::ViNormal,
+                crate::keymap_registry::KeymapMode::ViNormal,
+            ),
+        ] {
+            // The pre-registry build order, verbatim.
+            let mut legacy = defaults.clone();
+            add_menu_keybindings(&mut legacy);
+            add_system_clipboard_keybindings(&mut legacy);
+            add_native_widget_keybindings(&mut legacy, target, &config, &bundle);
+            add_bundle_widget_keybindings(&mut legacy, target, &config, &bundle);
+            add_user_widget_keybindings(&mut legacy, &user);
+            add_engine_bind_keybindings(&mut legacy, target, &[]);
+
+            let (built, entries, dropped) =
+                build_keymap_for_target(defaults, target, mode, &config, &bundle, &user, &[]);
+            assert_eq!(
+                built.get_keybindings(),
+                legacy.get_keybindings(),
+                "keymap drift on {target:?}"
+            );
+            assert!(dropped.is_empty(), "no drops without engine binds");
+            assert_eq!(
+                entries.len(),
+                built.get_keybindings().len(),
+                "the registry lists exactly the effective table on {target:?}"
+            );
+        }
+    }
+
+    // niubash#630, the one deliberate precedence change (DESIGN §5.3):
+    // a user binding (NIU_BINDKEYS) now beats a script `bind` on the
+    // same key — before the registry build, the engine pass ran last
+    // and silently overrode the user. The registry records the win
+    // and what it shadowed.
+    #[test]
+    fn issue630_user_binding_beats_script_binding() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        let config = NativeWidgetConfig::default();
+        let engine = vec![BindEntry {
+            keyseq: r"\C-g".to_string(),
+            kind: BindKind::Execute {
+                command: "script-widget".to_string(),
+            },
+            keymap: None,
+        }];
+        let user = vec![native_widget_binding("^G", None, "accept-line")];
+        let (built, entries, dropped) = build_keymap_for_target(
+            default_emacs_keybindings(),
+            NativeKeymapTarget::Emacs,
+            crate::keymap_registry::KeymapMode::Emacs,
+            &config,
+            &[],
+            &user,
+            &engine,
+        );
+        assert!(dropped.is_empty());
+        assert_eq!(
+            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(ReedlineEvent::Enter),
+            "the user's binding wins the slot"
+        );
+        let row = entries
+            .iter()
+            .find(|entry| entry.key_display == "\"\\C-g\"")
+            .expect("registry row for the contested key");
+        assert_eq!(
+            row.source,
+            crate::keymap_registry::KeymapSource::User {
+                via: crate::keymap_registry::UserBindingVia::NiuBindkeys
+            }
+        );
+        assert_eq!(
+            row.shadowed,
+            Some(crate::keymap_registry::KeymapSource::Script)
+        );
+        assert_eq!(row.action, "accept line");
+    }
+
+    // niubash#630: the recorded half of the bridge — dropped records
+    // classify by shape (DESIGN §6.1), and a key-script macro is
+    // recorded as mirrored-with-loss while its translation stays the
+    // pre-K3 literal insert.
+    #[test]
+    fn issue630_dropped_records_classify_by_shape() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use crate::keymap_registry::{DroppedKind, DroppedReason};
+        let entry = |keyseq: &str, kind: BindKind| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind,
+            keymap: None,
+        };
+        let engine = vec![
+            entry(
+                r"\C-\e(",
+                BindKind::Function {
+                    name: "redraw-current-line".to_string(),
+                },
+            ),
+            entry(
+                r"\C-z",
+                BindKind::Function {
+                    name: "vi-editing-mode".to_string(),
+                },
+            ),
+            // zoxide's response-sequence trick (DESIGN §3 #5).
+            entry(
+                r"\e[0n",
+                BindKind::Execute {
+                    command: "__zoxide_hook".to_string(),
+                },
+            ),
+            entry(
+                r"\C-g",
+                BindKind::Function {
+                    name: "no-such-readline-function".to_string(),
+                },
+            ),
+            // fzf's Alt-C macro (DESIGN §3 #7): control escapes and a
+            // command substitution — a key script, not text.
+            entry(
+                r"\ec",
+                BindKind::Macro {
+                    text: r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string(),
+                },
+            ),
+            // The same macro in its stored form: the engine has
+            // already translated the escapes to raw control bytes.
+            entry(
+                r"\C-x",
+                BindKind::Macro {
+                    text: " \u{2}\u{b} __fzf_cd__".to_string(),
+                },
+            ),
+        ];
+        let (built, _entries, dropped) = build_keymap_for_target(
+            default_emacs_keybindings(),
+            NativeKeymapTarget::Emacs,
+            crate::keymap_registry::KeymapMode::Emacs,
+            &NativeWidgetConfig::default(),
+            &[],
+            &[],
+            &engine,
+        );
+        let shapes: Vec<(&str, DroppedReason)> = dropped
+            .iter()
+            .map(|bind| (bind.keyseq.as_str(), bind.reason))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (r"\C-\e(", DroppedReason::ChainedSequence),
+                (r"\C-z", DroppedReason::ModeToggleFunction),
+                (r"\e[0n", DroppedReason::ResponseSequence),
+                (r"\C-g", DroppedReason::UnknownFunction),
+                (r"\ec", DroppedReason::ScriptMacro),
+                (r"\C-x", DroppedReason::ScriptMacro),
+            ]
+        );
+        assert_eq!(dropped[2].kind, DroppedKind::Execute);
+        assert_eq!(
+            dropped[0].target_name.as_deref(),
+            Some("redraw-current-line")
+        );
+        // K1 records the macro; the translation is unchanged until K3.
+        assert_eq!(
+            built.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
+            Some(edit_event(EditCommand::InsertString(
+                r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string()
+            )))
+        );
     }
 
     #[test]

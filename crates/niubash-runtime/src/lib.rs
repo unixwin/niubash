@@ -73,6 +73,7 @@ pub mod fonts;
 pub mod git_prompt;
 pub(crate) mod history;
 pub mod interactive_menu;
+pub mod keymap_registry;
 pub mod logo;
 pub mod msix;
 pub mod panic_restore;

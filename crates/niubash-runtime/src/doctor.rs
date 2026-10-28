@@ -401,6 +401,46 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
         style.as_str()
     )?;
 
+    // ── Advisory: key bindings (niubash#630) ─────────────────────────────
+    // The doctor is the standing face of the unified keymap registry:
+    // the effective table itself is the help topic's job, but the
+    // dropped records (with one-line fixes) live here permanently, so
+    // a bind that never landed is discoverable without waiting for a
+    // startup reminder. The snapshot is the last interactive build's;
+    // doctor never sources rc files to rebuild it.
+    match crate::keymap_registry::load_state_from(&crate::keymap_registry::state_path()) {
+        Some(state) => {
+            writeln!(
+                out,
+                "  {info} key bindings      {} effective ({} mode, registry generation {}), \
+                 {} dropped — full table and fixes: `{}`",
+                state.entries.len(),
+                state.editor_mode,
+                state.registry_generation,
+                state.dropped.len(),
+                crate::keymap_registry::keymap_help_command()
+            )?;
+            for bind in &state.dropped {
+                writeln!(
+                    out,
+                    "  {info}   dropped '{}' ({}) — {}; fix: {}",
+                    bind.keyseq,
+                    bind.target_name.as_deref().unwrap_or(""),
+                    bind.reason.why(),
+                    bind.session_fix()
+                )?;
+            }
+        }
+        None => {
+            writeln!(
+                out,
+                "  {info} key bindings      no interactive session has built a keymap yet \
+                 — `{}` explains the binding layers",
+                crate::keymap_registry::keymap_help_command()
+            )?;
+        }
+    }
+
     // ── Advisory: timing scripts (niubash#201) ────────────────────────────
     // `date` is an external program: each `$(date +%s%N)` pays Windows
     // process creation (~10-30ms). The bash 5 builtin `$EPOCHREALTIME`
