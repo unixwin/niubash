@@ -177,36 +177,6 @@ impl CompletionState {
         }
     }
 
-    /// Replace the bundle-provided definitions inside the external
-    /// completion plugin.
-    ///
-    /// The initial definition set is installed at `Shell::new`, before any
-    /// startup rc runs — so packs enabled later by the rc (the
-    /// `NIU_PLUGINS=(...)` line the setup wizard writes) would never
-    /// contribute completions: aliases and functions load through the rc,
-    /// but completion TOMLs were snapshotted too early. Official pack names
-    /// are masked by the compiled-in fallback; third-party and newly added
-    /// packs are not. Rebuilding the external plugin from the recorded user
-    /// directories keeps overrides intact; callers recompute only when the
-    /// enabled-pack set changes, so steady-state prompt cost is unchanged.
-    pub fn refresh_bundle_definitions(&mut self, bundle_definitions: Vec<CommandDef>) {
-        let dirs = self.completion_dirs.clone();
-        let mut external = ExternalCompletionPlugin::new();
-        external.replace_definitions(bundle_definitions);
-        for dir in &dirs {
-            external.load_dir(dir);
-        }
-        if let Some(slot) = self.plugins.iter_mut().rev().find(|p| {
-            p.as_any()
-                .downcast_ref::<ExternalCompletionPlugin>()
-                .is_some()
-        }) {
-            *slot = Arc::new(external);
-        } else {
-            self.add_plugin(Arc::new(external));
-        }
-    }
-
     /// Collect command names known to loaded completion plugins.
     ///
     /// External TOML definitions (from oh-my-niu, user overrides, etc.)
