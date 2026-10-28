@@ -1,4 +1,4 @@
-//! Asset-level activation for trusted external sources — `niu plugin
+//! Asset-level activation for external sources — `niu plugin
 //! list/enable/disable` operating on the *real* manager assets
 //! (oh-my-bash themes/plugins/aliases/completions, bash-it components,
 //! bash-completion as a whole, and per-file sources for wild plugins and
@@ -179,7 +179,7 @@ pub struct AssetRow {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceReport {
     pub status: SourceStatus,
-    /// Assets with activation state (empty for degraded/untrusted rows).
+    /// Assets with activation state (empty for rows whose tree is missing).
     pub assets: Vec<AssetRow>,
     /// True when the managed rc block (or bash-it enabled/ entries) is in
     /// place, i.e. the source participates in startup.
@@ -344,8 +344,8 @@ fn render_block(record: &SourceRecord, model: &SelectionModel, state: &BlockStat
 }
 
 /// The body of one source's activation block — theme line, selection
-/// arrays (or per-file guarded source lines for DirectFiles), the static
-/// drift guard, then the adapter's guarded loader snippet. This exact
+/// arrays (or per-file guarded source lines for DirectFiles), then the
+/// adapter's guarded loader snippet. This exact
 /// byte stream used to sit between a managed block's markers in the user
 /// rc; since niubash#359 it is the body of a section in the generated
 /// loader (`plugins::loader`), unchanged in content, changed in position.
@@ -387,31 +387,11 @@ fn render_block_body(record: &SourceRecord, model: &SelectionModel, state: &Bloc
             body.push_str(&format!("if [ -f \"{path}\" ]; then\n  . \"{path}\"\nfi\n"));
         }
     }
-    // Drift guard (niubash#297, deliberately STATIC text): `niu plugin sync`
-    // lists drifted source ids in drifted-sources.txt under the sources
-    // root; the block prints the warning at startup. No hashing here — the
-    // rc stays static and cacheable, the ledger file is the only dynamic
-    // channel.
-    body.push_str(&drift_guard_lines(&record.id));
     let loader = adapter.loader_snippet(record);
     if !loader.is_empty() {
         body.push_str(&loader);
     }
     body
-}
-
-/// The static drift-guard snippet for one source's managed block: warn at
-/// startup when `niu plugin sync` recorded this id in the drift ledger.
-fn drift_guard_lines(id: &str) -> String {
-    format!(
-        "# drift guard (static): `niu plugin sync` lists drifted ids in drifted-sources.txt\n\
-         _niu_drift=\"${{NIU_PLUGIN_SOURCES_ROOT:-$HOME/.niubash/sources}}/drifted-sources.txt\"\n\
-         if [ -s \"$_niu_drift\" ] && command -v grep >/dev/null 2>&1 && grep -qx {} \"$_niu_drift\" 2>/dev/null; then\n\
-         \x20 echo \"niubash plugin: source {id} no longer matches its lockfile pin — run: niu plugin source verify {id}; repair with: niu plugin restore {id}\" >&2\n\
-         fi\n\
-         unset _niu_drift\n",
-        shell_quote(id)
-    )
 }
 
 /// Every inclusive `(start, stop)` line span of a managed marker pair, in
@@ -827,10 +807,13 @@ fn is_managed_marker_boundary(line: &str) -> bool {
                 .starts_with("<<<"))
 }
 
-/// One drift-guard line (niubash#297's static snippet, id embedded in the
-/// echo): the exact shapes niu itself writes. A moved-out copy of these is
-/// niu-authored debris — the guard belongs INSIDE the managed block, where
-/// every rewrite re-renders it, never in the user area.
+/// One drift-guard line (niubash#297's retired static snippet, id embedded
+/// in the echo): the exact shapes older niu builds wrote inside managed
+/// blocks. The guard itself is gone (niubash#647) and current sections
+/// never carry it; a moved-out copy of these lines in the user area is
+/// niu-authored debris that only this detector still recognizes — kept so
+/// the migration below and the doctor can clean up after the retired
+/// feature.
 fn is_drift_guard_debris(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed == "fi"
@@ -875,8 +858,8 @@ fn migrated_section_spans(lines: &[String]) -> Vec<(usize, usize)> {
 /// moved-out content as fresh user lines, and the copy boundary recognized
 /// the guard's closing `fi` as managed structure while migrating its
 /// openers — leaving N dangling `if` fragments in the user area, a syntax
-/// error on every startup. The debris is redundant by construction (every
-/// managed-block rewrite re-renders the complete guard inside the block),
+/// error on every startup. The debris is dead text by construction (the
+/// guard is retired, niubash#647, and nothing renders it any more),
 /// so a section whose every non-comment line is guard-shaped goes
 /// entirely. A section mixing genuine user lines with debris is kept
 /// VERBATIM — the user area is only ever edited whole-section here, never
@@ -985,7 +968,7 @@ fn write_managed_block(begin: &str, end: &str, block: &str) -> anyhow::Result<(P
     if debris_removed > 0 {
         eprintln!(
             "warning: removed {debris_removed} stale moved-out drift-guard remnant(s) left by \
-             an older niu (niu #324) — the guard lives inside the managed block"
+             an older niu (niu #324) — the drift guard itself is retired (niubash#647); nothing reads these lines"
         );
     }
     let pile_lines: std::collections::BTreeSet<String> = migrated_section_spans(&lines)
@@ -1093,7 +1076,7 @@ fn remove_managed_block(begin: &str, end: &str) -> anyhow::Result<usize> {
     if debris_removed > 0 {
         eprintln!(
             "warning: removed {debris_removed} stale moved-out drift-guard remnant(s) left by \
-             an older niu (niu #324) — the guard lives inside the managed block"
+             an older niu (niu #324) — the drift guard itself is retired (niubash#647); nothing reads these lines"
         );
     }
     // Same move-not-copy dedupe as the write path (niubash#324): lines an
@@ -1304,7 +1287,8 @@ fn deactivate_block(record: &SourceRecord) -> anyhow::Result<()> {
 // ── Overview ─────────────────────────────────────────────────────────────────
 
 /// Compute `niu plugin list` rows: every registered source with its assets
-/// and activation state (untrusted/degraded sources list with state only).
+/// and activation state (sources whose tree is missing list with state
+/// only).
 pub fn asset_overview() -> Vec<SourceReport> {
     let mut out = Vec::new();
     for status in list_sources() {
@@ -1316,7 +1300,7 @@ pub fn asset_overview() -> Vec<SourceReport> {
             });
             continue;
         };
-        if status.degraded || !status.record.trusted {
+        if status.missing {
             out.push(SourceReport {
                 status,
                 assets: Vec::new(),
@@ -1373,7 +1357,7 @@ fn asset_enabled(
 
 /// Resolve an enable/disable target: a source id (`oh-my-bash`), a
 /// qualified asset (`oh-my-bash/git`), or a bare asset name that must be
-/// unambiguous across trusted sources.
+/// unambiguous across installed sources.
 enum Target {
     Source(SourceRecord),
     Asset {
@@ -1401,7 +1385,7 @@ fn resolve_target(name: &str) -> anyhow::Result<Target> {
     if let Some(record) = records.iter().find(|record| record.id == name) {
         return check_gate(Target::Source(record.clone()), record);
     }
-    // Bare asset name across gated (trusted, non-degraded) sources.
+    // Bare asset name across installed sources whose tree is present.
     let mut matches = Vec::new();
     for record in &records {
         if let Some(asset) = find_asset(record, name) {
@@ -1428,7 +1412,7 @@ fn resolve_target(name: &str) -> anyhow::Result<Target> {
             &matches[0].0,
         ),
         _ => {
-            // A bare name shipping from several trusted sources is
+            // A bare name shipping from several installed sources is
             // ambiguous — UNLESS the spec's own theme claim names exactly
             // one of the matches. The wizard's finish screen and the setup
             // journal print the bare name in the undo receipt
@@ -1495,20 +1479,12 @@ fn find_asset(record: &SourceRecord, name: &str) -> Option<SourceAsset> {
         .find(|asset| asset.name == name)
 }
 
-/// The execution gate applies to activation too: untrusted or degraded
-/// sources contribute nothing (§12.2/§11.4).
+/// Activation requires the tree to be there: a source whose directory is
+/// gone contributes nothing until restored (§11.4).
 fn check_gate(target: Target, record: &SourceRecord) -> anyhow::Result<Target> {
     if !record.path.is_dir() {
         bail!(
-            "source '{}' is degraded (tree missing); restore it first: `niu plugin restore {}`",
-            record.id,
-            record.id
-        );
-    }
-    if !record.trusted {
-        bail!(
-            "source '{}' is installed but untrusted; review and trust it first: \
-             `niu plugin trust {}`",
+            "source '{}' cannot activate (tree missing); restore it first: `niu plugin restore {}`",
             record.id,
             record.id
         );
@@ -1872,8 +1848,8 @@ pub fn disable(name: &str) -> anyhow::Result<ActivationOutcome> {
 /// in the generated loader through [`publish_loader_generation`]).
 #[derive(Debug, Clone)]
 pub struct ComputedSelection {
-    /// The source's rendered section body (theme/arrays/files + drift
-    /// guard + loader snippet) when it participates in the generation;
+    /// The source's rendered section body (theme/arrays/files + loader
+    /// snippet) when it participates in the generation;
     /// `None` = the generation drops the section (nothing enabled).
     pub section: Option<String>,
     pub detail: String,
@@ -1896,8 +1872,8 @@ pub struct GenerationRow {
     pub detail: String,
 }
 
-/// Compute one spec entry's selection against a trusted, non-degraded
-/// record (§14.6.3 merge semantics): the spec's selection plus any
+/// Compute one spec entry's selection against an installed record whose
+/// tree is present (§14.6.3 merge semantics): the spec's selection plus any
 /// hand-added entries wins; entries the spec dropped (in `prev` but not
 /// `next`) are removed; a hand-set theme survives a spec that does not
 /// declare one.
@@ -2114,8 +2090,8 @@ pub fn compute_spec_selection(
 /// generation survives a failed validation/publish unchanged
 /// (validate-then-atomic), and a byte-identical regeneration is a no-op.
 ///
-/// `keep_current` names ids this pass SKIPPED (awaiting-trust, degraded,
-/// drifted, install failure): their current sections carry over verbatim,
+/// `keep_current` names ids this pass SKIPPED (missing tree,
+/// install failure): their current sections carry over verbatim,
 /// exactly as the rc materialization era left their blocks untouched on a
 /// skip. `drop_silent` names ids another pass already reported
 /// (sync's undeclared-source deactivation): their sections go without a
@@ -2212,7 +2188,7 @@ pub fn publish_loader_generation(
 /// no registry or spec writes (the migrate-rc half of the generator;
 /// design §4.1 step 2). Sources the spec declares but that cannot safely
 /// materialize keep their current section exactly as a sync skip would:
-/// untrusted, degraded, drifted, compute failures — AND entries that still
+/// missing trees, compute failures — AND entries that still
 /// resolve to an id but have no registry record yet (their activation,
 /// if any was ever published, carries over instead of being silently
 /// dropped: a regeneration on the migrate-rc verb must never de-activate).
@@ -2253,11 +2229,7 @@ pub fn regenerate_loader_generation() -> anyhow::Result<bool> {
             continue;
         };
         let claimed = theme_claimed_elsewhere.get(index).copied().unwrap_or(false);
-        let eligible = record.trusted
-            && record.path.is_dir()
-            && super::sources::verify_record(record)
-                .map(|report| report.verified)
-                .unwrap_or(false);
+        let eligible = record.path.is_dir();
         if !eligible {
             keep_current.insert(record.id.clone());
             continue;
@@ -2544,10 +2516,6 @@ mod tests {
         .expect("fixture add");
     }
 
-    fn trust(id: &str) {
-        super::super::sources::trust_source(id).expect("fixture trust");
-    }
-
     fn rc_text() -> String {
         fs::read_to_string(rc_file()).unwrap_or_default()
     }
@@ -2632,11 +2600,8 @@ mod tests {
         let box_ = sandbox("omb-roundtrip");
         install(&origin);
 
-        // Gate: untrusted sources cannot activate.
-        let err = enable("oh-my-bash").expect_err("untrusted enable must fail");
-        assert!(err.to_string().contains("untrusted"), "{err}");
-        assert!(rc_text().is_empty(), "no rc written on refusal");
-        trust("oh-my-bash");
+        // niubash#647: no trust gate — enable works right after install.
+        assert!(rc_text().is_empty(), "no rc written before any verb");
 
         // Asset-level sugar: each enable edits the spec entry, sync
         // publishes the generated loader (niubash#359: the rc is never
@@ -2730,8 +2695,6 @@ mod tests {
         let box_ = sandbox("same-name-undo");
         install(&omb_origin);
         install(&bashit_origin);
-        trust("oh-my-bash");
-        trust("bash-it");
 
         // No claim yet: the bare name stays honestly ambiguous.
         let err = disable("agnoster").expect_err("ambiguous disable must fail");
@@ -2776,7 +2739,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("omb-user-rc");
         install(&origin);
-        trust("oh-my-bash");
 
         // A user-written rc keeps its content through enable/disable --
         // byte-identically (niubash#359: no verb writes the rc; the
@@ -2808,7 +2770,6 @@ mod tests {
         write_bash_it_fixture(&origin);
         let box_ = sandbox("bash-it");
         install(&origin);
-        trust("bash-it");
 
         enable("base").expect("plugin enable");
         let entry = box_
@@ -2852,7 +2813,6 @@ mod tests {
         write_bash_completion_fixture(&origin);
         let box_ = sandbox("bash-completion");
         install(&origin);
-        trust("bash-completion");
 
         enable("bash-completion").expect("whole-source enable");
         let loader = loader_section("bash-completion");
@@ -2881,7 +2841,6 @@ mod tests {
         let record = read_source_registry().into_iter().next().unwrap();
         assert_eq!(record.id, "sparkline", "{}", record.id);
         assert_eq!(record.adapter, "file");
-        trust(&record.id);
 
         // Honest enumeration: every *.sh/*.bash is a candidate, tagged, in
         // depth order; nothing is hidden and nothing is auto-picked.
@@ -2954,8 +2913,6 @@ mod tests {
         let box_ = sandbox("ambiguous");
         install(&omb);
         install(&bc);
-        trust("oh-my-bash");
-        trust("bash-completion");
 
         // "git" exists as an OMB plugin and a bash-completion completion.
         let err = enable("git").expect_err("ambiguity must be reported");
@@ -2995,8 +2952,6 @@ mod tests {
         let box_ = sandbox("theme-claim-move");
         install(&omb);
         install(&bit);
-        trust("oh-my-bash");
-        trust("bash-it");
 
         // Pick demox from oh-my-bash: the loader carries it, the spec
         // claims it, and the rc is untouched (niubash#359).
@@ -3051,17 +3006,16 @@ mod tests {
     }
 
     #[test]
-    fn degraded_source_refuses_activation_with_restore_hint() {
+    fn missing_source_refuses_activation_with_restore_hint() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let origin = unique_temp_dir("deg-origin");
         write_omb_fixture(&origin);
-        let box_ = sandbox("degraded");
+        let box_ = sandbox("missing");
         install(&origin);
-        trust("oh-my-bash");
         fs::remove_dir_all(box_.temp.join("sources/oh-my-bash")).unwrap();
 
-        let err = enable("oh-my-bash").expect_err("degraded enable must fail");
-        assert!(err.to_string().contains("degraded"), "{err}");
+        let err = enable("oh-my-bash").expect_err("missing-tree enable must fail");
+        assert!(err.to_string().contains("tree missing"), "{err}");
         assert!(
             err.to_string().contains("niu plugin restore oh-my-bash"),
             "{err}"
@@ -3095,7 +3049,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("malformed");
         install(&origin);
-        trust("oh-my-bash");
 
         enable("git").expect("clean enable first");
         // Seed the write-era block, then corrupt it: drop the end marker
@@ -3157,7 +3110,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("duplicate");
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("loader published first");
         let _ = loader_text();
 
@@ -3226,7 +3178,6 @@ mod tests {
         fs::write(rc_file(), "alias ll='ls -l'\r\nset -o vi\r\n").unwrap();
 
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("enable publishes the loader");
 
         let text = rc_text();
@@ -3273,7 +3224,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("migrate");
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("loader published first");
 
         // The user hand-writes a line inside the legacy block.
@@ -3320,7 +3270,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("near");
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("loader published first");
 
         // Seed a block whose begin marker lost one bracket; the end stays
@@ -3406,7 +3355,6 @@ mod tests {
         let before = backup_names();
 
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("loader publish");
         enable("cargo").expect("second loader publish");
         disable("git").expect("disable");
@@ -3553,7 +3501,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("i324-converge");
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("loader generation first");
 
         // The corrupt fixture: write-era block + 5 fi-less fragments + the
@@ -3641,7 +3588,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("i324-stable");
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("loader generation first");
         seed_legacy_block("oh-my-bash", OMB_BLOCK);
         let base = rc_text().trim_end().to_string();
@@ -3687,7 +3633,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("i324-dedupe");
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("loader generation first");
 
         // The alias was already migrated out once; the SAME line is back
@@ -3736,7 +3681,6 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("i324-mixed");
         install(&origin);
-        trust("oh-my-bash");
         enable("git").expect("canonical block first");
 
         let mixed_section = format!(

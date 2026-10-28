@@ -55,8 +55,8 @@ C:\Program Files
   git prompt that grows teeth inside any repository, syntax highlighting,
   autosuggestions, vi and emacs modes, and Ctrl+R history search.
 - **The bash ecosystem as the plugin system.** oh-my-bash, bash-it,
-  bash-completion and any git source install through `niu plugin` under an
-  explicit trust review — nothing is sourced until you say so. A ~540-row
+  bash-completion and any git source install through `niu plugin` —
+  nothing is sourced until you enable it. A ~540-row
   recipe index (`niu plugin recipe list`) covers themes, plugins, aliases,
   completions and prompt tools.
 

@@ -4,8 +4,7 @@
 //! same format from a repo or directory, byte-identical in shape
 //! (LazyVim's user-extras rule: anything the distro can do, a user repo
 //! can do). `apply` walks the entries through [`super::recipes::install`]
-//! and **never auto-trusts** — sources land untrusted with their review
-//! verb printed, per owner ruling 2026-10-02.
+//! — sources land installed; activation stays a separate explicit verb.
 //!
 //! Imported collections live under `~/.niubash/distros/<name>/` with a
 //! `niu-collection.toml` manifest at the root; the registry
@@ -343,8 +342,7 @@ pub struct CollectionApply {
     pub installed_sources: Vec<String>,
 }
 
-/// Apply a collection: walk the entries through the recipe drivers. Trust
-/// is never granted here — each report carries the review verb.
+/// Apply a collection: walk the entries through the recipe drivers.
 /// Executable-tool entries recommend package managers (download retraction
 /// 2026-10-04); they install nothing and fail nothing.
 pub fn apply(name: &str) -> anyhow::Result<CollectionApply> {
@@ -634,9 +632,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_activates_assets_on_a_trusted_manager() {
-        // Network-free apply path: with the oh-my-bash fixture installed and
-        // trusted, a collection entry that rides it activates locally (the
+    fn apply_activates_assets_on_an_installed_manager() {
+        // Network-free apply path: with the oh-my-bash fixture installed,
+        // a collection entry that rides it activates locally (the
         // recipes::install manager-asset branch). The collection itself is
         // imported from a local directory so no git clone runs.
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -665,7 +663,6 @@ mod tests {
             ..Default::default()
         })
         .expect("fixture source add");
-        super::super::sources::trust_source("oh-my-bash").expect("fixture trust");
 
         let source = temp.join("collection-src");
         fs::create_dir_all(&source).unwrap();
@@ -843,7 +840,7 @@ mod tests {
     /// niubash#171: an independent recipe entry (a completion-script repo,
     /// not a framework and not an executable tool) installs through the
     /// collection apply via the plugin driver's own git install — clone,
-    /// file-source detection, recipe-entry validation, untrusted landing.
+    /// file-source detection, recipe-entry validation, plain landing.
     /// Fully offline: the recipe's canonical GitHub origin resolves through
     /// the seeded local mirror, and the registry keeps the canonical URL
     /// (the mirror is transport-only).
@@ -886,18 +883,16 @@ mod tests {
         assert_eq!(ids, ["complete-alias", "git-flow-completion"], "{ids:?}");
         for report in &outcome.reports {
             assert!(
-                report.summary.contains("untrusted"),
-                "the trust gate must hold: {}",
+                report.summary.contains("installed source"),
+                "honest install report: {}",
                 report.summary
             );
         }
-        // The recipe's own review + enable verbs, spelled out.
+        // The recipe's own enable verb, spelled out (niubash#647: there
+        // is no trust step in the chain).
         assert_eq!(
             outcome.reports[0].next,
-            vec![
-                "niu plugin trust complete-alias",
-                "niu plugin enable complete-alias/complete_alias",
-            ],
+            vec!["niu plugin enable complete-alias/complete_alias"],
             "{:?}",
             outcome.reports[0].next
         );
@@ -916,7 +911,7 @@ mod tests {
                 .into_iter()
                 .find(|record| record.id == id)
                 .unwrap_or_else(|| panic!("{id} must be registered"));
-            assert!(!record.trusted, "{id} must land untrusted");
+            assert!(record.path.is_dir(), "{id} must land installed");
             assert!(
                 record.url.starts_with("https://github.com/"),
                 "canonical origin, not the mirror: {}",
@@ -1001,7 +996,7 @@ mod tests {
             outcome.reports
         );
         // Nine reports, eight landed sources (the theme rides the
-        // oh-my-bash manager source), all untrusted.
+        // oh-my-bash manager source), all installed.
         let mut landed = outcome.installed_sources.clone();
         landed.sort();
         assert_eq!(
@@ -1136,7 +1131,6 @@ mod tests {
             ..Default::default()
         })
         .expect("fixture source add");
-        super::super::sources::trust_source("oh-my-bash").expect("fixture trust");
 
         let source = temp.join("collection-src");
         fs::create_dir_all(&source).unwrap();
@@ -1152,7 +1146,7 @@ mod tests {
         // The failing entry is named, with the honest reason.
         assert_eq!(outcome.failures.len(), 1, "{:?}", outcome.failures);
         assert_eq!(outcome.failures[0].0, "omb-theme-90210");
-        // The healthy entry still installed (activated through the trusted
+        // The healthy entry still installed (activated through the
         // fixture manager) — a bad entry never kills the rest.
         assert_eq!(outcome.reports.len(), 1, "{:?}", outcome.reports);
         assert_eq!(outcome.reports[0].recipe_id, "omb-theme-agnoster");

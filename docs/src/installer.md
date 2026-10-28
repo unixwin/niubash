@@ -238,5 +238,5 @@ command set, and the command links.
 
 The external bash ecosystem (oh-my-bash, bash-it, bash-completion, wild
 plugins) installs on explicit user command — `niu plugin add <id>` clones
-from upstream into the user profile, under the trust protocol. There is
+from upstream into the user profile. There is
 nothing to pre-stage and nothing to update with the shell.

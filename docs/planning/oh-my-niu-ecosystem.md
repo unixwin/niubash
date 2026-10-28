@@ -2,6 +2,15 @@
 
 状态：设计稿（未实现、未提交）
 日期：2026-09-26
+
+> **后置裁定（2026-10-28，niubash#647，用户裁定）**：本文的 **trust 体系已全量移除**——
+> §12 的信任分级（checksum 档 / local-sign 签名档）、`niu plugin trust` / `source sign` /
+> `source verify` 动词、#297 漂移检测与 drifted-sources 账本、#298 first_fetch_verified、
+> registry 的哈希/签名字段均已从产品中删除。理由：无行业先例、属多此一举；安装即普通
+> git clone + 显式 enable 激活（bash-it 模型）。`--checksum` 仅保留为安装时对外部给定
+> 值的钉验（install-time pin），不再落盘为信任状态。§12 的下载/注册表/回滚协议部分
+> （12.1 schema 纪律、12.2 两道闸中的 fetch 闸、12.4）继续有效，registry schema 现为
+> `@0.4.0`。本文其余 trust 表述按历史设计记录保留，不再代表现行行为。
 输入：`crates/niubash-runtime` 现状代码；`D:/repo/rubash/target-ecosys/REPORT.md`（第一轮生态验收）；`D:/repo/rubash/target-ecosys2/REPORT.md`（577 文件 conformance 全扫 + 117 插件冒烟 + 冲突矩阵）。
 
 ## 0. 总原则："别人的更好，我们的作为保底"

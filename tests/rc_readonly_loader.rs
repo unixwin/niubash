@@ -193,8 +193,8 @@ fn assert_success(output: &Output, context: &str) {
     );
 }
 
-/// Install + trust the local oh-my-bash fixture (offline).
-fn install_trusted_omb(sandbox: &Sandbox) {
+/// Install the local oh-my-bash fixture (offline).
+fn install_omb(sandbox: &Sandbox) {
     assert_success(
         &sandbox.run(&[
             "plugin",
@@ -205,7 +205,6 @@ fn install_trusted_omb(sandbox: &Sandbox) {
         ]),
         "plugin add oh-my-bash --path",
     );
-    assert_success(&sandbox.run(&["plugin", "trust", "oh-my-bash"]), "trust");
 }
 
 /// The write-era managed block for the fixture (what an old niu left in a
@@ -247,7 +246,7 @@ fn case_359_4_explicit_verbs_never_write_the_rc() {
         "# my rc\nexport MY_VAR=1\nalias ll='ls -la'\n",
     )
     .unwrap();
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     let identity = sandbox.rc_identity();
 
     // Success paths.
@@ -315,7 +314,7 @@ fn case_359_4_explicit_verbs_never_write_the_rc() {
 #[test]
 fn case_359_6_corrupt_rc_is_preserved_through_all_verbs() {
     let sandbox = Sandbox::new("359-6");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     // Canonical loader generation first (as a post-migration machine has).
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
 
@@ -364,7 +363,7 @@ fn case_359_6_corrupt_rc_is_preserved_through_all_verbs() {
 #[test]
 fn case_359_7_loader_regeneration_is_byte_stable_and_idempotent() {
     let sandbox = Sandbox::new("359-7");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable 1");
     assert_success(&sandbox.run(&["plugin", "enable", "agnoster"]), "enable 2");
     let first = fs::read(sandbox.loader_path()).unwrap();
@@ -406,7 +405,7 @@ fn case_359_7_loader_regeneration_is_byte_stable_and_idempotent() {
 #[test]
 fn case_359_8_double_execution_guard_and_hand_removal() {
     let sandbox = Sandbox::new("359-8");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
 
     // The loader generation sets its own mark; the legacy rc block sets
@@ -547,7 +546,7 @@ fn case_359_9_order_override_and_rollback_switch() {
 #[test]
 fn migrate_rc_reports_never_writes_and_candidates_the_diff() {
     let sandbox = Sandbox::new("migrate-rc");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
     // The user's rc with a legacy block plus real user lines around it.
     fs::write(
@@ -632,7 +631,7 @@ fn migrate_rc_on_a_clean_machine_is_a_honest_noop() {
 #[test]
 fn migrate_rc_names_guard_trips_the_scan_cannot_attribute() {
     let sandbox = Sandbox::new("guard-trip-report");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
     // An id-less marker pair wrapping real content: the guard trips, the
     // id-anchored scan finds no id to attribute it to.
@@ -741,7 +740,7 @@ fn case_359_12_retired_writers_have_no_verb_call_sites() {
     // CR F1: the audit walks the ENTIRE production source tree (both
     // crates' src/ and the binary's src/), not a hand-maintained file
     // list — a new module, or a call smuggled into setup_wizard.rs /
-    // repl.rs / trust.rs, is scanned the same as everything else. The
+    // repl.rs, is scanned the same as everything else. The
     // mutation this closes: `assets::deactivate_block` used to be `pub`,
     // so any module could compile-passing reach `remove_managed_block`
     // through it; it is now private, and the tree-wide absence scan makes
@@ -851,7 +850,7 @@ fn case_359_12_retired_writers_have_no_verb_call_sites() {
 #[test]
 fn lone_begin_with_executable_content_holds_the_loader_off() {
     let sandbox = Sandbox::new("f2p-side-a");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
     let loader = sandbox.loader();
     let marked = loader.replace(
@@ -922,7 +921,7 @@ fn lone_begin_with_executable_content_holds_the_loader_off() {
 #[test]
 fn lone_begin_with_only_comments_keeps_the_loader_on() {
     let sandbox = Sandbox::new("f2p-side-b");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
     let loader = sandbox.loader();
     let marked = loader.replace(
@@ -961,7 +960,7 @@ fn lone_begin_with_only_comments_keeps_the_loader_on() {
 #[test]
 fn startup_hint_marker_is_the_only_config_dir_write() {
     let sandbox = Sandbox::new("hint-marker");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
     fs::write(sandbox.rc_path(), legacy_omb_block()).unwrap();
     let before = sandbox.config_inventory();

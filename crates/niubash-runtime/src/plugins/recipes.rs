@@ -243,9 +243,8 @@ pub struct RecipeInstall {
 }
 
 /// `niu plugin add <recipe-id>`: install through the recipe's driver.
-/// Every branch keeps the trust protocol: sources land **untrusted**,
-/// assets activate only through an explicit later step (or immediately
-/// when the manager source is already trusted).
+/// Sources land installed; assets activate through the enable step
+/// (immediately, when the manager source is already installed).
 pub fn install(id: &str) -> anyhow::Result<RecipeInstall> {
     let found = recipe(id).ok_or_else(|| anyhow!("unknown recipe '{id}'"))?;
     match (&found.driver, &found.manager) {
@@ -308,7 +307,7 @@ fn install_git_source(
         request.entry = entry.map(str::to_string);
     }
     let record = sources::add_source(request)?;
-    let mut next = vec![format!("niu plugin trust {}", record.id)];
+    let mut next = Vec::new();
     match entry {
         // File sources enable per-file (DirectFiles); the recipe's entry is
         // the recommended pick, spelled out so the next verb works as-is.
@@ -317,17 +316,13 @@ fn install_git_source(
     }
     Ok(RecipeInstall {
         recipe_id: id.to_string(),
-        summary: format!(
-            "installed source '{}' ({}) — untrusted",
-            record.id, record.version
-        ),
+        summary: format!("installed source '{}' ({})", record.id, record.version),
         next,
     })
 }
 
 /// Asset recipe: ensure the manager source exists, then activate the asset
-/// through the manager's own selection mechanism (only when already
-/// trusted).
+/// through the manager's own selection mechanism.
 fn install_manager_asset(found: &Recipe, manager: &str) -> anyhow::Result<RecipeInstall> {
     let asset = found
         .asset
@@ -338,7 +333,7 @@ fn install_manager_asset(found: &Recipe, manager: &str) -> anyhow::Result<Recipe
         .find(|record| record.id == manager);
     match installed {
         None => {
-            // Install the manager first (untrusted), then hint the chain.
+            // Install the manager first, then hint the enable step.
             let manager_recipe = recipe(manager).ok_or_else(|| {
                 anyhow!(
                     "asset recipe '{}' references unknown manager '{manager}'",
@@ -363,24 +358,11 @@ fn install_manager_asset(found: &Recipe, manager: &str) -> anyhow::Result<Recipe
             Ok(RecipeInstall {
                 recipe_id: found.id.clone(),
                 summary: format!(
-                    "installed manager '{manager}' (untrusted); asset '{asset}' activates after trust"
+                    "installed manager '{manager}'; asset '{asset}' activates with the enable step"
                 ),
-                next: vec![
-                    format!("niu plugin trust {manager}"),
-                    format!("niu plugin enable {asset}"),
-                ],
+                next: vec![format!("niu plugin enable {asset}")],
             })
         }
-        Some(record) if !record.trusted => Ok(RecipeInstall {
-            recipe_id: found.id.clone(),
-            summary: format!(
-                "manager '{manager}' is installed but untrusted; asset '{asset}' waits"
-            ),
-            next: vec![
-                format!("niu plugin trust {manager}"),
-                format!("niu plugin enable {asset}"),
-            ],
-        }),
         Some(_) => {
             let outcome = assets::enable(asset)?;
             Ok(RecipeInstall {
@@ -672,11 +654,9 @@ pub fn recipe_state(id: &str) -> RecipeState {
                 .find(|record| record.id == *manager)
                 .map(|record| {
                     if !record.path.is_dir() {
-                        "degraded".to_string()
-                    } else if record.trusted {
-                        "ready".to_string()
+                        "missing".to_string()
                     } else {
-                        "untrusted".to_string()
+                        "ready".to_string()
                     }
                 })
                 .unwrap_or_else(|| "not-installed".to_string());
@@ -692,14 +672,10 @@ pub fn recipe_state(id: &str) -> RecipeState {
                 .find(|record| record.id == source_id)
             {
                 Some(record) if record.path.is_dir() => RecipeState::ManagerAsset {
-                    manager_state: if record.trusted {
-                        "ready".to_string()
-                    } else {
-                        "untrusted".to_string()
-                    },
+                    manager_state: "ready".to_string(),
                 },
                 Some(_) => RecipeState::ManagerAsset {
-                    manager_state: "degraded".to_string(),
+                    manager_state: "missing".to_string(),
                 },
                 None => RecipeState::Available,
             }
