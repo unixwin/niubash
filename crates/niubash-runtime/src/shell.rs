@@ -3751,10 +3751,16 @@ fn bare_windows_drive_command_root(command: &rubash::parser::CommandNode) -> Opt
     let [word] = command.words.as_slice() else {
         return None;
     };
+    // The `word_quotes` half of this admission is gone: the
+    // engine field was always empty (any word that would record
+    // a quote is stored in its quoted form instead — the field's
+    // own doc named this reader as its last consumer), so the
+    // disjunct never fired. Dropping the read retires the field
+    // engine-side (companion deletion in rubash).
     if command
         .word_metadata
         .first()
-        .is_some_and(|metadata| !metadata.word_quotes.is_empty() || metadata.raw.as_str() != word)
+        .is_some_and(|metadata| metadata.raw.as_str() != word)
     {
         return None;
     }
