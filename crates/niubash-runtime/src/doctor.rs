@@ -401,6 +401,24 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
         style.as_str()
     )?;
 
+    // ── Advisory: TAB completion interaction (niubash#631) ──────────────
+    // The second completion axis rides beside the style row: how TAB
+    // drives the line while candidates are shown, with the same
+    // precedence display (env > config > default).
+    let (interaction, interaction_source) = crate::config::resolve_completion_interaction();
+    let interaction_origin = match interaction_source {
+        crate::config::CompletionInteractionSource::Env => " (NIU_COMPLETION_INTERACTION override)",
+        crate::config::CompletionInteractionSource::ConfigFile => " (persisted)",
+        crate::config::CompletionInteractionSource::Default => " (default)",
+    };
+    writeln!(
+        out,
+        "  {info} completion interact {}{interaction_origin} — change with: \
+         `niu config set completion.interaction insert|cycle` \
+         (or NIU_COMPLETION_INTERACTION)",
+        interaction.as_str()
+    )?;
+
     // ── Advisory: key bindings (niubash#630) ─────────────────────────────
     // The doctor is the standing face of the unified keymap registry:
     // the effective table itself is the help topic's job, but the

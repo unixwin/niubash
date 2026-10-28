@@ -1016,6 +1016,11 @@ fn tab_completion_empty_set_enter_still_submits() {
 /// dismissal prefix made the first Enter close the menu and run `cat
 /// m486-` (a "No such file" error); pinned for all four interactive menu
 /// styles (`column` — the default, `list`, `ide`, `inline`).
+///
+/// niubash#631: this is the *insert* interaction's contract, so the
+/// sessions pin `NIU_COMPLETION_INTERACTION=insert` — since 1.5.0 the
+/// default interaction is cycle, whose Enter accepts AND runs in one
+/// press (pinned in tests/issue631_completion_interaction.rs).
 #[test]
 fn completion_menu_enter_commits_highlighted_candidate() {
     if !require_pty_or_skip("completion_menu_enter_commits_highlighted_candidate") {
@@ -1025,7 +1030,13 @@ fn completion_menu_enter_commits_highlighted_candidate() {
         let mut s = NiuSession::spawn_custom(
             "menu-enter-486",
             &driver::default_rc(),
-            &[("NIU_COMPLETION_STYLE".to_string(), style.to_string())],
+            &[
+                ("NIU_COMPLETION_STYLE".to_string(), style.to_string()),
+                (
+                    "NIU_COMPLETION_INTERACTION".to_string(),
+                    "insert".to_string(),
+                ),
+            ],
             (120, 30),
             DEFAULT_TIMEOUT,
         );

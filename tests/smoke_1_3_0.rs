@@ -819,6 +819,11 @@ fn d2_wizard_one_run_theme_journey() {
     // pre-highlighted, so Enter keeps it (a no-op pick writes no rc line).
     s.expect("TAB completion style?");
     answer(&mut s, "\r");
+    // Q2.7 (niubash#631): TAB completion interaction — same discipline:
+    // the current effective interaction (the cycle default) is
+    // pre-highlighted, so Enter keeps it and writes no rc line.
+    s.expect("TAB completion interaction?");
+    answer(&mut s, "\r");
     // Q3 (Windows only): niu-git — asked once per lasting answer and skipped
     // entirely when the running installation already bundles niugit
     // (niubash#230: never re-offer what is already there). Whether it
@@ -1042,6 +1047,12 @@ fn d3_setup_rerun_applies_in_the_live_session() {
     // no-op pick writes no rc line). Without this answer the wizard waits
     // on the menu and the journey dead-ends at its 180s session timeout.
     s.expect("TAB completion style?");
+    answer(&mut s, "\r");
+    // Q2.7 (niubash#631): TAB completion interaction — runs on re-runs
+    // too, current effective value pre-highlighted; Enter keeps it.
+    // Without this answer the wizard waits on the menu and the journey
+    // dead-ends, exactly like the Q2.6 note above.
+    s.expect("TAB completion interaction?");
     answer(&mut s, "\r");
     // Q3 (Windows only): niu-git — the default (Skip) is highlighted.
     #[cfg(windows)]

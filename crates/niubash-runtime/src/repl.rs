@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 use std::{borrow::Cow, io::Write};
 
 use crate::autosuggest::HistoryAutosuggestHinter;
+use crate::completion::cycle_menu::SharedCycleSession;
 use crate::completion::NiubashCompleter;
 use crate::config::{
-    CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding, NativeWidgetConfig,
+    CompletionInteraction, CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding,
+    NativeWidgetConfig,
 };
 use crate::history::LiveFileBackedHistory;
 use crate::shell::Shell;
@@ -276,6 +278,25 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     crate::shell::install_completion_bridge(shell);
     let menu_config = shell_ref.menu_config;
 
+    // niubash#631: the cycle interaction's shared session cell. The
+    // CycleMenu publishes its session (pre-completion snapshot, "a
+    // candidate is in the line") into it; the edit-mode wrapper
+    // consumes it at key-translation time for the two keys a menu
+    // cannot finish itself — Esc (roll the line back to the snapshot)
+    // and Enter (accept the candidate and run). Only built when the
+    // interaction applies: `cycle` on a non-GNU style (the GNU style's
+    // literal readline interaction is inert to the axis by design).
+    let cycle_session: Option<SharedCycleSession> = if menu_config.completion_interaction
+        == CompletionInteraction::Cycle
+        && menu_config.completion_style != CompletionStyle::Gnu
+    {
+        Some(Arc::new(std::sync::Mutex::new(
+            crate::completion::cycle_menu::CycleSession::default(),
+        )))
+    } else {
+        None
+    };
+
     // The GNU completion style redraws the prompt unchanged while its list
     // is up; reedline replaces the prompt indicator with the active menu's
     // marker, so the GNU menu carries the shell's own indicator (the same
@@ -299,6 +320,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             menu_config,
             &gnu_indicator,
             menu_open.clone(),
+            cycle_session.clone(),
         ),
         completer: Box::new(completer),
     };
@@ -317,6 +339,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         &shell_ref.user_keymap_rules,
         &shell_ref.user_keymap_unbinds,
         shell_ref.engine_bind_generation,
+        menu_config.completion_interaction,
     );
     // Publish the unified keymap registry (niubash#630): this build's
     // effective table and dropped records become the one snapshot the
@@ -325,6 +348,20 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // it replaces the old per-build warning pass).
     for notice in crate::keymap_registry::publish(keymap_registry) {
         eprintln!("{notice}");
+    }
+    // niubash#631: the one-time legacy-config disclosure. An existing
+    // config.toml that never picked a completion interaction gets the
+    // new cycle default with this build — say so once, in the §8
+    // summary-line shape, with the revert command. The once-flag lives
+    // in the keymap state file (the reminder-state family, just
+    // published above), never in the user's config itself.
+    if crate::config::legacy_config_lacks_interaction_setting()
+        && crate::keymap_registry::claim_interaction_change_disclosure()
+    {
+        eprintln!(
+            "{}",
+            crate::keymap_registry::interaction_change_disclosure_line()
+        );
     }
 
     let mut editor = Reedline::create()
@@ -380,10 +417,10 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         // normally (niubash#284). Ctrl+V (PasteSystem, bound below)
         // remains the one-shot clipboard path.
         .use_bracketed_paste(cfg!(not(target_os = "windows")))
-        .with_edit_mode(Box::new(PasteChunkEditMode::new(
-            edit_mode,
-            menu_config.completion_style,
-        )));
+        .with_edit_mode(Box::new(
+            PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
+                .with_cycle_session(cycle_session),
+        ));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
         editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(
@@ -428,7 +465,24 @@ fn configured_completion_menu(
     config: MenuConfig,
     gnu_indicator: &str,
     menu_open: Arc<AtomicBool>,
+    cycle_session: Option<SharedCycleSession>,
 ) -> Box<dyn reedline::Menu> {
+    // niubash#631: under the cycle interaction the CycleMenu serves
+    // every non-GNU style — it renders its own candidate grid and
+    // splices candidates into the line itself, which no stock menu
+    // exposes the control for (see `completion::cycle_menu`). The
+    // GNU style is exempt: its interaction stays the literal readline
+    // shape whatever the axis says. Under `insert`, the per-style
+    // menus below are exactly the pre-#631 behavior.
+    if let Some(session) = cycle_session {
+        if config.completion_style != CompletionStyle::Gnu {
+            return Box::new(
+                crate::completion::cycle_menu::CycleMenu::new(session)
+                    .with_name(name)
+                    .with_menu_open_flag(menu_open),
+            );
+        }
+    }
     match config.completion_style {
         CompletionStyle::Gnu => {
             // GNU readline literal semantics (opt-in, `completion.style gnu`):
@@ -665,6 +719,7 @@ fn build_keymap_for_target(
     engine_bindings: &[crate::bind_surface::EngineBindEntry],
     user_keymap_rules: &[crate::bind_surface::EngineBindEntry],
     user_keymap_unbinds: &[(KeyModifiers, KeyCode)],
+    completion_interaction: CompletionInteraction,
 ) -> (
     Keybindings,
     Vec<crate::keymap_registry::KeymapEntry>,
@@ -673,7 +728,7 @@ fn build_keymap_for_target(
     use crate::keymap_registry::{entries_from_stacks, KeymapSource, UserBindingVia};
     let mut builder = LayeredKeymap::new(defaults);
     builder.layer(KeymapSource::HostBaseline, |keybindings| {
-        add_menu_keybindings(keybindings)
+        add_menu_keybindings(keybindings, completion_interaction)
     });
     builder.layer(KeymapSource::HostBaseline, |keybindings| {
         add_system_clipboard_keybindings(keybindings)
@@ -761,6 +816,7 @@ fn build_edit_mode(
     user_keymap_rules: &[crate::bind_surface::EngineBindEntry],
     user_keymap_unbinds: &[(KeyModifiers, KeyCode)],
     engine_bind_generation: u64,
+    completion_interaction: CompletionInteraction,
 ) -> (Box<dyn EditMode>, crate::keymap_registry::KeymapRegistry) {
     use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
@@ -775,6 +831,7 @@ fn build_edit_mode(
                 engine_bindings,
                 user_keymap_rules,
                 user_keymap_unbinds,
+                completion_interaction,
             );
             (
                 Box::new(Emacs::new(keybindings)),
@@ -797,6 +854,7 @@ fn build_edit_mode(
                 engine_bindings,
                 user_keymap_rules,
                 user_keymap_unbinds,
+                completion_interaction,
             );
             let (normal_keybindings, normal_entries, normal_dropped) = build_keymap_for_target(
                 default_vi_normal_keybindings(),
@@ -808,6 +866,7 @@ fn build_edit_mode(
                 engine_bindings,
                 user_keymap_rules,
                 user_keymap_unbinds,
+                completion_interaction,
             );
             entries.extend(normal_entries);
             for bind in normal_dropped {
@@ -964,6 +1023,17 @@ struct PasteChunkEditMode {
     /// into the editable line — the 1.1.0 behavior niubash#486 restores —
     /// and a second Enter submits.
     enter_dismisses_menu: bool,
+    /// niubash#631: the cycle interaction's shared session cell, when
+    /// this editor was built for `completion.interaction = cycle` on a
+    /// non-GNU style. The CycleMenu publishes its session (snapshot +
+    /// spliced flag) there; this wrapper consumes it in
+    /// [`Self::delegate`] for the keys a menu cannot finish itself:
+    /// Esc rolls the line back to the snapshot, an Enter inside a live
+    /// session accepts the candidate in the line and submits in the
+    /// same press, and any other edit key ends the session as
+    /// accepted-in-place. `None` under `insert` and for the GNU style
+    /// — every #631 path is inert then.
+    cycle_session: Option<SharedCycleSession>,
     /// niubash#420: put probe-consumed events BACK into the input stream.
     /// The live console cannot unread, so the events are written back into
     /// the kernel input queue (`WriteConsoleInputW`, the #417 reinjection
@@ -1224,6 +1294,62 @@ impl PasteChunkEditMode {
         )
     }
 
+    /// Attach the cycle interaction's shared session cell
+    /// (niubash#631) — see the `cycle_session` field.
+    fn with_cycle_session(mut self, cycle_session: Option<SharedCycleSession>) -> Self {
+        self.cycle_session = cycle_session;
+        self
+    }
+
+    /// Whether the attached cycle session is live right now.
+    fn cycle_session_open(&self) -> bool {
+        self.cycle_session
+            .as_ref()
+            .and_then(|session| session.lock().ok())
+            .is_some_and(|state| state.is_open())
+    }
+
+    /// niubash#631: the navigation splice for a TAB (`delta` +1) or
+    /// Shift-TAB (-1) inside a live cycle session, as the edit batch
+    /// that replaces the current candidate with the next one
+    /// (wrap-around). Issued HERE, at key-translation time, because
+    /// the menu cannot: a menu-side splice runs at paint time in
+    /// `update_working_details`, and the painter composes the frame's
+    /// input line before that hook — the line would lag the grid's
+    /// highlight by a full paint on every TAB. The batch is the
+    /// rollback's proven whole-line shape (Clear + InsertString +
+    /// MoveToPosition): mid-session the buffer is always the snapshot
+    /// with its span replaced by the current candidate, so the next
+    /// buffer is a pure string computation over the shared cell,
+    /// which this also advances (index, region, nav_seq — the menu
+    /// consumes one nav_seq per Edit echo the engine reports back).
+    /// `None` when no live session can navigate (the key then takes
+    /// its normal translation: TAB #1 opens the menu through the
+    /// bindings, and the menu begins the session itself).
+    fn cycle_navigation_edits(&self, delta: isize) -> Option<Vec<EditCommand>> {
+        let session = self.cycle_session.as_ref()?;
+        let mut state = session.lock().ok()?;
+        if !state.is_open() || state.candidates.len() < 2 {
+            return None;
+        }
+        let snapshot = state.snapshot.clone()?;
+        let len = state.candidates.len() as isize;
+        state.index = (state.index as isize + delta).rem_euclid(len) as usize;
+        let text = state.candidates[state.index].splice_text();
+        let (start, span_end) = state.span;
+        let mut new_buffer = String::with_capacity(snapshot.buffer.len() + text.len());
+        new_buffer.push_str(&snapshot.buffer[..start]);
+        new_buffer.push_str(&text);
+        new_buffer.push_str(&snapshot.buffer[span_end..]);
+        state.region = (start, start + text.len());
+        state.nav_seq += 1;
+        state.spliced = true;
+        Some(crate::completion::cycle_menu::whole_line_edits(
+            &new_buffer,
+            start + text.len(),
+        ))
+    }
+
     /// The test constructor: a scripted lookahead queue in place of the
     /// live console queue. The requeue pushes FRONT — the same head slot
     /// the production face guarantees by draining the pending tail and
@@ -1267,6 +1393,7 @@ impl PasteChunkEditMode {
             lookahead,
             menu_possible: false,
             enter_dismisses_menu: matches!(completion_style, CompletionStyle::Gnu),
+            cycle_session: None,
             unread,
         }
     }
@@ -1699,6 +1826,100 @@ impl PasteChunkEditMode {
 
     /// Hand the raw event to the wrapped edit mode unchanged.
     fn delegate(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
+        // niubash#631: a TAB / Shift-TAB inside a live cycle session
+        // IS the navigation splice, issued here at translation time
+        // (see `cycle_navigation_edits`) — the key never reaches the
+        // menu bindings, whose MenuNext the menu could only apply at
+        // paint time, one frame behind the grid's highlight. With no
+        // live session the key falls through to its normal
+        // translation (TAB #1 opens the menu through the bindings).
+        if let crossterm29::event::Event::Key(key) = &raw {
+            if key.kind == crossterm29::event::KeyEventKind::Press {
+                let delta = match (key.code, key.modifiers) {
+                    (crossterm29::event::KeyCode::Tab, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some(1)
+                    }
+                    (crossterm29::event::KeyCode::BackTab, _) => Some(-1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    if let Some(edits) = self.cycle_navigation_edits(delta) {
+                        self.menu_possible = true;
+                        return ReedlineEvent::Edit(edits);
+                    }
+                }
+            }
+        }
+        // niubash#631: classify the raw key against a live cycle
+        // session BEFORE anything else translates it. This wrapper is
+        // the only component that sees raw keys synchronously — the
+        // CycleMenu learns of a key a paint later — so the session's
+        // end states are decided here: deciding them in the menu would
+        // let an Esc in the same key burst be translated before the
+        // menu knew the session had been edited or rolled back.
+        // Navigation keys (TAB / Shift-TAB) leave the session to the
+        // menu; Enter is decided with the submit shape below; a bare
+        // Esc consumes the session and (when a candidate was spliced)
+        // arms the rollback edits; every other editing key ends the
+        // session as accepted-in-place. Only key presses and pastes
+        // classify — non-key events (ConPTY's focus flicker rides this
+        // path between real keys) and key releases leave the session
+        // untouched.
+        let mut cycle_rollback: Option<Vec<EditCommand>> = None;
+        if let Some(session) = &self.cycle_session {
+            enum CycleKey {
+                Navigate,
+                Accept,
+                Rollback,
+                EndSession,
+                Ignore,
+            }
+            let classification = match &raw {
+                crossterm29::event::Event::Key(key)
+                    if key.kind == crossterm29::event::KeyEventKind::Press =>
+                {
+                    match (key.code, key.modifiers) {
+                        (crossterm29::event::KeyCode::Tab, modifiers)
+                            if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                        {
+                            CycleKey::Navigate
+                        }
+                        (crossterm29::event::KeyCode::BackTab, _) => CycleKey::Navigate,
+                        (crossterm29::event::KeyCode::Esc, modifiers)
+                            if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                        {
+                            CycleKey::Rollback
+                        }
+                        (crossterm29::event::KeyCode::Enter, modifiers)
+                            if !modifiers.contains(crossterm29::event::KeyModifiers::CONTROL) =>
+                        {
+                            CycleKey::Accept
+                        }
+                        _ => CycleKey::EndSession,
+                    }
+                }
+                crossterm29::event::Event::Paste(_) => CycleKey::EndSession,
+                _ => CycleKey::Ignore,
+            };
+            match classification {
+                CycleKey::Rollback => {
+                    if let Ok(mut state) = session.lock() {
+                        if let Some(snapshot) = state.take_rollback() {
+                            cycle_rollback =
+                                Some(crate::completion::cycle_menu::rollback_edits(&snapshot));
+                        }
+                    }
+                }
+                CycleKey::EndSession => {
+                    if let Ok(mut state) = session.lock() {
+                        state.end_if_open();
+                    }
+                }
+                CycleKey::Navigate | CycleKey::Accept | CycleKey::Ignore => {}
+            }
+        }
         // Track the menu window (niubash#373) for every key that actually
         // dispatches — a TAB may leave the completion menu alive, a CONTROL
         // chord hands the next Enter to a verb (history search, cancel,
@@ -1773,6 +1994,43 @@ impl PasteChunkEditMode {
                 ReedlineEvent::Enter => events.push(ReedlineEvent::Enter),
                 ReedlineEvent::Multiple(rest) => events.extend(rest),
                 _ => unreachable!("checked above"),
+            }
+            return ReedlineEvent::Multiple(events);
+        }
+        // niubash#631: under the cycle interaction, an Enter inside a
+        // live session accepts the candidate already in the line AND
+        // runs the command in the same press (DESIGN §7.2) — a
+        // `MenuAccept` rides ahead of the submit: the engine's accept
+        // closes the menu over the spliced candidate (the CycleMenu's
+        // `replace_in_buffer` is a no-op; the text is already there)
+        // and the Enter then submits the accepted line. A bare Enter
+        // would die in the engine's first-refusal instead (the #486
+        // two-Enter shape, which is the *insert* interaction's
+        // contract, not cycle's). The gates mirror the GNU wrap above:
+        // `submit_carries_enter` + `enter_press` + the TAB window keep
+        // the `Multiple` out of Ctrl+R search, and the live-session
+        // check keeps every non-completion submit byte-identical
+        // (`MenuAccept` is inapplicable without an open menu, but the
+        // wrap itself must not exist outside a session).
+        if submit_carries_enter && enter_press && self.menu_possible && self.cycle_session_open() {
+            self.menu_possible = false;
+            let mut events = vec![ReedlineEvent::MenuAccept];
+            match translated {
+                ReedlineEvent::Enter => events.push(ReedlineEvent::Enter),
+                ReedlineEvent::Multiple(rest) => events.extend(rest),
+                _ => unreachable!("checked above"),
+            }
+            return ReedlineEvent::Multiple(events);
+        }
+        // niubash#631: an Esc that consumed a spliced cycle session
+        // carries the rollback edits ahead of its own translation, so
+        // the pre-completion line is restored in the same engine batch
+        // that closes the menu, restore first.
+        if let Some(edits) = cycle_rollback {
+            let mut events = vec![ReedlineEvent::Edit(edits)];
+            match translated {
+                ReedlineEvent::Multiple(rest) => events.extend(rest),
+                other => events.push(other),
             }
             return ReedlineEvent::Multiple(events);
         }
@@ -2098,15 +2356,31 @@ pub(crate) fn char_offset_to_byte(buffer: &str, chars: usize) -> usize {
         .unwrap_or(buffer.len())
 }
 
-fn add_menu_keybindings(keybindings: &mut Keybindings) {
-    keybindings.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
+fn add_menu_keybindings(
+    keybindings: &mut Keybindings,
+    completion_interaction: CompletionInteraction,
+) {
+    // niubash#631: TAB's shape follows the interaction axis. Under
+    // `insert` it is the pre-#631 binding: open the menu, falling back
+    // to the engine's own `Complete` edit when no menu takes it. Under
+    // `cycle`, TAB is the cycle key: while the CycleMenu is open it is
+    // `MenuNext` (advance + splice the next candidate); with no menu
+    // open `MenuNext` is inapplicable and the `UntilFound` falls
+    // through to opening the menu, whose activation splices the first
+    // candidate. The `Edit(Complete)` fallback is insert-only — under
+    // cycle it would splice the common prefix behind the menu's back
+    // and desync the frozen candidate set.
+    let tab_event = match completion_interaction {
+        CompletionInteraction::Insert => ReedlineEvent::UntilFound(vec![
             ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
             ReedlineEvent::Edit(vec![EditCommand::Complete]),
         ]),
-    );
+        CompletionInteraction::Cycle => ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::MenuNext,
+            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+        ]),
+    };
+    keybindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, tab_event);
     keybindings.add_binding(
         KeyModifiers::SHIFT,
         KeyCode::BackTab,
@@ -3676,7 +3950,7 @@ mod tests {
     #[test]
     fn emacs_keybindings_keep_ctrl_r_history_search_and_tab_completion() {
         let mut keybindings = default_emacs_keybindings();
-        add_menu_keybindings(&mut keybindings);
+        add_menu_keybindings(&mut keybindings, CompletionInteraction::Insert);
         assert_eq!(
             keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
             Some(ReedlineEvent::SearchHistory)
@@ -3743,6 +4017,7 @@ mod tests {
                 history_page_size: 7,
                 max_entry_lines: 3,
                 completion_style: CompletionStyle::default(),
+                completion_interaction: CompletionInteraction::Insert,
             },
         );
 
@@ -3915,8 +4190,8 @@ mod tests {
     fn vi_keybindings_keep_ctrl_r_history_search_and_tab_completion() {
         let mut insert = default_vi_insert_keybindings();
         let mut normal = default_vi_normal_keybindings();
-        add_menu_keybindings(&mut insert);
-        add_menu_keybindings(&mut normal);
+        add_menu_keybindings(&mut insert, CompletionInteraction::Insert);
+        add_menu_keybindings(&mut normal, CompletionInteraction::Insert);
 
         for keybindings in [insert, normal] {
             assert_eq!(
@@ -4750,7 +5025,7 @@ mod tests {
         ] {
             // The pre-registry build order, verbatim.
             let mut legacy = defaults.clone();
-            add_menu_keybindings(&mut legacy);
+            add_menu_keybindings(&mut legacy, CompletionInteraction::Insert);
             add_system_clipboard_keybindings(&mut legacy);
             add_native_widget_keybindings(&mut legacy, target, &config, &bundle);
             add_bundle_widget_keybindings(&mut legacy, target, &config, &bundle);
@@ -4767,6 +5042,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                CompletionInteraction::Insert,
             );
             assert_eq!(
                 built.get_keybindings(),
@@ -4809,6 +5085,7 @@ mod tests {
             &engine,
             &[],
             &[],
+            CompletionInteraction::Insert,
         );
         assert!(dropped.is_empty());
         assert_eq!(
@@ -4899,6 +5176,7 @@ mod tests {
             &engine,
             &[],
             &[],
+            CompletionInteraction::Insert,
         );
         let shapes: Vec<(&str, DroppedReason)> = dropped
             .iter()
@@ -5034,6 +5312,7 @@ mod tests {
             &engine,
             &rules,
             &[],
+            CompletionInteraction::Insert,
         );
         assert!(dropped.is_empty());
         assert_eq!(
@@ -5094,6 +5373,7 @@ mod tests {
             &engine,
             &[],
             &[],
+            CompletionInteraction::Insert,
         );
         assert_eq!(dropped.len(), 2, "both script shapes are unrescuable");
         assert_eq!(
@@ -5113,6 +5393,7 @@ mod tests {
             &engine,
             &rules,
             &[],
+            CompletionInteraction::Insert,
         );
         assert_eq!(
             built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
@@ -5166,6 +5447,7 @@ mod tests {
             &engine,
             &rules,
             &[],
+            CompletionInteraction::Insert,
         );
         assert!(dropped.is_empty());
         assert_eq!(
@@ -5214,6 +5496,7 @@ mod tests {
                 engine,
                 &rules,
                 &[],
+                CompletionInteraction::Insert,
             )
         };
         let (built, _entries, _dropped) = build(&[execute(r"\C-g", "first-widget")]);
@@ -5286,6 +5569,7 @@ mod tests {
             &engine,
             &[],
             &unbinds,
+            CompletionInteraction::Insert,
         );
         assert!(dropped.is_empty());
         for (modifiers, code) in [
@@ -5330,6 +5614,7 @@ mod tests {
             &[],
             &rules,
             &[],
+            CompletionInteraction::Insert,
         );
         let shapes: Vec<(&str, DroppedReason)> = dropped
             .iter()
@@ -6784,5 +7069,230 @@ mod tests {
                 "the follow-up submit stays bare ({completion_style:?}): {event:?}"
             );
         }
+    }
+
+    /// niubash#631: a detector carrying a cycle session cell, plus the
+    /// cell itself so a test can publish the session state the
+    /// CycleMenu would have published.
+    fn cycle_detector() -> (PasteChunkEditMode, SharedCycleSession) {
+        let (detector, _queue) =
+            paste_detector_and_queue_for_style(Vec::new(), CompletionStyle::Column);
+        let session: SharedCycleSession = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::completion::cycle_menu::CycleSession::default(),
+        ));
+        (detector.with_cycle_session(Some(session.clone())), session)
+    }
+
+    /// Publish a live, spliced cycle session over the line `git ch`
+    /// (the state the CycleMenu leaves after TAB #1 on `git ch`).
+    fn arm_cycle_session(session: &SharedCycleSession, spliced: bool) {
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "git ch".to_string(),
+            cursor: 6,
+        });
+        state.spliced = spliced;
+    }
+
+    fn esc() -> ReedlineRawEvent {
+        paste_key(
+            crossterm29::event::KeyCode::Esc,
+            crossterm29::event::KeyModifiers::NONE,
+        )
+    }
+
+    #[test]
+    fn issue631_tab_binding_shape_follows_the_interaction_axis() {
+        // insert: the pre-#631 binding, byte for byte — open the menu,
+        // falling back to the engine's Complete edit.
+        let mut insert_map = default_emacs_keybindings();
+        add_menu_keybindings(&mut insert_map, CompletionInteraction::Insert);
+        assert_eq!(
+            insert_map.find_binding(KeyModifiers::NONE, KeyCode::Tab),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+                ReedlineEvent::Edit(vec![EditCommand::Complete]),
+            ]))
+        );
+        // cycle: TAB is MenuNext first (advance an open menu), falling
+        // through to opening the menu when none is open.
+        let mut cycle_map = default_emacs_keybindings();
+        add_menu_keybindings(&mut cycle_map, CompletionInteraction::Cycle);
+        assert_eq!(
+            cycle_map.find_binding(KeyModifiers::NONE, KeyCode::Tab),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuNext,
+                ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+            ]))
+        );
+        // Shift-TAB navigates backwards under both interactions.
+        for map in [insert_map, cycle_map] {
+            assert_eq!(
+                map.find_binding(KeyModifiers::SHIFT, KeyCode::BackTab),
+                Some(ReedlineEvent::MenuPrevious)
+            );
+        }
+    }
+
+    #[test]
+    fn issue631_wrapper_esc_rolls_back_a_spliced_cycle_session() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, true);
+        detector.parse_event(tab());
+        let event = detector.parse_event(esc());
+        match &event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(events.len(), 2, "{event:?}");
+                // Restore first, then the Esc that closes the menu.
+                assert_eq!(
+                    events[0],
+                    ReedlineEvent::Edit(crate::completion::cycle_menu::rollback_edits(
+                        &crate::completion::cycle_menu::CycleSnapshot {
+                            buffer: "git ch".to_string(),
+                            cursor: 6,
+                        },
+                    ))
+                );
+                assert!(matches!(&events[1], ReedlineEvent::Esc));
+            }
+            other => panic!("expected rollback + Esc, got {other:?}"),
+        }
+        // The session was consumed: no second rollback can fire.
+        assert!(!session.lock().unwrap().is_open());
+    }
+
+    #[test]
+    fn issue631_wrapper_esc_without_a_splice_stays_a_plain_esc() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, false);
+        detector.parse_event(tab());
+        let event = detector.parse_event(esc());
+        assert!(
+            matches!(event, ReedlineEvent::Esc),
+            "nothing was spliced, so nothing rolls back: {event:?}"
+        );
+        assert!(!session.lock().unwrap().is_open());
+    }
+
+    #[test]
+    fn issue631_wrapper_enter_accepts_and_submits_inside_a_live_cycle_session() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, true);
+        detector.parse_event(tab());
+        let event = detector.parse_event(cr());
+        match &event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(events.len(), 2, "{event:?}");
+                assert!(matches!(&events[0], ReedlineEvent::MenuAccept));
+                assert!(matches!(&events[1], ReedlineEvent::Enter));
+            }
+            other => panic!("expected accept + submit, got {other:?}"),
+        }
+
+        // No live session (cell attached but closed): the Enter stays
+        // bare — the #486 first-refusal shape decides, not a wrap.
+        let (mut detector, session) = cycle_detector();
+        assert!(!session.lock().unwrap().is_open());
+        detector.parse_event(tab());
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "no live cycle session, no accept wrap: {event:?}"
+        );
+    }
+
+    /// Publish a live cycle session the way the CycleMenu leaves it
+    /// after TAB #1 on `git ch`: candidates frozen, candidate 1 in
+    /// the line (region 4..12), snapshot span 4..6.
+    fn arm_cycle_session_with_candidates(session: &SharedCycleSession) {
+        use crate::completion::cycle_menu::CycleCandidate;
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "git ch".to_string(),
+            cursor: 6,
+        });
+        state.spliced = true;
+        state.candidates = vec![
+            CycleCandidate {
+                value: "checkout".to_string(),
+                append_whitespace: false,
+            },
+            CycleCandidate {
+                value: "cherry".to_string(),
+                append_whitespace: false,
+            },
+        ];
+        state.span = (4, 6);
+        state.index = 0;
+        state.region = (4, 12);
+        state.nav_seq = 0;
+    }
+
+    #[test]
+    fn issue631_wrapper_tab_issues_the_navigation_splice_itself() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_candidates(&session);
+
+        // TAB: the wrapper returns the whole-line splice to candidate
+        // 2 directly — no MenuNext reaches the bindings, so the line
+        // and the grid highlight can never sit a paint apart.
+        let event = detector.parse_event(tab());
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        {
+            let state = session.lock().unwrap();
+            assert_eq!(state.index, 1);
+            assert_eq!(state.region, (4, 10));
+            assert_eq!(state.nav_seq, 1);
+        }
+        // TAB again wraps to candidate 1; Shift-TAB wraps back.
+        let event = detector.parse_event(tab());
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git checkout",
+                12,
+            ))
+        );
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::BackTab,
+            crossterm29::event::KeyModifiers::SHIFT,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        let state = session.lock().unwrap();
+        assert_eq!(state.index, 1);
+        assert_eq!(state.nav_seq, 3);
+    }
+
+    #[test]
+    fn issue631_wrapper_edit_key_ends_the_cycle_session_as_accepted() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, true);
+        // A plain character is an edit on the spliced candidate: the
+        // session ends (accepted in place) at translation time, so a
+        // following Esc is a plain menu-close Esc with no rollback.
+        detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Char('x'),
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert!(!session.lock().unwrap().is_open());
+        let event = detector.parse_event(esc());
+        assert!(
+            matches!(event, ReedlineEvent::Esc),
+            "the accepted session leaves nothing to roll back: {event:?}"
+        );
     }
 }

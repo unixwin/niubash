@@ -3548,9 +3548,11 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `niu config` — persisted user settings (`~/.niubash/config.toml`, the
-/// mirrors.toml convention). Deliberately tiny: one flat file, three settings
-/// (the niubash#249 command-not-found hint policy, since 1.4.1 the
-/// `completion.style` TAB shape, and niubash#359's `startup.rc-policy`).
+/// mirrors.toml convention). Deliberately tiny: one flat file, a handful
+/// of settings (the niubash#249 command-not-found hint policy, since
+/// 1.4.1 the `completion.style` TAB shape, niubash#359's
+/// `startup.rc-policy`, the niubash#630 keymap rules, and — niubash#631 —
+/// the `completion.interaction` axis beside the style).
 /// Any read problem degrades to the default in the runtime; `get`/`list`
 /// surface values as resolved (file, overridden by the `NIU_` env variable).
 /// `startup.rc-policy` is displayed but owned by `niu setup --rc-policy` —
@@ -3586,9 +3588,11 @@ fn run_help_command(args: &[String]) -> anyhow::Result<()> {
 fn run_config_command(args: &[String]) -> anyhow::Result<()> {
     use niubash_runtime::config::{
         add_keymap_bind_rule, add_keymap_unbind_rule, resolve_command_not_found_hint,
-        resolve_completion_style, resolve_keymap_rule_specs, resolve_rc_policy,
-        set_command_not_found_hint, set_completion_style, user_config_path, CommandNotFoundHint,
-        CompletionStyle, CompletionStyleSource, COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_STYLE_KEY,
+        resolve_completion_interaction, resolve_completion_style, resolve_keymap_rule_specs,
+        resolve_rc_policy, set_command_not_found_hint, set_completion_interaction,
+        set_completion_style, user_config_path, CommandNotFoundHint, CompletionInteraction,
+        CompletionInteractionSource, CompletionStyle, CompletionStyleSource,
+        COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_INTERACTION_KEY, COMPLETION_STYLE_KEY,
         KEYMAP_BIND_KEY, KEYMAP_UNBIND_KEY, RC_POLICY_KEY,
     };
     // One line describing where the effective completion style came from —
@@ -3601,6 +3605,22 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
             CompletionStyleSource::Default => " (built-in default)",
         };
         println!("{COMPLETION_STYLE_KEY} = {}{origin}", style.as_str());
+    }
+    // The interaction axis (niubash#631) prints the same outcome line —
+    // the two axes resolve on the same precedence chain.
+    fn print_completion_interaction_outcome(
+        interaction: CompletionInteraction,
+        source: CompletionInteractionSource,
+    ) {
+        let origin = match source {
+            CompletionInteractionSource::Env => " (NIU_COMPLETION_INTERACTION overrides the file)",
+            CompletionInteractionSource::ConfigFile => " (persisted)",
+            CompletionInteractionSource::Default => " (built-in default)",
+        };
+        println!(
+            "{COMPLETION_INTERACTION_KEY} = {}{origin}",
+            interaction.as_str()
+        );
     }
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
@@ -3617,6 +3637,11 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
             println!("  {COMPLETION_STYLE_KEY} = {}", style.as_str());
             if source == CompletionStyleSource::Env {
                 println!("    (overridden by NIU_COMPLETION_STYLE)");
+            }
+            let (interaction, interaction_source) = resolve_completion_interaction();
+            println!("  {COMPLETION_INTERACTION_KEY} = {}", interaction.as_str());
+            if interaction_source == CompletionInteractionSource::Env {
+                println!("    (overridden by NIU_COMPLETION_INTERACTION)");
             }
             println!("  {RC_POLICY_KEY} = {}", resolve_rc_policy().as_str());
             println!("    (owned by `niu setup --rc-policy`; `niu config` preserves it)");
@@ -3642,6 +3667,10 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                 }
                 COMPLETION_STYLE_KEY => {
                     println!("{}", resolve_completion_style().0.as_str());
+                    Ok(())
+                }
+                COMPLETION_INTERACTION_KEY => {
+                    println!("{}", resolve_completion_interaction().0.as_str());
                     Ok(())
                 }
                 RC_POLICY_KEY => {
@@ -3749,6 +3778,36 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                     print_completion_style_outcome(effective, source);
                     Ok(())
                 }
+                COMPLETION_INTERACTION_KEY => {
+                    let Some(interaction) = CompletionInteraction::parse(value) else {
+                        anyhow::bail!(
+                            "invalid value '{value}' for {COMPLETION_INTERACTION_KEY}: expected insert or cycle"
+                        )
+                    };
+                    set_completion_interaction(interaction)?;
+                    println!(
+                        "{} {COMPLETION_INTERACTION_KEY} = {}",
+                        niubash_runtime::text_style::green("Set:"),
+                        interaction.as_str()
+                    );
+                    match interaction {
+                        CompletionInteraction::Cycle => println!(
+                            "  TAB cycles candidates into the line; Enter accepts and runs, Esc rolls back"
+                        ),
+                        CompletionInteraction::Insert => println!(
+                            "  TAB completes the common prefix and opens the menu; Enter confirms the pick"
+                        ),
+                    }
+                    // Same env-outranks-file note as the style axis.
+                    let (effective, source) = resolve_completion_interaction();
+                    if source == CompletionInteractionSource::Env {
+                        println!(
+                            "  note: NIU_COMPLETION_INTERACTION is set in this environment and wins:"
+                        );
+                    }
+                    print_completion_interaction_outcome(effective, source);
+                    Ok(())
+                }
                 KEYMAP_BIND_KEY => {
                     // niubash#630: the value is ONE bind argument
                     // string; it is validated by the loader's parser
@@ -3815,6 +3874,18 @@ fn print_config_usage() {
     println!("      Alternatives: gnu (GNU readline literal), ide (VS Code popup),");
     println!("      list (fish vertical), inline (bash menu-complete).");
     println!("      NIU_COMPLETION_STYLE overrides this file.");
+    println!();
+    println!(
+        "  {k}",
+        k = niubash_runtime::config::COMPLETION_INTERACTION_KEY
+    );
+    println!("      How TAB drives the line while candidates are shown");
+    println!("      (niubash#631). cycle (default) — TAB puts candidates into");
+    println!("      the line one at a time, Enter accepts and runs, Esc rolls");
+    println!("      back to the pre-completion line. insert — the pre-#631");
+    println!("      behavior: TAB completes the common prefix, Enter confirms");
+    println!("      the menu's pick. The gnu style ignores this axis.");
+    println!("      NIU_COMPLETION_INTERACTION overrides this file.");
     println!();
     println!("  {k}", k = niubash_runtime::config::RC_POLICY_KEY);
     println!("      Personal-rc selection for interactive shells. primary-only");

@@ -479,6 +479,9 @@ pub struct WizardConfig {
     pub theme_source_id: Option<String>,
     pub cwd_style: String,
     pub completion_style: String,
+    /// The Q2.7 pick (niubash#631): the `NIU_COMPLETION_INTERACTION`
+    /// value; empty means no override, like `completion_style`.
+    pub completion_interaction: String,
     /// Extra `alias name='cmd'` lines appended to the generated rc.
     pub aliases: Vec<(String, String)>,
     /// Opt-in (default off): append the standard carapace-bin integration
@@ -1250,6 +1253,20 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     let current_completion_style = crate::config::resolve_completion_style().0;
     let completion_style_pick = ask!(ask_completion_style(&mut io, &t, current_completion_style));
 
+    // --- Q2.7: TAB completion interaction (niubash#631) ---
+    // The interaction axis joined the style axis in 1.5.0 with a new
+    // default (cycle), so it gets the same discovery discipline as
+    // Q2.6: asked on first install AND on every `niu setup` re-run,
+    // the current effective value pre-highlighted, written only when
+    // the pick differs. The question names the axis in one line apart
+    // from Q2.6's shape question, per the ruling.
+    let current_completion_interaction = crate::config::resolve_completion_interaction().0;
+    let completion_interaction_pick = ask!(ask_completion_interaction(
+        &mut io,
+        &t,
+        current_completion_interaction
+    ));
+
     // --- Q3: niu-git, offered once (never auto-installed, never nagged) ---
     // Windows-only question: niu-git is Windows-native git, and Linux/macOS
     // users already have native git. niu installs nothing itself (download
@@ -1285,6 +1302,9 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // untouched so the runtime default can keep evolving.
     if completion_style_pick != current_completion_style.as_str() {
         cfg.completion_style = completion_style_pick;
+    }
+    if completion_interaction_pick != current_completion_interaction.as_str() {
+        cfg.completion_interaction = completion_interaction_pick;
     }
     cfg.external_completion_snippet = external_completions;
     print_config_summary(
@@ -1956,6 +1976,49 @@ fn ask_completion_style(
     Some(entries[idx].1.to_string())
 }
 
+/// The TAB completion interaction question (niubash#631, Q2.7 — asked
+/// immediately after Q2.6). Where Q2.6 asks how the candidates *look*,
+/// this asks what TAB *does* with the line; each entry is described by
+/// the observable TAB/Enter/Esc behavior so the axis is legible in one
+/// line, distinct from the style question. The user's current
+/// effective interaction is pre-highlighted, exactly like Q2.6.
+/// `None` = Ctrl-C.
+fn ask_completion_interaction(
+    io: &mut WizardIo,
+    t: &Lang,
+    current: crate::config::CompletionInteraction,
+) -> Option<String> {
+    use crate::config::CompletionInteraction;
+    let entries = [
+        (
+            CompletionInteraction::Cycle,
+            "cycle",
+            t.tr("default — TAB cycles candidates into the line, Enter accepts and runs, Esc rolls back"),
+        ),
+        (
+            CompletionInteraction::Insert,
+            "insert",
+            t.tr("TAB completes the prefix and opens the menu, Enter confirms the pick, Esc keeps the text"),
+        ),
+    ];
+    let default_idx = entries
+        .iter()
+        .position(|(interaction, _, _)| *interaction == current)
+        .unwrap_or(0);
+    let options: Vec<String> = entries
+        .iter()
+        .map(|(_, name, description)| format!("{}  {}", pad_display(name, 10), description))
+        .collect();
+    let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let idx = io.choice(
+        t.tr("  \u{2328}\u{fe0f}  TAB completion interaction?"),
+        default_idx,
+        &option_refs,
+        t.tr("  |  change any time with `niu config set completion.interaction <name>` or NIU_COMPLETION_INTERACTION"),
+    )?; // cancelled
+    Some(entries[idx].1.to_string())
+}
+
 /// The recorded niu-git answer, when the user gave a lasting one ("never",
 /// "recommended" after a pick, or "installed" when the release bundle
 /// already ships niu-git). While `None` the wizard may
@@ -2395,6 +2458,12 @@ fn generate_rc(cfg: &WizardConfig) -> String {
         header.push_str(&format!(
             "NIU_COMPLETION_STYLE={}\n",
             shell_quote(cfg.completion_style.as_str())
+        ));
+    }
+    if !cfg.completion_interaction.is_empty() {
+        header.push_str(&format!(
+            "NIU_COMPLETION_INTERACTION={}\n",
+            shell_quote(cfg.completion_interaction.as_str())
         ));
     }
     let alias_block = if cfg.aliases.is_empty() {
@@ -3274,6 +3343,102 @@ mod tests {
         cfg.completion_style = "ide".into();
         let rc = generate_rc(&cfg);
         assert!(rc.contains("NIU_COMPLETION_STYLE='ide'"), "{rc}");
+    }
+
+    /// The interaction step (niubash#631, Q2.7) pre-highlights the
+    /// user's current effective interaction exactly like Q2.6 does for
+    /// the style: Enter means "no change", the other row is a
+    /// deliberate move, and a non-interactive run answers the current
+    /// value so a piped `niu setup` never flips the axis.
+    #[test]
+    fn issue631_completion_interaction_step_preselects_the_effective_interaction() {
+        use crate::config::CompletionInteraction;
+        // Row 0 is cycle: with current=cycle, row 0 keeps it.
+        let mut io = WizardIo::scripted(&[0]);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).unwrap();
+        assert_eq!(pick, "cycle");
+        // With current=insert, row 0 is the user explicitly moving to cycle.
+        let mut io = WizardIo::scripted(&[0]);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Insert).unwrap();
+        assert_eq!(pick, "cycle");
+        // Row 1 is insert.
+        let mut io = WizardIo::scripted(&[1]);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).unwrap();
+        assert_eq!(pick, "insert");
+        // Non-interactive io answers the default — the current value.
+        let mut io = WizardIo::new(false);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Insert).unwrap();
+        assert_eq!(pick, "insert");
+        // Ctrl-C cancels.
+        let mut io = WizardIo::scripted(&[usize::MAX]);
+        assert!(
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).is_none()
+        );
+    }
+
+    /// The Q2.7 write path is the same rule as Q2.6's: a differing pick
+    /// lands in the rc as the env-layer line of the one resolve chain
+    /// (DESIGN §7.6 — the wizard writes env, `niu config set` writes
+    /// config.toml, one resolve reads both); keeping the effective
+    /// value writes nothing.
+    #[test]
+    fn issue631_completion_interaction_pick_lands_in_the_rc_only_when_it_differs() {
+        let mut cfg = build_config(&ThemePick::Keep);
+        assert!(
+            cfg.completion_interaction.is_empty(),
+            "a fresh wizard config carries no interaction override"
+        );
+        assert!(
+            !generate_rc(&cfg).contains("NIU_COMPLETION_INTERACTION="),
+            "no rc line without an override: {}",
+            generate_rc(&cfg)
+        );
+
+        // The user moved off the effective interaction: the rc line appears.
+        cfg.completion_interaction = "insert".into();
+        let rc = generate_rc(&cfg);
+        assert!(rc.contains("NIU_COMPLETION_INTERACTION='insert'"), "{rc}");
+    }
+
+    /// The rc line the wizard writes is read back by the interaction
+    /// resolver as an env-layer value (DESIGN §9 K5's readback pin):
+    /// wizard write → rc → shell env → resolve, one chain.
+    #[test]
+    fn issue631_wizard_rc_line_reads_back_through_the_resolver_as_env() {
+        use crate::config::{
+            resolve_completion_interaction, CompletionInteraction, CompletionInteractionSource,
+        };
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous_config = std::env::var_os("NIU_CONFIG");
+        let previous_interaction = std::env::var_os("NIU_COMPLETION_INTERACTION");
+        // No config file in play: only the wizard's env line speaks.
+        std::env::set_var(
+            "NIU_CONFIG",
+            std::env::temp_dir().join("niu-wizard-readback-absent-config.toml"),
+        );
+        std::env::set_var("NIU_COMPLETION_INTERACTION", "insert");
+        let resolved = resolve_completion_interaction();
+        match previous_config {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        match previous_interaction {
+            Some(value) => std::env::set_var("NIU_COMPLETION_INTERACTION", value),
+            None => std::env::remove_var("NIU_COMPLETION_INTERACTION"),
+        }
+        assert_eq!(
+            resolved,
+            (
+                CompletionInteraction::Insert,
+                CompletionInteractionSource::Env
+            )
+        );
     }
 
     #[test]
