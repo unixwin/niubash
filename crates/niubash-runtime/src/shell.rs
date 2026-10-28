@@ -832,18 +832,18 @@ impl Shell {
         let script = std::fs::read_to_string(&child.script_path)?;
 
         let saved_script_name = self
-            .executor_mut()
-            .get_env("__RUBASH_SCRIPT_NAME")
-            .map(str::to_owned);
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SCRIPT_NAME");
         let saved_bash_argv0 = self.session_mut().variables().resolved_value("BASH_ARGV0");
         let saved_function_stdin = self
-            .executor_mut()
-            .get_env("__RUBASH_FUNCTION_STDIN")
-            .map(str::to_owned);
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_FUNCTION_STDIN");
         let saved_function_stdin_offset = self
-            .executor_mut()
-            .get_env("__RUBASH_FUNCTION_STDIN_OFFSET")
-            .map(str::to_owned);
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_FUNCTION_STDIN_OFFSET");
 
         self.set_script_name(&child.script_name);
         self.session_mut()
@@ -1528,6 +1528,20 @@ impl Shell {
     }
 
     fn run_startup_files(&mut self, repl: bool) -> Option<i32> {
+        // 1.5.0 migration adjudication: the Session contract's
+        // source_startup_files / RcPolicy is deliberately NOT adopted
+        // for this chain. The contract sources engine-selected files
+        // per class and propagates a read failure as an error; this
+        // chain's file selection is host policy (primary-only rc
+        // resolution, the login chain, host-expanded $ENV), the
+        // generated plugin loader interleaves at three
+        // branch-specific slots under a guard keyed on the rc text,
+        // failures warn and continue per file (GNU maybe_execute_file
+        // semantics), and the branch tails (marker pairing,
+        // completion snapshot, greeting) interleave between files.
+        // No class decomposition expresses that without behavior
+        // change, so the per-file funnel below stays the host's,
+        // over the tier-C seam (see the migration report).
         // niubash#180 baseline: this session sources the current rc right
         // now, so a marker left by a setup that ran before this session
         // started is stale by definition — consume it here so only a setup
@@ -1820,8 +1834,9 @@ impl Shell {
     /// means the default state, where extglob is off.
     fn resync_parse_extglob_gate(&mut self) {
         let enabled = self
-            .executor_mut()
-            .get_env("__RUBASH_SHOPT_STATE")
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SHOPT_STATE")
             .is_some_and(|state| state.split('\u{1f}').any(|entry| entry == "extglob"));
         self.session_mut().options().set("extglob", enabled);
     }
@@ -1844,9 +1859,9 @@ impl Shell {
         // startup-file time is the inherited environment; prefer the
         // executor table so an earlier startup file could export it.
         let raw = self
-            .executor_mut()
-            .get_env(name)
-            .map(str::to_owned)
+            .session_mut()
+            .variables()
+            .resolved_value(name)
             .or_else(|| std::env::var(name).ok())
             .filter(|value| !value.trim().is_empty());
         let raw = raw?;
@@ -1928,9 +1943,9 @@ impl Shell {
         // environment as fallback. NIU_ENV keeps precedence over
         // BASH_ENV in both sources.
         let niu_raw = self
-            .executor_mut()
-            .get_env(NIU_ENV_VAR)
-            .map(str::to_owned)
+            .session_mut()
+            .variables()
+            .resolved_value(NIU_ENV_VAR)
             .or_else(|| std::env::var(NIU_ENV_VAR).ok())
             .filter(|value| !value.trim().is_empty());
         // GNU shell.c:1216 gates BASH_ENV on posixly_correct == 0 and
@@ -2173,14 +2188,16 @@ impl Shell {
     fn sync_bash_prompt_from_env(&mut self) {
         if self.prompt_slot_claimed() {
             let ps1 = self
-                .executor_mut()
-                .get_env("PS1")
-                .unwrap_or("\\$ ")
+                .session_mut()
+                .variables()
+                .resolved_value("PS1")
+                .unwrap_or_else(|| "\\$ ".to_string())
                 .to_string();
             let ps2 = self
-                .executor_mut()
-                .get_env("PS2")
-                .unwrap_or("> ")
+                .session_mut()
+                .variables()
+                .resolved_value("PS2")
+                .unwrap_or_else(|| "> ".to_string())
                 .to_string();
             let left = self.session_mut().expand_prompt(&ps1);
             let multiline = self.session_mut().expand_prompt(&ps2);
@@ -2201,10 +2218,10 @@ impl Shell {
 
     fn run_bash_ps0_preexec(&mut self) {
         let Some(ps0) = self
-            .executor_mut()
-            .get_env("PS0")
+            .session_mut()
+            .variables()
+            .resolved_value("PS0")
             .filter(|value| !value.is_empty())
-            .map(str::to_owned)
         else {
             return;
         };
@@ -2238,10 +2255,10 @@ impl Shell {
     pub fn print_rendered_prompt_for_preview(&mut self) {
         self.run_precmd_hooks();
         let Some(ps1) = self
-            .executor_mut()
-            .get_env("PS1")
+            .session_mut()
+            .variables()
+            .resolved_value("PS1")
             .filter(|value| !value.is_empty())
-            .map(str::to_owned)
         else {
             return;
         };
@@ -2321,9 +2338,9 @@ impl Shell {
     /// been sourced and before the line editor is built.
     pub fn load_user_widget_bindings(&mut self) {
         let value = self
-            .executor_mut()
-            .get_env("NIU_BINDKEYS")
-            .map(str::to_owned)
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_BINDKEYS")
             .unwrap_or_default();
         self.user_widget_bindings = crate::repl::parse_user_bindkeys(&value);
     }
@@ -2576,9 +2593,9 @@ impl Shell {
     /// completion state together with the config-layer directories.
     pub fn load_user_compdefs(&mut self) {
         let value = self
-            .executor_mut()
-            .get_env("NIU_COMPDEFS")
-            .map(str::to_owned)
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_COMPDEFS")
             .unwrap_or_default();
         let mut compdefs = Vec::new();
         let mut compdef_dirs: Vec<PathBuf> = Vec::new();
@@ -2638,9 +2655,9 @@ impl Shell {
         }
 
         let result = self
-            .executor_mut()
-            .get_env("NIU_COMP_RESULT")
-            .map(str::to_owned);
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_COMP_RESULT");
         self.session_mut().variables().unset("NIU_COMP_WORDS");
         self.session_mut().variables().unset("NIU_COMP_CWORD");
         self.session_mut().variables().unset("NIU_COMP_RESULT");
@@ -2686,16 +2703,17 @@ impl Shell {
         }
 
         let result = self
-            .executor_mut()
-            .get_env("NIU_WIDGET_RESULT")
-            .map(str::to_owned);
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_WIDGET_RESULT");
         let accept = self
-            .executor_mut()
-            .get_env("NIU_WIDGET_ACCEPT")
-            .map(str::to_owned);
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_WIDGET_ACCEPT");
         let cursor_result = self
-            .executor_mut()
-            .get_env("NIU_WIDGET_CURSOR_RESULT")
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_WIDGET_CURSOR_RESULT")
             .and_then(|value| value.trim().parse::<usize>().ok());
 
         self.session_mut().variables().unset("NIU_WIDGET_RESULT");
@@ -3181,15 +3199,15 @@ impl Shell {
             return;
         };
         let histcontrol = self
-            .executor_mut()
-            .get_env("HISTCONTROL")
-            .unwrap_or("")
-            .to_owned();
+            .session_mut()
+            .variables()
+            .resolved_value("HISTCONTROL")
+            .unwrap_or_default();
         let histignore = self
-            .executor_mut()
-            .get_env("HISTIGNORE")
-            .unwrap_or("")
-            .to_owned();
+            .session_mut()
+            .variables()
+            .resolved_value("HISTIGNORE")
+            .unwrap_or_default();
         let histsize = rubash::history::SessionHistory::size_limit(
             self.session_mut()
                 .variables()
@@ -3203,8 +3221,9 @@ impl Shell {
                 .as_deref(),
         );
         let histappend = self
-            .executor_mut()
-            .get_env("__RUBASH_SHOPT_STATE")
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SHOPT_STATE")
             .is_some_and(|state| state.split('\u{1f}').any(|entry| entry == "histappend"));
         if let Ok(mut settings) = settings.lock() {
             settings.histcontrol = histcontrol;
@@ -3577,8 +3596,10 @@ impl Shell {
     fn inject_process_stdin_for_rewritten_pipeline(&mut self, ast: &mut Ast) -> anyhow::Result<()> {
         if !self.process_stdin_pipeline_bridge
             || self
-                .executor_mut()
-                .get_env("__RUBASH_INHERIT_PROCESS_STDIN")
+                .session_mut()
+                .variables()
+                .resolved_value("__RUBASH_INHERIT_PROCESS_STDIN")
+                .as_deref()
                 != Some("1")
         {
             return Ok(());
