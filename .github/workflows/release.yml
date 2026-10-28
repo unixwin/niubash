@@ -21,6 +21,9 @@ on:
 
 permissions:
   contents: write
+  # The SignPath connector reads the workflow artifact holding the unsigned
+  # installer (github-artifact-id flow), which needs actions: read.
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -836,6 +839,68 @@ jobs:
             "/DAppArch=${{ matrix.arch }}" `
             "/DSourceDir=$sourceDir" `
             "/DOutputDir=$outputDir"
+
+      # SignPath signing: the installer is signed BEFORE any digest or alias
+      # is produced, so the .sha256 sidecars, the unversioned aliases, the
+      # release SHA256SUMS, and the winget InstallerSha256 all describe the
+      # SIGNED bytes. Fail-closed: a failed signing request aborts the leg —
+      # an unsigned installer must never silently ship.
+      - name: Upload unsigned installer for SignPath
+        id: sign_upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-installer-win-${{ matrix.arch }}
+          path: dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Submit SignPath signing request
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.sign_upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signpath-out
+
+      - name: Verify and install the signed installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "signpath-out"
+          # SignPath returns either the signed file directly or wrapped in a
+          # zip, depending on the project's artifact configuration — accept
+          # both.
+          $zip = Get-ChildItem -LiteralPath $out -Recurse -Filter *.zip |
+            Select-Object -First 1
+          if ($zip) {
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath (Join-Path $out "extracted") -Force
+          }
+          $searchRoot = Join-Path $out "extracted"
+          if (-not (Test-Path -LiteralPath $searchRoot)) { $searchRoot = $out }
+          $signed = Get-ChildItem -LiteralPath $searchRoot -Recurse -Filter *.exe |
+            Select-Object -First 1
+          if (-not $signed) {
+            throw "SignPath returned no signed installer"
+          }
+
+          # Honest gate: the returned artifact must carry an Authenticode
+          # signature. The STATUS is allowed to be untrusted here (the test
+          # certificate does not chain to a machine-trusted root on the
+          # runner) — it must never be NotSigned, which would mean SignPath
+          # handed back the bytes unsigned.
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed.FullName
+          if ($signature.Status -eq "NotSigned") {
+            throw "SignPath returned an installer without an Authenticode signature"
+          }
+          Write-Host "signature status: $($signature.Status)"
+          Write-Host "signer: $($signature.SignerCertificate.Subject)"
+
+          $target = "dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe"
+          Copy-Item -LiteralPath $signed.FullName -Destination $target -Force
+          Write-Host "signed installer installed to $target"
 
       - name: Add latest-compatible asset aliases
         shell: pwsh
