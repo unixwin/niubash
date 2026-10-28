@@ -259,7 +259,7 @@ begin
   { niubash#511: silent updates used to pre-kill niu.exe with
     `taskkill /IM niu.exe /F` at ssInstall. That force-kill shape is part
     of the Behavior:Win32/DefenseEvasion.A!ml fingerprint audited in
-    #511, and it is redundant: [Setup] declares CloseApplications=yes
+    issue #511, and it is redundant: [Setup] declares CloseApplications=yes
     with CloseApplicationsFilter=niu.exe (Restart Manager graceful
     close), and `niu --self-update` already passes /CLOSEAPPLICATIONS
     /FORCECLOSEAPPLICATIONS. A silent install run WITHOUT those switches
