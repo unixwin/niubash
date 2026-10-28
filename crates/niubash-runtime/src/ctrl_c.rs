@@ -50,7 +50,7 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         // waiting for it to finish. At the reedline prompt the console is
         // in raw mode so this handler rarely fires; the `0x03` keystroke
         // path is Signal::CtrlC + consume_ctrl_c.
-        rubash::builtins::kill::note_console_ctrl_c();
+        rubash::script_driver::inject_console_ctrl_c();
         return 1; // handled — don't terminate the shell
     }
     0 // pass through for other signals
@@ -105,7 +105,7 @@ pub fn install() {
 /// dispatch (`Shell::dispatch_prompt_interrupt`) and a trapped INT fires
 /// at the prompt like GNU. `handler_already_queued` is the Windows
 /// `consume_ctrl_c()` result: when the console handler fired, it already
-/// queued the delivery via `note_console_ctrl_c`, and a second one would
+/// queued the delivery via the engine note (script_driver::inject_console_ctrl_c), and a second one would
 /// dispatch twice. On unix there is no host handler, so nothing is ever
 /// pre-queued and the delivery is a real self-raise — it travels through
 /// the engine's own kernel disposition (signal-hook), which is a
@@ -118,7 +118,7 @@ pub fn queue_prompt_sigint(handler_already_queued: bool) {
     }
     #[cfg(windows)]
     {
-        rubash::builtins::kill::note_console_ctrl_c();
+        rubash::script_driver::inject_console_ctrl_c();
     }
     #[cfg(not(windows))]
     {
