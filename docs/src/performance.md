@@ -66,6 +66,31 @@ v1.4.3 changelog notes);
 [rubash#916](https://github.com/unixwin/rubash/issues/916) stays open on the
 residual.
 
+## Startup — the 2026-10-28 perf round (Linux, same machine)
+
+The 2026-10-28 perf round re-ran the startup adjudication: 50-sample
+interleaved runs of release builds on one Linux machine (sampling gate:
+load1 ≤ 2.0, no other cargo/rustc), niu at master `c06b2a08` embedding
+rubash `231ffe1a`, against a self-compiled GNU bash 5.3.20 oracle.
+These are Linux same-machine numbers; they say nothing about Windows
+magnitudes.
+
+| shape | niu | rubash | GNU bash 5.3.20 |
+|---|---|---|---|
+| bare run (p50) | **3.71 ms** | 3.28 ms | 2.60 ms |
+| `-c 'true'` (p50) | 4.14 ms | 3.59 ms | 2.67 ms |
+
+The headline is the bare run: **16.98 ms in the 2026-10-25 baseline →
+3.71 ms** — the non-interactive fast path
+([niubash#562](https://github.com/unixwin/niubash/issues/562)) works as
+designed, and niu bare startup now sits at the bare engine's level. The
+`-c 'true'` row is ≈ baseline for all three shells. Engine-side detail
+from the same round — the 30-case A-table, the pattern-op and
+element-write fixes — lives in rubash's
+[`docs/performance.md`](https://github.com/unixwin/rubash/blob/master/docs/performance.md);
+the corpus and raw results live in
+[shellbench](https://github.com/unixwin/shellbench).
+
 ## Android baseline — measured, honest, not yet re-measured
 
 On a Termux aarch64 tablet, niubash 1.4.0 vs GNU bash 5.3.20
