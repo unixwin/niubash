@@ -814,6 +814,11 @@ impl Shell {
             self.executor.set_history_provider(provider.clone());
             self.history_provider = Some(provider);
         }
+        // niubash#646: snapshot the inherited HIST* values into the
+        // settings cell; the REPL loops refresh it at every prompt
+        // boundary, so values the startup files set land there before
+        // the first line is recorded.
+        self.refresh_history_settings();
         self.executor.set_env("__RUBASH_SHELL_NAME", "niu");
         // unixwin/niubash#117: a PS1 inherited from the process environment
         // (Git for Windows exports its session PS1 into every child) carries
@@ -2962,6 +2967,61 @@ impl Shell {
             .as_ref()
             .and_then(|provider| provider.try_borrow().ok())
             .map(|provider| provider.ledger())
+    }
+
+    /// The HIST* settings cell shared with the provider instance, if
+    /// interactive entry installed one (niubash#646). The editor
+    /// history instance adopts it, mirroring `history_ledger`.
+    pub(crate) fn history_settings(&self) -> Option<Arc<Mutex<crate::history::HistorySettings>>> {
+        self.history_provider
+            .as_ref()
+            .and_then(|provider| provider.try_borrow().ok())
+            .map(|provider| provider.settings())
+    }
+
+    /// Refresh the shared HIST* settings cell from the executor's
+    /// current state (niubash#646).
+    ///
+    /// GNU reads each history variable at the moment of the operation
+    /// it governs — HISTCONTROL/HISTIGNORE when a line is recorded
+    /// (bashhist.c check_history_control/history_should_ignore),
+    /// HISTSIZE when the list is stifled, HISTFILESIZE and histappend
+    /// at the session-end write (maybe_save_shell_history) — so the
+    /// host re-snapshots the cell at every prompt boundary (both REPL
+    /// loops), at interactive entry, and once more after the EXIT trap
+    /// inside `end_repl_session`, and the history objects consult the
+    /// snapshot. The size variables go through the engine's own
+    /// `SessionHistory::size_limit` mapping (variables.c sv_histsize:
+    /// unset/empty/negative/non-numeric means no limit); histappend is
+    /// read from the engine's `__RUBASH_SHOPT_STATE` carrier, the same
+    /// read `resync_parse_extglob_gate` performs for extglob.
+    /// HISTTIMEFORMAT is not snapshotted: it has no consumer on this
+    /// side of the provider contract (see `HistorySettings`).
+    pub fn refresh_history_settings(&mut self) {
+        let Some(settings) = self.history_settings() else {
+            return;
+        };
+        let histcontrol = self
+            .executor
+            .get_env("HISTCONTROL")
+            .unwrap_or("")
+            .to_owned();
+        let histignore = self.executor.get_env("HISTIGNORE").unwrap_or("").to_owned();
+        let histsize =
+            rubash::history::SessionHistory::size_limit(self.executor.get_env("HISTSIZE"));
+        let histfilesize =
+            rubash::history::SessionHistory::size_limit(self.executor.get_env("HISTFILESIZE"));
+        let histappend = self
+            .executor
+            .get_env("__RUBASH_SHOPT_STATE")
+            .is_some_and(|state| state.split('\u{1f}').any(|entry| entry == "histappend"));
+        if let Ok(mut settings) = settings.lock() {
+            settings.histcontrol = histcontrol;
+            settings.histignore = histignore;
+            settings.histsize = histsize;
+            settings.histfilesize = histfilesize;
+            settings.histappend = histappend;
+        };
     }
 
     /// Execute an entire script (multi-line) via rubash full AST execution.
