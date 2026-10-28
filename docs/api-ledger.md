@@ -21,6 +21,26 @@ Measured on 2026-10-25 against:
 - rubash master `abd9be95b556556149ab44c45d0e80d27eefa8f6`
 - niubash master `b53e6bffcfa4abe25a1e2176b16b63cdc24f487b`
 
+Re-census for Ledger v2 (PLAN row 11, 2026-10-28), same rules:
+
+- rubash master `231ffe1a1b28923ce60c38552ed7f5ad5e99e6ea`
+  (the row-11 branch base; the row's rubash PR is its child)
+- niubash master `c06b2a08` (PR #624 merge)
+
+Path references at the re-census: **133 inline occurrences, 65
+distinct paths** after the use-list union, spread over **7
+files** (the basis set plus
+`crates/niubash-runtime/src/syntax_highlighting.rs`). Symbols
+niubash gained since the basis — `ExecuteError::SigintUnwind`,
+`script_driver::stdin_script_errexit_enabled`,
+`executor::read_process_stdin_bytes`,
+`executor::bytes_to_shell_text`, and the methods
+`take_signal_discard_pending`, `mark_login_shell`,
+`last_command_inverted` — are recorded in §6 with this census
+as their basis. The row-11 dispositions (§4) move the
+`builtins::kill` hooks out of the consumed surface and add
+their replacements.
+
 Counting rules (so any future re-census is comparable):
 
 - **Path references**: occurrences of the token pattern
@@ -79,10 +99,10 @@ the 1.5.0 tiers exist to fix.
 | `script_driver` | `run_source_with_line_offset` (2), `run_stdin_script`, `run_script_with_history`, `run_script_with_history_at_line_offset_tracked`, `run_interactive_stdin`, `pre_process_interactive_line`, `prepare_interactive_history`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`, `InteractiveExpansion` + variants `Execute`, `Discard` (1 each unless noted) |
 | `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1) |
 | `lexer` | `tokenize` (2), `tokenize_with_initial_posix` (1), `has_unclosed_input_syntax` (1), `has_unclosed_input_syntax_posix` (1) |
-| `shell::bind_registry` | `BindEntry` (9), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 20 references in total |
+| `shell::bind_registry` | `BindEntry` (10), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 23 references at the v2 re-census, all of them inside niubash's gated bind surface since row 11 (see §4) |
 | `invocation` | `ShellInvocation` (3, + `parse`, §2.2), `materialize_command_file` (1) |
 | `usage` | `LONG_OPTIONS` (3), `SHORT_OPTIONS` (2), `LONG_OPTIONS_WITH_VALUE` (1), `show_shell_version` (1), `show_shell_help` (1), `is_short_option_letter` (1), `invocation_help_name` (1), plus 2 module-level references |
-| `builtins::kill` | `note_console_ctrl_c` (1), `consume_background_wrapper_handshake` (1) — internal hooks; one of these disappearing is what broke niubash master in the bulk-merge incident |
+| `builtins::kill` | **exited in row 11 (M-3)**: `note_console_ctrl_c` (2) and `consume_background_wrapper_handshake` (1) are no longer consumed — niubash calls the Tier B driver faces `script_driver::inject_console_ctrl_c` / `script_driver::consume_background_wrapper_handshake` instead, and the Tier A replacements are `Executor::inject_signal` / `Executor::interrupt`. The kill items remain `pub` in the engine only until niubash's migration is on master (the pairing compile builds niubash master against this tree); their demotion to `pub(crate)` is the recorded follow-up below. (One of these hooks disappearing is what broke niubash master in the bulk-merge incident — which is why the exit is staged, not abrupt.) |
 
 ### 2.2 `Executor` methods niubash calls (receiver-verified)
 
@@ -162,10 +182,13 @@ the RFC) lands.
 | `usage` printers and option tables | B | stay the shared host/engine bridge |
 | `parser` family (`parse*`, `CommandNode`, `ParseLoopOptions`, `WordMetadata`, `ast_print`) | B | `Session::parse` + `api::syntax` view types (no internal `Ast` in Tier A) |
 | `lexer` family (`tokenize*`) | B | `api::syntax` token view |
-| `shell::bind_registry` (`BindEntry`, `BindKind`) | C | interactive layer's own gated surface |
-| `invocation` (`ShellInvocation`, `materialize_command_file`) | C | bin/driver internal |
-| `builtins::kill` console hooks | C | replaced by `Session::interrupt` / `inject_signal` |
-| snapshots & misc accessors (`aliases_snapshot`, `bind_registry_snapshot`, `bind_registry_generation`, `alias_expansion_enabled`, `shell_pwd_display_path`, `resolve_shell_path*`, `find_script_on_path`, `set_winuxcmd_path`, `set_shell_root`, `set_compatible_shell_path`, `set_builtin_disabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals |
+| `shell::bind_registry` (`BindEntry`, `BindKind`) | C | interactive layer's own gated surface — **landed as gated in row 11**: niubash consumes it only inside `crates/niubash-runtime/src/bind_surface.rs`, behind niubash's `internals` feature (default on; a `--no-default-features` build has zero Tier C references), converted there to niu-owned mirror types |
+| `invocation` (`ShellInvocation`, `materialize_command_file`) | B (row-11 ruling) | driver-layer input type: both binaries' `main()` parse through it identically, and the RFC's own §8 puts driver wrappers at B; it stays in the `invocation` module in-tree and moves with the driver layer at the split |
+| `builtins::kill` console hooks | C → **replaced (row 11)** | `Executor::inject_signal` / `Executor::interrupt` (Tier A, RFC §6.4) for session-scoped delivery; `script_driver::inject_console_ctrl_c` / `script_driver::consume_background_wrapper_handshake` (Tier B) for the two host-launcher shapes that have no executor yet. The kill items themselves are demoted to `pub(crate)` in the follow-up change once niubash's migration is on master |
+| session configuration (`set_winuxcmd_path`, `set_shell_root`, `set_compatible_shell_path`, `set_builtin_disabled`, `mark_login_shell`) | A (row-11 ruling) | builder-time session initialization — M-2's own language ("the 55 set_env sites collapse into builder initialization"); these five are the same shape: host facts installed before the first run |
+| driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup |
+| signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
+| snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
 
 ## 5. The canary: how the freeze is enforced
 
@@ -205,10 +228,10 @@ item rubash::Ast
 item rubash::Executor
 item rubash::Token
 item rubash::TokenKind
-item rubash::builtins::kill::consume_background_wrapper_handshake
-item rubash::builtins::kill::note_console_ctrl_c
 item rubash::decode_to_visible_text
 item rubash::executor::ExecuteError
+item rubash::executor::bytes_to_shell_text
+item rubash::executor::read_process_stdin_bytes
 item rubash::executor::Executor
 item rubash::executor::shell_pwd_display_path
 item rubash::history::HistoryProvider
@@ -225,6 +248,9 @@ item rubash::parser::ast_print::pretty_print_command
 item rubash::parser::parse
 item rubash::parser::parse_with_options
 item rubash::script_driver::InteractiveExpansion
+item rubash::script_driver::consume_background_wrapper_handshake
+item rubash::script_driver::inject_console_ctrl_c
+item rubash::script_driver::stdin_script_errexit_enabled
 item rubash::script_driver::READ_STDIN_MARKER
 item rubash::script_driver::check_binary_file
 item rubash::script_driver::heredoc_delimiter_unclosed_quote
@@ -256,6 +282,7 @@ variant rubash::executor::ExecuteError::ExpansionFailure
 variant rubash::executor::ExecuteError::FatalFunctionError
 variant rubash::executor::ExecuteError::IoError
 variant rubash::executor::ExecuteError::Return
+variant rubash::executor::ExecuteError::SigintUnwind
 variant rubash::script_driver::InteractiveExpansion::Discard
 variant rubash::script_driver::InteractiveExpansion::Execute
 variant rubash::shell::bind_registry::BindKind::Execute
@@ -281,6 +308,10 @@ method rubash::executor::Executor::has_compspec
 method rubash::executor::Executor::has_function
 method rubash::executor::Executor::inherit_process_stdin
 method rubash::executor::Executor::last_exit_code
+method rubash::executor::Executor::inject_signal
+method rubash::executor::Executor::interrupt
+method rubash::executor::Executor::last_command_inverted
+method rubash::executor::Executor::mark_login_shell
 method rubash::executor::Executor::new
 method rubash::executor::Executor::resolve_shell_path
 method rubash::executor::Executor::resolve_shell_path_from_env
@@ -297,13 +328,21 @@ method rubash::executor::Executor::set_shell_root
 method rubash::executor::Executor::set_shopt_option
 method rubash::executor::Executor::set_winuxcmd_path
 method rubash::executor::Executor::take_exit_jump_pending
+method rubash::executor::Executor::take_signal_discard_pending
 method rubash::executor::Executor::take_parse_error
 method rubash::executor::Executor::unset_env
 method rubash::invocation::ShellInvocation::parse
 method rubash::parser::WordMetadata::literal
 ```
 
-*Ledger v1, 2026-10-25. Update rule: any change to the consumed
+*Ledger v2, 2026-10-28 (PLAN row 11): §0 census basis
+re-stated; the `builtins::kill` hooks exited the consumed
+surface (replacements recorded in §4/§6 — the items' demotion
+to `pub(crate)` follows once niubash's migration is on
+master); `invocation` ruled Tier B; session-configuration and
+driver-path-resolution families ruled A and B respectively;
+the bind registry's gated-surface home landed on the niubash
+side. Ledger v1, 2026-10-25. Update rule: any change to the consumed
 surface (a symbol appears, vanishes, or moves tiers) updates this
 file — both copies — in the same change that causes it, with the
 census basis in §0 re-stated.*
