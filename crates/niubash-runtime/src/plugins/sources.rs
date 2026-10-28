@@ -1746,7 +1746,6 @@ pub fn clean_sources(delete_orphans: bool) -> Vec<SourceSyncOutcome> {
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceThemeEntry {
     pub name: String,
-    pub path: PathBuf,
     pub source_id: String,
     pub adapter_display: String,
 }
@@ -1767,7 +1766,6 @@ pub fn source_theme_entries() -> Vec<SourceThemeEntry> {
             if asset.kind == SourceAssetKind::Theme {
                 out.push(SourceThemeEntry {
                     name: asset.name,
-                    path: asset.path,
                     source_id: status.record.id.clone(),
                     adapter_display: adapter.display_name().to_string(),
                 });
