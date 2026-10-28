@@ -6,6 +6,7 @@ pub mod column_menu;
 pub mod command;
 pub mod common_assets;
 pub mod completer;
+pub mod cycle_menu;
 pub mod external;
 pub mod gnu_menu;
 pub mod path;

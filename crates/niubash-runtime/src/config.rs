@@ -145,12 +145,58 @@ impl CompletionStyle {
     }
 }
 
+/// How TAB completion interacts with the line while candidates are on
+/// display (niubash#631): the *interaction* axis, orthogonal to
+/// [`CompletionStyle`], which is the *presentation* axis (how the
+/// candidate set renders). The two keys name the two axes on every
+/// surface — `completion.interaction` here, `completion.style` there.
+///
+/// The default is [`CompletionInteraction::Cycle`] (owner ruling
+/// 2026-10-28, superseding the keymap design draft's insert-first
+/// suggestion): TAB puts the first candidate into the line and further
+/// TABs cycle through the candidate set (the zsh menu-completion form);
+/// Enter accepts the candidate in the line and runs the command; Esc
+/// rolls the line back to its pre-completion snapshot.
+/// [`CompletionInteraction::Insert`] keeps the pre-#631 behavior as a
+/// first-class option: TAB completes the common prefix / opens the
+/// presentation menu, Enter confirms the pick, and Esc keeps what was
+/// already inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletionInteraction {
+    /// zsh menu-completion form: TAB cycles candidates into the line.
+    #[default]
+    Cycle,
+    /// The pre-#631 interaction: TAB inserts the common prefix and the
+    /// presentation menu confirms a pick with Enter.
+    Insert,
+}
+
+impl CompletionInteraction {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cycle" => Some(Self::Cycle),
+            "insert" => Some(Self::Insert),
+            _ => None,
+        }
+    }
+
+    /// The canonical spelling used by the persisted config file, env
+    /// values and every display surface (`niu doctor`, `niu config`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cycle => "cycle",
+            Self::Insert => "insert",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuConfig {
     pub completion_page_size: usize,
     pub history_page_size: usize,
     pub max_entry_lines: u16,
     pub completion_style: CompletionStyle,
+    pub completion_interaction: CompletionInteraction,
 }
 
 impl Default for MenuConfig {
@@ -160,6 +206,7 @@ impl Default for MenuConfig {
             history_page_size: 10,
             max_entry_lines: 5,
             completion_style: CompletionStyle::default(),
+            completion_interaction: CompletionInteraction::default(),
         }
     }
 }
@@ -170,6 +217,10 @@ impl MenuConfig {
         // > persisted `completion.style` (config.toml) > the built-in default
         // (column). `resolve_completion_style` warns once on a bad env value.
         self.completion_style = resolve_completion_style().0;
+        // The interaction axis resolves on the same chain (niubash#631):
+        // NIU_COMPLETION_INTERACTION env > persisted `completion.interaction`
+        // > the built-in default (cycle).
+        self.completion_interaction = resolve_completion_interaction().0;
         self
     }
 }
@@ -415,6 +466,12 @@ pub const COMMAND_NOT_FOUND_HINT_KEY: &str = "command-not-found-hint";
 /// table with a `style` field), spelled with the dot on every command surface.
 pub const COMPLETION_STYLE_KEY: &str = "completion.style";
 
+/// The TAB completion interaction key (niubash#631): `niu config set
+/// completion.interaction <insert|cycle>`. In the file this is the
+/// `interaction` field of the same `[completion]` table that carries
+/// `style` — the two axes of TAB completion, one table.
+pub const COMPLETION_INTERACTION_KEY: &str = "completion.interaction";
+
 /// The personal-rc policy key (niubash#359): in the file this is the TOML
 /// dotted key `startup.rc-policy` (a `[startup]` table with an `rc-policy`
 /// field). Explicit `niu setup --rc-policy` owns the write; `niu config`
@@ -441,6 +498,8 @@ pub const KEYMAP_UNBIND_KEY: &str = "keymap.unbind";
 struct CompletionConfigSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interaction: Option<String>,
 }
 
 /// The `[startup]` section of config.toml.
@@ -593,6 +652,11 @@ const USER_CONFIG_NOTES: &str = "\
 # completion.style: TAB completion shape. column (default) | gnu |\n\
 #   ide | list | inline — `NIU_COMPLETION_STYLE` overrides this\n\
 #   file (env > config > default).\n\
+# completion.interaction: how TAB drives the line while candidates\n\
+#   are shown. cycle (default) | insert — cycle puts candidates into\n\
+#   the line one TAB at a time (Enter accepts and runs, Esc rolls\n\
+#   back); insert keeps the pre-#631 prefix-and-menu behavior.\n\
+#   `NIU_COMPLETION_INTERACTION` overrides this file.\n\
 # startup.rc-policy: which file fills the interactive personal-rc slot\n\
 #   when ~/.niubashrc is absent. primary-only (default) |\n\
 #   bashrc-fallback — explicit `niu setup --rc-policy` owns this key;\n\
@@ -784,6 +848,87 @@ pub fn set_completion_style(style: CompletionStyle) -> anyhow::Result<PathBuf> {
             set_table_key(doc, "completion", "style", toml_edit::value(style.as_str()))
         }
     })
+}
+
+/// Where the effective completion interaction came from (niubash#631).
+/// Display surfaces (doctor, `niu config`) use it to say whether the
+/// value is the built-in default, a persisted pick or an env override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionInteractionSource {
+    /// No config file key and no env override.
+    Default,
+    /// `completion.interaction` in config.toml (env not set).
+    ConfigFile,
+    /// `NIU_COMPLETION_INTERACTION` set — wins over the config file.
+    Env,
+}
+
+/// Resolve the effective TAB completion interaction (niubash#631):
+/// `NIU_COMPLETION_INTERACTION` env > persisted `completion.interaction`
+/// (config.toml) > built-in default (cycle). An unparsable env value
+/// warns once and falls through to the lower-precedence source; an
+/// unparsable file value silently falls through like every other config
+/// degradation.
+pub fn resolve_completion_interaction() -> (CompletionInteraction, CompletionInteractionSource) {
+    let mut interaction = CompletionInteraction::default();
+    let mut source = CompletionInteractionSource::Default;
+    if let Some(parsed) = read_user_config()
+        .completion
+        .and_then(|completion| completion.interaction)
+        .and_then(|value| CompletionInteraction::parse(&value))
+    {
+        interaction = parsed;
+        source = CompletionInteractionSource::ConfigFile;
+    }
+    if let Ok(value) = std::env::var("NIU_COMPLETION_INTERACTION") {
+        match CompletionInteraction::parse(&value) {
+            Some(parsed) => {
+                interaction = parsed;
+                source = CompletionInteractionSource::Env;
+            }
+            None => eprintln!("niubash: NIU_COMPLETION_INTERACTION must be one of: insert, cycle"),
+        }
+    }
+    (interaction, source)
+}
+
+/// Persist `completion.interaction` (the `niu config set
+/// completion.interaction` writer, niubash#631). Only that one key is
+/// touched; passing the current built-in default removes the key again
+/// so the file never pins a stale default.
+pub fn set_completion_interaction(interaction: CompletionInteraction) -> anyhow::Result<PathBuf> {
+    write_user_config(|doc| {
+        ensure_schema(doc);
+        if interaction == CompletionInteraction::default() {
+            remove_table_key(doc, "completion", "interaction");
+            Ok(())
+        } else {
+            set_table_key(
+                doc,
+                "completion",
+                "interaction",
+                toml_edit::value(interaction.as_str()),
+            )
+        }
+    })
+}
+
+/// True when this user upgrades with a legacy configuration: a
+/// config.toml exists, but nothing — neither the file nor the env —
+/// picks a completion interaction, so the #631 default flip (to cycle)
+/// changes their TAB behavior without any action of theirs. The REPL
+/// prints the one-time disclosure for exactly this shape (and only when
+/// the interaction actually applies: the gnu style's literal readline
+/// interaction is inert to the axis, so a gnu user sees no change and
+/// gets no line).
+pub fn legacy_config_lacks_interaction_setting() -> bool {
+    if resolve_completion_interaction().1 != CompletionInteractionSource::Default {
+        return false;
+    }
+    if resolve_completion_style().0 == CompletionStyle::Gnu {
+        return false;
+    }
+    user_config_path().exists()
 }
 
 /// Persist `command-not-found-hint` (the `niu config set` writer). Only
@@ -1647,5 +1792,155 @@ mod tests {
         let _ = std::fs::remove_dir_all(&isolated_home);
         let _ = std::fs::remove_dir_all(&decoy_profile);
         result.unwrap();
+    }
+
+    /// Run `body` with NIU_CONFIG pointed at a fresh temp file path and
+    /// the completion env overrides cleared, restoring the process env
+    /// afterwards (the `completion_style_persists_and_env_wins_over_file`
+    /// discipline, factored for the #631 interaction tests).
+    fn with_interaction_env(tag: &str, body: impl FnOnce(&std::path::Path)) {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = std::env::temp_dir().join(format!(
+            "niu-config-interaction-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let previous_config = std::env::var_os("NIU_CONFIG");
+        let previous_interaction = std::env::var_os("NIU_COMPLETION_INTERACTION");
+        let previous_style = std::env::var_os("NIU_COMPLETION_STYLE");
+        std::env::set_var("NIU_CONFIG", &temp);
+        std::env::remove_var("NIU_COMPLETION_INTERACTION");
+        std::env::remove_var("NIU_COMPLETION_STYLE");
+        body(&temp);
+        match previous_config {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        match previous_interaction {
+            Some(value) => std::env::set_var("NIU_COMPLETION_INTERACTION", value),
+            None => std::env::remove_var("NIU_COMPLETION_INTERACTION"),
+        }
+        match previous_style {
+            Some(value) => std::env::set_var("NIU_COMPLETION_STYLE", value),
+            None => std::env::remove_var("NIU_COMPLETION_STYLE"),
+        }
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    #[test]
+    fn issue631_interaction_defaults_to_cycle_without_any_setting() {
+        with_interaction_env("default", |path| {
+            // No config file at all: the built-in default is cycle, and
+            // the legacy-disclosure predicate stays off (fresh install).
+            assert!(!path.exists());
+            assert_eq!(
+                resolve_completion_interaction(),
+                (
+                    CompletionInteraction::Cycle,
+                    CompletionInteractionSource::Default
+                )
+            );
+            assert_eq!(
+                MenuConfig::default().completion_interaction,
+                CompletionInteraction::Cycle
+            );
+            assert!(!legacy_config_lacks_interaction_setting());
+        });
+    }
+
+    #[test]
+    fn issue631_interaction_config_file_value_resolves_with_config_source() {
+        with_interaction_env("config", |path| {
+            std::fs::write(
+                path,
+                "schema = \"x\"\n\n[completion]\ninteraction = \"insert\"\n",
+            )
+            .unwrap();
+            assert_eq!(
+                resolve_completion_interaction(),
+                (
+                    CompletionInteraction::Insert,
+                    CompletionInteractionSource::ConfigFile
+                )
+            );
+            // An explicit pick is not a legacy config: no disclosure.
+            assert!(!legacy_config_lacks_interaction_setting());
+        });
+    }
+
+    #[test]
+    fn issue631_interaction_env_wins_over_config_file() {
+        with_interaction_env("env", |path| {
+            std::fs::write(path, "[completion]\ninteraction = \"cycle\"\n").unwrap();
+            std::env::set_var("NIU_COMPLETION_INTERACTION", "insert");
+            assert_eq!(
+                resolve_completion_interaction(),
+                (
+                    CompletionInteraction::Insert,
+                    CompletionInteractionSource::Env
+                )
+            );
+            assert!(!legacy_config_lacks_interaction_setting());
+            // A bad env value falls through to the config-file pick.
+            std::env::set_var("NIU_COMPLETION_INTERACTION", "spiral");
+            assert_eq!(
+                resolve_completion_interaction(),
+                (
+                    CompletionInteraction::Cycle,
+                    CompletionInteractionSource::ConfigFile
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn issue631_interaction_set_round_trips_and_default_removes_the_key() {
+        with_interaction_env("set", |path| {
+            // The non-default pick persists into the [completion] table.
+            set_completion_interaction(CompletionInteraction::Insert).unwrap();
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(text.contains("interaction = \"insert\""), "{text}");
+            assert_eq!(
+                resolve_completion_interaction(),
+                (
+                    CompletionInteraction::Insert,
+                    CompletionInteractionSource::ConfigFile
+                )
+            );
+
+            // Setting the built-in default again removes the key — and
+            // the sibling style key and the schema survive the write.
+            set_completion_style(CompletionStyle::Ide).unwrap();
+            set_completion_interaction(CompletionInteraction::Cycle).unwrap();
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(!text.contains("interaction ="), "{text}");
+            assert!(text.contains("style = \"ide\""), "{text}");
+            assert!(text.contains("schema = \"niubash:config@0.1.0\""), "{text}");
+            assert_eq!(
+                resolve_completion_interaction(),
+                (
+                    CompletionInteraction::Cycle,
+                    CompletionInteractionSource::Default
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn issue631_legacy_config_predicate_needs_an_existing_file_and_no_setting() {
+        with_interaction_env("legacy", |path| {
+            // A pre-#631 config: other keys present, no interaction key.
+            std::fs::write(path, "command-not-found-hint = \"wpm\"\n").unwrap();
+            assert!(legacy_config_lacks_interaction_setting());
+            // The gnu style makes the axis inert: nothing changes for
+            // this user, so no disclosure either.
+            std::fs::write(path, "[completion]\nstyle = \"gnu\"\n").unwrap();
+            assert!(!legacy_config_lacks_interaction_setting());
+        });
     }
 }

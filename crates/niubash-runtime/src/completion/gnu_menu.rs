@@ -134,7 +134,11 @@ impl GnuMenu {
 /// widest candidate plus the two-space gutter; as many columns as the
 /// terminal fits, at least one; rows ceil(count / columns). Returns
 /// `(columns, rows)`.
-fn column_layout(count: usize, longest: usize, terminal_columns: usize) -> (usize, usize) {
+pub(crate) fn column_layout(
+    count: usize,
+    longest: usize,
+    terminal_columns: usize,
+) -> (usize, usize) {
     let count = count.max(1);
     let field = longest.max(1).saturating_add(GNU_COLUMN_GUTTER);
     let columns = (terminal_columns / field).max(1).min(count);
@@ -150,7 +154,7 @@ fn column_layout(count: usize, longest: usize, terminal_columns: usize) -> (usiz
 /// already scrolled to make room up to the screen height, and GNU's
 /// `--More--` paging needs an interaction channel a printed list must not
 /// have.
-fn render_list(
+pub(crate) fn render_list(
     values: &[&str],
     widths: &[usize],
     terminal_columns: usize,
