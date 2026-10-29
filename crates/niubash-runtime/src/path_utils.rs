@@ -51,6 +51,75 @@ pub(crate) fn shell_path_to_host_path(value: &str) -> String {
     value.to_string()
 }
 
+/// The host's ONE logical shell-path resolver (niubash#627 G2): the
+/// completion walk and the syntax highlighter used to carry a private
+/// copy each, and both read the *process* environment's temp dir for
+/// the `/tmp` arm, so a session-level `TMPDIR=/x` never moved them —
+/// while the engine's own resolution (`Executor::resolve_shell_path`)
+/// reads the executor's session env and follows the assignment
+/// immediately. There is now exactly this definition; both readers
+/// call it and no third copy may grow.
+///
+/// `tmp_base` is the backing directory for the session's `/tmp`: the
+/// engine-resolved value the host syncs out of the Session (Shell's
+/// completion-state sync stores `Executor::resolve_shell_path("/tmp")`
+/// per line). Callers without session state pass
+/// `std::env::temp_dir()` — the process environment is the fallback
+/// only for the not-yet-synced/stateless case, never the source once a
+/// session exists. `/var/tmp` deliberately keeps deriving from the
+/// process temp dir: the engine's var-tmp base
+/// (`windows_var_tmp_dir`) does not follow the session TMPDIR either,
+/// so both layers keep it on the process source and it never drifts
+/// from the open points.
+pub(crate) fn resolve_logical_shell_path(value: &str, tmp_base: &Path) -> Option<PathBuf> {
+    let normalized = value.replace('\\', "/");
+    let root = std::env::var_os("NIU_ROOT")
+        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
+        .map(PathBuf::from)?;
+    if normalized == "/" {
+        return Some(root);
+    }
+    if normalized == "/home" || normalized.starts_with("/home/") {
+        let users = shell_home_dir()?.parent()?.to_path_buf();
+        let rest = normalized
+            .trim_start_matches("/home")
+            .trim_start_matches('/');
+        return Some(if rest.is_empty() {
+            users
+        } else {
+            users.join(rest)
+        });
+    }
+    // /tmp and /var/tmp are per-user temporary namespaces backed by the real
+    // Windows temp dir, never the install tree (unixwin/niubash#94).
+    if normalized == "/tmp" || normalized.starts_with("/tmp/") {
+        let rest = normalized
+            .trim_start_matches("/tmp")
+            .trim_start_matches('/');
+        return Some(if rest.is_empty() {
+            tmp_base.to_path_buf()
+        } else {
+            tmp_base.join(rest)
+        });
+    }
+    if normalized == "/var/tmp" || normalized.starts_with("/var/tmp/") {
+        let rest = normalized
+            .trim_start_matches("/var/tmp")
+            .trim_start_matches('/');
+        let base = std::env::temp_dir().join("var").join("tmp");
+        return Some(if rest.is_empty() {
+            base
+        } else {
+            base.join(rest)
+        });
+    }
+    let rest = normalized.strip_prefix('/')?;
+    match rest.split('/').next() {
+        Some("bin" | "dev" | "etc" | "opt" | "usr" | "var") => Some(root.join(rest)),
+        _ => None,
+    }
+}
+
 /// Split a shell PATH list into entries. `;` always separates; `:` separates
 /// everywhere except right after a single ASCII letter at an entry start
 /// (a Windows drive prefix like `C:/...` or `C:\...`).
@@ -259,6 +328,76 @@ mod tests {
             shell_home_dir().unwrap(),
             normalize_existing_host_path(profile)
         );
+    }
+
+    /// niubash#627 G2: the unified resolver roots `/tmp` in the
+    /// caller-supplied session base (the engine-resolved TMPDIR
+    /// backing), NOT in the process temp dir — a session
+    /// `TMPDIR=/x` assignment is exactly what changes the supplied
+    /// base. `/var/tmp` deliberately stays on the process source,
+    /// matching the engine, and the enclave arms are untouched.
+    #[test]
+    fn issue627_g2_tmp_arm_roots_in_the_session_base() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("g2-session-base");
+        let root = temp.join("root");
+        let session_base = temp.join("session-temp");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&session_base).unwrap();
+        let _root = EnvGuard::set("NIU_ROOT", &root);
+
+        assert_eq!(
+            resolve_logical_shell_path("/tmp", &session_base).as_deref(),
+            Some(session_base.as_path())
+        );
+        assert_eq!(
+            resolve_logical_shell_path("/tmp/deep/file.txt", &session_base).as_deref(),
+            Some(session_base.join("deep").join("file.txt").as_path())
+        );
+        // Even when the supplied base IS the process temp the arm
+        // answers through it (one code path, no special case).
+        let process = std::env::temp_dir();
+        assert_eq!(
+            resolve_logical_shell_path("/tmp", &process).as_deref(),
+            Some(process.as_path())
+        );
+        // /var/tmp never follows the session base (engine parity).
+        assert_eq!(
+            resolve_logical_shell_path("/var/tmp", &session_base).as_deref(),
+            Some(process.join("var").join("tmp").as_path())
+        );
+        // The untouched arms keep their shapes.
+        assert_eq!(
+            resolve_logical_shell_path("/", &session_base).as_deref(),
+            Some(root.as_path())
+        );
+        assert_eq!(
+            resolve_logical_shell_path("/bin/ls", &session_base).as_deref(),
+            Some(root.join("bin").join("ls").as_path())
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    /// niubash#627 G2: with no shell root configured the resolver
+    /// stays out entirely (the pre-existing gate), so stateless
+    /// readers on an unenclaved host see plain paths, exactly as
+    /// before the unification.
+    #[test]
+    fn issue627_g2_resolver_stays_out_without_a_root() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _root = EnvGuard {
+            name: "NIU_ROOT",
+            previous: std::env::var_os("NIU_ROOT"),
+        };
+        std::env::remove_var("NIU_ROOT");
+        let _bridge = EnvGuard {
+            name: "WINUXSH_ROOT",
+            previous: std::env::var_os("WINUXSH_ROOT"),
+        };
+        std::env::remove_var("WINUXSH_ROOT");
+        let session_base = unique_temp_dir("g2-no-root");
+        assert_eq!(resolve_logical_shell_path("/tmp", &session_base), None);
+        let _ = fs::remove_dir_all(session_base);
     }
 
     /// niubash#304: the atomic writer replaces existing content in one

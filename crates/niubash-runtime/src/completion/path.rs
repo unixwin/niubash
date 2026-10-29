@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::completion::{CompletionBehavior, CompletionContext, CompletionResult};
-use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
+use crate::path_utils::{resolve_logical_shell_path, shell_home_dir, shell_path_to_host_path};
 use anyhow::Result;
 
 /// Path completer
@@ -25,7 +25,7 @@ impl PathCompleter {
             .get_command_name()
             .as_deref()
             .is_some_and(is_directory_only_command);
-        let query = PathQuery::from_word(&context.current_dir, word, quote);
+        let query = PathQuery::from_word(&context.current_dir, word, quote, &context.tmp_base);
 
         // niubash#627: the /dev and /proc namespaces are simulated by
         // the engine — there is no real directory to walk. Their
@@ -131,7 +131,7 @@ struct PathQuery {
 }
 
 impl PathQuery {
-    fn from_word(current_dir: &Path, word: &str, quote: Option<char>) -> Self {
+    fn from_word(current_dir: &Path, word: &str, quote: Option<char>, tmp_base: &Path) -> Self {
         if word.is_empty() {
             return Self {
                 base_dir: current_dir.to_path_buf(),
@@ -164,9 +164,9 @@ impl PathQuery {
             let dir_part = &word[..last_sep];
             let prefix = word[last_sep + 1..].to_string();
             let base_dir = if dir_part.is_empty() {
-                resolve_base_dir(current_dir, "/")
+                resolve_base_dir(current_dir, "/", tmp_base)
             } else {
-                resolve_base_dir(current_dir, dir_part)
+                resolve_base_dir(current_dir, dir_part, tmp_base)
             };
             return Self {
                 base_dir,
@@ -226,8 +226,8 @@ impl PartialOrd for PathCandidate {
     }
 }
 
-fn resolve_base_dir(current_dir: &Path, dir_part: &str) -> PathBuf {
-    if let Some(path) = resolve_logical_shell_dir(dir_part) {
+fn resolve_base_dir(current_dir: &Path, dir_part: &str, tmp_base: &Path) -> PathBuf {
+    if let Some(path) = resolve_logical_shell_path(dir_part, tmp_base) {
         return path;
     }
     if let Some(path) = expand_tilde_path(dir_part) {
@@ -243,55 +243,6 @@ fn resolve_base_dir(current_dir: &Path, dir_part: &str) -> PathBuf {
         path
     } else {
         current_dir.join(path)
-    }
-}
-
-fn resolve_logical_shell_dir(value: &str) -> Option<PathBuf> {
-    let normalized = value.replace('\\', "/");
-    let root = std::env::var_os("NIU_ROOT")
-        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
-        .map(PathBuf::from)?;
-    if normalized == "/" {
-        return Some(root);
-    }
-    if normalized == "/home" || normalized.starts_with("/home/") {
-        let users = shell_home_dir()?.parent()?.to_path_buf();
-        let rest = normalized
-            .trim_start_matches("/home")
-            .trim_start_matches('/');
-        return Some(if rest.is_empty() {
-            users
-        } else {
-            users.join(rest)
-        });
-    }
-    // /tmp and /var/tmp are per-user temporary namespaces backed by the real
-    // Windows temp dir, never the install tree (unixwin/niubash#94).
-    if normalized == "/tmp" || normalized.starts_with("/tmp/") {
-        let rest = normalized
-            .trim_start_matches("/tmp")
-            .trim_start_matches('/');
-        return Some(if rest.is_empty() {
-            std::env::temp_dir()
-        } else {
-            std::env::temp_dir().join(rest)
-        });
-    }
-    if normalized == "/var/tmp" || normalized.starts_with("/var/tmp/") {
-        let rest = normalized
-            .trim_start_matches("/var/tmp")
-            .trim_start_matches('/');
-        let base = std::env::temp_dir().join("var").join("tmp");
-        return Some(if rest.is_empty() {
-            base
-        } else {
-            base.join(rest)
-        });
-    }
-    let rest = normalized.strip_prefix('/')?;
-    match rest.split('/').next() {
-        Some("bin" | "dev" | "etc" | "opt" | "usr" | "var") => Some(root.join(rest)),
-        _ => None,
     }
 }
 
@@ -872,8 +823,30 @@ mod simulated_namespace_tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     fn query(word: &str) -> PathQuery {
-        PathQuery::from_word(Path::new("/"), word, None)
+        PathQuery::from_word(Path::new("/"), word, None, &std::env::temp_dir())
     }
 
     fn ctx(fds: &[u32]) -> CompletionContext {
@@ -897,6 +870,62 @@ mod simulated_namespace_tests {
         assert_eq!(logical_dir_of("/dev").as_deref(), Some("/"));
         assert_eq!(logical_dir_of("plain"), None);
         assert_eq!(logical_dir_of("C:\\dev\\").as_deref(), Some("C:/dev"));
+    }
+
+    /// niubash#627 G2: a `/tmp/` completion walks the directory the
+    /// context's session tmp base names (the engine-resolved TMPDIR
+    /// backing the shell synced in) — the walk steers by that base,
+    /// not by the process temp dir.
+    #[test]
+    fn issue627_g2_completion_walks_the_session_tmp_base() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "niubash-g2-completion-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let root = scratch.join("root");
+        let session_base = scratch.join("session-temp");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&session_base).unwrap();
+        std::fs::write(session_base.join("g2mark-session.txt"), "x").unwrap();
+        std::fs::write(scratch.join("g2mark-decoy.txt"), "x").unwrap();
+        let _root = EnvGuard::set("NIU_ROOT", &root);
+
+        let mut context = CompletionContext::new(
+            PathBuf::from("/"),
+            "cat /tmp/g2mark".to_string(),
+            "cat /tmp/g2mark".len(),
+        );
+        context.tmp_base = session_base.clone();
+        let values = PathCompleter::complete(&context)
+            .unwrap()
+            .map(|result| result.completions)
+            .unwrap_or_default();
+        assert_eq!(values, vec!["/tmp/g2mark-session.txt".to_string()]);
+
+        // Point the base at the scratch dir instead (the stateless
+        // shape) and the same word finds the decoy there: the base
+        // steers the walk, the spelling does not.
+        let mut fallback = CompletionContext::new(
+            PathBuf::from("/"),
+            "cat /tmp/g2mark".to_string(),
+            "cat /tmp/g2mark".len(),
+        );
+        fallback.tmp_base = scratch.clone();
+        let values = PathCompleter::complete(&fallback)
+            .unwrap()
+            .map(|result| result.completions)
+            .unwrap_or_default();
+        assert_eq!(values, vec!["/tmp/g2mark-decoy.txt".to_string()]);
+
+        let _ = std::fs::remove_dir_all(scratch);
     }
 
     #[test]
