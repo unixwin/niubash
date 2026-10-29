@@ -215,7 +215,7 @@ fn mark_self_forwarded_ctrl_c() {
 #[cfg(windows)]
 fn take_self_forwarded_ctrl_c() -> bool {
     SELF_FORWARDED_CTRL_C
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
         .is_ok()
 }
 
@@ -311,10 +311,13 @@ mod watch_imp {
                 .spawn(move || {
                     // Move the OwnedHandle itself across: it carries
                     // the unsafe Send impl (the typeahead sweeper moves
-                    // its handle the same way); the raw HANDLE is not
-                    // Send. It drops (closes) when the thread ends.
-                    let conin = handle.0;
-                    run(conin, thread_stop);
+                    // its handle the same way); the raw HANDLE field is
+                    // not Send, so destructure a pair to force
+                    // whole-variable capture instead of disjoint field
+                    // capture of `handle.0` alone. The handle drops
+                    // (closes) when the thread ends.
+                    let (handle, stop) = (handle, thread_stop);
+                    run(handle.0, stop);
                 })
                 .is_ok();
             if !spawned {
