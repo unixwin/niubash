@@ -1489,6 +1489,8 @@ mod tests {
         // same.
         for spelling in [
             "/dev/null",
+            "/dev/zero",
+            "/dev/full",
             "/dev/stdin",
             "/dev/stdout",
             "/dev/stderr",
@@ -1514,11 +1516,15 @@ mod tests {
         assert!(is_simulated_path("/dev/fd/3"));
         assert!(is_simulated_path("/dev/tcp/127.0.0.1/80"));
         assert_eq!(is_simulated_path("/proc/self"), cfg!(windows));
-        // Spellings the registry does not serve are not simulated:
-        // /dev/zero is a plain filesystem path to the open points
-        // today (audit D5 owns the device), and ordinary words fall
-        // through to the existence check untouched.
-        assert!(!is_simulated_path("/dev/zero"));
+        // The zero/full devices joined the registry as first-class
+        // classes with the audit-D5 simulation (rubash#1898, landed
+        // via rubash#2015), so the registry arm serves them now —
+        // niubash#688 re-derived this pin from the registry.
+        assert!(is_simulated_path("/dev/zero"));
+        assert!(is_simulated_path("/dev/full"));
+        // Spellings the registry does not serve are not simulated,
+        // and ordinary words fall through to the existence check
+        // untouched.
         assert!(!is_simulated_path("/etc/passwd"));
         assert!(!is_simulated_path("plain-word"));
     }
