@@ -271,8 +271,11 @@ python scripts/test-skill-bundle.py   # golden check: regions + embed manifest
 
 ## Prompt And Themes
 
-Defaults are a floor, not an identity. The built-in prompt (a reedline
-template: `user@host cwd symbol`) renders only while nothing claims `PS1`.
+Defaults are a floor, not an identity. The built-in prompt renders only
+while nothing claims `PS1`. It has two faces: on Windows, a Git
+Bash-compatible two-row prompt (green `user@host`, yellow cwd, cyan
+`(branch)` git segment — see [Getting Started](getting-started.md));
+elsewhere, a reedline template (`user@host cwd symbol`).
 Whoever sets `PS1` last owns the prompt completely — your own rc line, an
 enabled oh-my-bash theme, or starship:
 
@@ -384,8 +387,10 @@ compose the two contracts freely.
 
 ## Git Prompt Performance
 
-The host computes the git segment once per prompt pass and hands themes the
-finished string; rendering never runs git. How the value is produced:
+This section covers the Windows prompt faces; off-Windows the git segment
+renders empty and nothing in this section applies. The host computes the
+git segment once per prompt pass and hands the prompt the finished string;
+rendering never runs git. How the value is produced:
 
 - inside a repository, one bounded spawn of the user's own git per pass
   (`git status --porcelain=v2 --branch`, 2 s timeout with the child killed,
@@ -403,6 +408,13 @@ Prompt and theme plugins render the snapshot the host computed for the pass;
 they must not shell out to git themselves. If the prompt flickers or
 repaints the current line, debug the segment lifecycle rather than adding
 more inline Git calls to the theme.
+
+Cross-pass caching and background refresh — recomputing only when the
+repository's HEAD/index state changes, with a late result landing on a
+later pass instead of being computed inside the current one — are planned
+(niubash#643, post-release batch) and are **not** part of the current
+build: today, every pass inside a repository pays its one bounded spawn,
+and no git value is carried across passes.
 
 ## Plugin Workflow
 
