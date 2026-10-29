@@ -26,6 +26,26 @@ impl PathCompleter {
             .as_deref()
             .is_some_and(is_directory_only_command);
         let query = PathQuery::from_word(&context.current_dir, word, quote);
+
+        // niubash#627: the /dev and /proc namespaces are simulated by
+        // the engine — there is no real directory to walk. Their
+        // candidates come from the engine's special-path registry,
+        // the same table the open points classify through.
+        if let Some(mut candidates) =
+            simulated_namespace_candidates(&query, word, context, directories_only)
+        {
+            if candidates.is_empty() {
+                return Ok(None);
+            }
+            candidates.sort();
+            return Ok(Some(CompletionResult::new(
+                candidates
+                    .into_iter()
+                    .map(|candidate| candidate.completion)
+                    .collect(),
+            )));
+        }
+
         let base_dir = Self::normalize_path(&query.base_dir);
 
         // Check if base directory exists
@@ -49,21 +69,11 @@ impl PathCompleter {
         };
 
         let mut completions: Vec<PathCandidate> = Vec::new();
-        // niubash#530: a word containing glob metacharacters (`*`, `@(a|b)`)
-        // is a pattern, not a literal prefix — GNU completes it against the
-        // directory entries the pattern matches. The plain prefix matcher
-        // could never match such a word, so Tab dead-ended at
-        // NO RECORDS FOUND even though plain filename completion worked.
-        let glob_pattern = prefix_is_glob_pattern(&query.prefix);
 
         for entry in entries.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
 
-            let matched = if glob_pattern {
-                glob_completion_matches(&query.prefix, &file_name, behavior)
-            } else {
-                behavior.matches(&file_name, &query.prefix)
-            };
+            let matched = name_matches(&query.prefix, &file_name, behavior);
             if matched {
                 let file_type = match entry.file_type() {
                     Ok(ft) => ft,
@@ -362,6 +372,150 @@ fn is_windows_drive_only(value: &str) -> bool {
 
 fn is_directory_only_command(command: &str) -> bool {
     matches!(command, "cd" | "pushd")
+}
+
+/// Whether a candidate `name` matches the typed `prefix`, under the
+/// same rules the filesystem walk uses.
+fn name_matches(prefix: &str, name: &str, behavior: CompletionBehavior) -> bool {
+    // niubash#530: a word containing glob metacharacters (`*`, `@(a|b)`)
+    // is a pattern, not a literal prefix — GNU completes it against the
+    // directory entries the pattern matches. The plain prefix matcher
+    // could never match such a word, so Tab dead-ended at
+    // NO RECORDS FOUND even though plain filename completion worked.
+    if prefix_is_glob_pattern(prefix) {
+        glob_completion_matches(prefix, name, behavior)
+    } else {
+        behavior.matches(name, prefix)
+    }
+}
+
+// ─── Simulated-namespace completion (niubash#627) ───────────────────────
+//
+// On Windows the /dev and /proc namespaces are simulated by the
+// engine: there is no real directory behind them (the enclave's
+// physical dev dir exists but is empty, and /proc has no physical
+// counterpart at all), so the filesystem walk can only ever answer
+// "no candidates". The candidates below come from the engine's
+// special-path registry (rubash::special_paths) — the same table the
+// open points classify through — so completion can never promise a
+// spelling the opens do not serve, nor hide one they do. The host
+// keeps no special-path knowledge of its own here.
+
+/// Candidates for a word whose directory part names a simulated
+/// namespace, or None when it names an ordinary directory (the
+/// caller then does the filesystem walk). A simulated answer is
+/// authoritative even when empty (no name matches the prefix, or the
+/// net dirs whose children are free text): it must not fall through
+/// to a walk of the enclave's physical directories.
+fn simulated_namespace_candidates(
+    query: &PathQuery,
+    word: &str,
+    context: &CompletionContext,
+    directories_only: bool,
+) -> Option<Vec<PathCandidate>> {
+    let dir = logical_dir_of(word)?;
+    #[cfg(windows)]
+    {
+        if let Some(candidates) = dev_namespace_candidates(&dir, query, context, directories_only) {
+            return Some(candidates);
+        }
+    }
+    // The registry's proc enumeration face is the /proc directory
+    // source; it answers None off Windows, where the real procfs
+    // lists itself through the ordinary walk.
+    if let Some(names) = rubash::special_paths::synthetic_proc_dir_entries(&dir) {
+        let mut candidates = Vec::new();
+        for name in &names {
+            if !name_matches(&query.prefix, name, context.behavior) {
+                continue;
+            }
+            let is_dir =
+                rubash::special_paths::synthetic_proc_dir_entries(&format!("{dir}/{name}"))
+                    .is_some();
+            if directories_only && !is_dir {
+                continue;
+            }
+            candidates.push(PathCandidate::new(
+                is_dir,
+                &query.display_prefix,
+                name,
+                query.quote,
+            ));
+        }
+        return Some(candidates);
+    }
+    None
+}
+
+/// The /dev family's candidates, by directory spelling. Compiled for
+/// tests on every platform; the dispatch only calls it on Windows,
+/// where the namespace is simulated — elsewhere /dev is a real
+/// directory the ordinary walk lists.
+#[cfg(any(windows, test))]
+fn dev_namespace_candidates(
+    dir: &str,
+    query: &PathQuery,
+    context: &CompletionContext,
+    directories_only: bool,
+) -> Option<Vec<PathCandidate>> {
+    match dir {
+        // Static tier: the registry's listable /dev names.
+        "/dev" => {
+            let mut candidates = Vec::new();
+            for (name, is_dir) in rubash::special_paths::special_dev_entries() {
+                if directories_only && !is_dir {
+                    continue;
+                }
+                if !name_matches(&query.prefix, name, context.behavior) {
+                    continue;
+                }
+                candidates.push(PathCandidate::new(
+                    *is_dir,
+                    &query.display_prefix,
+                    name,
+                    query.quote,
+                ));
+            }
+            Some(candidates)
+        }
+        // Dynamic tier: the session's live fd numbers, from the fd
+        // table snapshot in the context — never a name list. The
+        // /proc/self/fd spelling is the same table by alias.
+        "/dev/fd" | "/proc/self/fd" => {
+            let mut candidates = Vec::new();
+            if !directories_only {
+                for fd in &context.open_fds {
+                    let name = fd.to_string();
+                    if name_matches(&query.prefix, &name, context.behavior) {
+                        candidates.push(PathCandidate::new(
+                            false,
+                            &query.display_prefix,
+                            &name,
+                            query.quote,
+                        ));
+                    }
+                }
+            }
+            Some(candidates)
+        }
+        // Net dirs: children are free-text host/port pairs. GNU has
+        // no completion there, and neither do we — an authoritative
+        // empty answer, so the enclave walk cannot invent any.
+        "/dev/tcp" | "/dev/udp" => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// The directory portion of the word as typed, in logical
+/// (forward-slash) form: "/dev/fd/3" → "/dev/fd", "/dev/" → "/dev".
+/// None when the word has no separator (a bare name completes in the
+/// current directory).
+fn logical_dir_of(word: &str) -> Option<String> {
+    let sep = word.rfind(['/', '\\'])?;
+    if sep == 0 {
+        return Some("/".to_string());
+    }
+    Some(word[..sep].replace('\\', "/"))
 }
 
 // ─── Glob-pattern filename completion (niubash#530) ────────────────────────
@@ -710,5 +864,174 @@ mod glob_completion_tests {
         assert!(glob_completion_matches("[a-c]?", "bx", ci));
         assert!(!glob_completion_matches("[!a-c]?", "bx", ci));
         assert!(glob_completion_matches("literal", "literal.txt", ci));
+    }
+}
+
+#[cfg(test)]
+mod simulated_namespace_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn query(word: &str) -> PathQuery {
+        PathQuery::from_word(Path::new("/"), word, None)
+    }
+
+    fn ctx(fds: &[u32]) -> CompletionContext {
+        let mut context = CompletionContext::new(PathBuf::from("/"), String::new(), 0);
+        context.open_fds = fds.to_vec();
+        context
+    }
+
+    fn values(mut candidates: Vec<PathCandidate>) -> Vec<String> {
+        candidates.sort();
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.completion)
+            .collect()
+    }
+
+    #[test]
+    fn issue627_logical_dir_splitting() {
+        assert_eq!(logical_dir_of("/dev/fd/3").as_deref(), Some("/dev/fd"));
+        assert_eq!(logical_dir_of("/dev/").as_deref(), Some("/dev"));
+        assert_eq!(logical_dir_of("/dev").as_deref(), Some("/"));
+        assert_eq!(logical_dir_of("plain"), None);
+        assert_eq!(logical_dir_of("C:\\dev\\").as_deref(), Some("C:/dev"));
+    }
+
+    #[test]
+    fn issue627_dev_static_tier_lists_registry_names() {
+        let q = query("/dev/");
+        let candidates = dev_namespace_candidates("/dev", &q, &ctx(&[]), false)
+            .expect("/dev is a simulated namespace");
+        let got: BTreeSet<String> = values(candidates).into_iter().collect();
+        // The expectation is rebuilt from the registry table itself:
+        // this pin follows the registry, it does not restate it.
+        let expected: BTreeSet<String> = rubash::special_paths::special_dev_entries()
+            .iter()
+            .map(|(name, is_dir)| {
+                if *is_dir {
+                    format!("/dev/{name}/")
+                } else {
+                    format!("/dev/{name}")
+                }
+            })
+            .collect();
+        assert_eq!(got, expected);
+        // Every listed leaf is a spelling the registry classifies as
+        // special — completion never promises what the opens refuse.
+        for (name, is_dir) in rubash::special_paths::special_dev_entries() {
+            if !is_dir {
+                assert_ne!(
+                    rubash::special_paths::classify_special_path(&format!("/dev/{name}")),
+                    rubash::special_paths::SpecialPathClass::Filesystem,
+                    "listed leaf {name} must classify as special"
+                );
+            }
+        }
+        // Spellings the registry does not simulate stay unlisted.
+        assert!(!got.iter().any(|value| value.contains("zero")));
+        assert!(!got.iter().any(|value| value.contains("tty")));
+    }
+
+    #[test]
+    fn issue627_dev_static_tier_prefix_and_directories_only() {
+        let q = query("/dev/n");
+        let candidates = dev_namespace_candidates("/dev", &q, &ctx(&[]), false).unwrap();
+        assert_eq!(values(candidates), vec!["/dev/null".to_string()]);
+
+        let q = query("/dev/");
+        let dirs = dev_namespace_candidates("/dev", &q, &ctx(&[]), true).unwrap();
+        assert_eq!(
+            values(dirs),
+            vec![
+                "/dev/fd/".to_string(),
+                "/dev/tcp/".to_string(),
+                "/dev/udp/".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn issue627_dev_fd_dynamic_tier_tracks_the_fd_table() {
+        let q = query("/dev/fd/");
+        let all = dev_namespace_candidates("/dev/fd", &q, &ctx(&[0, 1, 2, 3, 10]), false).unwrap();
+        assert_eq!(
+            values(all),
+            vec![
+                "/dev/fd/0".to_string(),
+                "/dev/fd/1".to_string(),
+                "/dev/fd/10".to_string(),
+                "/dev/fd/2".to_string(),
+                "/dev/fd/3".to_string()
+            ]
+        );
+
+        // The prefix narrows by the number's spelling.
+        let q = query("/dev/fd/1");
+        let narrowed =
+            dev_namespace_candidates("/dev/fd", &q, &ctx(&[0, 1, 2, 3, 10]), false).unwrap();
+        assert_eq!(
+            values(narrowed),
+            vec!["/dev/fd/1".to_string(), "/dev/fd/10".to_string()]
+        );
+
+        // Closing an fd removes it: the tier tracks the table.
+        let q = query("/dev/fd/");
+        let after_close = dev_namespace_candidates("/dev/fd", &q, &ctx(&[0, 1, 2]), false).unwrap();
+        assert!(!values(after_close).iter().any(|value| value == "/dev/fd/3"));
+
+        // The /proc/self/fd spelling serves the same table.
+        let q = query("/proc/self/fd/");
+        let alias =
+            dev_namespace_candidates("/proc/self/fd", &q, &ctx(&[0, 1, 2, 3]), false).unwrap();
+        assert!(values(alias).contains(&"/proc/self/fd/3".to_string()));
+
+        // Fds are not directories.
+        let q = query("/dev/fd/");
+        assert!(
+            dev_namespace_candidates("/dev/fd", &q, &ctx(&[0, 1, 2, 3]), true)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn issue627_net_dirs_complete_nothing() {
+        for dir in ["/dev/tcp", "/dev/udp"] {
+            let q = query(&format!("{dir}/"));
+            let candidates = dev_namespace_candidates(dir, &q, &ctx(&[0, 1, 2]), false);
+            assert_eq!(
+                candidates.map(|candidates| candidates.len()),
+                Some(0),
+                "{dir} must answer authoritatively empty"
+            );
+        }
+        // An ordinary directory is not this dispatch's business.
+        let q = query("/etc/");
+        assert!(dev_namespace_candidates("/etc", &q, &ctx(&[]), false).is_none());
+    }
+
+    #[test]
+    fn issue627_proc_falls_through_where_no_simulation() {
+        // Off Windows the registry's proc face answers None and the
+        // real procfs is the ordinary walk's business.
+        if !cfg!(windows) {
+            let q = query("/proc/");
+            let context = ctx(&[0, 1, 2]);
+            assert!(simulated_namespace_candidates(&q, "/proc/", &context, false).is_none());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue627_proc_tier_lists_registry_entries() {
+        let q = query("/proc/");
+        let context = ctx(&[0, 1, 2]);
+        let candidates = simulated_namespace_candidates(&q, "/proc/", &context, false)
+            .expect("/proc is simulated on Windows");
+        let values = values(candidates);
+        assert!(values.contains(&"/proc/meminfo".to_string()), "{values:?}");
+        assert!(values.contains(&"/proc/self/".to_string()), "{values:?}");
     }
 }
