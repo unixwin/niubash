@@ -92,10 +92,22 @@ pub struct Shell {
     /// The engine session this shell drives (the 1.5.0 Session
     /// contract). `None` only after
     /// [`Shell::finish_with_engine_finish`] consumes it through
-    /// `Session::close` on a route tail whose process exits
-    /// immediately afterwards; the accessors below panic on use
-    /// after that point, which is a host bug by construction.
+    /// `Session::close` on a route tail; the accessors below panic
+    /// on use after that point, which is a host bug by construction.
+    /// The one sanctioned post-close read is
+    /// [`Shell::current_host_cwd`], which the finish funnel feeds
+    /// through `finish_cwd` below before consuming the session.
     pub session: Option<Session>,
+    /// The shell's final directory, captured by
+    /// [`Shell::finish_with_engine_finish`] after the EXIT trap has
+    /// run and before the session is consumed by `Session::close`.
+    /// The `--cwd-state` recorder in the binary reads the directory
+    /// AFTER the finish funnel returns (docs/cwd-state.md §3: the
+    /// record happens after the trap, from `PWD`, because a trap's
+    /// `cd` updates `PWD` but not the process cwd), so the value
+    /// must be taken while the session is still alive and handed
+    /// over here. `None` until that funnel runs.
+    finish_cwd: Option<PathBuf>,
     pub completion_state: Arc<Mutex<CompletionState>>,
     pub prompt: PromptBackend,
     /// Product floor prompt (defaults-as-floor, design §14.5): the
@@ -719,6 +731,7 @@ impl Shell {
         let gitbash_prompt_active = cfg!(windows) && !one_shot && prompt_style == "gitbash";
         let mut shell = Self {
             session: Some(session),
+            finish_cwd: None,
             completion_state,
             prompt: prompt.clone(),
             gitbash_prompt_active,
@@ -3012,6 +3025,15 @@ impl Shell {
     /// `PWD` is the truth for "where did this invocation end" — the value
     /// the `--cwd-state` host contract records.
     pub fn current_host_cwd(&self) -> PathBuf {
+        // After `finish_with_engine_finish` consumed the session the
+        // executor is gone; the funnel captured the final directory
+        // (post-EXIT-trap) into `finish_cwd` for exactly this read.
+        if self.session.is_none() {
+            return self
+                .finish_cwd
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        }
         self.executor_pwd_host_path()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
@@ -3129,38 +3151,60 @@ impl Shell {
 
     /// niubash#652: teardown for the one-shot and host-driven stream
     /// routes (script file, -c, the host stdin driver) via the engine's
-    /// shared finish path, `script_driver::finish_shell` — the
-    /// same one rubash's own main runs at those route tails. In GNU
-    /// exit_shell order it performs the session-history write (inert on
-    /// these routes unless the script itself armed history, rubash#1049
-    /// parity), the end-of-stream job-notification flush (rubash#1853),
-    /// the EXIT trap, the debugger exit note, and the persistent output
-    /// procsub close (rubash#1336). These routes previously ran only the
-    /// trap (finish_with_exit_trap), so the flush and the close never
-    /// happened: a signal death reaped during the last command stayed
-    /// silent, and `exec > >(cat > LOG)` lost the whole log. The
-    /// zshexit hooks are a host-only step and run first, exactly as in
-    /// finish_with_exit_trap. REPL exits do NOT come here: the REPL's
-    /// history write is the ledger-reconciled provider flush in
-    /// end_repl_session (#642/#649), which must stay after the trap.
+    /// shared finish duties — the same set `script_driver::finish_shell`
+    /// performs at rubash's own route tails: the session-history write
+    /// (inert on these routes unless the script itself armed history,
+    /// rubash#1049 parity), the end-of-stream job-notification flush
+    /// (rubash#1853), the EXIT trap, the debugger exit note, and the
+    /// persistent output procsub close (rubash#1336). These routes
+    /// previously ran only the trap (finish_with_exit_trap), so the
+    /// flush and the close never happened: a signal death reaped during
+    /// the last command stayed silent, and `exec > >(cat > LOG)` lost
+    /// the whole log. The composition below runs the trap through
+    /// finish_with_exit_trap and the remaining duties through
+    /// `Session::close`; the in-body comment explains why (the
+    /// --cwd-state post-finish read) and records the one ordering
+    /// delta. REPL exits do NOT come here: the REPL's history write
+    /// is the ledger-reconciled provider flush in end_repl_session
+    /// (#642/#649), which must stay after the trap.
     pub fn finish_with_engine_finish(&mut self, status: i32) -> i32 {
-        self.run_zshexit_hooks();
-        // 1.5.0 migration: the tail is the Session contract's
-        // close() — the same finish_shell funnel (EXIT trap,
-        // history write, job terminal-state flush), with two
-        // shape adaptations: the caller's status is made the
-        // session's last status first (close reads the status
-        // from the session, where the direct call passed it),
-        // and the session's own interactive flag replaces the
-        // old hardcoded `false` — it is false on every route
-        // that reaches this funnel (the flag only turns true
-        // through prepare_line/run_line, and the REPL tail
-        // deliberately does not come through here; see the
-        // #642/#649 finish discipline). close() consumes the
-        // session, so `Shell::session` is None from here on;
-        // every calling route exits the process immediately
-        // afterwards.
-        self.session_mut().set_last_status(status);
+        // Composition (repaired after PR #668's cwd-state
+        // regression): the EXIT trap runs FIRST, through the host's
+        // retained trap funnel, and the shell's final directory is
+        // captured immediately afterwards; only then is the session
+        // consumed by `Session::close` for the remaining finish
+        // duties (session-history write, stream-end job flush,
+        // debugger exit note — the trap inside close's finish_shell
+        // is already taken and the procsub close already done, so
+        // both are no-ops there).
+        //
+        // Why the trap cannot stay inside close(): the binary's
+        // `--cwd-state` recorder reads the final directory through
+        // `current_host_cwd` AFTER this funnel returns, and the
+        // documented contract (docs/cwd-state.md §3) is that the
+        // record reflects the EXIT trap's `cd`, which updates
+        // `PWD` but not the process cwd. A consuming close() leaves
+        // no live session to read that `PWD` from: the first
+        // version of this migration step closed first and read
+        // afterwards, the accessor panicked ("shell session
+        // already closed"), the process exited 1, and the state
+        // file was never written (tests/cwd_state.rs 9/11 on
+        // PR #668's CI). Capturing between the trap and the close
+        // is the only point where the post-trap directory exists.
+        //
+        // Known ordering delta vs a single finish_shell pass: the
+        // history write and the job-notification flush now run
+        // (inside close) after the trap instead of before it. No
+        // pin covers trap-vs-flush ordering (#652's pins assert
+        // the notice is flushed and the procsub bodies are
+        // delivered, both unchanged); the delta is confined to a
+        // trap that itself mutates history state or races a job
+        // notice. The status close() finishes with is the trap
+        // funnel's resulting code, made the session's last status
+        // first, exactly as the direct close did.
+        let code = self.finish_with_exit_trap(status).unwrap_or(status);
+        self.finish_cwd = Some(self.current_host_cwd());
+        self.session_mut().set_last_status(code);
         let session = self.session.take().expect("shell session already closed");
         session.close()
     }
@@ -9141,6 +9185,7 @@ complete -F _envtooldyn_hook envtooldyn
         session.options().set("expand_aliases", true);
         let mut shell = Shell {
             session: Some(session),
+            finish_cwd: None,
             completion_state: Arc::new(Mutex::new(CompletionState::new(PathBuf::from(".")))),
             prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             gitbash_prompt_active: false,
