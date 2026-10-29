@@ -686,14 +686,18 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
                 // the login flag whole — no login mark, no profile
                 // chain, no env file, silently diverging from the same
                 // spelling on the engine route (`-lc`). Converge: mark
-                // login (the carrier + login_shell shopt pair, so `$-`
-                // gains `l`) and run the same non-interactive startup
-                // chain (profile chain, then the env file, #399/#402)
-                // before the command string; an `exit` in a startup
-                // file ends the invocation with its status. The order
-                // matches the engine route: the startup chain runs
-                // before BASH_EXECUTION_STRING is set below.
-                shell.executor_mut().mark_login_shell();
+                // login (the host classification plus the carrier +
+                // login_shell shopt pair, so `$-` gains `l`) and run
+                // the same non-interactive startup chain (profile
+                // chain, then the env file, #399/#402) before the
+                // command string; an `exit` in a startup file ends the
+                // invocation with its status. The order matches the
+                // engine route: the startup chain runs before
+                // BASH_EXECUTION_STRING is set below. rubash#2129: the
+                // mark goes through the host door so the funnel's
+                // classification (host state) and the engine's carrier
+                // projection move together.
+                shell.mark_own_login_shell();
                 if let Some(status) = shell.source_non_interactive_env() {
                     finish_startup_exit(&mut shell, status);
                 }
