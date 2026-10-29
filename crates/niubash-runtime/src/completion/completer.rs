@@ -81,6 +81,14 @@ pub struct CompletionState {
     /// completer's dynamic tier lists these under `/dev/fd/`
     /// (niubash#627).
     pub open_fds: Vec<u32>,
+    /// The backing directory for the session's `/tmp`, resolved by
+    /// the engine from the session env (session TMPDIR wins) and
+    /// synced by `Shell::update_completion_state`. The path
+    /// completer and the syntax highlighter root `/tmp` spellings
+    /// here so both follow a session `TMPDIR` assignment immediately
+    /// (niubash#627 G2). Starts at the process temp dir, the pre-sync
+    /// fallback.
+    pub tmp_base: PathBuf,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -112,6 +120,7 @@ impl CompletionState {
             aliases: HashSet::new(),
             functions: HashSet::new(),
             open_fds: Vec::new(),
+            tmp_base: std::env::temp_dir(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
             command_probe: CommandProbe::default(),
@@ -232,7 +241,7 @@ impl NiubashCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, open_fds, behavior, plugins) =
+        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, plugins) =
             if let Ok(state) = self.state.lock() {
                 (
                     state.current_dir.clone(),
@@ -240,6 +249,7 @@ impl NiubashCompleter {
                     state.aliases.clone(),
                     state.functions.clone(),
                     state.open_fds.clone(),
+                    state.tmp_base.clone(),
                     state.behavior,
                     state.plugins.clone(),
                 )
@@ -250,6 +260,7 @@ impl NiubashCompleter {
         let mut context =
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
         context.open_fds = open_fds;
+        context.tmp_base = tmp_base;
         let mut all_suggestions = Vec::new();
 
         // Shell-function completions (`NIU_COMPDEFS`): only available while

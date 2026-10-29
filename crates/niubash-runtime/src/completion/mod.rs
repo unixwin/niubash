@@ -68,6 +68,13 @@ pub struct CompletionContext {
     /// The path completer's dynamic tier lists these under `/dev/fd/`
     /// (niubash#627).
     pub open_fds: Vec<u32>,
+    /// The backing directory for the session's `/tmp` at snapshot
+    /// time, resolved by the engine from the session env (session
+    /// TMPDIR wins) via `CompletionState`. The path completer's
+    /// logical resolver roots `/tmp` spellings here (niubash#627 G2).
+    /// Contexts built without session state keep the process temp
+    /// dir — the fallback for the stateless case only.
+    pub tmp_base: PathBuf,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -102,6 +109,7 @@ impl CompletionContext {
             cursor_pos,
             behavior,
             open_fds: Vec::new(),
+            tmp_base: std::env::temp_dir(),
         }
     }
 

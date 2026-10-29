@@ -3040,6 +3040,14 @@ impl Shell {
         // the same compare-and-store discipline as the other
         // components (the vec is tiny — fd counts, not env-sized).
         let open_fds = self.executor().open_fds();
+        // niubash#627 G2: the /tmp backing directory, resolved by the
+        // engine from the SESSION env (its TMPDIR wins, the process
+        // temp dir is the engine's own fallback) through the Session
+        // seam. Completion and highlighting root /tmp spellings in
+        // this value, so a session `TMPDIR=/x` moves them on the very
+        // next line — the same immediacy the engine's opens have —
+        // instead of pinning both readers to the process env forever.
+        let tmp_base = self.executor().resolve_shell_path("/tmp");
         let mut alias_names: Vec<String> = self.aliases.keys().cloned().collect();
         alias_names.sort_unstable();
         if let Ok(mut state) = self.completion_state.lock() {
@@ -3061,6 +3069,9 @@ impl Shell {
             }
             if state.open_fds != open_fds {
                 state.open_fds = open_fds;
+            }
+            if state.tmp_base != tmp_base {
+                state.tmp_base = tmp_base;
             }
         }
     }
@@ -9582,5 +9593,89 @@ mod invocation_name_tests {
         // Net dirs complete nothing past the guide form.
         let net = shell.completion_probe("cat /dev/tcp/", "cat /dev/tcp/".len());
         assert!(net.is_empty(), "{net:?}");
+    }
+
+    /// niubash#627 G2 end-to-end (Windows, where /tmp is the enclave
+    /// namespace): a session `TMPDIR` assignment moves /tmp
+    /// completion to the new backing directory on the very next
+    /// probe — the readers follow the session value the engine
+    /// resolves, not the process environment they used to read. A
+    /// subshell assignment does not leak back, and unsetting TMPDIR
+    /// returns completion to the process temp fallback.
+    #[cfg(windows)]
+    #[test]
+    fn issue627_g2_completion_follows_session_tmpdir() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch =
+            std::env::temp_dir().join(format!("niubash-g2-shell-{}-{}", std::process::id(), nanos));
+        let dir_a = scratch.join("a");
+        let dir_b = scratch.join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::write(dir_a.join("g2alpha.txt"), "x").unwrap();
+        std::fs::write(dir_b.join("g2beta.txt"), "x").unwrap();
+        let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
+        let probe = |shell: &Shell| shell.completion_probe("cat /tmp/g2", "cat /tmp/g2".len());
+
+        shell
+            .execute_interactive_line(&format!("TMPDIR={}", slash(&dir_a)))
+            .unwrap();
+        let got = probe(&shell);
+        assert!(got.contains(&"/tmp/g2alpha.txt".to_string()), "{got:?}");
+        assert!(!got.contains(&"/tmp/g2beta.txt".to_string()), "{got:?}");
+
+        // Repointing the session value moves completion immediately.
+        shell
+            .execute_interactive_line(&format!("TMPDIR={}", slash(&dir_b)))
+            .unwrap();
+        let got = probe(&shell);
+        assert!(got.contains(&"/tmp/g2beta.txt".to_string()), "{got:?}");
+        assert!(!got.contains(&"/tmp/g2alpha.txt".to_string()), "{got:?}");
+
+        // A subshell assignment is scoped to the subshell (GNU
+        // inheritance shape): the session value — and completion —
+        // stay where the parent session put them.
+        shell
+            .execute_interactive_line(&format!("( TMPDIR={} )", slash(&dir_a)))
+            .unwrap();
+        let got = probe(&shell);
+        assert!(got.contains(&"/tmp/g2beta.txt".to_string()), "{got:?}");
+        assert!(!got.contains(&"/tmp/g2alpha.txt".to_string()), "{got:?}");
+
+        // Unsetting TMPDIR falls back to the process temp dir.
+        shell.execute_interactive_line("unset TMPDIR").unwrap();
+        let fallback_name = format!("g2fallback-{}.txt", std::process::id());
+        let fallback_file = std::env::temp_dir().join(&fallback_name);
+        std::fs::write(&fallback_file, "x").unwrap();
+        let input = format!("cat /tmp/{}", &fallback_name[..fallback_name.len() - 4]);
+        let got = shell.completion_probe(&input, input.len());
+        assert!(got.contains(&format!("/tmp/{fallback_name}")), "{got:?}");
+        let _ = std::fs::remove_file(fallback_file);
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    /// niubash#627 G2 (non-Windows): the synced tmp base is whatever
+    /// the ENGINE resolves — off Windows there is no enclave, so a
+    /// session TMPDIR does not move it. The host takes the engine's
+    /// answer through the Session seam instead of inventing its own
+    /// TMPDIR read (the pre-G2 copies diverged exactly that way).
+    #[cfg(not(windows))]
+    #[test]
+    fn issue627_g2_tmp_base_is_the_engine_answer_off_windows() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_interactive_line("TMPDIR=/definitely/not/the/base")
+            .unwrap();
+        shell.update_completion_state();
+        let state = shell.completion_state.lock().unwrap();
+        assert_eq!(state.tmp_base, std::path::PathBuf::from("/tmp"));
     }
 }
