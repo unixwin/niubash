@@ -76,6 +76,19 @@ pub struct CompletionState {
     pub env_vars: HashMap<String, String>,
     pub aliases: HashSet<String>,
     pub functions: HashSet<String>,
+    /// The session's open fd numbers, synced from the engine's fd
+    /// table by `Shell::update_completion_state`. The path
+    /// completer's dynamic tier lists these under `/dev/fd/`
+    /// (niubash#627).
+    pub open_fds: Vec<u32>,
+    /// The backing directory for the session's `/tmp`, resolved by
+    /// the engine from the session env (session TMPDIR wins) and
+    /// synced by `Shell::update_completion_state`. The path
+    /// completer and the syntax highlighter root `/tmp` spellings
+    /// here so both follow a session `TMPDIR` assignment immediately
+    /// (niubash#627 G2). Starts at the process temp dir, the pre-sync
+    /// fallback.
+    pub tmp_base: PathBuf,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -106,6 +119,8 @@ impl CompletionState {
             env_vars: HashMap::new(),
             aliases: HashSet::new(),
             functions: HashSet::new(),
+            open_fds: Vec::new(),
+            tmp_base: std::env::temp_dir(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
             command_probe: CommandProbe::default(),
@@ -226,13 +241,15 @@ impl NiubashCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, behavior, plugins) =
+        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, plugins) =
             if let Ok(state) = self.state.lock() {
                 (
                     state.current_dir.clone(),
                     state.env_vars.clone(),
                     state.aliases.clone(),
                     state.functions.clone(),
+                    state.open_fds.clone(),
+                    state.tmp_base.clone(),
                     state.behavior,
                     state.plugins.clone(),
                 )
@@ -240,8 +257,10 @@ impl NiubashCompleter {
                 return Vec::new();
             };
 
-        let context =
+        let mut context =
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
+        context.open_fds = open_fds;
+        context.tmp_base = tmp_base;
         let mut all_suggestions = Vec::new();
 
         // Shell-function completions (`NIU_COMPDEFS`): only available while
@@ -307,7 +326,7 @@ impl NiubashCompleter {
 
         // GNU programmable completion (rubash engine): when the command has a
         // compspec registered via the `complete` builtin, argument candidates
-        // come from `Executor::complete_line` through the shell bridge. The
+        // come from `Session::complete` through the shell bridge. The
         // completion *engine* lives in rubash while niubash keeps its
         // cwd-priority, common-command, and file overlays for everything else.
         // The `has_compspec` gate keeps this free for commands without a
@@ -317,12 +336,17 @@ impl NiubashCompleter {
             let first_word = input.split_whitespace().next().unwrap_or_default();
             let has_compspec = !first_word.is_empty()
                 && crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.has_compspec(first_word)
+                    shell.session().has_compspec(first_word)
                 })
                 .unwrap_or(false);
             if has_compspec {
                 if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.complete_line(input, cursor_pos)
+                    shell
+                        .session_mut()
+                        .complete(input, cursor_pos)
+                        .into_iter()
+                        .map(|candidate| candidate.text)
+                        .collect::<Vec<String>>()
                 }) {
                     if !cands.is_empty() {
                         let result = CompletionResult::new(cands);

@@ -37,8 +37,8 @@ niubash
 You should see something like:
 
 ```text
-user@DESKTOP C:\Users\you
-%
+user@DESKTOP ~
+$
 ```
 
 Type `exit` or press Ctrl+D to quit.
@@ -49,24 +49,24 @@ Type `exit` or press Ctrl+D to quit.
 
 ```sh
 cd C:\Users\you\repo
-# if inside a repo, the prompt changes:
-user@DESKTOP C:\Users\you\repo  git:(main) ●1 ✚2 ?1
-%
+# inside a repo, the first prompt row gains a branch segment:
+user@DESKTOP ~/repo (main)
+$
 ```
 
-Symbols at a glance:
+The segment is deliberately small — the Git Bash shape, not a status
+dashboard:
 
-| Symbol | Meaning |
-|--------|---------|
-| `●N`   | N files staged for commit |
-| `✚N`   | N files modified but unstaged |
-| `?N`   | N untracked files |
-| `↑N`   | N commits ahead of upstream |
-| `↓N`   | N commits behind upstream |
-| `⚑N`   | N stashes saved |
-| `✖N`   | N merge conflicts |
+| Shape | Meaning |
+|-------|---------|
+| `(main)` | on branch `main`, working tree clean |
+| `(main*)` | on branch `main`, working tree dirty — the trailing `*` is the only dirty marker: any staged, unstaged, or untracked change sets it, and there are no per-category counts |
+| `(a1b2c3d)` | detached HEAD — the short commit SHA instead of a branch name |
+| *(no segment)* | outside a repository (or git unavailable) — the segment is simply absent |
 
-The branch name is green when the tree is clean, yellow when dirty.
+The branch segment is always cyan; clean versus dirty is told by the `*`,
+not by a colour change. A fresh `git init` repository shows its unborn
+branch name too.
 
 ## 4. Try some commands
 
