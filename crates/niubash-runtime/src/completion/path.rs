@@ -929,8 +929,15 @@ mod simulated_namespace_tests {
                 );
             }
         }
-        // Spellings the registry does not simulate stay unlisted.
-        assert!(!got.iter().any(|value| value.contains("zero")));
+        // The device spellings the registry promoted to first-class
+        // classes (rubash#1898: ZeroDevice/FullDevice, listed by
+        // special_dev_entries in the same change) are listed too —
+        // niubash#688 re-derived this pin from the registry after
+        // the promotion landed via rubash#2015.
+        assert!(got.contains("/dev/zero"));
+        assert!(got.contains("/dev/full"));
+        // Spellings the registry does not simulate stay unlisted:
+        // /dev/tty is deliberately unclassified (Filesystem) today.
         assert!(!got.iter().any(|value| value.contains("tty")));
     }
 
