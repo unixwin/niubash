@@ -76,6 +76,19 @@ pub struct CompletionState {
     pub env_vars: HashMap<String, String>,
     pub aliases: HashSet<String>,
     pub functions: HashSet<String>,
+    /// The session's open fd numbers, synced from the engine's fd
+    /// table by `Shell::update_completion_state`. The path
+    /// completer's dynamic tier lists these under `/dev/fd/`
+    /// (niubash#627).
+    pub open_fds: Vec<u32>,
+    /// The backing directory for the session's `/tmp`, resolved by
+    /// the engine from the session env (session TMPDIR wins) and
+    /// synced by `Shell::update_completion_state`. The path
+    /// completer and the syntax highlighter root `/tmp` spellings
+    /// here so both follow a session `TMPDIR` assignment immediately
+    /// (niubash#627 G2). Starts at the process temp dir, the pre-sync
+    /// fallback.
+    pub tmp_base: PathBuf,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -106,6 +119,8 @@ impl CompletionState {
             env_vars: HashMap::new(),
             aliases: HashSet::new(),
             functions: HashSet::new(),
+            open_fds: Vec::new(),
+            tmp_base: std::env::temp_dir(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
             command_probe: CommandProbe::default(),
@@ -226,13 +241,15 @@ impl NiubashCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, behavior, plugins) =
+        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, plugins) =
             if let Ok(state) = self.state.lock() {
                 (
                     state.current_dir.clone(),
                     state.env_vars.clone(),
                     state.aliases.clone(),
                     state.functions.clone(),
+                    state.open_fds.clone(),
+                    state.tmp_base.clone(),
                     state.behavior,
                     state.plugins.clone(),
                 )
@@ -240,8 +257,10 @@ impl NiubashCompleter {
                 return Vec::new();
             };
 
-        let context =
+        let mut context =
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
+        context.open_fds = open_fds;
+        context.tmp_base = tmp_base;
         let mut all_suggestions = Vec::new();
 
         // Shell-function completions (`NIU_COMPDEFS`): only available while
@@ -254,7 +273,10 @@ impl NiubashCompleter {
         // working directory ahead of PATH command matches. This mirrors the
         // Windows-shell expectation that `win` in a folder containing
         // `./niubash/` should offer `./niubash/` first, instead of only showing
-        // PATH executables like `winver` or `winrm`.
+        // PATH executables like `winver` or `winrm`. Only entries that could
+        // actually run from the command slot qualify — directories and
+        // executable files (niubash#671); plain data files are not commands
+        // and readline/GNU never offer them here.
         let cwd_path_suggestions = self.cwd_path_suggestions_at_command_position(&context);
         let alias_suggestions = self.alias_suggestions_at_command_position(&context, &aliases);
         let function_suggestions =
@@ -304,7 +326,7 @@ impl NiubashCompleter {
 
         // GNU programmable completion (rubash engine): when the command has a
         // compspec registered via the `complete` builtin, argument candidates
-        // come from `Executor::complete_line` through the shell bridge. The
+        // come from `Session::complete` through the shell bridge. The
         // completion *engine* lives in rubash while niubash keeps its
         // cwd-priority, common-command, and file overlays for everything else.
         // The `has_compspec` gate keeps this free for commands without a
@@ -314,12 +336,17 @@ impl NiubashCompleter {
             let first_word = input.split_whitespace().next().unwrap_or_default();
             let has_compspec = !first_word.is_empty()
                 && crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.has_compspec(first_word)
+                    shell.session().has_compspec(first_word)
                 })
                 .unwrap_or(false);
             if has_compspec {
                 if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.complete_line(input, cursor_pos)
+                    shell
+                        .session_mut()
+                        .complete(input, cursor_pos)
+                        .into_iter()
+                        .map(|candidate| candidate.text)
+                        .collect::<Vec<String>>()
                 }) {
                     if !cands.is_empty() {
                         let result = CompletionResult::new(cands);
@@ -370,6 +397,13 @@ impl NiubashCompleter {
                 continue;
             }
             let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            // niubash#671: a non-directory qualifies for the command
+            // slot only when it is executable — offering plain files
+            // (`notes.txt`) as `./notes.txt` manufactures commands the
+            // shell would never resolve at this position.
+            if !is_dir && !Self::is_command_file(&entry) {
+                continue;
+            }
             if file_name.starts_with('.') && !word.starts_with('.') {
                 continue;
             }
@@ -409,6 +443,40 @@ impl NiubashCompleter {
                 match_indices: None,
             })
             .collect()
+    }
+
+    /// niubash#671: whether a non-directory cwd entry could actually
+    /// run from the command slot. Platform rule: on Unix, any execute
+    /// bit; on Windows, an extension listed in PATHEXT (the same list
+    /// command resolution uses; the Windows default applies when the
+    /// variable is unset).
+    fn is_command_file(entry: &std::fs::DirEntry) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            entry
+                .metadata()
+                .map(|md| md.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+        #[cfg(windows)]
+        {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                return false;
+            };
+            let pathext =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            pathext
+                .split(';')
+                .filter(|item| !item.is_empty())
+                .any(|item| item.trim_start_matches('.').eq_ignore_ascii_case(ext))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = entry;
+            false
+        }
     }
 
     fn alias_suggestions_at_command_position(
@@ -848,9 +916,23 @@ mod cwd_priority_tests {
 
     #[test]
     fn command_position_offers_matching_cwd_file_with_dot_slash() {
+        // niubash#671 revised this pin: the fixture used to be a plain
+        // data file (`winuxfile.txt`), which the command slot must NOT
+        // offer — only an executable file qualifies. The `./` shape and
+        // span contract for qualifying files are unchanged.
         let temp_dir = unique_temp_dir("niubash-cwd-priority-files");
         std::fs::create_dir_all(&temp_dir).unwrap();
         std::fs::write(temp_dir.join("winuxfile.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("winuxrun.exe"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                temp_dir.join("winuxrun.exe"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
 
         let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
         let mut completer = NiubashCompleter::new(state);
@@ -858,11 +940,59 @@ mod cwd_priority_tests {
 
         let file_suggestion = suggestions
             .iter()
-            .find(|suggestion| suggestion.value == "./winuxfile.txt")
+            .find(|suggestion| suggestion.value == "./winuxrun.exe")
             .unwrap_or_else(|| panic!("expected cwd file with ./, got {suggestions:?}"));
         assert_eq!(file_suggestion.span.start, 0);
         assert_eq!(file_suggestion.span.end, 3);
         assert!(file_suggestion.append_whitespace);
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./winuxfile.txt"),
+            "plain data file leaked into command position: {suggestions:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn issue671_command_position_skips_plain_files_keeps_dirs_and_executables() {
+        let temp_dir = unique_temp_dir("niubash-issue671");
+        std::fs::create_dir_all(temp_dir.join("rundir")).unwrap();
+        std::fs::write(temp_dir.join("runnotes.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("runapp.exe"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                temp_dir.join("runapp.exe"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("run", 3);
+
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./rundir/"),
+            "directory must stay offered: {suggestions:?}"
+        );
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./runapp.exe"),
+            "executable file must stay offered: {suggestions:?}"
+        );
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./runnotes.txt"),
+            "plain data file must not be offered at command position: {suggestions:?}"
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -884,11 +1014,14 @@ mod cwd_priority_tests {
             .unwrap_or_else(|| panic!("expected cwd dir on empty Tab, got {suggestions:?}"));
         assert!(!dir_suggestion.append_whitespace);
 
-        let file_suggestion = suggestions
-            .iter()
-            .find(|suggestion| suggestion.value == "./localfile.txt")
-            .unwrap_or_else(|| panic!("expected cwd file on empty Tab, got {suggestions:?}"));
-        assert!(file_suggestion.append_whitespace);
+        // niubash#671 revised this pin: a plain data file is not a
+        // command and must not be dumped into the empty-prompt list.
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./localfile.txt"),
+            "plain data file leaked into empty-input command position: {suggestions:?}"
+        );
         assert!(
             !suggestions
                 .iter()

@@ -478,6 +478,41 @@ fn ctrl_c_interrupts_builtin_sleep() {
     s.expect_prompt();
 }
 
+/// niubash#669: Ctrl+C during a foreground `sleep` must return the
+/// prompt with `$?` = 130. On the reporter's real-machine PTY harness
+/// the press never reached the shell at all (no reaction, the sleep ran
+/// to completion) while GNU in the same harness settled 130 at once:
+/// a Ctrl+C that reaches the console as a queued input record is never
+/// translated into the CTRL_C_EVENT the host's console handler waits
+/// for. The host now watches the input queue during foreground
+/// execution and synthesizes the delivery (`ForegroundWatch`). Like
+/// the rest of this suite it skips on hosted CI
+/// (`require_pty_or_skip`); it guards desktop / real-machine runs.
+#[test]
+fn issue669_ctrl_c_during_sleep_returns_prompt_with_130() {
+    if !require_pty_or_skip("issue669_ctrl_c_during_sleep_returns_prompt_with_130") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-sleep-669",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send_line("sleep 30");
+    std::thread::sleep(Duration::from_millis(700));
+    s.send(CTRL_C);
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:130");
+    s.expect_prompt();
+    s.send_line("echo still-alive-669");
+    s.expect("still-alive-669");
+    s.expect_prompt();
+}
+
 /// Ctrl-D on an empty line exits the shell with status 0.
 #[test]
 fn ctrl_d_on_empty_line_exits() {
