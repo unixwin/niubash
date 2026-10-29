@@ -4857,7 +4857,21 @@ fn ensure_windows_profile_env(executor: &mut Executor, home_dir: &Path) {
 }
 
 fn ensure_prompt_terminal_env(executor: &mut Executor) {
-    set_executor_env_if_missing_or_empty(executor, "COLUMNS", "80");
+    // niubash#667: COLUMNS is a plain shell variable in GNU bash — the
+    // shell maintains it for its own line discipline and prompt math,
+    // and it reaches a child's environment only when the user exports
+    // it. The width seed must therefore go through the non-exporting
+    // write. (The shared helper below exports on purpose: its other
+    // callers seed the Windows profile variables, which ARE environment
+    // citizens.) Same-family check: LINES is never seeded by the host —
+    // the engine's own winsize face owns it — so COLUMNS is the only
+    // terminal-size variable on this path.
+    if executor
+        .get_env("COLUMNS")
+        .is_none_or(|current| current.trim().is_empty())
+    {
+        executor.set_env("COLUMNS", "80");
+    }
 }
 
 fn set_executor_env_if_missing_or_empty(executor: &mut Executor, name: &str, value: &str) {
