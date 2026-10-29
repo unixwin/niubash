@@ -9622,12 +9622,11 @@ mod invocation_name_tests {
         std::fs::write(dir_a.join("g2alpha.txt"), "x").unwrap();
         std::fs::write(dir_b.join("g2beta.txt"), "x").unwrap();
         let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
-        let probe = |shell: &_| shell.completion_probe("cat /tmp/g2", "cat /tmp/g2".len());
 
         shell
             .execute_interactive_line(&format!("TMPDIR={}", slash(&dir_a)))
             .unwrap();
-        let got = probe(&shell);
+        let got = shell.completion_probe("cat /tmp/g2", "cat /tmp/g2".len());
         assert!(got.contains(&"/tmp/g2alpha.txt".to_string()), "{got:?}");
         assert!(!got.contains(&"/tmp/g2beta.txt".to_string()), "{got:?}");
 
@@ -9635,7 +9634,7 @@ mod invocation_name_tests {
         shell
             .execute_interactive_line(&format!("TMPDIR={}", slash(&dir_b)))
             .unwrap();
-        let got = probe(&shell);
+        let got = shell.completion_probe("cat /tmp/g2", "cat /tmp/g2".len());
         assert!(got.contains(&"/tmp/g2beta.txt".to_string()), "{got:?}");
         assert!(!got.contains(&"/tmp/g2alpha.txt".to_string()), "{got:?}");
 
@@ -9645,7 +9644,7 @@ mod invocation_name_tests {
         shell
             .execute_interactive_line(&format!("( TMPDIR={} )", slash(&dir_a)))
             .unwrap();
-        let got = probe(&shell);
+        let got = shell.completion_probe("cat /tmp/g2", "cat /tmp/g2".len());
         assert!(got.contains(&"/tmp/g2beta.txt".to_string()), "{got:?}");
         assert!(!got.contains(&"/tmp/g2alpha.txt".to_string()), "{got:?}");
 
