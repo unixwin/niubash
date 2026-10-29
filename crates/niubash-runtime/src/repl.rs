@@ -2544,6 +2544,27 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "backward-delete-char" => Some(edit_event(EditCommand::Backspace)),
         "delete-char" => Some(edit_event(EditCommand::Delete)),
         "backward-kill-word" => Some(edit_event(EditCommand::CutWordLeft)),
+        // GNU readline names for the two word-case transforms and the
+        // transpose. The editor delivers all three (emacs Ctrl+T is
+        // `SwapGraphemes` in reedline's own table), so a user re-binding
+        // them in an rc file must mirror instead of being reported as
+        // "not in the host's deliverable set" (niubash#630 gap list).
+        "upcase-word" => Some(edit_event(EditCommand::UppercaseWord)),
+        "downcase-word" => Some(edit_event(EditCommand::LowercaseWord)),
+        "transpose-chars" => Some(edit_event(EditCommand::SwapGraphemes)),
+        // GNU `unix-word-rubout` (Ctrl+W) is the same "kill the word
+        // before the cursor into the cut buffer" gesture as
+        // `backward-kill-word`; readline keeps both names.
+        "unix-word-rubout" => Some(edit_event(EditCommand::CutWordLeft)),
+        // `previous-history` / `next-history` are GNU's one-step
+        // history moves — the same shape as the `*-line-or-history`
+        // aliases above.
+        "previous-history" => Some(ReedlineEvent::Up),
+        "next-history" => Some(ReedlineEvent::Down),
+        // `complete` is readline's "complete as TAB would"; the host's
+        // completion event is exactly that (menu first, then the
+        // editor's own completion).
+        "complete" => Some(completion_event()),
         "kill-word" => Some(edit_event(EditCommand::CutWordRight)),
         "kill-line" => Some(edit_event(EditCommand::CutToLineEnd)),
         "backward-kill-line" | "unix-line-discard" => {
@@ -4506,6 +4527,7 @@ mod tests {
             "history-substring-search-up",
             "history-search-backward",
             "up-line-or-history",
+            "previous-history",
         ] {
             assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Up));
         }
@@ -4513,9 +4535,49 @@ mod tests {
             "history-substring-search-down",
             "history-search-forward",
             "down-line-or-history",
+            "next-history",
         ] {
             assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Down));
         }
+    }
+
+    /// niubash#630 gap list: GNU readline functions the editor can already
+    /// deliver must mirror when a user re-binds them in an rc file. Before
+    /// this, `bind '"\C-t": transpose-chars'` (and the word-case pair, and
+    /// `unix-word-rubout`) landed in the unknown-widget sentinel and were
+    /// reported as "function is not in the host's deliverable set".
+    #[test]
+    fn native_widget_maps_deliverable_gnu_readline_names() {
+        assert_eq!(
+            native_widget_event("transpose-chars"),
+            Some(edit_event(EditCommand::SwapGraphemes))
+        );
+        assert_eq!(
+            native_widget_event("upcase-word"),
+            Some(edit_event(EditCommand::UppercaseWord))
+        );
+        assert_eq!(
+            native_widget_event("downcase-word"),
+            Some(edit_event(EditCommand::LowercaseWord))
+        );
+        assert_eq!(
+            native_widget_event("unix-word-rubout"),
+            Some(edit_event(EditCommand::CutWordLeft))
+        );
+        // `complete` shares the TAB completion event (menu first, then the
+        // editor's own completion), never the host-command sentinel.
+        match native_widget_event("complete") {
+            Some(ReedlineEvent::UntilFound(events)) => {
+                assert!(matches!(events.first(), Some(ReedlineEvent::Menu(_))));
+            }
+            other => panic!("complete must map to the completion event, got {other:?}"),
+        }
+        // A genuinely undeliverable name still falls through to the
+        // shell-function-widget sentinel (the bridge reports those).
+        assert!(matches!(
+            native_widget_event("no_such_readline_fn"),
+            Some(ReedlineEvent::ExecuteHostCommand(_))
+        ));
     }
 
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
