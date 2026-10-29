@@ -785,6 +785,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             piped_stdout::finish_and_exit(rubash::run_debug_cli(rubash::DebugCliPreset {
                 program: Some(script.clone()),
                 args: invocation.positional_params.clone(),
+                startup_file: debug_startup_file(&invocation),
             }));
         }
     }
@@ -1011,6 +1012,29 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         finish_one_shot(&shell, code);
     }
     Ok(())
+}
+
+/// niubash#692: the `--debug` CLI route's startup file — the
+/// invocation's explicit `--rcfile`, gated by `--norc` exactly
+/// the way every other route gates rc reading through
+/// `Shell::no_rc`. Before this mapping existed, the debug
+/// dispatch dropped the flag silently: the rc never loaded, so
+/// its function and trap definitions never reached the
+/// debuggee (the niubash#681 repro was written against this
+/// face). The engine sources the file into the debug session
+/// ahead of the program (`DebugCliPreset::startup_file`); a
+/// missing file surfaces as the source builtin's diagnostic
+/// there — visible, never silent. Only the explicit flag is
+/// mapped: the debug route keeps the script route's contract
+/// for the default rc (a non-interactive script run does not
+/// source it), and `--dap` launches keep the editor-owned
+/// startup model.
+fn debug_startup_file(invocation: &ShellInvocation) -> Option<String> {
+    if invocation.no_rc {
+        None
+    } else {
+        invocation.rc_file.clone()
+    }
 }
 
 fn invocation_input(invocation: &ShellInvocation) -> anyhow::Result<String> {
@@ -4970,6 +4994,19 @@ mod tests {
         invocation.command = None;
         invocation.script = Some("D:/repo/probe.sh".to_string());
         assert_eq!(invocation_source_name(&invocation), "D:/repo/probe.sh");
+    }
+
+    /// niubash#692: the --debug dispatch must hand the invocation's
+    /// explicit --rcfile to the engine preset — dropping it was the
+    /// defect — and --norc must gate it like every other route.
+    #[test]
+    fn debug_startup_file_maps_rcfile_unless_norc() {
+        let mut invocation = ShellInvocation::parse(&[]).unwrap();
+        assert_eq!(debug_startup_file(&invocation), None);
+        invocation.rc_file = Some("rc.sh".to_string());
+        assert_eq!(debug_startup_file(&invocation), Some("rc.sh".to_string()));
+        invocation.no_rc = true;
+        assert_eq!(debug_startup_file(&invocation), None);
     }
 }
 
