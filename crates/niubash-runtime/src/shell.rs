@@ -1416,7 +1416,18 @@ impl Shell {
         // form and GNU load them fine. `set_shell_option` is idempotent, so
         // the extra `finish_startup` passes on the REPL paths are harmless.
         if self.invoked_as_rbash {
-            self.session_mut().options().set("restricted", true);
+            // NOT through the session options view: `restricted` is
+            // a flag-only option in the engine (GNU: `set -r`, never
+            // a `set -o` enumeration entry), so the view's family
+            // check does not know the name and its set() reports
+            // false with no state change — the migration's rewrite
+            // of this line to the view silently disarmed the rbash
+            // persona (tests/rc_readonly_loader.rs
+            // rbash_named_session_loads_the_generated_loader_then_restricts).
+            // The executor's set_shell_option resolves the name in
+            // the set machinery itself, including the
+            // maybe_make_restricted readonly marks.
+            self.executor_mut().set_shell_option("restricted", true);
         }
     }
 
