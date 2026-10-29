@@ -351,8 +351,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         menu_config,
     )));
 
-    let (edit_mode, keymap_registry) = build_edit_mode(
-        shell_ref.editor_mode,
+    let build_args = (
         &shell_ref.native_widgets,
         &shell_ref.native_widget_bindings,
         &shell_ref.user_widget_bindings,
@@ -361,6 +360,24 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         &shell_ref.user_keymap_unbinds,
         shell_ref.engine_bind_generation,
         menu_config.completion_interaction,
+    );
+    let (edit_mode, keymap_registry) = build_edit_mode(shell_ref.editor_mode, build_args.0, build_args.1, build_args.2, build_args.3, build_args.4, build_args.5, build_args.6, build_args.7);
+    // niubash#630: the other machine, registered as a standby so a startup
+    // `bind` of `vi-editing-mode` / `emacs-editing-mode` (GNU's two
+    // editing-mode toggles) can actually reach it via
+    // `ReedlineEvent::SwitchMode`. Without a standby the engine has nothing
+    // to switch *to* and declines the event. Its keymap is built the same
+    // way as the configured mode's — the same native widgets, engine
+    // `bind -m` entries and user rules — so a flip keeps the user's
+    // bindings in the target keymap. Its registry snapshot is discarded:
+    // the published one describes the active mode.
+    let (standby_edit_mode, _) = build_edit_mode(
+        match shell_ref.editor_mode {
+            EditorMode::Emacs => EditorMode::Vi,
+            EditorMode::Vi => EditorMode::Emacs,
+        },
+        build_args.0, build_args.1, build_args.2, build_args.3,
+        build_args.4, build_args.5, build_args.6, build_args.7,
     );
     // Publish the unified keymap registry (niubash#630): this build's
     // effective table and dropped records become the one snapshot the
@@ -440,6 +457,10 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         .use_bracketed_paste(cfg!(not(target_os = "windows")))
         .with_edit_mode(Box::new(
             PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
+                .with_cycle_session(cycle_session.clone()),
+        ))
+        .with_additional_edit_mode(Box::new(
+            PasteChunkEditMode::new(standby_edit_mode, menu_config.completion_style)
                 .with_cycle_session(cycle_session),
         ));
 
@@ -1631,6 +1652,17 @@ fn is_bare_enter_press(raw: &crossterm29::event::Event) -> bool {
 }
 
 impl EditMode for PasteChunkEditMode {
+    /// The paste layer carries no mode semantics of its own, so a
+    /// mode-specific event — in particular `ReedlineEvent::SwitchMode`,
+    /// which is how the engine asks a machine to become the vi/emacs
+    /// machine a `bind` target names — belongs to the wrapped machine.
+    fn handle_mode_specific_event(
+        &mut self,
+        event: ReedlineEvent,
+    ) -> reedline::EventStatus {
+        self.inner.handle_mode_specific_event(event)
+    }
+
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let raw = crossterm29::event::Event::from(event);
         // Events the Enter lookahead read but did not consume entered the
@@ -2564,6 +2596,13 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // GNU's Ctrl+R (`reverse-search-history`) and the interactive
         // search spelling niu already carried are one action.
         "reverse-search-history" => Some(ReedlineEvent::SearchHistory),
+        // GNU's editing-mode toggles: session-level mode switches, which
+        // reedline delivers as `SwitchMode` (the standby machine built in
+        // `build_line_editor` is what accepts the target).
+        "vi-editing-mode" => Some(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
+            PromptViMode::Insert,
+        ))),
+        "emacs-editing-mode" => Some(ReedlineEvent::SwitchMode(PromptEditMode::Emacs)),
         // `complete` is readline's "complete as TAB would"; the host's
         // completion event is exactly that (menu first, then the
         // editor's own completion).
@@ -4599,11 +4638,7 @@ mod tests {
         unmapped.sort();
         assert_eq!(
             unmapped,
-            vec![
-                r"\e".to_string(),
-                r"\e[5~".to_string(),
-                r"\e[6~".to_string()
-            ],
+            vec![r"\e[5~".to_string(), r"\e[6~".to_string()],
             "GNU default table must mirror except the documented gaps"
         );
 
@@ -4662,6 +4697,20 @@ mod tests {
             }
             other => panic!("complete must map to the completion event, got {other:?}"),
         }
+        // GNU's editing-mode toggles are session-level switches, delivered
+        // as `SwitchMode` (the standby machine built by `build_line_editor`
+        // accepts the target).
+        assert_eq!(
+            native_widget_event("vi-editing-mode"),
+            Some(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
+                PromptViMode::Insert
+            )))
+        );
+        assert_eq!(
+            native_widget_event("emacs-editing-mode"),
+            Some(ReedlineEvent::SwitchMode(PromptEditMode::Emacs))
+        );
+
         // A genuinely undeliverable name still falls through to the
         // shell-function-widget sentinel (the bridge reports those).
         assert!(matches!(
@@ -4983,25 +5032,25 @@ mod tests {
             keyseq: r"\C-\e(".to_string(),
             reason: UnusableBindReason::ChainedSequence,
         };
-        let toggle = UnusableBind {
-            keyseq: r"\C-z".to_string(),
-            reason: UnusableBindReason::ModeToggleFunction,
-        };
+        // The `\C-z` editing-mode toggles are no longer dropped: they map
+        // onto `SwitchMode` (the standby machine accepts the target), so
+        // only the chained sequence stays unusable here.
+
         for (target, mut keybindings, expected) in [
             (
                 NativeKeymapTarget::Emacs,
                 default_emacs_keybindings(),
-                vec![chained.clone(), toggle.clone()],
+                vec![chained.clone()],
             ),
             (
                 NativeKeymapTarget::ViInsert,
                 default_vi_insert_keybindings(),
-                vec![toggle.clone()],
+                Vec::new(),
             ),
             (
                 NativeKeymapTarget::ViNormal,
                 default_vi_normal_keybindings(),
-                vec![toggle.clone()],
+                Vec::new(),
             ),
         ] {
             let unusable = add_engine_bind_keybindings(&mut keybindings, target, &workarounds);
@@ -5092,20 +5141,6 @@ mod tests {
                 keymap: Some("emacs-standard".to_string()),
             },
             // Invented mode toggles: keys/keymaps no real script uses.
-            BindEntry {
-                keyseq: r"\C-q".to_string(),
-                kind: BindKind::Function {
-                    name: "vi-editing-mode".to_string(),
-                },
-                keymap: None,
-            },
-            BindEntry {
-                keyseq: r"\eg".to_string(),
-                kind: BindKind::Function {
-                    name: "emacs-editing-mode".to_string(),
-                },
-                keymap: None,
-            },
             // Unknown function name: actionable, still warns.
             BindEntry {
                 keyseq: r"\C-g".to_string(),
@@ -5142,8 +5177,6 @@ mod tests {
             vec![
                 UnusableBindReason::ChainedSequence,
                 UnusableBindReason::ChainedSequence,
-                UnusableBindReason::ModeToggleFunction,
-                UnusableBindReason::ModeToggleFunction,
                 UnusableBindReason::Other,
                 UnusableBindReason::Other,
                 UnusableBindReason::Other,
