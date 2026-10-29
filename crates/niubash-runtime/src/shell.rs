@@ -9622,7 +9622,7 @@ mod invocation_name_tests {
         std::fs::write(dir_a.join("g2alpha.txt"), "x").unwrap();
         std::fs::write(dir_b.join("g2beta.txt"), "x").unwrap();
         let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
-        let probe = |shell: &Shell| shell.completion_probe("cat /tmp/g2", "cat /tmp/g2".len());
+        let probe = |shell: &_| shell.completion_probe("cat /tmp/g2", "cat /tmp/g2".len());
 
         shell
             .execute_interactive_line(&format!("TMPDIR={}", slash(&dir_a)))
