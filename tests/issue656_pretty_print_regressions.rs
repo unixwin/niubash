@@ -94,3 +94,26 @@ fn pretty_print_parse_error_stops_with_rc1() {
     assert_eq!(stdout, "echo before\n");
     assert!(!stdout.contains("__RUBASH_PARSE"));
 }
+
+/// niubash#656 flake guard: on Windows the commands printed above
+/// travel through the piped-stdout pump (src/piped_stdout.rs,
+/// niubash#245/#256), and the parse-error arm used to leave via a
+/// bare `std::process::exit`, skipping the pump drain that `main`
+/// runs for every returning path. Whether the pump forwarded the
+/// buffered bytes before the process died was a scheduling race —
+/// CI sampled the pin above red 2 of 4 runs, always with stdout
+/// completely empty and the exit code still 1. The arm now leaves
+/// through `piped_stdout::finish_and_exit`. One green run proves
+/// nothing about a race, so repeat the shape: at the sampled ~1/2
+/// per-run red rate a regression escapes 16 rounds with probability
+/// ~1/65536.
+#[test]
+fn pretty_print_parse_error_output_survives_exit_repeatedly() {
+    let dir = scratch("errloop");
+    for round in 0..16 {
+        let (stdout, _stderr, code) =
+            run_pretty_print(&dir, "echo before\nif then fi\necho after\n");
+        assert_eq!(code, 1, "round {round}");
+        assert_eq!(stdout, "echo before\n", "round {round}");
+    }
+}
