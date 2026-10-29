@@ -362,6 +362,9 @@ fn cached_segment(worktree: &Path) -> Option<String> {
 /// result; the spawn inside `read_status` keeps every isolation rule
 /// from the module docs.
 fn launch_refresh(worktree: PathBuf, fingerprint: RepoFingerprint, cycles: u64) {
+    // The closure takes `worktree`; the spawn-failure fallback below
+    // still needs the key, so keep a clone for it.
+    let fallback_key = worktree.clone();
     let spawned = std::thread::Builder::new()
         .name("niu-git-prompt-refresh".to_string())
         .spawn(move || {
@@ -387,7 +390,7 @@ fn launch_refresh(worktree: PathBuf, fingerprint: RepoFingerprint, cycles: u64) 
         // pass retries instead of waiting on a landing that never
         // comes.
         let mut cache = segment_cache_lock();
-        if let Some(entry) = cache.entries.get_mut(&worktree) {
+        if let Some(entry) = cache.entries.get_mut(&fallback_key) {
             entry.refreshing = false;
         }
         SEGMENT_CACHE.1.notify_all();
