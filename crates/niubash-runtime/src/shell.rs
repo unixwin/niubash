@@ -1007,6 +1007,32 @@ impl Shell {
         self.session_mut()
             .variables()
             .set("__RUBASH_INTERACTIVE", "1");
+        // Job control must exist for every interactive session, whoever
+        // drives it: GNU initialize_job_control ends with jobs.c:4869
+        // `change_flag ('m', job_control ? '-' : '+')`, which keeps `m` for
+        // an interactive shell (WSL GNU bash 5.3.x: `bash -i -c 'echo $-'`
+        // -> `himBHc`). The engine applies that default at its own
+        // interactive stdin entry (rubash script_driver.rs:4203-4209,
+        // rubash#1991) — which only the piped `niu -i` face reaches. The
+        // REPL faces drive lines through execute_interactive_line instead,
+        // so without this mirror their `monitor` stayed off and `fg`/`bg`
+        // with no jobs refused with the NON-interactive wording `fg: no
+        // job control` (rubash job_builtins.rs:2332-2337, the fg_bg.def:
+        // 108-113 `job_control == 0` branch) where GNU prints `fg: current:
+        // no such job` (job_builtins.rs:2659-2671 write_job_not_found).
+        // niubash#683. Same gate as the engine's: an explicit startup
+        // transport value (`-m`/`+m`, `-o`/`+o monitor` ->
+        // `__RUBASH_SETOPT_monitor`) is the user's word and stands; a
+        // later `set +o monitor` in the rc or at the prompt wins over this
+        // default because the key then exists.
+        if self
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SETOPT_monitor")
+            .is_none()
+        {
+            self.session_mut().options().set("monitor", true);
+        }
         // GNU init_interactive (shell.c): interactive shells default
         // expand_aliases on so ~/.niubashrc aliases expand without a
         // user shopt line. Non-interactive entry points never call
