@@ -47,6 +47,12 @@ const NIU_ENV_VAR: &str = "NIU_ENV";
 /// agents already use BASH_ENV).
 const BASH_ENV_VAR: &str = "BASH_ENV";
 
+/// GNU bash's compiled-in default primary prompt, used when the
+/// environment carries no PS1 at all (niubash#672). Verified against
+/// the GNU 5.3.20 oracle: an interactive shell started with PS1 unset
+/// reports `PS1=[\s-\v\$ ]` (and renders `bash-5.3$ ` / `bash-5.3# `).
+const GNU_DEFAULT_PS1: &str = "\\s-\\v\\$ ";
+
 /// Editor outcome produced by a shell-function widget.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WidgetOutcome {
@@ -136,6 +142,16 @@ pub struct Shell {
     /// is cfg'd there), like `gitbash_prompt_active` above.
     #[cfg_attr(not(windows), allow(dead_code))]
     vcs_pass_seq: u64,
+    /// niubash#672: this shell seeded PS1 with the GNU compiled-in
+    /// default at interactive entry because the environment carried no
+    /// PS1 at all. While the variable still holds exactly that seeded
+    /// value it is NOT a prompt claim: the product floor keeps
+    /// rendering (design §14.5), exactly as if PS1 were unset. Any
+    /// write by the user changes the value and claims the slot through
+    /// the ordinary path; a user who deliberately assigns the default
+    /// string verbatim keeps the floor (accepted, documented edge —
+    /// the value alone cannot distinguish the two authors).
+    ps1_seeded_default: bool,
     pub home_dir: PathBuf,
     pub shell_root: Option<PathBuf>,
     pub history_path: PathBuf,
@@ -736,6 +752,7 @@ impl Shell {
             prompt: prompt.clone(),
             gitbash_prompt_active,
             vcs_pass_seq: 0,
+            ps1_seeded_default: false,
             floor_prompt: prompt,
             home_dir,
             shell_root,
@@ -967,6 +984,19 @@ impl Shell {
         // and script mode never pass through here, so env-var visibility for
         // non-interactive children stays GNU-identical.
         self.discard_foreign_inherited_prompt();
+        // niubash#672: GNU seeds PS1 with its compiled-in default when
+        // the environment carries none, so an interactive shell always
+        // HAS a PS1 value (probes like ${PS1:+...} and `declare -p PS1`
+        // must see it). Seed after the foreign-PS1 discard above: a
+        // surviving inherited PS1 is a genuine claim and is never
+        // overwritten, and rc files have not run yet, so a user PS1
+        // still lands on top. The seed is a plain variable (never
+        // exported, matching GNU) and `ps1_seeded_default` keeps it
+        // from claiming the prompt slot away from the product floor.
+        if self.executor().get_env("PS1").is_none() {
+            self.executor_mut().set_env("PS1", GNU_DEFAULT_PS1);
+            self.ps1_seeded_default = true;
+        }
         // `$-` must contain `i` while startup files run: GNU sets
         // forced_interactive before run_startup_files (shell.c:672; flags.c:174
         // renders it in `$-`), so rc-level `case $- in *i*)` guards
@@ -2172,9 +2202,15 @@ impl Shell {
     /// `run_precmd_hooks` runs the hook before syncing, the claim is already
     /// visible when the backend is chosen.
     fn prompt_slot_claimed(&self) -> bool {
-        self.executor()
-            .get_env("PS1")
-            .is_some_and(|value| !value.is_empty())
+        match self.executor().get_env("PS1") {
+            Some(value) if !value.is_empty() => {
+                // niubash#672: the host-seeded GNU default is not a
+                // claim while the variable still holds the seeded
+                // value verbatim.
+                !(self.ps1_seeded_default && value == GNU_DEFAULT_PS1)
+            }
+            _ => false,
+        }
     }
 
     /// Execute `PROMPT_COMMAND` through the engine and report whether the
@@ -5192,7 +5228,21 @@ fn ensure_windows_profile_env(executor: &mut Executor, home_dir: &Path) {
 }
 
 fn ensure_prompt_terminal_env(executor: &mut Executor) {
-    set_executor_env_if_missing_or_empty(executor, "COLUMNS", "80");
+    // niubash#667: COLUMNS is a plain shell variable in GNU bash — the
+    // shell maintains it for its own line discipline and prompt math,
+    // and it reaches a child's environment only when the user exports
+    // it. The width seed must therefore go through the non-exporting
+    // write. (The shared helper below exports on purpose: its other
+    // callers seed the Windows profile variables, which ARE environment
+    // citizens.) Same-family check: LINES is never seeded by the host —
+    // the engine's own winsize face owns it — so COLUMNS is the only
+    // terminal-size variable on this path.
+    if executor
+        .get_env("COLUMNS")
+        .is_none_or(|current| current.trim().is_empty())
+    {
+        executor.set_env("COLUMNS", "80");
+    }
 }
 
 fn set_executor_env_if_missing_or_empty(executor: &mut Executor, name: &str, value: &str) {
@@ -8518,14 +8568,9 @@ complete -F _envtooldyn_hook envtooldyn
 
         // The foreign value is gone from the environment, so no prompt path
         // (REPL sync or engine interactive stdin) can expand `__git_ps1`.
-        assert_eq!(
-            shell
-                .session_mut()
-                .variables()
-                .resolved_value("PS1")
-                .as_deref(),
-            None
-        );
+        // Entry then seeds the GNU compiled-in default (niubash#672),
+        // read back through the same executor face the seed wrote.
+        assert_eq!(shell.executor().get_env("PS1"), Some(GNU_DEFAULT_PS1));
         // The shell's own theme backend is untouched by the discard.
         assert!(matches!(shell.prompt, PromptBackend::Template(_)));
 
@@ -8545,6 +8590,36 @@ complete -F _envtooldyn_hook envtooldyn
         );
         plain.sync_bash_prompt_from_env();
         assert!(matches!(plain.prompt, PromptBackend::Bash(_)));
+    }
+
+    /// niubash#672: with no PS1 anywhere, interactive entry seeds the
+    /// GNU compiled-in default as a plain variable — visible to probes
+    /// (`${PS1:+...}`, `declare -p PS1`) — while the product floor
+    /// keeps rendering: the seed is not a §14.5 prompt claim. A user
+    /// write afterwards claims the slot through the ordinary path.
+    #[test]
+    fn enter_interactive_seeds_gnu_default_ps1_without_claiming_the_floor() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let history_dir = tempfile::tempdir().unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = history_dir.path().join("history");
+        shell.executor_mut().unset_env("PS1");
+
+        shell.enter_interactive();
+
+        assert_eq!(shell.executor().get_env("PS1"), Some(GNU_DEFAULT_PS1));
+        assert!(!shell.prompt_slot_claimed());
+        shell.run_precmd_hooks();
+        assert!(
+            matches!(shell.prompt, PromptBackend::Template(_)),
+            "the floor keeps rendering under the seeded default"
+        );
+
+        shell.executor_mut().set_env("PS1", "mine> ");
+        assert!(shell.prompt_slot_claimed());
+        shell.run_precmd_hooks();
+        assert!(matches!(shell.prompt, PromptBackend::Bash(_)));
     }
 
     /// Defaults-as-floor (design §14.5): a PS1 written *after* interactive
@@ -9331,6 +9406,7 @@ complete -F _envtooldyn_hook envtooldyn
             prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             gitbash_prompt_active: false,
             vcs_pass_seq: 0,
+            ps1_seeded_default: false,
             floor_prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             home_dir: PathBuf::from("."),
             shell_root: None,

@@ -56,11 +56,19 @@ impl Hinter for HistoryAutosuggestHinter {
             history.session(),
         )) {
             if let Some(entry) = entries.first() {
-                self.current_hint = entry
-                    .command_line
-                    .get(line.len()..)
-                    .unwrap_or_default()
-                    .to_string();
+                let suffix = entry.command_line.get(line.len()..).unwrap_or_default();
+                // niubash#673: a hint never spans a line the user has
+                // not typed. When the matching history entry is a
+                // multi-line command, its remainder paints ghost text
+                // across the continuation the user is still writing —
+                // visually indistinguishable from typed input — and
+                // the accept key would splice those untyped lines into
+                // the submission wholesale. Offer the entry only once
+                // its remainder fits the current line, i.e. the typed
+                // prefix already covers the entry's earlier lines.
+                if !suffix.contains('\n') {
+                    self.current_hint = suffix.to_string();
+                }
             }
         }
 
@@ -198,6 +206,35 @@ mod tests {
         );
         assert_eq!(hinter.complete_hint(), " status --short");
         assert_eq!(hinter.next_hint_token(), " status");
+    }
+
+    #[test]
+    fn issue673_multiline_entry_remainder_is_not_offered_across_lines() {
+        let mut history = FileBackedHistory::default();
+        history
+            .save(HistoryItem::from_command_line(
+                "for i in 1 2\ndo\necho $i\ndone",
+            ))
+            .unwrap();
+
+        let config = AutosuggestConfig::default();
+        let mut hinter = HistoryAutosuggestHinter::new(&config, Arc::new(AtomicBool::new(false)));
+
+        // Mid-continuation (the audit shape): the typed prefix covers
+        // only the loop header, so the entry's remainder spans three
+        // untyped lines — no ghost may be painted or accepted.
+        assert_eq!(hinter.handle("for i in 1 2", 10, &history, false, ""), "");
+        assert_eq!(hinter.complete_hint(), "");
+        assert_eq!(hinter.handle("for i in 1 2\n", 11, &history, false, ""), "");
+        assert_eq!(hinter.complete_hint(), "");
+
+        // Once the typed prefix covers the entry's earlier lines, the
+        // single-line remainder completes the current line as usual.
+        assert_eq!(
+            hinter.handle("for i in 1 2\ndo\necho $i\n", 22, &history, false, ""),
+            "done"
+        );
+        assert_eq!(hinter.complete_hint(), "done");
     }
 
     #[test]
