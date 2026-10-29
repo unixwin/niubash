@@ -1,0 +1,156 @@
+name: SignPath integration smoke
+
+# Diagnostic lane for the SignPath signing chain (companion to the signing
+# stage in release.yml). Two modes:
+#
+#   1. Dispatch with no input: submits a real signing request against the
+#      current repo secrets using a real released installer as the payload,
+#      trying both org-secret candidates. One failure email per run —
+#      expected.
+#   2. Dispatch with `request_id`: INSPECT-ONLY. Queries an existing signing
+#      request through the SignPath REST API and prints its status/reason.
+#      No new signing request is created.
+#
+# This is a diagnostic, not a release gate — drop it or keep it dormant
+# (dispatch-only) as preferred.
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: "Existing signing request id to inspect (skips submitting a new one)"
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # SaaS API host is app.signpath.io (signpath.io itself is the marketing
+  # site; a wrong host answers with its Framer 404 page).
+  SIGNPATH_API_BASE: https://app.signpath.io/api/v1
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Fetch a real released installer as the signing payload
+        if: ${{ inputs.request_id == '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          gh release download v1.4.4 --repo unixwin/niubash `
+            --pattern "niubash-v1.4.4-win-x64-setup.exe" --dir payload --clobber
+          if (-not (Test-Path "payload/niubash-v1.4.4-win-x64-setup.exe")) {
+            throw "payload download failed"
+          }
+          (Get-FileHash "payload/niubash-v1.4.4-win-x64-setup.exe" -Algorithm SHA256).Hash
+
+      - name: Upload payload artifact
+        if: ${{ inputs.request_id == '' }}
+        id: payload
+        uses: actions/upload-artifact@v7
+        with:
+          name: signpath-smoke-payload
+          path: payload/niubash-v1.4.4-win-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Submit signing request (SIGNPATH_ORGANIZATION_ID)
+        if: ${{ inputs.request_id == '' }}
+        id: sign_primary
+        uses: signpath/github-action-submit-signing-request@v3
+        continue-on-error: true
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.payload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signpath-out-primary
+
+      - name: Submit signing request (SIGNPATH_ORG_ID fallback)
+        if: ${{ inputs.request_id == '' && steps.sign_primary.outcome == 'failure' }}
+        id: sign_fallback
+        uses: signpath/github-action-submit-signing-request@v3
+        continue-on-error: true
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.payload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signpath-out-fallback
+
+      - name: Query signing request details (SignPath REST API)
+        if: ${{ inputs.request_id != '' || steps.sign_primary.outcome == 'failure' || steps.sign_fallback.outcome == 'failure' }}
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          ORG_ID_A: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          ORG_ID_B: ${{ secrets.SIGNPATH_ORG_ID }}
+          PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          REQUEST_ID: ${{ inputs.request_id || steps.sign_primary.outputs.signing-request-id || steps.sign_fallback.outputs.signing-request-id }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          Write-Host "signing request id: $env:REQUEST_ID"
+          # Per docs.signpath.io/build-system-integration: bearer auth, not a
+          # custom token header.
+          $headers = @{ "Authorization" = "Bearer $env:SIGNPATH_API_TOKEN" }
+
+          foreach ($org in @($env:ORG_ID_A, $env:ORG_ID_B) | Where-Object { $_ }) {
+            $reqUrl = "$env:SIGNPATH_API_BASE/$org/signing-requests/$env:REQUEST_ID"
+            Write-Host "--- GET $reqUrl (org secret candidate) ---"
+            $resp = Invoke-WebRequest -Uri $reqUrl -Headers $headers -SkipHttpErrorCheck
+            Write-Host "HTTP $($resp.StatusCode)"
+            Write-Host $resp.Content
+          }
+
+          foreach ($org in @($env:ORG_ID_A, $env:ORG_ID_B) | Where-Object { $_ }) {
+            $projUrl = "$env:SIGNPATH_API_BASE/$org/projects/$env:PROJECT_SLUG"
+            Write-Host "--- GET $projUrl (project metadata, best effort) ---"
+            $resp2 = Invoke-WebRequest -Uri $projUrl -Headers $headers -SkipHttpErrorCheck
+            Write-Host "HTTP $($resp2.StatusCode)"
+            Write-Host $resp2.Content
+
+            # Pull the default artifact configuration's XML — the structure
+            # contract between what the connector uploads and what SignPath
+            # accepts.
+            try {
+              $proj = $resp2.Content | ConvertFrom-Json
+              $default = $proj.artifactConfigurations | Where-Object { $_.isDefault } | Select-Object -First 1
+              $xmlLink = $default.artifactConfigurationXmlLink
+              if ($xmlLink) {
+                Write-Host "--- GET artifact configuration XML ---"
+                $resp3 = Invoke-WebRequest -Uri $xmlLink -Headers $headers -SkipHttpErrorCheck
+                Write-Host "HTTP $($resp3.StatusCode)"
+                Write-Host $resp3.Content
+
+              }
+            } catch {
+              Write-Host "::warning::could not fetch artifact configuration XML: $($_.Exception.Message)"
+            }
+          }
+
+      - name: Verdict
+        if: ${{ inputs.request_id == '' }}
+        shell: pwsh
+        run: |
+          $primary = "${{ steps.sign_primary.outcome }}"
+          $fallback = "${{ steps.sign_fallback.outcome }}"
+          if ($primary -eq "success") {
+            Write-Host "SMOKE PASS — SIGNPATH_ORGANIZATION_ID is the working org secret"
+          }
+          elseif ($fallback -eq "success") {
+            Write-Host "::warning::SMOKE PASS via SIGNPATH_ORG_ID — SIGNPATH_ORGANIZATION_ID holds the WRONG value; release.yml must use SIGNPATH_ORG_ID (or the secret should be renamed)"
+          }
+          else {
+            Write-Host "::error::SMOKE FAIL with both org secrets — read the two signing steps' logs for SignPath's error (401 = bad token, 404 = wrong org/project/policy slug)"
+            exit 1
+          }
