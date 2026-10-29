@@ -469,15 +469,6 @@ pub(crate) fn read_status_call_count(worktree: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Clear every per-worktree spawn count (test builds only).
-#[cfg(test)]
-pub(crate) fn reset_read_status_call_counts() {
-    READ_STATUS_CALLS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
-}
-
 /// One read-only `git status` for the prompt, with every isolation rule from
 /// the module docs applied. Returns the branch name (or detached short SHA)
 /// plus whether anything is dirty.
