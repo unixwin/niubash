@@ -20,48 +20,39 @@
 //! (101 cols x 33 rows) and asserts the query faces answer with the
 //! console's real geometry and the mode faces still apply cleanly.
 //!
-//! Unlike tests/interactive.rs this target does not skip merely because
-//! the CI marker is set: the legs are single batch commands with marker
-//! assertions, not timing-sensitive live-session dances. If no pseudo
-//! terminal can be constructed at all, the target skips with a notice
-//! (that shape then belongs to the real-machine smoke list).
+//! Gating follows the driver's own rule (`require_pty_or_skip`), like
+//! tests/interactive.rs. A first version of this target ran ungated on
+//! hosted CI (run 40793320883): the session spawned and the banner
+//! expect passed, but the sentinel-prompt expect timed out
+//! (driver.rs:767) — the hosted-runner ConPTY session class the gate
+//! exists for — and, the readiness wait sitting outside the skip path,
+//! the timeout failed the whole workspace job. The legs therefore run
+//! on real desktops and wherever `NIU_INTERACTIVE_TESTS=1` forces them;
+//! for hosted CI this face stays on the real-machine smoke list. The
+//! engine fix itself is gated deterministically on the rubash side
+//! (non-terminal diagnostic pins in tests/issue282_* plus the Windows
+//! CI build of the changed builtin).
 
 #[path = "interactive/driver.rs"]
 mod driver;
 
-use driver::{default_rc, niu_binary, NiuSession, HEAVY_TIMEOUT};
+use driver::{default_rc, niu_binary, require_pty_or_skip, NiuSession, HEAVY_TIMEOUT};
 
 /// (cols, rows) the pseudo console is created with.
 const SIZE: (u16, u16) = (101, 33);
 
-fn spawn_or_skip(context: &str) -> Option<NiuSession> {
-    // The driver's spawn panics when the session cannot be established;
-    // catch it so a host with no usable pseudo terminal skips honestly
-    // instead of failing the suite.
-    for _ in 0..2 {
-        let attempt = std::panic::catch_unwind(|| {
-            NiuSession::spawn_custom("issue535", &default_rc(), &[], SIZE, HEAVY_TIMEOUT)
-        });
-        match attempt {
-            Ok(mut session) => {
-                session.wait_ready();
-                return Some(session);
-            }
-            Err(_) => continue,
-        }
-    }
-    eprintln!("SKIP {context}: could not establish a ConPTY session on this host");
-    None
-}
-
 /// The full #535 face set in one session: size/cols/rows report the
 /// pseudo console's created geometry; raw/sane mode operands still
-/// apply (they were never part of the breakage and must not regress).
+/// apply (they were never part of the breakage and must not regress);
+/// a nested `niu -c` inheriting the session's console answers
+/// identically (the `-c` face from the issue).
 #[test]
 fn stty_query_faces_answer_under_conpty() {
-    let Some(mut s) = spawn_or_skip("stty_query_faces_answer_under_conpty") else {
+    if !require_pty_or_skip("stty_query_faces_answer_under_conpty") {
         return;
-    };
+    }
+    let mut s = NiuSession::spawn_custom("issue535", &default_rc(), &[], SIZE, HEAVY_TIMEOUT);
+    s.wait_ready();
     s.send_line("echo \"SZ[$(stty size)]\"");
     s.expect("SZ[33 101]");
     s.send_line("echo \"CL[$(stty cols)]\"");
