@@ -2561,6 +2561,9 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // aliases above.
         "previous-history" => Some(ReedlineEvent::Up),
         "next-history" => Some(ReedlineEvent::Down),
+        // GNU's Ctrl+R (`reverse-search-history`) and the interactive
+        // search spelling niu already carried are one action.
+        "reverse-search-history" => Some(ReedlineEvent::SearchHistory),
         // `complete` is readline's "complete as TAB would"; the host's
         // completion event is exactly that (menu first, then the
         // editor's own completion).
@@ -2744,6 +2747,26 @@ pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)>
         "^[[B" | "\\e[B" | "\\eOB" => Some((KeyModifiers::NONE, KeyCode::Down)),
         "^[[C" | "\\e[C" | "\\eOC" => Some((KeyModifiers::NONE, KeyCode::Right)),
         "^[[D" | "\\e[D" | "\\eOD" => Some((KeyModifiers::NONE, KeyCode::Left)),
+        // The VT100/xterm keypad and editing-key spellings real terminals
+        // send, which GNU's own default map binds (`bind -p` on bash 5.3:
+        // `"\e[1~": beginning-of-line`, `"\e[4~": end-of-line`,
+        // `"\e[3~": delete-char`, ...). Both the `~`-numbered and the
+        // `O`/`[` letter forms are accepted; `\e[7~`/`\e[8~` are the rxvt
+        // spellings of Home/End.
+        "\\e[1~" | "^[[1~" | "\\e[7~" | "^[[7~" | "\\e[H" | "^[[H" | "\\eOH" => {
+            Some((KeyModifiers::NONE, KeyCode::Home))
+        }
+        "\\e[4~" | "^[[4~" | "\\e[8~" | "^[[8~" | "\\e[F" | "^[[F" | "\\eOF" => {
+            Some((KeyModifiers::NONE, KeyCode::End))
+        }
+        "\\e[2~" | "^[[2~" => Some((KeyModifiers::NONE, KeyCode::Insert)),
+        "\\e[3~" | "^[[3~" => Some((KeyModifiers::NONE, KeyCode::Delete)),
+        "\\e[5~" | "^[[5~" | "\\e[I" | "^[[I" => Some((KeyModifiers::NONE, KeyCode::PageUp)),
+        "\\e[6~" | "^[[6~" | "\\e[G" | "^[[G" => Some((KeyModifiers::NONE, KeyCode::PageDown)),
+        // A bare ESC is one of GNU's default binds (`"\e": emacs-editing-mode`).
+        // It arrives here only when it is the whole keyseq; `\e[...` forms
+        // were matched above.
+        "\\e" | "^[" => Some((KeyModifiers::NONE, KeyCode::Esc)),
         "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
         _ => parse_alt_key_sequence(value)
             .or_else(|| parse_meta_key_sequence(value))
@@ -4539,6 +4562,73 @@ mod tests {
         ] {
             assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Down));
         }
+    }
+
+    /// niubash#630 gap list: the **whole GNU default bind table** must
+    /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
+    /// is the table `bind -p` prints for a fresh bash 5.3, so feeding it
+    /// through the bridge is the compatibility gate for "GNU habits as the
+    /// default".
+    ///
+    /// Only three entries are expected to stay unmapped, and each has a
+    /// reason: `\e[5~`/`\e[6~` are `beginning-of-history` /
+    /// `end-of-history`, which need a reedline history-jump primitive
+    /// (nushell/reedline#1269); `\e` is `emacs-editing-mode`, a
+    /// session-level mode toggle the editor cannot deliver per key (it is
+    /// dropped as a structural class, i.e. silently, not as a warning).
+    /// Everything else — including the Home/End/Delete terminal spellings —
+    /// must land in the keybindings.
+    #[test]
+    fn gnu_default_bind_table_mirrors_except_known_gaps() {
+        let entries: Vec<crate::bind_surface::EngineBindEntry> =
+            rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
+                .iter()
+                .map(|(keyseq, name)| crate::bind_surface::EngineBindEntry {
+                    keyseq: (*keyseq).to_string(),
+                    kind: crate::bind_surface::EngineBindKind::Function {
+                        name: (*name).to_string(),
+                    },
+                    keymap: Some("emacs-standard".to_string()),
+                })
+                .collect();
+
+        let mut keybindings = default_emacs_keybindings();
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+        let mut unmapped: Vec<String> = unusable.into_iter().map(|bind| bind.keyseq).collect();
+        unmapped.sort();
+        assert_eq!(
+            unmapped,
+            vec![
+                r"\e".to_string(),
+                r"\e[5~".to_string(),
+                r"\e[6~".to_string()
+            ],
+            "GNU default table must mirror except the documented gaps"
+        );
+
+        // Spot-check the terminal spellings that used to be rejected: the
+        // action, not just "no warning".
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Home),
+            Some(edit_event(EditCommand::MoveToLineStart { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::End),
+            Some(edit_event(EditCommand::MoveToLineEnd { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Delete),
+            Some(edit_event(EditCommand::Delete))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            Some(ReedlineEvent::SearchHistory)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
+            Some(edit_event(EditCommand::SwapGraphemes))
+        );
     }
 
     /// niubash#630 gap list: GNU readline functions the editor can already
