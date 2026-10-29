@@ -91,6 +91,38 @@ element-write fixes — lives in rubash's
 the corpus and raw results live in
 [shellbench](https://github.com/unixwin/shellbench).
 
+## Residual round close-out — 2026-10-29 (Linux, same machine)
+
+The perf round's residual batch has closed out (the fixes land
+engine-side in rubash; niu inherits them with the engine). Same caliber
+family as above: release builds, Linux same-machine interleaved
+sampling — the residual batch sampled in same-window pairs under
+ambient load, so ratios and growth factors are the verdict basis.
+
+- Associative-array element reads no longer scale with table size: a
+  `${m[key]}` miss at 10,000 entries measures 18.3 µs against GNU's
+  13.4 µs, flat in n; the length form `${#m[key]}` had its growth
+  factor cut from ×10.67 to ×1.08 on misses. The mechanism is a
+  settled read on the combined table — the typed cell mirror answers
+  hits and misses authoritatively (rubash PR #1919, merged; the length
+  legs in the residual batch). Full account in the engine ledger.
+- Command-completion candidates are cached: `compgen -c` on a fat
+  PATH (~3,100 candidates) fell from 110.6 ms to 13.6 ms per call
+  (GNU measures 277.6 ms in the same window); the walk re-runs only
+  when the PATH/cwd fingerprint changes.
+- Large grouped scripts load faster: an 8,000-line
+  function-definition group — the grouped shape heavy startup scripts
+  such as nvm.sh exercise — reads in at 0.533 s, down from 3.248 s;
+  the grouped reader no longer re-tokenizes the accumulated logical
+  line per physical line.
+- Honest floor, unchanged: plain command dispatch still carries the
+  ~2.83–2.95× A-table floor tax against GNU (tracked in
+  [rubash#682](https://github.com/unixwin/rubash/issues/682)). The
+  filed "procsub read at 68×" figure did not reproduce on current
+  master: draining a procsub costs 1.3 µs/line, and the while-read
+  residual prices the same across file and pipe sources — it is this
+  floor tax, not a procsub defect.
+
 ## Android baseline — measured, honest, not yet re-measured
 
 On a Termux aarch64 tablet, niubash 1.4.0 vs GNU bash 5.3.20
