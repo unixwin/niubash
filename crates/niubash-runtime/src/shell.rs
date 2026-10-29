@@ -9605,6 +9605,26 @@ mod invocation_name_tests {
     #[cfg(windows)]
     #[test]
     fn issue627_g2_completion_follows_session_tmpdir() {
+        struct EnvGuard {
+            name: &'static str,
+            previous: Option<std::ffi::OsString>,
+        }
+        impl EnvGuard {
+            fn set(name: &'static str, value: &std::path::Path) -> Self {
+                let previous = std::env::var_os(name);
+                std::env::set_var(name, value);
+                Self { name, previous }
+            }
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
@@ -9619,6 +9639,12 @@ mod invocation_name_tests {
         let dir_b = scratch.join("b");
         std::fs::create_dir_all(&dir_a).unwrap();
         std::fs::create_dir_all(&dir_b).unwrap();
+        // The enclave resolver only answers with a shell root
+        // configured (a real niu process always exports its own);
+        // point it at a stub root for the test.
+        let stub_root = scratch.join("root");
+        std::fs::create_dir_all(&stub_root).unwrap();
+        let _root_guard = EnvGuard::set("NIU_ROOT", &stub_root);
         std::fs::write(dir_a.join("g2alpha.txt"), "x").unwrap();
         std::fs::write(dir_b.join("g2beta.txt"), "x").unwrap();
         let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
