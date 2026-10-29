@@ -20,6 +20,17 @@
 > removed, renamed, or re-signed without a ledger update in the same
 > change and a tier assignment for whatever replaces it (§4).
 >
+> Addendum (dump-strings / pretty-print library entries, 2026-10-29,
+> rubash#1977 / niubash#656): the -D dump face and the pretty-print
+> loop moved into the library (`locale::collect_locale_strings` /
+> `render_locale_string_dump`, `parser::ast_print::
+> pretty_print_input`); niubash's host shadow implementations are
+> deleted and both binaries consume the entries. Tier: the
+> pretty-print entry rides the Tier B `parser` family row in §4; the
+> dump face is recorded as a Tier B `locale` family (§2.1 row + §4
+> row) — a driver-layer text pass over the public lexer, in the
+> module that already owns locale.c's surface.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -155,8 +166,9 @@ the 1.5.0 tiers exist to fix.
 | `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword` — the bind builtin's spec-parsing helpers, consumed inside niubash's gated bind surface (missed by the v2 census; recorded in v3) |
 | `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today; plus the `SessionHistory::size_limit` associated helper (recorded in v3) |
 | `script_driver` | `run_source_with_line_offset` (2), `run_script_with_history_at_line_offset_tracked`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `bytes_to_script_text`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER` (1 each unless noted). (Ledger v4: `run_stdin_script`, `run_interactive_stdin`, `prepare_interactive_history`, `pre_process_interactive_line` + `InteractiveExpansion`, and `finish_shell` have exited the consumed surface — `Session::run_stdin` / `run_interactive_stdin` / `prepare_line` / `close` carry that traffic now; the symbols stay `pub` in the engine.) |
-| `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1); `Ast` is also consumed under this defining-module spelling (the root re-export above is the other spelling; both recorded in §6) |
+| `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1), `ast_print::pretty_print_input` (1); `Ast` is also consumed under this defining-module spelling (the root re-export above is the other spelling; both recorded in §6) |
 | `lexer` | `tokenize` (2), `tokenize_with_initial_posix` (1), `has_unclosed_input_syntax` (1), `has_unclosed_input_syntax_posix` (1) |
+| `locale` | `collect_locale_strings` (1), `render_locale_string_dump` (1) — the -D dump face (rubash#1977); `decode_to_visible_text` is recorded under root re-exports above |
 | `shell::bind_registry` | `BindEntry` (10), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 23 references at the v2 re-census, all of them inside niubash's gated bind surface since row 11 (see §4); plus `KEYMAP_NAMES` (recorded in v3) |
 | `invocation` | `ShellInvocation` (3, + `parse`, §2.2), `materialize_command_file` (1) |
 | `usage` | `LONG_OPTIONS` (3), `SHORT_OPTIONS` (2), `LONG_OPTIONS_WITH_VALUE` (1), `show_shell_version` (1), `show_shell_help` (1), `is_short_option_letter` (1), `invocation_help_name` (1), plus 2 module-level references |
@@ -303,6 +315,7 @@ to the split core crate without changing its shape.
 | `usage` printers and option tables | B | stay the shared host/engine bridge |
 | `parser` family (`parse*`, `CommandNode`, `ParseLoopOptions`, `WordMetadata`, `ast_print`) | B | `Session::parse` + `api::syntax` view types (no internal `Ast` in Tier A) |
 | `lexer` family (`tokenize*`) | B | `api::syntax` token view |
+| `locale` dump face (`collect_locale_strings`, `render_locale_string_dump`) | B | driver-layer text pass over the public lexer (locale.c's home); the rubash binary's main consumes it too |
 | `shell::bind_registry` (`BindEntry`, `BindKind`) | C | interactive layer's own gated surface — **landed as gated in row 11**: niubash consumes it only inside `crates/niubash-runtime/src/bind_surface.rs`, behind niubash's `internals` feature (default on; a `--no-default-features` build has zero Tier C references), converted there to niu-owned mirror types |
 | `invocation` (`ShellInvocation`, `materialize_command_file`) | B (row-11 ruling) | driver-layer input type: both binaries' `main()` parse through it identically, and the RFC's own §8 puts driver wrappers at B; it stays in the `invocation` module in-tree and moves with the driver layer at the split |
 | `builtins::kill` console hooks | C → **replaced (row 11)** | `Executor::inject_signal` / `Executor::interrupt` (Tier A, RFC §6.4) for session-scoped delivery; `script_driver::inject_console_ctrl_c` / `script_driver::consume_background_wrapper_handshake` (Tier B) for the two host-launcher shapes that have no executor yet. The kill items themselves were demoted to `pub(crate)` in the migration's companion change (Ledger v4) |
@@ -395,11 +408,14 @@ item rubash::lexer::has_unclosed_input_syntax
 item rubash::lexer::has_unclosed_input_syntax_posix
 item rubash::lexer::tokenize
 item rubash::lexer::tokenize_with_initial_posix
+item rubash::locale::collect_locale_strings
+item rubash::locale::render_locale_string_dump
 item rubash::parser::Ast
 item rubash::parser::CommandNode
 item rubash::parser::ParseLoopOptions
 item rubash::parser::WordMetadata
 item rubash::parser::ast_print::pretty_print_command
+item rubash::parser::ast_print::pretty_print_input
 item rubash::parser::parse
 item rubash::parser::parse_with_options
 item rubash::run_dap_stdio

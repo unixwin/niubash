@@ -3745,6 +3745,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // rebuild at the top of the loop.
         typeahead.disarm_and_reinject();
 
+        // niubash#669: while the foreground work below runs, watch the
+        // console input queue for a Ctrl+C that arrived as a raw input
+        // record — those never become a CTRL_C_EVENT, so the console
+        // handler cannot fire for them and a foreground command would
+        // run to completion uninterruptible. The watch synthesizes the
+        // missing delivery (engine note + group broadcast) and drops
+        // when this iteration ends. Windows-only effect.
+        let _foreground_ctrl_c_watch = crate::ctrl_c::ForegroundWatch::arm();
+
         match signal {
             Ok(Signal::HostCommand(payload)) => {
                 // reedline 0.50 delivers ReedlineEvent::ExecuteHostCommand
