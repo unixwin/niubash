@@ -785,6 +785,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             piped_stdout::finish_and_exit(rubash::run_debug_cli(rubash::DebugCliPreset {
                 program: Some(script.clone()),
                 args: invocation.positional_params.clone(),
+                startup_file: debug_startup_file(&invocation),
             }));
         }
     }
@@ -1013,17 +1014,105 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// niubash#692: the `--debug` CLI route's startup file — the
+/// invocation's explicit `--rcfile`, gated by `--norc` exactly
+/// the way every other route gates rc reading through
+/// `Shell::no_rc`. Before this mapping existed, the debug
+/// dispatch dropped the flag silently: the rc never loaded, so
+/// its function and trap definitions never reached the
+/// debuggee (the niubash#681 repro was written against this
+/// face). The engine sources the file into the debug session
+/// ahead of the program (`DebugCliPreset::startup_file`); a
+/// missing file surfaces as the source builtin's diagnostic
+/// there — visible, never silent. Only the explicit flag is
+/// mapped: the debug route keeps the script route's contract
+/// for the default rc (a non-interactive script run does not
+/// source it), and `--dap` launches keep the editor-owned
+/// startup model.
+fn debug_startup_file(invocation: &ShellInvocation) -> Option<String> {
+    if invocation.no_rc {
+        None
+    } else {
+        invocation.rc_file.clone()
+    }
+}
+
+/// The input text for the one-shot text faces. Census of the
+/// faces fed by this helper (niubash#694) — exactly two callers,
+/// both one-shot and file-fed:
+///   * `--dump-strings` / `--dump-po-strings` (one arm), and
+///   * `--pretty-print`.
+/// Per input source:
+///   * `-c` command string: argv text, no file access, unchanged.
+///   * script operand: read with the execution path's open
+///     discipline (`read_invocation_script_operand`) — before
+///     #694 this arm's `read_to_string` error rode the anyhow
+///     chain out of `main` and landed as a bare rc 1 with no
+///     diagnostic, where the execution path (and GNU, for these
+///     same faces) answers 127/126 with the file named.
+///   * stdin: raw bytes decoded like script bytes — a non-UTF-8
+///     stream used to fail the read the same flattened way,
+///     where GNU dumps/pretty-prints it fine.
 fn invocation_input(invocation: &ShellInvocation) -> anyhow::Result<String> {
     if let Some(command) = &invocation.command {
         return Ok(command.clone());
     }
     if let Some(script_name) = &invocation.script {
-        let path = script_arg_to_host_path(script_name);
-        return Ok(std::fs::read_to_string(&path)?);
+        return read_invocation_script_operand(script_name);
     }
-    let mut content = String::new();
-    std::io::stdin().read_to_string(&mut content)?;
-    Ok(content)
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes)?;
+    Ok(rubash::script_driver::bytes_to_script_text(&bytes))
+}
+
+/// niubash#694: read a script operand for the one-shot text
+/// faces with the execution path's open discipline (the
+/// `read_script_operand` caliber, niubash#591/#547/#654):
+/// $PATH search for a slash-less name, a missing file answered
+/// `niu: <file>: No such file or directory` with status 127, a
+/// directory or a permission failure answered with status 126,
+/// each naming the operand as given. Bytes are decoded through
+/// `bytes_to_script_text`, never `read_to_string`, so a
+/// non-UTF-8 script dumps and pretty-prints instead of failing
+/// its read. Unclassified read errors keep the caller's anyhow
+/// path, exactly as the execution path leaves them.
+fn read_invocation_script_operand(name: &str) -> anyhow::Result<String> {
+    let mut script = script_arg_to_host_path(name);
+    if !script.exists() && !name.contains('/') && !name.contains('\\') {
+        // A bare executor only to borrow the engine's own $PATH
+        // script search — the same lookup `read_script_operand`
+        // runs through the live shell.
+        let executor = rubash::Executor::new();
+        if let Some(found) = executor.find_script_on_path(name) {
+            script = found;
+        }
+    }
+    if !script.exists() {
+        eprintln!("niu: {name}: No such file or directory");
+        piped_stdout::finish_and_exit(127);
+    }
+    if script.is_dir() {
+        eprintln!("niu: {name}: Is a directory");
+        piped_stdout::finish_and_exit(126);
+    }
+    match std::fs::read(&script) {
+        Ok(bytes) => Ok(rubash::script_driver::bytes_to_script_text(&bytes)),
+        Err(error) => match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                eprintln!("niu: {name}: No such file or directory");
+                piped_stdout::finish_and_exit(127);
+            }
+            std::io::ErrorKind::PermissionDenied => {
+                eprintln!("niu: {name}: Permission denied");
+                piped_stdout::finish_and_exit(126);
+            }
+            std::io::ErrorKind::IsADirectory => {
+                eprintln!("niu: {name}: Is a directory");
+                piped_stdout::finish_and_exit(126);
+            }
+            _ => Err(error.into()),
+        },
+    }
 }
 
 /// -D / --dump-strings: list every locale string ($"...") without executing,
@@ -4970,6 +5059,19 @@ mod tests {
         invocation.command = None;
         invocation.script = Some("D:/repo/probe.sh".to_string());
         assert_eq!(invocation_source_name(&invocation), "D:/repo/probe.sh");
+    }
+
+    /// niubash#692: the --debug dispatch must hand the invocation's
+    /// explicit --rcfile to the engine preset — dropping it was the
+    /// defect — and --norc must gate it like every other route.
+    #[test]
+    fn debug_startup_file_maps_rcfile_unless_norc() {
+        let mut invocation = ShellInvocation::parse(&[]).unwrap();
+        assert_eq!(debug_startup_file(&invocation), None);
+        invocation.rc_file = Some("rc.sh".to_string());
+        assert_eq!(debug_startup_file(&invocation), Some("rc.sh".to_string()));
+        invocation.no_rc = true;
+        assert_eq!(debug_startup_file(&invocation), None);
     }
 }
 
