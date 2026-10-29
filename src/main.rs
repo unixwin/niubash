@@ -800,7 +800,13 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         if !pretty_print_script(&input) {
             // GNU pretty_print_loop returns EXECUTION_FAILURE when the
             // input stops at a parse error (eval.c:215-253).
-            std::process::exit(1);
+            // niubash#656: leave through the drain like every other
+            // post-execution exit funnel — a bare `process::exit` skips
+            // the piped-stdout pump drain in `main` and raced it,
+            // intermittently dropping the already-printed commands on
+            // Windows (CI sampled this face red 2 of 4 runs with stdout
+            // completely empty while the exit code stayed 1).
+            piped_stdout::finish_and_exit(1);
         }
         return Ok(());
     }
