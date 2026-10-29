@@ -1347,6 +1347,7 @@ impl Shell {
             PreparedLine::Execute(expanded) => {
                 let code = self.execute_line_with_options(&expanded, true, line_offset)?;
                 self.invalidate_command_probe_after_line(&expanded);
+                self.invalidate_git_prompt_after_line();
                 code
             }
             PreparedLine::Discard => self.session().last_status(),
@@ -1384,6 +1385,7 @@ impl Shell {
         self.interactive_lines_read += script.split_inclusive('\n').count().max(1);
         let code = self.execute_script_with_options(script, true, line_offset)?;
         self.invalidate_command_probe_after_line(script);
+        self.invalidate_git_prompt_after_line();
         self.remember_interactive_command(script, code);
         let new_pwd = self.session_mut().variables().resolved_value("PWD");
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
@@ -2223,12 +2225,17 @@ impl Shell {
     /// active flag with a live claim renders the claimed prompt untouched.
     ///
     /// On the segments face, the clone handed out here is stamped with
-    /// this pass's Vcs value (niubash#592, S2): computed in this call —
-    /// which the REPL makes after `run_precmd_hooks`, so a hook that
-    /// changes the repository is reflected in the same pass — exactly
-    /// once per pass, while the pass's repaints re-read the stamp
-    /// instead of spawning git per repaint. `self.prompt` itself is
-    /// never stamped, so no value can outlive its pass.
+    /// this pass's Vcs value (niubash#592, S2): the value is read from
+    /// the cross-pass segment cache in this call — which the REPL
+    /// makes after `run_precmd_hooks` — and the pass's repaints
+    /// re-read the stamp instead of touching the cache again.
+    /// Since niubash#685 the read never computes and never waits: on a
+    /// cold or stale entry this call launches a background refresh and
+    /// stamps the cached value as-is, so a hook that changes the
+    /// repository is reflected from the NEXT pass (the fingerprint
+    /// detects the change here; the fresh value lands asynchronously).
+    /// `self.prompt` itself is never stamped, so no stamped value can
+    /// outlive its pass.
     pub(crate) fn prompt_for_display(&mut self) -> PromptBackend {
         #[cfg(windows)]
         if self.gitbash_prompt_active && !self.prompt_slot_claimed() {
@@ -2376,6 +2383,21 @@ impl Shell {
             // still do (prompt re-sync, title hooks): GNU longjmps out of
             // execute_variable_command into the reader's top level.
             return true;
+        }
+        // niubash#685: hooks are commands too — a precmd script or
+        // PROMPT_COMMAND can rewrite worktree files the git segment's
+        // fingerprint cannot see, so a cycle that actually ran one
+        // marks the cached segment dirty. The refresh stays in the
+        // background; the pass below still never waits on git. A cycle
+        // with no user hook content marks nothing, so idle passes in a
+        // hook-less shell stay spawn-free.
+        if !hooks.is_empty()
+            || self
+                .executor()
+                .get_env("PROMPT_COMMAND")
+                .is_some_and(|value| !value.is_empty())
+        {
+            self.invalidate_git_prompt_after_line();
         }
         self.sync_bash_prompt_from_env();
         let title = self.resolve_title_value();
@@ -2960,6 +2982,28 @@ impl Shell {
         // (PATH + PATHEXT) stayed byte-identical — so they retire on
         // the same lines.
         crate::completion::command::CommandCompleter::invalidate_command_caches();
+    }
+
+    /// niubash#685: a completed interactive command cycle can have
+    /// rewritten worktree files without touching HEAD or the index —
+    /// the two things the git prompt segment's fingerprint can see —
+    /// so the cached segment for the (post-command) current repository
+    /// is marked dirty. The next prompt pass serves the cached value
+    /// and refreshes it in the background; no pass ever waits on git.
+    /// Called from the same two post-line sites as the command-probe
+    /// invalidation above (the interactive line and script funnels);
+    /// an empty submission never reaches either site, so it costs
+    /// nothing.
+    fn invalidate_git_prompt_after_line(&self) {
+        #[cfg(windows)]
+        {
+            if self.one_shot {
+                return;
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                crate::git_prompt::invalidate_segment_for_cwd(&cwd);
+            }
+        }
     }
 
     /// Update the shared completion state from the current env + cwd.
@@ -8685,8 +8729,12 @@ complete -F _envtooldyn_hook envtooldyn
 
     /// Probe cells 1+2 (§6) and the §5 rows they cover (first frame,
     /// ordinary pass, repaint storm, completion/resize repaints — all
-    /// repaints of the handed-out prompt): one computation per pass,
-    /// repaints add zero spawns.
+    /// repaints of the handed-out prompt), under the niubash#685
+    /// revision of the S2 contract: a pass never computes and never
+    /// waits — the first pass launches ONE background refresh and
+    /// renders without the segment, repaints re-read the stamp, and
+    /// later passes are cache hits that add zero spawns while the
+    /// fingerprint is unchanged and no command cycle intervenes.
     #[cfg(windows)]
     #[test]
     fn issue592_probe_repaint_storm_and_pass_budget() {
@@ -8699,45 +8747,55 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut shell = segments_shell_with_vcs();
-        crate::git_prompt::reset_read_status_call_count();
+        // Keyed by the worktree as resolved from the process cwd —
+        // the same derivation `prompt_for_display` feeds the cache.
+        let key = crate::git_prompt::worktree_key_for(&std::env::current_dir().unwrap()).unwrap();
 
-        // Cell 1 / first frame: the first pass computes exactly once,
-        // then a repaint storm re-reads the stamp.
+        // Cell 1 / first frame: the cold pass renders without the
+        // segment (it does not wait for git), a repaint storm re-reads
+        // the stamp, and exactly one background spawn lands the value.
         let prompt = shell.prompt_for_display();
-        let first_pass = crate::git_prompt::read_status_call_count();
+        assert!(
+            !render_left_of(&prompt).contains("main"),
+            "the cold pass must not wait for the segment"
+        );
         for _ in 0..10 {
             let _ = render_left_of(&prompt);
             let _ = reedline::Prompt::render_prompt_right(&prompt);
         }
-        let after_storm = crate::git_prompt::read_status_call_count();
-        eprintln!(
-            "issue592 probe cell1: first_pass_spawns={first_pass} \
-             after_10_repaints={after_storm}"
-        );
-        assert_eq!(first_pass, 1, "the first pass computes exactly once");
-        assert_eq!(after_storm, 1, "repaints of a stamped prompt never spawn");
-        assert!(render_left_of(&prompt).contains("main"));
+        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
+        let after_storm = crate::git_prompt::read_status_call_count(&key);
+        eprintln!("issue592 probe cell1 (#685): after_10_repaints_spawns={after_storm}");
+        assert_eq!(after_storm, 1, "one background spawn; repaints never spawn");
 
         // Cell 2: K further passes, each with its own repaint storm,
-        // cost exactly one spawn each.
+        // are cache hits — the total stays at one spawn.
         for k in 2..=4usize {
             let p = shell.prompt_for_display();
             for _ in 0..5 {
                 let _ = render_left_of(&p);
             }
-            let total = crate::git_prompt::read_status_call_count();
-            eprintln!("issue592 probe cell2: passes={k} total_spawns={total}");
-            assert_eq!(total, k, "pass {k} must add exactly one spawn");
+            assert!(render_left_of(&p).contains("main"));
+            let total = crate::git_prompt::read_status_call_count(&key);
+            eprintln!("issue592 probe cell2 (#685): passes={k} total_spawns={total}");
+            assert_eq!(total, 1, "pass {k} must be a cache hit");
         }
     }
 
-    /// Probe cell 5 (§6, the §3.4 ordering invariant): a hook that
-    /// changes the repository is reflected in the SAME pass's segment,
-    /// and the pass still costs exactly one spawn — the hook's change
-    /// is never bought with a second computation or a one-pass lag.
+    /// Probe cell 5 (§6, the §3.4 ordering invariant), as revised by
+    /// niubash#685: the S2 shape reflected a hook's repository change
+    /// in the SAME pass by computing synchronously after the hooks —
+    /// that computation is exactly the per-pass wait #685 removes.
+    /// The revised invariant: hooks still run before the pass, the
+    /// pass detects the change (the fingerprint under real git, the
+    /// command-cycle mark for the hook itself under any git) and
+    /// launches ONE background refresh while rendering the cached
+    /// value, and the hook's branch is visible from the NEXT pass.
     #[cfg(windows)]
     #[test]
-    fn issue592_probe_hook_change_visible_same_pass() {
+    fn issue592_probe_hook_change_visible_next_pass() {
         let tmp = tempfile::tempdir().unwrap();
         if !repo_on_branch(tmp.path(), "main") {
             return;
@@ -8748,9 +8806,16 @@ complete -F _envtooldyn_hook envtooldyn
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut shell = segments_shell_with_vcs();
         shell.sync_executor_pwd_from_process_cwd();
+        let key = crate::git_prompt::worktree_key_for(&std::env::current_dir().unwrap()).unwrap();
 
+        // Settle the cache on the pre-hook value.
+        let _ = shell.prompt_for_display();
+        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
         let before = shell.prompt_for_display();
         assert!(render_left_of(&before).contains("main"));
+        assert_eq!(crate::git_prompt::read_status_call_count(&key), 1);
 
         // REPL order: hooks first, prompt second. Under the Wine shim
         // the "repository change" is the canned status flipping to the
@@ -8768,26 +8833,47 @@ complete -F _envtooldyn_hook envtooldyn
         };
         shell.session_mut().variables().set("PROMPT_COMMAND", &hook);
         shell.run_precmd_hooks();
-        crate::git_prompt::reset_read_status_call_count();
+
+        // The pass after the hook renders the cached (pre-hook) value
+        // — it never waits — and exactly one background spawn lands
+        // the hook's branch for the next pass.
         let prompt = shell.prompt_for_display();
-        let spawns = crate::git_prompt::read_status_call_count();
         let left = render_left_of(&prompt);
-        eprintln!("issue592 probe cell5: pass_spawns={spawns} segment={left:?}");
-        assert_eq!(spawns, 1, "the pass after the hook computes exactly once");
-        assert!(
-            left.contains("hooked"),
-            "hook's branch must be visible in the same pass: {left:?}"
+        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
+        let spawns = crate::git_prompt::read_status_call_count(&key);
+        eprintln!("issue592 probe cell5 (#685): total_spawns={spawns} pass_after_hook={left:?}");
+        assert_eq!(
+            spawns, 2,
+            "the hook cycle costs exactly one background spawn"
         );
+        assert!(
+            left.contains("main") && !left.contains("hooked"),
+            "the pass after the hook serves the cached value: {left:?}"
+        );
+        let next = shell.prompt_for_display();
+        assert!(
+            render_left_of(&next).contains("hooked"),
+            "the hook's branch is visible from the next pass"
+        );
+        assert_eq!(crate::git_prompt::read_status_call_count(&key), 2);
     }
 
-    /// §5 rows "empty Enter" / "prompt Ctrl+C" / "interrupted command":
-    /// all three return to the loop top and take a fresh prompt with no
-    /// command in between (repl.rs: the empty-line `continue`, the
-    /// CtrlC branch's `continue`), so consecutive passes with nothing
-    /// between them are their exact shape — each costs one computation.
+    /// §5 rows "empty Enter" / "prompt Ctrl+C": both return to the
+    /// loop top and take a fresh prompt with no command cycle in
+    /// between (repl.rs: the empty-line `continue`, the CtrlC branch's
+    /// `continue` — neither reaches `execute_interactive_line`), so
+    /// consecutive passes with nothing between them are their exact
+    /// shape. Under niubash#685 they are all cache hits: the first
+    /// pass's one background spawn is the only one. (The S2-era
+    /// expectation — each such pass computes once — is superseded; a
+    /// command that DID run, even one interrupted mid-flight, goes
+    /// through the command-cycle mark instead and costs one
+    /// background refresh, pinned in git_prompt's own tests.)
     #[cfg(windows)]
     #[test]
-    fn issue592_consecutive_passes_each_compute_once() {
+    fn issue592_consecutive_passes_hit_the_cache() {
         let tmp = tempfile::tempdir().unwrap();
         if !repo_on_branch(tmp.path(), "main") {
             return;
@@ -8797,18 +8883,27 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut shell = segments_shell_with_vcs();
-        crate::git_prompt::reset_read_status_call_count();
+        let key = crate::git_prompt::worktree_key_for(&std::env::current_dir().unwrap()).unwrap();
         for m in 1..=3usize {
             let p = shell.prompt_for_display();
             let _ = render_left_of(&p);
-            let total = crate::git_prompt::read_status_call_count();
-            eprintln!("issue592 probe empty-enter shape: passes={m} total_spawns={total}");
-            assert_eq!(total, m, "each consecutive pass computes exactly once");
+            assert!(crate::git_prompt::wait_for_segment_cache_idle(
+                std::time::Duration::from_secs(30)
+            ));
+            let total = crate::git_prompt::read_status_call_count(&key);
+            eprintln!("issue592 probe empty-enter shape (#685): passes={m} total_spawns={total}");
+            assert_eq!(total, 1, "pass {m} must be served by the one landing");
         }
+        let p = shell.prompt_for_display();
+        assert!(render_left_of(&p).contains("main"));
     }
 
     /// Probe cell 3 (§6) / §5 "outside a repository" row: no pass and
-    /// no repaint ever spawns, and the segment stays empty.
+    /// no repaint ever spawns, and the segment stays empty. (Under
+    /// #685 the count is keyed by resolved worktree; outside a
+    /// repository there is none — `find_worktree` short-circuits
+    /// before the cache or the spawn point can be reached, which the
+    /// `None` key pins structurally.)
     #[cfg(windows)]
     #[test]
     fn issue592_outside_repository_never_spawns() {
@@ -8817,7 +8912,7 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut shell = segments_shell_with_vcs();
-        crate::git_prompt::reset_read_status_call_count();
+        assert!(crate::git_prompt::worktree_key_for(tmp.path()).is_none());
         for _ in 0..3 {
             let p = shell.prompt_for_display();
             for _ in 0..4 {
@@ -8825,16 +8920,18 @@ complete -F _envtooldyn_hook envtooldyn
             }
             assert_eq!(render_left_of(&p), "");
         }
-        let total = crate::git_prompt::read_status_call_count();
+        let total = crate::git_prompt::read_status_call_count(tmp.path());
         eprintln!("issue592 probe cell3: outside_repo_total_spawns={total}");
         assert_eq!(total, 0, "outside a repository nothing may spawn");
     }
 
-    /// Probe cell 4 (§6) and the §5 "cd" row: the root and a
-    /// subdirectory of one repository produce the identical segment at
-    /// one spawn per pass (no per-directory accounting), and moving to
-    /// another repository is picked up by the next pass — again one
-    /// spawn, no cross-pass reuse.
+    /// Probe cell 4 (§6) and the §5 "cd" row, under niubash#685: the
+    /// root and a subdirectory of one repository share the root's
+    /// cache entry (the key is the resolved worktree), so the
+    /// subdirectory pass is a hit at no extra spawn; moving to
+    /// another repository is cold there — the first pass renders
+    /// without the segment, one background spawn lands it, and the
+    /// next pass shows it.
     #[cfg(windows)]
     #[test]
     fn issue592_subdir_matches_root_and_cd_recomputes_next_pass() {
@@ -8852,31 +8949,45 @@ complete -F _envtooldyn_hook envtooldyn
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
         let mut shell = segments_shell_with_vcs();
-        crate::git_prompt::reset_read_status_call_count();
 
         std::env::set_current_dir(repo_a.path()).unwrap();
+        let key_a = crate::git_prompt::worktree_key_for(&std::env::current_dir().unwrap()).unwrap();
+        let _ = shell.prompt_for_display();
+        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
         let at_root = render_left_of(&shell.prompt_for_display());
-        let after_root = crate::git_prompt::read_status_call_count();
+        let after_root = crate::git_prompt::read_status_call_count(&key_a);
         std::env::set_current_dir(&sub).unwrap();
         let at_sub = render_left_of(&shell.prompt_for_display());
-        let after_sub = crate::git_prompt::read_status_call_count();
+        let after_sub = crate::git_prompt::read_status_call_count(&key_a);
         eprintln!(
-            "issue592 probe cell4: root_spawns={after_root} subdir_spawns={after_sub} \
+            "issue592 probe cell4 (#685): root_spawns={after_root} subdir_spawns={after_sub} \
              identical={}",
             at_root == at_sub
         );
         assert_eq!(after_root, 1);
-        assert_eq!(after_sub, 2, "the subdirectory pass computes once more");
+        assert_eq!(after_sub, 1, "the subdirectory pass is a cache hit");
         assert_eq!(at_root, at_sub, "same repository, same segment");
         assert!(at_root.contains("main"));
 
         write_shim_state("other");
         std::env::set_current_dir(repo_b.path()).unwrap();
+        let key_b = crate::git_prompt::worktree_key_for(&std::env::current_dir().unwrap()).unwrap();
+        let cold_b = render_left_of(&shell.prompt_for_display());
+        assert!(
+            !cold_b.contains("other"),
+            "the first pass in a new repository does not wait: {cold_b:?}"
+        );
+        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
         let at_b = render_left_of(&shell.prompt_for_display());
-        let total = crate::git_prompt::read_status_call_count();
-        eprintln!("issue592 probe cd row: total_spawns={total} segment_b={at_b:?}");
-        assert_eq!(total, 3, "the pass after cd computes exactly once");
+        let total_b = crate::git_prompt::read_status_call_count(&key_b);
+        eprintln!("issue592 probe cd row (#685): repo_b_spawns={total_b} segment_b={at_b:?}");
+        assert_eq!(total_b, 1, "the cd costs exactly one background spawn");
         assert!(at_b.contains("other"), "{at_b:?}");
+        assert_eq!(crate::git_prompt::read_status_call_count(&key_a), 1);
     }
 
     /// starship's claim shape (src/init/starship.bash): PROMPT_COMMAND names
