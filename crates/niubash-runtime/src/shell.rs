@@ -2830,6 +2830,11 @@ impl Shell {
         // actually consumes are always current.
         let env_fingerprint = Self::completion_env_fingerprint(self.executor.env_vars());
         let function_names = self.executor.functions_snapshot();
+        // niubash#627: the /dev/fd completion tier lists the session's
+        // live fd numbers; sync them from the engine's fd table with
+        // the same compare-and-store discipline as the other
+        // components (the vec is tiny — fd counts, not env-sized).
+        let open_fds = self.executor.open_fds();
         let mut alias_names: Vec<String> = self.aliases.keys().cloned().collect();
         alias_names.sort_unstable();
         if let Ok(mut state) = self.completion_state.lock() {
@@ -2848,6 +2853,9 @@ impl Shell {
             if state.snapshot_alias_names != alias_names {
                 state.aliases = alias_names.iter().cloned().collect();
                 state.snapshot_alias_names = alias_names;
+            }
+            if state.open_fds != open_fds {
+                state.open_fds = open_fds;
             }
         }
     }
@@ -8734,5 +8742,52 @@ mod invocation_name_tests {
             Some(value) => std::env::set_var("NIU_INVOKED_AS", value),
             None => std::env::remove_var("NIU_INVOKED_AS"),
         }
+    }
+
+    /// niubash#627 end-to-end (Windows, where the namespaces are
+    /// simulated): the completion probe — the same state the REPL's
+    /// Tab reads — serves the registry's /dev names, the registry's
+    /// /proc enumeration, and the live fd table under /dev/fd/.
+    #[cfg(windows)]
+    #[test]
+    fn issue627_completion_probe_serves_simulated_namespaces() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        // Static tier: /dev/ lists the registry's simulated names.
+        let dev = shell.completion_probe("cat /dev/", "cat /dev/".len());
+        for expected in ["/dev/null", "/dev/stdin", "/dev/fd/", "/dev/tcp/"] {
+            assert!(
+                dev.contains(&expected.to_string()),
+                "{dev:?} missing {expected}"
+            );
+        }
+
+        // /proc/ enumerates through the registry's proc face.
+        let proc_list = shell.completion_probe("cat /proc/", "cat /proc/".len());
+        assert!(
+            proc_list.contains(&"/proc/meminfo".to_string()),
+            "{proc_list:?}"
+        );
+        assert!(
+            proc_list.contains(&"/proc/self/".to_string()),
+            "{proc_list:?}"
+        );
+
+        // Dynamic tier: the fd table decides — fd 3 appears once
+        // opened and disappears once closed.
+        let before = shell.completion_probe("cat /dev/fd/", "cat /dev/fd/".len());
+        assert!(!before.contains(&"/dev/fd/3".to_string()), "{before:?}");
+        shell.execute_interactive_line("exec 3>/dev/null").unwrap();
+        let opened = shell.completion_probe("cat /dev/fd/", "cat /dev/fd/".len());
+        assert!(opened.contains(&"/dev/fd/3".to_string()), "{opened:?}");
+        shell.execute_interactive_line("exec 3>&-").unwrap();
+        let closed = shell.completion_probe("cat /dev/fd/", "cat /dev/fd/".len());
+        assert!(!closed.contains(&"/dev/fd/3".to_string()), "{closed:?}");
+
+        // Net dirs complete nothing past the guide form.
+        let net = shell.completion_probe("cat /dev/tcp/", "cat /dev/tcp/".len());
+        assert!(net.is_empty(), "{net:?}");
     }
 }

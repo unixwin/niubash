@@ -76,6 +76,11 @@ pub struct CompletionState {
     pub env_vars: HashMap<String, String>,
     pub aliases: HashSet<String>,
     pub functions: HashSet<String>,
+    /// The session's open fd numbers, synced from the engine's fd
+    /// table by `Shell::update_completion_state`. The path
+    /// completer's dynamic tier lists these under `/dev/fd/`
+    /// (niubash#627).
+    pub open_fds: Vec<u32>,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -106,6 +111,7 @@ impl CompletionState {
             env_vars: HashMap::new(),
             aliases: HashSet::new(),
             functions: HashSet::new(),
+            open_fds: Vec::new(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
             command_probe: CommandProbe::default(),
@@ -226,13 +232,14 @@ impl NiubashCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, behavior, plugins) =
+        let (current_dir, env_vars, aliases, functions, open_fds, behavior, plugins) =
             if let Ok(state) = self.state.lock() {
                 (
                     state.current_dir.clone(),
                     state.env_vars.clone(),
                     state.aliases.clone(),
                     state.functions.clone(),
+                    state.open_fds.clone(),
                     state.behavior,
                     state.plugins.clone(),
                 )
@@ -240,8 +247,9 @@ impl NiubashCompleter {
                 return Vec::new();
             };
 
-        let context =
+        let mut context =
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
+        context.open_fds = open_fds;
         let mut all_suggestions = Vec::new();
 
         // Shell-function completions (`NIU_COMPDEFS`): only available while

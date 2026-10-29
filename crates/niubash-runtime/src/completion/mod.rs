@@ -63,6 +63,11 @@ pub struct CompletionContext {
     pub cursor_pos: usize,
     /// User-configurable matching behavior.
     pub behavior: CompletionBehavior,
+    /// The session's open fd numbers at snapshot time, from the
+    /// engine's fd table (`Executor::open_fds`) via `CompletionState`.
+    /// The path completer's dynamic tier lists these under `/dev/fd/`
+    /// (niubash#627).
+    pub open_fds: Vec<u32>,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -96,6 +101,7 @@ impl CompletionContext {
             input,
             cursor_pos,
             behavior,
+            open_fds: Vec::new(),
         }
     }
 
