@@ -252,6 +252,27 @@ pub struct Shell {
     // --noediting: disable readline-style line editing in the REPL.
     pub no_editing: bool,
     startup_invocation: Option<rubash::invocation::ShellInvocation>,
+    // rubash#2129 (niu companion): this session's login classification,
+    // owned by the host and derived ONLY from this process's own
+    // invocation — the argv[0] `-` seed recorded at construction, the
+    // `ShellInvocation` parse recorded by
+    // `apply_invocation_before_startup`, or the legacy `-c -l` mark
+    // (`mark_own_login_shell`). `login_shell_active` reads this field;
+    // the executor's `__RUBASH_LOGIN_SHELL` carrier is a write-only
+    // projection of it for engine faces (the `logout` builtin, the
+    // `login_shell` shopt) and is never read back: the carrier is
+    // exported, so a child that merely inherits it (a procsub respawn
+    // out of an rc file — the fzf completion.bash shape) would
+    // otherwise adopt the parent's login shape and re-run the profile
+    // chain without bound.
+    own_login_shell: bool,
+    // rubash#2129 (niu companion): this process is a respawned internal
+    // child of another session (the engine's procsub / `&` / coproc
+    // transports), snapshotted once at construction from the same
+    // marker pair the engine tests at `Executor::new`. A respawned
+    // child is GNU's forked subshell: the parent session already ran
+    // startup, so the startup funnel sources nothing for it.
+    respawned_child: bool,
     // niubash#400: `Shell::new` found the rbash invocation face (argv[0]
     // basename or the shim-forwarded NIU_INVOKED_AS). Only the mark lives
     // here; `finish_startup` turns it into `set -o restricted` at the same
@@ -445,6 +466,14 @@ impl Shell {
         // and the shell-name block below reuses `invoked_as` rather than
         // re-reading the now-cleared environment.
         let invoked_as = invoked_as_from_env();
+        // rubash#2129 (niu companion): snapshot the engine's internal
+        // respawn markers BEFORE the Session builder's `Executor::new`
+        // consumes them — the same pair the engine itself tests there
+        // (rubash executor/init.rs: `__RUBASH_COPROC_CHILD == "1"` or a
+        // present `__RUBASH_SHELL_PID`). Read once, here, into host
+        // state; the startup funnel never re-reads the raw markers.
+        let respawned_child = std::env::var("__RUBASH_COPROC_CHILD").as_deref() == Ok("1")
+            || std::env::var_os("__RUBASH_SHELL_PID").is_some();
         // niubash#495: an MSIX package root is read-only, so the default
         // shell-root resolution fails every session with os error 5. Point
         // NIU_ROOT at the package's private LocalCache before the root is
@@ -533,6 +562,13 @@ impl Shell {
                 .map(|arg| arg.to_string_lossy().into_owned())
         });
         let mut invoked_as_rbash = false;
+        // rubash#2129 (niu companion): the host-owned login
+        // classification (see the `own_login_shell` field). The only
+        // construction-time source is the argv[0] `-` mark in the
+        // shell-name block below — the same seed that arms the
+        // builder's login funnel; the parse-based source joins in
+        // `apply_invocation_before_startup`.
+        let mut own_login_shell = false;
         // The posix *option* half of the sh/ash seed pair is applied
         // after build (the env half is a builder seed below): the
         // engine option store does not exist before the session
@@ -558,6 +594,7 @@ impl Shell {
                 // builds against carries the Session contract, so
                 // the funnel is available on every supported rev.
                 builder = builder.login_shell(true);
+                own_login_shell = true;
             }
             if matches!(unmarked_name, "sh" | "ash") {
                 builder = builder.env("__RUBASH_POSIX_MODE", "1");
@@ -622,6 +659,27 @@ impl Shell {
         if posix_option_seed {
             session.options().set("posix", true);
         }
+        // rubash#2129 (niu companion): carrier normalization. The
+        // executor the builder just assembled imported the process
+        // environment wholesale, so it can carry a parent session's
+        // exported startup-shape carriers — and shape is decided by
+        // THIS process's own invocation, never by inheritance (GNU
+        // decides from the invocation itself: shell.c:497-503 login,
+        // shell.c:540-549 interactive). Unless the argv[0] `-` seed
+        // above earned login, an inherited `__RUBASH_LOGIN_SHELL` is
+        // removed before any startup funnel can see it; this session's
+        // own login, when its parse earns it, is (re)written later by
+        // `apply_invocation_before_startup` / `mark_own_login_shell`.
+        // `__RUBASH_INTERACTIVE` is scrubbed unconditionally: no
+        // construction path seeds it, so a copy present here is
+        // inherited by construction — and every host face that earns
+        // the interactive shape (enter_interactive, the piped `-i`
+        // route, the theme-preview channel) writes it after
+        // classification, from the session's own parse.
+        if !own_login_shell {
+            session.executor_mut().unset_env("__RUBASH_LOGIN_SHELL");
+        }
+        session.executor_mut().unset_env("__RUBASH_INTERACTIVE");
         // GNU bash defaults expand_aliases on only for interactive shells
         // (shell.c init_interactive()/init_interactive_script()); -c,
         // script-file, and stdin runs keep the engine default (off).
@@ -791,6 +849,8 @@ impl Shell {
             rc_file: None,
             no_editing: false,
             startup_invocation: None,
+            own_login_shell,
+            respawned_child,
             invoked_as_rbash,
             script_exit_jump: false,
             session_exit_jump: None,
@@ -1456,8 +1516,32 @@ impl Shell {
         invocation: &rubash::invocation::ShellInvocation,
     ) -> Result<(), String> {
         invocation.apply_to_executor_before_startup(self.executor_mut())?;
+        // rubash#2129 (niu companion): the parse is this process's own
+        // word on its shape. An earned `--login`/`-l` joins the
+        // construction-time argv[0] seed in the host classification
+        // the startup funnel reads (`login_shell_active`); the engine
+        // apply above has already written the carrier projection for
+        // it (`mark_login_shell`). An invocation that did not earn
+        // login leaves the classification — and the executor
+        // construction scrubbed of any inherited carrier — exactly as
+        // they are.
+        if invocation.login {
+            self.own_login_shell = true;
+        }
         self.startup_invocation = Some(invocation.clone());
         Ok(())
+    }
+
+    /// Record that this process's own invocation earned the login
+    /// shape on a route whose parse never reaches `ShellInvocation`
+    /// (the launcher's legacy `niu -c -l` route, niubash#587): the
+    /// host classification (`own_login_shell`) and the engine's
+    /// carrier + `login_shell` shopt projection
+    /// (`Executor::mark_login_shell`, so `$-` gains `l`) move
+    /// together, here only — each reader takes its own side.
+    pub fn mark_own_login_shell(&mut self) {
+        self.own_login_shell = true;
+        self.executor_mut().mark_login_shell();
     }
 
     fn finish_startup(&mut self) {
@@ -1589,14 +1673,26 @@ impl Shell {
         exit
     }
 
-    /// True when this session is a login shell: `--login`/`-l` (the engine's
-    /// `apply_to_executor` records the flag) or an argv[0] whose basename
-    /// starts with `-' (shell.c set_shell_name; Shell::new records the same
-    /// marker). The login profile chain then replaces the interactive-RC
+    /// True when this session is a login shell BY ITS OWN INVOCATION:
+    /// `--login`/`-l` in the host's own parse
+    /// (`apply_invocation_before_startup` records it), the legacy
+    /// `-c -l` mark (`mark_own_login_shell`), or an argv[0] whose
+    /// basename starts with `-` (shell.c set_shell_name; Shell::new
+    /// records the same seed that arms the builder's login funnel).
+    /// The login profile chain then replaces the interactive-RC
     /// branch of the startup path (niubash#399); the env-file gates are
     /// independent of it (see `source_non_interactive_env`).
+    ///
+    /// rubash#2129 (niu companion): this used to read the executor's
+    /// `__RUBASH_LOGIN_SHELL` carrier back — but the carrier is an
+    /// exported projection, so a child that merely inherited it (the
+    /// procsub respawn out of an rc file, fzf's completion.bash shape)
+    /// adopted the parent's login shape and re-ran the profile chain,
+    /// recursing without bound. The classification is host state now
+    /// (`own_login_shell`); the carrier is written for engine faces
+    /// and never read back here.
     pub fn login_shell_active(&self) -> bool {
-        self.executor().get_env("__RUBASH_LOGIN_SHELL") == Some("1")
+        self.own_login_shell
     }
 
     /// The login profile chain (GNU shell.c:1836-1880
@@ -1668,6 +1764,18 @@ impl Shell {
         // No class decomposition expresses that without behavior
         // change, so the per-file funnel below stays the host's,
         // over the tier-C seam (see the migration report).
+        // rubash#2129 (niu companion): the respawn door. A respawned
+        // internal child is GNU's forked subshell (execute_cmd.c:1576
+        // execute_in_subshell): the parent session already ran startup
+        // and this process inherits its post-startup state, so the
+        // funnel sources NOTHING for it — no profile chain, no rc, no
+        // $ENV. The engine applies the same door in its own
+        // run_startup_files; without it, a startup file that respawns
+        // the shell (the fzf procsub shape) re-enters this funnel in
+        // every generation.
+        if self.respawned_child {
+            return None;
+        }
         // niubash#180 baseline: this session sources the current rc right
         // now, so a marker left by a setup that ran before this session
         // started is stale by definition — consume it here so only a setup
@@ -2047,6 +2155,16 @@ impl Shell {
     /// file is sourced: no plugins, prompts, or completion machinery is loaded,
     /// so interactive-only content stays out of the one-shot execution path.
     pub fn source_non_interactive_env(&mut self) -> Option<i32> {
+        // rubash#2129 (niu companion): the respawn door, as in
+        // run_startup_files — a respawned internal child (the procsub
+        // `niu -c 'complete -p ...'` generation is exactly this route)
+        // sources no profile chain and no BASH_ENV/NIU_ENV file; the
+        // parent session's startup is the only one. finish_startup
+        // still runs so the route tails keep their shape.
+        if self.respawned_child {
+            self.finish_startup();
+            return None;
+        }
         let mut exit = if self.login_shell_active() {
             self.source_login_profile_files()
         } else {
@@ -9248,16 +9366,16 @@ complete -F _envtooldyn_hook envtooldyn
             ..HookConfig::default()
         });
         shell.home_dir = temp.path().to_path_buf();
-        // The `sh -l -i` shape: posix mode (invoked as sh) plus the login
-        // marker, REPL dispatch (the greeting tail only runs with repl).
+        // The `sh -l -i` shape: posix mode (invoked as sh) plus the
+        // host login classification, REPL dispatch (the greeting tail
+        // only runs with repl). rubash#2129: the classification is
+        // host state (`own_login_shell`), not the env carrier this
+        // test used to plant.
         shell
             .session_mut()
             .variables()
             .set("__RUBASH_POSIX_MODE", "1");
-        shell
-            .session_mut()
-            .variables()
-            .set("__RUBASH_LOGIN_SHELL", "1");
+        shell.own_login_shell = true;
         shell
             .executor_mut()
             .set_env("ENV", &env_file.to_string_lossy());
@@ -9313,10 +9431,8 @@ complete -F _envtooldyn_hook envtooldyn
             .session_mut()
             .variables()
             .set("__RUBASH_POSIX_MODE", "1");
-        shell
-            .session_mut()
-            .variables()
-            .set("__RUBASH_LOGIN_SHELL", "1");
+        // rubash#2129: host login classification, not the env carrier.
+        shell.own_login_shell = true;
         shell
             .executor_mut()
             .set_env("ENV", &env_file.to_string_lossy());
@@ -9471,6 +9587,8 @@ complete -F _envtooldyn_hook envtooldyn
             rc_file: None,
             no_editing: false,
             startup_invocation: None,
+            own_login_shell: false,
+            respawned_child: false,
             invoked_as_rbash: false,
             script_exit_jump: false,
             session_exit_jump: None,
