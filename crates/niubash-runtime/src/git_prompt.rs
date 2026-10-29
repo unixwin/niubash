@@ -15,12 +15,18 @@
 //!    answered by the git the user actually runs (the libgit2 prompt silently
 //!    dropped the branch segment on old-owner repo trees once already);
 //!  - **cost**: a bounded `git status --porcelain=v2 --branch` runs at
-//!    most once per prompt pass on each prompt face — computed when the
-//!    host prepares the prompt, after the precmd hooks — and repaints
-//!    within a pass re-read the string computed for that pass instead
-//!    of spawning again. Outside a repository the segment spawns
-//!    nothing at all, which is already better than `__git_ps1`, that
-//!    forks several times even in `$HOME`;
+//!    most once per command cycle per repository, on a background
+//!    refresh thread the draw never waits on (niubash#685: the
+//!    cross-pass cache below). A prompt pass only reads the cached
+//!    segment — fresh while the repo fingerprint (HEAD contents +
+//!    index stat) still matches, no command cycle has completed since
+//!    it was computed, and it is younger than the cache TTL; a stale
+//!    or cold entry is served as-is for that pass while its refresh
+//!    lands for the next one. Repaints within a pass re-read the
+//!    pass's stamp, never the cache, and never spawn. Outside a
+//!    repository the segment spawns nothing at all, which is already
+//!    better than `__git_ps1`, that forks several times even in
+//!    `$HOME`;
 //!  - **isolation**, one rule per incident: never through a shell (a missing
 //!    git is an OS error, not a "command not found" on the terminal), stdout
 //!    piped and stderr discarded (git warnings can never reach the screen),
@@ -31,10 +37,10 @@
 //!
 //! This is not the niubash#145 shape: that was a persistent worker thread
 //! plus a daemon child that the main thread *waited on before the first
-//! prompt*. The child here is scoped to one segment render, is never waited
-//! on by anything else, and its reader thread dies with it; the startup
-//! regression tests keep asserting that nothing is waited on before the first
-//! paint.
+//! prompt*. The child here is scoped to one cache refresh, runs on a
+//! detached thread spawned by that refresh, and no prompt pass ever
+//! waits on it; the startup regression tests keep asserting that nothing
+//! is waited on before the first paint.
 //!
 //! Segments outside a repository are empty (Git Bash prints no branch there
 //! either), and a detached HEAD shows the short SHA the way `__git_ps1`
@@ -152,9 +158,14 @@ fn find_worktree(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// The git segment of the prompt: `branch` / `branch*` (dirty) / short SHA
-/// (detached) — `None` outside a repository, when git is unavailable, or when
-/// the read fails or times out. Failures are silent by design: the prompt
-/// degrades to "no branch" and the terminal stays clean.
+/// (detached) — `None` outside a repository, when git is unavailable, or
+/// when the last read failed or timed out. Failures are silent by design:
+/// the prompt degrades to "no branch" and the terminal stays clean.
+///
+/// The value comes from the cross-pass cache (niubash#685, below): this
+/// call never spawns and never waits — on a cold or stale entry it
+/// returns the cached value (or `None`) and a background refresh lands
+/// the fresh value for the next call.
 ///
 /// Public so the segment prompt engine can drive it
 /// (`SegmentId::Vcs`, niubash#331): the oh-my-niu bundle's
@@ -163,33 +174,305 @@ fn find_worktree(cwd: &Path) -> Option<PathBuf> {
 /// `[git_dirty]` yellow off exactly that star.
 pub fn branch_segment(cwd: &Path) -> Option<String> {
     let worktree = find_worktree(cwd)?;
-    let (name, dirty) = read_status(&worktree)?;
-    Some(if dirty { format!("{name}*") } else { name })
+    cached_segment(&worktree)
 }
 
-// Spawn counter for the niubash#592 acceptance probe (test builds only):
-// `read_status` is the prompt's only git spawn point and runs exactly once
-// per spawn, so counting its entries counts prompt git spawns exactly.
-// The counter is thread-local on purpose: a probe drives its whole
-// scenario (hooks, prompt passes, repaints) on its own test thread, so
-// other tests running in parallel in the same binary can neither
-// inflate nor drain its count. Production builds carry no counter.
-#[cfg(test)]
-thread_local! {
-    static READ_STATUS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+// ---- Cross-pass segment cache (niubash#685) ----
+//
+// #592's shipped shape computed the segment inside the prompt pass: one
+// bounded spawn per pass, waited on by the draw — on Windows a mid-size
+// repository charges every pass ~70 ms of process creation (Package 9
+// A4, real machine). The 2026-10-26 phase-one ruling always paired the
+// spawn with this layer; #685 lands it. The spawn itself is untouched
+// (same single point, same isolation, same data — the user's own git
+// remains the only source); what changed is when it runs and who waits
+// for it: nobody.
+//
+// Freshness contract for one worktree's entry — an entry is served
+// without a refresh only while ALL of these hold:
+//   * its repo fingerprint still matches (HEAD contents + index stat:
+//     branch switches, staging and commits all move one of the two);
+//   * no command cycle has completed since it was computed (the host
+//     calls `invalidate_segment_for_cwd` after each interactive line:
+//     a command can rewrite worktree files without touching HEAD or
+//     the index, which is exactly what the fingerprint cannot see);
+//   * it is younger than SEGMENT_CACHE_TTL (the backstop for worktree
+//     edits made entirely outside this shell — an editor saving a
+//     tracked file moves neither HEAD nor the index).
+// Otherwise the pass serves the entry as-is (the previous value, or
+// `None` on a cold cache) and at most one background refresh per
+// worktree recomputes it. The lock guards the map only; the one piece
+// of file inspection on the read path, the fingerprint, is a HEAD read
+// plus one or two stats and is taken BEFORE the lock.
+
+/// How long a computed segment may be served while nothing the
+/// fingerprint or the command-cycle mark can see has changed. The only
+/// class it bounds is out-of-shell worktree edits, so a minute-scale
+/// value keeps idle prompts spawn-free without letting an external
+/// edit linger: 60 s.
+const SEGMENT_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// What the cache can know about a repository without spawning: the
+/// HEAD file's contents (the branch ref or detached oid) and the index
+/// file's stat. Both are read through the gitdir resolution so linked
+/// worktrees and submodules (a `.git` *file*) fingerprint their own
+/// HEAD and index, not the main worktree's.
+#[derive(Clone, PartialEq, Eq)]
+struct RepoFingerprint {
+    head: Option<String>,
+    index: Option<(std::time::SystemTime, u64)>,
 }
 
-/// Number of `read_status` calls on this thread since the last reset
-/// (test builds only).
-#[cfg(test)]
-pub(crate) fn read_status_call_count() -> usize {
-    READ_STATUS_CALLS.with(|calls| calls.get())
+/// Resolve a worktree's gitdir: the `.git` directory itself, or the
+/// target of a `.git` file's `gitdir:` line (linked worktrees,
+/// submodules), relative to the worktree when spelled relative.
+fn resolve_gitdir(worktree: &Path) -> Option<PathBuf> {
+    let dot = worktree.join(".git");
+    if dot.is_dir() {
+        return Some(dot);
+    }
+    let text = std::fs::read_to_string(&dot).ok()?;
+    let target = text.trim().strip_prefix("gitdir:")?.trim();
+    let path = Path::new(target);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        worktree.join(path)
+    })
 }
 
-/// Reset this thread's `read_status` call counter (test builds only).
+/// Resolve a gitdir's commondir (the shared `.git` for linked
+/// worktrees; the gitdir itself when no `commondir` file exists).
+fn resolve_commondir(gitdir: &Path) -> PathBuf {
+    if let Ok(text) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let target = text.trim();
+        let path = Path::new(target);
+        if path.is_absolute() {
+            return path.to_path_buf();
+        }
+        return gitdir.join(path);
+    }
+    gitdir.to_path_buf()
+}
+
+/// Fingerprint the repository at `worktree`. The index is per-worktree
+/// state, so its stat is taken at the gitdir first; the commondir is
+/// the fallback for layouts that keep it there. A missing index (a
+/// fresh `git init` has none) fingerprints as `None`.
+fn repo_fingerprint(worktree: &Path) -> RepoFingerprint {
+    let Some(gitdir) = resolve_gitdir(worktree) else {
+        return RepoFingerprint {
+            head: None,
+            index: None,
+        };
+    };
+    let head = std::fs::read_to_string(gitdir.join("HEAD"))
+        .ok()
+        .map(|text| text.trim().to_string());
+    let stat = |path: PathBuf| {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| meta.modified().ok().map(|mtime| (mtime, meta.len())))
+    };
+    let index =
+        stat(gitdir.join("index")).or_else(|| stat(resolve_commondir(&gitdir).join("index")));
+    RepoFingerprint { head, index }
+}
+
+struct CachedSegment {
+    /// The segment body exactly as `branch_segment` returns it; a
+    /// stored `None` is a computed result ("no segment": git missing,
+    /// failed or timed out), not a missing value.
+    value: Option<String>,
+    fingerprint: RepoFingerprint,
+    computed_at: std::time::Instant,
+    /// Bumped by every command-cycle invalidation that lands while
+    /// this entry lives; a refresh records the count it started under
+    /// and only clears `dirty` when the count is unchanged on landing,
+    /// so an invalidation mid-refresh is never lost.
+    cycles: u64,
+    dirty: bool,
+    refreshing: bool,
+}
+
+#[derive(Default)]
+struct SegmentCache {
+    entries: std::collections::HashMap<PathBuf, CachedSegment>,
+}
+
+static SEGMENT_CACHE: std::sync::LazyLock<(std::sync::Mutex<SegmentCache>, std::sync::Condvar)> =
+    std::sync::LazyLock::new(|| {
+        (
+            std::sync::Mutex::new(SegmentCache::default()),
+            std::sync::Condvar::new(),
+        )
+    });
+
+fn segment_cache_lock() -> std::sync::MutexGuard<'static, SegmentCache> {
+    SEGMENT_CACHE
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Serve the segment for `worktree` from the cache, launching one
+/// background refresh when the entry is cold or stale. Never blocks on
+/// git; the only file inspection is the fingerprint (see above).
+fn cached_segment(worktree: &Path) -> Option<String> {
+    let fingerprint = repo_fingerprint(worktree);
+    let mut launch: Option<(RepoFingerprint, u64)> = None;
+    let value = {
+        let mut cache = segment_cache_lock();
+        match cache.entries.get_mut(worktree) {
+            Some(entry) => {
+                let fresh = !entry.dirty
+                    && entry.fingerprint == fingerprint
+                    && entry.computed_at.elapsed() < SEGMENT_CACHE_TTL;
+                if !fresh && !entry.refreshing {
+                    entry.refreshing = true;
+                    launch = Some((fingerprint, entry.cycles));
+                }
+                entry.value.clone()
+            }
+            None => {
+                cache.entries.insert(
+                    worktree.to_path_buf(),
+                    CachedSegment {
+                        value: None,
+                        fingerprint: fingerprint.clone(),
+                        computed_at: std::time::Instant::now(),
+                        cycles: 0,
+                        dirty: true,
+                        refreshing: true,
+                    },
+                );
+                launch = Some((fingerprint, 0));
+                None
+            }
+        }
+    };
+    if let Some((fingerprint, cycles)) = launch {
+        launch_refresh(worktree.to_path_buf(), fingerprint, cycles);
+    }
+    value
+}
+
+/// Recompute one worktree's segment on a detached thread. The thread
+/// holds no engine lock and touches the cache lock only to store its
+/// result; the spawn inside `read_status` keeps every isolation rule
+/// from the module docs.
+fn launch_refresh(worktree: PathBuf, fingerprint: RepoFingerprint, cycles: u64) {
+    let spawned = std::thread::Builder::new()
+        .name("niu-git-prompt-refresh".to_string())
+        .spawn(move || {
+            let computed = read_status(&worktree).map(|(name, status_dirty)| {
+                if status_dirty {
+                    format!("{name}*")
+                } else {
+                    name
+                }
+            });
+            let mut cache = segment_cache_lock();
+            if let Some(entry) = cache.entries.get_mut(&worktree) {
+                entry.value = computed;
+                entry.fingerprint = fingerprint;
+                entry.computed_at = std::time::Instant::now();
+                entry.dirty = entry.cycles != cycles;
+                entry.refreshing = false;
+            }
+            SEGMENT_CACHE.1.notify_all();
+        });
+    if spawned.is_err() {
+        // The refresh could not start; unstick the entry so a later
+        // pass retries instead of waiting on a landing that never
+        // comes.
+        let mut cache = segment_cache_lock();
+        if let Some(entry) = cache.entries.get_mut(&worktree) {
+            entry.refreshing = false;
+        }
+        SEGMENT_CACHE.1.notify_all();
+    }
+}
+
+/// Mark the cached segment for the repository containing `cwd` dirty:
+/// the host's command-cycle invalidation (see the freshness contract
+/// above). A repository with no entry needs no mark — its next pass
+/// computes cold anyway.
+pub(crate) fn invalidate_segment_for_cwd(cwd: &Path) {
+    let Some(worktree) = find_worktree(cwd) else {
+        return;
+    };
+    let mut cache = segment_cache_lock();
+    if let Some(entry) = cache.entries.get_mut(&worktree) {
+        entry.cycles += 1;
+        entry.dirty = true;
+    }
+}
+
+/// The cache key `branch_segment` resolves for a path (test builds
+/// only): probes key their spawn counts by the resolved worktree,
+/// never by a fixture path's own spelling.
 #[cfg(test)]
-pub(crate) fn reset_read_status_call_count() {
-    READ_STATUS_CALLS.with(|calls| calls.set(0));
+pub(crate) fn worktree_key_for(cwd: &Path) -> Option<PathBuf> {
+    find_worktree(cwd)
+}
+
+/// Block until no worktree has a refresh in flight (test builds only):
+/// the deterministic landing point for cache assertions — event-driven
+/// on the cache condvar, never a sleep or a poll.
+#[cfg(test)]
+pub(crate) fn wait_for_segment_cache_idle(timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut cache = segment_cache_lock();
+    loop {
+        if cache.entries.values().all(|entry| !entry.refreshing) {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let (guard, _) = SEGMENT_CACHE
+            .1
+            .wait_timeout(cache, deadline - now)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache = guard;
+    }
+}
+
+// Spawn counter for the niubash#592/#685 acceptance probes (test builds
+// only): `read_status` is the prompt's only git spawn point and runs
+// exactly once per spawn, so counting its entries counts prompt git
+// spawns exactly. The count is kept per worktree: since #685 the spawn
+// runs on a refresh thread, not the caller's, so the old thread-local
+// count can no longer see it — and per-worktree keys keep parallel
+// tests isolated exactly as the thread-local count did, because every
+// probe drives its own fixture repository. Production builds carry no
+// counter.
+#[cfg(test)]
+static READ_STATUS_CALLS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Number of `read_status` calls for `worktree` so far (test builds
+/// only).
+#[cfg(test)]
+pub(crate) fn read_status_call_count(worktree: &Path) -> usize {
+    READ_STATUS_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(worktree)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Clear every per-worktree spawn count (test builds only).
+#[cfg(test)]
+pub(crate) fn reset_read_status_call_counts() {
+    READ_STATUS_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
 }
 
 /// One read-only `git status` for the prompt, with every isolation rule from
@@ -197,13 +480,23 @@ pub(crate) fn reset_read_status_call_count() {
 /// plus whether anything is dirty.
 fn read_status(worktree: &Path) -> Option<(String, bool)> {
     #[cfg(test)]
-    READ_STATUS_CALLS.with(|calls| calls.set(calls.get() + 1));
+    {
+        let mut counts = READ_STATUS_CALLS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *counts.entry(worktree.to_path_buf()).or_insert(0) += 1;
+    }
     // stdout goes to a scratch file, not a pipe: a pipe needs either a drain
     // thread (whose hand-off costs a scheduler quantum on Windows, ~15 ms,
     // which would double the segment) or risks wedging the child once it
     // writes past the pipe buffer. The wait below is a precise Win32 wait on
-    // the process handle, so nothing polls either.
-    let scratch = std::env::temp_dir().join(format!("niu-prompt-git-{}.out", std::process::id()));
+    // the process handle, so nothing polls either. The per-call sequence
+    // keeps concurrent refreshes (two repositories in one session,
+    // niubash#685) out of each other's scratch.
+    static SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch =
+        std::env::temp_dir().join(format!("niu-prompt-git-{}-{}.out", std::process::id(), seq));
     let mut command = Command::new("git");
     command
         // Never start or refresh an fsmonitor daemon from a prompt: those
@@ -380,6 +673,25 @@ mod tests {
             && git(dir, &["commit", "--quiet", "--allow-empty", "-m", "init"])
     }
 
+    /// Drive one segment read to its settled value under the #685
+    /// cache: the first call only triggers the background refresh, so
+    /// wait for the landing (event-driven, never a poll), then read
+    /// again.
+    fn settled_segment(dir: &Path) -> Option<String> {
+        let _ = branch_segment(dir);
+        assert!(
+            wait_for_segment_cache_idle(Duration::from_secs(30)),
+            "the segment refresh must land"
+        );
+        branch_segment(dir)
+    }
+
+    /// `render` over a settled cache (see `settled_segment`).
+    fn settled_render(dir: &Path) -> String {
+        let _ = settled_segment(dir);
+        render(dir)
+    }
+
     fn git_stdout(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
@@ -422,7 +734,7 @@ mod tests {
         if !repo_with_commit(tmp.path()) {
             return;
         }
-        let left = render(tmp.path());
+        let left = settled_render(tmp.path());
         assert!(left.contains("(main)"), "{left:?}");
         assert!(!left.contains("(main*)"), "{left:?}");
     }
@@ -440,7 +752,7 @@ mod tests {
             return;
         }
         std::fs::write(tmp.path().join("tracked.txt"), b"v2").unwrap();
-        let left = render(tmp.path());
+        let left = settled_render(tmp.path());
         assert!(left.contains("(main*)"), "{left:?}");
     }
 
@@ -451,7 +763,7 @@ mod tests {
             return;
         }
         std::fs::write(tmp.path().join("brand-new.txt"), b"x").unwrap();
-        let left = render(tmp.path());
+        let left = settled_render(tmp.path());
         assert!(left.contains("(main*)"), "{left:?}");
     }
 
@@ -464,7 +776,7 @@ mod tests {
         if !init_repo(tmp.path()) {
             return;
         }
-        let left = render(tmp.path());
+        let left = settled_render(tmp.path());
         assert!(left.contains("(main)"), "{left:?}");
     }
 
@@ -478,7 +790,7 @@ mod tests {
         if full.len() < 7 {
             return;
         }
-        let left = render(tmp.path());
+        let left = settled_render(tmp.path());
         assert!(left.contains(&full[..7]), "{left:?}");
     }
 
@@ -506,7 +818,7 @@ mod tests {
             return;
         }
         assert!(find_worktree(&linked_path).is_some());
-        let left = render(&linked_path);
+        let left = settled_render(&linked_path);
         assert!(left.contains("(side)"), "{left:?}");
     }
 
@@ -558,14 +870,14 @@ mod tests {
 
     #[test]
     fn prompt_is_within_the_render_budget() {
-        // 120ms budget (owner red line). The segment now spawns the user's
-        // git inside a repository, so this catches a per-prompt regression
-        // that would blow the budget (a hanging child, an unbounded status
-        // sweep).
+        // 120ms budget (owner red line). Since #685 a render only reads
+        // the segment cache, so this catches a regression that puts a
+        // spawn or a wait back on the draw path.
         let tmp = tempfile::tempdir().unwrap();
         if !repo_with_commit(tmp.path()) {
             return;
         }
+        let _ = settled_segment(tmp.path());
         let start = std::time::Instant::now();
         for _ in 0..10 {
             let _ = render(tmp.path());
@@ -575,5 +887,100 @@ mod tests {
             per_call.as_millis() < 120,
             "per-prompt render took {per_call:?}, budget is 120ms"
         );
+    }
+
+    // ---- niubash#685: the cross-pass cache contract ----
+
+    #[test]
+    fn cold_cache_first_read_is_empty_then_the_value_lands() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        assert_eq!(
+            branch_segment(tmp.path()),
+            None,
+            "a cold cache serves no segment instead of waiting"
+        );
+        assert!(wait_for_segment_cache_idle(Duration::from_secs(30)));
+        assert_eq!(read_status_call_count(tmp.path()), 1);
+        assert_eq!(branch_segment(tmp.path()).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn cache_hits_cost_no_further_spawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        assert_eq!(settled_segment(tmp.path()).as_deref(), Some("main"));
+        for _ in 0..3 {
+            assert_eq!(branch_segment(tmp.path()).as_deref(), Some("main"));
+        }
+        assert_eq!(
+            read_status_call_count(tmp.path()),
+            1,
+            "fingerprint-fresh hits never spawn"
+        );
+    }
+
+    #[test]
+    fn command_cycle_mark_serves_stale_then_costs_exactly_one_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        assert_eq!(settled_segment(tmp.path()).as_deref(), Some("main"));
+        // A worktree edit the fingerprint cannot see (it moves neither
+        // HEAD nor the index), then the host's command-cycle mark.
+        std::fs::write(tmp.path().join("loose.txt"), b"x").unwrap();
+        invalidate_segment_for_cwd(tmp.path());
+        // The stale value is served while the refresh runs — the read
+        // never waits for the new state.
+        assert_eq!(branch_segment(tmp.path()).as_deref(), Some("main"));
+        assert!(wait_for_segment_cache_idle(Duration::from_secs(30)));
+        assert_eq!(
+            read_status_call_count(tmp.path()),
+            2,
+            "the mark costs exactly one background spawn"
+        );
+        assert_eq!(branch_segment(tmp.path()).as_deref(), Some("main*"));
+    }
+
+    #[test]
+    fn head_switch_invalidates_by_fingerprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        assert_eq!(settled_segment(tmp.path()).as_deref(), Some("main"));
+        if !git(tmp.path(), &["switch", "--quiet", "-c", "side"]) {
+            return;
+        }
+        // No command-cycle mark: the fingerprint alone notices HEAD
+        // moving, triggers one refresh, and the settled value follows.
+        let _ = branch_segment(tmp.path());
+        assert!(wait_for_segment_cache_idle(Duration::from_secs(30)));
+        assert_eq!(read_status_call_count(tmp.path()), 2);
+        assert_eq!(branch_segment(tmp.path()).as_deref(), Some("side"));
+    }
+
+    #[test]
+    fn index_change_invalidates_by_fingerprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        assert_eq!(settled_segment(tmp.path()).as_deref(), Some("main"));
+        std::fs::write(tmp.path().join("staged.txt"), b"x").unwrap();
+        if !git(tmp.path(), &["add", "staged.txt"]) {
+            return;
+        }
+        // Staging rewrites the index (its stat moves) without touching
+        // HEAD: the fingerprint alone must notice.
+        let _ = branch_segment(tmp.path());
+        assert!(wait_for_segment_cache_idle(Duration::from_secs(30)));
+        assert_eq!(read_status_call_count(tmp.path()), 2);
+        assert_eq!(branch_segment(tmp.path()).as_deref(), Some("main*"));
     }
 }
