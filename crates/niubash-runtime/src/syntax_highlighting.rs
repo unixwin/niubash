@@ -689,6 +689,19 @@ fn contains_variable(word: &str) -> bool {
 }
 
 fn path_kind(word: &str) -> Option<SyntaxKind> {
+    // niubash#628: ask the engine's special-path registry before the
+    // existence check. Simulated paths have no filesystem presence
+    // (the enclave's physical /dev is an empty dir, /proc has no
+    // physical counterpart at all), so the existence check can only
+    // ever miss them — at command position they fell through to
+    // UnknownToken and rendered red. A registry hit settles the word
+    // as a path directly; a miss falls through to the existence
+    // check unchanged, so genuinely nonexistent ordinary paths are
+    // still marked (the registry only prevents false reds, it does
+    // not disarm the check).
+    if is_simulated_path(word) {
+        return Some(SyntaxKind::Path);
+    }
     let path = resolve_path(word);
     if path.exists() {
         return Some(SyntaxKind::Path);
@@ -697,6 +710,37 @@ fn path_kind(word: &str) -> Option<SyntaxKind> {
         return Some(SyntaxKind::PathPrefix);
     }
     None
+}
+
+/// Whether `word` spells a path the engine serves from simulation
+/// rather than the filesystem, per the special-path registry
+/// (rubash::special_paths) — the same classification the open points
+/// use. Covers the classified spellings themselves (`/dev/null`,
+/// `/dev/fd/3`, `/dev/tcp/host/port`, `/proc/self/status`, ...) plus
+/// the simulated namespaces' directory spellings (`/proc`,
+/// `/proc/self`, `/dev/fd`, ...), which the registry's enumeration
+/// faces answer for.
+fn is_simulated_path(word: &str) -> bool {
+    let word = shell_unescape_word(word.trim_matches(|ch| matches!(ch, '\'' | '"' | ')' | '(')));
+    let normalized = word.replace('\\', "/");
+    if rubash::special_paths::classify_special_path(&normalized)
+        != rubash::special_paths::SpecialPathClass::Filesystem
+    {
+        return true;
+    }
+    let trimmed = normalized.trim_end_matches('/');
+    if rubash::special_paths::synthetic_proc_dir_entries(trimmed).is_some() {
+        return true;
+    }
+    if trimmed == "/dev" {
+        return true;
+    }
+    if let Some(name) = trimmed.strip_prefix("/dev/") {
+        return rubash::special_paths::special_dev_entries()
+            .iter()
+            .any(|(entry, is_dir)| *is_dir && *entry == name);
+    }
+    false
 }
 
 fn resolve_path(word: &str) -> PathBuf {
@@ -1394,6 +1438,89 @@ mod tests {
 
     fn raw_parts(styled: &StyledText) -> Vec<String> {
         styled.buffer.iter().map(|(_, text)| text.clone()).collect()
+    }
+
+    #[test]
+    fn issue628_simulated_spellings_are_paths() {
+        // Classified spellings: the registry arm answers on every
+        // platform for the shell-invented families (device, fd
+        // alias, net); the /proc content spellings reach Path on
+        // Windows through the registry and elsewhere through the
+        // real procfs existence check — the styled outcome is the
+        // same.
+        for spelling in [
+            "/dev/null",
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/fd/3",
+            "/dev/tcp/127.0.0.1/80",
+            "/dev/udp/example.invalid/53",
+            "/proc/self/status",
+            "/proc/self/exe",
+            "/dev/fd",
+            "/dev/tcp",
+            "/proc/self",
+            "/proc",
+        ] {
+            assert_eq!(
+                path_kind(spelling),
+                Some(SyntaxKind::Path),
+                "{spelling} must highlight as a path"
+            );
+        }
+        // The registry pre-check itself: /proc directory spellings
+        // are simulation only where the simulation lives.
+        assert!(is_simulated_path("/dev/null"));
+        assert!(is_simulated_path("/dev/fd/3"));
+        assert!(is_simulated_path("/dev/tcp/127.0.0.1/80"));
+        assert_eq!(is_simulated_path("/proc/self"), cfg!(windows));
+        // Spellings the registry does not serve are not simulated:
+        // /dev/zero is a plain filesystem path to the open points
+        // today (audit D5 owns the device), and ordinary words fall
+        // through to the existence check untouched.
+        assert!(!is_simulated_path("/dev/zero"));
+        assert!(!is_simulated_path("/etc/passwd"));
+        assert!(!is_simulated_path("plain-word"));
+    }
+
+    #[test]
+    fn issue628_simulated_paths_do_not_render_as_unknown() {
+        let highlighter = NiubashSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
+
+        // Command position: a simulated path used as the command
+        // word must not fall to UnknownToken (the red foreground).
+        let styled = highlighter.highlight("/dev/null", 0);
+        assert_eq!(
+            style_for(&styled, "/dev/null"),
+            highlighter.style(SyntaxKind::Path)
+        );
+
+        // Argument position: recognized as paths, not left Default.
+        let styled = highlighter.highlight("cat /dev/null /dev/fd/3", 0);
+        assert_eq!(
+            style_for(&styled, "/dev/null"),
+            highlighter.style(SyntaxKind::Path)
+        );
+        assert_eq!(
+            style_for(&styled, "/dev/fd/3"),
+            highlighter.style(SyntaxKind::Path)
+        );
+
+        // The registry pre-check must not disarm the existence
+        // check: a genuinely nonexistent ordinary path stays
+        // unstyled as an argument and UnknownToken at command
+        // position.
+        let styled = highlighter.highlight("cat /no/such/file-xyz-628", 0);
+        assert_eq!(
+            style_for(&styled, "/no/such/file-xyz-628"),
+            highlighter.style(SyntaxKind::Default)
+        );
+        let styled = highlighter.highlight("/no/such/file-xyz-628", 0);
+        assert_eq!(
+            style_for(&styled, "/no/such/file-xyz-628"),
+            highlighter.style(SyntaxKind::UnknownToken)
+        );
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
