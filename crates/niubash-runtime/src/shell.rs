@@ -8519,7 +8519,7 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(shell.take_session_exit_jump(), None);
     }
 
-    fn test_shell(hooks: HookConfig) -> Shell {
+    pub(super) fn test_shell(hooks: HookConfig) -> Shell {
         let mut executor = Executor::new();
         executor.set_shopt_option("expand_aliases", true);
         let mut shell = Shell {
@@ -8643,12 +8643,12 @@ complete -F _envtooldyn_hook envtooldyn
         }
     }
 
-    struct CwdGuard {
+    pub(super) struct CwdGuard {
         previous: PathBuf,
     }
 
     impl CwdGuard {
-        fn capture() -> Self {
+        pub(super) fn capture() -> Self {
             Self {
                 previous: std::env::current_dir().unwrap(),
             }
@@ -8669,7 +8669,8 @@ complete -F _envtooldyn_hook envtooldyn
 
 #[cfg(test)]
 mod invocation_name_tests {
-    use super::default_script_name_from;
+    use super::tests::{test_shell, CwdGuard};
+    use super::{default_script_name_from, HookConfig};
     use crate::test_support::PROCESS_STATE_LOCK;
 
     #[test]
