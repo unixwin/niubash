@@ -168,6 +168,10 @@ pub fn queue_prompt_sigint(handler_already_queued: bool) {
 /// - the 'C' key with a Ctrl modifier and no Shift — the form
 ///   `WriteConsoleInputW` injectors write when they synthesize the chord
 ///   as a key record (char unit NUL or 'C'/'c' depending on the writer).
+// On non-Windows the only consumers are this module's unit tests
+// (the watch itself is Windows-only); keep the cross-check
+// `-D warnings` line green there.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn is_ctrl_c_key_record(
     is_key_event: bool,
     key_down: bool,
@@ -304,7 +308,14 @@ mod watch_imp {
             let thread_stop = Arc::clone(&stop);
             let spawned = std::thread::Builder::new()
                 .name("niu-ctrlc-watch".to_string())
-                .spawn(move || run(handle.0, thread_stop))
+                .spawn(move || {
+                    // Move the OwnedHandle itself across: it carries
+                    // the unsafe Send impl (the typeahead sweeper moves
+                    // its handle the same way); the raw HANDLE is not
+                    // Send. It drops (closes) when the thread ends.
+                    let conin = handle.0;
+                    run(conin, thread_stop);
+                })
                 .is_ok();
             if !spawned {
                 return None;
