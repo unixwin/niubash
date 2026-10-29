@@ -250,7 +250,10 @@ fn take_self_forwarded_ctrl_c() -> bool {
 /// at the moment the command is being aborted anyway. One-shot per arm:
 /// after a delivery the watch thread exits.
 pub struct ForegroundWatch {
+    // Held only for its Drop (disarming stops the watcher thread);
+    // the value itself is never read.
     #[cfg(windows)]
+    #[allow(dead_code)]
     inner: Option<watch_imp::Watch>,
 }
 
