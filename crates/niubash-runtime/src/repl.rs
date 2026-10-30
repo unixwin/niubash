@@ -909,7 +909,16 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
-                collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs),
+                {
+                    let mut chords =
+                        collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
+                    chords.extend(collect_chord_bindings(
+                        user_keymap_rules,
+                        NativeKeymapTarget::Emacs,
+                        engine_bindings.len(),
+                    ));
+                    chords
+                },
             )
         }
         EditorMode::Vi => {
@@ -958,13 +967,18 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
-                collect_chord_bindings(engine_bindings, NativeKeymapTarget::ViInsert)
-                    .into_iter()
-                    .chain(collect_chord_bindings(
-                        engine_bindings,
-                        NativeKeymapTarget::ViNormal,
-                    ))
-                    .collect(),
+                {
+                    let mut chords = Vec::new();
+                    for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                        chords.extend(collect_chord_bindings(engine_bindings, target, 0));
+                        chords.extend(collect_chord_bindings(
+                            user_keymap_rules,
+                            target,
+                            engine_bindings.len(),
+                        ));
+                    }
+                    chords
+                },
             )
         }
     }
@@ -2617,6 +2631,7 @@ struct ChordBinding {
 fn collect_chord_bindings(
     entries: &[crate::bind_surface::EngineBindEntry],
     target: NativeKeymapTarget,
+    index_base: usize,
 ) -> Vec<ChordBinding> {
     let mut chords = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -2628,7 +2643,10 @@ fn collect_chord_bindings(
         };
         let event = match &entry.kind {
             crate::bind_surface::EngineBindKind::Execute { .. } => {
-                ReedlineEvent::ExecuteHostCommand(format!("{BINDX_HOST_COMMAND_PREFIX}{index}"))
+                ReedlineEvent::ExecuteHostCommand(format!(
+                    "{BINDX_HOST_COMMAND_PREFIX}{}",
+                    index_base + index
+                ))
             }
             crate::bind_surface::EngineBindKind::Macro { text } => {
                 edit_event(EditCommand::InsertString(text.clone()))
@@ -2991,8 +3009,16 @@ fn split_key_units(value: &str) -> Option<Vec<&str>> {
                 .map(|(i, c)| i + c.len_utf8())?;
             (&rest[..end], &rest[end..])
         } else if let Some(tail) = rest.strip_prefix("\\e") {
-            let end = rest.len() - tail.len();
-            (&rest[..end], tail)
+            // `\e` alone is ESC; `\eX` is the meta form one key (the same
+            // shape `parse_key_sequence` accepts as ALT+X), so it is not a
+            // chord unit boundary.
+            let mut chars = tail.chars();
+            let end = match (chars.next(), chars.next()) {
+                (Some('['), _) => unreachable!("handled above"),
+                (Some(ch), None) => rest.len() - tail.len() + ch.len_utf8(),
+                _ => rest.len() - tail.len(),
+            };
+            (&rest[..end], &rest[end..])
         } else if let Some(tail) = rest.strip_prefix('^') {
             let ch = tail.chars().next()?;
             let end = 1 + ch.len_utf8();
@@ -5142,7 +5168,7 @@ mod tests {
                 keymap: None,
             },
         ];
-        let chords = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs);
+        let chords = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs, 0);
         assert_eq!(chords.len(), 2);
         assert_eq!(
             chords[0].event,
@@ -5652,19 +5678,14 @@ mod tests {
         assert_eq!(
             shapes,
             vec![
-                (r"\C-\e(", DroppedReason::ChainedSequence),
-                (r"\C-z", DroppedReason::ModeToggleFunction),
                 (r"\e[0n", DroppedReason::ResponseSequence),
                 (r"\C-g", DroppedReason::UnknownFunction),
                 (r"\ec", DroppedReason::ScriptMacro),
                 (r"\C-x", DroppedReason::ScriptMacro),
-            ]
+            ],
+            "the chord and the mode toggle are delivered now, not dropped"
         );
-        assert_eq!(dropped[2].kind, DroppedKind::Execute);
-        assert_eq!(
-            dropped[0].target_name.as_deref(),
-            Some("redraw-current-line")
-        );
+        assert_eq!(dropped[0].kind, DroppedKind::Execute);
         // K1 records the macro; the translation is unchanged until K3.
         assert_eq!(
             built.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
@@ -5842,7 +5863,14 @@ mod tests {
             &[],
             CompletionInteraction::Insert,
         );
-        assert_eq!(dropped.len(), 2, "both script shapes are unrescuable");
+        assert_eq!(
+            dropped.len(),
+            0,
+            "the chord is delivered by the chord layer and the toggle by SwitchMode"
+        );
+        let chords = collect_chord_bindings(&engine, NativeKeymapTarget::Emacs, 0);
+        assert_eq!(chords.len(), 1);
+        assert_eq!(chords[0].event, ReedlineEvent::Repaint);
         assert_eq!(
             built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
             Some(edit_event(EditCommand::Redo)),
@@ -5869,8 +5897,8 @@ mod tests {
         );
         assert_eq!(
             dropped.len(),
-            2,
-            "the chain and the toggle stay recorded — the rescue is a new binding"
+            0,
+            "the rescue rule adds a single-key binding; nothing is dropped"
         );
         let row = entries
             .iter()
@@ -6090,11 +6118,14 @@ mod tests {
         assert_eq!(
             shapes,
             vec![
-                (r"\C-\e(", DroppedReason::ChainedSequence),
                 (r"\C-g", DroppedReason::UnknownFunction),
                 (r"\ec", DroppedReason::ScriptMacro),
-            ]
+            ],
+            "a user rule's chord is delivered like a script's"
         );
+        let chords = collect_chord_bindings(&rules, NativeKeymapTarget::Emacs, 0);
+        assert_eq!(chords.len(), 1, "the user rule's chord is collected");
+        assert_eq!(chords[0].event, ReedlineEvent::Repaint);
     }
 
     #[test]
