@@ -95,7 +95,7 @@ def main():
     worst, per = at.verdict_for(asset, dead, budgets)
     expect("error verdict", worst, "hard-fail")
 
-    # 6. The default hard multiplier is 5 when budgets.toml omits it.
+    # 6. The default hard multiplier is 5 when budgets.json omits it.
     expect("default hard multiplier",
            at.Budgets({"defaults": {}}).hard_mult, 5.0)
 

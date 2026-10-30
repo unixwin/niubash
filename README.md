@@ -121,7 +121,7 @@ Each claim below links to the artifact that produced it: a committed log, a base
 
 **Framework assets are sourced and timed.** The timing baseline loads 437 real oh-my-bash and bash-it assets (166 themes plus plugins, completions, aliases) and measures three phases per asset (source, first prompt, re-render) as a median of three runs. That includes the nvm assets of both frameworks, and real users' dotfiles that load nvm.sh go through the same harness with per-phase timings on record ([baseline](scripts/perf/baselines/asset-timing-baseline.json), [snapshot](scripts/harvest/snapshots/wt92-local-20261005/)).
 
-**A release cannot ship slow.** Every asset in [budgets.toml](scripts/perf/budgets.toml) carries a measured budget (healthy themes re-render in 11–35 ms and the budget line is 120 ms on the Windows reference baseline; 5× over budget is a hard fail). The [release pipeline](.github/workflows/release.yml) runs the `perfbudget` gate and fails the release on a breach; a nightly run watches the trend.
+**A release cannot ship slow.** Every asset in [budgets.json](scripts/perf/budgets.json) carries a measured budget (healthy themes re-render in 11–35 ms and the budget line is 120 ms on the Windows reference baseline; 5× over budget is a hard fail). The [release pipeline](.github/workflows/release.yml) runs the `perfbudget` gate and fails the release on a breach; a nightly run watches the trend.
 
 ## Performance
 

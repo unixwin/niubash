@@ -1,7 +1,7 @@
 //! Mirror pipeline CLI tests (design §14.8, wt49/bmirror; git-only since
 //! the download retraction 2026-10-04): `niu plugin mirror set <url>` is
 //! the one-command configuration face — it validates and normalizes a
-//! pasted mirror URL, round-trips through `~/.niubash/mirrors.toml`
+//! pasted mirror URL, round-trips through `~/.niubash/mirrors.json`
 //! (env-scoped for the test), and `mirror list` reports the active git
 //! channel. The transport invariants (git insteadOf, canonical origins in
 //! records, legacy download channels ignored) are pinned in the
@@ -66,7 +66,7 @@ fn temp_dir(name: &str) -> PathBuf {
 #[test]
 fn mirror_set_url_roundtrip_and_disable() {
     let home = temp_dir("mirror-cli");
-    let config = home.join("mirrors.toml");
+    let config = home.join("mirrors.json");
     let envs = [("NIU_MIRRORS", config.to_string_lossy().into_owned())];
 
     // Direct by default.
@@ -94,10 +94,11 @@ fn mirror_set_url_roundtrip_and_disable() {
 
     let written = fs::read_to_string(&config).unwrap();
     assert!(written.contains("niubash:mirrors@0.1.0"));
-    assert!(written.contains("active = \"custom\""));
-    assert!(written.contains("git_instead_of = \"https://mirror.example.com/github.com/\""));
-    // The community-service caveat ships in the file, not as a preset.
-    assert!(written.contains("UNSUPPORTED"));
+    assert!(written.contains("\"active\": \"custom\""));
+    assert!(written.contains("\"git_instead_of\": \"https://mirror.example.com/github.com/\""));
+    // JSON carries no comments: the community-service caveat that used
+    // to ship as comments in the file now lives in the plugin guide.
+    assert!(!written.contains("UNSUPPORTED"));
 
     // list reports the active channel.
     let out = run_niu_with_env(&["plugin", "mirror", "list"], &envs);
@@ -119,7 +120,7 @@ fn mirror_set_url_roundtrip_and_disable() {
     assert!(text.contains("direct connection"), "{text}");
     let written = fs::read_to_string(&config).unwrap();
     assert!(
-        written.contains("git_instead_of = \"https://mirror.example.com/github.com/\""),
+        written.contains("\"git_instead_of\": \"https://mirror.example.com/github.com/\""),
         "custom section must survive set none:\n{written}"
     );
 
@@ -131,7 +132,7 @@ fn mirror_set_url_roundtrip_and_disable() {
 #[test]
 fn mirror_set_rejects_garbage_and_help_exists() {
     let home = temp_dir("mirror-cli-reject");
-    let config = home.join("mirrors.toml");
+    let config = home.join("mirrors.json");
     let envs = [("NIU_MIRRORS", config.to_string_lossy().into_owned())];
 
     let out = run_niu_with_env(&["plugin", "mirror", "set", "not a url"], &envs);
@@ -170,14 +171,13 @@ fn mirror_set_rejects_garbage_and_help_exists() {
 #[test]
 fn mirror_list_reports_hand_edited_git_only_config() {
     let home = temp_dir("mirror-cli-git");
-    let config = home.join("mirrors.toml");
+    let config = home.join("mirrors.json");
     fs::write(
         &config,
         concat!(
-            "schema = \"niubash:mirrors@0.1.0\"\n",
-            "active = \"custom\"\n",
-            "\n[github]\n",
-            "git_instead_of = \"https://git.example.com/github.com\"\n",
+            "{ \"schema\": \"niubash:mirrors@0.1.0\", ",
+            "\"active\": \"custom\", ",
+            "\"github\": { \"git_instead_of\": \"https://git.example.com/github.com\" } }",
         ),
     )
     .unwrap();
@@ -203,7 +203,7 @@ fn mirror_list_reports_hand_edited_git_only_config() {
 #[test]
 fn plaintext_http_mirror_requires_explicit_confirmation() {
     let home = temp_dir("mirror-cli-plaintext");
-    let config = home.join("mirrors.toml");
+    let config = home.join("mirrors.json");
     let envs = [("NIU_MIRRORS", config.to_string_lossy().into_owned())];
 
     // Without the flag: refused, nothing written.
@@ -250,7 +250,7 @@ fn plaintext_http_mirror_requires_explicit_confirmation() {
     assert!(stored.contains("http://mirror.example.com/github.com"),);
 
     // An https:// mirror never needs the flag.
-    let https = home.join("https.toml");
+    let https = home.join("https.json");
     let envs2 = [("NIU_MIRRORS", https.to_string_lossy().into_owned())];
     let set = run_niu_with_env(
         &[

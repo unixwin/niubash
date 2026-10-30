@@ -1,0 +1,5355 @@
+{
+ "recipe": [
+  {
+   "id": "omb-theme-90210",
+   "category": "theme",
+   "summary": "oh-my-bash theme 90210",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/90210",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "90210"
+  },
+  {
+   "id": "omb-theme-absimple",
+   "category": "theme",
+   "summary": "oh-my-bash theme absimple",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/absimple",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "absimple"
+  },
+  {
+   "id": "omb-theme-agnoster",
+   "category": "theme",
+   "summary": "oh-my-bash theme agnoster",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/agnoster",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "agnoster"
+  },
+  {
+   "id": "omb-theme-axin",
+   "category": "theme",
+   "summary": "oh-my-bash theme axin",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/axin",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "axin"
+  },
+  {
+   "id": "omb-theme-bakke",
+   "category": "theme",
+   "summary": "oh-my-bash theme bakke",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/bakke",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "bakke"
+  },
+  {
+   "id": "omb-theme-binaryanomaly",
+   "category": "theme",
+   "summary": "oh-my-bash theme binaryanomaly",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/binaryanomaly",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "binaryanomaly"
+  },
+  {
+   "id": "omb-theme-bobby",
+   "category": "theme",
+   "summary": "oh-my-bash theme bobby",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/bobby",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "bobby"
+  },
+  {
+   "id": "omb-theme-bobby-python",
+   "category": "theme",
+   "summary": "oh-my-bash theme bobby-python",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/bobby-python",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "bobby-python"
+  },
+  {
+   "id": "omb-theme-brainy",
+   "category": "theme",
+   "summary": "oh-my-bash theme brainy",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/brainy",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "brainy"
+  },
+  {
+   "id": "omb-theme-brunton",
+   "category": "theme",
+   "summary": "oh-my-bash theme brunton",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/brunton",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "brunton"
+  },
+  {
+   "id": "omb-theme-candy",
+   "category": "theme",
+   "summary": "oh-my-bash theme candy",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/candy",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "candy"
+  },
+  {
+   "id": "omb-theme-clean",
+   "category": "theme",
+   "summary": "oh-my-bash theme clean",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/clean",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "clean"
+  },
+  {
+   "id": "omb-theme-cooperkid",
+   "category": "theme",
+   "summary": "oh-my-bash theme cooperkid",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/cooperkid",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "cooperkid"
+  },
+  {
+   "id": "omb-theme-copied-duru",
+   "category": "theme",
+   "summary": "oh-my-bash theme copied-duru",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/copied-duru",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "copied-duru"
+  },
+  {
+   "id": "omb-theme-cupcake",
+   "category": "theme",
+   "summary": "oh-my-bash theme cupcake",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/cupcake",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "cupcake"
+  },
+  {
+   "id": "omb-theme-demula",
+   "category": "theme",
+   "summary": "oh-my-bash theme demula",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/demula",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "demula"
+  },
+  {
+   "id": "omb-theme-developer",
+   "category": "theme",
+   "summary": "oh-my-bash theme developer",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/developer",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "developer"
+  },
+  {
+   "id": "omb-theme-dos",
+   "category": "theme",
+   "summary": "oh-my-bash theme dos",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/dos",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "dos"
+  },
+  {
+   "id": "omb-theme-doubletime",
+   "category": "theme",
+   "summary": "oh-my-bash theme doubletime",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/doubletime",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "doubletime"
+  },
+  {
+   "id": "omb-theme-doubletime_multiline",
+   "category": "theme",
+   "summary": "oh-my-bash theme doubletime_multiline",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/doubletime_multiline",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "doubletime_multiline"
+  },
+  {
+   "id": "omb-theme-doubletime_multiline_pyonly",
+   "category": "theme",
+   "summary": "oh-my-bash theme doubletime_multiline_pyonly",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/doubletime_multiline_pyonly",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "doubletime_multiline_pyonly"
+  },
+  {
+   "id": "omb-theme-dulcie",
+   "category": "theme",
+   "summary": "oh-my-bash theme dulcie",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/dulcie",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "dulcie"
+  },
+  {
+   "id": "omb-theme-duru",
+   "category": "theme",
+   "summary": "oh-my-bash theme duru",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/duru",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "duru"
+  },
+  {
+   "id": "omb-theme-edsonarios",
+   "category": "theme",
+   "summary": "oh-my-bash theme edsonarios",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/edsonarios",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "edsonarios"
+  },
+  {
+   "id": "omb-theme-emperor",
+   "category": "theme",
+   "summary": "oh-my-bash theme emperor",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/emperor",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "emperor"
+  },
+  {
+   "id": "omb-theme-envy",
+   "category": "theme",
+   "summary": "oh-my-bash theme envy",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/envy",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "envy"
+  },
+  {
+   "id": "omb-theme-font",
+   "category": "theme",
+   "summary": "oh-my-bash theme font",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/font",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "font"
+  },
+  {
+   "id": "omb-theme-gallifrey",
+   "category": "theme",
+   "summary": "oh-my-bash theme gallifrey",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/gallifrey",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "gallifrey"
+  },
+  {
+   "id": "omb-theme-garo",
+   "category": "theme",
+   "summary": "oh-my-bash theme garo",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/garo",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "garo"
+  },
+  {
+   "id": "omb-theme-half-life",
+   "category": "theme",
+   "summary": "oh-my-bash theme half-life",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/half-life",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "half-life"
+  },
+  {
+   "id": "omb-theme-hawaii50",
+   "category": "theme",
+   "summary": "oh-my-bash theme hawaii50",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/hawaii50",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "hawaii50"
+  },
+  {
+   "id": "omb-theme-ht",
+   "category": "theme",
+   "summary": "oh-my-bash theme ht",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/ht",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "ht"
+  },
+  {
+   "id": "omb-theme-iterate",
+   "category": "theme",
+   "summary": "oh-my-bash theme iterate",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/iterate",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "iterate"
+  },
+  {
+   "id": "omb-theme-kitsune",
+   "category": "theme",
+   "summary": "oh-my-bash theme kitsune",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/kitsune",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "kitsune"
+  },
+  {
+   "id": "omb-theme-lambda",
+   "category": "theme",
+   "summary": "oh-my-bash theme lambda",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/lambda",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "lambda"
+  },
+  {
+   "id": "omb-theme-luan",
+   "category": "theme",
+   "summary": "oh-my-bash theme luan",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/luan",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "luan"
+  },
+  {
+   "id": "omb-theme-lucky",
+   "category": "theme",
+   "summary": "oh-my-bash theme lucky",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/lucky",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "lucky"
+  },
+  {
+   "id": "omb-theme-mairan",
+   "category": "theme",
+   "summary": "oh-my-bash theme mairan",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/mairan",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "mairan"
+  },
+  {
+   "id": "omb-theme-mbriggs",
+   "category": "theme",
+   "summary": "oh-my-bash theme mbriggs",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/mbriggs",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "mbriggs"
+  },
+  {
+   "id": "omb-theme-minimal",
+   "category": "theme",
+   "summary": "oh-my-bash theme minimal",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/minimal",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "minimal"
+  },
+  {
+   "id": "omb-theme-minimal-gh",
+   "category": "theme",
+   "summary": "oh-my-bash theme minimal-gh",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/minimal-gh",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "minimal-gh"
+  },
+  {
+   "id": "omb-theme-modern",
+   "category": "theme",
+   "summary": "oh-my-bash theme modern",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/modern",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "modern"
+  },
+  {
+   "id": "omb-theme-modern-t",
+   "category": "theme",
+   "summary": "oh-my-bash theme modern-t",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/modern-t",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "modern-t"
+  },
+  {
+   "id": "omb-theme-morris",
+   "category": "theme",
+   "summary": "oh-my-bash theme morris",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/morris",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "morris"
+  },
+  {
+   "id": "omb-theme-n0qorg",
+   "category": "theme",
+   "summary": "oh-my-bash theme n0qorg",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/n0qorg",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "n0qorg"
+  },
+  {
+   "id": "omb-theme-nekolight",
+   "category": "theme",
+   "summary": "oh-my-bash theme nekolight",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/nekolight",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "nekolight"
+  },
+  {
+   "id": "omb-theme-nekonight",
+   "category": "theme",
+   "summary": "oh-my-bash theme nekonight",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/nekonight",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "nekonight"
+  },
+  {
+   "id": "omb-theme-nekonight_moon",
+   "category": "theme",
+   "summary": "oh-my-bash theme nekonight_moon",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/nekonight_moon",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "nekonight_moon"
+  },
+  {
+   "id": "omb-theme-nwinkler",
+   "category": "theme",
+   "summary": "oh-my-bash theme nwinkler",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/nwinkler",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "nwinkler"
+  },
+  {
+   "id": "omb-theme-nwinkler_random_colors",
+   "category": "theme",
+   "summary": "oh-my-bash theme nwinkler_random_colors",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/nwinkler_random_colors",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "nwinkler_random_colors"
+  },
+  {
+   "id": "omb-theme-pete",
+   "category": "theme",
+   "summary": "oh-my-bash theme pete",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/pete",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "pete"
+  },
+  {
+   "id": "omb-theme-powerbash10k",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerbash10k",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerbash10k",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerbash10k"
+  },
+  {
+   "id": "omb-theme-powerline",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerline",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerline",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerline"
+  },
+  {
+   "id": "omb-theme-powerline-icon",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerline-icon",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerline-icon",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerline-icon"
+  },
+  {
+   "id": "omb-theme-powerline-light",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerline-light",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerline-light",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerline-light"
+  },
+  {
+   "id": "omb-theme-powerline-multiline",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerline-multiline",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerline-multiline",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerline-multiline"
+  },
+  {
+   "id": "omb-theme-powerline-naked",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerline-naked",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerline-naked",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerline-naked"
+  },
+  {
+   "id": "omb-theme-powerline-plain",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerline-plain",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerline-plain",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerline-plain"
+  },
+  {
+   "id": "omb-theme-powerline-wizard",
+   "category": "theme",
+   "summary": "oh-my-bash theme powerline-wizard",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/powerline-wizard",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "powerline-wizard"
+  },
+  {
+   "id": "omb-theme-primer",
+   "category": "theme",
+   "summary": "oh-my-bash theme primer",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/primer",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "primer"
+  },
+  {
+   "id": "omb-theme-pro",
+   "category": "theme",
+   "summary": "oh-my-bash theme pro",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/pro",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "pro"
+  },
+  {
+   "id": "omb-theme-pure",
+   "category": "theme",
+   "summary": "oh-my-bash theme pure",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/pure",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "pure"
+  },
+  {
+   "id": "omb-theme-purity",
+   "category": "theme",
+   "summary": "oh-my-bash theme purity",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/purity",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "purity"
+  },
+  {
+   "id": "omb-theme-pzq",
+   "category": "theme",
+   "summary": "oh-my-bash theme pzq",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/pzq",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "pzq"
+  },
+  {
+   "id": "omb-theme-rainbowbrite",
+   "category": "theme",
+   "summary": "oh-my-bash theme rainbowbrite",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/rainbowbrite",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "rainbowbrite"
+  },
+  {
+   "id": "omb-theme-rana",
+   "category": "theme",
+   "summary": "oh-my-bash theme rana",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/rana",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "rana"
+  },
+  {
+   "id": "omb-theme-rjorgenson",
+   "category": "theme",
+   "summary": "oh-my-bash theme rjorgenson",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/rjorgenson",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "rjorgenson"
+  },
+  {
+   "id": "omb-theme-robbyrussell",
+   "category": "theme",
+   "summary": "oh-my-bash theme robbyrussell",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/robbyrussell",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "robbyrussell"
+  },
+  {
+   "id": "omb-theme-roderik",
+   "category": "theme",
+   "summary": "oh-my-bash theme roderik",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/roderik",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "roderik"
+  },
+  {
+   "id": "omb-theme-rr",
+   "category": "theme",
+   "summary": "oh-my-bash theme rr",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/rr",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "rr"
+  },
+  {
+   "id": "omb-theme-sexy",
+   "category": "theme",
+   "summary": "oh-my-bash theme sexy",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/sexy",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "sexy"
+  },
+  {
+   "id": "omb-theme-simple",
+   "category": "theme",
+   "summary": "oh-my-bash theme simple",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/simple",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "simple"
+  },
+  {
+   "id": "omb-theme-sirup",
+   "category": "theme",
+   "summary": "oh-my-bash theme sirup",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/sirup",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "sirup"
+  },
+  {
+   "id": "omb-theme-slick",
+   "category": "theme",
+   "summary": "oh-my-bash theme slick",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/slick",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "slick"
+  },
+  {
+   "id": "omb-theme-standard",
+   "category": "theme",
+   "summary": "oh-my-bash theme standard",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/standard",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "standard"
+  },
+  {
+   "id": "omb-theme-tonka",
+   "category": "theme",
+   "summary": "oh-my-bash theme tonka",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/tonka",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "tonka"
+  },
+  {
+   "id": "omb-theme-tonotdo",
+   "category": "theme",
+   "summary": "oh-my-bash theme tonotdo",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/tonotdo",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "tonotdo"
+  },
+  {
+   "id": "omb-theme-tylenol",
+   "category": "theme",
+   "summary": "oh-my-bash theme tylenol",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/tylenol",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "tylenol"
+  },
+  {
+   "id": "omb-theme-vscode",
+   "category": "theme",
+   "summary": "oh-my-bash theme vscode",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/vscode",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "vscode"
+  },
+  {
+   "id": "omb-theme-wanelo",
+   "category": "theme",
+   "summary": "oh-my-bash theme wanelo",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/wanelo",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "wanelo"
+  },
+  {
+   "id": "omb-theme-zitron",
+   "category": "theme",
+   "summary": "oh-my-bash theme zitron",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/zitron",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "zitron"
+  },
+  {
+   "id": "omb-theme-zork",
+   "category": "theme",
+   "summary": "oh-my-bash theme zork",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/themes/zork",
+   "manager": "oh-my-bash",
+   "asset_kind": "theme",
+   "asset": "zork"
+  },
+  {
+   "id": "omb-plugin-ansible",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin ansible",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/ansible",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "ansible"
+  },
+  {
+   "id": "omb-plugin-asdf",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin asdf",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/asdf",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "asdf"
+  },
+  {
+   "id": "omb-plugin-aws",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin aws",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/aws",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "aws"
+  },
+  {
+   "id": "omb-plugin-bash-preexec",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin bash-preexec",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/bash-preexec",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "bash-preexec"
+  },
+  {
+   "id": "omb-plugin-bashmarks",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin bashmarks",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/bashmarks",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "bashmarks"
+  },
+  {
+   "id": "omb-plugin-battery",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin battery",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/battery",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "battery"
+  },
+  {
+   "id": "omb-plugin-brew",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin brew",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/brew",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "brew"
+  },
+  {
+   "id": "omb-plugin-bu",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin bu",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/bu",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "bu"
+  },
+  {
+   "id": "omb-plugin-cargo",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin cargo",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/cargo",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "cargo"
+  },
+  {
+   "id": "omb-plugin-chezmoi",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin chezmoi",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/chezmoi",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "chezmoi"
+  },
+  {
+   "id": "omb-plugin-colored-man-pages",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin colored-man-pages",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/colored-man-pages",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "colored-man-pages"
+  },
+  {
+   "id": "omb-plugin-donottrack",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin donottrack",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/donottrack",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "donottrack"
+  },
+  {
+   "id": "omb-plugin-dotnet",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin dotnet",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/dotnet",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "dotnet"
+  },
+  {
+   "id": "omb-plugin-fasd",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin fasd",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/fasd",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "fasd"
+  },
+  {
+   "id": "omb-plugin-fzf",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin fzf",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/fzf",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "fzf"
+  },
+  {
+   "id": "omb-plugin-gcloud",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin gcloud",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/gcloud",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "gcloud"
+  },
+  {
+   "id": "omb-plugin-git",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin git",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/git",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "git"
+  },
+  {
+   "id": "omb-plugin-goenv",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin goenv",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/goenv",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "goenv"
+  },
+  {
+   "id": "omb-plugin-golang",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin golang",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/golang",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "golang"
+  },
+  {
+   "id": "omb-plugin-jump",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin jump",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/jump",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "jump"
+  },
+  {
+   "id": "omb-plugin-kubectl",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin kubectl",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/kubectl",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "kubectl"
+  },
+  {
+   "id": "omb-plugin-npm",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin npm",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/npm",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "npm"
+  },
+  {
+   "id": "omb-plugin-nvm",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin nvm",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/nvm",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "nvm"
+  },
+  {
+   "id": "omb-plugin-progress",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin progress",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/progress",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "progress"
+  },
+  {
+   "id": "omb-plugin-pyenv",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin pyenv",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/pyenv",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "pyenv"
+  },
+  {
+   "id": "omb-plugin-rbenv",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin rbenv",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/rbenv",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "rbenv"
+  },
+  {
+   "id": "omb-plugin-sdkman",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin sdkman",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/sdkman",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "sdkman"
+  },
+  {
+   "id": "omb-plugin-starship",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin starship",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/starship",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "starship"
+  },
+  {
+   "id": "omb-plugin-sudo",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin sudo",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/sudo",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "sudo"
+  },
+  {
+   "id": "omb-plugin-tmux-autoattach",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin tmux-autoattach",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/tmux-autoattach",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "tmux-autoattach"
+  },
+  {
+   "id": "omb-plugin-vagrant",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin vagrant",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/vagrant",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "vagrant"
+  },
+  {
+   "id": "omb-plugin-virtualenvwrapper",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin virtualenvwrapper",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/virtualenvwrapper",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "virtualenvwrapper"
+  },
+  {
+   "id": "omb-plugin-zellij-autoattach",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin zellij-autoattach",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/zellij-autoattach",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "zellij-autoattach"
+  },
+  {
+   "id": "omb-plugin-zoxide",
+   "category": "plugin",
+   "summary": "oh-my-bash plugin zoxide",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/plugins/zoxide",
+   "manager": "oh-my-bash",
+   "asset_kind": "plugin",
+   "asset": "zoxide"
+  },
+  {
+   "id": "omb-alias-cargo",
+   "category": "alias",
+   "summary": "oh-my-bash alias cargo",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/cargo",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "cargo"
+  },
+  {
+   "id": "omb-alias-chmod",
+   "category": "alias",
+   "summary": "oh-my-bash alias chmod",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/chmod",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "chmod"
+  },
+  {
+   "id": "omb-alias-debian",
+   "category": "alias",
+   "summary": "oh-my-bash alias debian",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/debian",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "debian"
+  },
+  {
+   "id": "omb-alias-docker",
+   "category": "alias",
+   "summary": "oh-my-bash alias docker",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/docker",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "docker"
+  },
+  {
+   "id": "omb-alias-general",
+   "category": "alias",
+   "summary": "oh-my-bash alias general",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/general",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "general"
+  },
+  {
+   "id": "omb-alias-ls",
+   "category": "alias",
+   "summary": "oh-my-bash alias ls",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/ls",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "ls"
+  },
+  {
+   "id": "omb-alias-misc",
+   "category": "alias",
+   "summary": "oh-my-bash alias misc",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/misc",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "misc"
+  },
+  {
+   "id": "omb-alias-package-manager",
+   "category": "alias",
+   "summary": "oh-my-bash alias package-manager",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/package-manager",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "package-manager"
+  },
+  {
+   "id": "omb-alias-terraform",
+   "category": "alias",
+   "summary": "oh-my-bash alias terraform",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/aliases/terraform",
+   "manager": "oh-my-bash",
+   "asset_kind": "alias",
+   "asset": "terraform"
+  },
+  {
+   "id": "omb-completion-apm",
+   "category": "completion",
+   "summary": "oh-my-bash completion apm",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/apm",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "apm"
+  },
+  {
+   "id": "omb-completion-asdf",
+   "category": "completion",
+   "summary": "oh-my-bash completion asdf",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/asdf",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "asdf"
+  },
+  {
+   "id": "omb-completion-awscli",
+   "category": "completion",
+   "summary": "oh-my-bash completion awscli",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/awscli",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "awscli"
+  },
+  {
+   "id": "omb-completion-brew",
+   "category": "completion",
+   "summary": "oh-my-bash completion brew",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/brew",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "brew"
+  },
+  {
+   "id": "omb-completion-bundler",
+   "category": "completion",
+   "summary": "oh-my-bash completion bundler",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/bundler",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "bundler"
+  },
+  {
+   "id": "omb-completion-capistrano",
+   "category": "completion",
+   "summary": "oh-my-bash completion capistrano",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/capistrano",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "capistrano"
+  },
+  {
+   "id": "omb-completion-chezmoi",
+   "category": "completion",
+   "summary": "oh-my-bash completion chezmoi",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/chezmoi",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "chezmoi"
+  },
+  {
+   "id": "omb-completion-composer",
+   "category": "completion",
+   "summary": "oh-my-bash completion composer",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/composer",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "composer"
+  },
+  {
+   "id": "omb-completion-conda",
+   "category": "completion",
+   "summary": "oh-my-bash completion conda",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/conda",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "conda"
+  },
+  {
+   "id": "omb-completion-crc",
+   "category": "completion",
+   "summary": "oh-my-bash completion crc",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/crc",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "crc"
+  },
+  {
+   "id": "omb-completion-defaults",
+   "category": "completion",
+   "summary": "oh-my-bash completion defaults",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/defaults",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "defaults"
+  },
+  {
+   "id": "omb-completion-dirs",
+   "category": "completion",
+   "summary": "oh-my-bash completion dirs",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/dirs",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "dirs"
+  },
+  {
+   "id": "omb-completion-django",
+   "category": "completion",
+   "summary": "oh-my-bash completion django",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/django",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "django"
+  },
+  {
+   "id": "omb-completion-docker-compose",
+   "category": "completion",
+   "summary": "oh-my-bash completion docker-compose",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/docker-compose",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "docker-compose"
+  },
+  {
+   "id": "omb-completion-docker-machine",
+   "category": "completion",
+   "summary": "oh-my-bash completion docker-machine",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/docker-machine",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "docker-machine"
+  },
+  {
+   "id": "omb-completion-docker",
+   "category": "completion",
+   "summary": "oh-my-bash completion docker",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/docker",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "docker"
+  },
+  {
+   "id": "omb-completion-drush",
+   "category": "completion",
+   "summary": "oh-my-bash completion drush",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/drush",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "drush"
+  },
+  {
+   "id": "omb-completion-gem",
+   "category": "completion",
+   "summary": "oh-my-bash completion gem",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/gem",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "gem"
+  },
+  {
+   "id": "omb-completion-gh",
+   "category": "completion",
+   "summary": "oh-my-bash completion gh",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/gh",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "gh"
+  },
+  {
+   "id": "omb-completion-git",
+   "category": "completion",
+   "summary": "oh-my-bash completion git",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/git",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "git"
+  },
+  {
+   "id": "omb-completion-git_flow",
+   "category": "completion",
+   "summary": "oh-my-bash completion git_flow",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/git_flow",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "git_flow"
+  },
+  {
+   "id": "omb-completion-git_flow_avh",
+   "category": "completion",
+   "summary": "oh-my-bash completion git_flow_avh",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/git_flow_avh",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "git_flow_avh"
+  },
+  {
+   "id": "omb-completion-go",
+   "category": "completion",
+   "summary": "oh-my-bash completion go",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/go",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "go"
+  },
+  {
+   "id": "omb-completion-gradle",
+   "category": "completion",
+   "summary": "oh-my-bash completion gradle",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/gradle",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "gradle"
+  },
+  {
+   "id": "omb-completion-grunt",
+   "category": "completion",
+   "summary": "oh-my-bash completion grunt",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/grunt",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "grunt"
+  },
+  {
+   "id": "omb-completion-gulp",
+   "category": "completion",
+   "summary": "oh-my-bash completion gulp",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/gulp",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "gulp"
+  },
+  {
+   "id": "omb-completion-helm",
+   "category": "completion",
+   "summary": "oh-my-bash completion helm",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/helm",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "helm"
+  },
+  {
+   "id": "omb-completion-homesick",
+   "category": "completion",
+   "summary": "oh-my-bash completion homesick",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/homesick",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "homesick"
+  },
+  {
+   "id": "omb-completion-hub",
+   "category": "completion",
+   "summary": "oh-my-bash completion hub",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/hub",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "hub"
+  },
+  {
+   "id": "omb-completion-jboss7",
+   "category": "completion",
+   "summary": "oh-my-bash completion jboss7",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/jboss7",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "jboss7"
+  },
+  {
+   "id": "omb-completion-jump",
+   "category": "completion",
+   "summary": "oh-my-bash completion jump",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/jump",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "jump"
+  },
+  {
+   "id": "omb-completion-jungle",
+   "category": "completion",
+   "summary": "oh-my-bash completion jungle",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/jungle",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "jungle"
+  },
+  {
+   "id": "omb-completion-kontena",
+   "category": "completion",
+   "summary": "oh-my-bash completion kontena",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/kontena",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "kontena"
+  },
+  {
+   "id": "omb-completion-kubectl",
+   "category": "completion",
+   "summary": "oh-my-bash completion kubectl",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/kubectl",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "kubectl"
+  },
+  {
+   "id": "omb-completion-makefile",
+   "category": "completion",
+   "summary": "oh-my-bash completion makefile",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/makefile",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "makefile"
+  },
+  {
+   "id": "omb-completion-maven",
+   "category": "completion",
+   "summary": "oh-my-bash completion maven",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/maven",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "maven"
+  },
+  {
+   "id": "omb-completion-minikube",
+   "category": "completion",
+   "summary": "oh-my-bash completion minikube",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/minikube",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "minikube"
+  },
+  {
+   "id": "omb-completion-npm",
+   "category": "completion",
+   "summary": "oh-my-bash completion npm",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/npm",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "npm"
+  },
+  {
+   "id": "omb-completion-nvm",
+   "category": "completion",
+   "summary": "oh-my-bash completion nvm",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/nvm",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "nvm"
+  },
+  {
+   "id": "omb-completion-oc",
+   "category": "completion",
+   "summary": "oh-my-bash completion oc",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/oc",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "oc"
+  },
+  {
+   "id": "omb-completion-packer",
+   "category": "completion",
+   "summary": "oh-my-bash completion packer",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/packer",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "packer"
+  },
+  {
+   "id": "omb-completion-pip",
+   "category": "completion",
+   "summary": "oh-my-bash completion pip",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/pip",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "pip"
+  },
+  {
+   "id": "omb-completion-pip3",
+   "category": "completion",
+   "summary": "oh-my-bash completion pip3",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/pip3",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "pip3"
+  },
+  {
+   "id": "omb-completion-projects",
+   "category": "completion",
+   "summary": "oh-my-bash completion projects",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/projects",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "projects"
+  },
+  {
+   "id": "omb-completion-rake",
+   "category": "completion",
+   "summary": "oh-my-bash completion rake",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/rake",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "rake"
+  },
+  {
+   "id": "omb-completion-salt",
+   "category": "completion",
+   "summary": "oh-my-bash completion salt",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/salt",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "salt"
+  },
+  {
+   "id": "omb-completion-sdkman",
+   "category": "completion",
+   "summary": "oh-my-bash completion sdkman",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/sdkman",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "sdkman"
+  },
+  {
+   "id": "omb-completion-ssh",
+   "category": "completion",
+   "summary": "oh-my-bash completion ssh",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/ssh",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "ssh"
+  },
+  {
+   "id": "omb-completion-svn",
+   "category": "completion",
+   "summary": "oh-my-bash completion svn",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/svn",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "svn"
+  },
+  {
+   "id": "omb-completion-system",
+   "category": "completion",
+   "summary": "oh-my-bash completion system",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/system",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "system"
+  },
+  {
+   "id": "omb-completion-terraform",
+   "category": "completion",
+   "summary": "oh-my-bash completion terraform",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/terraform",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "terraform"
+  },
+  {
+   "id": "omb-completion-test_kitchen",
+   "category": "completion",
+   "summary": "oh-my-bash completion test_kitchen",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/test_kitchen",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "test_kitchen"
+  },
+  {
+   "id": "omb-completion-tkn",
+   "category": "completion",
+   "summary": "oh-my-bash completion tkn",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/tkn",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "tkn"
+  },
+  {
+   "id": "omb-completion-tmux",
+   "category": "completion",
+   "summary": "oh-my-bash completion tmux",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/tmux",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "tmux"
+  },
+  {
+   "id": "omb-completion-todo",
+   "category": "completion",
+   "summary": "oh-my-bash completion todo",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/todo",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "todo"
+  },
+  {
+   "id": "omb-completion-uv",
+   "category": "completion",
+   "summary": "oh-my-bash completion uv",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/uv",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "uv"
+  },
+  {
+   "id": "omb-completion-vagrant",
+   "category": "completion",
+   "summary": "oh-my-bash completion vagrant",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/vagrant",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "vagrant"
+  },
+  {
+   "id": "omb-completion-vault",
+   "category": "completion",
+   "summary": "oh-my-bash completion vault",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/vault",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "vault"
+  },
+  {
+   "id": "omb-completion-virtualbox",
+   "category": "completion",
+   "summary": "oh-my-bash completion virtualbox",
+   "license": "MIT",
+   "url": "https://github.com/ohmybash/oh-my-bash/tree/master/completions/virtualbox",
+   "manager": "oh-my-bash",
+   "asset_kind": "completion",
+   "asset": "virtualbox"
+  },
+  {
+   "id": "bashit-alias-ag",
+   "category": "alias",
+   "summary": "the silver searcher (ag) aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/ag.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "ag"
+  },
+  {
+   "id": "bashit-alias-ansible",
+   "category": "alias",
+   "summary": "ansible abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/ansible.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "ansible"
+  },
+  {
+   "id": "bashit-alias-apt",
+   "category": "alias",
+   "summary": "Apt and dpkg aliases for Ubuntu and Debian distros.",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/apt.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "apt"
+  },
+  {
+   "id": "bashit-alias-atom",
+   "category": "alias",
+   "summary": "Atom.io editor abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/atom.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "atom"
+  },
+  {
+   "id": "bashit-alias-bash-it",
+   "category": "alias",
+   "summary": "Aliases for the bash-it command (these aliases are automatically included with the ",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/bash-it.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "bash-it"
+  },
+  {
+   "id": "bashit-alias-bolt",
+   "category": "alias",
+   "summary": "puppet bolt aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/bolt.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "bolt"
+  },
+  {
+   "id": "bashit-alias-bundler",
+   "category": "alias",
+   "summary": "ruby bundler",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/bundler.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "bundler"
+  },
+  {
+   "id": "bashit-alias-clipboard",
+   "category": "alias",
+   "summary": "xclip shortcuts",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/clipboard.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "clipboard"
+  },
+  {
+   "id": "bashit-alias-composer",
+   "category": "alias",
+   "summary": "common composer abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/composer.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "composer"
+  },
+  {
+   "id": "bashit-alias-curl",
+   "category": "alias",
+   "summary": "Curl aliases for convenience.",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/curl.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "curl"
+  },
+  {
+   "id": "bashit-alias-directory",
+   "category": "alias",
+   "summary": "Shortcuts for directory commands: ls, cd, &c.",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/directory.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "directory"
+  },
+  {
+   "id": "bashit-alias-dnf",
+   "category": "alias",
+   "summary": "dnf aliases for fedora 22+ distros",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/dnf.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "dnf"
+  },
+  {
+   "id": "bashit-alias-docker-compose",
+   "category": "alias",
+   "summary": "docker-compose abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/docker-compose.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "docker-compose"
+  },
+  {
+   "id": "bashit-alias-docker",
+   "category": "alias",
+   "summary": "docker abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/docker.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "docker"
+  },
+  {
+   "id": "bashit-alias-editor",
+   "category": "alias",
+   "summary": "shortcuts for editing",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/editor.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "editor"
+  },
+  {
+   "id": "bashit-alias-emacs",
+   "category": "alias",
+   "summary": "emacs editor",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/emacs.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "emacs"
+  },
+  {
+   "id": "bashit-alias-fuck",
+   "category": "alias",
+   "summary": "fuck/please to retry last command with sudo",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/fuck.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "fuck"
+  },
+  {
+   "id": "bashit-alias-general",
+   "category": "alias",
+   "summary": "general aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/general.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "general"
+  },
+  {
+   "id": "bashit-alias-git-omz",
+   "category": "alias",
+   "summary": "git aliases from oh-my-zsh (incompatible with regular git aliases option)",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/git-omz.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "git-omz"
+  },
+  {
+   "id": "bashit-alias-git",
+   "category": "alias",
+   "summary": "common git abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/git.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "git"
+  },
+  {
+   "id": "bashit-alias-gitsvn",
+   "category": "alias",
+   "summary": "common git-svn abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/gitsvn.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "gitsvn"
+  },
+  {
+   "id": "bashit-alias-heroku",
+   "category": "alias",
+   "summary": "heroku task abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/heroku.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "heroku"
+  },
+  {
+   "id": "bashit-alias-hg",
+   "category": "alias",
+   "summary": "mercurial abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/hg.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "hg"
+  },
+  {
+   "id": "bashit-alias-homebrew-cask",
+   "category": "alias",
+   "summary": "Some aliases for Homebrew Cask",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/homebrew-cask.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "homebrew-cask"
+  },
+  {
+   "id": "bashit-alias-homebrew",
+   "category": "alias",
+   "summary": "Some aliases for Homebrew",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/homebrew.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "homebrew"
+  },
+  {
+   "id": "bashit-alias-homesick",
+   "category": "alias",
+   "summary": "homesick aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/homesick.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "homesick"
+  },
+  {
+   "id": "bashit-alias-jitsu",
+   "category": "alias",
+   "summary": "jitsu task abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/jitsu.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "jitsu"
+  },
+  {
+   "id": "bashit-alias-kubectl",
+   "category": "alias",
+   "summary": "kubectl aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/kubectl.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "kubectl"
+  },
+  {
+   "id": "bashit-alias-laravel",
+   "category": "alias",
+   "summary": "laravel artisan abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/laravel.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "laravel"
+  },
+  {
+   "id": "bashit-alias-maven",
+   "category": "alias",
+   "summary": "maven abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/maven.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "maven"
+  },
+  {
+   "id": "bashit-alias-msys2",
+   "category": "alias",
+   "summary": "MSYS2 aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/msys2.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "msys2"
+  },
+  {
+   "id": "bashit-alias-node",
+   "category": "alias",
+   "summary": "the Node.js environment aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/node.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "node"
+  },
+  {
+   "id": "bashit-alias-npm",
+   "category": "alias",
+   "summary": "common npm abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/npm.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "npm"
+  },
+  {
+   "id": "bashit-alias-osx",
+   "category": "alias",
+   "summary": "osx-specific aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/osx.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "osx"
+  },
+  {
+   "id": "bashit-alias-phoenix",
+   "category": "alias",
+   "summary": "phoenix abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/phoenix.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "phoenix"
+  },
+  {
+   "id": "bashit-alias-puppet",
+   "category": "alias",
+   "summary": "puppet aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/puppet.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "puppet"
+  },
+  {
+   "id": "bashit-alias-pyrocms",
+   "category": "alias",
+   "summary": "pyrocms abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/pyrocms.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "pyrocms"
+  },
+  {
+   "id": "bashit-alias-rails",
+   "category": "alias",
+   "summary": "rails abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/rails.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "rails"
+  },
+  {
+   "id": "bashit-alias-svn",
+   "category": "alias",
+   "summary": "common svn abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/svn.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "svn"
+  },
+  {
+   "id": "bashit-alias-systemd",
+   "category": "alias",
+   "summary": "systemd service",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/systemd.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "systemd"
+  },
+  {
+   "id": "bashit-alias-terraform",
+   "category": "alias",
+   "summary": "Aliases for Terraform/OpenTofu and Terragrunt",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/terraform.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "terraform"
+  },
+  {
+   "id": "bashit-alias-terragrunt",
+   "category": "alias",
+   "summary": "Aliases for Terraform and Terragrunt",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/terragrunt.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "terragrunt"
+  },
+  {
+   "id": "bashit-alias-textmate",
+   "category": "alias",
+   "summary": "textmate abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/textmate.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "textmate"
+  },
+  {
+   "id": "bashit-alias-tmux",
+   "category": "alias",
+   "summary": "Tmux terminal multiplexer",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/tmux.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "tmux"
+  },
+  {
+   "id": "bashit-alias-todo",
+   "category": "alias",
+   "summary": "todo.txt-cli abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/todo.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "todo"
+  },
+  {
+   "id": "bashit-alias-uuidgen",
+   "category": "alias",
+   "summary": "uuidgen aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/uuidgen.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "uuidgen"
+  },
+  {
+   "id": "bashit-alias-vagrant",
+   "category": "alias",
+   "summary": "vagrant aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/vagrant.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "vagrant"
+  },
+  {
+   "id": "bashit-alias-vault",
+   "category": "alias",
+   "summary": "vault aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/vault.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "vault"
+  },
+  {
+   "id": "bashit-alias-vim",
+   "category": "alias",
+   "summary": "vim abbreviations",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/vim.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "vim"
+  },
+  {
+   "id": "bashit-alias-yarn",
+   "category": "alias",
+   "summary": "yarn package manager aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/aliases/available/yarn.aliases.bash",
+   "manager": "bash-it",
+   "asset_kind": "alias",
+   "asset": "yarn"
+  },
+  {
+   "id": "bashit-plugin-alias-completion",
+   "category": "plugin",
+   "summary": "Compatibility stub - redirects to aliases completion (DEPRECATED)",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/alias-completion.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "alias-completion"
+  },
+  {
+   "id": "bashit-plugin-autojump",
+   "category": "plugin",
+   "summary": "Autojump configuration, see https://github.com/wting/autojump for more details",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/autojump.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "autojump"
+  },
+  {
+   "id": "bashit-plugin-aws",
+   "category": "plugin",
+   "summary": "AWS helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/aws.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "aws"
+  },
+  {
+   "id": "bashit-plugin-base",
+   "category": "plugin",
+   "summary": "miscellaneous tools",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/base.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "base"
+  },
+  {
+   "id": "bashit-plugin-basher",
+   "category": "plugin",
+   "summary": "initializes basher, the shell package manager",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/basher.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "basher"
+  },
+  {
+   "id": "bashit-plugin-blesh",
+   "category": "plugin",
+   "summary": "load ble.sh, the Bash line editor!",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/blesh.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "blesh"
+  },
+  {
+   "id": "bashit-plugin-boot2docker",
+   "category": "plugin",
+   "summary": "Helpers to get Docker setup correctly for boot2docker",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/boot2docker.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "boot2docker"
+  },
+  {
+   "id": "bashit-plugin-browser",
+   "category": "plugin",
+   "summary": "render commandline output in your browser",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/browser.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "browser"
+  },
+  {
+   "id": "bashit-plugin-chruby-auto",
+   "category": "plugin",
+   "summary": "load chruby + auto-switching (from /usr/local/share/chruby)",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/chruby-auto.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "chruby-auto"
+  },
+  {
+   "id": "bashit-plugin-chruby",
+   "category": "plugin",
+   "summary": "load chruby                  (from /usr/local/share/chruby)",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/chruby.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "chruby"
+  },
+  {
+   "id": "bashit-plugin-cht-sh",
+   "category": "plugin",
+   "summary": "Simplify `curl cht.sh/<query>` to `cht.sh <query>`",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/cht-sh.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "cht-sh"
+  },
+  {
+   "id": "bashit-plugin-cmd-returned-notify",
+   "category": "plugin",
+   "summary": "Alert (BEL) when process ends after a threshold of seconds",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/cmd-returned-notify.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "cmd-returned-notify"
+  },
+  {
+   "id": "bashit-plugin-colors",
+   "category": "plugin",
+   "summary": "Provides color definitions and ANSI color code functions for terminal output",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/colors.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "colors"
+  },
+  {
+   "id": "bashit-plugin-direnv",
+   "category": "plugin",
+   "summary": "load direnv, if you are using it: https://direnv.net/",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/direnv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "direnv"
+  },
+  {
+   "id": "bashit-plugin-dirs",
+   "category": "plugin",
+   "summary": "directory stack navigation",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/dirs.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "dirs"
+  },
+  {
+   "id": "bashit-plugin-docker-compose",
+   "category": "plugin",
+   "summary": "Helper functions for using docker-compose",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/docker-compose.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "docker-compose"
+  },
+  {
+   "id": "bashit-plugin-docker-machine",
+   "category": "plugin",
+   "summary": "Helpers to get Docker setup correctly for docker-machine",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/docker-machine.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "docker-machine"
+  },
+  {
+   "id": "bashit-plugin-docker",
+   "category": "plugin",
+   "summary": "Helpers to more easily work with Docker",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/docker.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "docker"
+  },
+  {
+   "id": "bashit-plugin-edit-mode-emacs",
+   "category": "plugin",
+   "summary": "Enable emacs editing mode",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/edit-mode-emacs.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "edit-mode-emacs"
+  },
+  {
+   "id": "bashit-plugin-edit-mode-vi",
+   "category": "plugin",
+   "summary": "Enable vi editing mode",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/edit-mode-vi.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "edit-mode-vi"
+  },
+  {
+   "id": "bashit-plugin-explain",
+   "category": "plugin",
+   "summary": "mankier.com explain function to explain other commands",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/explain.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "explain"
+  },
+  {
+   "id": "bashit-plugin-extract",
+   "category": "plugin",
+   "summary": "one command to extract them all...",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/extract.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "extract"
+  },
+  {
+   "id": "bashit-plugin-fasd",
+   "category": "plugin",
+   "summary": "load fasd, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/fasd.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "fasd"
+  },
+  {
+   "id": "bashit-plugin-fzf",
+   "category": "plugin",
+   "summary": "load fzf, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/fzf.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "fzf"
+  },
+  {
+   "id": "bashit-plugin-gif",
+   "category": "plugin",
+   "summary": "video to gif, gif to WebM helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/gif.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "gif"
+  },
+  {
+   "id": "bashit-plugin-git-subrepo",
+   "category": "plugin",
+   "summary": "load git-subrepo if you are using it, and initialize completions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/git-subrepo.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "git-subrepo"
+  },
+  {
+   "id": "bashit-plugin-git",
+   "category": "plugin",
+   "summary": "git helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/git.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "git"
+  },
+  {
+   "id": "bashit-plugin-gitstatus",
+   "category": "plugin",
+   "summary": "speeds up your life by using gitstatus for git status calculations. install from https://github.com/romkatv/gitstatus",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/gitstatus.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "gitstatus"
+  },
+  {
+   "id": "bashit-plugin-go",
+   "category": "plugin",
+   "summary": "go environment variables & path configuration",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/go.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "go"
+  },
+  {
+   "id": "bashit-plugin-goenv",
+   "category": "plugin",
+   "summary": "load goenv, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/goenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "goenv"
+  },
+  {
+   "id": "bashit-plugin-gradle",
+   "category": "plugin",
+   "summary": "Add a gw command to use gradle wrapper if present, else use system gradle",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/gradle.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "gradle"
+  },
+  {
+   "id": "bashit-plugin-hg",
+   "category": "plugin",
+   "summary": "hg helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/hg.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "hg"
+  },
+  {
+   "id": "bashit-plugin-history-eternal",
+   "category": "plugin",
+   "summary": "eternal bash history",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/history-eternal.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "history-eternal"
+  },
+  {
+   "id": "bashit-plugin-history-search",
+   "category": "plugin",
+   "summary": "search history using the prefix already entered",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/history-search.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "history-search"
+  },
+  {
+   "id": "bashit-plugin-history-substring-search",
+   "category": "plugin",
+   "summary": "search history using the substring already entered",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/history-substring-search.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "history-substring-search"
+  },
+  {
+   "id": "bashit-plugin-history",
+   "category": "plugin",
+   "summary": "improve history handling with sane defaults",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/history.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "history"
+  },
+  {
+   "id": "bashit-plugin-hub",
+   "category": "plugin",
+   "summary": "load hub, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/hub.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "hub"
+  },
+  {
+   "id": "bashit-plugin-java",
+   "category": "plugin",
+   "summary": "Java and JAR helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/java.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "java"
+  },
+  {
+   "id": "bashit-plugin-javascript",
+   "category": "plugin",
+   "summary": "download jquery files into current project",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/javascript.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "javascript"
+  },
+  {
+   "id": "bashit-plugin-jekyll",
+   "category": "plugin",
+   "summary": "manage your jekyll site",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/jekyll.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "jekyll"
+  },
+  {
+   "id": "bashit-plugin-jenv",
+   "category": "plugin",
+   "summary": "load jenv, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/jenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "jenv"
+  },
+  {
+   "id": "bashit-plugin-jgitflow",
+   "category": "plugin",
+   "summary": "Maven jgitflow build helpers",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/jgitflow.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "jgitflow"
+  },
+  {
+   "id": "bashit-plugin-jump",
+   "category": "plugin",
+   "summary": "initialize jump (see https://github.com/gsamokovarov/jump). Add `export JUMP_OPTS=(",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/jump.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "jump"
+  },
+  {
+   "id": "bashit-plugin-latex",
+   "category": "plugin",
+   "summary": "add MacTeX to PATH",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/latex.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "latex"
+  },
+  {
+   "id": "bashit-plugin-less-pretty-cat",
+   "category": "plugin",
+   "summary": "pygmentize instead of cat to terminal if possible",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/less-pretty-cat.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "less-pretty-cat"
+  },
+  {
+   "id": "bashit-plugin-man",
+   "category": "plugin",
+   "summary": "colorize man pages for better readability",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/man.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "man"
+  },
+  {
+   "id": "bashit-plugin-nginx",
+   "category": "plugin",
+   "summary": "manage your nginx service",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/nginx.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "nginx"
+  },
+  {
+   "id": "bashit-plugin-node",
+   "category": "plugin",
+   "summary": "Node.js helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/node.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "node"
+  },
+  {
+   "id": "bashit-plugin-nodenv",
+   "category": "plugin",
+   "summary": "load nodenv, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/nodenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "nodenv"
+  },
+  {
+   "id": "bashit-plugin-nvm",
+   "category": "plugin",
+   "summary": "node version manager configuration",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/nvm.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "nvm"
+  },
+  {
+   "id": "bashit-plugin-osx-timemachine",
+   "category": "plugin",
+   "summary": "OS X Time Machine functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/osx-timemachine.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "osx-timemachine"
+  },
+  {
+   "id": "bashit-plugin-osx",
+   "category": "plugin",
+   "summary": "osx-specific functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/osx.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "osx"
+  },
+  {
+   "id": "bashit-plugin-pack",
+   "category": "plugin",
+   "summary": "CNB pack cli aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/pack.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "pack"
+  },
+  {
+   "id": "bashit-plugin-percol",
+   "category": "plugin",
+   "summary": "Search&Select history with percol",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/percol.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "percol"
+  },
+  {
+   "id": "bashit-plugin-pipsi",
+   "category": "plugin",
+   "summary": "load pipsi, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/pipsi.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "pipsi"
+  },
+  {
+   "id": "bashit-plugin-plenv",
+   "category": "plugin",
+   "summary": "plenv plugin for Perl",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/plenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "plenv"
+  },
+  {
+   "id": "bashit-plugin-postgres",
+   "category": "plugin",
+   "summary": "postgres helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/postgres.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "postgres"
+  },
+  {
+   "id": "bashit-plugin-powerline",
+   "category": "plugin",
+   "summary": "enables powerline daemon",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/powerline.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "powerline"
+  },
+  {
+   "id": "bashit-plugin-projects",
+   "category": "plugin",
+   "summary": "quickly navigate configured project paths",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/projects.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "projects"
+  },
+  {
+   "id": "bashit-plugin-proxy",
+   "category": "plugin",
+   "summary": "Proxy Tools",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/proxy.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "proxy"
+  },
+  {
+   "id": "bashit-plugin-pyenv",
+   "category": "plugin",
+   "summary": "load pyenv, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/pyenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "pyenv"
+  },
+  {
+   "id": "bashit-plugin-python",
+   "category": "plugin",
+   "summary": "alias ",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/python.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "python"
+  },
+  {
+   "id": "bashit-plugin-rails",
+   "category": "plugin",
+   "summary": "Helper functions for Ruby on Rails",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/rails.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "rails"
+  },
+  {
+   "id": "bashit-plugin-rbenv",
+   "category": "plugin",
+   "summary": "load rbenv, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/rbenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "rbenv"
+  },
+  {
+   "id": "bashit-plugin-ruby",
+   "category": "plugin",
+   "summary": "ruby and rubygems specific functions and settings",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/ruby.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "ruby"
+  },
+  {
+   "id": "bashit-plugin-rvm",
+   "category": "plugin",
+   "summary": "load rvm, if you are using it",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/rvm.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "rvm"
+  },
+  {
+   "id": "bashit-plugin-sdkman",
+   "category": "plugin",
+   "summary": "Load Software Development Kit Manager",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/sdkman.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "sdkman"
+  },
+  {
+   "id": "bashit-plugin-ssh",
+   "category": "plugin",
+   "summary": "ssh helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/ssh.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "ssh"
+  },
+  {
+   "id": "bashit-plugin-sshagent",
+   "category": "plugin",
+   "summary": "sshagent helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/sshagent.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "sshagent"
+  },
+  {
+   "id": "bashit-plugin-subversion",
+   "category": "plugin",
+   "summary": "svn helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/subversion.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "subversion"
+  },
+  {
+   "id": "bashit-plugin-sudo",
+   "category": "plugin",
+   "summary": "Toggle sudo at the beginning of the current or the previous command by hitting the ESC key twice",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/sudo.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "sudo"
+  },
+  {
+   "id": "bashit-plugin-textmate",
+   "category": "plugin",
+   "summary": "set textmate as a default editor",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/textmate.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "textmate"
+  },
+  {
+   "id": "bashit-plugin-thefuck",
+   "category": "plugin",
+   "summary": "Initialization for fuck",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/thefuck.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "thefuck"
+  },
+  {
+   "id": "bashit-plugin-tmux",
+   "category": "plugin",
+   "summary": "make sure that tmux is launched in 256 color mode",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/tmux.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "tmux"
+  },
+  {
+   "id": "bashit-plugin-tmuxinator",
+   "category": "plugin",
+   "summary": "sources tmuxinator script if available",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/tmuxinator.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "tmuxinator"
+  },
+  {
+   "id": "bashit-plugin-todo",
+   "category": "plugin",
+   "summary": "Todo.txt integration",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/todo.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "todo"
+  },
+  {
+   "id": "bashit-plugin-url",
+   "category": "plugin",
+   "summary": "Basic url handling and manipulation functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/url.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "url"
+  },
+  {
+   "id": "bashit-plugin-virtualenv",
+   "category": "plugin",
+   "summary": "virtualenvwrapper and pyenv-virtualenvwrapper helper functions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/virtualenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "virtualenv"
+  },
+  {
+   "id": "bashit-plugin-xterm",
+   "category": "plugin",
+   "summary": "automatically set your xterm title with host and location info",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/xterm.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "xterm"
+  },
+  {
+   "id": "bashit-plugin-z_autoenv",
+   "category": "plugin",
+   "summary": "source into environment when cding to directories",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/z_autoenv.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "z_autoenv"
+  },
+  {
+   "id": "bashit-plugin-zoxide",
+   "category": "plugin",
+   "summary": "zoxide is a smarter cd command for your shell.",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/plugins/available/zoxide.plugin.bash",
+   "manager": "bash-it",
+   "asset_kind": "plugin",
+   "asset": "zoxide"
+  },
+  {
+   "id": "bashit-completion-aliases",
+   "category": "completion",
+   "summary": "bash-it completion aliases",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/aliases.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "aliases"
+  },
+  {
+   "id": "bashit-completion-apm",
+   "category": "completion",
+   "summary": "apm completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/apm.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "apm"
+  },
+  {
+   "id": "bashit-completion-artisan",
+   "category": "completion",
+   "summary": "Laravel artisan completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/artisan.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "artisan"
+  },
+  {
+   "id": "bashit-completion-awless",
+   "category": "completion",
+   "summary": "bash-it completion awless",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/awless.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "awless"
+  },
+  {
+   "id": "bashit-completion-awscli",
+   "category": "completion",
+   "summary": "aws - Amazon Web Services command-line interface",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/awscli.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "awscli"
+  },
+  {
+   "id": "bashit-completion-bash-it",
+   "category": "completion",
+   "summary": "bash-it - completion for bash-it framework commands",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/bash-it.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "bash-it"
+  },
+  {
+   "id": "bashit-completion-brew",
+   "category": "completion",
+   "summary": "brew completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/brew.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "brew"
+  },
+  {
+   "id": "bashit-completion-bundler",
+   "category": "completion",
+   "summary": "bundler - Ruby dependency manager for managing gem dependencies",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/bundler.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "bundler"
+  },
+  {
+   "id": "bashit-completion-capistrano",
+   "category": "completion",
+   "summary": "capistrano - remote server automation and deployment tool for Ruby",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/capistrano.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "capistrano"
+  },
+  {
+   "id": "bashit-completion-cargo",
+   "category": "completion",
+   "summary": "cargo (Rust package manager) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/cargo.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "cargo"
+  },
+  {
+   "id": "bashit-completion-composer",
+   "category": "completion",
+   "summary": "composer completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/composer.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "composer"
+  },
+  {
+   "id": "bashit-completion-conda",
+   "category": "completion",
+   "summary": "conda completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/conda.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "conda"
+  },
+  {
+   "id": "bashit-completion-consul",
+   "category": "completion",
+   "summary": "Hashicorp consul completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/consul.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "consul"
+  },
+  {
+   "id": "bashit-completion-crystal",
+   "category": "completion",
+   "summary": "bash-it completion crystal",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/crystal.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "crystal"
+  },
+  {
+   "id": "bashit-completion-dart",
+   "category": "completion",
+   "summary": "dart - programming language optimized for client-side development",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/dart.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "dart"
+  },
+  {
+   "id": "bashit-completion-defaults",
+   "category": "completion",
+   "summary": "bash-it completion defaults",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/defaults.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "defaults"
+  },
+  {
+   "id": "bashit-completion-dirs",
+   "category": "completion",
+   "summary": "Bash completion support for the ",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/dirs.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "dirs"
+  },
+  {
+   "id": "bashit-completion-django",
+   "category": "completion",
+   "summary": "django completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/django.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "django"
+  },
+  {
+   "id": "bashit-completion-dmidecode",
+   "category": "completion",
+   "summary": "bash-it completion dmidecode",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/dmidecode.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "dmidecode"
+  },
+  {
+   "id": "bashit-completion-docker-compose",
+   "category": "completion",
+   "summary": "docker-compose - tool for defining and running multi-container Docker applications",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/docker-compose.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "docker-compose"
+  },
+  {
+   "id": "bashit-completion-docker-machine",
+   "category": "completion",
+   "summary": "docker-machine - deprecated tool for provisioning Docker hosts (DEPRECATED)",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/docker-machine.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "docker-machine"
+  },
+  {
+   "id": "bashit-completion-docker",
+   "category": "completion",
+   "summary": "docker completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/docker.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "docker"
+  },
+  {
+   "id": "bashit-completion-dotnet",
+   "category": "completion",
+   "summary": "bash parameter completion for the dotnet CLI",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/dotnet.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "dotnet"
+  },
+  {
+   "id": "bashit-completion-drush",
+   "category": "completion",
+   "summary": "bash-it completion drush",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/drush.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "drush"
+  },
+  {
+   "id": "bashit-completion-export",
+   "category": "completion",
+   "summary": "bash-it completion export",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/export.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "export"
+  },
+  {
+   "id": "bashit-completion-fabric",
+   "category": "completion",
+   "summary": "fabric - Python library and CLI tool for streamlining SSH deployments",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/fabric.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "fabric"
+  },
+  {
+   "id": "bashit-completion-flutter",
+   "category": "completion",
+   "summary": "flutter - Google",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/flutter.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "flutter"
+  },
+  {
+   "id": "bashit-completion-gcloud",
+   "category": "completion",
+   "summary": "Google Cloud SDK completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/gcloud.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "gcloud"
+  },
+  {
+   "id": "bashit-completion-gem",
+   "category": "completion",
+   "summary": "gem completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/gem.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "gem"
+  },
+  {
+   "id": "bashit-completion-git",
+   "category": "completion",
+   "summary": "git - distributed version control system",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/git.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "git"
+  },
+  {
+   "id": "bashit-completion-git_flow",
+   "category": "completion",
+   "summary": "bash-it completion git_flow",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/git_flow.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "git_flow"
+  },
+  {
+   "id": "bashit-completion-git_flow_avh",
+   "category": "completion",
+   "summary": "bash-it completion git_flow_avh",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/git_flow_avh.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "git_flow_avh"
+  },
+  {
+   "id": "bashit-completion-github-cli",
+   "category": "completion",
+   "summary": "GitHub CLI completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/github-cli.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "github-cli"
+  },
+  {
+   "id": "bashit-completion-go",
+   "category": "completion",
+   "summary": "completion for go command using gocomplete",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/go.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "go"
+  },
+  {
+   "id": "bashit-completion-gradle",
+   "category": "completion",
+   "summary": "gradle - Java build automation tool using Groovy-based DSL",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/gradle.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "gradle"
+  },
+  {
+   "id": "bashit-completion-grunt",
+   "category": "completion",
+   "summary": "grunt - JavaScript task runner for automation",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/grunt.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "grunt"
+  },
+  {
+   "id": "bashit-completion-gulp",
+   "category": "completion",
+   "summary": "gulp - JavaScript build system and task automation tool",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/gulp.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "gulp"
+  },
+  {
+   "id": "bashit-completion-helm",
+   "category": "completion",
+   "summary": "helm (Kubernetes Package Manager) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/helm.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "helm"
+  },
+  {
+   "id": "bashit-completion-herdr",
+   "category": "completion",
+   "summary": "Herdr Terminal Multiplexer tab completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/herdr.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "herdr"
+  },
+  {
+   "id": "bashit-completion-homesick",
+   "category": "completion",
+   "summary": "bash-it completion homesick",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/homesick.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "homesick"
+  },
+  {
+   "id": "bashit-completion-hub",
+   "category": "completion",
+   "summary": "hub - GitHub command-line wrapper extending git with GitHub features",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/hub.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "hub"
+  },
+  {
+   "id": "bashit-completion-invoke",
+   "category": "completion",
+   "summary": "invoke - Python task execution tool and library",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/invoke.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "invoke"
+  },
+  {
+   "id": "bashit-completion-jboss5",
+   "category": "completion",
+   "summary": "jboss5 completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/jboss5.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "jboss5"
+  },
+  {
+   "id": "bashit-completion-jboss7",
+   "category": "completion",
+   "summary": "jboss7 completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/jboss7.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "jboss7"
+  },
+  {
+   "id": "bashit-completion-jungle",
+   "category": "completion",
+   "summary": "jungle(AWS cli tool) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/jungle.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "jungle"
+  },
+  {
+   "id": "bashit-completion-kind",
+   "category": "completion",
+   "summary": "bash-it completion kind",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/kind.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "kind"
+  },
+  {
+   "id": "bashit-completion-knife",
+   "category": "completion",
+   "summary": "bash-it completion knife",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/knife.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "knife"
+  },
+  {
+   "id": "bashit-completion-kontena",
+   "category": "completion",
+   "summary": "bash-it completion kontena",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/kontena.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "kontena"
+  },
+  {
+   "id": "bashit-completion-kubectl",
+   "category": "completion",
+   "summary": "kubectl (Kubernetes CLI) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/kubectl.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "kubectl"
+  },
+  {
+   "id": "bashit-completion-laravel",
+   "category": "completion",
+   "summary": "laravel - PHP web application framework installer and command-line tool",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/laravel.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "laravel"
+  },
+  {
+   "id": "bashit-completion-lerna",
+   "category": "completion",
+   "summary": "lerna(javascript project manager tool) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/lerna.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "lerna"
+  },
+  {
+   "id": "bashit-completion-makefile",
+   "category": "completion",
+   "summary": "bash-it completion makefile",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/makefile.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "makefile"
+  },
+  {
+   "id": "bashit-completion-maven",
+   "category": "completion",
+   "summary": "maven - Java project build and dependency tool",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/maven.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "maven"
+  },
+  {
+   "id": "bashit-completion-minikube",
+   "category": "completion",
+   "summary": "minikube (Local Kubernetes) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/minikube.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "minikube"
+  },
+  {
+   "id": "bashit-completion-minishift",
+   "category": "completion",
+   "summary": "bash-it completion minishift",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/minishift.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "minishift"
+  },
+  {
+   "id": "bashit-completion-ng",
+   "category": "completion",
+   "summary": "ng - Angular CLI for scaffolding and managing Angular applications",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/ng.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "ng"
+  },
+  {
+   "id": "bashit-completion-ngrok",
+   "category": "completion",
+   "summary": "bash-it completion ngrok",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/ngrok.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "ngrok"
+  },
+  {
+   "id": "bashit-completion-notify-send",
+   "category": "completion",
+   "summary": "bash-it completion notify-send",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/notify-send.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "notify-send"
+  },
+  {
+   "id": "bashit-completion-npm",
+   "category": "completion",
+   "summary": "npm (Node Package Manager) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/npm.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "npm"
+  },
+  {
+   "id": "bashit-completion-nvm",
+   "category": "completion",
+   "summary": "nvm (Node Version Manager) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/nvm.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "nvm"
+  },
+  {
+   "id": "bashit-completion-op",
+   "category": "completion",
+   "summary": "1Password CLI tab completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/op.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "op"
+  },
+  {
+   "id": "bashit-completion-openshift",
+   "category": "completion",
+   "summary": "bash-it completion openshift",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/openshift.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "openshift"
+  },
+  {
+   "id": "bashit-completion-packer",
+   "category": "completion",
+   "summary": "packer completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/packer.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "packer"
+  },
+  {
+   "id": "bashit-completion-pew",
+   "category": "completion",
+   "summary": "bash-it completion pew",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/pew.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "pew"
+  },
+  {
+   "id": "bashit-completion-pip",
+   "category": "completion",
+   "summary": "pip - Python package installer and dependency manager",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/pip.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "pip"
+  },
+  {
+   "id": "bashit-completion-pip3",
+   "category": "completion",
+   "summary": "pip3 - Python 3 package installer and dependency manager",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/pip3.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "pip3"
+  },
+  {
+   "id": "bashit-completion-pipenv",
+   "category": "completion",
+   "summary": "pipenv - Python development workflow tool combining pip and virtualenv",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/pipenv.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "pipenv"
+  },
+  {
+   "id": "bashit-completion-pipx",
+   "category": "completion",
+   "summary": "bash-it completion pipx",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/pipx.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "pipx"
+  },
+  {
+   "id": "bashit-completion-projects",
+   "category": "completion",
+   "summary": "bash-it completion projects",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/projects.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "projects"
+  },
+  {
+   "id": "bashit-completion-rake",
+   "category": "completion",
+   "summary": "rake - Ruby task automation and build tool",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/rake.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "rake"
+  },
+  {
+   "id": "bashit-completion-rustup",
+   "category": "completion",
+   "summary": "rustup (Rust toolchain installer) completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/rustup.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "rustup"
+  },
+  {
+   "id": "bashit-completion-rvm",
+   "category": "completion",
+   "summary": "Bash completion support for  RVM.",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/rvm.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "rvm"
+  },
+  {
+   "id": "bashit-completion-salt",
+   "category": "completion",
+   "summary": "bash-it completion salt",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/salt.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "salt"
+  },
+  {
+   "id": "bashit-completion-sdkman",
+   "category": "completion",
+   "summary": "bash-it completion sdkman",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/sdkman.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "sdkman"
+  },
+  {
+   "id": "bashit-completion-sqlmap",
+   "category": "completion",
+   "summary": "bash-it completion sqlmap",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/sqlmap.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "sqlmap"
+  },
+  {
+   "id": "bashit-completion-ssh",
+   "category": "completion",
+   "summary": "ssh - secure shell remote login and command execution",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/ssh.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "ssh"
+  },
+  {
+   "id": "bashit-completion-svn",
+   "category": "completion",
+   "summary": "svn - Apache Subversion version control system",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/svn.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "svn"
+  },
+  {
+   "id": "bashit-completion-system",
+   "category": "completion",
+   "summary": "bash-it completion system",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/system.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "system"
+  },
+  {
+   "id": "bashit-completion-terraform",
+   "category": "completion",
+   "summary": "terraform/tofu completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/terraform.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "terraform"
+  },
+  {
+   "id": "bashit-completion-test_kitchen",
+   "category": "completion",
+   "summary": "bash-it completion test_kitchen",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/test_kitchen.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "test_kitchen"
+  },
+  {
+   "id": "bashit-completion-tmux",
+   "category": "completion",
+   "summary": "tmux - terminal multiplexer for managing multiple shell sessions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/tmux.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "tmux"
+  },
+  {
+   "id": "bashit-completion-todo",
+   "category": "completion",
+   "summary": "bash-it completion todo",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/todo.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "todo"
+  },
+  {
+   "id": "bashit-completion-travis",
+   "category": "completion",
+   "summary": "bash-it completion travis",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/travis.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "travis"
+  },
+  {
+   "id": "bashit-completion-vagrant",
+   "category": "completion",
+   "summary": "vagrant - tool for building and managing virtualized development environments",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/vagrant.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "vagrant"
+  },
+  {
+   "id": "bashit-completion-vault",
+   "category": "completion",
+   "summary": "vault completion",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/vault.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "vault"
+  },
+  {
+   "id": "bashit-completion-virsh",
+   "category": "completion",
+   "summary": "bash-it completion virsh",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/virsh.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "virsh"
+  },
+  {
+   "id": "bashit-completion-virtualbox",
+   "category": "completion",
+   "summary": "virtualbox - Oracle VM VirtualBox virtualization software",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/virtualbox.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "virtualbox"
+  },
+  {
+   "id": "bashit-completion-vuejs",
+   "category": "completion",
+   "summary": "bash-it completion vuejs",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/vuejs.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "vuejs"
+  },
+  {
+   "id": "bashit-completion-wpscan",
+   "category": "completion",
+   "summary": "bash-it completion wpscan",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/wpscan.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "wpscan"
+  },
+  {
+   "id": "bashit-completion-yarn",
+   "category": "completion",
+   "summary": "yarn cli completions",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/completion/available/yarn.completion.bash",
+   "manager": "bash-it",
+   "asset_kind": "completion",
+   "asset": "yarn"
+  },
+  {
+   "id": "bashit-theme-90210",
+   "category": "theme",
+   "summary": "bash-it theme 90210",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/90210",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "90210"
+  },
+  {
+   "id": "bashit-theme-agnoster",
+   "category": "theme",
+   "summary": "bash-it theme agnoster",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/agnoster",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "agnoster"
+  },
+  {
+   "id": "bashit-theme-atomic",
+   "category": "theme",
+   "summary": "bash-it theme atomic",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/atomic",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "atomic"
+  },
+  {
+   "id": "bashit-theme-axin",
+   "category": "theme",
+   "summary": "bash-it theme axin",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/axin",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "axin"
+  },
+  {
+   "id": "bashit-theme-bakke",
+   "category": "theme",
+   "summary": "bash-it theme bakke",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/bakke",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "bakke"
+  },
+  {
+   "id": "bashit-theme-barbuk",
+   "category": "theme",
+   "summary": "bash-it theme barbuk",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/barbuk",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "barbuk"
+  },
+  {
+   "id": "bashit-theme-binaryanomaly",
+   "category": "theme",
+   "summary": "bash-it theme binaryanomaly",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/binaryanomaly",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "binaryanomaly"
+  },
+  {
+   "id": "bashit-theme-bira",
+   "category": "theme",
+   "summary": "bash-it theme bira",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/bira",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "bira"
+  },
+  {
+   "id": "bashit-theme-bobby",
+   "category": "theme",
+   "summary": "bash-it theme bobby",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/bobby",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "bobby"
+  },
+  {
+   "id": "bashit-theme-bobby-python",
+   "category": "theme",
+   "summary": "bash-it theme bobby-python",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/bobby-python",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "bobby-python"
+  },
+  {
+   "id": "bashit-theme-brainy",
+   "category": "theme",
+   "summary": "bash-it theme brainy",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/brainy",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "brainy"
+  },
+  {
+   "id": "bashit-theme-brunton",
+   "category": "theme",
+   "summary": "bash-it theme brunton",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/brunton",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "brunton"
+  },
+  {
+   "id": "bashit-theme-candy",
+   "category": "theme",
+   "summary": "bash-it theme candy",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/candy",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "candy"
+  },
+  {
+   "id": "bashit-theme-clean",
+   "category": "theme",
+   "summary": "bash-it theme clean",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/clean",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "clean"
+  },
+  {
+   "id": "bashit-theme-codeword",
+   "category": "theme",
+   "summary": "bash-it theme codeword",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/codeword",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "codeword"
+  },
+  {
+   "id": "bashit-theme-cooperkid",
+   "category": "theme",
+   "summary": "bash-it theme cooperkid",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/cooperkid",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "cooperkid"
+  },
+  {
+   "id": "bashit-theme-cupcake",
+   "category": "theme",
+   "summary": "bash-it theme cupcake",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/cupcake",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "cupcake"
+  },
+  {
+   "id": "bashit-theme-demula",
+   "category": "theme",
+   "summary": "bash-it theme demula",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/demula",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "demula"
+  },
+  {
+   "id": "bashit-theme-dos",
+   "category": "theme",
+   "summary": "bash-it theme dos",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/dos",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "dos"
+  },
+  {
+   "id": "bashit-theme-doubletime",
+   "category": "theme",
+   "summary": "bash-it theme doubletime",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/doubletime",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "doubletime"
+  },
+  {
+   "id": "bashit-theme-doubletime_multiline",
+   "category": "theme",
+   "summary": "bash-it theme doubletime_multiline",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/doubletime_multiline",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "doubletime_multiline"
+  },
+  {
+   "id": "bashit-theme-doubletime_multiline_pyonly",
+   "category": "theme",
+   "summary": "bash-it theme doubletime_multiline_pyonly",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/doubletime_multiline_pyonly",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "doubletime_multiline_pyonly"
+  },
+  {
+   "id": "bashit-theme-dulcie",
+   "category": "theme",
+   "summary": "bash-it theme dulcie",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/dulcie",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "dulcie"
+  },
+  {
+   "id": "bashit-theme-duru",
+   "category": "theme",
+   "summary": "bash-it theme duru",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/duru",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "duru"
+  },
+  {
+   "id": "bashit-theme-easy",
+   "category": "theme",
+   "summary": "bash-it theme easy",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/easy",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "easy"
+  },
+  {
+   "id": "bashit-theme-elixr",
+   "category": "theme",
+   "summary": "bash-it theme elixr",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/elixr",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "elixr"
+  },
+  {
+   "id": "bashit-theme-emperor",
+   "category": "theme",
+   "summary": "bash-it theme emperor",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/emperor",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "emperor"
+  },
+  {
+   "id": "bashit-theme-envy",
+   "category": "theme",
+   "summary": "bash-it theme envy",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/envy",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "envy"
+  },
+  {
+   "id": "bashit-theme-essential",
+   "category": "theme",
+   "summary": "bash-it theme essential",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/essential",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "essential"
+  },
+  {
+   "id": "bashit-theme-font",
+   "category": "theme",
+   "summary": "bash-it theme font",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/font",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "font"
+  },
+  {
+   "id": "bashit-theme-gallifrey",
+   "category": "theme",
+   "summary": "bash-it theme gallifrey",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/gallifrey",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "gallifrey"
+  },
+  {
+   "id": "bashit-theme-gitline",
+   "category": "theme",
+   "summary": "bash-it theme gitline",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/gitline",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "gitline"
+  },
+  {
+   "id": "bashit-theme-hawaii50",
+   "category": "theme",
+   "summary": "bash-it theme hawaii50",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/hawaii50",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "hawaii50"
+  },
+  {
+   "id": "bashit-theme-inretio",
+   "category": "theme",
+   "summary": "bash-it theme inretio",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/inretio",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "inretio"
+  },
+  {
+   "id": "bashit-theme-iterate",
+   "category": "theme",
+   "summary": "bash-it theme iterate",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/iterate",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "iterate"
+  },
+  {
+   "id": "bashit-theme-kitsune",
+   "category": "theme",
+   "summary": "bash-it theme kitsune",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/kitsune",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "kitsune"
+  },
+  {
+   "id": "bashit-theme-lambda",
+   "category": "theme",
+   "summary": "bash-it theme lambda",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/lambda",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "lambda"
+  },
+  {
+   "id": "bashit-theme-liquidprompt",
+   "category": "theme",
+   "summary": "bash-it theme liquidprompt",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/liquidprompt",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "liquidprompt"
+  },
+  {
+   "id": "bashit-theme-luan",
+   "category": "theme",
+   "summary": "bash-it theme luan",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/luan",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "luan"
+  },
+  {
+   "id": "bashit-theme-mairan",
+   "category": "theme",
+   "summary": "bash-it theme mairan",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/mairan",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "mairan"
+  },
+  {
+   "id": "bashit-theme-mbriggs",
+   "category": "theme",
+   "summary": "bash-it theme mbriggs",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/mbriggs",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "mbriggs"
+  },
+  {
+   "id": "bashit-theme-metal",
+   "category": "theme",
+   "summary": "bash-it theme metal",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/metal",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "metal"
+  },
+  {
+   "id": "bashit-theme-minimal",
+   "category": "theme",
+   "summary": "bash-it theme minimal",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/minimal",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "minimal"
+  },
+  {
+   "id": "bashit-theme-modern",
+   "category": "theme",
+   "summary": "bash-it theme modern",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/modern",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "modern"
+  },
+  {
+   "id": "bashit-theme-modern-t",
+   "category": "theme",
+   "summary": "bash-it theme modern-t",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/modern-t",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "modern-t"
+  },
+  {
+   "id": "bashit-theme-modern-time",
+   "category": "theme",
+   "summary": "bash-it theme modern-time",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/modern-time",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "modern-time"
+  },
+  {
+   "id": "bashit-theme-morris",
+   "category": "theme",
+   "summary": "bash-it theme morris",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/morris",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "morris"
+  },
+  {
+   "id": "bashit-theme-n0qorg",
+   "category": "theme",
+   "summary": "bash-it theme n0qorg",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/n0qorg",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "n0qorg"
+  },
+  {
+   "id": "bashit-theme-newin",
+   "category": "theme",
+   "summary": "bash-it theme newin",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/newin",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "newin"
+  },
+  {
+   "id": "bashit-theme-norbu",
+   "category": "theme",
+   "summary": "bash-it theme norbu",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/norbu",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "norbu"
+  },
+  {
+   "id": "bashit-theme-nwinkler",
+   "category": "theme",
+   "summary": "bash-it theme nwinkler",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/nwinkler",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "nwinkler"
+  },
+  {
+   "id": "bashit-theme-nwinkler_random_colors",
+   "category": "theme",
+   "summary": "bash-it theme nwinkler_random_colors",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/nwinkler_random_colors",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "nwinkler_random_colors"
+  },
+  {
+   "id": "bashit-theme-oh-my-posh",
+   "category": "theme",
+   "summary": "bash-it theme oh-my-posh",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/oh-my-posh",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "oh-my-posh"
+  },
+  {
+   "id": "bashit-theme-parrot",
+   "category": "theme",
+   "summary": "bash-it theme parrot",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/parrot",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "parrot"
+  },
+  {
+   "id": "bashit-theme-pete",
+   "category": "theme",
+   "summary": "bash-it theme pete",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/pete",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "pete"
+  },
+  {
+   "id": "bashit-theme-powerline",
+   "category": "theme",
+   "summary": "bash-it theme powerline",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/powerline",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "powerline"
+  },
+  {
+   "id": "bashit-theme-powerline-multiline",
+   "category": "theme",
+   "summary": "bash-it theme powerline-multiline",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/powerline-multiline",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "powerline-multiline"
+  },
+  {
+   "id": "bashit-theme-powerline-naked",
+   "category": "theme",
+   "summary": "bash-it theme powerline-naked",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/powerline-naked",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "powerline-naked"
+  },
+  {
+   "id": "bashit-theme-powerline-plain",
+   "category": "theme",
+   "summary": "bash-it theme powerline-plain",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/powerline-plain",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "powerline-plain"
+  },
+  {
+   "id": "bashit-theme-powerturk",
+   "category": "theme",
+   "summary": "bash-it theme powerturk",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/powerturk",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "powerturk"
+  },
+  {
+   "id": "bashit-theme-primer",
+   "category": "theme",
+   "summary": "bash-it theme primer",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/primer",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "primer"
+  },
+  {
+   "id": "bashit-theme-pro",
+   "category": "theme",
+   "summary": "bash-it theme pro",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/pro",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "pro"
+  },
+  {
+   "id": "bashit-theme-pure",
+   "category": "theme",
+   "summary": "bash-it theme pure",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/pure",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "pure"
+  },
+  {
+   "id": "bashit-theme-purity",
+   "category": "theme",
+   "summary": "bash-it theme purity",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/purity",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "purity"
+  },
+  {
+   "id": "bashit-theme-radek",
+   "category": "theme",
+   "summary": "bash-it theme radek",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/radek",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "radek"
+  },
+  {
+   "id": "bashit-theme-rainbowbrite",
+   "category": "theme",
+   "summary": "bash-it theme rainbowbrite",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/rainbowbrite",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "rainbowbrite"
+  },
+  {
+   "id": "bashit-theme-ramses",
+   "category": "theme",
+   "summary": "bash-it theme ramses",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/ramses",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "ramses"
+  },
+  {
+   "id": "bashit-theme-rana",
+   "category": "theme",
+   "summary": "bash-it theme rana",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/rana",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "rana"
+  },
+  {
+   "id": "bashit-theme-redline",
+   "category": "theme",
+   "summary": "bash-it theme redline",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/redline",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "redline"
+  },
+  {
+   "id": "bashit-theme-rjorgenson",
+   "category": "theme",
+   "summary": "bash-it theme rjorgenson",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/rjorgenson",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "rjorgenson"
+  },
+  {
+   "id": "bashit-theme-robbyrussell",
+   "category": "theme",
+   "summary": "bash-it theme robbyrussell",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/robbyrussell",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "robbyrussell"
+  },
+  {
+   "id": "bashit-theme-roderik",
+   "category": "theme",
+   "summary": "bash-it theme roderik",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/roderik",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "roderik"
+  },
+  {
+   "id": "bashit-theme-sexy",
+   "category": "theme",
+   "summary": "bash-it theme sexy",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/sexy",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "sexy"
+  },
+  {
+   "id": "bashit-theme-simple",
+   "category": "theme",
+   "summary": "bash-it theme simple",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/simple",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "simple"
+  },
+  {
+   "id": "bashit-theme-sirup",
+   "category": "theme",
+   "summary": "bash-it theme sirup",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/sirup",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "sirup"
+  },
+  {
+   "id": "bashit-theme-slick",
+   "category": "theme",
+   "summary": "bash-it theme slick",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/slick",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "slick"
+  },
+  {
+   "id": "bashit-theme-standard",
+   "category": "theme",
+   "summary": "bash-it theme standard",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/standard",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "standard"
+  },
+  {
+   "id": "bashit-theme-tokyonight",
+   "category": "theme",
+   "summary": "bash-it theme tokyonight",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/tokyonight",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "tokyonight"
+  },
+  {
+   "id": "bashit-theme-tonka",
+   "category": "theme",
+   "summary": "bash-it theme tonka",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/tonka",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "tonka"
+  },
+  {
+   "id": "bashit-theme-tonotdo",
+   "category": "theme",
+   "summary": "bash-it theme tonotdo",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/tonotdo",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "tonotdo"
+  },
+  {
+   "id": "bashit-theme-tylenol",
+   "category": "theme",
+   "summary": "bash-it theme tylenol",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/tylenol",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "tylenol"
+  },
+  {
+   "id": "bashit-theme-wanelo",
+   "category": "theme",
+   "summary": "bash-it theme wanelo",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/wanelo",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "wanelo"
+  },
+  {
+   "id": "bashit-theme-zitron",
+   "category": "theme",
+   "summary": "bash-it theme zitron",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/zitron",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "zitron"
+  },
+  {
+   "id": "bashit-theme-zork",
+   "category": "theme",
+   "summary": "bash-it theme zork",
+   "license": "MIT",
+   "url": "https://github.com/Bash-it/bash-it/tree/master/themes/zork",
+   "manager": "bash-it",
+   "asset_kind": "theme",
+   "asset": "zork"
+  },
+  {
+   "id": "bash-preexec",
+   "category": "plugin",
+   "summary": "precmd/preexec hook layer for bash (the zsh-preeq equivalent)",
+   "license": "MIT",
+   "url": "https://github.com/rcaloras/bash-preexec",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "bash-preexec.sh",
+   "origin": "https://github.com/rcaloras/bash-preexec.git"
+  },
+  {
+   "id": "liquidprompt",
+   "category": "prompt",
+   "summary": "adaptive prompt: git/virtualenv/weather-aware, bash 3.2+",
+   "license": "AGPL-3.0-only",
+   "url": "https://github.com/liquidprompt/liquidprompt",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "liquidprompt",
+   "origin": "https://github.com/liquidprompt/liquidprompt.git"
+  },
+  {
+   "id": "bash-git-prompt",
+   "category": "prompt",
+   "summary": "git status prompt line with themes (source gitprompt.sh)",
+   "license": "BSD-2-Clause",
+   "url": "https://github.com/magicmonty/bash-git-prompt",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "gitprompt.sh",
+   "origin": "https://github.com/magicmonty/bash-git-prompt.git"
+  },
+  {
+   "id": "sexy-bash-prompt",
+   "category": "prompt",
+   "summary": "minimal colored prompt (`make install` model; info-only in niu)",
+   "license": "MIT",
+   "url": "https://github.com/twolfson/sexy-bash-prompt"
+  },
+  {
+   "id": "bpkg",
+   "category": "manager",
+   "summary": "lightweight bash package manager (bpkg install owner/pkg)",
+   "license": "MIT",
+   "url": "https://github.com/bpkg/bpkg",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "bpkg.sh",
+   "origin": "https://github.com/bpkg/bpkg.git"
+  },
+  {
+   "id": "complete-alias",
+   "category": "completion",
+   "summary": "automagical alias completion: completes what your aliases expand to (needs bash-completion)",
+   "license": "GPL-3.0-only",
+   "url": "https://github.com/cykerway/complete-alias",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "complete_alias",
+   "origin": "https://github.com/cykerway/complete-alias.git"
+  },
+  {
+   "id": "fzf-git.sh",
+   "category": "plugin",
+   "summary": "fzf key bindings for git objects (files, branches, commits); script only — needs the fzf binary (package-manager install)",
+   "license": "MIT",
+   "url": "https://github.com/junegunn/fzf-git.sh",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "fzf-git.sh",
+   "origin": "https://github.com/junegunn/fzf-git.sh.git"
+  },
+  {
+   "id": "bash-sensible",
+   "category": "plugin",
+   "summary": "sane bash defaults in one sourceable file (vim-sensible for bash)",
+   "license": "MIT",
+   "url": "https://github.com/mrzool/bash-sensible",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "sensible.bash",
+   "origin": "https://github.com/mrzool/bash-sensible.git"
+  },
+  {
+   "id": "git-flow-completion",
+   "category": "completion",
+   "summary": "bash completion for git-flow (feature/hotfix/release/support commands)",
+   "license": "MIT",
+   "url": "https://github.com/bobthecow/git-flow-completion",
+   "driver": "git",
+   "kind": "generic",
+   "entry": "git-flow-completion.bash",
+   "origin": "https://github.com/bobthecow/git-flow-completion.git"
+  },
+  {
+   "id": "basher",
+   "category": "manager",
+   "summary": "package manager with per-package bins (PATH + `basher init` model; info-only in niu)",
+   "license": "MIT",
+   "url": "https://github.com/basherpm/basher"
+  },
+  {
+   "id": "ble.sh",
+   "category": "plugin",
+   "summary": "line editor: syntax highlight, autosuggest, vim mode for bash (build from source)",
+   "license": "BSD-3-Clause",
+   "url": "https://github.com/akinomyoga/ble.sh"
+  },
+  {
+   "id": "fzf",
+   "category": "plugin",
+   "summary": "fuzzy finder with official bash key-bindings and completion",
+   "license": "MIT",
+   "url": "https://github.com/junegunn/fzf",
+   "driver": "download",
+   "version": "v0.74.4",
+   "bins": [
+    "fzf"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-windows_amd64.zip",
+     "archive": "zip",
+     "sha256": "5e63c0e798406fcb9c51a9fed4988398e25fdabf8c670e32c16caf7b4a7ed02d"
+    },
+    "linux-x64": {
+     "url": "https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-linux_amd64.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "05e6813a337cc722c3ed07e54a764b75cc5d671e2e60459db0ba696ee5fa7504"
+    }
+   }
+  },
+  {
+   "id": "starship",
+   "category": "prompt",
+   "summary": "cross-shell prompt: fast, configurable, git/k8s/module aware",
+   "license": "ISC",
+   "url": "https://github.com/starship/starship",
+   "driver": "download",
+   "version": "v1.26.0",
+   "bins": [
+    "starship"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-pc-windows-msvc.zip",
+     "archive": "zip",
+     "sha256": "690021e22f2bf2c57d5867dc0fababe5e55e714c26942bd909ffddb6c5df42f2"
+    },
+    "linux-x64": {
+     "url": "https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-unknown-linux-gnu.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "321f0dd7af8340a5f2e6a8fec6538a04f617486f9ec70d878f91c09cd8deef22"
+    },
+    "linux-arm64": {
+     "url": "https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-unknown-linux-musl.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "dc30189378d2f2e287384e8a692d3f95ad1df64cf0e8c36aa9201516028aed6b"
+    }
+   }
+  },
+  {
+   "id": "ripgrep",
+   "category": "plugin",
+   "summary": "fast recursive grep (rg) with regex defaults and .gitignore respect",
+   "license": "MIT OR Unlicense",
+   "url": "https://github.com/BurntSushi/ripgrep",
+   "driver": "download",
+   "version": "15.2.0",
+   "bins": [
+    "rg"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+     "archive": "zip",
+     "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+     "bins": [
+      "ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+     "bins": [
+      "ripgrep-15.2.0-x86_64-unknown-linux-musl/rg"
+     ]
+    }
+   }
+  },
+  {
+   "id": "fd",
+   "category": "plugin",
+   "summary": "fast, user-friendly find (fd) with sane defaults and color output",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/sharkdp/fd",
+   "driver": "download",
+   "version": "v10.4.2",
+   "bins": [
+    "fd"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-pc-windows-msvc.zip",
+     "archive": "zip",
+     "sha256": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
+     "bins": [
+      "fd-v10.4.2-x86_64-pc-windows-msvc/fd.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "def59805cd14b5651b68990855f426ad087f3b96881296d963910431ba3143c8",
+     "bins": [
+      "fd-v10.4.2-x86_64-unknown-linux-gnu/fd"
+     ]
+    }
+   }
+  },
+  {
+   "id": "bat",
+   "category": "plugin",
+   "summary": "cat(1) clone with syntax highlighting and git integration",
+   "license": "MIT OR Apache-2.0",
+   "url": "https://github.com/sharkdp/bat",
+   "driver": "download",
+   "version": "v0.26.1",
+   "bins": [
+    "bat"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-x86_64-pc-windows-msvc.zip",
+     "archive": "zip",
+     "sha256": "0f729b4b6f5f28d395c641eacc2e9ff68d0096b85aa0eec344aa62425144b69b",
+     "bins": [
+      "bat-v0.26.1-x86_64-pc-windows-msvc/bat.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-x86_64-unknown-linux-gnu.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "726f04c8f576a7fd18b7634f1bbf2f915c43494c1c0f013baa3287edb0d5a2a3",
+     "bins": [
+      "bat-v0.26.1-x86_64-unknown-linux-gnu/bat"
+     ]
+    }
+   }
+  },
+  {
+   "id": "eza",
+   "category": "plugin",
+   "summary": "modern ls replacement with icons, git status, and tree view",
+   "license": "MIT",
+   "url": "https://github.com/eza-community/eza",
+   "driver": "download",
+   "version": "v0.23.5",
+   "bins": [
+    "eza"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/eza-community/eza/releases/download/v0.23.5/eza.exe_x86_64-pc-windows-gnu.zip",
+     "archive": "zip",
+     "sha256": "c830638c844a5b89d39ba662b5549903a71fa539018e813880f5b8afa77bac2e",
+     "bins": [
+      "eza.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/eza-community/eza/releases/download/v0.23.5/eza_x86_64-unknown-linux-gnu.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "35c70c5c43c29108075e58b893234c67ef585f0b53a7eaf8e9e7d4eec9f339b4",
+     "bins": [
+      "eza"
+     ]
+    }
+   }
+  },
+  {
+   "id": "zoxide",
+   "category": "plugin",
+   "summary": "smarter cd that learns your habits (z/zi with fzf integration)",
+   "license": "MIT",
+   "url": "https://github.com/ajeetdsouza/zoxide",
+   "driver": "download",
+   "version": "v0.10.0",
+   "bins": [
+    "zoxide"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-x86_64-pc-windows-msvc.zip",
+     "archive": "zip",
+     "sha256": "f465ae548f8754c8e7edbc60b45fbf58c92bfe123db83d790252d6810fa5daf1",
+     "bins": [
+      "zoxide.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-x86_64-unknown-linux-musl.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "2d93385b99f3e82cf2701609a1bffcad863fbeb75aa3fe7eb6be4d29be68b1ae",
+     "bins": [
+      "zoxide"
+     ]
+    }
+   }
+  },
+  {
+   "id": "dust",
+   "category": "plugin",
+   "summary": "du + tree: intuitive disk usage analyzer",
+   "license": "Apache-2.0",
+   "url": "https://github.com/bootandy/dust",
+   "driver": "download",
+   "version": "v1.2.4",
+   "bins": [
+    "dust"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/bootandy/dust/releases/download/v1.2.4/dust-v1.2.4-x86_64-pc-windows-msvc.zip",
+     "archive": "zip",
+     "sha256": "eb08d642f016787bb9fc918a4dc5f34665463657fddf83a40f2441cbf020fb4c",
+     "bins": [
+      "dust-v1.2.4-x86_64-pc-windows-msvc/dust.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/bootandy/dust/releases/download/v1.2.4/dust-v1.2.4-x86_64-unknown-linux-gnu.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "707cfdbfb9d2dc536f8c3853815bbe98a01012f2772463835edae06816551160",
+     "bins": [
+      "dust-v1.2.4-x86_64-unknown-linux-gnu/dust"
+     ]
+    }
+   }
+  },
+  {
+   "id": "duf",
+   "category": "plugin",
+   "summary": "disk usage/free utility with a clean tabular display",
+   "license": "MIT",
+   "url": "https://github.com/muesli/duf",
+   "driver": "download",
+   "version": "v0.9.1",
+   "bins": [
+    "duf"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/muesli/duf/releases/download/v0.9.1/duf_0.9.1_windows_x86_64.zip",
+     "archive": "zip",
+     "sha256": "503934be81f847d9ddb1b739834217480633435ad16515dd199e372c0b2e1afc",
+     "bins": [
+      "duf.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/muesli/duf/releases/download/v0.9.1/duf_0.9.1_linux_x86_64.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "5add851e7062c5e56939abb664705e4d14fa2d06289490aff31d51f153832de7",
+     "bins": [
+      "duf"
+     ]
+    }
+   }
+  },
+  {
+   "id": "erdtree",
+   "category": "plugin",
+   "summary": "modern tree/disk-usage hybrid (erd) with parallel traversal",
+   "license": "MIT",
+   "url": "https://github.com/solidiquis/erdtree",
+   "driver": "download",
+   "version": "v3.1.2",
+   "bins": [
+    "erd"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/solidiquis/erdtree/releases/download/v3.1.2/erd-v3.1.2-x86_64-pc-windows-msvc.exe",
+     "archive": "raw",
+     "sha256": "df359e20e5a38384c27b98667d780c5bd5ab1ce4bac739a5fa9c5ed25511a0a1",
+     "bins": [
+      "erd.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/solidiquis/erdtree/releases/download/v3.1.2/erd-v3.1.2-x86_64-unknown-linux-gnu.tar.gz",
+     "archive": "tar-gzip",
+     "sha256": "9354667bc1ef744cb363604d4eb5b6784205b7fb1c283f4c0f9d78e3ad07e42f",
+     "bins": [
+      "erd"
+     ]
+    }
+   }
+  },
+  {
+   "id": "direnv",
+   "category": "plugin",
+   "summary": "per-directory environment loader (un/ad-hoc env on cd)",
+   "license": "MIT",
+   "url": "https://github.com/direnv/direnv",
+   "driver": "download",
+   "version": "v2.37.1",
+   "bins": [
+    "direnv"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/direnv/direnv/releases/download/v2.37.1/direnv.windows-amd64",
+     "archive": "raw",
+     "sha256": "d96fc8b7cf020c2d4c1dbbc2ccec5fd1cab05b51c491f02c8527a7fa6c50a1cd",
+     "bins": [
+      "direnv.exe"
+     ]
+    },
+    "linux-x64": {
+     "url": "https://github.com/direnv/direnv/releases/download/v2.37.1/direnv.linux-amd64",
+     "archive": "raw",
+     "sha256": "1f1b93dd6f38523fde26dfac96151ef9d31a374e3005cd3345fb93555ae0c9b5",
+     "bins": [
+      "direnv"
+     ]
+    }
+   }
+  },
+  {
+   "id": "niugit",
+   "category": "plugin",
+   "summary": "native Windows git without MSYS (niu-git build); the setup wizard's git pick",
+   "license": "GPL-2.0-only",
+   "url": "https://github.com/unixwin/niu-git",
+   "driver": "download",
+   "version": "v2.56.0.3",
+   "bins": [
+    "git.exe"
+   ],
+   "downloads": {
+    "windows-x64": {
+     "url": "https://github.com/unixwin/niu-git/releases/download/v2.56.0.3/niu-git-2.56.0.windows.4-x64.zip",
+     "archive": "zip",
+     "sha256": "fc700ae92fb50209344ad7d18649e1fc1cb5cba21ffe75d95ec5668fd1e625a1",
+     "bins": [
+      "git.exe"
+     ]
+    }
+   }
+  },
+  {
+   "id": "thefuck",
+   "category": "plugin",
+   "summary": "fixes your previous command (thefuck); no binary release — install via pip or a package manager",
+   "license": "MIT",
+   "url": "https://github.com/nvbn/thefuck"
+  }
+ ]
+}

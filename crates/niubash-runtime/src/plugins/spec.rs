@@ -1,4 +1,4 @@
-//! The declarative plugin spec — `~/.niubash/plugins.toml`
+//! The declarative plugin spec — `~/.niubash/plugins.json`
 //! (design §14.6.3, owner ruling 2026-10-03: "添加插件应该用配置文件，
 //! 不只是 CLI").
 //!
@@ -9,30 +9,37 @@
 //! sync` (and the CLI verbs, which are sugar over spec edits + sync)
 //! reconciles the two and materializes the managed rc blocks from the spec.
 //!
-//! ```toml
-//! schema = "niubash:plugin-spec@0.1.0"
-//!
-//! [[sources]]
-//! target = "oh-my-bash"            # catalog id | owner/repo | url | path
-//! enable = ["git", "npm"]
-//! theme  = "agnoster"
-//!
-//! [[sources]]
-//! target = "rcaloras/bash-preexec" # wild file source (GitHub shorthand)
-//! enable = ["bash-preexec.sh"]     # asset names are tree-relative paths
+//! ```json
+//! {
+//!   "schema": "niubash:plugin-spec@0.1.0",
+//!   "sources": [
+//!     { "target": "oh-my-bash", "enable": ["git", "npm"], "theme": "agnoster" },
+//!     { "target": "rcaloras/bash-preexec", "enable": ["bash-preexec.sh"] }
+//!   ]
+//! }
 //! ```
+//!
+//! The spec is JSON since the 1.5.0 product-TOML deletion; the pre-1.5.0
+//! TOML spec (`plugins.toml`, same directory) is converted exactly once
+//! by [`migrate_legacy_spec`] (`niu plugin migrate`) — no runtime path
+//! reads it.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::path_utils::shell_home_dir;
 
 pub const PLUGIN_SPEC_SCHEMA: &str = "niubash:plugin-spec@0.1.0";
 
+/// Pre-1.5.0 TOML spec name. Read exactly once, by
+/// [`migrate_legacy_spec`]; no runtime path looks for it.
+const LEGACY_SPEC_FILE: &str = "plugins.toml";
+
 /// Where the spec lives: `$NIU_PLUGIN_SPEC` overrides (tests, portable
-/// setups); default `~/.niubash/plugins.toml`.
+/// setups); default `~/.niubash/plugins.json`.
 pub fn spec_path() -> PathBuf {
     if let Some(value) = std::env::var_os("NIU_PLUGIN_SPEC") {
         let path = PathBuf::from(value);
@@ -43,7 +50,13 @@ pub fn spec_path() -> PathBuf {
     shell_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".niubash")
-        .join("plugins.toml")
+        .join("plugins.json")
+}
+
+/// Where the pre-1.5.0 TOML spec lived: the sibling of [`spec_path`]
+/// under its retired name (migrate-only).
+fn legacy_spec_path() -> PathBuf {
+    spec_path().with_file_name(LEGACY_SPEC_FILE)
 }
 
 /// The parsed spec file.
@@ -89,67 +102,145 @@ pub struct SpecSource {
     pub enable: Vec<String>,
 }
 
+/// Parse spec JSON text. A blank document is the empty spec: the TOML
+/// parser this replaced read an empty file as a valid empty document,
+/// and a zero-byte `plugins.json` (touched into place, or truncated by a
+/// crashed editor) must not brick every verb with serde_json's
+/// `EOF while parsing a value` error.
+fn parse_spec_json(text: &str) -> anyhow::Result<PluginSpec> {
+    if text.trim().is_empty() {
+        return Ok(PluginSpec::default());
+    }
+    Ok(serde_json::from_str(text)?)
+}
+
 /// Read the spec. `Ok(None)` = no spec file yet (imperative/legacy mode:
-/// nothing is declared, sync only reports).
+/// nothing is declared, sync only reports). A blank spec file is
+/// present-but-empty, not missing.
 pub fn load_spec() -> anyhow::Result<Option<PluginSpec>> {
     let path = spec_path();
     if !path.is_file() {
         return Ok(None);
     }
     let text = fs::read_to_string(&path)?;
-    let spec: PluginSpec = toml::from_str(&text)?;
-    Ok(Some(spec))
+    Ok(Some(parse_spec_json(&text)?))
 }
 
-/// Write the spec (creating parent directories as needed).
-pub fn save_spec(spec: &PluginSpec) -> anyhow::Result<()> {
-    let path = spec_path();
+/// Render the spec document: pretty JSON with the schema marker stamped
+/// whenever sources are declared (so a hand-editor sees the format name
+/// first, the role the hand-rendered TOML header line used to play); an
+/// empty spec renders as the minimal `{}`.
+fn render_spec(spec: &PluginSpec) -> anyhow::Result<String> {
+    let mut rendered = spec.clone();
+    if !rendered.sources.is_empty() && rendered.schema.is_none() {
+        rendered.schema = Some(PLUGIN_SPEC_SCHEMA.to_string());
+    }
+    let mut body = serde_json::to_string_pretty(&rendered)?;
+    body.push('\n');
+    Ok(body)
+}
+
+fn write_spec_to(path: &Path, spec: &PluginSpec) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
-    }
-    let mut out = String::new();
-    // A stable, hand-edit-friendly rendering: schema line, then entries in
-    // declaration order with blank lines between them.
-    if !spec.sources.is_empty() {
-        out.push_str(&format!("schema = \"{PLUGIN_SPEC_SCHEMA}\"\n"));
-    }
-    for source in &spec.sources {
-        out.push_str("\n[[sources]]\n");
-        out.push_str(&format!("target = {}\n", toml_quote(&source.target)));
-        if let Some(id) = &source.id {
-            out.push_str(&format!("id = {}\n", toml_quote(id)));
-        }
-        if let Some(kind) = &source.kind {
-            out.push_str(&format!("kind = {}\n", toml_quote(kind)));
-        }
-        if let Some(ref_name) = &source.ref_name {
-            out.push_str(&format!("ref = {}\n", toml_quote(ref_name)));
-        }
-        if let Some(theme) = &source.theme {
-            out.push_str(&format!("theme = {}\n", toml_quote(theme)));
-        }
-        if !source.enable.is_empty() {
-            let items: Vec<String> = source.enable.iter().map(|n| toml_quote(n)).collect();
-            out.push_str(&format!("enable = [{}]\n", items.join(", ")));
-        }
-    }
-    if out.is_empty() {
-        out.push_str(&format!(
-            "# niubash plugin spec — declare sources here, then run `niu plugin sync`.\n\
-             # schema = \"{PLUGIN_SPEC_SCHEMA}\"\n"
-        ));
     }
     // niubash#359 (design §4.4): the spec is control-plane state, so it
     // gets the same #304 atomic swap (a concurrent reader — a sync or the
     // doctor in another terminal — never observes a truncate window). The
     // bare fs::write here was the exact hazard the rc writers had already
     // retired.
-    crate::path_utils::write_file_atomic(&path, out.as_bytes())?;
+    crate::path_utils::write_file_atomic(path, render_spec(spec)?.as_bytes())?;
     Ok(())
 }
 
-fn toml_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
+/// Write the spec (creating parent directories as needed).
+pub fn save_spec(spec: &PluginSpec) -> anyhow::Result<()> {
+    write_spec_to(&spec_path(), spec)
+}
+
+/// Outcome of [`migrate_legacy_spec`]: what the one-shot bridge moved.
+#[derive(Debug, Clone)]
+pub struct SpecMigrationReport {
+    /// The legacy spec file, renamed aside (present iff one was converted).
+    pub backup: Option<PathBuf>,
+    /// Targets the legacy spec declared that the JSON spec did not
+    /// already carry (merged in by target).
+    pub sources: Vec<String>,
+    /// The legacy spec, left in place because it could not be converted
+    /// (named, with the reason — never guessed at).
+    pub skipped: Vec<String>,
+}
+
+/// One-time migration from the pre-1.5.0 TOML spec (`plugins.toml`) to
+/// the JSON spec (`plugins.json`). This is the ONLY code that still
+/// reads the TOML form — the runtime never does (the same one-shot
+/// pattern as `niu config migrate` on the config face and
+/// `distros::migrate_legacy_distros` on the distro face). The legacy
+/// file is renamed to `<name>.migrated-<UTC timestamp>`, never deleted.
+/// When there is no legacy spec this returns `Ok(None)`; a spec that
+/// does not parse as the legacy shape is skipped and named in the
+/// report (left in place, fixable by hand, re-runnable) while the rest
+/// of `niu plugin migrate` still proceeds. An existing JSON spec wins
+/// entry-by-entry (keyed by `target`); legacy entries it does not
+/// declare are appended. A JSON spec niu cannot read refuses the
+/// conversion before anything on disk changes.
+pub fn migrate_legacy_spec() -> anyhow::Result<Option<SpecMigrationReport>> {
+    let legacy_path = legacy_spec_path();
+    let json_path = if legacy_path == spec_path() {
+        // An override still naming the retired file itself: the JSON
+        // form takes the same stem with the new extension.
+        legacy_path.with_extension("json")
+    } else {
+        spec_path()
+    };
+    let text = match fs::read_to_string(&legacy_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("could not read {}", legacy_path.display()))
+        }
+    };
+    let legacy_spec: PluginSpec = match toml::from_str(&text) {
+        Ok(spec) => spec,
+        Err(err) => {
+            return Ok(Some(SpecMigrationReport {
+                backup: None,
+                sources: Vec::new(),
+                skipped: vec![format!(
+                    "{}: could not parse the legacy TOML spec ({err})",
+                    legacy_path.display()
+                )],
+            }));
+        }
+    };
+    let mut merged = PluginSpec::default();
+    if json_path.is_file() {
+        let existing_text = fs::read_to_string(&json_path)?;
+        merged = parse_spec_json(&existing_text).with_context(|| {
+            format!(
+                "could not parse {} — fix or remove the file by hand; \
+                 niu never rewrites a spec it cannot read",
+                json_path.display()
+            )
+        })?;
+    }
+    if merged.schema.is_none() {
+        merged.schema = legacy_spec.schema.clone();
+    }
+    let mut carried = Vec::new();
+    for entry in legacy_spec.sources {
+        if !merged.sources.iter().any(|e| e.target == entry.target) {
+            carried.push(entry.target.clone());
+            merged.sources.push(entry);
+        }
+    }
+    write_spec_to(&json_path, &merged)?;
+    let backup = super::distros::rename_legacy_file(&legacy_path)?;
+    Ok(Some(SpecMigrationReport {
+        backup: Some(backup),
+        sources: carried,
+        skipped: Vec::new(),
+    }))
 }
 
 impl PluginSpec {
@@ -229,13 +320,13 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("plugins.toml");
+        let path = dir.join("plugins.json");
         let guard = EnvGuard::set(&path);
         (path, guard)
     }
 
     #[test]
-    fn spec_round_trips_through_toml() {
+    fn spec_round_trips_through_json() {
         let _env_lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -263,11 +354,15 @@ mod tests {
         };
         save_spec(&spec).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[[sources]]"), "{text}");
-        assert!(text.contains("target = 'oh-my-bash'"), "{text}");
-        assert!(text.contains("theme = 'agnoster'"), "{text}");
-        assert!(text.contains("enable = ['git', 'npm']"), "{text}");
-        assert!(text.contains("target = 'rcaloras/bash-preexec'"), "{text}");
+        assert!(text.contains("\"sources\""), "{text}");
+        assert!(text.contains("\"target\": \"oh-my-bash\""), "{text}");
+        assert!(text.contains("\"theme\": \"agnoster\""), "{text}");
+        assert!(text.contains("\"enable\""), "{text}");
+        assert!(text.contains("\"git\""), "{text}");
+        assert!(
+            text.contains("\"target\": \"rcaloras/bash-preexec\""),
+            "{text}"
+        );
         // Reload parses back to the same spec.
         let loaded = load_spec().unwrap().expect("spec present");
         assert_eq!(loaded, spec);
@@ -283,9 +378,26 @@ mod tests {
         assert!(load_spec().unwrap().is_none());
         save_spec(&PluginSpec::default()).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("niu plugin sync"), "{text}");
+        assert_eq!(text.trim(), "{}", "{text}");
         // An empty spec still parses as present-but-empty.
         assert_eq!(load_spec().unwrap().unwrap().sources, Vec::new());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn blank_spec_file_reads_as_present_but_empty() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (path, _guard) = temp_spec("blank");
+        // Zero-byte: the shape the TOML reader always accepted as an
+        // empty spec (the prune-hint sync in tests/plugin_spec_sync.rs
+        // writes exactly this file, then syncs against it).
+        fs::write(&path, "").unwrap();
+        assert_eq!(load_spec().unwrap(), Some(PluginSpec::default()));
+        // Whitespace-only is the same blank document.
+        fs::write(&path, "  \n").unwrap();
+        assert_eq!(load_spec().unwrap(), Some(PluginSpec::default()));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -332,5 +444,127 @@ mod tests {
             enable: vec![],
         };
         assert_eq!(resolve_entry_id(&wild), None);
+    }
+
+    const LEGACY_SPEC_TOML: &str = "schema = \"niubash:plugin-spec@0.1.0\"\n\
+        \n\
+        [[sources]]\n\
+        target = \"oh-my-bash\"\n\
+        enable = [\"git\", \"npm\"]\n\
+        theme = \"agnoster\"\n\
+        \n\
+        [[sources]]\n\
+        target = \"rcaloras/bash-preexec\"\n\
+        enable = [\"bash-preexec.sh\"]\n";
+
+    #[test]
+    fn migrate_converts_the_legacy_toml_spec() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (path, _guard) = temp_spec("migrate");
+        let dir = path.parent().unwrap().to_path_buf();
+        let legacy_path = dir.join("plugins.toml");
+        fs::write(&legacy_path, LEGACY_SPEC_TOML).unwrap();
+
+        // The runtime is blind to the TOML form until migrate runs.
+        assert!(load_spec().unwrap().is_none());
+
+        let report = migrate_legacy_spec()
+            .unwrap()
+            .expect("legacy spec migrates");
+        assert_eq!(
+            report.sources,
+            ["oh-my-bash", "rcaloras/bash-preexec"],
+            "{report:?}"
+        );
+        let backup = report.backup.expect("legacy renamed aside");
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("plugins.toml.migrated-"),
+            "{backup:?}"
+        );
+        assert!(!legacy_path.exists(), "legacy renamed, not copied");
+        assert_eq!(
+            fs::read_to_string(&backup).unwrap(),
+            LEGACY_SPEC_TOML,
+            "the backup keeps the original bytes"
+        );
+
+        let loaded = load_spec().unwrap().expect("spec present after migrate");
+        assert_eq!(loaded.sources.len(), 2);
+        assert_eq!(loaded.sources[0].theme.as_deref(), Some("agnoster"));
+        assert_eq!(loaded.sources[0].enable, ["git", "npm"]);
+        assert_eq!(loaded.sources[1].target, "rcaloras/bash-preexec");
+
+        // Second run: nothing left to migrate.
+        assert!(migrate_legacy_spec().unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_merges_into_an_existing_json_spec_by_target() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (path, _guard) = temp_spec("migrate-merge");
+        let dir = path.parent().unwrap().to_path_buf();
+        // The JSON spec already declares oh-my-bash (its theme wins);
+        // the legacy spec re-declares it and adds one more source.
+        save_spec(&PluginSpec {
+            schema: None,
+            sources: vec![SpecSource {
+                target: "oh-my-bash".to_string(),
+                id: None,
+                kind: None,
+                ref_name: None,
+                theme: Some("demox".to_string()),
+                enable: vec!["git".to_string()],
+            }],
+        })
+        .unwrap();
+        fs::write(dir.join("plugins.toml"), LEGACY_SPEC_TOML).unwrap();
+
+        let report = migrate_legacy_spec()
+            .unwrap()
+            .expect("legacy spec migrates");
+        assert_eq!(report.sources, ["rcaloras/bash-preexec"], "{report:?}");
+        let loaded = load_spec().unwrap().expect("spec present");
+        assert_eq!(loaded.sources.len(), 2);
+        assert_eq!(
+            loaded.sources[0].theme.as_deref(),
+            Some("demox"),
+            "the JSON entry wins by target"
+        );
+        assert_eq!(loaded.sources[1].target, "rcaloras/bash-preexec");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_skips_an_unconvertible_spec_and_leaves_it() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (path, _guard) = temp_spec("migrate-bad");
+        let dir = path.parent().unwrap().to_path_buf();
+        let legacy_path = dir.join("plugins.toml");
+        fs::write(&legacy_path, "[invalid TOML\n").unwrap();
+
+        let report = migrate_legacy_spec()
+            .unwrap()
+            .expect("a bad spec is reported, not an error");
+        assert!(report.backup.is_none(), "{report:?}");
+        assert_eq!(report.skipped.len(), 1, "{report:?}");
+        assert!(
+            report.skipped[0].contains("plugins.toml"),
+            "{}",
+            report.skipped[0]
+        );
+        assert!(legacy_path.is_file(), "the bad spec is left in place");
+        assert!(!path.exists(), "no JSON spec was written");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

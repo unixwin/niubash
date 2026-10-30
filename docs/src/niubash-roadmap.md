@@ -25,7 +25,7 @@ niubash = rubash + winuxcmd + reedline + the external bash ecosystem
 - The plugin system is the external bash ecosystem: real sources
   (oh-my-bash, bash-it, bash-completion, wild git repos) installed over
   `git clone`, driven by the declarative
-  manifest `~/.niubash/plugins.toml`, and activated through the generated
+  manifest `~/.niubash/plugins.json`, and activated through the generated
   loader `~/.niubash/generated/plugins.niu` — no verb writes the user rc
   (niubash#359, v1.4.2).
 - Plugin inventory, review, doctor, enable/disable, update, and rollback

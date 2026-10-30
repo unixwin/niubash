@@ -172,6 +172,20 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
         )?;
     }
 
+    // ── Advisory: wizard answers files (1.5.0 TOML→JSON) ──────────────────
+    // Read-only like every doctor row: the wizard converts a pre-1.5.0
+    // `wizard-answers.toml` on its load path, so the doctor only names
+    // the states that conversion leaves behind — a legacy file it
+    // refused (left untouched, its answers ignored) or an unreadable
+    // JSON — instead of letting them fail silently.
+    if let Some(problem) = crate::setup_wizard::wizard_answers_problem(&home) {
+        if problem.is_warning() {
+            writeln!(out, "  {warn} wizard answers      {}", problem.describe())?;
+        } else {
+            writeln!(out, "  {info} wizard answers      {}", problem.describe())?;
+        }
+    }
+
     // ── Advisory: plugin loader / legacy managed blocks (niubash#359) ─────
     // Read-only: the generated loader is the activation channel and the rc
     // is never touched, so a legacy managed block in the rc (the old
@@ -540,7 +554,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
             writeln!(
                 out,
                 "  {info} plugin spec         none — imperative mode \
-                 (`niu plugin add <target>` creates ~/.niubash/plugins.toml)"
+                 (`niu plugin add <target>` creates ~/.niubash/plugins.json)"
             )?;
         }
         Ok(Some(spec)) => {

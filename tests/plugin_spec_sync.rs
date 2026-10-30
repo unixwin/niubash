@@ -98,7 +98,7 @@ impl Sandbox {
             (
                 "NIU_PLUGIN_SPEC",
                 home.join(".niubash")
-                    .join("plugins.toml")
+                    .join("plugins.json")
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -134,7 +134,7 @@ impl Sandbox {
     }
 
     fn spec_path(&self) -> PathBuf {
-        self.home.join(".niubash").join("plugins.toml")
+        self.home.join(".niubash").join("plugins.json")
     }
 
     fn spec(&self) -> String {
@@ -155,13 +155,7 @@ fn sync_is_idempotent_bootstrap_quiet_and_merges_honestly() {
     fs::write(
         sandbox.spec_path(),
         format!(
-            "schema = \"niubash:plugin-spec@0.1.0\"\n\
-             \n\
-             [[sources]]\n\
-             target = '{origin}'\n\
-             id = 'oh-my-bash'\n\
-             theme = 'agnoster'\n\
-             enable = ['git', 'cargo']\n"
+            "{{\n  \"schema\": \"niubash:plugin-spec@0.1.0\",\n  \"sources\": [\n    {{ \"target\": \"{origin}\", \"id\": \"oh-my-bash\", \"theme\": \"agnoster\", \"enable\": [\"git\", \"cargo\"] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -222,12 +216,7 @@ fn sync_is_idempotent_bootstrap_quiet_and_merges_honestly() {
     fs::write(
         sandbox.spec_path(),
         format!(
-            "schema = \"niubash:plugin-spec@0.1.0\"\n\
-             \n\
-             [[sources]]\n\
-             target = '{origin}'\n\
-             id = 'oh-my-bash'\n\
-             enable = ['git']\n"
+            "{{\n  \"schema\": \"niubash:plugin-spec@0.1.0\",\n  \"sources\": [\n    {{ \"target\": \"{origin}\", \"id\": \"oh-my-bash\", \"enable\": [\"git\"] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -289,18 +278,16 @@ fn cli_sugar_matches_the_handwritten_spec_byte_for_byte() {
         );
     }
 
-    // Lane B: hand-written spec + sync.
+    // Lane B: hand-written spec + sync. The literal is written in the
+    // spec writer's canonical pretty shape (`render_spec` in spec.rs:
+    // serde_json::to_string_pretty + trailing newline) — this lane pins
+    // that the CLI's rendered declaration and a hand-written one agree
+    // byte-for-byte.
     let hand = Sandbox::new("spec-hand");
     fs::write(
         hand.spec_path(),
         format!(
-            "schema = \"niubash:plugin-spec@0.1.0\"\n\
-             \n\
-             [[sources]]\n\
-             target = '{origin}'\n\
-             id = 'oh-my-bash'\n\
-             theme = 'agnoster'\n\
-             enable = ['git']\n"
+            "{{\n  \"schema\": \"niubash:plugin-spec@0.1.0\",\n  \"sources\": [\n    {{\n      \"target\": \"{origin}\",\n      \"id\": \"oh-my-bash\",\n      \"theme\": \"agnoster\",\n      \"enable\": [\n        \"git\"\n      ]\n    }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -405,7 +392,7 @@ fn undeclared_sources_are_suggested_then_pruned() {
         "tree pruned"
     );
     let registry =
-        fs::read_to_string(sandbox.sources_root.join("registry.toml")).unwrap_or_default();
+        fs::read_to_string(sandbox.sources_root.join("registry.json")).unwrap_or_default();
     assert!(
         !registry.contains("oh-my-bash"),
         "registry entry pruned: {registry}"
@@ -455,7 +442,7 @@ fn no_spec_startup_is_silent_and_sync_suggests_adopt() {
     assert!(out.contains("imperative mode"), "{out}");
     assert!(out.contains("oh-my-bash"), "{out}");
     assert!(out.contains("niu plugin sync --adopt"), "{out}");
-    assert!(out.contains("[[sources]]"), "starter block shown: {out}");
+    assert!(out.contains("\"sources\""), "starter block shown: {out}");
     assert!(
         out.contains("niu plugin add <target>"),
         "single-source advice still named: {out}"
@@ -500,9 +487,12 @@ fn adopt_snapshots_the_live_state_and_round_trips() {
     assert!(out.contains("declared oh-my-bash"), "{out}");
     assert!(out.contains("adopted 1 source(s)"), "{out}");
     let spec = sandbox.spec();
-    assert!(spec.contains("id = 'oh-my-bash'"), "{spec}");
-    assert!(spec.contains("theme = 'agnoster'"), "{spec}");
-    assert!(spec.contains("enable = ['git']"), "{spec}");
+    assert!(spec.contains("\"id\": \"oh-my-bash\""), "{spec}");
+    assert!(spec.contains("\"theme\": \"agnoster\""), "{spec}");
+    assert!(
+        spec.contains("\"enable\"") && spec.contains("\"git\""),
+        "{spec}"
+    );
     assert_eq!(sandbox.rc(), live_rc, "adopt must not move the rc");
 
     // Round-trip: plain sync is a no-op — loader, rc and spec byte-stable.
@@ -552,12 +542,12 @@ fn plugin_add_on_an_installed_source_declares_it() {
     assert!(out.contains("Declared"), "declared, not installed: {out}");
     assert!(out.contains("already installed"), "{out}");
     let spec = sandbox.spec();
-    assert!(spec.contains("target = 'oh-my-bash'"), "{spec}");
-    assert!(spec.contains("id = 'oh-my-bash'"), "{spec}");
+    assert!(spec.contains("\"target\": \"oh-my-bash\""), "{spec}");
+    assert!(spec.contains("\"id\": \"oh-my-bash\""), "{spec}");
 
     // Exactly one tree, untouched: the add declared, it did not fetch.
-    let registry = fs::read_to_string(sandbox.sources_root.join("registry.toml")).unwrap();
-    assert_eq!(registry.matches("[[sources]]").count(), 1, "{registry}");
+    let registry = fs::read_to_string(sandbox.sources_root.join("registry.json")).unwrap();
+    assert_eq!(registry.matches("\"id\":").count(), 1, "{registry}");
     assert!(
         !registry.contains("trusted"),
         "the registry carries no trust field at all (niubash#647): {registry}"
@@ -598,7 +588,7 @@ fn plugin_add_honors_the_checksum_pin_and_rolls_back_on_failure() {
         "{wrong_out}"
     );
     assert!(
-        !sandbox.spec().contains("target ="),
+        !sandbox.spec().contains("\"target\""),
         "no stranded spec entry: {}",
         sandbox.spec()
     );
@@ -693,12 +683,12 @@ fn failed_add_rolls_back_and_prune_removes_legacy_strands() {
     );
     // Spec, registry, and tree: all clean.
     assert!(
-        !sandbox.spec().contains("target ="),
+        !sandbox.spec().contains("\"target\""),
         "no stranded spec entry: {}",
         sandbox.spec()
     );
     assert!(
-        !sandbox.sources_root.join("registry.toml").exists(),
+        !sandbox.sources_root.join("registry.json").exists(),
         "no registry record"
     );
     assert!(!sandbox.sources_root.join("oh-my-bash").exists());
@@ -718,7 +708,7 @@ fn failed_add_rolls_back_and_prune_removes_legacy_strands() {
     fs::write(
         sandbox.spec_path(),
         format!(
-            "schema = \"niubash:plugin-spec@0.1.0\"\n\n[[sources]]\ntarget = '{}'\nid = 'stranded'\n",
+            "{{\n  \"schema\": \"niubash:plugin-spec@0.1.0\",\n  \"sources\": [\n    {{ \"target\": \"{}\", \"id\": \"stranded\" }}\n  ]\n}}\n",
             missing.to_string_lossy().replace('\\', "/")
         ),
     )

@@ -7,7 +7,7 @@ repo / single-file plugin — installs on explicit command, activates only
 through an explicit enable, and loads through its **own** loader, never
 through a niubash re-implementation of it.
 
-The declarative spec `~/.niubash/plugins.toml` is the single source of
+The declarative spec `~/.niubash/plugins.json` is the single source of
 truth for *what should be installed and enabled*. The CLI verbs are sugar
 over the spec; `niu plugin sync` reconciles the spec with the machine.
 
@@ -35,21 +35,23 @@ This is byte-faithful to manually sourcing the file under GNU bash —
 including the errors a plugin produces when its framework is missing
 (§14.4, no shims; see *Troubleshooting*).
 
-## The spec: `~/.niubash/plugins.toml`
+## The spec: `~/.niubash/plugins.json`
 
-```toml
-schema = "niubash:plugin-spec@0.1.0"
-
-[[sources]]
-target = "oh-my-bash"            # catalog id | owner/repo | git url | local path
-enable = ["git", "npm"]          # manager-native selection (OMB: plugins=() rc arrays)
-theme  = "agnoster"              # optional: OSH_THEME / BASH_IT_THEME; absent = unmanaged
-
-[[sources]]
-target = "rcaloras/bash-preexec" # wild file source: GitHub shorthand
-id     = "bash-preexec"          # bound automatically at first sync
-enable = ["bash-preexec.sh"]     # asset names are tree-relative paths
+```json
+{
+  "schema": "niubash:plugin-spec@0.1.0",
+  "sources": [
+    { "target": "oh-my-bash", "enable": ["git", "npm"], "theme": "agnoster" },
+    { "target": "rcaloras/bash-preexec", "id": "bash-preexec", "enable": ["bash-preexec.sh"] }
+  ]
+}
 ```
+
+(`target` is a catalog id | owner/repo | git url | local path; `enable` is
+the manager-native selection — OMB: `plugins=()` rc arrays, wild sources:
+tree-relative paths; `theme` is optional — OSH_THEME / BASH_IT_THEME,
+absent = unmanaged; a wild source's `id` is bound automatically at first
+sync.)
 
 Fields:
 
@@ -85,7 +87,7 @@ claimed theme: a source with no selection of its own does not load its
 framework on top of another source's claimed theme.
 
 The spec declares *what should exist*; the registry
-(`~/.niubash/sources/registry.toml`, schema `@0.3.0`) locks *what exists*
+(`~/.niubash/sources/registry.json`, schema `@0.4.0`) locks *what exists*
 (commit + tree checksum pins) and remembers the last selection the spec
 materialized (`spec_enabled`/`spec_theme`). This is the same spec + lock
 pair lazy.nvim/vim-plug use.
@@ -160,22 +162,24 @@ undeclared / no spec).
 
 Two consequences of the explicit-only design:
 
-- **No spec → nothing to reconcile.** Imperative mode (no `plugins.toml`)
+- **No spec → nothing to reconcile.** Imperative mode (no `plugins.json`)
   means installed-but-undeclared sources are the legacy state, not drift.
   An explicit `niu plugin sync` lists them — with the migration verb.
 - **Failed installs are reported by the verb that ran them.** Nothing
   retries in the background: re-run `niu plugin sync` / `niu plugin add`
-  when the network or the origin is back. A `bootstrap-failures.toml`
-  left under the sources root by an old version is still honored in one
-  way: it marks the declarations that version stranded, so
-  `niu plugin sync --prune` can remove them, and an explicit retry clears
-  the entry it resolves.
+  when the network or the origin is back. A `bootstrap-failures.json`
+  ledger under the sources root, left by an old version whose startup
+  sync memoized failed installs, is still honored in one way: it marks
+  the declarations that version stranded, so `niu plugin sync --prune`
+  can remove them, and an explicit retry clears the entry it resolves.
+  (A pre-1.5.0 `bootstrap-failures.toml` is converted by
+  `niu plugin migrate`.)
 
 ### Imperative mode → spec adoption (`niu plugin sync --adopt`)
 
 Machines that installed sources before the spec existed (1.3.0's wizard
 collection apply, `niu plugin source add`) land in *imperative mode*: the
-registry has sources, `plugins.toml` does not exist. `niu plugin sync`
+registry has sources, `plugins.json` does not exist. `niu plugin sync`
 then reports the state and names the one-line migration:
 
 ```
@@ -195,7 +199,7 @@ source that is already installed declares it too (printed as `Declared …
 The setup wizard does the same adoption at the end of a collection apply
 (after the post-install theme pick), so a fresh 1.3.1+ wizard run ends
 **spec-managed**: sources and the picked theme are all
-described by `~/.niubash/plugins.toml`, and no migration verb is needed.
+described by `~/.niubash/plugins.json`, and no migration verb is needed.
 
 ### Merge semantics: spec vs your hand edits
 
@@ -315,20 +319,23 @@ rewritten, through git's own `insteadOf` mechanism; anything else passes
 through untouched.
 
 Mirrors are **git-only** since the retraction (the shell has no HTTP
-transport left). The config lives in `~/.niubash/mirrors.toml` (see
+transport left). The config lives in `~/.niubash/mirrors.json` (see
 `niu plugin mirror --help`):
 
-```toml
-schema = "niubash:mirrors@0.1.0"
-active = "custom"
-
-[github]
-git_instead_of = "https://your-git-mirror/"    # git clone/fetch
+```json
+{
+  "schema": "niubash:mirrors@0.1.0",
+  "active": "custom",
+  "github": { "git_instead_of": "https://your-git-mirror/" }
+}
 ```
 
 niubash ships **no bundled mirror list**: community mirror services are
-unsupported and may disappear at any time — the examples written as
-comments in the config file are starting points, not endorsements.
+unsupported and may disappear at any time. Two starting points that were
+verified live (git transport included) when this was written —
+`https://gitclone.com/github.com` and `https://ghproxy.net/github.com` —
+are starting points, not endorsements; verify a service works for you
+before relying on it.
 
 ## Environment overrides
 
@@ -337,7 +344,7 @@ comments in the config file are starting points, not endorsements.
 | `NIU_PLUGIN_SPEC` | Alternate spec file location |
 | `NIU_PLUGIN_SOURCES_ROOT` | Alternate install root (default `~/.niubash/sources`) |
 | `NIU_PLUGIN_BOOTSTRAP` | `off` disables the rc bootstrap line |
-| `NIU_MIRRORS` | Alternate mirror config (default `~/.niubash/mirrors.toml`) |
+| `NIU_MIRRORS` | Alternate mirror config (default `~/.niubash/mirrors.json`) |
 
 Design references: `docs/planning/oh-my-niu-ecosystem.md` §14.6 (three
 layers, descriptor table, declarative spec), §14.4 (no shims), §14.8

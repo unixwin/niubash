@@ -90,7 +90,7 @@ impl Sandbox {
             (
                 "NIU_PLUGIN_SPEC",
                 home.join(".niubash")
-                    .join("plugins.toml")
+                    .join("plugins.json")
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -120,7 +120,7 @@ impl Sandbox {
     }
 
     fn spec(&self) -> String {
-        fs::read_to_string(self.home.join(".niubash").join("plugins.toml")).unwrap_or_default()
+        fs::read_to_string(self.home.join(".niubash").join("plugins.json")).unwrap_or_default()
     }
 }
 
@@ -189,7 +189,7 @@ fn local_dir_named_like_a_catalog_id_is_not_hijacked() {
         "the catalog origin never wins: {spec}"
     );
     assert!(
-        !spec.contains("target = 'oh-my-bash'"),
+        !spec.contains("\"target\": \"oh-my-bash\""),
         "not the raw relative spelling either: {spec}"
     );
 
@@ -240,8 +240,8 @@ fn already_declared_hint_matches_the_state() {
 
     // A stranded declaration: hand-written spec entry, nothing installed.
     fs::write(
-        box_.home.join(".niubash").join("plugins.toml"),
-        "[[sources]]\ntarget = './ghost'\n",
+        box_.home.join(".niubash").join("plugins.json"),
+        "{ \"sources\": [ { \"target\": \"./ghost\" } ] }",
     )
     .unwrap();
     let output = box_.run_in(&["plugin", "add", "./ghost"], &cwd);

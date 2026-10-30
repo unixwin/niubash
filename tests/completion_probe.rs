@@ -381,19 +381,214 @@ complete -F _bashtool bashtool
     assert_contains(&bash_suggestions, "--verbose");
 }
 
-// ── Issue #305: built-in definitions for common external commands ────────────
+// ── Issue #305, post-1.5.0 contract: no compiled-in tables for common
+//    external commands ────────────────────────────────────────────────────
 //
-// git, tar, curl, ssh, docker, kubectl, and npm are not WinuxCmd applets; the
-// compiled common layer must serve each of them through the probe surface.
+// #305 originally embedded curated TOML tables for git, tar, curl, ssh,
+// docker, kubectl, and npm in the binary. The 1.5.0 product-TOML deletion
+// retired that embedded layer (the WinuxCmd applet tables are the sole
+// exception and stay); the completion pipeline itself is unchanged, so
+// these commands are now served by the layers that always ranked beside
+// the embedded one:
+//   * git/docker/kubectl/npm — the oh-my-niu bundle tables, which enter
+//     through the same directory channel as user tables (NIU_COMPDEFS /
+//     the bundle completion dir) and replace per command;
+//   * curl/ssh/tar — user-supplied tables only; with none, the argument
+//     position falls through to path completion, like any table-less
+//     command.
+// The pins below nail that contract: bare env → the retired layer's
+// candidates are gone; bundle/user dir present → its candidates serve.
+// The bundle fixtures are verbatim excerpts of oh-my-niu's
+// completions/{git,docker,kubectl,npm}.toml (the production takeover
+// source for those four commands).
+
+/// A probe env whose rc declares a completion-definition directory
+/// holding the given `<cmd>.toml` tables (the bundle/user channel).
+fn env_with_compdefs(prefix: &str, tables: &[(&str, &str)]) -> ProbeEnv {
+    let env = ProbeEnv::new(prefix);
+    let defs = env.root.join("compdefs");
+    std::fs::create_dir_all(&defs).unwrap();
+    for (file, body) in tables {
+        std::fs::write(defs.join(file), body).unwrap();
+    }
+    env.write_primary_rc(&format!("NIU_COMPDEFS=\"{}\"\n", path_string(&defs)));
+    env
+}
+
+const GIT_BUNDLE_TABLE: &str = r#"command = "git"
+description = "the stupid content tracker"
+
+[[subcommands]]
+name = "checkout"
+description = "switch branches or restore working tree files"
+
+[[subcommands.flags]]
+short = "-b"
+description = "create and checkout a new branch"
+
+[[subcommands.flags]]
+short = "-B"
+description = "create and checkout a new branch (reset if exists)"
+
+[[subcommands.flags]]
+long = "--track"
+description = "set up upstream tracking"
+
+[[subcommands.flags]]
+short = "-f"
+long = "--force"
+description = "force checkout"
+
+[[subcommands]]
+name = "commit"
+description = "record changes to the repository"
+
+[[subcommands.flags]]
+short = "-m"
+long = "--message"
+description = "commit message"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-a"
+long = "--all"
+description = "commit all changed files"
+
+[[subcommands.flags]]
+short = "--amend"
+description = "amend the previous commit"
+
+[[subcommands.flags]]
+short = "-v"
+long = "--verbose"
+description = "show what would be committed"
+
+[[subcommands.flags]]
+short = "-s"
+long = "--signoff"
+description = "add a Signed-off-by trailer"
+
+[[subcommands.flags]]
+long = "--no-verify"
+description = "bypass pre-commit hooks"
+
+[[subcommands.flags]]
+short = "-F"
+long = "--file"
+description = "read message from file"
+takes_value = true
+"#;
+
+const DOCKER_BUNDLE_TABLE: &str = r#"command = "docker"
+description = "Docker CLI"
+
+[[subcommands]]
+name = "run"
+description = "run a command in a new container"
+
+[[subcommands.flags]]
+short = "-i"
+long = "--interactive"
+description = "keep STDIN open"
+
+[[subcommands.flags]]
+short = "-t"
+long = "--tty"
+description = "allocate a pseudo-TTY"
+
+[[subcommands.flags]]
+short = "-d"
+long = "--detach"
+description = "run container in background"
+
+[[subcommands.flags]]
+long = "--name"
+description = "assign a name to the container"
+takes_value = true
+
+[[subcommands.flags]]
+short = "-p"
+long = "--publish"
+description = "publish a container port to the host"
+takes_value = true
+"#;
+
+const KUBECTL_BUNDLE_TABLE: &str = r#"command = "kubectl"
+description = "Kubernetes CLI"
+
+[[subcommands]]
+name = "get"
+description = "display one or many resources"
+
+[[subcommands.flags]]
+short = "-A"
+long = "--all-namespaces"
+description = "list resources across all namespaces"
+
+[[subcommands.flags]]
+short = "-w"
+long = "--watch"
+description = "watch changes"
+
+[[subcommands.flags]]
+short = "-o"
+long = "--output"
+description = "output format"
+takes_value = true
+values = ["json", "yaml", "wide", "name"]
+"#;
+
+const NPM_BUNDLE_TABLE: &str = r#"command = "npm"
+description = "node package manager"
+
+[[subcommands]]
+name = "install"
+description = "install a package"
+
+[[subcommands.flags]]
+short = "-g"
+long = "--global"
+description = "install globally"
+
+[[subcommands.flags]]
+short = "-D"
+long = "--save-dev"
+description = "save to devDependencies"
+
+[[subcommands.flags]]
+short = "-S"
+long = "--save"
+description = "save to dependencies"
+
+[[subcommands]]
+name = "init"
+description = "create a package.json file"
+
+[[subcommands.flags]]
+short = "-y"
+long = "--yes"
+description = "automatically answer yes to prompts"
+"#;
 
 #[test]
-fn builtin_git_definition_completes_subcommands_and_flags() {
-    let env = ProbeEnv::new("niubash-completion-builtin-git");
+fn git_completion_is_served_by_the_bundle_layer_not_a_builtin_table() {
+    // Bare env: the retired embedded table's candidates are gone.
+    let bare = ProbeEnv::new("niubash-completion-git-bare");
+    let subcommands = run_probe("git ch", &bare, &[]);
+    assert_not_contains(&subcommands, "checkout");
+    let flags = run_probe("git commit -", &bare, &[]);
+    assert_not_contains(&flags, "--message");
+    assert_not_contains(&flags, "--amend");
 
+    // Bundle present: oh-my-niu's git table serves, prefix discipline
+    // intact (the table also declares `commit`, which `ch` must filter).
+    let env = env_with_compdefs(
+        "niubash-completion-git-bundle",
+        &[("git.toml", GIT_BUNDLE_TABLE)],
+    );
     let subcommands = run_probe("git ch", &env, &[]);
     assert_contains(&subcommands, "checkout");
-    assert_contains(&subcommands, "cherry-pick");
-    assert_not_contains(&subcommands, "clone");
+    assert_not_contains(&subcommands, "commit");
 
     let flags = run_probe("git commit -", &env, &[]);
     assert_contains(&flags, "--message");
@@ -401,42 +596,19 @@ fn builtin_git_definition_completes_subcommands_and_flags() {
 }
 
 #[test]
-fn builtin_tar_definition_completes_flags() {
-    let env = ProbeEnv::new("niubash-completion-builtin-tar");
+fn docker_completion_is_served_by_the_bundle_layer_not_a_builtin_table() {
+    let bare = ProbeEnv::new("niubash-completion-docker-bare");
+    let subcommands = run_probe("docker r", &bare, &[]);
+    assert_not_contains(&subcommands, "run");
+    let flags = run_probe("docker run -", &bare, &[]);
+    assert_not_contains(&flags, "--name");
 
-    let suggestions = run_probe("tar --", &env, &[]);
-    assert_contains(&suggestions, "--gzip");
-    assert_contains(&suggestions, "--extract");
-    assert_contains(&suggestions, "--auto-compress");
-}
-
-#[test]
-fn builtin_curl_definition_completes_flag_values() {
-    let env = ProbeEnv::new("niubash-completion-builtin-curl");
-
-    let suggestions = run_probe("curl -X ", &env, &[]);
-    assert_contains(&suggestions, "POST");
-    assert_contains(&suggestions, "PUT");
-    assert_not_contains(&suggestions, "--silent");
-}
-
-#[test]
-fn builtin_ssh_definition_completes_flags() {
-    let env = ProbeEnv::new("niubash-completion-builtin-ssh");
-
-    let suggestions = run_probe("ssh -", &env, &[]);
-    assert_contains(&suggestions, "-i");
-    assert_contains(&suggestions, "-p");
-    assert_contains(&suggestions, "-V");
-}
-
-#[test]
-fn builtin_docker_definition_completes_subcommands_and_flags() {
-    let env = ProbeEnv::new("niubash-completion-builtin-docker");
-
+    let env = env_with_compdefs(
+        "niubash-completion-docker-bundle",
+        &[("docker.toml", DOCKER_BUNDLE_TABLE)],
+    );
     let subcommands = run_probe("docker r", &env, &[]);
     assert_contains(&subcommands, "run");
-    assert_contains(&subcommands, "rmi");
 
     let flags = run_probe("docker run -", &env, &[]);
     assert_contains(&flags, "--name");
@@ -444,9 +616,17 @@ fn builtin_docker_definition_completes_subcommands_and_flags() {
 }
 
 #[test]
-fn builtin_kubectl_definition_completes_subcommands_and_flags() {
-    let env = ProbeEnv::new("niubash-completion-builtin-kubectl");
+fn kubectl_completion_is_served_by_the_bundle_layer_not_a_builtin_table() {
+    let bare = ProbeEnv::new("niubash-completion-kubectl-bare");
+    let subcommands = run_probe("kubectl g", &bare, &[]);
+    assert_not_contains(&subcommands, "get");
+    let flags = run_probe("kubectl get -", &bare, &[]);
+    assert_not_contains(&flags, "--all-namespaces");
 
+    let env = env_with_compdefs(
+        "niubash-completion-kubectl-bundle",
+        &[("kubectl.toml", KUBECTL_BUNDLE_TABLE)],
+    );
     let subcommands = run_probe("kubectl g", &env, &[]);
     assert_contains(&subcommands, "get");
 
@@ -456,15 +636,114 @@ fn builtin_kubectl_definition_completes_subcommands_and_flags() {
 }
 
 #[test]
-fn builtin_npm_definition_completes_subcommands_and_flags() {
-    let env = ProbeEnv::new("niubash-completion-builtin-npm");
+fn npm_completion_is_served_by_the_bundle_layer_not_a_builtin_table() {
+    let bare = ProbeEnv::new("niubash-completion-npm-bare");
+    let subcommands = run_probe("npm i", &bare, &[]);
+    assert_not_contains(&subcommands, "install");
+    let flags = run_probe("npm install -", &bare, &[]);
+    assert_not_contains(&flags, "--save-dev");
 
+    let env = env_with_compdefs(
+        "niubash-completion-npm-bundle",
+        &[("npm.toml", NPM_BUNDLE_TABLE)],
+    );
     let subcommands = run_probe("npm i", &env, &[]);
     assert_contains(&subcommands, "install");
     assert_contains(&subcommands, "init");
 
     let flags = run_probe("npm install -", &env, &[]);
     assert_contains(&flags, "--save-dev");
+}
+
+#[test]
+fn curl_completion_falls_through_to_user_supplied_tables() {
+    // No bundle table exists for curl: bare env serves nothing static.
+    let bare = ProbeEnv::new("niubash-completion-curl-bare");
+    let suggestions = run_probe("curl -X ", &bare, &[]);
+    assert_not_contains(&suggestions, "POST");
+    assert_not_contains(&suggestions, "PUT");
+
+    // A user-supplied table (the channel that owns curl now) serves its
+    // flag values; the value position still never offers flags.
+    let env = env_with_compdefs(
+        "niubash-completion-curl-user",
+        &[(
+            "curl.toml",
+            r#"command = "curl"
+description = "user-supplied fixture"
+
+[[flags]]
+short = "-X"
+long = "--request"
+description = "request method"
+takes_value = true
+values = ["GET", "POST", "PUT", "DELETE"]
+
+[[flags]]
+long = "--silent"
+description = "silent mode"
+"#,
+        )],
+    );
+    let suggestions = run_probe("curl -X ", &env, &[]);
+    assert_contains(&suggestions, "POST");
+    assert_contains(&suggestions, "PUT");
+    assert_not_contains(&suggestions, "--silent");
+}
+
+#[test]
+fn ssh_completion_falls_through_to_user_supplied_tables() {
+    let bare = ProbeEnv::new("niubash-completion-ssh-bare");
+    let suggestions = run_probe("ssh -", &bare, &[]);
+    assert_not_contains(&suggestions, "-i");
+    assert_not_contains(&suggestions, "-p");
+    assert_not_contains(&suggestions, "-V");
+
+    let env = env_with_compdefs(
+        "niubash-completion-ssh-user",
+        &[(
+            "ssh.toml",
+            r#"command = "ssh"
+description = "user-supplied fixture"
+
+[[flags]]
+short = "-i"
+description = "identity file"
+takes_value = true
+
+[[flags]]
+short = "-p"
+description = "port"
+takes_value = true
+
+[[flags]]
+short = "-V"
+description = "print version"
+"#,
+        )],
+    );
+    let suggestions = run_probe("ssh -", &env, &[]);
+    assert_contains(&suggestions, "-i");
+    assert_contains(&suggestions, "-p");
+    assert_contains(&suggestions, "-V");
+}
+
+#[test]
+fn tar_completion_falls_through_to_path_completion() {
+    // The retired table's long flags are gone with no table anywhere...
+    let env = ProbeEnv::new("niubash-completion-tar-bare");
+    let suggestions = run_probe("tar --", &env, &[]);
+    assert_not_contains(&suggestions, "--gzip");
+    assert_not_contains(&suggestions, "--extract");
+    assert_not_contains(&suggestions, "--auto-compress");
+
+    // ...and the argument position is plain path completion, the same
+    // treatment every table-less command gets.
+    std::fs::write(env.start.join("tape-backup.tar"), "x").unwrap();
+    std::fs::write(env.start.join("notes.txt"), "x").unwrap();
+    let suggestions = run_probe("tar ta", &env, &[]);
+    assert_contains(&suggestions, "tape-backup.tar");
+    assert_not_contains(&suggestions, "notes.txt");
 }
 
 fn run_probe(line: &str, env: &ProbeEnv, extra_env: &[(&str, String)]) -> Vec<String> {

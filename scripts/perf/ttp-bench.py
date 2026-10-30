@@ -16,7 +16,7 @@ Method (same discipline as scripts/perf/asset-timing.py):
     startup, not the DSR-silent degradation path;
   * TTP = spawn -> first prompt sentinel byte in the RAW stream. Absolute
     numbers carry this machine's ConPTY transport floor (1.5-2.5 s here,
-    see scripts/perf/budgets.toml) on BOTH sides; the comparison and the
+    see scripts/perf/budgets.json) on BOTH sides; the comparison and the
     before/after delta are the usable outputs;
   * niu attribution: a second pass re-runs niu with NIU_TRACE_STARTUP=1 and
     parses the per-stage ticks (config load, prompt backend, completion

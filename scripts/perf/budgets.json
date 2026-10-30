@@ -1,0 +1,212 @@
+{
+ "schema": "niubash:perf-asset-budgets@1.0.0",
+ "updated": "2026-10-13",
+ "phase_timeout_s": 12.0,
+ "hard_fail_multiplier": 5,
+ "defaults": {
+  "omb.theme": {
+   "source_ms": 1800,
+   "first_prompt_ms": 6500,
+   "rerender_ms": 200
+  },
+  "bashit.theme": {
+   "source_ms": 1500,
+   "first_prompt_ms": 3100,
+   "rerender_ms": 120
+  },
+  "omb.alias": {
+   "source_ms": 1100,
+   "first_prompt_ms": 5000,
+   "rerender_ms": 120
+  },
+  "omb.plugin": {
+   "source_ms": 1400,
+   "first_prompt_ms": 5400,
+   "rerender_ms": 120
+  },
+  "omb.completion": {
+   "source_ms": 1850,
+   "first_prompt_ms": 5400,
+   "rerender_ms": 120
+  },
+  "bashit.alias": {
+   "source_ms": 800,
+   "first_prompt_ms": 1100,
+   "rerender_ms": 120
+  },
+  "bashit.plugin": {
+   "source_ms": 620,
+   "first_prompt_ms": 1100,
+   "rerender_ms": 120
+  },
+  "bashit.completion": {
+   "source_ms": 1000,
+   "first_prompt_ms": 1400,
+   "rerender_ms": 120
+  }
+ },
+ "assets": {
+  "omb.theme:developer": {
+   "budget": {
+    "source_ms": 1920
+   },
+   "justification": "baseline 1424ms source; theme sets its own prompt machinery; fix-lane candidate to reach the 250ms mandate"
+  },
+  "omb.theme:dulcie": {
+   "budget": {
+    "source_ms": 2400
+   },
+   "justification": "baseline 1526ms source (p90 1105); runner 2107ms (run 38404767765)"
+  },
+  "omb.completion:svn": {
+   "budget": {
+    "source_ms": 1950
+   },
+   "justification": "baseline 1443ms source; svn completion is the heaviest omb.completion (p90 1009)"
+  },
+  "bashit.theme:dulcie": {
+   "budget": {
+    "source_ms": 2000
+   },
+   "justification": "baseline 1244ms source (p90 878); runner 1962ms (run 38404767765)"
+  },
+  "omb.theme:hawaii50": {
+   "budget": {
+    "source_ms": 2900
+   },
+   "justification": "runner 2506ms source (run 38404767765); heaviest healthy omb.theme on the gate machine"
+  },
+  "omb.theme:emperor": {
+   "budget": {
+    "source_ms": 2250
+   },
+   "justification": "runner 1944ms source (run 38404767765); ordinary heavy asset"
+  },
+  "bashit.theme:liquidprompt": {
+   "budget": {
+    "source_ms": 3200,
+    "first_prompt_ms": 5400
+   },
+   "justification": "runner 2631ms source (run 38404767765) / 3101ms (run 38452840701) / 4698ms first prompt; still a fix-lane asset at the mandated 250/400 targets"
+  },
+  "omb.theme:axin": {
+   "budget": {
+    "rerender_ms": 1800
+   },
+   "justification": "PS1-embedded \\$(scm_prompt_info) hits the engine's slow prompt-expansion substitution path: 617ms runner / 544ms baseline / 1566ms dev (ablation 110ms without the PS1 call); engine fix-lane"
+  },
+  "omb.theme:clean": {
+   "budget": {
+    "rerender_ms": 1800
+   },
+   "justification": "same PS1-embedded scm pattern as axin: 441ms runner / 541ms baseline / 1602ms dev; engine fix-lane"
+  },
+  "omb.theme:simple": {
+   "budget": {
+    "rerender_ms": 1800
+   },
+   "justification": "same PS1-embedded scm pattern as axin: 541ms runner / 464ms baseline / 1595ms dev; engine fix-lane"
+  },
+  "omb.theme:sexy": {
+   "budget": {
+    "rerender_ms": 1000
+   },
+   "justification": "PS1-embedded 'parse_git_branch' substitution: 336ms runner / 332ms baseline / 838ms dev; engine fix-lane"
+  },
+  "bashit.theme:sexy": {
+   "budget": {
+    "rerender_ms": 1200
+   },
+   "justification": "bash-it's same-name theme pays the same substitution cost: 336ms runner / 330ms baseline / 984ms dev; engine fix-lane"
+  },
+  "bashit.theme:font": {
+   "budget": {
+    "rerender_ms": 260
+   },
+   "justification": "PS1 carries clock + scm substitutions inline: 220ms runner / 185ms baseline / 118ms dev"
+  },
+  "bashit.theme:sirup": {
+   "budget": {
+    "rerender_ms": 260
+   },
+   "justification": "git_ps1 substitution per render: 176ms runner (baseline host 4.9ms is the outlier — resync to the current corpus) / 140ms dev"
+  },
+  "omb.plugin:git": {
+   "budget": {
+    "source_ms": 7000,
+    "first_prompt_ms": 11500
+   },
+   "justification": "pathological upstream loader (6-second-incident family): 6275ms source / 9234ms first prompt on the runner; the plugin's own sourcing behavior, fix-lane REQUIRED"
+  },
+  "omb.completion:git": {
+   "budget": {
+    "source_ms": 6600,
+    "first_prompt_ms": 12000
+   },
+   "justification": "the git plugin's completion sibling: 6044ms source / 10108ms first prompt on the runner; fix-lane REQUIRED"
+  },
+  "bashit.completion:dirs": {
+   "budget": {
+    "source_ms": 2060,
+    "first_prompt_ms": 1590
+   },
+   "justification": "baseline 1524ms source / 1176ms first prompt (class p90 510/753); dirs completion rebuilds its index at load"
+  },
+  "bashit.completion:django": {
+   "budget": {
+    "source_ms": 2110,
+    "first_prompt_ms": 1680
+   },
+   "justification": "baseline 1560ms source / 1244ms first prompt; heaviest bash-it completion"
+  },
+  "bashit.completion:dmidecode": {
+   "budget": {
+    "source_ms": 910
+   },
+   "justification": "baseline 676ms source"
+  },
+  "bashit.completion:docker-compose": {
+   "budget": {
+    "source_ms": 1300
+   },
+   "justification": "baseline 966ms source"
+  },
+  "bashit.completion:hub": {
+   "budget": {
+    "source_ms": 950
+   },
+   "justification": "baseline 706ms source"
+  },
+  "bashit.completion:npm": {
+   "budget": {
+    "source_ms": 920
+   },
+   "justification": "baseline 683ms source"
+  },
+  "bashit.plugin:alias-completion": {
+   "budget": {
+    "source_ms": 740
+   },
+   "justification": "baseline 549ms source; scans all enabled aliases at load"
+  },
+  "bashit.plugin:node": {
+   "budget": {
+    "source_ms": 950,
+    "first_prompt_ms": 1090
+   },
+   "justification": "baseline 706ms source / 804ms first prompt; probes node --version at load"
+  },
+  "bashit.plugin:sshagent": {
+   "budget": {
+    "source_ms": 720
+   },
+   "justification": "baseline 535ms source"
+  },
+  "bashit.plugin:thefuck": {
+   "budget": {
+    "source_ms": 810
+   },
+   "justification": "baseline 602ms source"
+  }
+ }
+}

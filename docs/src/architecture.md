@@ -113,7 +113,7 @@ differentiators.
   rc names and `~/.bashrc` are never read, migrated, or written —
   a session without `~/.niubashrc` starts with the defaults.
 - Plugin activation is a derived plane, not an rc edit (niubash#359): the
-  manifest (`~/.niubash/plugins.toml` + `~/.niubash/sources/registry.toml`)
+  manifest (`~/.niubash/plugins.json` + `~/.niubash/sources/registry.json`)
   drives the generated loader `~/.niubash/generated/plugins.niu`, which the
   host sources read-only before the user rc. No `niu plugin` verb writes
   `~/.niubashrc`.
@@ -143,7 +143,7 @@ packages stage no plugin content (niubash#161). The plugin system is the
   framework assets enable through each
   manager's own selection mechanism (rc arrays, `enabled/` entries), never
   through shims that re-implement upstream library functions.
-- The declarative spec `~/.niubash/plugins.toml` is the source of truth
+- The declarative spec `~/.niubash/plugins.json` is the source of truth
   for what is declared; the registry pins installed trees (commit), and
   `niu plugin sync` reconciles the two.
 - Plugins cannot extend the rubash parser/executor, and cannot source

@@ -85,7 +85,7 @@ impl Sandbox {
         let sources_root = root.join("sources");
         fs::create_dir_all(home.join(".niubash")).unwrap();
         fs::create_dir_all(&sources_root).unwrap();
-        let spec_path = home.join(".niubash").join("plugins.toml");
+        let spec_path = home.join(".niubash").join("plugins.json");
         let envs = vec![
             ("HOME", home.to_string_lossy().into_owned()),
             ("USERPROFILE", home.to_string_lossy().into_owned()),
@@ -618,9 +618,9 @@ fn d1_setup_preset_recommended_writes_a_clean_parseable_rc() {
     let parse = run_niu(&["-n", &rc_path.to_string_lossy()], &sandbox.envs);
     assert_success(&parse, "niu -n parse of the generated rc");
 
-    let journal = fs::read_to_string(sandbox.home.join(".niubash").join("setup-journal.toml"))
+    let journal = fs::read_to_string(sandbox.home.join(".niubash").join("setup-journal.json"))
         .expect("journal written");
-    assert!(journal.contains("preset = 'recommended'"), "{journal}");
+    assert!(journal.contains("\"preset\": \"recommended\""), "{journal}");
 }
 
 // ── D. setup wizard (continued): the one-run out-of-box journey ─────────────
@@ -750,13 +750,10 @@ fn d2_wizard_one_run_theme_journey() {
         mirror.display().to_string().replace('\\', "/")
     );
     fs::write(
-        home.join(".niubash").join("mirrors.toml"),
+        home.join(".niubash").join("mirrors.json"),
         format!(
-            "# smoke journey: rewrite GitHub fetches to the seeded local mirror\n\
-             schema = \"niubash:mirrors@0.1.0\"\n\
-             active = \"custom\"\n\n\
-             [github]\n\
-             git_instead_of = \"{mirror_base}/\"\n"
+            "{{\"schema\": \"niubash:mirrors@0.1.0\", \"active\": \"custom\", \
+             \"github\": {{\"git_instead_of\": \"{mirror_base}/\"}}}}"
         ),
     )
     .unwrap();
@@ -769,14 +766,14 @@ fn d2_wizard_one_run_theme_journey() {
         (
             "NIU_PLUGIN_SPEC".to_string(),
             home.join(".niubash")
-                .join("plugins.toml")
+                .join("plugins.json")
                 .to_string_lossy()
                 .into_owned(),
         ),
         (
             "NIU_MIRRORS".to_string(),
             home.join(".niubash")
-                .join("mirrors.toml")
+                .join("mirrors.json")
                 .to_string_lossy()
                 .into_owned(),
         ),
@@ -878,14 +875,17 @@ fn d2_wizard_one_run_theme_journey() {
         loader.contains("OSH_THEME='agnoster'"),
         "the pick published the loader generation: {loader}"
     );
-    let journal = fs::read_to_string(s.home().join(".niubash").join("setup-journal.toml")).unwrap();
-    assert!(journal.contains("theme = 'agnoster'"), "{journal}");
-    assert!(journal.contains("collection = 'recommended'"), "{journal}");
+    let journal = fs::read_to_string(s.home().join(".niubash").join("setup-journal.json")).unwrap();
+    assert!(journal.contains("\"theme\": \"agnoster\""), "{journal}");
+    assert!(
+        journal.contains("\"collection\": \"recommended\""),
+        "{journal}"
+    );
 
     // 1.3.1: the journey ends SPEC-MANAGED. The post-pick adoption
     // declared the collection's sources with the live snapshot — canonical
     // origins (the mirror is transport-only) and the picked theme.
-    let spec = fs::read_to_string(home.join(".niubash").join("plugins.toml")).unwrap();
+    let spec = fs::read_to_string(home.join(".niubash").join("plugins.json")).unwrap();
     assert!(
         spec.contains("https://github.com/ohmybash/oh-my-bash.git"),
         "oh-my-bash declared by its canonical origin: {spec}"
@@ -908,14 +908,14 @@ fn d2_wizard_one_run_theme_journey() {
         spec.contains("https://github.com/junegunn/fzf-git.sh.git"),
         "fzf-git.sh declared: {spec}"
     );
-    assert!(spec.contains("theme = 'agnoster'"), "{spec}");
+    assert!(spec.contains("\"theme\": \"agnoster\""), "{spec}");
 
     // And a fresh shell sees the theme.
     let home_str = s.home().to_string_lossy().into_owned();
     let sources_str = sources.to_string_lossy().into_owned();
     let spec_str = home
         .join(".niubash")
-        .join("plugins.toml")
+        .join("plugins.json")
         .to_string_lossy()
         .into_owned();
     let probe_env: Vec<(&str, String)> = vec![
@@ -973,7 +973,7 @@ fn d3_setup_rerun_applies_in_the_live_session() {
     let rc_text = "PS1='OLD> '\nNIU_DISABLE_DEFAULT_PLUGINS=1\n";
     fs::write(home.join(".niubashrc"), rc_text).unwrap();
 
-    let spec_path = home.join(".niubash").join("plugins.toml");
+    let spec_path = home.join(".niubash").join("plugins.json");
     let envs: Vec<(&str, String)> = vec![
         ("HOME", home.to_string_lossy().into_owned()),
         ("USERPROFILE", home.to_string_lossy().into_owned()),

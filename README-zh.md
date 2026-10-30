@@ -121,7 +121,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 **生态框架是被 source、被计时的。** 逐资产计时基线加载 437 个真实 oh-my-bash / bash-it 资产（166 款主题加上 plugins、completions、aliases），每资产测三个阶段（source、首帧 prompt、重渲染），取三次运行的中位数。两个框架自带的 nvm 资产就在这份基线里；真实用户 dotfiles 里加载 nvm.sh 的链路也走同一套 harness，分相计时在案（[基线](scripts/perf/baselines/asset-timing-baseline.json)、[快照](scripts/harvest/snapshots/wt92-local-20261005/))。
 
-**慢的发布发不出去。** [budgets.toml](scripts/perf/budgets.toml) 里每个资产都带实测预算（Windows 参考基线口径下，健康主题重渲染 11–35 ms、预算线 120 ms；超预算 5 倍硬失败）。[发布流水线](.github/workflows/release.yml)跑 `perfbudget` 门禁，超限即 fail 本次发布；另有每夜趋势跑盯漂移。
+**慢的发布发不出去。** [budgets.json](scripts/perf/budgets.json) 里每个资产都带实测预算（Windows 参考基线口径下，健康主题重渲染 11–35 ms、预算线 120 ms；超预算 5 倍硬失败）。[发布流水线](.github/workflows/release.yml)跑 `perfbudget` 门禁，超限即 fail 本次发布；另有每夜趋势跑盯漂移。
 
 ## 性能
 

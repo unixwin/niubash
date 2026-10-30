@@ -1156,9 +1156,9 @@ jobs:
           # 4) plugin stack offline check: empty spec, isolated HOME —
           #    must exit 0 with zero output and touch no network.
           mkdir -p "$RUNNER_TEMP/smoke-home"
-          : > "$RUNNER_TEMP/smoke-plugins.toml"
+          printf '{}' > "$RUNNER_TEMP/smoke-plugins.json"
           out="$(HOME="$RUNNER_TEMP/smoke-home" \
-            NIU_PLUGIN_SPEC="$RUNNER_TEMP/smoke-plugins.toml" \
+            NIU_PLUGIN_SPEC="$RUNNER_TEMP/smoke-plugins.json" \
             "$bin" plugin sync --bootstrap 2>&1)"
           if [ -n "$out" ]; then
             echo "plugin sync --bootstrap was not quiet on empty spec:" >&2
@@ -1385,9 +1385,9 @@ jobs:
           # 4) plugin stack offline check: empty spec, isolated HOME —
           #    must exit 0 with zero output and touch no network.
           mkdir -p "$RUNNER_TEMP/smoke-home"
-          : > "$RUNNER_TEMP/smoke-plugins.toml"
+          printf '{}' > "$RUNNER_TEMP/smoke-plugins.json"
           out="$(HOME="$RUNNER_TEMP/smoke-home" \
-            NIU_PLUGIN_SPEC="$RUNNER_TEMP/smoke-plugins.toml" \
+            NIU_PLUGIN_SPEC="$RUNNER_TEMP/smoke-plugins.json" \
             $prefix "$bin" plugin sync --bootstrap 2>&1)"
           if [ -n "$out" ]; then
             echo "plugin sync --bootstrap was not quiet on empty spec:" >&2
@@ -1948,7 +1948,7 @@ jobs:
   # Per-asset timing budget gate (owner directive 2026-10-04): EVERY theme
   # and plugin asset of every trusted source gets a measured time on every
   # release. Contract since run 38489787748's calibration: an asset past
-  # its hard cap (hard_fail_multiplier) in scripts/perf/budgets.toml FAILS
+  # its hard cap (hard_fail_multiplier) in scripts/perf/budgets.json FAILS
   # the release; a soft over (above budget, inside the hard band) prints
   # with its numbers as a warning — the first_prompt median moves ~30%
   # between reps of the SAME asset under concurrent lane builds, so the

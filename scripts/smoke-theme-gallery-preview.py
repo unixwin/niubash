@@ -225,7 +225,7 @@ def run_golden(exe: Path, root: Path) -> None:
         "TERM": "xterm",
         "NIU_LANG": "en",
         "NIU_PLUGIN_SOURCES_ROOT": str(sources),
-        "NIU_PLUGIN_SPEC": str(home / ".niubash" / "plugins.toml"),
+        "NIU_PLUGIN_SPEC": str(home / ".niubash" / "plugins.json"),
         "PATH": os.pathsep.join([
             str(Path(exe).parent), system_root + r"\System32", system_root,
         ]),

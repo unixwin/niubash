@@ -178,8 +178,8 @@ niu plugin disable oh-my-bash # manifest updated; the built-in floor returns
 ```
 
 Since the niubash#359 rework (v1.4.2), **plugin verbs never write your rc**.
-What `enable`/`disable` update is the manifest — `~/.niubash/plugins.toml`
-plus `~/.niubash/sources/registry.toml` — and every mutating verb regenerates
+What `enable`/`disable` update is the manifest — `~/.niubash/plugins.json`
+plus `~/.niubash/sources/registry.json` — and every mutating verb regenerates
 `~/.niubash/generated/plugins.niu`, the derived activation plane the host
 sources *before* `~/.niubashrc` (so your own PS1/alias/function lines always
 win). POSIX-mode interactive shells load it too — after the profile chain

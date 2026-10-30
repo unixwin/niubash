@@ -56,8 +56,8 @@ Invoke the binary as `bash`/`sh` (the bundled hardlinks) for the
 byte-for-byte GNU face: `bash --help`, `bash -c`, POSIX `sh` mode.
 
 Plugin system verbs (git-clone-only external sources, explicit trust gate,
-declarative spec `~/.niubash/plugins.toml` + lockfile
-`~/.niubash/sources/registry.toml` driving the generated loader):
+declarative spec `~/.niubash/plugins.json` + lockfile
+`~/.niubash/sources/registry.json` driving the generated loader):
 
 ```text
 <!-- BEGIN GENERATED:plugin-verbs -->

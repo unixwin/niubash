@@ -1,0 +1,25 @@
+{
+ "schema": "niubash:plugin-collection@1",
+ "name": "recommended",
+ "description": "oh-my-bash + its default theme + the standard completions + curated hooks & completion scripts (bash-preexec, complete-alias, fzf-git.sh)",
+ "entry": [
+  {
+   "recipe": "oh-my-bash"
+  },
+  {
+   "recipe": "omb-theme-robbyrussell"
+  },
+  {
+   "recipe": "bash-completion"
+  },
+  {
+   "recipe": "bash-preexec"
+  },
+  {
+   "recipe": "complete-alias"
+  },
+  {
+   "recipe": "fzf-git.sh"
+  }
+ ]
+}

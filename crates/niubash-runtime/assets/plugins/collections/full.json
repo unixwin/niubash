@@ -1,0 +1,34 @@
+{
+ "schema": "niubash:plugin-collection@1",
+ "name": "full",
+ "description": "both frameworks + hooks + curated independent recipes (bash-preexec, complete-alias, fzf-git.sh, bash-sensible, git-flow-completion); fzf & starship are not entries — install them with your package manager (niu downloads nothing)",
+ "entry": [
+  {
+   "recipe": "oh-my-bash"
+  },
+  {
+   "recipe": "omb-theme-robbyrussell"
+  },
+  {
+   "recipe": "bash-it"
+  },
+  {
+   "recipe": "bash-completion"
+  },
+  {
+   "recipe": "bash-preexec"
+  },
+  {
+   "recipe": "complete-alias"
+  },
+  {
+   "recipe": "fzf-git.sh"
+  },
+  {
+   "recipe": "bash-sensible"
+  },
+  {
+   "recipe": "git-flow-completion"
+  }
+ ]
+}

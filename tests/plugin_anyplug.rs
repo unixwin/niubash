@@ -96,7 +96,7 @@ impl Sandbox {
             (
                 "NIU_PLUGIN_SPEC",
                 home.join(".niubash")
-                    .join("plugins.toml")
+                    .join("plugins.json")
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -121,7 +121,7 @@ impl Sandbox {
     }
 
     fn spec(&self) -> String {
-        fs::read_to_string(self.home.join(".niubash").join("plugins.toml")).unwrap_or_default()
+        fs::read_to_string(self.home.join(".niubash").join("plugins.json")).unwrap_or_default()
     }
 }
 
@@ -178,7 +178,7 @@ fn wild_single_file_plugin_enumerates_honestly_and_loads() {
         "{rc}"
     );
     assert!(
-        sandbox.spec().contains("'spark.bash'"),
+        sandbox.spec().contains("\"spark.bash\""),
         "{}",
         sandbox.spec()
     );
@@ -303,7 +303,7 @@ fn bpkg_package_adoption_uses_manifest_scripts_and_per_package_ids() {
     );
     let spec = sandbox.spec();
     assert!(
-        spec.contains("target =") && !spec.contains("id = 'bpkg'"),
+        spec.contains("\"target\"") && !spec.contains("\"id\": \"bpkg\""),
         "spec entry leaves the id to sync (derived per package): {spec}"
     );
 

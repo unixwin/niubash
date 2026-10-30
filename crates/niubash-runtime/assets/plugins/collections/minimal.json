@@ -1,0 +1,10 @@
+{
+ "schema": "niubash:plugin-collection@1",
+ "name": "minimal",
+ "description": "completions only: bash-completion, no frameworks",
+ "entry": [
+  {
+   "recipe": "bash-completion"
+  }
+ ]
+}
