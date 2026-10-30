@@ -1,0 +1,180 @@
+# winuxcore FFI tier table (generated at build time; do not edit)
+# winuxcmd-version: 1.2.0-dev
+# source-manifest: src/ffi/tiers-manifest.tsv
+command	tier	fallback_shapes	note
+arch	spawn	-	unclassified: R1-R7 audit pending
+b2sum	spawn	-	unclassified: R1-R7 audit pending
+base32	spawn	-	unclassified: R1-R7 audit pending
+base64	spawn	-	unclassified: R1-R7 audit pending
+basename	spawn	-	unclassified: R1-R7 audit pending
+basenc	spawn	-	unclassified: R1-R7 audit pending
+cal	spawn	-	unclassified: R1-R7 audit pending
+cat	tier1	-	Tier-1: simulated-layer retirement surface (DESIGN 6.1)
+chattr	spawn	-	unclassified: R1-R7 audit pending
+chcon	spawn	-	unclassified: R1-R7 audit pending
+chgrp	spawn	-	unclassified: R1-R7 audit pending
+chmod	tier1	-	Tier-1: simulated-layer retirement surface (DESIGN 6.1)
+chown	spawn	-	unclassified: R1-R7 audit pending
+chroot	spawn	-	unclassified: R1-R7 audit pending
+cksum	spawn	-	unclassified: R1-R7 audit pending
+clear	spawn	-	unclassified: R1-R7 audit pending
+cmp	spawn	-	unclassified: R1-R7 audit pending
+col	spawn	-	unclassified: R1-R7 audit pending
+column	spawn	-	unclassified: R1-R7 audit pending
+comm	spawn	-	unclassified: R1-R7 audit pending
+cp	tier1	-	Tier-1: simulated-layer retirement surface (DESIGN 6.1)
+cpio	spawn	-	unclassified: R1-R7 audit pending
+csplit	spawn	-	unclassified: R1-R7 audit pending
+cut	spawn	-	unclassified: R1-R7 audit pending
+cygpath	spawn	-	unclassified: R1-R7 audit pending
+d2u	spawn	-	unclassified: R1-R7 audit pending
+date	spawn	-	unclassified: R1-R7 audit pending
+dd	conditional	-	Blocked: GetStdHandle usage needs per-site review (DESIGN 6.4)
+df	spawn	-	unclassified: R1-R7 audit pending
+diff	spawn	-	unclassified: R1-R7 audit pending
+diff3	spawn	-	unclassified: R1-R7 audit pending
+dir	spawn	-	unclassified: R1-R7 audit pending
+dircolors	spawn	-	unclassified: R1-R7 audit pending
+dirname	spawn	-	unclassified: R1-R7 audit pending
+dos2unix	spawn	-	unclassified: R1-R7 audit pending
+du	spawn	-	unclassified: R1-R7 audit pending
+echo	spawn	-	unclassified: R1-R7 audit pending
+env	spawn	-	unclassified: R1-R7 audit pending
+envsubst	spawn	-	unclassified: R1-R7 audit pending
+expand	spawn	-	unclassified: R1-R7 audit pending
+expr	conditional	-	Blocked: exception sites need boundary differential/fuzz proof (DESIGN 6.4)
+factor	spawn	-	unclassified: R1-R7 audit pending
+false	spawn	-	unclassified: R1-R7 audit pending
+file	spawn	-	unclassified: R1-R7 audit pending
+find	spawn	-	unclassified: R1-R7 audit pending
+fmt	spawn	-	unclassified: R1-R7 audit pending
+fold	spawn	-	unclassified: R1-R7 audit pending
+free	spawn	-	unclassified: R1-R7 audit pending
+getconf	spawn	-	unclassified: R1-R7 audit pending
+getfacl	spawn	-	unclassified: R1-R7 audit pending
+getopt	spawn	-	unclassified: R1-R7 audit pending
+grep	spawn	-	unclassified: R1-R7 audit pending
+groups	spawn	-	unclassified: R1-R7 audit pending
+head	spawn	-	unclassified: R1-R7 audit pending
+hexdump	spawn	-	unclassified: R1-R7 audit pending
+hmac256	spawn	-	unclassified: R1-R7 audit pending
+hostid	spawn	-	unclassified: R1-R7 audit pending
+hostname	spawn	-	unclassified: R1-R7 audit pending
+id	spawn	-	unclassified: R1-R7 audit pending
+infocmp	spawn	-	unclassified: R1-R7 audit pending
+install	spawn	-	unclassified: R1-R7 audit pending
+join	spawn	-	unclassified: R1-R7 audit pending
+kill	spawn	-	unclassified: R1-R7 audit pending
+killall	spawn	-	unclassified: R1-R7 audit pending
+ldd	spawn	-	unclassified: R1-R7 audit pending
+less	never	-	Interactive pager (R2)
+ln	spawn	-	unclassified: R1-R7 audit pending
+locale	spawn	-	unclassified: R1-R7 audit pending
+locate	spawn	-	unclassified: R1-R7 audit pending
+logger	spawn	-	unclassified: R1-R7 audit pending
+logname	spawn	-	unclassified: R1-R7 audit pending
+look	spawn	-	unclassified: R1-R7 audit pending
+ls	spawn	-	unclassified: R1-R7 audit pending
+lsattr	spawn	-	unclassified: R1-R7 audit pending
+lsof	spawn	-	unclassified: R1-R7 audit pending
+man	spawn	-	unclassified: R1-R7 audit pending
+md5sum	spawn	-	unclassified: R1-R7 audit pending
+mkdir	tier1	-	Tier-1: simulated-layer retirement surface (DESIGN 6.1)
+mkfifo	tier1	-	Tier-1: both forms honestly return rc 1 on Windows (DESIGN 6.1)
+mkgroup	spawn	-	unclassified: R1-R7 audit pending
+mknod	spawn	-	unclassified: R1-R7 audit pending
+mkpasswd	spawn	-	unclassified: R1-R7 audit pending
+mktemp	spawn	-	unclassified: R1-R7 audit pending
+more	never	-	Interactive pager (R2)
+mpicalc	spawn	-	unclassified: R1-R7 audit pending
+mv	spawn	-	unclassified: R1-R7 audit pending
+namei	spawn	-	unclassified: R1-R7 audit pending
+nice	spawn	-	unclassified: R1-R7 audit pending
+nl	spawn	-	unclassified: R1-R7 audit pending
+nohup	spawn	-	unclassified: R1-R7 audit pending
+nproc	spawn	-	unclassified: R1-R7 audit pending
+numfmt	spawn	-	unclassified: R1-R7 audit pending
+od	spawn	-	unclassified: R1-R7 audit pending
+paste	spawn	-	unclassified: R1-R7 audit pending
+patch	spawn	-	unclassified: R1-R7 audit pending
+pathchk	spawn	-	unclassified: R1-R7 audit pending
+pgrep	spawn	-	unclassified: R1-R7 audit pending
+pidof	spawn	-	unclassified: R1-R7 audit pending
+pinky	spawn	-	unclassified: R1-R7 audit pending
+pkill	spawn	-	unclassified: R1-R7 audit pending
+pldd	spawn	-	unclassified: R1-R7 audit pending
+pr	spawn	-	unclassified: R1-R7 audit pending
+printenv	spawn	-	unclassified: R1-R7 audit pending
+printf	spawn	-	unclassified: R1-R7 audit pending
+ps	spawn	-	unclassified: R1-R7 audit pending
+ptx	spawn	-	unclassified: R1-R7 audit pending
+pwd	spawn	-	unclassified: R1-R7 audit pending
+readlink	spawn	-	unclassified: R1-R7 audit pending
+realpath	spawn	-	unclassified: R1-R7 audit pending
+regtool	spawn	-	unclassified: R1-R7 audit pending
+renice	spawn	-	unclassified: R1-R7 audit pending
+reset	spawn	-	unclassified: R1-R7 audit pending
+rev	spawn	-	unclassified: R1-R7 audit pending
+rm	tier1	-i,-I	Interactive shapes prompt on the console (R2): spawn form prompts for real; also repairs the simulated layer's silent-delete divergence
+rmdir	tier1	-	Tier-1: simulated-layer retirement surface (DESIGN 6.1)
+runcon	spawn	-	unclassified: R1-R7 audit pending
+sdiff	spawn	-	unclassified: R1-R7 audit pending
+sed	tier1	-	Tier-1: simulated-layer retirement surface (DESIGN 6.1)
+seq	spawn	-	unclassified: R1-R7 audit pending
+sha1sum	spawn	-	unclassified: R1-R7 audit pending
+sha224sum	spawn	-	unclassified: R1-R7 audit pending
+sha256sum	spawn	-	unclassified: R1-R7 audit pending
+sha384sum	spawn	-	unclassified: R1-R7 audit pending
+sha512sum	spawn	-	unclassified: R1-R7 audit pending
+shred	spawn	-	unclassified: R1-R7 audit pending
+shuf	spawn	-	unclassified: R1-R7 audit pending
+sleep	never	-	Long-running shape (R3)
+sort	conditional	-	Blocked: writes std::cout directly, bypassing the console layer (DESIGN 6.4)
+split	conditional	-	Blocked: env borrow must be proven under the FFI lock first (DESIGN 6.4)
+stat	spawn	-	unclassified: R1-R7 audit pending
+stdbuf	conditional	-	Blocked: env borrow must be proven under the FFI lock first (DESIGN 6.4)
+strings	spawn	-	unclassified: R1-R7 audit pending
+stty	never	-	Mutates console mode/codepage (DESIGN 1.4, 6.3)
+sum	spawn	-	unclassified: R1-R7 audit pending
+sync	spawn	-	unclassified: R1-R7 audit pending
+tac	spawn	-	unclassified: R1-R7 audit pending
+tail	spawn	-	unclassified: R1-R7 audit pending
+tee	conditional	-	Blocked: SIGINT disposition is set and never restored (DESIGN 6.4)
+test	spawn	-	unclassified: R1-R7 audit pending
+test_bracket	spawn	-	unclassified: R1-R7 audit pending
+tic	spawn	-	unclassified: R1-R7 audit pending
+time	spawn	-	unclassified: R1-R7 audit pending
+timeout	spawn	-	unclassified: R1-R7 audit pending
+toe	spawn	-	unclassified: R1-R7 audit pending
+top	never	-	Interactive/long-running (R2, R3)
+touch	tier1	-	Tier-1: simulated-layer retirement surface (DESIGN 6.1)
+tput	spawn	-	unclassified: R1-R7 audit pending
+tr	spawn	-	unclassified: R1-R7 audit pending
+tree	spawn	-	unclassified: R1-R7 audit pending
+true	spawn	-	unclassified: R1-R7 audit pending
+truncate	spawn	-	unclassified: R1-R7 audit pending
+tsort	spawn	-	unclassified: R1-R7 audit pending
+tty	tier1	-	Tier-1: output becomes the platform-honest form (DESIGN 6.1)
+tzset	spawn	-	unclassified: R1-R7 audit pending
+u2d	spawn	-	unclassified: R1-R7 audit pending
+uname	spawn	-	unclassified: R1-R7 audit pending
+unexpand	spawn	-	unclassified: R1-R7 audit pending
+uniq	conditional	-	Blocked: writes std::cout directly, bypassing the console layer (DESIGN 6.4)
+unix2dos	spawn	-	unclassified: R1-R7 audit pending
+unlink	spawn	-	unclassified: R1-R7 audit pending
+updatedb	spawn	-	unclassified: R1-R7 audit pending
+uptime	spawn	-	unclassified: R1-R7 audit pending
+users	spawn	-	unclassified: R1-R7 audit pending
+vdir	spawn	-	unclassified: R1-R7 audit pending
+vmstat	spawn	-	unclassified: R1-R7 audit pending
+w	spawn	-	unclassified: R1-R7 audit pending
+watch	never	-	Long-running (R3)
+wc	spawn	-	unclassified: R1-R7 audit pending
+whereis	spawn	-	unclassified: R1-R7 audit pending
+which	spawn	-	unclassified: R1-R7 audit pending
+who	spawn	-	unclassified: R1-R7 audit pending
+whoami	spawn	-	unclassified: R1-R7 audit pending
+wpm	never	-	Manages the tree the DLL lives in; spawns children (DESIGN 6.3)
+xargs	spawn	-	unclassified: R1-R7 audit pending
+xxd	conditional	-	Blocked: exception sites need boundary differential/fuzz proof (DESIGN 6.4)
+yes	never	-	Unbounded output stream (R3)
