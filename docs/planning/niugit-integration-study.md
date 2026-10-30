@@ -203,5 +203,5 @@ sha256(本地zip) = sha256(release asset) = wpm index = fc293ad2daed66da...e356
 - 构建/产物：`D:\repo\niu-git\scripts\build.py`（configure 82-92、DLL 181-186）、`scripts/entry/launch-git.c`、`dist/etc/gitconfig`、`wpm/niugit.json`
 - 计划与基线：`D:\repo\niubash\docs\planning\niubash-git.md`（§3 依赖边界、§8 集成、§10 阶段）、`D:\repo\niu-git\docs\test-baseline.md`、`D:\repo\niu-git\testlog-run10\SUMMARY.md`
 - 凭据语义：`D:\repo\niu-git\src\credential.c` `credential_do()`（helper 三分支）、`run_credential_helper()`（use_shell）
-- 生态接线：`D:\repo\niubash\crates\niubash-runtime\src\setup_wizard.rs`（NIUGIT_INSTALL_COMMAND）、`plugins/sources.rs:531`（Command::new("git")）、`D:\repo\unixwin-oh-my-winuxsh\lib\git.niu`、`D:\repo\wpm-source\index.json`（git/niugit 条目）
+- 生态接线：`D:\repo\niubash\crates\niubash-runtime\src\setup_wizard.rs`（NIUGIT_INSTALL_COMMAND）、`plugins/sources.rs:531`（Command::new("git")）、`D:\repo\oh-my-niu\lib\git.niu`、`D:\repo\wpm-source\index.json`（git/niugit 条目）
 - 上游：git-for-windows v2.55.0.windows.3 release notes（wincred CVE GHSA-rxqw-wxqg-g7hw）、windows.5（MSYS2 runtime 更新）

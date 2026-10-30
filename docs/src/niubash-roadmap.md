@@ -21,7 +21,7 @@ niubash = rubash + winuxcmd + reedline + the external bash ecosystem
 - The REPL uses reedline for editing, history, menus, autosuggestions, syntax
   highlighting, vi/emacs modes, and prompt rendering.
 - `~/.niubashrc` is the primary — and only — interactive startup file; the
-  legacy `~/.winuxshrc`/`~/.winshrc`/`~/.bashrc` names are never read.
+  pre-rename legacy names and `~/.bashrc` are never read.
 - The plugin system is the external bash ecosystem: real sources
   (oh-my-bash, bash-it, bash-completion, wild git repos) installed over
   `git clone`, driven by the declarative

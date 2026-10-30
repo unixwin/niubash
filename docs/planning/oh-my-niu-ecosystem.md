@@ -46,7 +46,7 @@
 | bundle 安装（staging + sha256 + lock + previous） | `mod.rs:2327-2425` | `apply_plugin_bundle_update_from_path` |
 | bundle 回滚 | `mod.rs:2426-2462` | `apply_plugin_bundle_rollback` |
 | 安装校验（schema/api/pack 契约/index 对账） | `mod.rs:2463-2681` | `validate_bundle_inventory_for_update` 等 |
-| source pack 契约 | `mod.rs:2745-2792` | **entry 只允许 `.niu`/`.winux`（`mod.rs:2768`）**，须声明 `shell:source` 权限 |
+| source pack 契约 | `mod.rs:2745-2792` | **entry 只允许 `.niu`**（规划期曾拟 `.winux` 扩展名，代码从未落地），须声明 `shell:source` 权限 |
 | 补全资产加载 | `mod.rs:3002-3055` | `plugin_completion_defs`：bundle TOML → 编译兜底（`git_completion_def` 在 `mod.rs:3057`） |
 | 主题目录/单主题 | `mod.rs:3172-3318` | `plugin_theme_catalog`（user + bundle TOML）、`plugin_theme`、`bundle_asset_path`（`mod.rs:3346-3365`） |
 | rc 启停 pack | `mod.rs:3512-3573` | `active_pack_names` / `enable_pack_in_rc` / `disable_pack_in_rc`（编辑 `NIU_PLUGINS=(…)` 行） |
@@ -320,7 +320,7 @@ bash-completion 注册过的命令（git、ssh、tar…）由引擎函数补全�
   `omb-ansible`、`bit-colors`、`bit-base`、`bit-proxy`、`bit-pack`、
   `bit-dirs`。前缀消歧：`omb-`/`bit-` 避免与原生 `git`/`npm` pack 撞名。
 - **契约放宽**：`validate_source_pack_contract`（`mod.rs:2745-2792`）现要求
-  entry 以 `.niu`/`.winux` 结尾（`mod.rs:2768`）。新增允许 `.sh`（生态
+  entry 以 `.niu` 结尾（规划期拟定的 `.winux` 从未落地）。新增允许 `.sh`（生态
   pack 原文），仍强制 `shell:source` 权限与 plugin 本地相对路径检查；同步
   更新 `framework_plugin_source_entry`（`mod.rs:859-876`）无需变（仅拼路径）
   与安装校验测试。

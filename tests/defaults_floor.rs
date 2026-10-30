@@ -183,7 +183,7 @@ fn install_omb(sandbox: &Sandbox) {
 
 /// The shipped example rc must sell the post-migration shape only: zero
 /// retired-stack fields (niubash#145: NIU_THEME/NIU_THEME_PLUGIN/
-/// NIU_PLUGINS/NIU_BANNER/NIUBASH + `oh-my-niu.winux` chain), floor knobs
+/// NIU_PLUGINS/NIU_BANNER/NIUBASH + the old oh-my-niu pack chain), floor knobs
 /// documented as floor-only, HOME bootstrap, and the loader/migrate-rc
 /// contract (niubash#359/#499: activation lives in the generated loader —
 /// the example carries NO managed-block sample for `niu plugin` to write).

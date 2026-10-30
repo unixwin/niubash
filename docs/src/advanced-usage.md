@@ -125,7 +125,7 @@ layer under niu? Add one visible line to `~/.niubashrc`:
 Explicit, visible, yours — the same shape as bash's own
 `.bash_profile` → `.bashrc` chain. `--norc` skips startup files;
 `--rcfile <file>` reads only the named file, exactly like GNU bash. The
-legacy `~/.winuxshrc` and `~/.winshrc` names are never read, migrated, or
+pre-rename legacy rc names are never read, migrated, or
 written. Machine state —
 the plugin manifest and source registry, the generated
 loader, test isolation, completion directories — is maintained by Niubash

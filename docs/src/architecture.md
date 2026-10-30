@@ -109,8 +109,8 @@ differentiators.
 - `~/.niubashrc` is the primary interactive entry point. Plain
   niubash/bash syntax declares plugin lists, theme, prompt template,
   `export`, `alias`, functions, and local startup logic.
-- `~/.niubashrc` is also the **only** entry point: the legacy `~/.winuxshrc`,
-  `~/.winshrc`, and `~/.bashrc` names are never read, migrated, or written —
+- `~/.niubashrc` is also the **only** entry point: pre-rename legacy
+  rc names and `~/.bashrc` are never read, migrated, or written —
   a session without `~/.niubashrc` starts with the defaults.
 - Plugin activation is a derived plane, not an rc edit (niubash#359): the
   manifest (`~/.niubash/plugins.toml` + `~/.niubash/sources/registry.toml`)

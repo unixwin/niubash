@@ -15,12 +15,12 @@ script.
   selection, prompt templates, exports, aliases, functions, and startup logic.
 - `oh-my-niu` is the official bundled plugin distribution. It is not a fork
   of another shell framework.
-- `~/.winshrc` remains a compatibility fallback only when `~/.niubashrc` is
-  absent.
+- No compatibility fallback is read when `~/.niubashrc` is absent; it is
+  the only automatic startup file.
 - The manifest-backed registry stores structured plugin CLI state for
   enablement, permissions, bundle versions, tests, and advanced
   machine-editable overrides.
-- Plugin manifests are the control plane; `.winux` source files are the trusted
+- Plugin manifests are the control plane; `.niu` source files are the trusted
   script plane for shell-mutating bundle code.
 - Prompt ownership stays with the active user/theme template. Segment providers
   such as Git or Starship may provide values for template tokens, but they do
@@ -40,7 +40,7 @@ niubash core
 
 oh-my-niu bundled distribution
   - official first-party plugin manifests
-  - .winux source scripts
+  - .niu source scripts
   - aliases, completions, functions, prompt presets, prompt segments
   - keybinding presets and theme assets
   - independent version and update channel
@@ -58,7 +58,7 @@ for the actual behavior they need:
 | kind | Purpose |
 | --- | --- |
 | `builtin` | Host-owned Rust implementations that remain part of Niubash core. |
-| `source` | Bundle-local `.winux` startup scripts sourced into the interactive shell. |
+| `source` | Bundle-local `.niu` startup scripts sourced into the interactive shell. |
 | `bridge` | Host-provided adapter surface for a pack that delegates to core features. |
 | `process` | External tool adapters with explicit command permissions and timeouts. |
 
@@ -75,7 +75,7 @@ The framework should be structured around small, auditable packs:
 - A pack has a manifest.
 - A pack can export aliases, completions, functions, prompt segments, hooks,
   commands, keybindings, themes, and settings.
-- A pack that needs shell code has one reviewed `.winux` entry point.
+- A pack that needs shell code has one reviewed `.niu` entry point.
 - A theme owns prompt layout and connective text.
 - Segment providers produce data only. For example, the Git segment can be
   native or Starship-backed, while the theme still decides where `{git}` is
@@ -102,7 +102,7 @@ hooks = ["startup"]
 commands = []
 
 [source]
-entry = "packs/git/init.winux"
+entry = "packs/git/init.niu"
 
 [settings]
 show_dirty = true
@@ -114,7 +114,7 @@ show_ahead_behind = true
 1. Keep the current plugin CLI and manifest registry focused on `[plugins]`.
 2. Load the bundled `oh-my-niu` baseline from the installed bundle path.
 3. Move first-party data assets into the bundle where safe.
-4. Use `.winux` source packs for reviewed shell helpers.
+4. Use `.niu` source packs for reviewed shell helpers.
 5. Keep core shell machinery in Niubash: rubash integration, reedline
    primitives, cwd/env/path synchronization, prompt rendering, and native
    builtins.
@@ -125,4 +125,4 @@ show_ahead_behind = true
 - No plugin access to rubash parser/executor internals.
 - No arbitrary user-discovered rc fragments as plugin code.
 - No DLL/FFI plugin ABI for community plugins.
-- No plugin behavior that depends on executing fallback `~/.winshrc`.
+- No plugin behavior that depends on executing a fallback rc file.

@@ -61,7 +61,7 @@ with a `.plugin.zsh` file is a plugin. Discovery (awesome lists), loading
   source packs activate. `niu plugin list/remove/search` round it out.
 - **P1 — federated indexes.** `index.toml` gains sources: official by
   default, user-added git/URL indexes appended. Discovery without curation.
-- **P2 — classic mode.** Accept a plain directory (or single `.winux` file)
+- **P2 — classic mode.** Accept a plain directory (or single `.niu` file)
   as a "classic" pack: auto-generated minimal manifest, alias/function-only
   scope, no process plugins without an explicit manifest.
 - **P3 — oh-my-zsh bridge (explicitly a shim, not a goal).** Load pure
