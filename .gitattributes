@@ -1,4 +1,4 @@
-# Shell scripts are executed by Git Bash / winuxsh, both of which treat CR
+# Shell scripts are executed by Git Bash / niubash, both of which treat CR
 # as payload: a CRLF checkout breaks heredocs, array literals, and rename
 # gates ("if" + CR: command not found), and perf scripts hung parsing a
 # word-split array literal on an autocrlf=true checkout. Force LF globally

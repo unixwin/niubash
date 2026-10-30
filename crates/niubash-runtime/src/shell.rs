@@ -506,9 +506,9 @@ impl Shell {
         } else {
             None
         };
-        // NIU_SHELL_PATH_STYLE / WINUXSH_SHELL_PATH_STYLE are no longer set
+        // NIU_SHELL_PATH_STYLE is no longer set
         // here: rubash#556 (P0 #537) retired the engine-side readers, so the
-        // vars are inert and only misinformed child processes. The engine now
+        // var is inert and only misinformed child processes. The engine now
         // renders $PWD/`pwd` in the POSIX persona form unconditionally; native
         // spelling is a spawn-boundary concern the host handles below.
         if let Some(shell_path) = &default_shell_path {
@@ -6277,7 +6277,7 @@ mod tests {
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let original = "export NIU_IGNORED_RC_TEST=loaded\nalias ignored_rc_alias='echo loaded'\n";
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             std::fs::write(home.join(name), original).unwrap();
         }
         for repl in [true, false] {
@@ -6305,7 +6305,7 @@ mod tests {
                     default_prompt.as_deref()
                 );
                 assert!(!home.join(NIU_RC_FILE).exists());
-                for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+                for name in [".zshrc", ".kshrc", ".bashrc"] {
                     assert_eq!(std::fs::read_to_string(home.join(name)).unwrap(), original);
                 }
             }
@@ -6379,7 +6379,7 @@ alias hello='echo from-alias'
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let ignored = "export NIU_IGNORED_RC_TEST=loaded\n";
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             std::fs::write(home.join(name), ignored).unwrap();
         }
         for (primary, expected) in [
@@ -6412,7 +6412,7 @@ alias hello='echo from-alias'
                 std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap(),
                 primary
             );
-            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            for name in [".zshrc", ".kshrc", ".bashrc"] {
                 assert_eq!(std::fs::read_to_string(home.join(name)).unwrap(), ignored);
             }
         }
@@ -6427,7 +6427,7 @@ alias hello='echo from-alias'
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let original = "export NIU_LEGACY_SELECTION_TEST=legacy\n";
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             std::fs::write(home.join(name), original).unwrap();
         }
         let custom = home.join("custom.rc");
@@ -6456,7 +6456,7 @@ alias hello='echo from-alias'
                 if no_rc { None } else { Some("custom") }
             );
             assert!(!home.join(NIU_RC_FILE).exists());
-            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+            for name in [".zshrc", ".kshrc", ".bashrc"] {
                 assert_eq!(std::fs::read_to_string(home.join(name)).unwrap(), original);
             }
         }

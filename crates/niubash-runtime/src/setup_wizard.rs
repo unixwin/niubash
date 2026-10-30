@@ -2915,13 +2915,13 @@ mod tests {
         let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&temp));
         let _userprofile = EnvGuard::unset("USERPROFILE");
         let ignored = "OSH_THEME='ignored'\n";
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             std::fs::write(temp.join(name), ignored).unwrap();
         }
         assert!(is_first_run());
         assert!(!temp.join(PRIMARY_RC_FILE).exists());
         assert!(!temp.join(".niubash").exists());
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             assert_eq!(std::fs::read_to_string(temp.join(name)).unwrap(), ignored);
         }
         std::fs::write(temp.join(PRIMARY_RC_FILE), "").unwrap();
@@ -4364,12 +4364,12 @@ mod tests {
         let _userprofile = EnvGuard::unset("USERPROFILE");
         assert_eq!(current_theme_pick(&temp), ThemePick::Keep);
         let ignored = "OSH_THEME='ignored'\n";
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             std::fs::write(temp.join(name), ignored).unwrap();
         }
         assert_eq!(current_theme_pick(&temp), ThemePick::Keep);
         assert!(!temp.join(PRIMARY_RC_FILE).exists());
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             assert_eq!(std::fs::read_to_string(temp.join(name)).unwrap(), ignored);
         }
 
