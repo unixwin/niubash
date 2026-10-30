@@ -9552,6 +9552,143 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(shell.take_session_exit_jump(), None);
     }
 
+    /// niubash#698 setup: make `sleep` resolvable for the pins below.
+    /// The engine's sleep fast path is an emulated external
+    /// (rubash#1545): it stands in for the PATH binary and inherits
+    /// its resolvability, so in an environment with no `sleep`
+    /// command the name is a 127, exactly as GNU's PATH search
+    /// adjudicates it — and nothing blocks for the delivery to
+    /// interrupt. The installed product always resolves it (the
+    /// winuxcmd command links are niubash's PATH floor), so the pins
+    /// install the same condition hermetically: a `sleep.exe`
+    /// placeholder in a temp dir prepended to the session PATH.
+    /// When the fast path answers, the placeholder is never spawned;
+    /// the in-process emulation is the product's answer for a
+    /// resolvable `sleep`. Returns the dir to keep it alive.
+    #[cfg(windows)]
+    fn issue698_make_sleep_resolvable(shell: &mut Shell) -> PathBuf {
+        let dir = unique_temp_dir("niu-issue698-sleep-link");
+        std::fs::create_dir_all(&dir).expect("create sleep link dir");
+        std::fs::write(dir.join("sleep.exe"), b"placeholder").expect("write sleep placeholder");
+        let old_path = shell
+            .executor()
+            .get_env("PATH")
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        shell
+            .executor_mut()
+            .set_env("PATH", &format!("{};{}", dir.display(), old_path));
+        dir
+    }
+
+    /// niubash#698: an untrapped Ctrl+C delivered while a foreground
+    /// command runs in an interactive session ends the command with
+    /// $?=130 and returns to the prompt (GNU jobs.c:3064 wait_for:
+    /// the interrupt settles the foreground job, the session lives).
+    /// The defect was the whole shell exiting rc=130: the mid-wait
+    /// mailbox drain classified the delivery as an exit jump because
+    /// the DISCARD classification (rubash#1662, completed for the
+    /// mid-wait drain by rubash#2145) never reached this boundary.
+    /// The delivery here is the genuine Windows face both real
+    /// senders use — the console handler and the ForegroundWatch
+    /// both end at `script_driver::inject_console_ctrl_c`, the
+    /// engine mailbox note this test injects from a side thread.
+    /// Windows-only: the note is the Windows transport; on unix the
+    /// kernel delivers SIGINT and the engine's guards route it.
+    #[cfg(windows)]
+    #[test]
+    fn issue698_untrapped_ctrl_c_during_foreground_command_keeps_the_session() {
+        use std::time::{Duration, Instant};
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+        let _sleep_link = issue698_make_sleep_resolvable(&mut shell);
+
+        let injector = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            rubash::script_driver::inject_console_ctrl_c();
+        });
+        let started = Instant::now();
+        let code = shell.execute_interactive_line("sleep 10").unwrap();
+        injector.join().unwrap();
+        assert_eq!(code, 130, "the interrupted command settles at 128+SIGINT");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the foreground sleep must abort on the delivery, not run to completion"
+        );
+        assert_eq!(
+            shell.take_session_exit_jump(),
+            None,
+            "an untrapped interactive Ctrl+C is a discard, not a session exit"
+        );
+        // The session survives: the next submission runs normally.
+        assert_eq!(shell.execute_interactive_line("true").unwrap(), 0);
+    }
+
+    /// niubash#698 control arm: the trapped path was never broken —
+    /// with `trap '' INT` the same delivery during a foreground
+    /// command is ignored and the command runs to completion; the
+    /// shell survives with the command's own status.
+    #[cfg(windows)]
+    #[test]
+    fn issue698_ignored_ctrl_c_during_foreground_command_completes_it() {
+        use std::time::{Duration, Instant};
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+        let _sleep_link = issue698_make_sleep_resolvable(&mut shell);
+        assert_eq!(shell.execute_interactive_line("trap '' INT").unwrap(), 0);
+
+        let injector = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            rubash::script_driver::inject_console_ctrl_c();
+        });
+        let started = Instant::now();
+        let code = shell.execute_interactive_line("sleep 2").unwrap();
+        injector.join().unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            started.elapsed() >= Duration::from_millis(1800),
+            "an ignored INT must not cut the command short"
+        );
+        assert_eq!(shell.take_session_exit_jump(), None);
+    }
+
+    /// niubash#698 boundary arm: the SAME delivery on the
+    /// non-interactive surface keeps the exit classification — a
+    /// script/`-c` shell dies at 128+SIGINT. Only the interactive
+    /// session converts the unwind into a discard; this is the
+    /// distinction the delivery/executor boundary must keep.
+    #[cfg(windows)]
+    #[test]
+    fn issue698_untrapped_ctrl_c_in_a_script_keeps_the_exit_classification() {
+        use std::time::{Duration, Instant};
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        // No enter_interactive: `__RUBASH_INTERACTIVE` stays unset.
+        let _sleep_link = issue698_make_sleep_resolvable(&mut shell);
+
+        let injector = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            rubash::script_driver::inject_console_ctrl_c();
+        });
+        let started = Instant::now();
+        let code = shell.execute_script("sleep 10").unwrap();
+        injector.join().unwrap();
+        assert_eq!(code, 130);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the delivery must still abort the blocked wait promptly"
+        );
+        assert!(
+            shell.take_script_exit_jump(),
+            "a non-interactive untrapped INT unwinds as a shell exit"
+        );
+    }
+
     pub(super) fn test_shell(hooks: HookConfig) -> Shell {
         let mut session = Session::builder().build().expect("test session builds");
         session.options().set("expand_aliases", true);
