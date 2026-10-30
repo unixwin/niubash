@@ -424,7 +424,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // GNU's `set keyseq-timeout` (rc `bind 'set ...'` or ~/.inputrc) is the
     // only surface for this knob — no config duplication. rubash's table
     // already defaults to 500, so an unset variable keeps readline's value.
-    let keyseq_timeout = engine_keyseq_timeout(&*shell_ref)
+    let keyseq_timeout = engine_keyseq_timeout(&shell_ref)
         .unwrap_or(std::time::Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS));
 
     let mut editor = Reedline::create()
