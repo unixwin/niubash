@@ -2611,8 +2611,8 @@ mod tests {
         );
         let spec = spec_text();
         assert!(spec.contains("\"target\": \""), "{spec}");
-        assert!(spec.contains("'git'"), "{spec}");
-        assert!(spec.contains("'agnoster'"), "{spec}");
+        assert!(spec.contains("\"git\""), "{spec}");
+        assert!(spec.contains("\"agnoster\""), "{spec}");
 
         // Overview reflects the state.
         let overview = asset_overview();

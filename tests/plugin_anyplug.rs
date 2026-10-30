@@ -178,7 +178,7 @@ fn wild_single_file_plugin_enumerates_honestly_and_loads() {
         "{rc}"
     );
     assert!(
-        sandbox.spec().contains("'spark.bash'"),
+        sandbox.spec().contains("\"spark.bash\""),
         "{}",
         sandbox.spec()
     );
