@@ -1104,6 +1104,13 @@ mod tests {
     fn vcs_content_in(dir: &Path) -> Option<String> {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd = CwdGuard::enter(dir);
+        // The segment is served from the #685 cross-pass cache: a cold
+        // read returns None and lands its value from a background
+        // refresh. Drive the read to its settled value the way
+        // git_prompt's own probes do — trigger, wait for the landing
+        // (event-driven, never a poll), read again.
+        let _ = vcs_segment_content();
+        let _ = crate::git_prompt::wait_for_segment_cache_idle(std::time::Duration::from_secs(30));
         vcs_segment_content()
     }
 
@@ -1200,6 +1207,13 @@ mod tests {
             let left = {
                 let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
                 let _cwd = CwdGuard::enter(tmp.path());
+                // Warm the #685 segment cache to its settled value
+                // first: render_left reads the cache and never waits,
+                // so a cold render would show no Vcs segment at all.
+                let _ = crate::git_prompt::branch_segment(tmp.path());
+                let _ = crate::git_prompt::wait_for_segment_cache_idle(
+                    std::time::Duration::from_secs(30),
+                );
                 prompt.render_left()
             };
             let ansi = if expected == Color::Cyan {
