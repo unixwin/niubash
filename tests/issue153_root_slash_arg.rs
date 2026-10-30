@@ -28,15 +28,14 @@ fn niu_binary() -> PathBuf {
     fallback
 }
 
-/// Run `niu` with a configured NIU_ROOT (installed-layout shell root) and a
-/// clean WINUXSH_ROOT so the root under test is exactly `root`.
+/// Run `niu` with a configured NIU_ROOT (installed-layout shell root) so
+/// the root under test is exactly `root`.
 fn run_with_root(script: &str, root: &Path) -> Output {
     let mut command = Command::new(niu_binary());
     command
         .arg("-c")
         .arg(script)
         .env("NIU_ROOT", root)
-        .env_remove("WINUXSH_ROOT")
         .stdin(Stdio::null());
     command
         .output()
