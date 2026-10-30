@@ -105,7 +105,7 @@ ambient load, so ratios and growth factors are the verdict basis.
   factor cut from ×10.67 to ×1.08 on misses. The mechanism is a
   settled read on the combined table — the typed cell mirror answers
   hits and misses authoritatively (rubash PR #1919, merged; the length
-  legs in the residual batch). Full account in the engine ledger.
+  legs in residual-batch PR #2060, merged). Full account in the engine ledger.
 - Command-completion candidates are cached: `compgen -c` on a fat
   PATH (~3,100 candidates) fell from 110.6 ms to 13.6 ms per call
   (GNU measures 277.6 ms in the same window); the walk re-runs only
