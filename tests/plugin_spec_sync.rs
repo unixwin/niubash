@@ -278,12 +278,16 @@ fn cli_sugar_matches_the_handwritten_spec_byte_for_byte() {
         );
     }
 
-    // Lane B: hand-written spec + sync.
+    // Lane B: hand-written spec + sync. The literal is written in the
+    // spec writer's canonical pretty shape (`render_spec` in spec.rs:
+    // serde_json::to_string_pretty + trailing newline) — this lane pins
+    // that the CLI's rendered declaration and a hand-written one agree
+    // byte-for-byte.
     let hand = Sandbox::new("spec-hand");
     fs::write(
         hand.spec_path(),
         format!(
-            "{{\n  \"schema\": \"niubash:plugin-spec@0.1.0\",\n  \"sources\": [\n    {{ \"target\": \"{origin}\", \"id\": \"oh-my-bash\", \"theme\": \"agnoster\", \"enable\": [\"git\"] }}\n  ]\n}}\n"
+            "{{\n  \"schema\": \"niubash:plugin-spec@0.1.0\",\n  \"sources\": [\n    {{\n      \"target\": \"{origin}\",\n      \"id\": \"oh-my-bash\",\n      \"theme\": \"agnoster\",\n      \"enable\": [\n        \"git\"\n      ]\n    }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
