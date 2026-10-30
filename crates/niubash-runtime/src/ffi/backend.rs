@@ -218,6 +218,14 @@ mod windows_backend {
         }
     }
 
+    // SAFETY: after `load`, the backend's state is immutable —
+    // the module handle plus three resolved fn pointers — and
+    // every access runs under the provider's lock with the DLL
+    // never unloaded, so moving the backend between threads
+    // cannot race or dangle. (The OS loader's module table is
+    // process-global state to begin with.)
+    unsafe impl Send for WindowsDllBackend {}
+
     impl FfiBackend for WindowsDllBackend {
         fn abi_version(&mut self) -> Result<u32, String> {
             // SAFETY: the export was resolved at load; the DLL is
