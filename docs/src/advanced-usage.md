@@ -223,19 +223,21 @@ python scripts/generate-winuxcmd-completions.py --winuxcmd <path-to-winuxcmd.exe
 python scripts/test-winuxcmd-completions.py   # golden check: corpus vs committed assets
 ```
 
-A second compiled layer covers the common external commands that are not
-WinuxCmd applets — git, tar, curl, ssh, docker, kubectl, and npm (issue
-#305): static subcommand/flag tables under
-`crates/niubash-runtime/assets/completions/common/`, so `git co<Tab>` offers
-`checkout`/`commit`/`config` and `kubectl get -<Tab>` offers `-o`/
-`--all-namespaces` on a fresh install.
+The common external commands that are not WinuxCmd applets — git, docker,
+kubectl, npm, and friends — are covered one layer up: the official
+oh-my-niu bundle ships their subcommand/flag tables in its `completions/`
+directory, so `git co<Tab>` offers `checkout`/`commit`/`config` once the
+bundle is in place. (The hand-curated tables niu used to compile in for
+these commands were removed with the 1.5.0 product-TOML deletion; commands
+no layer covers fall back to path completion, and a user completion dir
+can always supply a table of its own.)
 
-Priority is layered: the embedded applet and common-command defaults are the
-base layer, and completion definitions loaded later override them per
-command — a bundle/pack TOML or a user completion-dir TOML whose file stem
-(or `command` key) matches the built-in name replaces the built-in
-definition entirely, so trimming or extending a command's flags is a plain
-file drop, not a fight with the defaults.
+Priority is layered: the embedded applet defaults are the base layer, and
+completion definitions loaded later override them per command — a
+bundle/pack TOML or a user completion-dir TOML whose file stem (or
+`command` key) matches the built-in name replaces the built-in definition
+entirely, so trimming or extending a command's flags is a plain file drop,
+not a fight with the defaults.
 
 ## AI Agent Skill Bundle
 

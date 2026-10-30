@@ -27,14 +27,15 @@ GNU surfaces are authoritative, in this order:
 2. a GNU compspec registered by `complete` (bash-completion included) — when
    it exists it owns the command's arguments, and neither the static tables
    nor the path fallback contribute;
-3. niu's embedded completion tables (winuxcmd applets and common commands,
-   then bundle and user completion dirs) — only for commands without a
-   compspec;
+3. niu's completion tables — the embedded winuxcmd applet tables first,
+   then bundle and user completion dirs (the official oh-my-niu bundle
+   carries the non-applet tables: git, docker, kubectl, npm, …) — only for
+   commands without a compspec;
 4. path / variable / command-name completion.
 
-The embedded tables are generated data (`assets/completions/*.toml`), not
-configuration: nothing about them is user-editable, and they never override
-what `complete` registered.
+The embedded tables are generated data (`assets/completions/winuxcmd/*.toml`),
+not configuration: nothing about them is user-editable, and they never
+override what `complete` registered.
 
 ## Completion styles
 
