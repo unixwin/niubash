@@ -441,11 +441,11 @@ fn setup_writes_a_journal_for_the_noninteractive_run() {
     let (sandbox, envs) = Sandbox::new("setup-journal");
     let setup = run_niu_with_env(&["setup"], &envs);
     assert_success(&setup, "non-interactive setup");
-    let journal_path = sandbox.home.join(".niubash").join("setup-journal.toml");
+    let journal_path = sandbox.home.join(".niubash").join("setup-journal.json");
     let journal = fs::read_to_string(&journal_path).expect("journal written");
     assert!(journal.contains("niubash:setup-journal@0.1.0"), "{journal}");
-    assert!(journal.contains("preset = 'minimal'"), "{journal}");
-    assert!(journal.contains("applied_at = "), "{journal}");
+    assert!(journal.contains("\"preset\": \"minimal\""), "{journal}");
+    assert!(journal.contains("\"applied_at\":"), "{journal}");
 
     let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
 }

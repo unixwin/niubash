@@ -618,9 +618,9 @@ fn d1_setup_preset_recommended_writes_a_clean_parseable_rc() {
     let parse = run_niu(&["-n", &rc_path.to_string_lossy()], &sandbox.envs);
     assert_success(&parse, "niu -n parse of the generated rc");
 
-    let journal = fs::read_to_string(sandbox.home.join(".niubash").join("setup-journal.toml"))
+    let journal = fs::read_to_string(sandbox.home.join(".niubash").join("setup-journal.json"))
         .expect("journal written");
-    assert!(journal.contains("preset = 'recommended'"), "{journal}");
+    assert!(journal.contains("\"preset\": \"recommended\""), "{journal}");
 }
 
 // ── D. setup wizard (continued): the one-run out-of-box journey ─────────────
@@ -878,9 +878,9 @@ fn d2_wizard_one_run_theme_journey() {
         loader.contains("OSH_THEME='agnoster'"),
         "the pick published the loader generation: {loader}"
     );
-    let journal = fs::read_to_string(s.home().join(".niubash").join("setup-journal.toml")).unwrap();
-    assert!(journal.contains("theme = 'agnoster'"), "{journal}");
-    assert!(journal.contains("collection = 'recommended'"), "{journal}");
+    let journal = fs::read_to_string(s.home().join(".niubash").join("setup-journal.json")).unwrap();
+    assert!(journal.contains("\"theme\": \"agnoster\""), "{journal}");
+    assert!(journal.contains("\"collection\": \"recommended\""), "{journal}");
 
     // 1.3.1: the journey ends SPEC-MANAGED. The post-pick adoption
     // declared the collection's sources with the live snapshot — canonical

@@ -18,6 +18,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
+
 use crate::interactive_menu::{self, pad_display, Selection};
 use crate::path_utils::shell_home_dir;
 
@@ -37,7 +39,7 @@ const APPLY_PENDING_FILE: &str = "setup-apply-pending";
 /// Schema marker for the wizard answers file (`~/.niubash/wizard-answers.toml`).
 const WIZARD_ANSWERS_SCHEMA: &str = "niubash:wizard-answers@0.1.0";
 
-/// Schema marker for the setup journal (`~/.niubash/setup-journal.toml`).
+/// Schema marker for the setup journal (`~/.niubash/setup-journal.json`).
 const SETUP_JOURNAL_SCHEMA: &str = "niubash:setup-journal@0.1.0";
 
 /// What one applied setup run changed — the durable side of the undo
@@ -81,7 +83,40 @@ struct CollectionJournal {
 }
 
 fn setup_journal_path(home: &std::path::Path) -> PathBuf {
-    home.join(".niubash").join("setup-journal.toml")
+    home.join(".niubash").join("setup-journal.json")
+}
+
+/// The on-disk form of [`SetupJournal`]: the applied-run receipt. The
+/// field names are the ones the pre-1.5.0 TOML journal used — only the
+/// syntax changed (the 1.5.0 product-TOML deletion). Nothing parses
+/// this file back: it is the durable copy of the undo receipt the
+/// finish screen prints, overwritten whole by the next setup run, so
+/// a pre-1.5.0 TOML receipt is simply replaced on the next run and is
+/// never converted.
+#[derive(Serialize)]
+struct SetupJournalRecord<'a> {
+    schema: &'a str,
+    applied_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rc_sample: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    rc_created: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    theme: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    theme_source: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    niu_git: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collection: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    collection_sources: &'a [String],
+    // Honesty (journey run-13): a collection whose entries failed — or
+    // whose whole apply errored — must never read back as a success.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    collection_failed: &'a [String],
 }
 
 /// Write the journal for the run that was just applied. Failures are
@@ -91,51 +126,44 @@ fn write_setup_journal(home: &std::path::Path, journal: &SetupJournal) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut body = format!(
-        "# Applied setup run — the finish screen printed an undo command per entry.\n\
-         schema = \"{SETUP_JOURNAL_SCHEMA}\"\n\
-         applied_at = \"{}\"\n",
-        timestamp_id()
-    );
-    if let Some(sample) = &journal.rc_sample {
-        body.push_str(&format!(
-            "rc_sample = {}\n",
-            shell_quote(&sample.to_string_lossy())
-        ));
-    }
-    if journal.rc_created {
-        body.push_str("rc_created = true\n");
-    }
-    if let Some((theme, source)) = &journal.theme {
-        body.push_str(&format!(
-            "theme = {}\ntheme_source = {}\n",
-            shell_quote(theme),
-            shell_quote(source)
-        ));
-    }
-    if let Some(preset) = &journal.preset {
-        body.push_str(&format!("preset = {}\n", shell_quote(preset)));
-    }
-    if let Some(niu_git) = &journal.niu_git {
-        body.push_str(&format!("niu_git = {}\n", shell_quote(niu_git)));
-    }
-    if let Some(collection) = &journal.collection {
-        body.push_str(&format!("collection = {}\n", shell_quote(&collection.name)));
-        if !collection.sources.is_empty() {
-            let ids: Vec<String> = collection
-                .sources
-                .iter()
-                .map(|id| shell_quote(id))
-                .collect();
-            body.push_str(&format!("collection_sources = [{}]\n", ids.join(", ")));
+    let empty: &[String] = &[];
+    let record = SetupJournalRecord {
+        schema: SETUP_JOURNAL_SCHEMA,
+        applied_at: timestamp_id(),
+        rc_sample: journal
+            .rc_sample
+            .as_ref()
+            .map(|sample| sample.to_string_lossy().into_owned()),
+        rc_created: journal.rc_created,
+        theme: journal.theme.as_ref().map(|(theme, _)| theme.as_str()),
+        theme_source: journal.theme.as_ref().map(|(_, source)| source.as_str()),
+        preset: journal.preset.as_deref(),
+        niu_git: journal.niu_git.as_deref(),
+        collection: journal.collection.as_ref().map(|c| c.name.as_str()),
+        collection_sources: journal
+            .collection
+            .as_ref()
+            .map(|c| c.sources.as_slice())
+            .unwrap_or(empty),
+        collection_failed: journal
+            .collection
+            .as_ref()
+            .map(|c| c.failed.as_slice())
+            .unwrap_or(empty),
+    };
+    let body = match serde_json::to_string_pretty(&record) {
+        Ok(mut body) => {
+            body.push('\n');
+            body
         }
-        // Honesty (journey run-13): a collection whose entries failed — or
-        // whose whole apply errored — must never read back as a success.
-        if !collection.failed.is_empty() {
-            let ids: Vec<String> = collection.failed.iter().map(|id| shell_quote(id)).collect();
-            body.push_str(&format!("collection_failed = [{}]\n", ids.join(", ")));
+        Err(err) => {
+            println!(
+                "  \u{26a0}\u{fe0f}  {} {err}",
+                Lang::detect().tr("could not write the setup journal")
+            );
+            return;
         }
-    }
+    };
     if let Err(err) = std::fs::write(&path, body) {
         println!(
             "  \u{26a0}\u{fe0f}  {} {err}",
@@ -3812,15 +3840,14 @@ mod tests {
             ..SetupJournal::default()
         };
         write_setup_journal(&home, &full);
-        let text = std::fs::read_to_string(home.join(".niubash/setup-journal.toml"))
-            .expect("journal written");
-        assert!(text.contains("collection = 'g3test'"), "{text}");
+        let text = std::fs::read_to_string(setup_journal_path(&home)).expect("journal written");
+        assert!(text.contains("\"collection\": \"g3test\""), "{text}");
         assert!(
             !text.contains("collection_sources"),
             "no source landed; the journal must not invent any: {text}"
         );
         assert!(
-            text.contains("collection_failed = ['omb-theme-90210']"),
+            text.contains("\"collection_failed\"") && text.contains("\"omb-theme-90210\""),
             "{text}"
         );
         // The finish screen's retry block names the exact verb.
@@ -4258,12 +4285,12 @@ mod tests {
         write_setup_journal(&temp, &journal);
         let text = std::fs::read_to_string(setup_journal_path(&temp)).unwrap();
         assert!(text.contains(SETUP_JOURNAL_SCHEMA), "{text}");
-        assert!(text.contains("rc_sample = "), "{text}");
-        assert!(text.contains("theme = 'robbyrussell'"), "{text}");
-        assert!(text.contains("theme_source = 'oh-my-bash'"), "{text}");
-        assert!(text.contains("collection = 'recommended'"), "{text}");
+        assert!(text.contains("\"rc_sample\":"), "{text}");
+        assert!(text.contains("\"theme\": \"robbyrussell\""), "{text}");
+        assert!(text.contains("\"theme_source\": \"oh-my-bash\""), "{text}");
+        assert!(text.contains("\"collection\": \"recommended\""), "{text}");
         assert!(
-            text.contains("collection_sources = ['oh-my-bash']"),
+            text.contains("\"collection_sources\"") && text.contains("\"oh-my-bash\""),
             "{text}"
         );
 
@@ -4331,8 +4358,8 @@ mod tests {
         );
         write_setup_journal(&temp, &fresh);
         let text = std::fs::read_to_string(setup_journal_path(&temp)).unwrap();
-        assert!(text.contains("rc_created = true"), "{text}");
-        assert!(!text.contains("rc_sample = "), "{text}");
+        assert!(text.contains("\"rc_created\": true"), "{text}");
+        assert!(!text.contains("\"rc_sample\""), "{text}");
         let _ = std::fs::remove_dir_all(&temp);
     }
 
