@@ -95,14 +95,27 @@ pub struct GithubMirror {
     pub git_instead_of: Option<String>,
 }
 
+/// Parse mirrors.json text: blank (zero-byte or whitespace-only) yields
+/// the default config, not a parse error — the tolerance the TOML reader
+/// had for an empty `mirrors.toml` (an empty TOML document is a valid
+/// all-default config; an empty JSON document is a serde EOF error),
+/// restored for the JSON form. Non-blank garbage goes to serde_json
+/// unchanged and keeps erroring. (Same rule as
+/// `super::spec::parse_spec_json`.)
+fn parse_mirror_config_json(text: &str) -> anyhow::Result<MirrorConfig> {
+    if text.trim().is_empty() {
+        return Ok(MirrorConfig::default());
+    }
+    Ok(serde_json::from_str(text)?)
+}
+
 pub fn load_mirror_config() -> anyhow::Result<Option<MirrorConfig>> {
     let path = mirrors_path();
     if !path.is_file() {
         return Ok(None);
     }
     let text = fs::read_to_string(&path)?;
-    let config: MirrorConfig = serde_json::from_str(&text)?;
-    Ok(Some(config))
+    Ok(Some(parse_mirror_config_json(&text)?))
 }
 
 /// Render the config as the file users edit: pretty JSON with the schema
@@ -203,7 +216,7 @@ pub fn migrate_legacy_mirrors() -> anyhow::Result<Option<MirrorMigrationReport>>
     };
     if json_path.is_file() {
         let existing_text = fs::read_to_string(&json_path)?;
-        let _: MirrorConfig = serde_json::from_str(&existing_text).with_context(|| {
+        let _: MirrorConfig = parse_mirror_config_json(&existing_text).with_context(|| {
             format!(
                 "could not parse {} — fix or remove the file by hand; \
                  niu never rewrites a mirror config it cannot read",
@@ -418,6 +431,54 @@ mod tests {
             fs::write(path, "this is { not json").unwrap();
             assert!(resolve_active_mirror().is_none());
             assert!(load_mirror_config().is_err());
+        });
+    }
+
+    /// A blank mirrors.json (zero-byte or whitespace-only — the shape of
+    /// a never-written or truncated file) reads as the default config:
+    /// the TOML reader took an empty mirrors.toml as all-default, so the
+    /// JSON reader must not turn the same file into a hard error for
+    /// `mirror list` / doctor / the `mirror set` writers.
+    #[test]
+    fn blank_config_reads_as_default_direct() {
+        with_temp_mirrors(|path| {
+            fs::write(path, "").unwrap();
+            let config = load_mirror_config()
+                .unwrap()
+                .expect("a blank file is present-but-empty, not missing");
+            assert_eq!(config, MirrorConfig::default());
+            assert!(resolve_active_mirror().is_none());
+            assert!(git_clone_args("https://github.com/o/r.git").is_empty());
+            // The write consumers proceed over it instead of erroring.
+            set_direct().unwrap();
+            assert_eq!(
+                load_mirror_config().unwrap().unwrap().active.as_deref(),
+                Some("none")
+            );
+            // Whitespace-only is the same shape.
+            fs::write(path, " \n").unwrap();
+            assert_eq!(
+                load_mirror_config().unwrap().unwrap(),
+                MirrorConfig::default()
+            );
+            assert!(resolve_active_mirror().is_none());
+        });
+    }
+
+    /// The migrate bridge validates an existing mirrors.json before
+    /// keeping it: a blank one is empty (kept, conversion proceeds),
+    /// not a config niu "cannot read".
+    #[test]
+    fn migrate_keeps_a_blank_existing_json_config() {
+        with_temp_mirrors(|path| {
+            let legacy = path.with_file_name("mirrors.toml");
+            fs::write(&legacy, "active = \"none\"\n").unwrap();
+            fs::write(path, "").unwrap();
+            let report = migrate_legacy_mirrors().unwrap().unwrap();
+            assert!(report.kept_existing);
+            assert!(report.skipped.is_empty());
+            assert!(report.backup.is_some());
+            assert!(!legacy.exists(), "legacy renamed aside");
         });
     }
 
