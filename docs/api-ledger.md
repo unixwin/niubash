@@ -56,8 +56,9 @@
 > `rubash::api` re-exports `ExternalRouteProvider`,
 > `ExternalRouteRequest`, `ExternalRouteStdio`,
 > `ExternalRouteHandle`, `ExternalRouteOutcome`, the builder
-> face `SessionBuilder::external_route_provider`, and the
-> Executor setter `Executor::set_external_route_provider` —
+> face `SessionBuilder::external_route_provider`, the
+> Executor setter `Executor::set_external_route_provider`,
+> and the adapter-consumed `ExternalRouteHandle::raw_or_zero` —
 > is recorded (§2.1 row, §2.3 row, §4 row, §6 entries). The
 > seam is new on the engine side in the same change: the
 > dispatcher consults a registered provider for a resolved
@@ -570,6 +571,7 @@ variant rubash::shell::bind_registry::BindKind::Function
 variant rubash::shell::bind_registry::BindKind::Macro
 variant rubash::special_paths::SpecialPathClass::Filesystem
 method rubash::Executor::new
+method rubash::api::ExternalRouteHandle::raw_or_zero
 method rubash::api::OptionsView::set
 method rubash::api::Session::aliases
 method rubash::api::Session::builder
