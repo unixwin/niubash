@@ -784,6 +784,9 @@ mod tests {
     fn shell_bridge_compdef_produces_candidates() {
         use crate::test_support::PROCESS_STATE_LOCK;
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Dropping this Shell must not take the test process's PATH
+        // with it (see ProcessEnvRestore).
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
 
         let mut shell = crate::shell::Shell::new().unwrap();
         assert!(shell
@@ -809,12 +812,19 @@ niu_git_comp() {
             .unwrap_or_else(|| panic!("missing compdef candidate, got {suggestions:?}"));
         assert_eq!(alpha.description.as_deref(), Some("First"));
         assert!(suggestions.iter().any(|s| s.value == "beta"));
+        // Drop the Shell inside this test, while _env_restore is still
+        // armed (the thread-local bridge would otherwise defer the drop
+        // to thread teardown).
+        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
     fn compspec_candidates_flow_through_rubash_hook() {
         use crate::test_support::PROCESS_STATE_LOCK;
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Dropping this Shell must not take the test process's PATH
+        // with it (see ProcessEnvRestore).
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
 
         let mut shell = crate::shell::Shell::new().unwrap();
         // Register a GNU compspec on the rubash executor via the `complete`
@@ -835,6 +845,10 @@ niu_git_comp() {
             suggestions.iter().any(|s| s.value == "alpha"),
             "missing compspec candidate alpha, got {suggestions:?}"
         );
+        // Drop the Shell inside this test, while _env_restore is still
+        // armed (the thread-local bridge would otherwise defer the drop
+        // to thread teardown).
+        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]

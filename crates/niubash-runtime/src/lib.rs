@@ -115,4 +115,44 @@ pub(crate) mod test_support {
     use std::sync::Mutex;
 
     pub(crate) static PROCESS_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII restore of process environment variables, for tests that
+    /// create and drop an engine Session inside this shared test process.
+    ///
+    /// On Windows the engine Executor's Drop restores the process
+    /// environment from its birth snapshot. That snapshot is keyed by
+    /// the process block's own spelling ("Path"), while the write
+    /// journal keys mirrored assignments by the shell's spelling
+    /// ("PATH") — the variable table got the case-normalization fix,
+    /// the snapshot did not — so the restore misses the snapshot entry
+    /// and deletes PATH from the host process instead of restoring it.
+    /// Every later test in the process that spawns a bare `git` then
+    /// fails with NotFound. Until the engine snapshot is normalized
+    /// the same way, a test that drops a Shell holds this guard so the
+    /// process environment it entered with is the one it leaves behind.
+    pub(crate) struct ProcessEnvRestore {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ProcessEnvRestore {
+        pub(crate) fn new(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for ProcessEnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
 }
