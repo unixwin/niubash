@@ -5436,7 +5436,6 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
     }
 
     let root = std::env::var_os("NIU_ROOT")
-        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
         .filter(|value| !value.is_empty())
         .map(|value| PathBuf::from(shell_path_to_host_path(&value.to_string_lossy())))
         .or_else(|| winuxcmd_path.map(winuxcmd::installation_root));
