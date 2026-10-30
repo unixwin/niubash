@@ -750,13 +750,10 @@ fn d2_wizard_one_run_theme_journey() {
         mirror.display().to_string().replace('\\', "/")
     );
     fs::write(
-        home.join(".niubash").join("mirrors.toml"),
+        home.join(".niubash").join("mirrors.json"),
         format!(
-            "# smoke journey: rewrite GitHub fetches to the seeded local mirror\n\
-             schema = \"niubash:mirrors@0.1.0\"\n\
-             active = \"custom\"\n\n\
-             [github]\n\
-             git_instead_of = \"{mirror_base}/\"\n"
+            "{{\"schema\": \"niubash:mirrors@0.1.0\", \"active\": \"custom\", \
+             \"github\": {{\"git_instead_of\": \"{mirror_base}/\"}}}}"
         ),
     )
     .unwrap();
@@ -776,7 +773,7 @@ fn d2_wizard_one_run_theme_journey() {
         (
             "NIU_MIRRORS".to_string(),
             home.join(".niubash")
-                .join("mirrors.toml")
+                .join("mirrors.json")
                 .to_string_lossy()
                 .into_owned(),
         ),
