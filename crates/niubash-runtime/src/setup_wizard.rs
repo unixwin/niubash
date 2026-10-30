@@ -3377,10 +3377,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let proposal = generate_rc(&clean_cfg());
         let broken = |_: &std::path::Path, _: &std::path::Path| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "transient storage failure",
-            ))
+            Err(std::io::Error::other("transient storage failure"))
         };
         let outcome = write_primary_rc_with_linker(&home, &proposal, &broken);
         assert!(
