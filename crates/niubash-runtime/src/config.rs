@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context as _;
 
@@ -477,15 +476,6 @@ pub const KEYMAP_BIND_KEY: &str = "keymap.bind";
 /// the key goes back to unbound, not to a lower layer's binding.
 pub const KEYMAP_UNBIND_KEY: &str = "keymap.unbind";
 
-/// The chord timeout key (niubash#630): the `[keymap]` table's
-/// `keyseq-timeout` integer, in milliseconds. It is readline's
-/// `keyseq-timeout`: how long a held multi-key prefix waits for its next
-/// unit before the prefix is replayed on its own. `0` means wait forever.
-pub const KEYMAP_KEYSEQ_TIMEOUT_KEY: &str = "keymap.keyseq-timeout";
-
-/// readline's `keyseq-timeout` default, in milliseconds.
-pub const DEFAULT_KEYSEQ_TIMEOUT_MS: u64 = 500;
-
 /// The `[completion]` section of config.toml.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct CompletionConfigSection {
@@ -513,12 +503,6 @@ struct KeymapConfigSection {
     bind: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unbind: Option<Vec<String>>,
-    #[serde(
-        rename = "keyseq-timeout",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    keyseq_timeout: Option<i64>,
 }
 
 /// Which file may fill the default interactive personal-rc slot
@@ -665,10 +649,7 @@ const USER_CONFIG_NOTES: &str = "\
 #   '\"\\C-g\": redisplay' or '-x \"\\C-t\": my-cmd'; unbind elements\n\
 #   name one key to remove outright, e.g. '\"\\C-t\"'. Rules apply at\n\
 #   editor build after scripts and NIU_BINDKEYS, so they win over\n\
-#   startup-file binds; add one with `niu config set keymap.bind`.\n\
-# keymap.keyseq-timeout: milliseconds a multi-key (chord) prefix waits\n\
-#   for its next unit; readline's keyseq-timeout. 500 (default), or 0\n\
-#   to wait forever. Change with `niu config set keymap.keyseq-timeout`.\n";
+#   startup-file binds; add one with `niu config set keymap.bind`.\n";
 
 /// The document a first-time writer starts from (header notes + schema).
 fn fresh_user_config_doc() -> toml_edit::DocumentMut {
@@ -1014,68 +995,6 @@ pub fn resolve_keymap_rule_specs() -> (Vec<String>, Vec<String>) {
     )
 }
 
-/// Parse one `keymap.keyseq-timeout` value: a non-negative integer number
-/// of milliseconds. `0` means "wait forever" (readline semantics); a
-/// negative, fractional or non-numeric value is refused.
-pub fn parse_keyseq_timeout(value: &str) -> Option<u64> {
-    value
-        .trim()
-        .parse::<i64>()
-        .ok()
-        .and_then(|ms| u64::try_from(ms).ok())
-}
-
-/// Resolve the chord prefix timeout (`keymap.keyseq-timeout`).
-///
-/// readline's default is 500 ms; `0` waits forever. A negative value is
-/// reported once per process and falls back to the default — a config
-/// problem must never break the editor build. Missing keys, unreadable
-/// files and malformed TOML degrade silently to the default, like every
-/// other config read.
-pub fn resolve_keyseq_timeout() -> Duration {
-    match read_user_config()
-        .keymap
-        .and_then(|section| section.keyseq_timeout)
-    {
-        None => Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS),
-        Some(ms) if ms >= 0 => Duration::from_millis(ms as u64),
-        Some(ms) => {
-            warn_invalid_keyseq_timeout_once(ms);
-            Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS)
-        }
-    }
-}
-
-/// Report an invalid negative `keyseq-timeout` once per process, not once
-/// per prompt rebuild.
-fn warn_invalid_keyseq_timeout_once(ms: i64) {
-    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if WARNED.set(()).is_ok() {
-        eprintln!(
-            "niubash: {KEYMAP_KEYSEQ_TIMEOUT_KEY} = {ms} is invalid: expected a \
-             non-negative integer (0 waits forever); using {DEFAULT_KEYSEQ_TIMEOUT_MS}"
-        );
-    }
-}
-
-/// Persist `keymap.keyseq-timeout` (the `niu config set
-/// keymap.keyseq-timeout` writer). Only that one key is touched; setting
-/// the built-in default removes the key again so the file never pins a
-/// stale default.
-pub fn set_keyseq_timeout(milliseconds: u64) -> anyhow::Result<PathBuf> {
-    let value = i64::try_from(milliseconds)
-        .map_err(|_| anyhow::anyhow!("{KEYMAP_KEYSEQ_TIMEOUT_KEY} is too large"))?;
-    write_user_config(|doc| {
-        ensure_schema(doc);
-        if milliseconds == DEFAULT_KEYSEQ_TIMEOUT_MS {
-            remove_table_key(doc, "keymap", "keyseq-timeout");
-            Ok(())
-        } else {
-            set_table_key(doc, "keymap", "keyseq-timeout", toml_edit::value(value))
-        }
-    })
-}
-
 /// Append one `[keymap].bind` rule (the `niu config set keymap.bind`
 /// writer, niubash#630). The spec is validated by the same parser the
 /// loader uses — a rule that can never apply is refused here, with the
@@ -1374,86 +1293,6 @@ mod tests {
             let keymap = parsed.keymap.expect("keymap section persisted");
             assert_eq!(keymap.bind.as_ref().map(Vec::len), Some(2));
             assert_eq!(keymap.unbind.as_ref().map(Vec::len), Some(1));
-            Ok::<(), anyhow::Error>(())
-        })();
-        match previous_config {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        let _ = std::fs::remove_file(&temp);
-        result.unwrap();
-    }
-
-    /// niubash#630: `[keymap].keyseq-timeout` resolves readline-style —
-    /// 500 ms default, `0` means wait forever, a custom value applies,
-    /// and an invalid value falls back to the default instead of
-    /// breaking startup.
-    #[test]
-    fn keyseq_timeout_resolves_default_zero_custom_and_invalid() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-keyseq-timeout-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous_config = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = (|| {
-            std::fs::remove_file(&temp).ok();
-            // No file: readline's default.
-            assert_eq!(
-                resolve_keyseq_timeout(),
-                Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS)
-            );
-            assert_eq!(parse_keyseq_timeout("0"), Some(0));
-            assert_eq!(parse_keyseq_timeout("1250"), Some(1250));
-            assert_eq!(parse_keyseq_timeout(" 250 "), Some(250));
-            assert_eq!(parse_keyseq_timeout("-1"), None);
-            assert_eq!(parse_keyseq_timeout("soon"), None);
-            assert_eq!(parse_keyseq_timeout("1.5"), None);
-
-            // A custom value applies as-is.
-            std::fs::write(&temp, "[keymap]\nkeyseq-timeout = 1250\n").unwrap();
-            assert_eq!(resolve_keyseq_timeout(), Duration::from_millis(1250));
-
-            // 0 is the readline "wait forever" spelling.
-            std::fs::write(&temp, "[keymap]\nkeyseq-timeout = 0\n").unwrap();
-            assert_eq!(resolve_keyseq_timeout(), Duration::ZERO);
-
-            // A negative value warns once and falls back to the default.
-            std::fs::write(&temp, "[keymap]\nkeyseq-timeout = -1\n").unwrap();
-            assert_eq!(
-                resolve_keyseq_timeout(),
-                Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS)
-            );
-
-            // A wrong-typed value degrades to the default like every other
-            // malformed config read.
-            std::fs::write(&temp, "[keymap]\nkeyseq-timeout = \"soon\"\n").unwrap();
-            assert_eq!(
-                resolve_keyseq_timeout(),
-                Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS)
-            );
-
-            // The writer round-trips the integer and removes it again at
-            // the built-in default.
-            set_keyseq_timeout(1250)?;
-            assert_eq!(resolve_keyseq_timeout(), Duration::from_millis(1250));
-            let text = std::fs::read_to_string(&temp)?;
-            let parsed: UserConfigFile = toml::from_str(&text)?;
-            assert_eq!(
-                parsed.keymap.and_then(|section| section.keyseq_timeout),
-                Some(1250)
-            );
-            set_keyseq_timeout(DEFAULT_KEYSEQ_TIMEOUT_MS)?;
-            let text = std::fs::read_to_string(&temp)?;
-            let parsed: UserConfigFile = toml::from_str(&text)?;
-            assert!(parsed.keymap.is_none(), "default must not be pinned");
             Ok::<(), anyhow::Error>(())
         })();
         match previous_config {

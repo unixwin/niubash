@@ -3182,14 +3182,13 @@ fn run_help_command(args: &[String]) -> anyhow::Result<()> {
 
 fn run_config_command(args: &[String]) -> anyhow::Result<()> {
     use niubash_runtime::config::{
-        add_keymap_bind_rule, add_keymap_unbind_rule, parse_keyseq_timeout,
-        resolve_command_not_found_hint, resolve_completion_interaction, resolve_completion_style,
-        resolve_keymap_rule_specs, resolve_keyseq_timeout, resolve_rc_policy,
-        set_command_not_found_hint, set_completion_interaction, set_completion_style,
-        set_keyseq_timeout, user_config_path, CommandNotFoundHint, CompletionInteraction,
+        add_keymap_bind_rule, add_keymap_unbind_rule, resolve_command_not_found_hint,
+        resolve_completion_interaction, resolve_completion_style, resolve_keymap_rule_specs,
+        resolve_rc_policy, set_command_not_found_hint, set_completion_interaction,
+        set_completion_style, user_config_path, CommandNotFoundHint, CompletionInteraction,
         CompletionInteractionSource, CompletionStyle, CompletionStyleSource,
         COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_INTERACTION_KEY, COMPLETION_STYLE_KEY,
-        KEYMAP_BIND_KEY, KEYMAP_KEYSEQ_TIMEOUT_KEY, KEYMAP_UNBIND_KEY, RC_POLICY_KEY,
+        KEYMAP_BIND_KEY, KEYMAP_UNBIND_KEY, RC_POLICY_KEY,
     };
     // One line describing where the effective completion style came from —
     // the precedence (env > config > default) is part of the contract, so
@@ -3250,15 +3249,6 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
             for rule in &unbind_rules {
                 println!("    {rule}");
             }
-            let keyseq_timeout = resolve_keyseq_timeout();
-            if keyseq_timeout.is_zero() {
-                println!("  {KEYMAP_KEYSEQ_TIMEOUT_KEY} = 0 ms (wait forever)");
-            } else {
-                println!(
-                    "  {KEYMAP_KEYSEQ_TIMEOUT_KEY} = {} ms",
-                    keyseq_timeout.as_millis()
-                );
-            }
             Ok(())
         }
         Some("get") => {
@@ -3300,10 +3290,6 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                     if rules.is_empty() {
                         println!("(no rules)");
                     }
-                    Ok(())
-                }
-                KEYMAP_KEYSEQ_TIMEOUT_KEY => {
-                    println!("{}", resolve_keyseq_timeout().as_millis());
                     Ok(())
                 }
                 unknown => anyhow::bail!(
@@ -3447,37 +3433,6 @@ fn run_config_command(args: &[String]) -> anyhow::Result<()> {
                     );
                     Ok(())
                 }
-                KEYMAP_KEYSEQ_TIMEOUT_KEY => {
-                    let Some(milliseconds) = parse_keyseq_timeout(value) else {
-                        anyhow::bail!(
-                            "invalid value '{value}' for {KEYMAP_KEYSEQ_TIMEOUT_KEY}: \
-                             expected a non-negative integer number of milliseconds \
-                             (0 waits forever)"
-                        )
-                    };
-                    let path = set_keyseq_timeout(milliseconds)?;
-                    println!(
-                        "{} {KEYMAP_KEYSEQ_TIMEOUT_KEY} = {milliseconds} ms",
-                        niubash_runtime::text_style::green("Set:")
-                    );
-                    if milliseconds == 0 {
-                        println!(
-                            "  a multi-key prefix waits forever; it completes with the next \
-                             key, however late."
-                        );
-                    } else {
-                        println!(
-                            "  a multi-key prefix waits {milliseconds} ms for its next unit \
-                             before the prefix replays on its own."
-                        );
-                    }
-                    println!(
-                        "  persisted in {}; applies when the editor is next built \
-                         (a new interactive session or the next prompt rebuild).",
-                        path.display()
-                    );
-                    Ok(())
-                }
                 unknown => anyhow::bail!(
                     "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
                 ),
@@ -3547,15 +3502,6 @@ fn print_config_usage() {
     println!("      Persistent key removals (niubash#630). The value names one");
     println!("      key in bind spelling ('\"\\C-t\"'); the key is unbound");
     println!("      outright — it does not fall back to a lower layer's binding.");
-    println!();
-    println!(
-        "  {k}",
-        k = niubash_runtime::config::KEYMAP_KEYSEQ_TIMEOUT_KEY
-    );
-    println!("      How long a multi-key (chord) prefix waits for its next");
-    println!("      unit, in milliseconds. readline's keyseq-timeout: 500 by");
-    println!("      default; 0 waits forever. Past the window the prefix");
-    println!("      replays on its own and the next key stands alone.");
 }
 
 fn print_plugin_mirror_usage() {
