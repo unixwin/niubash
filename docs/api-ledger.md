@@ -51,6 +51,24 @@
 > no census ever registered the constructor under its root
 > re-export spelling.
 >
+> Addendum (external route provider seam, 2026-10-30,
+> niubash#567): the route capability family — the
+> `rubash::api` re-exports `ExternalRouteProvider`,
+> `ExternalRouteRequest`, `ExternalRouteStdio`,
+> `ExternalRouteHandle`, `ExternalRouteOutcome`, the builder
+> face `SessionBuilder::external_route_provider`, the
+> Executor setter `Executor::set_external_route_provider`,
+> and the adapter-consumed `ExternalRouteHandle::raw_or_zero` —
+> is recorded (§2.1 row, §2.3 row, §4 row, §6 entries). The
+> seam is new on the engine side in the same change: the
+> dispatcher consults a registered provider for a resolved
+> foreground external whose spawn is fully prepared, and
+> niubash's FFI provider (niubash#567; the provider landed
+> in niubash#708) registers through the builder face. It is
+> NOT the retired buffered host-handler shape: the request
+> carries live OS stdio handles, the complete child
+> environment, the session cwd, and a cancellation poll.
+>
 > Addendum (DEFAULT_FUNCTION_BINDINGS census backfill, 2026-10-30,
 > niubash#701): the engine's default binding table
 > `builtins::bind::DEFAULT_FUNCTION_BINDINGS` is recorded
@@ -244,7 +262,7 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the route family `ExternalRouteProvider` / `ExternalRouteRequest` / `ExternalRouteStdio` / `ExternalRouteHandle` (+ variants `Inherit`, `Handle`) / `ExternalRouteOutcome` (+ variants `Completed`, `Declined`, `Cancelled`) — the niubash#567 route capability (see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
@@ -329,6 +347,7 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::aliases` / `functions` | 1 / 2 | snapshots for completion state |
 | `Session::close` | 1 | the one-shot finish funnel |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
+| `SessionBuilder::external_route_provider` | 1 | the niubash#567 route registration: the host's FFI provider is installed at build; registration is inert until the provider itself claims a call under its own host-side switches |
 
 Deliberate non-adoptions, adjudicated during the migration:
 the `HistoryProvider` is **not** builder-injected — it is
@@ -392,6 +411,7 @@ to the split core crate without changing its shape.
 | `last_exit_code` / `set_last_exit_code` | A | `Session::last_status` + `RunOutcome` |
 | `complete_line`, `has_compspec` | A | `Session::complete` + compspec view |
 | `set_history_provider` + `HistoryProvider` | A | builder-injected capability (trait unchanged) |
+| external route capability (`ExternalRouteProvider` + the request / stdio / handle / outcome family) | A | builder-injected capability in the §5.5 family, beside `ExternalCommandHandler`: the dispatcher consults it after resolution and redirection with the spawn prepared; the provider runs the call in-process over live handles or declines to the spawn (niubash#567) |
 | `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` + functions view |
 | `inherit_process_stdin` | A | builder stream binding |
 | `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome` |
@@ -470,6 +490,11 @@ item rubash::DebugCliPreset
 item rubash::Executor
 item rubash::Token
 item rubash::TokenKind
+item rubash::api::ExternalRouteHandle
+item rubash::api::ExternalRouteOutcome
+item rubash::api::ExternalRouteProvider
+item rubash::api::ExternalRouteRequest
+item rubash::api::ExternalRouteStdio
 item rubash::api::Flow
 item rubash::api::PreparedLine
 item rubash::api::RunOptions
@@ -539,6 +564,11 @@ variant rubash::TokenKind::Assignment
 variant rubash::TokenKind::BraceExpand
 variant rubash::TokenKind::CommandSubst
 variant rubash::TokenKind::Word
+variant rubash::api::ExternalRouteHandle::Handle
+variant rubash::api::ExternalRouteHandle::Inherit
+variant rubash::api::ExternalRouteOutcome::Cancelled
+variant rubash::api::ExternalRouteOutcome::Completed
+variant rubash::api::ExternalRouteOutcome::Declined
 variant rubash::api::Flow::ExitRequested
 variant rubash::api::PreparedLine::Discard
 variant rubash::api::PreparedLine::Execute
@@ -556,6 +586,7 @@ variant rubash::shell::bind_registry::BindKind::Function
 variant rubash::shell::bind_registry::BindKind::Macro
 variant rubash::special_paths::SpecialPathClass::Filesystem
 method rubash::Executor::new
+method rubash::api::ExternalRouteHandle::raw_or_zero
 method rubash::api::OptionsView::set
 method rubash::api::Session::aliases
 method rubash::api::Session::builder
@@ -581,6 +612,7 @@ method rubash::api::SessionBuilder::argv0
 method rubash::api::SessionBuilder::build
 method rubash::api::SessionBuilder::compatible_shell_path
 method rubash::api::SessionBuilder::disable_builtin
+method rubash::api::SessionBuilder::external_route_provider
 method rubash::api::SessionBuilder::env
 method rubash::api::SessionBuilder::login_shell
 method rubash::api::SessionBuilder::shell_root
@@ -616,6 +648,7 @@ method rubash::executor::Executor::resolve_shell_path_process_entries_from_env
 method rubash::executor::Executor::run_exit_trap_with_status
 method rubash::executor::Executor::script_fd0_line
 method rubash::executor::Executor::set_env
+method rubash::executor::Executor::set_external_route_provider
 method rubash::executor::Executor::set_history_provider
 method rubash::executor::Executor::set_shopt_option
 method rubash::executor::Executor::take_exit_jump_pending
