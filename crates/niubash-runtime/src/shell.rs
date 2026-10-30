@@ -83,6 +83,20 @@ pub fn install_completion_bridge(shell: &Rc<RefCell<Shell>>) {
     });
 }
 
+/// Remove the completion bridge installed on this thread, dropping the
+/// bridged Shell if the caller holds no other `Rc` clone.
+///
+/// Test-only: the bridge is thread-local, so without an explicit
+/// uninstall the Shell outlives the test function and is dropped at
+/// thread teardown — after any test-local state restore has already
+/// run (see `test_support::ProcessEnvRestore`).
+#[cfg(test)]
+pub(crate) fn uninstall_completion_bridge() {
+    COMPLETION_BRIDGE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
 /// Run `f` with mutable access to the bridged shell, or `None` when no
 /// bridge is installed on this thread.
 pub(crate) fn with_completion_bridge<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {

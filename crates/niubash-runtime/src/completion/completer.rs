@@ -812,6 +812,10 @@ niu_git_comp() {
             .unwrap_or_else(|| panic!("missing compdef candidate, got {suggestions:?}"));
         assert_eq!(alpha.description.as_deref(), Some("First"));
         assert!(suggestions.iter().any(|s| s.value == "beta"));
+        // Drop the Shell inside this test, while _env_restore is still
+        // armed (the thread-local bridge would otherwise defer the drop
+        // to thread teardown).
+        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
@@ -841,6 +845,10 @@ niu_git_comp() {
             suggestions.iter().any(|s| s.value == "alpha"),
             "missing compspec candidate alpha, got {suggestions:?}"
         );
+        // Drop the Shell inside this test, while _env_restore is still
+        // armed (the thread-local bridge would otherwise defer the drop
+        // to thread teardown).
+        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
