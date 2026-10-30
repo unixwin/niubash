@@ -2765,7 +2765,31 @@ fn staged_rc_seq() -> u128 {
 /// first rc (niubash#304's same-window guarantee, restated under
 /// create-only rules where a plain `rename` publish would be forbidden:
 /// rename REPLACES, and replacing is exactly what this contract retires).
+///
+/// Where the filesystem refuses hard links AS A CLASS (niubash#728 —
+/// Android app-private storage denies `link(2)` outright), the link
+/// publish can never succeed, so publication falls back to an exclusive
+/// create of the destination itself ([`create_rc_exclusive`]): still
+/// create-only, still no-clobber under race, at the price of the atomic
+/// swap (a mid-write crash could expose a partial rc — on such a
+/// filesystem the alternative is setup failing outright, which is what
+/// #728 shipped). Link-capable filesystems never take the fallback.
 fn write_primary_rc(home: &std::path::Path, rc_content: &str) -> anyhow::Result<RcWrite> {
+    write_primary_rc_with_linker(home, rc_content, &rc_hard_link)
+}
+
+/// `std::fs::hard_link` behind the concrete signature the publish step
+/// injects (the same linker-injection shape `shell_links` uses, so tests
+/// can refuse links the way a link-denying filesystem does).
+fn rc_hard_link(source: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::fs::hard_link(source, link)
+}
+
+fn write_primary_rc_with_linker(
+    home: &std::path::Path,
+    rc_content: &str,
+    hard_link: &dyn Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> anyhow::Result<RcWrite> {
     let rc_path = home.join(PRIMARY_RC_FILE);
     let niubash_dir = home.join(".niubash");
     std::fs::create_dir_all(&niubash_dir)?;
@@ -2779,22 +2803,90 @@ fn write_primary_rc(home: &std::path::Path, rc_content: &str) -> anyhow::Result<
     }
 
     let staging = rc_path.with_file_name(format!(".{PRIMARY_RC_FILE}.tmp-{}", staged_rc_seq()));
-    let published = std::fs::write(&staging, rc_content.as_bytes())
-        .and_then(|()| std::fs::hard_link(&staging, &rc_path));
+    let published = std::fs::write(&staging, rc_content.as_bytes()).and_then(|()| {
+        publish_rc_create_only(&staging, &rc_path, rc_content.as_bytes(), hard_link)
+    });
     // The staging copy is never the deliverable: remove it whatever the
-    // link did (the successful link made its own directory entry).
+    // publish did (a successful link made its own directory entry, and
+    // the exclusive-create fallback wrote the destination directly).
     let _ = std::fs::remove_file(&staging);
     match published {
         Ok(()) => Ok(RcWrite::Created),
         // A concurrent creator won the race between our occupied check and
-        // the link: their rc is user-owned now — park the sample, touch
+        // the publish: their rc is user-owned now — park the sample, touch
         // nothing (the same conservative resolution an ambiguous error at
-        // the occupied-check gets).
+        // the occupied-check gets). Both publish paths report the lost
+        // race as AlreadyExists, so this arm covers the fallback too.
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             park_rc_sample(home, rc_content)
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Create-only publication of the staged candidate at `rc_path`: the
+/// hard link first (atomic swap), and — only when the link failed
+/// because this filesystem cannot create links at all
+/// ([`hard_link_unavailable`]) — the exclusive-create fallback. Every
+/// other link error is a real outcome and propagates untouched.
+fn publish_rc_create_only(
+    staging: &std::path::Path,
+    rc_path: &std::path::Path,
+    rc_content: &[u8],
+    hard_link: &dyn Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match hard_link(staging, rc_path) {
+        Ok(()) => Ok(()),
+        Err(err) if hard_link_unavailable(&err) => create_rc_exclusive(rc_path, rc_content),
+        Err(err) => Err(err),
+    }
+}
+
+/// The "links cannot be created here" error class (niubash#728):
+/// `link(2)` itself is refused — permission denials (EPERM/EACCES, e.g.
+/// Android app-private storage), operation-not-supported reports
+/// (EOPNOTSUPP/ENOSYS from filesystems without hard links), and
+/// cross-device reports (EXDEV). Membership is by error CLASS, never by
+/// a single errno: any member means a link publish can never succeed on
+/// this target, which is the only condition under which the exclusive-
+/// create fallback may run. `AlreadyExists` is deliberately NOT a
+/// member — it is the lost-race verdict, not a capability statement.
+fn hard_link_unavailable(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        err.kind(),
+        ErrorKind::PermissionDenied | ErrorKind::Unsupported | ErrorKind::CrossesDevices
+    )
+}
+
+/// Fallback publication for filesystems that refuse hard links entirely
+/// (niubash#728): create the rc directly with `O_CREAT|O_EXCL`
+/// (`create_new`) — still exclusive, so a concurrent creator's entry
+/// makes the open fail with `AlreadyExists`, never a clobber. The
+/// candidate bytes are written and synced before the create counts as
+/// published; if the write itself fails, the partial entry is removed
+/// again (exclusivity proves this call created it), so a failed
+/// generation leaves nothing behind. The parent directory is synced
+/// best-effort where the platform allows opening one.
+fn create_rc_exclusive(rc_path: &std::path::Path, rc_content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(rc_path)?;
+    let written = file.write_all(rc_content).and_then(|()| file.sync_all());
+    if let Err(err) = written {
+        drop(file);
+        let _ = std::fs::remove_file(rc_path);
+        return Err(err);
+    }
+    drop(file);
+    if let Some(parent) = rc_path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 fn timestamp_id() -> String {
@@ -3375,6 +3467,167 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&temp);
         }
+    }
+
+    /// niubash#728: on a filesystem that refuses hard links as a class
+    /// (Android app-private storage denies `link(2)` outright — EPERM),
+    /// the create-only publish falls back to an exclusive create: the
+    /// first rc still lands with the exact proposed bytes, no sample is
+    /// parked, and no staging file is left behind. The injected linker
+    /// stands in for the link-denying filesystem, so the fallback path
+    /// is pinned on every platform, not just on Android.
+    #[test]
+    fn issue728_rc_is_created_via_exclusive_create_when_links_are_denied() {
+        let temp = unique_temp_dir("wizard-issue728-link-denied");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let proposal = generate_rc(&clean_cfg());
+        let denied = |_: &std::path::Path, _: &std::path::Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "hard links are denied on this filesystem",
+            ))
+        };
+        let outcome = write_primary_rc_with_linker(&home, &proposal, &denied)
+            .expect("the exclusive-create fallback must succeed");
+        assert!(
+            matches!(outcome, RcWrite::Created),
+            "a link-denied publish must still create the rc, got {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(PRIMARY_RC_FILE)).unwrap(),
+            proposal,
+            "the fallback must land the exact proposed bytes"
+        );
+        assert!(
+            !home.join(".niubash/candidates").exists(),
+            "no sample is parked when the fallback created the rc"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging leftovers: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#728: the fallback trigger is the link-unavailable error
+    /// CLASS, not the EPERM code alone — an operation-not-supported
+    /// refusal (a filesystem without hard links at all) falls back too.
+    #[test]
+    fn issue728_unsupported_link_error_class_also_falls_back() {
+        let temp = unique_temp_dir("wizard-issue728-link-unsupported");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let proposal = generate_rc(&clean_cfg());
+        let unsupported = |_: &std::path::Path, _: &std::path::Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this filesystem has no hard links",
+            ))
+        };
+        let outcome = write_primary_rc_with_linker(&home, &proposal, &unsupported)
+            .expect("the exclusive-create fallback must succeed");
+        assert!(matches!(outcome, RcWrite::Created), "got {outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(home.join(PRIMARY_RC_FILE)).unwrap(),
+            proposal
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#728: EXDEV belongs to the same class (std surfaces it as
+    /// `ErrorKind::CrossesDevices`): a link that can never be created on
+    /// this target falls back instead of failing the whole setup.
+    #[cfg(unix)]
+    #[test]
+    fn issue728_exdev_link_failure_also_falls_back() {
+        let temp = unique_temp_dir("wizard-issue728-link-exdev");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let proposal = generate_rc(&clean_cfg());
+        let exdev = |_: &std::path::Path, _: &std::path::Path| {
+            // EXDEV is 18 on Linux, Android, and the BSDs alike.
+            Err(std::io::Error::from_raw_os_error(18))
+        };
+        let outcome = write_primary_rc_with_linker(&home, &proposal, &exdev)
+            .expect("the exclusive-create fallback must succeed");
+        assert!(matches!(outcome, RcWrite::Created), "got {outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(home.join(PRIMARY_RC_FILE)).unwrap(),
+            proposal
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#728: the fallback stays create-only under race. If a
+    /// concurrent creator lands its rc while our link attempt is being
+    /// refused, the exclusive create reports AlreadyExists, the winner's
+    /// bytes stay byte-identical, and our proposal parks as the sample —
+    /// the same verdict the link path gives a lost race.
+    #[test]
+    fn issue728_fallback_never_clobbers_a_concurrent_winner() {
+        let temp = unique_temp_dir("wizard-issue728-fallback-race");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let winner = "# winner rc\nexport WHO=winner\n";
+        let race_home = home.clone();
+        let sneaky = move |_: &std::path::Path, _: &std::path::Path| {
+            // The concurrent creator lands between our occupied check
+            // and the publish; the filesystem refuses our link anyway.
+            std::fs::write(race_home.join(PRIMARY_RC_FILE), winner).unwrap();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "hard links are denied on this filesystem",
+            ))
+        };
+        let proposal = "# loser proposal\nexport WHO=loser\n";
+        let outcome = write_primary_rc_with_linker(&home, proposal, &sneaky)
+            .expect("a lost race parks a sample, it must not error");
+        let RcWrite::ExistingKept(sample) = &outcome else {
+            panic!("a lost fallback race must yield ExistingKept, got {outcome:?}");
+        };
+        assert_eq!(
+            std::fs::read_to_string(home.join(PRIMARY_RC_FILE)).unwrap(),
+            winner,
+            "the winner's rc must stay byte-identical"
+        );
+        assert_eq!(
+            std::fs::read_to_string(sample).unwrap(),
+            proposal,
+            "the losing proposal parks as the sample"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#728: errors OUTSIDE the link-unavailable class are real
+    /// outcomes, not fallback triggers — they propagate, and neither an
+    /// rc nor a sample is left behind.
+    #[test]
+    fn issue728_unrelated_link_errors_still_propagate() {
+        let temp = unique_temp_dir("wizard-issue728-link-other-error");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let proposal = generate_rc(&clean_cfg());
+        let broken = |_: &std::path::Path, _: &std::path::Path| {
+            Err(std::io::Error::other("transient storage failure"))
+        };
+        let outcome = write_primary_rc_with_linker(&home, &proposal, &broken);
+        assert!(
+            outcome.is_err(),
+            "an unrelated link error must propagate, got {outcome:?}"
+        );
+        assert!(
+            !home.join(PRIMARY_RC_FILE).exists(),
+            "no rc may be created when the publish errored"
+        );
+        assert!(
+            !home.join(".niubash/candidates").exists(),
+            "no sample is parked for a publish that never resolved the slot"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     /// niubash#359: the undo receipt for an existing-kept run removes the
