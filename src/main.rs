@@ -238,7 +238,6 @@ fn run_main() -> ExitCode {
     niubash_runtime::console_guard::enable_vt_output();
 
     // Expose the host binary path so rubash's bash shim can forward to niu.
-    // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.
     // Invoked through a `bash`/`sh` hardlink, `current_exe()` is that face; the
     // contract these variables carry is the shell itself, so report the real
     // `niu.exe` of this installation while `$BASH`/`$SHELL` keep following the
@@ -247,7 +246,6 @@ fn run_main() -> ExitCode {
         let shell = niubash_runtime::shell_links::resolved_shell_path(&invoked);
         if let Some(path) = shell.to_str() {
             std::env::set_var("NIU_SHELL", path);
-            std::env::set_var("WINUXSH_SHELL", path);
         }
     }
 

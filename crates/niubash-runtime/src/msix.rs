@@ -121,11 +121,9 @@ pub fn writable_root() -> Option<PathBuf> {
     }
 }
 
-/// `NIU_ROOT`/`WINUXSH_ROOT` already present in the environment (the
-/// deprecated bridge name is still read by `prepare_shell_root`).
+/// `NIU_ROOT` already present in the environment.
 fn configured_shell_root() -> Option<PathBuf> {
     std::env::var_os("NIU_ROOT")
-        .or_else(|| std::env::var_os("WINUXSH_ROOT"))
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
@@ -144,7 +142,7 @@ pub fn session_writable_root() -> Option<PathBuf> {
 /// Point `NIU_ROOT` at the writable per-package root before startup
 /// prepares the shell root (niubash#495: the package root is read-only, so
 /// the default resolution fails every session with os error 5). An
-/// explicit `NIU_ROOT`/`WINUXSH_ROOT` always wins — that override is the
+/// explicit `NIU_ROOT` always wins — that override is the
 /// escape hatch for layouts that already manage a root.
 pub fn apply_writable_shell_root() {
     if !is_packaged() || configured_shell_root().is_some() {

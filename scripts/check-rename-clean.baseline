@@ -7,13 +7,6 @@ AGENTS.md	- Rename brand gate: `sh scripts/check-rename-clean.sh` must pass (res
 AGENTS.md	- Runtime environment variables use the `NIU_` prefix. During the transition, niubash also sets/reads the deprecated `WINUXSH_SHELL` and `WINUXSH_ROOT` names because current rubash upstream still reads them; these bridges are marked with comments and must be removed once rubash renames its readers. (The `*_SHELL_PATH_STYLE` pair was retired rubash-side in rubash#556 / rubash#537: the engine always renders `$PWD`/`pwd` in the POSIX persona form, and niubash no longer exports the variables.)
 AGENTS.md	- Use `~/.niubashrc` as the primary-only interactive user entry point for plugin lists, theme selection, exports, aliases, functions, and shell startup logic. Do not read, migrate, delete, or modify the legacy `~/.winuxshrc` and `~/.winshrc` startup files. An explicitly opted-in `~/.bashrc` fallback is a future plan only, not supported behavior. Startup must not automatically run setup or plugin sync, create the primary rc, or rewrite user rc files. Issue #359 case A (1.4.2): plugin management never writes the rc at all — the manifest (`plugins.toml` + `sources/registry.toml`) drives the generated loader `~/.niubash/generated/plugins.niu`, which the host sources read-only BEFORE the user rc; `niu setup` still writes the rc (create/whole-file) until its 1.4.3 create-only convergence. Never re-attach the retired managed-block writers (`assets::write_managed_block`/`remove_managed_block`) to any verb — the 359.12 structure ratchet fails the build's test suite if you do.
 CHANGELOG.md	- **MSIX Store 版静默降级**（#504/#505）：旧 NSIS 安装残留的 `WINUXCMD_PATH`/`WINUXSH_ROOT` 环境变量会让 packaged 进程解析到旧安装树；package identity 下现按外来安装忽略。
-crates/niubash-runtime/src/msix.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT"))
-crates/niubash-runtime/src/msix.rs	/// `NIU_ROOT`/`WINUXSH_ROOT` already present in the environment (the
-crates/niubash-runtime/src/msix.rs	/// explicit `NIU_ROOT`/`WINUXSH_ROOT` always wins — that override is the
-crates/niubash-runtime/src/path_utils.rs	            name: "WINUXSH_ROOT",
-crates/niubash-runtime/src/path_utils.rs	            previous: std::env::var_os("WINUXSH_ROOT"),
-crates/niubash-runtime/src/path_utils.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
-crates/niubash-runtime/src/path_utils.rs	        std::env::remove_var("WINUXSH_ROOT");
 crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
 crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
 crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
@@ -21,12 +14,10 @@ crates/niubash-runtime/src/setup_wizard.rs	        for name in [".winuxshrc", ".
 crates/niubash-runtime/src/shell.rs	                for name in [".winuxshrc", ".winshrc", ".bashrc"] {
 crates/niubash-runtime/src/shell.rs	            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
 crates/niubash-runtime/src/shell.rs	            for name in [".winuxshrc", ".winshrc", ".bashrc"] {
-crates/niubash-runtime/src/shell.rs	        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
 crates/niubash-runtime/src/shell.rs	        // NIU_SHELL_PATH_STYLE / WINUXSH_SHELL_PATH_STYLE are no longer set
 crates/niubash-runtime/src/shell.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
 crates/niubash-runtime/src/shell.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
 crates/niubash-runtime/src/shell.rs	        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
-crates/niubash-runtime/src/shell_links.rs	/// contract variables (`NIU_SHELL`, `WINUXSH_SHELL`) and the shim's own target
 docs/audit/AUDIT-PLAN.md	  (documented), winuxshrc → niubashrc migration once-only claim
 docs/audit/AUDIT-PLAN.md	  (winuxshrc migration claim, NIU_ENV precedence claim).
 docs/audit/AUDIT-PLAN.md	  Local/Programs/Winuxsh/niu.exe`) is first on PATH; `command -v niu`
@@ -93,8 +84,6 @@ src/bin/bash.rs	//! `winuxsh.exe` / `WINUXSH_SHELL` names stay in the fallback c
 src/bin/bash.rs	/// The pre-rename `winuxsh` stays in the chain so layouts built by older
 src/bin/bash.rs	const SHELL_EXE_NAMES: [&str; 2] = ["niu", "winuxsh"];
 src/bin/bash.rs	const SHELL_EXE_NAMES: [&str; 2] = ["niu.exe", "winuxsh.exe"];
-src/main.rs	            std::env::set_var("WINUXSH_SHELL", path);
-src/main.rs	    // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.
 tests/issue153_root_slash_arg.rs	        .env_remove("WINUXSH_ROOT")
 tests/issue153_root_slash_arg.rs	/// clean WINUXSH_ROOT so the root under test is exactly `root`.
 tests/startup_files.rs	    [".winuxshrc", ".winshrc", ".bashrc"]
