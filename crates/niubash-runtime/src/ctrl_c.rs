@@ -25,6 +25,24 @@
 //! real children — and is consumed so the next prompt does not read the
 //! same ^C a second time.
 //!
+//! niubash#724: that synthesis is only owed while the console input
+//! buffer has `ENABLE_PROCESSED_INPUT` set. The mode is a property of
+//! the shared input buffer, so it is the foreground program's own
+//! declaration: a program that disabled processed input (ssh, vim,
+//! less — the raw-mode class) did so precisely to consume `0x03` as a
+//! data byte itself, the way a POSIX program clearing `ISIG` owns the
+//! byte. Its queued Ctrl+C records are its input, not a skipped
+//! delivery, and synthesizing anyway double-delivers: the byte reaches
+//! the program *and* a `CTRL_C_EVENT` reaches every process sharing
+//! the console (a group-0 broadcast cannot be scoped to the child —
+//! for `CTRL_C_EVENT` the system delivers console-wide regardless of
+//! the group argument), driving raw-mode programs down their event
+//! exit path: an interactive ssh session dies on a later Ctrl+C even
+//! though the remote host already echoed `^C` from the forwarded byte.
+//! The watch therefore samples the input mode at fire time and stays
+//! silent under raw mode; see
+//! [`queued_ctrl_c_earns_synthesized_delivery`].
+//!
 //! Unix: the ENGINE owns the kernel signal surface. `Executor` init calls
 //! `register_signal_mailbox` (rubash `src/executor/init.rs`) ->
 //! `kernel_signals::install()` (rubash `src/builtins/kill.rs`), which
@@ -202,6 +220,34 @@ pub(crate) fn is_ctrl_c_key_record(
         && matches!(unicode_char, 0 | 0x43 | 0x63)
 }
 
+/// niubash#724: the foreground watch's fire decision, as a pure
+/// function of the two facts sampled per wake: whether the peeked
+/// queue holds a Ctrl+C record, and whether the console input buffer
+/// currently has `ENABLE_PROCESSED_INPUT` set.
+///
+/// - Processed input on + a record queued: in this mode the console
+///   server turns a real Ctrl+C press into a `CTRL_C_EVENT` and never
+///   queues it, so a queued record means the synthesis was bypassed
+///   (records injected straight into the input buffer — the #669
+///   shape) and the delivery is owed.
+/// - Processed input off: the foreground program disabled it to
+///   consume `0x03` as data (ssh, vim, less — the POSIX `ISIG`-off
+///   class), so the record is that program's input. Synthesizing
+///   would double-deliver — the byte, plus a console-wide event the
+///   program never asked for — and force it down its event exit
+///   path (#724). The watch stays silent.
+///
+/// Field-level like [`is_ctrl_c_key_record`] so the decision table is
+/// testable off Windows; the Windows watch reads the live mode with
+/// `GetConsoleMode` at fire time.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn queued_ctrl_c_earns_synthesized_delivery(
+    record_is_ctrl_c: bool,
+    processed_input_enabled: bool,
+) -> bool {
+    record_is_ctrl_c && processed_input_enabled
+}
+
 /// niubash#669: number of `GenerateConsoleCtrlEvent` broadcasts this
 /// process generated itself (see `ForegroundWatch`). The console handler
 /// fires for those too — the broadcast reaches every process in the
@@ -252,6 +298,13 @@ fn take_self_forwarded_ctrl_c() -> bool {
 /// 3. consumption of exactly that record, so the next prompt does not
 ///    read the same press again as a prompt interrupt.
 ///
+/// One gate on all three legs (niubash#724): the delivery is owed
+/// only while the console input buffer has `ENABLE_PROCESSED_INPUT`
+/// set, sampled at fire time. A foreground program that cleared it
+/// (ssh, vim, less) owns the queued record as data; for its presses
+/// the watch neither synthesizes nor consumes — it keeps watching,
+/// because the same line may later run a command in the #669 shape.
+///
 /// Peeking never takes input away from the foreground command (the
 /// command owns the terminal in this window — `cat`/`read`/`ssh` must
 /// see console stdin); the only consumption is the single Ctrl+C record
@@ -289,8 +342,9 @@ mod watch_imp {
 
     use windows_sys::Win32::Foundation::{HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Console::{
-        GenerateConsoleCtrlEvent, GetNumberOfConsoleInputEvents, PeekConsoleInputW,
-        ReadConsoleInputW, WriteConsoleInputW, CTRL_C_EVENT, INPUT_RECORD, KEY_EVENT,
+        GenerateConsoleCtrlEvent, GetConsoleMode, GetNumberOfConsoleInputEvents, PeekConsoleInputW,
+        ReadConsoleInputW, WriteConsoleInputW, CTRL_C_EVENT, ENABLE_PROCESSED_INPUT, INPUT_RECORD,
+        KEY_EVENT,
     };
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
@@ -363,7 +417,10 @@ mod watch_imp {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
-            if peek_finds_ctrl_c(conin) {
+            if super::queued_ctrl_c_earns_synthesized_delivery(
+                peek_finds_ctrl_c(conin),
+                processed_input_enabled(conin),
+            ) {
                 deliver(conin);
                 return; // one-shot
             }
@@ -396,6 +453,22 @@ mod watch_imp {
         }
         buffer.truncate(read as usize);
         buffer.iter().any(record_is_ctrl_c)
+    }
+
+    /// niubash#724: the console input buffer's current
+    /// `ENABLE_PROCESSED_INPUT` state — the term that decides whether a
+    /// queued Ctrl+C record is a delivery the server skipped (#669) or
+    /// the foreground program's own data (#724). The mode belongs to
+    /// the shared input buffer, so this reads the mode the foreground
+    /// program itself established for its run. An unreadable mode is
+    /// treated as processed: synthesis is suppressed only on positively
+    /// observed raw mode, never on a failed probe.
+    fn processed_input_enabled(conin: HANDLE) -> bool {
+        let mut mode = 0u32;
+        if unsafe { GetConsoleMode(conin, &mut mode) } == 0 {
+            return true;
+        }
+        mode & ENABLE_PROCESSED_INPUT != 0
     }
 
     /// Perform the delivery the console server skipped for a queued
@@ -502,5 +575,30 @@ mod ctrl_c_record_tests {
         drop(watch);
         let watch = super::ForegroundWatch::arm();
         drop(watch);
+    }
+
+    #[test]
+    fn issue724_raw_mode_record_is_the_foreground_programs_data() {
+        // A raw-mode foreground program (ssh/vim/less class) disabled
+        // processed input precisely to consume 0x03 itself; a queued
+        // Ctrl+C record is its input and must not earn a synthesized
+        // delivery.
+        assert!(!super::queued_ctrl_c_earns_synthesized_delivery(
+            true, false
+        ));
+    }
+
+    #[test]
+    fn issue669_processed_mode_record_still_earns_delivery() {
+        // The #669 shape is unchanged: processed input on, yet a
+        // record sits queued — the server synthesis was bypassed and
+        // the delivery is owed. A non-Ctrl+C record never earns one.
+        assert!(super::queued_ctrl_c_earns_synthesized_delivery(true, true));
+        assert!(!super::queued_ctrl_c_earns_synthesized_delivery(
+            false, true
+        ));
+        assert!(!super::queued_ctrl_c_earns_synthesized_delivery(
+            false, false
+        ));
     }
 }
