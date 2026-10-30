@@ -78,12 +78,6 @@ scripts/harvest/eco-test.py	                    "NIU_REPL_STARTUP", "BASH_ENV", 
 scripts/harvest/snapshots/wt92-local-20261005/test-results.jsonl	{"ts": "2026-10-05T03:20:16Z", "content_hash": "ccdb6cdce47107a97c59fa8ec900f9623e662b25", "repo": "icy/pacapt", "path": "lib/zz_main.sh", "tier": "t3", "category": "framework", "bytes": 8357, "source_url": "https://raw.githubusercontent.com/icy/pacapt/94c4b2c2209659a0e0b745d7c9417033bd71a399/lib/zz_main.sh", "niu": "D:\\repo\\niubash-wt-hres\\target\\debug\\niu.exe", "rubash": "D:\\repo\\rubash\\target\\debug\\rubash.exe", "local_work": "E:\\eco-harvest\\tmp\\work-ccdb6cdce471\\asset.sh", "rubash_ok": true, "phases_ms": {"startup": 2301, "source_wall": 328, "enter1": 83, "enter2": 82}, "phase": null, "tail": [], "storm_lines": 9, "storm_head": ["niu: _sun_tools_init: command not found", "niu: _require_programs: command not found", "niu: _debug: command not found", "rams/Winuxsh/niu: cannot execute binary file", "niu: _PACMAN_detect: command not found", "niu: _die: command not found", "niu: _die: command not found", "niu: _validate_operation: command not found", "niu: _not_implemented: command not found"], "signature": "ok", "verdict": "OK", "ms": 5634}
 scripts/journey/golden-journey.py	                "WINUXSH_ROOT", "NIU_THEME", "OSH_THEME", "BASH_IT_THEME"):
 skills/niubash/SKILL.md	  the shell through `NIU_SHELL`. `WINUXSH_SHELL` is a deprecated bridge
-src/bin/bash.rs	    for variable in ["NIU_SHELL", "WINUXSH_SHELL"] {
-src/bin/bash.rs	    for variable in ["WINUXSH", "SHELL"] {
-src/bin/bash.rs	//! `winuxsh.exe` / `WINUXSH_SHELL` names stay in the fallback chain so
-src/bin/bash.rs	/// The pre-rename `winuxsh` stays in the chain so layouts built by older
-src/bin/bash.rs	const SHELL_EXE_NAMES: [&str; 2] = ["niu", "winuxsh"];
-src/bin/bash.rs	const SHELL_EXE_NAMES: [&str; 2] = ["niu.exe", "winuxsh.exe"];
 tests/issue153_root_slash_arg.rs	        .env_remove("WINUXSH_ROOT")
 tests/issue153_root_slash_arg.rs	/// clean WINUXSH_ROOT so the root under test is exactly `root`.
 tests/startup_files.rs	    [".winuxshrc", ".winshrc", ".bashrc"]

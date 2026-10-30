@@ -4,9 +4,7 @@
 //!
 //! The shim intentionally forwards the command line and standard handles
 //! without interpreting shell syntax. It lets Unix scripts resolve
-//! `/usr/bin/bash` to the installed Niubash executable. The pre-rename
-//! `winuxsh.exe` / `WINUXSH_SHELL` names stay in the fallback chain so
-//! layouts built by older installers keep launching.
+//! `/usr/bin/bash` to the installed Niubash executable.
 //!
 //! niubash#464: this binary is Niubash's own. The forwarding shim used to
 //! be built from the rubash repository and staged into the package as a
@@ -128,20 +126,16 @@ fn interactive_launch_wanted() -> bool {
     false
 }
 
-/// The shell executable names the locate chain looks for, current first.
-/// The pre-rename `winuxsh` stays in the chain so layouts built by older
-/// installers keep launching.
+/// The shell executable names the locate chain looks for.
 #[cfg(windows)]
-const SHELL_EXE_NAMES: [&str; 2] = ["niu.exe", "winuxsh.exe"];
+const SHELL_EXE_NAMES: [&str; 1] = ["niu.exe"];
 #[cfg(not(windows))]
-const SHELL_EXE_NAMES: [&str; 2] = ["niu", "winuxsh"];
+const SHELL_EXE_NAMES: [&str; 1] = ["niu"];
 
 fn locate_shell() -> Option<PathBuf> {
-    for variable in ["NIU_SHELL", "WINUXSH_SHELL"] {
-        if let Some(path) = env::var_os(variable).map(PathBuf::from) {
-            if is_executable_file(&path) && !same_as_current_exe(&path) {
-                return Some(path);
-            }
+    if let Some(path) = env::var_os("NIU_SHELL").map(PathBuf::from) {
+        if is_executable_file(&path) && !same_as_current_exe(&path) {
+            return Some(path);
         }
     }
 
@@ -158,11 +152,9 @@ fn locate_shell() -> Option<PathBuf> {
         }
     }
 
-    for variable in ["WINUXSH", "SHELL"] {
-        if let Some(path) = env::var_os(variable).map(PathBuf::from) {
-            if is_executable_file(&path) && !same_as_current_exe(&path) {
-                return Some(path);
-            }
+    if let Some(path) = env::var_os("SHELL").map(PathBuf::from) {
+        if is_executable_file(&path) && !same_as_current_exe(&path) {
+            return Some(path);
         }
     }
 
