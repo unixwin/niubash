@@ -73,9 +73,7 @@ pub(crate) fn shell_path_to_host_path(value: &str) -> String {
 /// from the open points.
 pub(crate) fn resolve_logical_shell_path(value: &str, tmp_base: &Path) -> Option<PathBuf> {
     let normalized = value.replace('\\', "/");
-    let root = std::env::var_os("NIU_ROOT")
-        .or_else(|| std::env::var_os("WINUXSH_ROOT")) // deprecated rubash bridge
-        .map(PathBuf::from)?;
+    let root = std::env::var_os("NIU_ROOT").map(PathBuf::from)?;
     if normalized == "/" {
         return Some(root);
     }
@@ -390,11 +388,6 @@ mod tests {
             previous: std::env::var_os("NIU_ROOT"),
         };
         std::env::remove_var("NIU_ROOT");
-        let _bridge = EnvGuard {
-            name: "WINUXSH_ROOT",
-            previous: std::env::var_os("WINUXSH_ROOT"),
-        };
-        std::env::remove_var("WINUXSH_ROOT");
         let session_base = unique_temp_dir("g2-no-root");
         assert_eq!(resolve_logical_shell_path("/tmp", &session_base), None);
         let _ = fs::remove_dir_all(session_base);

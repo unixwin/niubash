@@ -154,3 +154,161 @@ pub fn route_annotation(name: &str, args: &[String]) -> Option<String> {
         None
     }
 }
+
+/// niubash#567 route registration (the engine seam, P3): the
+/// `rubash::api::ExternalRouteProvider` face over this runtime.
+/// The engine dispatcher consults it for a resolved foreground
+/// external whose spawn is fully prepared; the provider here
+/// re-derives its route decision from the name + argv (its
+/// classifier consumes tiers.tsv host-side, as designed) and
+/// either runs the call through the DLL backend over the
+/// request's live handles or declines to the prepared spawn.
+pub struct FfiRouteProvider;
+
+/// The boxed provider the session builder registers
+/// (`SessionBuilder::external_route_provider`). Registration is
+/// unconditional and inert: while the provider's own switches
+/// are off it declines every call before touching the backend,
+/// so a session with the switch off behaves byte-identically
+/// to one with no registration at all.
+pub fn route_provider() -> Box<dyn rubash::api::ExternalRouteProvider> {
+    Box::new(FfiRouteProvider)
+}
+
+impl rubash::api::ExternalRouteProvider for FfiRouteProvider {
+    fn execute_route(
+        &mut self,
+        request: &rubash::api::ExternalRouteRequest,
+    ) -> rubash::api::ExternalRouteOutcome {
+        let ffi_request = ffi_request_from_route(request);
+        route_outcome_from_ffi(execute_routed(&ffi_request, request.cancel_check))
+    }
+
+    fn route_annotation(&self, name: &str) -> Option<String> {
+        // The seam's annotation query is name-only (it backs
+        // `type` / `command -V`, which ask about a name, not an
+        // invocation); the classifier's argv-sensitive rows are
+        // invocation refinements, not name claims.
+        route_annotation(name, &[])
+    }
+}
+
+/// Run one routed call through the process provider. The
+/// engine's pending-interrupt check joins the provider's own
+/// prompt flag as a cancellation source (see
+/// [`FfiProvider::execute_with_engine_cancel`]).
+pub fn execute_routed(request: &FfiRequest, engine_cancel: &dyn Fn() -> bool) -> FfiOutcome {
+    let mut provider = runtime().provider.lock().expect("ffi provider lock");
+    // `emulation_available` is pinned true: the flag only selects
+    // WHICH decline a tier-1 name receives (the emulation route
+    // vs the tier-1 gate-closed route) — both decline across this
+    // seam, so the choice cannot change whether a call is
+    // claimed, only the recorded reason.
+    provider.execute_with_engine_cancel(request, true, engine_cancel)
+}
+
+/// The seam request in the provider's own request type: the
+/// command word comes off the argv head (the provider's request
+/// keeps name and args apart), the environment pairs carry
+/// over verbatim, and each stdio handle maps through
+/// [`rubash::api::ExternalRouteHandle::raw_or_zero`] — inherit
+/// becomes the ABI's NULL ("keep the current handle").
+fn ffi_request_from_route(request: &rubash::api::ExternalRouteRequest) -> FfiRequest {
+    FfiRequest {
+        name: request.name.to_string(),
+        args: request.argv.get(1..).unwrap_or(&[]).to_vec(),
+        env: request.env.to_vec(),
+        cwd: request.cwd.to_path_buf(),
+        std: StdHandles {
+            stdin: request.stdio.stdin.raw_or_zero(),
+            stdout: request.stdio.stdout.raw_or_zero(),
+            stderr: request.stdio.stderr.raw_or_zero(),
+        },
+    }
+}
+
+/// The provider's outcome in the seam's outcome type. A provider
+/// fallback is already recorded in the provider's own status
+/// (`last_fallback`); across the seam it is simply a decline —
+/// the engine spawns the prepared command.
+fn route_outcome_from_ffi(outcome: FfiOutcome) -> rubash::api::ExternalRouteOutcome {
+    match outcome {
+        FfiOutcome::Completed(status) => rubash::api::ExternalRouteOutcome::Completed(status),
+        FfiOutcome::Cancelled => rubash::api::ExternalRouteOutcome::Cancelled,
+        FfiOutcome::Declined(_) | FfiOutcome::Fallback(_) => {
+            rubash::api::ExternalRouteOutcome::Declined
+        }
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+    use rubash::api::{ExternalRouteHandle, ExternalRouteStdio};
+    use std::path::Path;
+
+    fn route_request() -> (
+        Vec<String>,
+        Vec<(String, String)>,
+        std::path::PathBuf,
+        ExternalRouteStdio,
+    ) {
+        (
+            vec!["grep".to_string(), "-n".to_string(), "a b".to_string()],
+            vec![("PREFIXED".to_string(), "1".to_string())],
+            std::path::PathBuf::from("/work"),
+            ExternalRouteStdio {
+                stdin: ExternalRouteHandle::Handle(5),
+                stdout: ExternalRouteHandle::Inherit,
+                stderr: ExternalRouteHandle::Handle(7),
+            },
+        )
+    }
+
+    #[test]
+    fn route_request_maps_to_ffi_request_verbatim() {
+        let (argv, env, cwd, stdio) = route_request();
+        let request = rubash::api::ExternalRouteRequest {
+            name: "grep",
+            argv: &argv,
+            program: Path::new("/bin/grep"),
+            env: &env,
+            cwd: &cwd,
+            stdio: &stdio,
+            cancel_check: &|| false,
+        };
+        let mapped = ffi_request_from_route(&request);
+        assert_eq!(mapped.name, "grep");
+        assert_eq!(mapped.args, vec!["-n".to_string(), "a b".to_string()]);
+        assert_eq!(mapped.env, env);
+        assert_eq!(mapped.cwd, cwd);
+        assert_eq!(mapped.std.stdin, 5);
+        assert_eq!(mapped.std.stdout, 0);
+        assert_eq!(mapped.std.stderr, 7);
+    }
+
+    #[test]
+    fn ffi_outcomes_map_to_route_outcomes() {
+        use rubash::api::ExternalRouteOutcome as Route;
+        assert_eq!(
+            route_outcome_from_ffi(FfiOutcome::Completed(42)),
+            Route::Completed(42)
+        );
+        assert_eq!(
+            route_outcome_from_ffi(FfiOutcome::Cancelled),
+            Route::Cancelled
+        );
+        let decision = RouteDecision {
+            route: route::Route::Spawn,
+            reason: route::RouteReason::SwitchOff,
+        };
+        assert_eq!(
+            route_outcome_from_ffi(FfiOutcome::Declined(decision)),
+            Route::Declined
+        );
+        assert_eq!(
+            route_outcome_from_ffi(FfiOutcome::Fallback("boom".to_string())),
+            Route::Declined
+        );
+    }
+}
