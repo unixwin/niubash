@@ -74,6 +74,19 @@
 > of niubash#704's merge, like the kill-hook records before
 > it.
 >
+> Addendum (inputrc reader census backfill, 2026-10-30,
+> niubash#710): the engine's inputrc parser entry
+> `builtins::bind::parse_inputrc_with_env` and its
+> environment struct `builtins::bind::InputrcEnv` are
+> recorded (§2 row, §6 entries) after §5's completeness
+> check flagged them as consumed-but-unrecorded —
+> niubash#710's config.toml removal made niubash's
+> startup actually read `$INPUTRC` / `~/.inputrc`
+> through the engine parser (niubash-runtime's config
+> reader), and no census ever registered the pair. The
+> completeness red this raised on every rubash PR's
+> pairing job is what surfaced the gap.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -235,7 +248,7 @@ the 1.5.0 tiers exist to fix.
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
-| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum) |
+| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface |
 | `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today; plus the `SessionHistory::size_limit` associated helper (recorded in v3) |
 | `script_driver` | `run_source_with_line_offset` (2), `run_script_with_history_at_line_offset_tracked`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `bytes_to_script_text`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER` (1 each unless noted). (Ledger v4: `run_stdin_script`, `run_interactive_stdin`, `prepare_interactive_history`, `pre_process_interactive_line` + `InteractiveExpansion`, and `finish_shell` have exited the consumed surface — `Session::run_stdin` / `run_interactive_stdin` / `prepare_line` / `close` carry that traffic now; the symbols stay `pub` in the engine.) |
 | `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1), `ast_print::pretty_print_input` (1); `Ast` is also consumed under this defining-module spelling (the root re-export above is the other spelling; both recorded in §6) |
@@ -399,7 +412,7 @@ to the split core crate without changing its shape.
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
 | tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, the post-build provider install, and the `&self` probe reads the `&mut`-shaped views cannot serve. Added with the migration's companion change; its consumer set is expected to shrink, never grow |
 | debugger front doors (`run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) | B | driver-layer front doors at the crate root — the design's §10 forms of the one debug session; they stay driver surface, not `Session` methods, and move with the driver layer at the split |
-| `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature |
+| `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers; plus the `InputrcEnv` / `parse_inputrc_with_env` inputrc reader pair) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature — except the inputrc reader pair, which niubash-runtime's config module consumes directly at startup (see the §2 row) |
 
 ## 5. The canary: how the freeze is enforced
 
@@ -466,7 +479,9 @@ item rubash::api::SessionBuilder
 item rubash::builtins::bind::BindSpecError
 item rubash::builtins::bind::BindingSpec
 item rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
+item rubash::builtins::bind::InputrcEnv
 item rubash::builtins::bind::format_invalid_keymap
+item rubash::builtins::bind::parse_inputrc_with_env
 item rubash::builtins::bind::parse_positional_binding
 item rubash::builtins::bind::parse_unix_command_spec
 item rubash::builtins::bind::strip_set_keyword
