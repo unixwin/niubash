@@ -421,7 +421,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // readline's `keyseq-timeout` for the chord layer, resolved once per
     // editor build. The standby machine gets the same value so a mode flip
     // keeps the wait the user configured.
-    let keyseq_timeout = crate::config::resolve_keyseq_timeout();
+    // GNU's `set keyseq-timeout` (rc `bind 'set ...'` or ~/.inputrc) is the
+    // only surface for this knob — no config duplication. rubash's table
+    // already defaults to 500, so an unset variable keeps readline's value.
+    let keyseq_timeout = engine_keyseq_timeout(&*shell_ref)
+        .unwrap_or(std::time::Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS));
 
     let mut editor = Reedline::create()
         .with_validator(Box::new(ReplValidator))
@@ -2855,9 +2859,13 @@ impl ChordEditMode {
             && self.inner.edit_mode() == PromptEditMode::Emacs
             && !self.alt_keys.is_empty()
         {
-            if let Some(partner) = self.lookahead.as_mut().and_then(|peek| peek(ESC_META_BUDGET)) {
-                if let Some((_mods, code)) = chord_key(&partner)
-                    .filter(|(_, code)| self.alt_keys.contains(code))
+            if let Some(partner) = self
+                .lookahead
+                .as_mut()
+                .and_then(|peek| peek(ESC_META_BUDGET))
+            {
+                if let Some((_mods, code)) =
+                    chord_key(&partner).filter(|(_, code)| self.alt_keys.contains(code))
                 {
                     let synthetic = crossterm29::event::Event::Key(
                         crossterm29::event::KeyEvent::new(code, KeyModifiers::ALT),
@@ -2942,6 +2950,20 @@ impl ChordEditMode {
             _ => ReedlineEvent::Multiple(events),
         }
     }
+}
+
+/// readline's `keyseq-timeout` default, in milliseconds.
+const DEFAULT_KEYSEQ_TIMEOUT_MS: u64 = 500;
+
+/// `set keyseq-timeout` as the engine recorded it (`bind 'set
+/// keyseq-timeout 250'` in the rc, or `~/.inputrc`). `None` when the engine
+/// has no such variable (older revision).
+fn engine_keyseq_timeout(shell: &Shell) -> Option<std::time::Duration> {
+    let raw = shell.executor().bind_readline_variable("keyseq-timeout")?;
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_millis)
 }
 
 fn edit_event(command: EditCommand) -> ReedlineEvent {
@@ -4452,8 +4474,8 @@ fn flush_repl_output() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use reedline::Menu;
+    use std::collections::HashSet;
 
     #[test]
     fn emacs_keybindings_keep_ctrl_r_history_search_and_tab_completion() {
@@ -5307,8 +5329,7 @@ mod tests {
         ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
     }
 
-    const TEST_KEYSEQ_TIMEOUT: Duration =
-        Duration::from_millis(crate::config::DEFAULT_KEYSEQ_TIMEOUT_MS);
+    const TEST_KEYSEQ_TIMEOUT: Duration = Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS);
 
     #[test]
     fn escape_partner_without_a_meta_binding_is_delivered_now() {
