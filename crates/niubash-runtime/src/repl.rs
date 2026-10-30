@@ -478,6 +478,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             ),
             chord_bindings,
             alt_keys,
+            Some(Box::new(live_lookahead)),
         )))
         .with_additional_edit_mode(Box::new(ChordEditMode::new(
             Box::new(
@@ -486,6 +487,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             ),
             standby_chord_bindings,
             standby_alt_keys,
+            Some(Box::new(live_lookahead)),
         )));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
@@ -2709,9 +2711,6 @@ struct ChordEditMode {
     alt_keys: std::collections::HashSet<KeyCode>,
     /// Peek for the ESC partner without consuming the input stream.
     lookahead: Option<Lookahead>,
-    /// Events the peek consumed but the decision did not need, replayed
-    /// before the next real event.
-    pushback: std::collections::VecDeque<crossterm29::event::Event>,
 }
 
 /// readline's `keyseq-timeout` default.
@@ -2725,6 +2724,7 @@ impl ChordEditMode {
         inner: Box<dyn EditMode>,
         chords: Vec<ChordBinding>,
         alt_keys: std::collections::HashSet<KeyCode>,
+        lookahead: Option<Lookahead>,
     ) -> Self {
         Self {
             inner,
@@ -2732,8 +2732,7 @@ impl ChordEditMode {
             pending: Vec::new(),
             pending_since: None,
             alt_keys,
-            lookahead: Some(Box::new(live_lookahead)),
-            pushback: std::collections::VecDeque::new(),
+            lookahead,
         }
     }
 
@@ -2780,11 +2779,6 @@ fn push_event(events: &mut Vec<ReedlineEvent>, event: ReedlineEvent) {
 
 impl EditMode for ChordEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
-        // Replay anything the ESC peek consumed earlier, in order.
-        if let Some(parked) = self.pushback.pop_front() {
-            self.pushback.push_front(crossterm29::event::Event::from(event));
-            return self.dispatch(parked);
-        }
         self.dispatch(crossterm29::event::Event::from(event))
     }
 
@@ -2810,10 +2804,9 @@ impl ChordEditMode {
             && !self.alt_keys.is_empty()
         {
             if let Some(partner) = self.lookahead.as_mut().and_then(|peek| peek(ESC_META_BUDGET)) {
-                if let Some((code, extra)) = chord_key(&partner).filter(|(_, code)| {
-                    self.alt_keys.contains(code)
-                }).map(|(mods, code)| (code, mods)) {
-                    let _ = extra;
+                if let Some((_mods, code)) = chord_key(&partner)
+                    .filter(|(_, code)| self.alt_keys.contains(code))
+                {
                     let synthetic = crossterm29::event::Event::Key(
                         crossterm29::event::KeyEvent::new(code, KeyModifiers::ALT),
                     );
@@ -2821,15 +2814,28 @@ impl ChordEditMode {
                         ReedlineRawEvent::try_from(synthetic).expect("synthetic meta key"),
                     );
                 }
-                self.pushback.push_back(partner);
+                // The peeked event is not a meta partner: deliver ESC and it
+                // in order, now. Parking it would delay the key until the
+                // *next* keystroke (reedline only calls us when input
+                // arrives).
+                let esc = self.forward(ReedlineRawEvent::try_from(raw).expect("escape"));
+                let partner = self.dispatch(partner);
+                let mut events = Vec::new();
+                push_event(&mut events, esc);
+                push_event(&mut events, partner);
+                return match events.len() {
+                    0 => ReedlineEvent::None,
+                    1 => events.pop().expect("one event"),
+                    _ => ReedlineEvent::Multiple(events),
+                };
             }
             return self.forward(ReedlineRawEvent::try_from(raw).expect("escape"));
         }
         if self.pending.is_empty() {
+            // A key that starts a chord waits, even when it also has its own
+            // binding: readline fires the single binding only after
+            // `keyseq-timeout` expires, which the flush below reproduces.
             if self.is_prefix(std::slice::from_ref(&key)) {
-                if let Some(event) = self.exact(std::slice::from_ref(&key)) {
-                    return event;
-                }
                 self.pending.push(raw);
                 self.pending_since = Some(std::time::Instant::now());
                 return ReedlineEvent::None;
@@ -5242,6 +5248,76 @@ mod tests {
         assert_eq!(parse_chord_sequence(""), None);
     }
 
+    fn chord_test_key(code: KeyCode, modifiers: KeyModifiers) -> ReedlineRawEvent {
+        use crossterm29::event::{Event, KeyEvent};
+        ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
+    }
+
+    #[test]
+    fn escape_partner_without_a_meta_binding_is_delivered_now() {
+        use crossterm29::event::{Event, KeyEvent};
+        let inner = Emacs::new(default_emacs_keybindings());
+        // Only `c` has an ALT binding, so ESC + Down is not a meta fold.
+        let alt: HashSet<KeyCode> = [KeyCode::Char('c')].into_iter().collect();
+        let partner = Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let lookahead: Lookahead = Box::new(move |_| Some(partner.clone()));
+        let mut mode = ChordEditMode::new(Box::new(inner), Vec::new(), alt, Some(lookahead));
+
+        let event = mode.parse_event(chord_test_key(KeyCode::Esc, KeyModifiers::NONE));
+        match event {
+            ReedlineEvent::Multiple(events) => assert_eq!(
+                events.len(),
+                2,
+                "ESC and the peeked key must both be delivered at once"
+            ),
+            other => panic!("expected ESC + Down as one batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_key_that_is_both_binding_and_prefix_waits_for_the_chord() {
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('x'),
+            edit_event(EditCommand::InsertString("SINGLE".to_string())),
+        );
+        let inner = Emacs::new(keybindings);
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode =
+            ChordEditMode::new(Box::new(inner), chords, HashSet::new(), None);
+
+        // The key is parked even though it has its own binding.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            edit_event(EditCommand::InsertString("QUICK".to_string()))
+        );
+
+        // Past the timeout the single binding fires, then the key stands alone.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        match mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)) {
+            ReedlineEvent::Multiple(events) => assert!(
+                events.contains(&edit_event(EditCommand::InsertString("SINGLE".to_string()))),
+                "the expired prefix replays its own binding: {events:?}"
+            ),
+            other => panic!("expected the single binding then the key, got {other:?}"),
+        }
+    }
+
     #[test]
     fn chord_prefix_expires_after_the_keyseq_timeout() {
         use crossterm29::event::{Event, KeyCode as Code, KeyEvent, KeyModifiers as Mods};
@@ -5253,7 +5329,7 @@ mod tests {
             ],
             event: edit_event(EditCommand::InsertString("QUICK".to_string())),
         }];
-        let mut mode = ChordEditMode::new(Box::new(inner), chords, HashSet::new());
+        let mut mode = ChordEditMode::new(Box::new(inner), chords, HashSet::new(), None);
         let key = |code, modifiers| {
             ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
         };
