@@ -2596,6 +2596,10 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // GNU's Ctrl+R (`reverse-search-history`) and the interactive
         // search spelling niu already carried are one action.
         "reverse-search-history" => Some(ReedlineEvent::SearchHistory),
+        // PgUp/PgDn in bash's default map: history jumps (the reedline
+        // fork pinned in Cargo.toml carries these two events).
+        "beginning-of-history" => Some(ReedlineEvent::FirstHistoryEntry),
+        "end-of-history" => Some(ReedlineEvent::LastHistoryEntry),
         // GNU's editing-mode toggles: session-level mode switches, which
         // reedline delivers as `SwitchMode` (the standby machine built in
         // `build_line_editor` is what accepts the target).
@@ -4609,14 +4613,11 @@ mod tests {
     /// through the bridge is the compatibility gate for "GNU habits as the
     /// default".
     ///
-    /// Only three entries are expected to stay unmapped, and each has a
-    /// reason: `\e[5~`/`\e[6~` are `beginning-of-history` /
-    /// `end-of-history`, which need a reedline history-jump primitive
-    /// (nushell/reedline#1269); `\e` is `emacs-editing-mode`, a
-    /// session-level mode toggle the editor cannot deliver per key (it is
-    /// dropped as a structural class, i.e. silently, not as a warning).
-    /// Everything else — including the Home/End/Delete terminal spellings —
-    /// must land in the keybindings.
+    /// With the reedline fork pinned in Cargo.toml (EventStatus re-export +
+    /// history-jump events) the whole table lands: no entry may stay
+    /// unmapped. Everything — Home/End/Delete spellings, `\C-r`
+    /// reverse-search, `\C-t` transpose, `\e` emacs-editing-mode and the
+    /// PgUp/PgDn history jumps — must reach the keybindings.
     #[test]
     fn gnu_default_bind_table_mirrors_except_known_gaps() {
         let entries: Vec<crate::bind_surface::EngineBindEntry> =
@@ -4638,7 +4639,7 @@ mod tests {
         unmapped.sort();
         assert_eq!(
             unmapped,
-            vec![r"\e[5~".to_string(), r"\e[6~".to_string()],
+            Vec::<String>::new(),
             "GNU default table must mirror except the documented gaps"
         );
 

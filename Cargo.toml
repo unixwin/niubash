@@ -87,3 +87,10 @@ strip = "symbols"
 # path must agree on the Cargo.toml version recorded in Cargo.lock.
 [patch."https://github.com/unixwin/rubash.git"]
 rubash = { path = "../rubash" }
+
+# TEMPORARY (drop when nushell/reedline ships these): the fork carries
+#   - EventStatus re-export            (nushell/reedline#1272)
+#   - FirstHistoryEntry/LastHistoryEntry (nushell/reedline#1271)
+# Both are needed for bash's default bind table to land 25/25.
+[patch.crates-io]
+reedline = { git = "https://github.com/caomengxuan666/reedline", rev = "401393f" }
