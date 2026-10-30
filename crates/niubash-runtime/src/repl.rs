@@ -361,7 +361,17 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         shell_ref.engine_bind_generation,
         menu_config.completion_interaction,
     );
-    let (edit_mode, keymap_registry) = build_edit_mode(shell_ref.editor_mode, build_args.0, build_args.1, build_args.2, build_args.3, build_args.4, build_args.5, build_args.6, build_args.7);
+    let (edit_mode, keymap_registry, chord_bindings) = build_edit_mode(
+        shell_ref.editor_mode,
+        build_args.0,
+        build_args.1,
+        build_args.2,
+        build_args.3,
+        build_args.4,
+        build_args.5,
+        build_args.6,
+        build_args.7,
+    );
     // niubash#630: the other machine, registered as a standby so a startup
     // `bind` of `vi-editing-mode` / `emacs-editing-mode` (GNU's two
     // editing-mode toggles) can actually reach it via
@@ -371,13 +381,19 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // `bind -m` entries and user rules — so a flip keeps the user's
     // bindings in the target keymap. Its registry snapshot is discarded:
     // the published one describes the active mode.
-    let (standby_edit_mode, _) = build_edit_mode(
+    let (standby_edit_mode, _, standby_chord_bindings) = build_edit_mode(
         match shell_ref.editor_mode {
             EditorMode::Emacs => EditorMode::Vi,
             EditorMode::Vi => EditorMode::Emacs,
         },
-        build_args.0, build_args.1, build_args.2, build_args.3,
-        build_args.4, build_args.5, build_args.6, build_args.7,
+        build_args.0,
+        build_args.1,
+        build_args.2,
+        build_args.3,
+        build_args.4,
+        build_args.5,
+        build_args.6,
+        build_args.7,
     );
     // Publish the unified keymap registry (niubash#630): this build's
     // effective table and dropped records become the one snapshot the
@@ -455,14 +471,20 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         // normally (niubash#284). Ctrl+V (PasteSystem, bound below)
         // remains the one-shot clipboard path.
         .use_bracketed_paste(cfg!(not(target_os = "windows")))
-        .with_edit_mode(Box::new(
-            PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
-                .with_cycle_session(cycle_session.clone()),
-        ))
-        .with_additional_edit_mode(Box::new(
-            PasteChunkEditMode::new(standby_edit_mode, menu_config.completion_style)
-                .with_cycle_session(cycle_session),
-        ));
+        .with_edit_mode(Box::new(ChordEditMode::new(
+            Box::new(
+                PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
+                    .with_cycle_session(cycle_session.clone()),
+            ),
+            chord_bindings,
+        )))
+        .with_additional_edit_mode(Box::new(ChordEditMode::new(
+            Box::new(
+                PasteChunkEditMode::new(standby_edit_mode, menu_config.completion_style)
+                    .with_cycle_session(cycle_session),
+            ),
+            standby_chord_bindings,
+        )));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
         editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(
@@ -859,7 +881,11 @@ fn build_edit_mode(
     user_keymap_unbinds: &[(KeyModifiers, KeyCode)],
     engine_bind_generation: u64,
     completion_interaction: CompletionInteraction,
-) -> (Box<dyn EditMode>, crate::keymap_registry::KeymapRegistry) {
+) -> (
+    Box<dyn EditMode>,
+    crate::keymap_registry::KeymapRegistry,
+    Vec<ChordBinding>,
+) {
     use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
         EditorMode::Emacs => {
@@ -883,6 +909,7 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
+                collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs),
             )
         }
         EditorMode::Vi => {
@@ -931,6 +958,13 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
+                collect_chord_bindings(engine_bindings, NativeKeymapTarget::ViInsert)
+                    .into_iter()
+                    .chain(collect_chord_bindings(
+                        engine_bindings,
+                        NativeKeymapTarget::ViNormal,
+                    ))
+                    .collect(),
             )
         }
     }
@@ -1656,10 +1690,7 @@ impl EditMode for PasteChunkEditMode {
     /// mode-specific event — in particular `ReedlineEvent::SwitchMode`,
     /// which is how the engine asks a machine to become the vi/emacs
     /// machine a `bind` target names — belongs to the wrapped machine.
-    fn handle_mode_specific_event(
-        &mut self,
-        event: ReedlineEvent,
-    ) -> reedline::EventStatus {
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
         self.inner.handle_mode_specific_event(event)
     }
 
@@ -2114,9 +2145,6 @@ struct UnusableBind {
 /// is new, actionable information and keeps the warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnusableBindReason {
-    /// Multi-key / chained sequence: reedline bindings are a single
-    /// (modifiers, key) pair, so a chain has no equivalent.
-    ChainedSequence,
     /// A readline editing-mode toggle function: switching keymaps is
     /// a session-level choice in niu (the configured `EditorMode`),
     /// not a per-key widget the bridge can deliver.
@@ -2130,10 +2158,7 @@ impl UnusableBindReason {
     /// decision lives in the registry's reminder pass, niubash#630).
     #[cfg(test)]
     fn is_structural(self) -> bool {
-        matches!(
-            self,
-            UnusableBindReason::ChainedSequence | UnusableBindReason::ModeToggleFunction
-        )
+        matches!(self, UnusableBindReason::ModeToggleFunction)
     }
 }
 
@@ -2157,64 +2182,6 @@ fn unusable_function_reason(name: &str) -> UnusableBindReason {
     }
 }
 
-/// Whether a raw bind sequence is a chain of two or more key units
-/// (e.g. `\C-x\C-f`, `\C-\e(`). Lexical only: the string must split
-/// cleanly into units; a malformed sequence stalls the scan and is
-/// *not* a chain (it is reported as unparseable instead).
-fn is_chained_key_sequence(value: &str) -> bool {
-    let chars: Vec<char> = value.chars().collect();
-    let mut pos = 0;
-    let mut units = 0;
-    while pos < chars.len() {
-        match key_unit_len(&chars[pos..]) {
-            Some(len) if len > 0 => {
-                pos += len;
-                units += 1;
-            }
-            _ => return false,
-        }
-    }
-    units >= 2
-}
-
-/// Length in chars of the first key unit of a raw bind sequence:
-/// a `\C-`/`\M-` chord, an `\e` chord or CSI form, a caret-notation
-/// key, a backslash escape, or a single plain char.
-fn key_unit_len(chars: &[char]) -> Option<usize> {
-    match chars {
-        ['\\', 'C', '-', ..] | ['\\', 'M', '-', ..] => {
-            char_spec_len(&chars[3..]).map(|len| 3 + len)
-        }
-        ['\\', 'e', '[', ..] => {
-            // CSI form: consume through the final byte (letter or '~').
-            let mut i = 3;
-            while i < chars.len() {
-                let c = chars[i];
-                i += 1;
-                if c.is_ascii_alphabetic() || c == '~' {
-                    return Some(i);
-                }
-            }
-            None
-        }
-        ['\\', 'e', ..] => char_spec_len(&chars[1..]).map(|len| 1 + len),
-        ['^', _, ..] => Some(2),
-        ['\\', _, ..] => Some(2),
-        [_, ..] => Some(1),
-        [] => None,
-    }
-}
-
-/// Length of the char spec a modifier prefix applies to: an escaped
-/// char (`\e`, `\\`, ...) or one plain char.
-fn char_spec_len(chars: &[char]) -> Option<usize> {
-    match chars {
-        ['\\', _, ..] => Some(2),
-        [c, ..] if *c != '\\' => Some(1),
-        _ => None,
-    }
-}
-
 /// Record an entry the editor cannot mirror, classified by reason
 /// (niubash#612). The entry also lands in the unified keymap
 /// registry's dropped records (niubash#630), with the coarse reason
@@ -2231,9 +2198,6 @@ fn note_unusable_bind(
         reason,
     });
     let structural = match reason {
-        UnusableBindReason::ChainedSequence => {
-            Some(crate::keymap_registry::DroppedReason::ChainedSequence)
-        }
         UnusableBindReason::ModeToggleFunction => {
             Some(crate::keymap_registry::DroppedReason::ModeToggleFunction)
         }
@@ -2315,15 +2279,19 @@ fn add_engine_bind_keybindings_recorded(
             continue;
         }
         let Some((modifiers, key_code)) = parse_key_sequence(&entry.keyseq) else {
-            // A clean chain of key units is structural (reedline binds
-            // single keys); anything else that fails to parse is
-            // malformed and stays actionable (niubash#612).
-            let reason = if is_chained_key_sequence(&entry.keyseq) {
-                UnusableBindReason::ChainedSequence
-            } else {
-                UnusableBindReason::Other
-            };
-            note_unusable_bind(&mut unusable, &mut dropped, entry, reason);
+            // A clean chain of key units is a chord: `ChordEditMode`
+            // delivers those (niubash#630), so it is neither dropped nor
+            // reported. Anything else that fails to parse is malformed
+            // and stays actionable (niubash#612).
+            if parse_chord_sequence(&entry.keyseq).is_some() {
+                continue;
+            }
+            note_unusable_bind(
+                &mut unusable,
+                &mut dropped,
+                entry,
+                UnusableBindReason::Other,
+            );
             continue;
         };
         let event = match &entry.kind {
@@ -2621,7 +2589,7 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "undo" => Some(edit_event(EditCommand::Undo)),
         "redo" => Some(edit_event(EditCommand::Redo)),
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
-        "redisplay" => Some(ReedlineEvent::Repaint),
+        "redisplay" | "redraw-current-line" => Some(ReedlineEvent::Repaint),
         "expand-or-complete" | "complete-word" => Some(completion_event()),
         "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
@@ -2632,6 +2600,170 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             "{}{}",
             WIDGET_HOST_COMMAND_PREFIX, widget
         ))),
+    }
+}
+
+/// One multi-key binding: the key units and the event the last unit fires.
+struct ChordBinding {
+    keys: Vec<(KeyModifiers, KeyCode)>,
+    event: ReedlineEvent,
+}
+
+/// Collect the engine `bind` entries that are chords (two or more key
+/// units) into the layer `ChordEditMode` walks. `Execute` entries keep the
+/// same `bind -x` index the flat keymap would have used; macros insert
+/// their text; function names go through [`native_widget_event`] and fall
+/// back to the shell-function sentinel like any other widget.
+fn collect_chord_bindings(
+    entries: &[crate::bind_surface::EngineBindEntry],
+    target: NativeKeymapTarget,
+) -> Vec<ChordBinding> {
+    let mut chords = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+            continue;
+        }
+        let Some(keys) = parse_chord_sequence(&entry.keyseq) else {
+            continue;
+        };
+        let event = match &entry.kind {
+            crate::bind_surface::EngineBindKind::Execute { .. } => {
+                ReedlineEvent::ExecuteHostCommand(format!("{BINDX_HOST_COMMAND_PREFIX}{index}"))
+            }
+            crate::bind_surface::EngineBindKind::Macro { text } => {
+                edit_event(EditCommand::InsertString(text.clone()))
+            }
+            crate::bind_surface::EngineBindKind::Function { name } => {
+                match native_widget_event(name) {
+                    Some(ReedlineEvent::ExecuteHostCommand(payload))
+                        if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                    {
+                        continue
+                    }
+                    Some(event) => event,
+                    None => continue,
+                }
+            }
+        };
+        chords.push(ChordBinding { keys, event });
+    }
+    chords
+}
+
+/// Multi-key (chord) dispatch, layered above the paste/typeahead machine.
+///
+/// reedline's flat keymap binds one key at a time, so a readline chord
+/// (`\C-x\C-e`, fzf's `\C-\e(`) used to be dropped. This layer buffers the
+/// first unit only when some chord starts with it, completes on an exact
+/// match, and — on a mismatch — replays the buffered keys through the inner
+/// machine before the current one, so nothing is swallowed. There is no
+/// keyseq timeout yet: a lone prefix waits for the next key (readline's
+/// `keyseq-timeout` default is 500 ms; the upstream chord design is
+/// nushell/reedline#1204).
+struct ChordEditMode {
+    inner: Box<dyn EditMode>,
+    chords: Vec<ChordBinding>,
+    pending: Vec<crossterm29::event::Event>,
+}
+
+impl ChordEditMode {
+    fn new(inner: Box<dyn EditMode>, chords: Vec<ChordBinding>) -> Self {
+        Self {
+            inner,
+            chords,
+            pending: Vec::new(),
+        }
+    }
+
+    fn exact(&self, keys: &[(KeyModifiers, KeyCode)]) -> Option<ReedlineEvent> {
+        self.chords
+            .iter()
+            .find(|chord| chord.keys == keys)
+            .map(|chord| chord.event.clone())
+    }
+
+    fn is_prefix(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
+        self.chords
+            .iter()
+            .any(|chord| chord.keys.len() > keys.len() && chord.keys.starts_with(keys))
+    }
+
+    fn forward(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
+        self.inner.parse_event(event)
+    }
+}
+
+fn chord_key(event: &crossterm29::event::Event) -> Option<(KeyModifiers, KeyCode)> {
+    match event {
+        crossterm29::event::Event::Key(key)
+            if key.kind == crossterm29::event::KeyEventKind::Press =>
+        {
+            Some((key.modifiers, key.code))
+        }
+        _ => None,
+    }
+}
+
+fn push_event(events: &mut Vec<ReedlineEvent>, event: ReedlineEvent) {
+    match event {
+        ReedlineEvent::None => {}
+        ReedlineEvent::Multiple(inner) => {
+            for event in inner {
+                push_event(events, event);
+            }
+        }
+        other => events.push(other),
+    }
+}
+
+impl EditMode for ChordEditMode {
+    fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
+        let raw = crossterm29::event::Event::from(event);
+        let Some(key) = chord_key(&raw) else {
+            return self.forward(ReedlineRawEvent::try_from(raw).expect("non-key event"));
+        };
+        if self.pending.is_empty() {
+            if self.is_prefix(std::slice::from_ref(&key)) {
+                if let Some(event) = self.exact(std::slice::from_ref(&key)) {
+                    return event;
+                }
+                self.pending.push(raw);
+                return ReedlineEvent::None;
+            }
+            return self.forward(ReedlineRawEvent::try_from(raw).expect("key event"));
+        }
+        let mut candidate: Vec<(KeyModifiers, KeyCode)> =
+            self.pending.iter().filter_map(chord_key).collect();
+        candidate.push(key);
+        if let Some(event) = self.exact(&candidate) {
+            self.pending.clear();
+            return event;
+        }
+        if self.is_prefix(&candidate) {
+            self.pending.push(raw);
+            return ReedlineEvent::None;
+        }
+        // Mismatch: replay the parked keys, then the current one, in order.
+        let mut events = Vec::new();
+        for parked in std::mem::take(&mut self.pending) {
+            let event = self.forward(ReedlineRawEvent::try_from(parked).expect("parked key"));
+            push_event(&mut events, event);
+        }
+        let event = self.forward(ReedlineRawEvent::try_from(raw).expect("key event"));
+        push_event(&mut events, event);
+        match events.len() {
+            0 => ReedlineEvent::None,
+            1 => events.pop().expect("one event"),
+            _ => ReedlineEvent::Multiple(events),
+        }
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
+        self.inner.handle_mode_specific_event(event)
     }
 }
 
@@ -2816,6 +2948,63 @@ pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)>
             .or_else(|| parse_control_key_sequence(value))
             .or_else(|| parse_plain_key_sequence(value)),
     }
+}
+
+/// Split a readline keyseq into per-key units and parse each unit.
+///
+/// The flat keymap owns single-key sequences; this returns `Some` only for
+/// a clean chain of two or more units (niubash#630: bash's
+/// `\C-x\C-e`-style chords, fzf's `\C-\e(`). A token that does not parse
+/// makes the whole sequence unparseable — the caller keeps reporting those
+/// (they are typos, not chords).
+fn parse_chord_sequence(value: &str) -> Option<Vec<(KeyModifiers, KeyCode)>> {
+    let units = split_key_units(value)?;
+    if units.len() < 2 {
+        return None;
+    }
+    units
+        .into_iter()
+        .map(parse_key_sequence)
+        .collect::<Option<Vec<_>>>()
+}
+
+/// Split a readline keyseq into its written units without interpreting
+/// them: `\C-x`, `\M-x`, `\e` (ESC), `\e[...]` terminal sequences, `^X`,
+/// and single literal characters.
+fn split_key_units(value: &str) -> Option<Vec<&str>> {
+    let mut rest = value;
+    let mut units = Vec::new();
+    while !rest.is_empty() {
+        let (unit, tail) = if let Some(tail) = rest
+            .strip_prefix("\\C-")
+            .or_else(|| rest.strip_prefix("\\M-"))
+        {
+            // The unit is the prefix plus one (possibly escaped) character.
+            let ch = tail.chars().next()?;
+            let end = rest.len() - tail.len() + ch.len_utf8();
+            (&rest[..end], &rest[end..])
+        } else if rest.starts_with("\\e[") {
+            let end = rest
+                .char_indices()
+                .skip(2)
+                .find(|(_, c)| c.is_ascii_alphabetic() || *c == '~')
+                .map(|(i, c)| i + c.len_utf8())?;
+            (&rest[..end], &rest[end..])
+        } else if let Some(tail) = rest.strip_prefix("\\e") {
+            let end = rest.len() - tail.len();
+            (&rest[..end], tail)
+        } else if let Some(tail) = rest.strip_prefix('^') {
+            let ch = tail.chars().next()?;
+            let end = 1 + ch.len_utf8();
+            (&rest[..end], &rest[end..])
+        } else {
+            let ch = rest.chars().next()?;
+            (&rest[..ch.len_utf8()], &rest[ch.len_utf8()..])
+        };
+        units.push(unit);
+        rest = tail;
+    }
+    Some(units)
 }
 
 /// GNU bind/inputrc `\C-x` / `\M-x` forms (readline rl_translate_keyseq).
@@ -4892,6 +5081,80 @@ mod tests {
     }
 
     #[test]
+    fn parse_chord_sequence_splits_readline_chains() {
+        // bash's `\C-x\C-e` and fzf's `\C-\e(` are chords; single units are
+        // the flat keymap's business.
+        assert_eq!(
+            parse_chord_sequence(r"\C-x\C-e"),
+            Some(vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::CONTROL, KeyCode::Char('e')),
+            ])
+        );
+        assert_eq!(
+            parse_chord_sequence(r"\C-\e("),
+            // Readline semantics: `\\C-\\` consumes the escape, so this is
+            // Ctrl-\\ then the *literal* `e` and `(` — the "impossible to
+            // type" marker fzf picked.
+            Some(vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('\\')),
+                (KeyModifiers::NONE, KeyCode::Char('e')),
+                (KeyModifiers::NONE, KeyCode::Char('(')),
+            ])
+        );
+        // Terminal-sequence units split correctly.
+        assert_eq!(
+            parse_chord_sequence(r"\e[1~\C-a"),
+            Some(vec![
+                (KeyModifiers::NONE, KeyCode::Home),
+                (KeyModifiers::CONTROL, KeyCode::Char('a')),
+            ])
+        );
+        // Single key, malformed tail, empty: not chords.
+        assert_eq!(parse_chord_sequence(r"\C-x"), None);
+        assert_eq!(parse_chord_sequence(r"\C-x\C-"), None);
+        assert_eq!(parse_chord_sequence(""), None);
+    }
+
+    #[test]
+    fn collect_chord_bindings_carries_events_and_bindx_indices() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        let entries = vec![
+            BindEntry {
+                keyseq: r"\C-t".to_string(),
+                kind: BindKind::Execute {
+                    command: "flat".to_string(),
+                },
+                keymap: None,
+            },
+            BindEntry {
+                keyseq: r"\C-x\C-e".to_string(),
+                kind: BindKind::Execute {
+                    command: "chord".to_string(),
+                },
+                keymap: None,
+            },
+            BindEntry {
+                keyseq: r"\C-x\C-r".to_string(),
+                kind: BindKind::Macro {
+                    text: "reload".to_string(),
+                },
+                keymap: None,
+            },
+        ];
+        let chords = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs);
+        assert_eq!(chords.len(), 2);
+        assert_eq!(
+            chords[0].event,
+            ReedlineEvent::ExecuteHostCommand(format!("{BINDX_HOST_COMMAND_PREFIX}1"))
+        );
+        assert_eq!(
+            chords[1].event,
+            edit_event(EditCommand::InsertString("reload".to_string()))
+        );
+    }
+
+    #[test]
     fn char_offset_to_byte_walks_multibyte_boundaries() {
         assert_eq!(char_offset_to_byte("", 0), 0);
         assert_eq!(char_offset_to_byte("abc", 1), 1);
@@ -4982,18 +5245,11 @@ mod tests {
         );
         assert_eq!(
             unusable,
-            vec![
-                UnusableBind {
-                    keyseq: r"\C-g".to_string(),
-                    reason: UnusableBindReason::Other,
-                },
-                // Multi-key sequences are recorded but, since
-                // niubash#612, classified structural (no warning).
-                UnusableBind {
-                    keyseq: r"\C-x\C-f".to_string(),
-                    reason: UnusableBindReason::ChainedSequence,
-                },
-            ]
+            vec![UnusableBind {
+                keyseq: r"\C-g".to_string(),
+                reason: UnusableBindReason::Other,
+            }],
+            "the chord entry is delivered by the chord layer, not dropped"
         );
     }
 
@@ -5029,19 +5285,15 @@ mod tests {
             function(r"\C-z", "vi-insert", "emacs-editing-mode"),
             function(r"\C-z", "emacs-standard", "vi-editing-mode"),
         ];
-        let chained = UnusableBind {
-            keyseq: r"\C-\e(".to_string(),
-            reason: UnusableBindReason::ChainedSequence,
-        };
-        // The `\C-z` editing-mode toggles are no longer dropped: they map
-        // onto `SwitchMode` (the standby machine accepts the target), so
-        // only the chained sequence stays unusable here.
+        // Nothing in fzf's workaround set is dropped any more: the `\C-z`
+        // toggles map onto `SwitchMode`, and the `\C-\e(` chord is
+        // delivered by `ChordEditMode`.
 
         for (target, mut keybindings, expected) in [
             (
                 NativeKeymapTarget::Emacs,
                 default_emacs_keybindings(),
-                vec![chained.clone()],
+                Vec::new(),
             ),
             (
                 NativeKeymapTarget::ViInsert,
@@ -5113,19 +5365,17 @@ mod tests {
         );
     }
 
-    // niubash#612: the structural classes are judged by the bind's own
-    // shape and function category, never by which tool emitted it.
-    // These entries are invented shapes (no tool's actual script):
-    // chained sequences and editing-mode toggles from a hypothetical
-    // third-party integration are just as silent, while an unknown
-    // function, a malformed sequence, and a real-but-unmirrored
-    // non-toggle function still warn.
+    // niubash#630 closed both structural classes: chained sequences are
+    // delivered by `ChordEditMode` (the chord layer), editing-mode toggles
+    // by `SwitchMode`, and `redraw-current-line` maps to `Repaint`. What
+    // still warns is exactly what a user can act on: an unknown function
+    // and a malformed sequence.
     #[test]
-    fn issue612_structural_silence_is_source_agnostic() {
+    fn issue612_structural_classes_are_gone() {
         use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
-            // Invented chained Execute bind.
+            // A chord: delivered by the chord layer, never dropped.
             BindEntry {
                 keyseq: r"\C-x\C-a".to_string(),
                 kind: BindKind::Execute {
@@ -5133,7 +5383,7 @@ mod tests {
                 },
                 keymap: None,
             },
-            // Invented chained Macro bind.
+            // A chord macro, same.
             BindEntry {
                 keyseq: r"\C-b\C-b".to_string(),
                 kind: BindKind::Macro {
@@ -5141,7 +5391,22 @@ mod tests {
                 },
                 keymap: Some("emacs-standard".to_string()),
             },
-            // Invented mode toggles: keys/keymaps no real script uses.
+            // A mode toggle: maps to SwitchMode.
+            BindEntry {
+                keyseq: r"\C-q".to_string(),
+                kind: BindKind::Function {
+                    name: "vi-editing-mode".to_string(),
+                },
+                keymap: None,
+            },
+            // A deliverable readline function: maps to Repaint.
+            BindEntry {
+                keyseq: r"\C-y".to_string(),
+                kind: BindKind::Function {
+                    name: "redraw-current-line".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
             // Unknown function name: actionable, still warns.
             BindEntry {
                 keyseq: r"\C-g".to_string(),
@@ -5150,8 +5415,7 @@ mod tests {
                 },
                 keymap: None,
             },
-            // Malformed sequence (dangling modifier): not a chain,
-            // still warns.
+            // Malformed sequence (dangling modifier): still warns.
             BindEntry {
                 keyseq: r"\C-".to_string(),
                 kind: BindKind::Execute {
@@ -5159,44 +5423,15 @@ mod tests {
                 },
                 keymap: None,
             },
-            // A real readline function niu does not mirror, but not a
-            // mode toggle: still warns (only the toggle class is
-            // structural on the function axis).
-            BindEntry {
-                keyseq: r"\C-y".to_string(),
-                kind: BindKind::Function {
-                    name: "redraw-current-line".to_string(),
-                },
-                keymap: Some("emacs-standard".to_string()),
-            },
         ];
         let unusable =
             add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
         let reasons: Vec<UnusableBindReason> = unusable.iter().map(|bind| bind.reason).collect();
         assert_eq!(
             reasons,
-            vec![
-                UnusableBindReason::ChainedSequence,
-                UnusableBindReason::ChainedSequence,
-                UnusableBindReason::Other,
-                UnusableBindReason::Other,
-                UnusableBindReason::Other,
-            ]
+            vec![UnusableBindReason::Other, UnusableBindReason::Other]
         );
-        assert_eq!(warned_keyseqs(&unusable), vec![r"\C-g", r"\C-", r"\C-y"]);
-    }
-
-    // niubash#612: the chain scan is lexical — a malformed sequence
-    // must not be misread as a chain (it warns as unparseable).
-    #[test]
-    fn issue612_chained_sequence_scan() {
-        assert!(is_chained_key_sequence(r"\C-x\C-f"));
-        assert!(is_chained_key_sequence(r"\C-\e("));
-        assert!(is_chained_key_sequence("ab"));
-        assert!(!is_chained_key_sequence(r"\C-z"));
-        assert!(!is_chained_key_sequence(r"\C-"));
-        assert!(!is_chained_key_sequence(r"\e[A"));
-        assert!(!is_chained_key_sequence(""));
+        assert_eq!(warned_keyseqs(&unusable), vec![r"\C-g", r"\C-"]);
     }
 
     #[test]

@@ -59,20 +59,23 @@ Enter always submits what you see.
 ## Key bindings from other tools
 
 niu mirrors GNU `bind` entries from your startup files into its line
-editor, but two classes of binding cannot be mirrored by design and
-are dropped silently (niubash#612):
+editor, including the two shapes a flat keymap cannot express on its own
+(niubash#630):
 
-* **Multi-key sequences** (e.g. `"\C-x\C-f"`): the editor binds one
-  key (with modifiers) at a time, so a chained sequence has no
-  equivalent.
+* **Multi-key sequences** (`"\C-x\C-e"`, fzf's `"\C-\e("`): delivered by a
+  chord layer above the editor. The first unit is held only when a chord
+  starts with it; a matching second unit fires the binding, and a
+  non-matching one replays the held key followed by the new one, so
+  nothing is swallowed. There is no `keyseq-timeout` yet: a lone prefix
+  waits for the next key (readline's default is 500 ms).
 * **Editing-mode toggles** (`vi-editing-mode` / `emacs-editing-mode`):
-  switching keymaps is a session-level choice in niu, not a per-key
-  action.
+  these switch the session's machine for real. The other mode is built as
+  a standby with the same widgets, `bind -m` entries and user keymap
+  rules, so a flip keeps your bindings.
 
-This applies to bindings from any tool, and any other unusable `bind`
-entry — an unparseable sequence, an unknown function — still produces
-a startup warning. Example: `eval "$(fzf --bash)"` registers one
-binding of each class (a multi-key `redraw-current-line` binding and
-`"\C-z"` mode toggles for its fallback macros); both are dropped,
-and the rest of the integration works in full: Ctrl+T (file widget),
-Ctrl+R (history widget) and Alt+C (cd widget).
+Anything genuinely unusable — an unparseable sequence, an unknown
+function — still produces a startup warning, with a per-item fix. Example:
+`eval "$(fzf --bash)"` registers one binding of each shape (a multi-key
+`redraw-current-line` binding and `"\C-z"` mode toggles for its fallback
+macros); both now apply, and the rest of the integration works in full:
+Ctrl+T (file widget), Ctrl+R (history widget) and Alt+C (cd widget).
