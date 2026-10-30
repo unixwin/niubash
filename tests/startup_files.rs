@@ -342,7 +342,7 @@ fn assert_success(output: &Output, context: &str) {
 const PROBE: &str = "echo ${STARTUP_MARKER:-unset}";
 
 fn seed_ignored_rc_files(fixture: &Fixture) -> Vec<(PathBuf, Vec<u8>)> {
-    [".winuxshrc", ".winshrc", ".bashrc"]
+    [".zshrc", ".kshrc", ".bashrc"]
         .into_iter()
         .map(|name| {
             let path = fixture.home.join(name);

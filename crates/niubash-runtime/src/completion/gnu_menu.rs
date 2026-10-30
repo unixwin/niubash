@@ -21,10 +21,15 @@
 //!
 //! Implementation rides reedline 0.52's `Menu` abstraction — the
 //! "print + redraw" exit shape the owner asked the menu/painter layers to be
-//! weighed against. The engine hands every menu [`Menu::update_working_details`]
-//! (editor + completer + painter) right before each repaint, which is where
-//! the double-TAB state machine runs (the `ColumnarMenu::apply_event`
-//! pattern). After TAB #1 the menu *deactivates itself*, so the next TAB
+//! weighed against. The double-TAB state machine runs at event-dispatch
+//! time, in [`Menu::can_partially_complete`] — the hook the engine calls
+//! from its `Menu` event arm before the batch's repaint, where the editor
+//! and completer are reachable. It must not run in
+//! [`Menu::update_working_details`]: the engine composes the frame's line
+//! strings from the editor *before* that paint-time hook, so a buffer
+//! mutation there paints one frame late (niubash#713). Paint time keeps
+//! only the queued `Edit` traffic (list dismissal) via
+//! `update_working_details`. After TAB #1 the menu *deactivates itself*, so the next TAB
 //! routes a fresh `MenuEvent::Activate` through the engine and the
 //! "second TAB lists" decision is carried entirely by this struct. The one
 //! GNU deviation is placement: reedline's painter owns menu geometry and
@@ -65,9 +70,12 @@ enum GnuPhase {
 pub struct GnuMenu {
     settings: MenuSettings,
     active: bool,
-    /// Engine events queued by [`GnuMenu::menu_event`], processed FIFO at
-    /// paint time in [`GnuMenu::update_working_details`] (where the editor
-    /// and completer are reachable — the ColumnarMenu pattern).
+    /// Engine events queued by [`GnuMenu::menu_event`]. An `Activate` is
+    /// normally consumed at dispatch time by
+    /// [`GnuMenu::can_partially_complete`] (niubash#713); what reaches the
+    /// paint-time drain in [`GnuMenu::update_working_details`] is the
+    /// `Edit` traffic (and, for direct drives of this type, `Activate`s no
+    /// dispatch hook consumed).
     ///
     /// The queue is a deque, not a single slot: `handle_menu_event` applies
     /// `Activate`'s `active` flip IMMEDIATELY, so a keystroke landing in the
@@ -134,7 +142,11 @@ impl GnuMenu {
 /// widest candidate plus the two-space gutter; as many columns as the
 /// terminal fits, at least one; rows ceil(count / columns). Returns
 /// `(columns, rows)`.
-fn column_layout(count: usize, longest: usize, terminal_columns: usize) -> (usize, usize) {
+pub(crate) fn column_layout(
+    count: usize,
+    longest: usize,
+    terminal_columns: usize,
+) -> (usize, usize) {
     let count = count.max(1);
     let field = longest.max(1).saturating_add(GNU_COLUMN_GUTTER);
     let columns = (terminal_columns / field).max(1).min(count);
@@ -150,7 +162,7 @@ fn column_layout(count: usize, longest: usize, terminal_columns: usize) -> (usiz
 /// already scrolled to make room up to the screen height, and GNU's
 /// `--More--` paging needs an interaction channel a printed list must not
 /// have.
-fn render_list(
+pub(crate) fn render_list(
     values: &[&str],
     widths: &[usize],
     terminal_columns: usize,
@@ -325,11 +337,28 @@ impl Menu for GnuMenu {
     fn can_partially_complete(
         &mut self,
         _values_updated: bool,
-        _editor: &mut Editor,
-        _completer: &mut dyn Completer,
+        editor: &mut Editor,
+        completer: &mut dyn Completer,
     ) -> bool {
-        // The GNU shape splices its own prefix in `apply_activate`; the
-        // engine's quick/partial completion hooks stay off.
+        // niubash#713: this hook is the engine's dispatch-time completion
+        // slot — `decide_menu_completion` calls it from the `Menu` event
+        // arm, BEFORE the batch's repaint. The GNU state machine runs HERE,
+        // not in `update_working_details`: the engine composes the frame's
+        // line strings from the editor before that paint-time hook runs, so
+        // a splice deferred to it lands in the buffer after the frame was
+        // already composed and only becomes visible at the NEXT keypress's
+        // repaint — the one-frame-late TAB this issue reports. (The other
+        // styles commit through this same hook, which is why only the GNU
+        // style lagged.) The engine's own splice machinery stays off — the
+        // state machine does its own accept/prefix work and the return
+        // stays `false`.
+        self.apply_activate(editor, completer);
+        // The `Activate` this dispatch belongs to was queued by
+        // `menu_event` moments earlier; it has now been applied, so drop
+        // every pending `Activate` — the paint-time drain must not run the
+        // same TAB twice. Queued `Edit`s keep their paint-time semantics.
+        self.events
+            .retain(|event| !matches!(event, MenuEvent::Activate(_)));
         false
     }
 
@@ -617,6 +646,86 @@ mod tests {
         assert_eq!(editor.get_buffer(), "zz", "no match, no edit");
         assert!(!menu.is_active());
         assert_eq!(menu.phase, GnuPhase::Idle);
+    }
+
+    /// Drive ONE engine TAB the way the reedline engine actually dispatches
+    /// it (fork `engine.rs`, the `ReedlineEvent::Menu` arm): `menu_event`
+    /// queues the `Activate`, then `decide_menu_completion` calls
+    /// `can_partially_complete` — all BEFORE the batch's repaint.
+    /// `update_working_details` is deliberately NOT driven here: the engine
+    /// composes the frame's line strings from the editor before that hook
+    /// runs, so whatever the menu has not done by the end of this helper is
+    /// absent from the frame the user sees for this TAB.
+    fn dispatch_tab(menu: &mut GnuMenu, editor: &mut Editor, completer: &mut dyn Completer) {
+        menu.menu_event(MenuEvent::Activate(false));
+        let _ = menu.can_partially_complete(false, editor, completer);
+    }
+
+    /// niubash#713: the TAB #1 splice must already be in the buffer when the
+    /// engine composes the frame — no subsequent keypress, no paint-time
+    /// drain. Deferring the splice to `update_working_details` painted it
+    /// one frame late: the buffer was right, the screen was not, until the
+    /// next keypress repainted.
+    #[test]
+    fn tab1_splice_is_in_the_frame_without_a_second_keypress() {
+        let mut completer = PrefixCompleter::new(&["checkout", "checkouts"]);
+        let mut menu = GnuMenu::default();
+        let mut editor = editor_with("che");
+
+        dispatch_tab(&mut menu, &mut editor, &mut completer);
+
+        assert_eq!(
+            editor.get_buffer(),
+            "checkout",
+            "the common prefix must be spliced at dispatch time, in this frame"
+        );
+        assert_eq!(menu.phase, GnuPhase::Attempted);
+        assert!(!menu.is_active(), "no list after TAB #1");
+
+        // The paint-time drain that still follows in the same frame must
+        // not apply the same TAB a second time.
+        menu.drain_events(&mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "checkout");
+        assert_eq!(menu.phase, GnuPhase::Attempted);
+    }
+
+    /// niubash#713, the reporter's exact shape: a lone candidate completes
+    /// outright — and must be visible in the TAB's own frame.
+    #[test]
+    fn tab1_lone_candidate_is_in_the_frame_without_a_second_keypress() {
+        let mut completer = PrefixCompleter::new(&["Desktop/"]);
+        let mut menu = GnuMenu::default();
+        let mut editor = editor_with("Desk");
+
+        dispatch_tab(&mut menu, &mut editor, &mut completer);
+
+        assert_eq!(editor.get_buffer(), "Desktop/");
+        assert!(!menu.is_active(), "a lone candidate never lists");
+
+        menu.drain_events(&mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "Desktop/");
+    }
+
+    /// niubash#713, TAB #2 leg: the list decision is dispatch-time too —
+    /// the menu is active and renderable in TAB #2's own frame, on top of
+    /// the line TAB #1 spliced in TAB #1's frame.
+    #[test]
+    fn tab2_list_is_up_in_the_same_frame() {
+        let mut completer = PrefixCompleter::new(&["checkout", "checkouts"]);
+        let mut menu = GnuMenu::default();
+        let mut editor = editor_with("check");
+
+        dispatch_tab(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "checkout");
+        dispatch_tab(&mut menu, &mut editor, &mut completer);
+
+        assert!(menu.is_active(), "TAB #2 lists in its own frame");
+        assert_eq!(menu.phase, GnuPhase::Listed);
+        assert!(menu.menu_string(20, false).contains("checkouts"));
+
+        menu.drain_events(&mut editor, &mut completer);
+        assert!(menu.is_active(), "the drain must not un-list TAB #2");
+        assert_eq!(editor.get_buffer(), "checkout");
     }
 
     /// niubash#537: `menu_event` must not lose a queued `Activate` when an

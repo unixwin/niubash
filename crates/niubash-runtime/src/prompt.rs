@@ -4,7 +4,9 @@
 //! with substitutions: {user}, {host}, {cwd}, {symbol}.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::prompt_segments::SegmentPromptAdapter;
 use nu_ansi_term::{Color, Style};
@@ -86,6 +88,30 @@ impl Default for PromptStyles {
     }
 }
 
+/// Every input the cwd-derived template values depend on (audit item
+/// A1). The prompt's cwd memo is keyed by all of them, so a memo hit
+/// can never serve a value computed under different inputs.
+#[derive(Clone, PartialEq, Eq)]
+struct CwdMemoKey {
+    cwd: Option<PathBuf>,
+    /// Raw `NIU_PROMPT_CWD_STYLE` (read by `display_cwd` itself).
+    style: Option<String>,
+    /// Raw `HOME` / `USERPROFILE` (what `shell_home_dir` resolves
+    /// from; its `dirs::home_dir()` fallback when both are unset is
+    /// process-stable and needs no key component).
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+}
+
+struct CwdMemo {
+    key: CwdMemoKey,
+    /// Unpainted `display_cwd` result; painting stays per-render.
+    display: String,
+    /// Unpainted `display_cwd_base` result, with the caller's
+    /// fall-back-to-display rule already applied.
+    display_base: String,
+}
+
 /// A prompt that renders the configured template with ANSI colours.
 #[derive(Clone)]
 pub struct NiubashPrompt {
@@ -94,6 +120,12 @@ pub struct NiubashPrompt {
     indicators: PromptIndicators,
     prompt_symbol: String,
     styles: PromptStyles,
+    /// Per-pass memo for the cwd-derived template values (audit item
+    /// A1), shared across the per-pass clones `Shell::prompt_for_display`
+    /// hands out: reedline repaints many times within a pass, and the
+    /// cwd chain costs several `canonicalize` calls that cannot change
+    /// mid-pass (cwd moves only when a command runs, ending the pass).
+    cwd_memo: Arc<Mutex<Option<CwdMemo>>>,
 }
 
 impl NiubashPrompt {
@@ -127,6 +159,7 @@ impl NiubashPrompt {
             indicators,
             prompt_symbol,
             styles: PromptStyles::default(),
+            cwd_memo: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -137,20 +170,11 @@ impl NiubashPrompt {
         let host = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .unwrap_or_else(|_| "winhost".to_string());
-        let cwd_path = std::env::current_dir().ok();
-        let cwd = cwd_path
-            .as_deref()
-            .map(display_cwd)
-            .unwrap_or_else(|| "?".to_string());
-        let cwd_base = cwd_path
-            .as_deref()
-            .and_then(display_cwd_base)
-            .unwrap_or_else(|| cwd.clone());
 
         let user_s = self.styles.user.paint(&user).to_string();
         let host_s = self.styles.host.paint(&host).to_string();
-        let dir_s = self.styles.dir.paint(&cwd).to_string();
-        let dir_base_s = self.styles.dir.paint(&cwd_base).to_string();
+        // Painted once and reused for {symbol}, {prompt_char} and %#:
+        // the paint is a pure function of the symbol and its style.
         let sym_s = self.styles.symbol.paint(&self.prompt_symbol).to_string();
         let user_host_s = format!("{user_s}@{host_s}");
 
@@ -160,29 +184,93 @@ impl NiubashPrompt {
             .or_else(|_| std::env::var("NIU_CMD_EXEC_TIME_MS"))
             .unwrap_or_default();
 
+        // The substitution chain keeps its historical order; the one
+        // change is that the cwd-derived values — the chain's only
+        // file-system-backed ingredient (≈5 `canonicalize` calls
+        // through display_cwd / display_cwd_base) — are computed
+        // lazily, at the first step whose token is actually present in
+        // the string being built, and at most once per render (audit
+        // item A1). Gating on presence is output-identical: replace()
+        // with an absent token is the identity, and each gate is
+        // evaluated at the same chain position as the replace it
+        // guards, so token text introduced by an earlier substitution
+        // (a USER value containing "{cwd}", say) still expands exactly
+        // as it did when the values were computed unconditionally.
         let mut rendered = template
             .replace("{time}", &time_str)
             .replace("{time_24}", &time_str_24)
             .replace("{user}", &user_s)
             .replace("{host}", &host_s)
-            .replace("{user_host}", &user_host_s)
-            .replace("{cwd}", &dir_s)
-            .replace("{cwd_base}", &dir_base_s)
+            .replace("{user_host}", &user_host_s);
+        let mut cwd_pair: Option<(String, String)> = None;
+        if rendered.contains("{cwd}") || rendered.contains("{cwd_base}") {
+            let (cwd, cwd_base) = self.cwd_displays(&mut cwd_pair);
+            let dir_s = self.styles.dir.paint(&cwd).to_string();
+            let dir_base_s = self.styles.dir.paint(&cwd_base).to_string();
+            rendered = rendered
+                .replace("{cwd}", &dir_s)
+                .replace("{cwd_base}", &dir_base_s);
+        }
+        rendered = rendered
             .replace("{symbol}", &sym_s)
             .replace("{prompt_char}", &sym_s)
             .replace("{newline}", "\n")
             .replace("{command_execution_time}", &command_execution_time)
-            .replace(
-                "%#",
-                &self.styles.symbol.paint(&self.prompt_symbol).to_string(),
-            )
+            .replace("%#", &sym_s)
             .replace("%n", &user)
-            .replace("%m", &host)
-            .replace("%~", &cwd);
+            .replace("%m", &host);
+        if rendered.contains("%~") {
+            let (cwd, _) = self.cwd_displays(&mut cwd_pair);
+            rendered = rendered.replace("%~", &cwd);
+        }
         if let Some(status_token) = status_token {
             rendered = rendered.replace("{status}", status_token);
         }
         rendered
+    }
+
+    /// The (display cwd, display cwd base) pair for one render: the
+    /// per-pass memo when its key still matches, computed and memoized
+    /// otherwise. `local` memoizes within a single render so the {cwd}
+    /// and %~ steps share one computation.
+    fn cwd_displays(&self, local: &mut Option<(String, String)>) -> (String, String) {
+        if let Some(pair) = local {
+            return pair.clone();
+        }
+        let cwd_path = std::env::current_dir().ok();
+        let key = CwdMemoKey {
+            cwd: cwd_path.clone(),
+            style: std::env::var("NIU_PROMPT_CWD_STYLE").ok(),
+            home: std::env::var_os("HOME"),
+            userprofile: std::env::var_os("USERPROFILE"),
+        };
+        if let Ok(guard) = self.cwd_memo.lock() {
+            if let Some(memo) = guard.as_ref() {
+                if memo.key == key {
+                    let pair = (memo.display.clone(), memo.display_base.clone());
+                    *local = Some(pair.clone());
+                    return pair;
+                }
+            }
+        }
+        let display = cwd_path
+            .as_deref()
+            .map(display_cwd)
+            .unwrap_or_else(|| "?".to_string());
+        let display_base = cwd_path
+            .as_deref()
+            .and_then(display_cwd_base)
+            .unwrap_or_else(|| display.clone());
+        if let Ok(mut guard) = self.cwd_memo.lock() {
+            *guard = Some(CwdMemo {
+                key,
+                display: display.clone(),
+                display_base: display_base.clone(),
+            });
+        }
+        let pair = (display, display_base);
+        *local = Some(pair.clone());
+        pair
     }
 
     fn render_prompt_template(&self, template: &str) -> String {
@@ -675,6 +763,45 @@ mod tests {
         if rendered != format!("{expected} {expected}") {
             let expected = format_local_time();
             assert_eq!(rendered, format!("{expected} {expected}"));
+        }
+    }
+
+    #[test]
+    fn cwd_values_track_cwd_and_home_changes_across_renders() {
+        // Audit item A1: the cwd memo must never serve a value computed
+        // under different inputs — moving cwd (same home) and moving
+        // HOME (same cwd) both have to miss and recompute.
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home_a = unique_temp_dir("niubash-prompt-memo-home-a");
+        let home_b = unique_temp_dir("niubash-prompt-memo-home-b");
+        let proj_a = home_a.join("proj-a");
+        let proj_b = home_a.join("proj-b");
+        std::fs::create_dir_all(&proj_a).unwrap();
+        std::fs::create_dir_all(&proj_b).unwrap();
+        let _userprofile = EnvGuard::unset("USERPROFILE");
+        let _style = EnvGuard::unset("NIU_PROMPT_CWD_STYLE");
+        let prompt = NiubashPrompt::new(Some("{cwd}".to_string()), None);
+        {
+            let _home = EnvGuard::set("HOME", &home_a.to_string_lossy());
+            let _cwd = CwdGuard::enter(&proj_a);
+            let rendered = prompt.render_prompt_left();
+            assert!(rendered.contains("~/proj-a"), "{rendered:?}");
+            // A second render under identical inputs agrees (memo hit).
+            let rendered = prompt.render_prompt_left();
+            assert!(rendered.contains("~/proj-a"), "{rendered:?}");
+        }
+        {
+            let _home = EnvGuard::set("HOME", &home_a.to_string_lossy());
+            let _cwd = CwdGuard::enter(&proj_b);
+            let rendered = prompt.render_prompt_left();
+            assert!(rendered.contains("~/proj-b"), "{rendered:?}");
+        }
+        {
+            let _home = EnvGuard::set("HOME", &home_b.to_string_lossy());
+            let _cwd = CwdGuard::enter(&proj_a);
+            let rendered = prompt.render_prompt_left();
+            assert!(!rendered.contains("~/"), "{rendered:?}");
+            assert!(rendered.contains("proj-a"), "{rendered:?}");
         }
     }
 

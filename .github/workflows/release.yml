@@ -21,6 +21,9 @@ on:
 
 permissions:
   contents: write
+  # The SignPath connector reads the workflow artifact holding the unsigned
+  # installer (github-artifact-id flow), which needs actions: read.
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -836,6 +839,68 @@ jobs:
             "/DAppArch=${{ matrix.arch }}" `
             "/DSourceDir=$sourceDir" `
             "/DOutputDir=$outputDir"
+
+      # SignPath signing: the installer is signed BEFORE any digest or alias
+      # is produced, so the .sha256 sidecars, the unversioned aliases, the
+      # release SHA256SUMS, and the winget InstallerSha256 all describe the
+      # SIGNED bytes. Fail-closed: a failed signing request aborts the leg —
+      # an unsigned installer must never silently ship.
+      - name: Upload unsigned installer for SignPath
+        id: sign_upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-installer-win-${{ matrix.arch }}
+          path: dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Submit SignPath signing request
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.sign_upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signpath-out
+
+      - name: Verify and install the signed installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "signpath-out"
+          # SignPath returns either the signed file directly or wrapped in a
+          # zip, depending on the project's artifact configuration — accept
+          # both.
+          $zip = Get-ChildItem -LiteralPath $out -Recurse -Filter *.zip |
+            Select-Object -First 1
+          if ($zip) {
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath (Join-Path $out "extracted") -Force
+          }
+          $searchRoot = Join-Path $out "extracted"
+          if (-not (Test-Path -LiteralPath $searchRoot)) { $searchRoot = $out }
+          $signed = Get-ChildItem -LiteralPath $searchRoot -Recurse -Filter *.exe |
+            Select-Object -First 1
+          if (-not $signed) {
+            throw "SignPath returned no signed installer"
+          }
+
+          # Honest gate: the returned artifact must carry an Authenticode
+          # signature. The STATUS is allowed to be untrusted here (the test
+          # certificate does not chain to a machine-trusted root on the
+          # runner) — it must never be NotSigned, which would mean SignPath
+          # handed back the bytes unsigned.
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed.FullName
+          if ($signature.Status -eq "NotSigned") {
+            throw "SignPath returned an installer without an Authenticode signature"
+          }
+          Write-Host "signature status: $($signature.Status)"
+          Write-Host "signer: $($signature.SignerCertificate.Subject)"
+
+          $target = "dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe"
+          Copy-Item -LiteralPath $signed.FullName -Destination $target -Force
+          Write-Host "signed installer installed to $target"
 
       - name: Add latest-compatible asset aliases
         shell: pwsh
@@ -2128,9 +2193,275 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # ---------------------------------------------------------------------------
+  # SignPath Foundation Authenticode signing (docs/planning/code-signing-
+  # free-options.md §3/§7; the systemic fix behind niubash#511).
+  #
+  # PENDING SIGNPATH CREDENTIALS — this job pair is INERT until the four
+  # SignPath secrets exist (SIGNPATH_ORG_ID, SIGNPATH_PROJECT_ID,
+  # SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_API_TOKEN): signpath-gate then
+  # reports enabled=false, signpath-sign is skipped entirely, and the
+  # release job publishes unsigned artifacts exactly as before this
+  # skeleton existed. Enabling signing is a repo-settings-only change (add
+  # the four secrets); no code or workflow edit. Setup walkthrough:
+  # .signpath/artifact-configuration/README.md.
+  #
+  # The job body follows the documented GitHub trusted-build shape
+  # (docs.signpath.io/trusted-build-systems/github): the SignPath input zip
+  # (stable entry names, layout declared by
+  # .signpath/artifact-configuration/artifact-configuration.xml) is stored
+  # as a GitHub artifact — the trusted-build connector only accepts
+  # artifacts the GitHub server holds — and
+  # signpath/github-action-submit-signing-request@v3 submits it with the
+  # CI user's API token and waits for approval + signing.
+  # ---------------------------------------------------------------------------
+  signpath-gate:
+    name: SignPath credential gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      # GitHub's `secrets` context is not readable in a job-level `if`,
+      # so the gate is its own job whose STEP (where it IS readable)
+      # emits the flag. ALL four secrets must exist to enable: a partial
+      # setup stays inert instead of half-failing a release.
+      - name: Check SignPath secrets
+        id: check
+        env:
+          SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+          SIGNPATH_PROJECT_ID: ${{ secrets.SIGNPATH_PROJECT_ID }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if [ -n "$SIGNPATH_ORG_ID" ] && [ -n "$SIGNPATH_PROJECT_ID" ] && \
+             [ -n "$SIGNPATH_SIGNING_POLICY_SLUG" ] && [ -n "$SIGNPATH_API_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "SignPath secrets present: signing ENABLED"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "SignPath secrets absent: signing DISABLED (skeleton inert; releases ship unsigned)"
+          fi
+
+  signpath-sign:
+    name: SignPath sign (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: [signpath-gate, build-windows]
+    if: needs.signpath-gate.outputs.enabled == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+          - arch: arm64
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release inputs
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Same contract as the build jobs: a dispatch of an old tag runs the
+      # tag's own copies of the two packaging scripts, not master's.
+      - name: Checkout release tag
+        run: |
+          git fetch --tags --force
+          git checkout "${{ steps.release.outputs.tag }}"
+
+      - name: Download the Windows package artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}
+          path: pkg
+
+      - name: Extract the portable package tree
+        id: tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Expand-Archive -LiteralPath "pkg/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip" -DestinationPath tree
+          $stage = (Resolve-Path "tree/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}").Path
+          Write-Host "package tree: $stage"
+          "stage=$stage" >> $env:GITHUB_OUTPUT
+
+      # Normalizes the release layout into the SignPath input zip (stable
+      # entry names: setup.exe, niu.exe, winuxcmd/...) and writes the
+      # write-back contract (mapping JSON with pre-signing SHA-256 per
+      # entry, the hardlink-family key for the apply step below).
+      - name: Build the SignPath input zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path signpath-input | Out-Null
+          ./scripts/release/build-signpath-artifact-zip.ps1 `
+            -PackageDir "${{ steps.tree.outputs.stage }}" `
+            -SetupExe "pkg/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe" `
+            -OutputZip "signpath-input/signpath-input.zip" `
+            -MappingJson "signpath-input/mapping.json"
+
+      # The trusted-build connector requires the unsigned artifact to be
+      # stored on GitHub before submission; the action consumes its id.
+      - name: Upload the unsigned artifact for SignPath
+        id: upload-input
+        uses: actions/upload-artifact@v7
+        with:
+          name: niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-signpath-input
+          path: signpath-input/signpath-input.zip
+          if-no-files-found: error
+          retention-days: 1
+
+      # PENDING SIGNPATH CREDENTIALS — the secrets below are only ever
+      # evaluated when signpath-gate enabled this job (all four present),
+      # so before org setup this step never runs. Shape per
+      # docs.signpath.io/trusted-build-systems/github.
+      # Foundation signing requests carry a manual approver sign-off; the
+      # approval link lands in the step output
+      # (signing-request-web-url). An approval exceeding the wait fails
+      # this job — fail-closed, the release job's needs gate then blocks
+      # publication rather than ship half-signed artifacts.
+      - name: Submit the SignPath signing request
+        id: signpath
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ secrets.SIGNPATH_ORG_ID }}'
+          project-slug: '${{ secrets.SIGNPATH_PROJECT_ID }}'
+          signing-policy-slug: '${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}'
+          github-artifact-id: '${{ steps.upload-input.outputs.artifact-id }}'
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: '3600'
+          output-artifact-directory: signed
+
+      # Writes the signed bytes back into the package tree and the
+      # installer, then restores the NTFS hardlink families the wpm layout
+      # ships (see the script header for why this is required and safe).
+      - name: Apply the signed bytes to the package tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./scripts/release/apply-signpath-signatures.ps1 `
+            -PackageDir "${{ steps.tree.outputs.stage }}" `
+            -SetupExe "pkg/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe" `
+            -SignedDir signed `
+            -MappingJson "signpath-input/mapping.json"
+
+      # Rebuilds every Windows release asset from the signed tree: the
+      # three archive formats, the latest-compatible aliases, and the
+      # .sha256 sidecars (niubash#311) — the sidecars MUST be regenerated
+      # or `niu --self-update` would verify the signed installer against
+      # unsigned bytes. File names match the plain artifact exactly, so
+      # the release job's merge step can overlay them by name.
+      - name: Repack the signed archives, aliases, and sidecars
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.release.outputs.version }}"
+          $arch = "${{ matrix.arch }}"
+          $name = "niubash-v$version-win-$arch"
+          $stage = (Resolve-Path "tree/$name").Path
+          New-Item -ItemType Directory -Force -Path signed-dist | Out-Null
+
+          # Portable zip: archive formats carry no hardlinks; entries are
+          # independent by design.
+          Compress-Archive -LiteralPath $stage -DestinationPath "signed-dist/$name.zip" -Force
+
+          # Hardlink-native tar.gz: the apply step re-linked the families,
+          # so tar records each shared binary once (the contract
+          # package-release.ps1's bsdtar archive upheld on the Windows legs).
+          tar -czf "signed-dist/$name.tar.gz" -C tree "$name"
+          if ($LASTEXITCODE -ne 0) { throw "tar -czf failed (exit $LASTEXITCODE)" }
+
+          # 7z: solid-LZMA companion (content-identity; links neither
+          # stored nor restored — documented in the release body).
+          7z a -snh "-mx=9" "signed-dist/$name.7z" "$stage" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z a failed (exit $LASTEXITCODE)" }
+
+          Copy-Item -LiteralPath "pkg/$name-setup.exe" -Destination "signed-dist/$name-setup.exe" -Force
+          Copy-Item -LiteralPath "signed-dist/$name.zip" -Destination "signed-dist/niubash-win-$arch.zip" -Force
+          Copy-Item -LiteralPath "signed-dist/$name.tar.gz" -Destination "signed-dist/niubash-win-$arch.tar.gz" -Force
+          Copy-Item -LiteralPath "signed-dist/$name.7z" -Destination "signed-dist/niubash-win-$arch.7z" -Force
+          Copy-Item -LiteralPath "signed-dist/$name-setup.exe" -Destination "signed-dist/niubash-win-$arch-setup.exe" -Force
+
+          foreach ($f in @("$name-setup.exe", "niubash-win-$arch-setup.exe")) {
+            $hash = (Get-FileHash -LiteralPath "signed-dist/$f" -Algorithm SHA256).Hash.ToLowerInvariant()
+            Set-Content -LiteralPath "signed-dist/$f.sha256" -Value "$hash  $f" -Encoding ascii
+            Write-Host "$f.sha256: $hash"
+          }
+
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### SignPath signing ($arch)`nrequest: ${{ steps.signpath.outputs.signing-request-web-url }}`nrequest id: ${{ steps.signpath.outputs.signing-request-id }}"
+
+      # Honest sanity gate on what will replace the published bytes: every
+      # asset present and non-empty, and the signed archives must genuinely
+      # DIFFER from the unsigned ones (signing appends certificates — if
+      # nothing changed, the write-back silently failed and the release
+      # must not proceed). Running the signed PEs is impossible on this
+      # linux runner and unnecessary: Authenticode signing does not alter
+      # code bytes, and the build-windows gates verified the same code.
+      - name: Verify the signed artifacts differ and are complete
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.release.outputs.version }}"
+          $arch = "${{ matrix.arch }}"
+          $name = "niubash-v$version-win-$arch"
+          foreach ($f in @("$name.zip", "$name.tar.gz", "$name.7z", "$name-setup.exe", "$name-setup.exe.sha256", "niubash-win-$arch.zip", "niubash-win-$arch.tar.gz", "niubash-win-$arch.7z", "niubash-win-$arch-setup.exe", "niubash-win-$arch-setup.exe.sha256")) {
+            if (-not (Test-Path -LiteralPath "signed-dist/$f")) {
+              throw "expected signed asset missing: signed-dist/$f"
+            }
+            if ((Get-Item -LiteralPath "signed-dist/$f").Length -eq 0) {
+              throw "signed asset is empty: signed-dist/$f"
+            }
+          }
+          foreach ($f in @("$name.zip", "$name.tar.gz", "$name.7z")) {
+            $before = (Get-FileHash -LiteralPath "pkg/$f" -Algorithm SHA256).Hash
+            $after = (Get-FileHash -LiteralPath "signed-dist/$f" -Algorithm SHA256).Hash
+            if ($before -eq $after) {
+              throw "signed $f is byte-identical to the unsigned artifact; the signing write-back did not happen"
+            }
+            Write-Host "$f: signed bytes differ from unsigned (expected)"
+          }
+
+      - name: Upload the signed release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-signpath-signed
+          path: |
+            signed-dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
+            signed-dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.tar.gz
+            signed-dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.7z
+            signed-dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
+            signed-dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe.sha256
+            signed-dist/niubash-win-${{ matrix.arch }}.zip
+            signed-dist/niubash-win-${{ matrix.arch }}.tar.gz
+            signed-dist/niubash-win-${{ matrix.arch }}.7z
+            signed-dist/niubash-win-${{ matrix.arch }}-setup.exe
+            signed-dist/niubash-win-${{ matrix.arch }}-setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 1
+
   release:
     runs-on: ubuntu-latest
-    needs: [build-windows, build-linux, build-macos, build-msix, journey, perfbudget, skill-bundle]
+    needs: [build-windows, build-linux, build-macos, build-msix, journey, perfbudget, skill-bundle, signpath-sign]
+    # signpath-sign is SKIPPED while the SignPath credentials are absent
+    # (the skeleton is inert) and a skipped need must not skip the
+    # release. A FAILED signing leg must, though — fail-closed: a release
+    # never publishes with only some legs signed. This condition
+    # reproduces the implicit success() outcome for every pre-existing
+    # need (none of them can ever be skipped) and additionally tolerates
+    # 'skipped'.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -2151,6 +2482,38 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+
+      # SignPath signing (niubash#511): when the signpath-sign job ran, its
+      # *-signpath-signed artifacts carry the same file names as the plain
+      # package artifacts — overlay them so SHA256SUMS and the release
+      # page carry SIGNED bytes. The *-signpath-input artifacts (unsigned,
+      # submission-only) are dropped so their zips never reach the release
+      # page. Both halves are no-ops while signing is disabled.
+      - name: Merge SignPath-signed artifacts (inert without credentials)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          signed=(artifacts/*-signpath-signed)
+          for dir in "${signed[@]}"; do
+            # Parameter expansion, not `basename NAME SUFFIX`: a suffix
+            # with a leading dash is parsed as basename options.
+            base="$(basename "$dir")"
+            base="${base%-signpath-signed}"
+            target="artifacts/$base"
+            if [ ! -d "$target" ]; then
+              echo "signed artifact '$base' has no matching unsigned artifact dir" >&2
+              exit 1
+            fi
+            echo "overlaying $base: signed bytes replace unsigned"
+            find "$dir" -type f -printf '%P\n' | while IFS= read -r rel; do
+              mkdir -p "$target/$(dirname "$rel")"
+              cp "$dir/$rel" "$target/$rel"
+            done
+          done
+          rm -rf artifacts/*-signpath-signed artifacts/*-signpath-input
+          if [ "${#signed[@]}" -eq 0 ]; then
+            echo "no SignPath-signed artifacts (signing disabled or skipped); publishing as before"
+          fi
 
       # All build jobs fetch the same PINNED rubash revision
       # (scripts/release/rubash-pin.json), so they must have compiled the same
@@ -2192,6 +2555,57 @@ jobs:
           echo "hashed $count artifacts:"
           cat SHA256SUMS
 
+      # Payload license hygiene: the Windows packages bundle GPL payloads via
+      # the pre-install step (gawk GPL-3.0-or-later incl. its libreadline8 DLL
+      # closure, niugit GPL-2.0-only) beside permissive ones (ripgrep, fd,
+      # WinuxCmd), and the release page must disclose each bundled
+      # component's license and where its Corresponding Source lives. The
+      # section below is GENERATED from scripts/release/preinstall.json's
+      # per-package `license` and `source` fields — the same entries
+      # tests/preinstall_manifest.rs pins — so a future payload change stays
+      # in sync by construction instead of editing hardcoded prose. When the
+      # per-component provenance sheet exists
+      # (scripts/release/licenses/<name>/PROVENANCE.md, staged into every
+      # package root as licenses\<name>\ by package-release.ps1 alongside the
+      # canonical LICENSE), the section points at it rather than restating
+      # the recipe here. Fail-closed, matching the packaging gate that
+      # already refuses to stage a package without its license text: a
+      # manifest entry with an empty license/source field, or without its
+      # licenses/<name>/ directory, fails the release instead of shrinking
+      # the disclosure to manifest-only prose.
+      - name: Generate the Licenses & Source release-body section
+        id: licenses
+        run: |
+          set -euo pipefail
+          manifest="scripts/release/preinstall.json"
+          licenses_dir="scripts/release/licenses"
+          section_file="$(mktemp)"
+          {
+            echo "## Licenses & Source"
+            echo
+            echo "Niubash itself is MIT (\`LICENSE\` in this repository and at the root of every package). The Windows packages bundle third-party payloads pre-installed from \`scripts/release/preinstall.json\`; each component ships its canonical license text under \`licenses\\<component>\\\` in the package tree, and the installer wizard surfaces niubash's own license at install time:"
+            echo
+            while IFS=$'\t' read -r name license source; do
+              if [ -z "$license" ] || [ -z "$source" ]; then
+                echo "preinstall package '$name' is missing a non-empty license or source field; the Licenses & Source section is generated from the manifest and cannot ship a gap" >&2
+                exit 1
+              fi
+              if [ ! -f "$licenses_dir/$name/LICENSE" ] || [ ! -f "$licenses_dir/$name/PROVENANCE.md" ]; then
+                echo "preinstall package '$name' has no $licenses_dir/$name/ (LICENSE + PROVENANCE.md); the packaging gate fails closed on the same requirement, so the release cannot disclose a component whose license text does not exist" >&2
+                exit 1
+              fi
+              echo "- **$name** — \`$license\`; upstream & Corresponding Source: $source. Provenance sheet: \`scripts/release/licenses/$name/PROVENANCE.md\` (staged as \`licenses\\$name\\\` in every Windows package)."
+            done < <(jq -r '.packages[] | [.name, (.license // ""), (.source // "")] | @tsv' "$manifest")
+            echo
+            echo "The pre-install caveat above applies per leg: a build that shipped without a given entry (no matching artifact for that architecture) also shipped without that entry's payload — the component and its license directory are simply absent from that package."
+          } > "$section_file"
+          {
+            echo "section<<LICENSES_SECTION_EOF"
+            cat "$section_file"
+            echo "LICENSES_SECTION_EOF"
+          } >> "$GITHUB_OUTPUT"
+          cat "$section_file"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -2218,6 +2632,8 @@ jobs:
             Every artifact was smoke-verified on the build OS of the job that produced it, before upload: `niu -c 'echo ok'`, `printf 'a\nb\n' | niu -c 'sort | head -1'`, an offline `NIU_PLUGIN_SPEC=<empty> niu plugin sync --bootstrap` (exit 0, no output, no network), and a `niu --version` check against this tag and the engine revision.
 
             Integrity (niubash#311): `SHA256SUMS` lists the SHA-256 of every shipped artifact, and each Windows installer has a `.sha256` sidecar beside it. `niu --self-update` verifies the installer against the sidecar before running it and aborts rather than execute anything it cannot verify. The same digests feed the winget manifest `InstallerSha256`.
+
+            ${{ steps.licenses.outputs.section }}
           files: |
             artifacts/**/*.zip
             artifacts/**/*.exe

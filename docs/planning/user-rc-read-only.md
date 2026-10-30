@@ -23,10 +23,10 @@ exports, plugin selections, and prompt overrides remain valid shell code.
 
 Niubash must not append, normalize, deduplicate, reformat, replace, truncate,
 rename, or repair an existing user rc. A backup does not authorize replacement.
-The same protection applies to legacy `~/.winuxshrc` and `~/.winshrc`, symlink
+The same protection applies to legacy pre-rename rc files, symlink
 targets, and rc files explicitly selected by users.
 
-Decision update: retire both `~/.winuxshrc` and `~/.winshrc` as startup inputs.
+Decision update: retire both pre-rename rc names as startup inputs.
 Do not read, migrate, copy, rename, repair, or delete them automatically. Preserve
 their bytes as user files; do not recommend legacy fallback compatibility.
 This proposal changes the earlier recommendation, not production behavior yet.

@@ -4,8 +4,15 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **`~/.niubash/config.toml` is gone (1.5.0, breaking)**: the runtime no longer reads or writes a user TOML config. GNU-shaped knobs come from rc `bind`/`set`/`shopt` and `$INPUTRC`/`~/.inputrc`; niu-proprietary knobs come from `NIU_COMPLETION_STYLE`, `NIU_COMPLETION_INTERACTION`, `NIU_COMMAND_NOT_FOUND_HINT`, and `NIU_RC_POLICY` (exported from the rc or the environment). The `[keymap].bind`/`[keymap].unbind` TOML channel is removed — bindings use rc `bind` and inputrc only. `niu config set` is removed with an actionable error.
+- **One-time migration**: `niu config migrate` translates an existing `~/.niubash/config.toml` into rc lines (`bind '<spec>'`, `bind -r '<key>'`, `export NIU_*`), appends a marked block to `~/.niubashrc` idempotently, and renames the old file to `config.toml.migrated-<UTC timestamp>`. A leftover file prints a one-line startup notice until migrated.
+
 ### Changed
 
+- **`niu config` is read-only**: `niu config` / `niu config get <key>` print the effective value and its source (`env`, `inputrc`, or `default`). `editing-mode` and `keyseq-timeout` are now surfaced from readline/inputrc.
+- **inputrc is read after the rc**: `Shell::load_engine_bindings()` initializes readline after startup files, so `$INPUTRC` / `~/.inputrc` variables and bindings override rc `bind` lines in the mirrored keymaps, and `set editing-mode` seeds the editor mode.
 - **Setup minimal preset completion style `gnu` → `column`**: the minimal preset — the one non-interactive / scripted `niu setup` applies — now pins the product-default `column` completion style (owner ruling 2026-10-14) instead of `gnu`. This is a behavior change for scripted installs: they move from the no-menu GNU shape, where Enter always executes the line, into the menu family, where Enter with the completion menu open commits the highlighted candidate. Users who picked a completion style explicitly are unaffected. (#342 follow-up sweep, 2026-10-26.)
 
 ## [1.4.4] - 2026-10-22

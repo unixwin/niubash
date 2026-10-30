@@ -30,7 +30,7 @@ niu.exe
 │   ├── completion/              ← shell definitions + bash auto-import + 3-level cache
 │   ├── prompt/                  ← prompt floor (defaults-as-floor, §14.5 of the ecosystem design)
 │   ├── config                   ← legacy/managed machine-state reads
-│   ├── plugins                  ← external bash-ecosystem sources (add/trust/enable, no bundles)
+│   ├── plugins                  ← external bash-ecosystem sources (add/enable, no bundles)
 │   └── ctrl_c                   ← Win32 Ctrl+C handling
 ├── rubash lib (Rust)
 │   ├── lexer/parser/ast
@@ -109,15 +109,15 @@ differentiators.
 - `~/.niubashrc` is the primary interactive entry point. Plain
   niubash/bash syntax declares plugin lists, theme, prompt template,
   `export`, `alias`, functions, and local startup logic.
-- `~/.niubashrc` is also the **only** entry point: the legacy `~/.winuxshrc`,
-  `~/.winshrc`, and `~/.bashrc` names are never read, migrated, or written —
+- `~/.niubashrc` is also the **only** entry point: pre-rename legacy
+  rc names and `~/.bashrc` are never read, migrated, or written —
   a session without `~/.niubashrc` starts with the defaults.
 - Plugin activation is a derived plane, not an rc edit (niubash#359): the
   manifest (`~/.niubash/plugins.toml` + `~/.niubash/sources/registry.toml`)
   drives the generated loader `~/.niubash/generated/plugins.niu`, which the
   host sources read-only before the user rc. No `niu plugin` verb writes
   `~/.niubashrc`.
-- Machine state — the plugin manifest, source registry/trust state, the
+- Machine state — the plugin manifest, source registry state, the
   generated loader, test isolation, completion
   directories — is maintained by the internal managed-state mechanism and is
   not a user configuration entry point.
@@ -139,14 +139,13 @@ packages stage no plugin content (niubash#161). The plugin system is the
   bash-completion, any wild plugin repo or single file — installed over
   git clone on explicit user command (`niu plugin add`), never vendored
   into the product.
-- Sources land **untrusted** and activate only through the graded trust
-  protocol (`niu plugin trust`); framework assets enable through each
+- Sources activate only through an explicit `niu plugin enable`;
+  framework assets enable through each
   manager's own selection mechanism (rc arrays, `enabled/` entries), never
   through shims that re-implement upstream library functions.
 - The declarative spec `~/.niubash/plugins.toml` is the source of truth
-  for what is declared; the registry pins installed trees (commit +
-  checksum), and `niu plugin sync` reconciles the two without ever
-  granting trust automatically.
+  for what is declared; the registry pins installed trees (commit), and
+  `niu plugin sync` reconciles the two.
 - Plugins cannot extend the rubash parser/executor, and cannot source
   arbitrary legacy `.winsh` files or rc fragments found in user
   directories beyond what the enabled sources themselves declare.
@@ -218,7 +217,7 @@ user types "ls -la | grep foo"
 | Built-ins | self-implemented builtins.rs | rubash::builtins |
 | Completion | src/completion/ | fully preserved, migrated |
 | Themes | theme.rs (8 themes) | built-in stack retired (niubash#145); themes come from external sources |
-| Plugins | Plugin trait + Oh-My-Niubash | external bash ecosystem as sources (add/trust/enable; no bundles) |
+| Plugins | Plugin trait + Oh-My-Niubash | external bash ecosystem as sources (add/enable; no bundles) |
 | License | MIT | MIT |
 
 ## Version planning
@@ -230,7 +229,7 @@ user types "ls -la | grep foo"
 - v2.4: interactive polish (right prompt, hints, completion menu, defaults)
 - v3: the external-ecosystem plugin system — first-party packs replaced by
   real upstream sources (oh-my-bash, bash-it, bash-completion, wild
-  plugins) under the trust protocol; the `oh-my-niu` bundle format was
+  plugins); the `oh-my-niu` bundle format was
   retired along the way (niubash#145/#161). Activation moved off the user rc
   in 1.4.2: the manifest drives a generated loader at
   `~/.niubash/generated/plugins.niu` (niubash#359).

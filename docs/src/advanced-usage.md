@@ -111,10 +111,10 @@ seat, your `$ENV` lines win over the loader just as rc lines do.
 Interactive shells read ONE startup file: `~/.niubashrc`. By default it
 is the only candidate: if it does not exist, the shell starts with no rc
 at all — `~/.bashrc` is not read. The single exception is opt-in: if you
-explicitly picked the `bashrc-fallback` rc policy during setup
-(`niu setup --rc-policy bashrc-fallback`), a genuinely absent
-`~/.niubashrc` lets `~/.bashrc` fill the slot instead (the migration path
-for existing bash configurations). Either way the two never stack — one
+explicitly picked the `bashrc-fallback` rc policy
+(`NIU_RC_POLICY=bashrc-fallback`, or `niu setup --rc-policy bashrc-fallback`),
+a genuinely absent `~/.niubashrc` lets `~/.bashrc` fill the slot instead
+(the migration path for existing bash configurations). Either way the two never stack — one
 config file, one blast radius, no implicit double-sourcing. Want the bash
 layer under niu? Add one visible line to `~/.niubashrc`:
 
@@ -125,9 +125,9 @@ layer under niu? Add one visible line to `~/.niubashrc`:
 Explicit, visible, yours — the same shape as bash's own
 `.bash_profile` → `.bashrc` chain. `--norc` skips startup files;
 `--rcfile <file>` reads only the named file, exactly like GNU bash. The
-legacy `~/.winuxshrc` and `~/.winshrc` names are never read, migrated, or
+pre-rename legacy rc names are never read, migrated, or
 written. Machine state —
-the plugin manifest, source registry and trust records, the generated
+the plugin manifest and source registry, the generated
 loader, test isolation, completion directories — is maintained by Niubash
 itself and is not a user configuration entry point.
 
@@ -169,10 +169,9 @@ use `NIU_ENV` / `BASH_ENV` to source a dedicated one-shot init file (see
 TAB completion comes in five shapes. The default since 1.4.0 is `column`
 (the GNU listing look, without GNU's two-TAB listing dance); before
 that it was `ide`. The literal GNU readline behavior is the opt-in `gnu`
-style below. Pick one with `niu config set completion.style <name>`
-(persisted in `~/.niubash/config.toml`) or `NIU_COMPLETION_STYLE=<name>`
-in `~/.niubashrc` or the environment — the env variable wins over the
-persisted value:
+style below. Pick one with `export NIU_COMPLETION_STYLE=<name>` in
+`~/.niubashrc` or the environment (see
+[Configuration Sources & Precedence](configuration.md)):
 
 - `gnu` — GNU readline: TAB completes the longest common prefix
   (a lone candidate completes outright); pressing TAB again on an unchanged
@@ -271,8 +270,11 @@ python scripts/test-skill-bundle.py   # golden check: regions + embed manifest
 
 ## Prompt And Themes
 
-Defaults are a floor, not an identity. The built-in prompt (a reedline
-template: `user@host cwd symbol`) renders only while nothing claims `PS1`.
+Defaults are a floor, not an identity. The built-in prompt renders only
+while nothing claims `PS1`. It has two faces: on Windows, a Git
+Bash-compatible two-row prompt (green `user@host`, yellow cwd, cyan
+`(branch)` git segment — see [Getting Started](getting-started.md));
+elsewhere, a reedline template (`user@host cwd symbol`).
 Whoever sets `PS1` last owns the prompt completely — your own rc line, an
 enabled oh-my-bash theme, or starship:
 
@@ -384,16 +386,34 @@ compose the two contracts freely.
 
 ## Git Prompt Performance
 
-Git status should be consumed as a coherent prompt snapshot, not rendered by
-blocking every prompt draw with fresh Git processes. The intended shape is:
+This section covers the Windows prompt faces; off-Windows the git segment
+renders empty and nothing in this section applies. The host computes the
+git segment once per prompt pass and hands the prompt the finished string;
+rendering never runs git. How the value is produced:
 
-- prompt/theme plugins render the latest available snapshot;
-- the host keeps git status work warm in the background;
-- late git work updates the next prompt instead of repainting the active input
-  line.
+- inside a repository, one bounded spawn of the user's own git per pass
+  (`git status --porcelain=v2 --branch`, 2 s timeout with the child killed,
+  `--no-optional-locks`, stderr discarded). The user's git is a deliberate
+  choice: sparse checkouts, submodules, linked worktrees and partial clones
+  are only answered correctly by the git the user actually runs — an
+  in-process library silently dropped the branch segment on old-owner
+  repository trees before;
+- repaints within the same pass re-read that pass's computed value and spawn
+  nothing;
+- outside a repository nothing is spawned at all — the host only walks up
+  from the cwd looking for a `.git` marker.
 
-If the prompt flickers or repaints the current line, debug the lifecycle and
-git snapshot path rather than adding more inline Git calls to the theme.
+Prompt and theme plugins render the snapshot the host computed for the pass;
+they must not shell out to git themselves. If the prompt flickers or
+repaints the current line, debug the segment lifecycle rather than adding
+more inline Git calls to the theme.
+
+Cross-pass caching and background refresh — recomputing only when the
+repository's HEAD/index state changes, with a late result landing on a
+later pass instead of being computed inside the current one — are planned
+(niubash#643, post-release batch) and are **not** part of the current
+build: today, every pass inside a repository pays its one bounded spawn,
+and no git value is carried across passes.
 
 ## Plugin Workflow
 
@@ -420,13 +440,11 @@ verbs for installed sources.
 
 Beyond the curated catalog (`oh-my-bash`, `bash-it`, `bash-completion`),
 niu can install any git repository or local path that follows a known
-plugin-manager layout. New sources are **untrusted by default**: nothing
-they ship runs until you explicitly trust them.
+plugin-manager layout. Installing is not activating: nothing a source
+ships runs until you explicitly enable it.
 
 ```sh
 niu plugin add https://github.com/someone/oh-my-bash-fork.git
-# review the cloned source under ~/.niubash/sources/<id>
-niu plugin trust oh-my-bash-fork
 niu plugin enable oh-my-bash-fork
 niu plugin source remove oh-my-bash-fork   # delete tree + registry entry
 ```
@@ -435,11 +453,9 @@ Notes:
 
 - Sources are cloned to `~/.niubash/sources/<id>` and registered in
   `~/.niubash/sources/registry.toml`; the registry records the origin, ref,
-  path, and trust state.
+  and path.
 - `niu plugin update <id>` re-fetches the registered origin;
   `niu plugin rollback <id>` returns to the previous version.
-- An untrusted source never activates: enable refuses until
-  `niu plugin trust <id>` passes the review gate.
 - A git ref can be pinned at add time with `niu plugin add <id> --ref <ref>`.
 - `NIU_PLUGIN_SOURCES_ROOT` overrides the sources root (portable setups and
   tests).

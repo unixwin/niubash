@@ -37,8 +37,8 @@ niubash
 You should see something like:
 
 ```text
-user@DESKTOP C:\Users\you
-%
+user@DESKTOP ~
+$
 ```
 
 Type `exit` or press Ctrl+D to quit.
@@ -49,24 +49,24 @@ Type `exit` or press Ctrl+D to quit.
 
 ```sh
 cd C:\Users\you\repo
-# if inside a repo, the prompt changes:
-user@DESKTOP C:\Users\you\repo  git:(main) ●1 ✚2 ?1
-%
+# inside a repo, the first prompt row gains a branch segment:
+user@DESKTOP ~/repo (main)
+$
 ```
 
-Symbols at a glance:
+The segment is deliberately small — the Git Bash shape, not a status
+dashboard:
 
-| Symbol | Meaning |
-|--------|---------|
-| `●N`   | N files staged for commit |
-| `✚N`   | N files modified but unstaged |
-| `?N`   | N untracked files |
-| `↑N`   | N commits ahead of upstream |
-| `↓N`   | N commits behind upstream |
-| `⚑N`   | N stashes saved |
-| `✖N`   | N merge conflicts |
+| Shape | Meaning |
+|-------|---------|
+| `(main)` | on branch `main`, working tree clean |
+| `(main*)` | on branch `main`, working tree dirty — the trailing `*` is the only dirty marker: any staged, unstaged, or untracked change sets it, and there are no per-category counts |
+| `(a1b2c3d)` | detached HEAD — the short commit SHA instead of a branch name |
+| *(no segment)* | outside a repository (or git unavailable) — the segment is simply absent |
 
-The branch name is green when the tree is clean, yellow when dirty.
+The branch segment is always cyan; clean versus dirty is told by the `*`,
+not by a colour change. A fresh `git init` repository shows its unborn
+branch name too.
 
 ## 4. Try some commands
 
@@ -137,8 +137,8 @@ hello() {
 one-shot REPL command path. It does not run for `niu -c ...`, script files,
 or stdin script execution, so agent and CI surfaces stay deterministic.
 
-`~/.niubashrc` is the **only** startup file niu reads. The legacy
-`~/.winuxshrc`, `~/.winshrc`, and `~/.bashrc` files are never sourced,
+`~/.niubashrc` is the **only** startup file niu reads. Pre-rename
+legacy rc files and `~/.bashrc` are never sourced,
 migrated, or modified — a session that finds no `~/.niubashrc` simply starts
 without one. Plugin enable/disable state, the source registry, and other
 machine state live under `~/.niubash/` and are managed by `niu plugin`, not
@@ -167,12 +167,11 @@ and its `PS1` takes over the prompt; disable it and the floor comes back.
 Themes and plugins come from external plugin managers, installed and
 enabled through `niu plugin`. The curated catalog has `oh-my-bash`,
 `bash-it`, and `bash-completion`; any git URL, `owner/repo` shorthand, or
-local path works too. New sources are **untrusted by default** — nothing
-they ship runs until you review and trust them:
+local path works too. Installing is not activating — nothing a source
+ships runs until you enable it:
 
 ```sh
-niu plugin add oh-my-bash     # install from the catalog (untrusted)
-niu plugin trust oh-my-bash   # review, then pass the execution gate
+niu plugin add oh-my-bash     # install from the catalog
 niu plugin enable oh-my-bash  # records the source in the manifest
 niu plugin enable agnoster    # a theme asset -> OSH_THEME in the loader
 niu plugin disable oh-my-bash # manifest updated; the built-in floor returns

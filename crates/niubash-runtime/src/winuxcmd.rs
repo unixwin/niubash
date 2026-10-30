@@ -1,8 +1,11 @@
 //! winuxcmd integration via PATH injection.
 //!
 //! rubash's `Executor` looks up external commands via `find_user_command()`,
-//! which walks `PATH`. We don't use FFI/DLL -- we just prepend the directory
-//! containing `winuxcmd.exe` to the process `PATH` so rubash finds it first.
+//! which walks `PATH`. PATH integration is the default, the fallback, and the
+//! equivalence reference: we prepend the directory containing `winuxcmd.exe`
+//! to the process `PATH` so rubash finds it first. The opt-in FFI
+//! acceleration surface (niubash#567) lives in [`crate::ffi`]; its discovery
+//! starts from the installation root this module's search establishes.
 
 use std::path::{Path, PathBuf};
 

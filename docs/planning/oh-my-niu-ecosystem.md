@@ -2,6 +2,15 @@
 
 状态：设计稿（未实现、未提交）
 日期：2026-09-26
+
+> **后置裁定（2026-10-28，niubash#647，用户裁定）**：本文的 **trust 体系已全量移除**——
+> §12 的信任分级（checksum 档 / local-sign 签名档）、`niu plugin trust` / `source sign` /
+> `source verify` 动词、#297 漂移检测与 drifted-sources 账本、#298 first_fetch_verified、
+> registry 的哈希/签名字段均已从产品中删除。理由：无行业先例、属多此一举；安装即普通
+> git clone + 显式 enable 激活（bash-it 模型）。`--checksum` 仅保留为安装时对外部给定
+> 值的钉验（install-time pin），不再落盘为信任状态。§12 的下载/注册表/回滚协议部分
+> （12.1 schema 纪律、12.2 两道闸中的 fetch 闸、12.4）继续有效，registry schema 现为
+> `@0.4.0`。本文其余 trust 表述按历史设计记录保留，不再代表现行行为。
 输入：`crates/niubash-runtime` 现状代码；`D:/repo/rubash/target-ecosys/REPORT.md`（第一轮生态验收）；`D:/repo/rubash/target-ecosys2/REPORT.md`（577 文件 conformance 全扫 + 117 插件冒烟 + 冲突矩阵）。
 
 ## 0. 总原则："别人的更好，我们的作为保底"
@@ -37,7 +46,7 @@
 | bundle 安装（staging + sha256 + lock + previous） | `mod.rs:2327-2425` | `apply_plugin_bundle_update_from_path` |
 | bundle 回滚 | `mod.rs:2426-2462` | `apply_plugin_bundle_rollback` |
 | 安装校验（schema/api/pack 契约/index 对账） | `mod.rs:2463-2681` | `validate_bundle_inventory_for_update` 等 |
-| source pack 契约 | `mod.rs:2745-2792` | **entry 只允许 `.niu`/`.winux`（`mod.rs:2768`）**，须声明 `shell:source` 权限 |
+| source pack 契约 | `mod.rs:2745-2792` | **entry 只允许 `.niu`**（规划期曾拟 `.winux` 扩展名，代码从未落地），须声明 `shell:source` 权限 |
 | 补全资产加载 | `mod.rs:3002-3055` | `plugin_completion_defs`：bundle TOML → 编译兜底（`git_completion_def` 在 `mod.rs:3057`） |
 | 主题目录/单主题 | `mod.rs:3172-3318` | `plugin_theme_catalog`（user + bundle TOML）、`plugin_theme`、`bundle_asset_path`（`mod.rs:3346-3365`） |
 | rc 启停 pack | `mod.rs:3512-3573` | `active_pack_names` / `enable_pack_in_rc` / `disable_pack_in_rc`（编辑 `NIU_PLUGINS=(…)` 行） |
@@ -311,7 +320,7 @@ bash-completion 注册过的命令（git、ssh、tar…）由引擎函数补全�
   `omb-ansible`、`bit-colors`、`bit-base`、`bit-proxy`、`bit-pack`、
   `bit-dirs`。前缀消歧：`omb-`/`bit-` 避免与原生 `git`/`npm` pack 撞名。
 - **契约放宽**：`validate_source_pack_contract`（`mod.rs:2745-2792`）现要求
-  entry 以 `.niu`/`.winux` 结尾（`mod.rs:2768`）。新增允许 `.sh`（生态
+  entry 以 `.niu` 结尾（规划期拟定的 `.winux` 从未落地）。新增允许 `.sh`（生态
   pack 原文），仍强制 `shell:source` 权限与 plugin 本地相对路径检查；同步
   更新 `framework_plugin_source_entry`（`mod.rs:859-876`）无需变（仅拼路径）
   与安装校验测试。

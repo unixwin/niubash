@@ -125,7 +125,7 @@ impl Sandbox {
     }
 }
 
-/// §14.6.4 row 1 — single-file wild plugin: add → trust → honest
+/// §14.6.4 row 1 — single-file wild plugin: add → honest
 /// candidate listing → enable by picking the file → the engine sources it
 /// and the function works. Nothing is guessed; the README is not a
 /// candidate; the file keeps its `script` tag in the listing.
@@ -141,11 +141,9 @@ fn wild_single_file_plugin_enumerates_honestly_and_loads() {
         add_out.contains("Installed source 'wild-spark'"),
         "{add_out}"
     );
-    assert!(add_out.contains("niu plugin trust wild-spark"), "{add_out}");
-
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "wild-spark"], &sandbox.envs),
-        "trust",
+    assert!(
+        add_out.contains("niu plugin enable wild-spark"),
+        "{add_out}"
     );
 
     // Honest enumeration: the one sourceable file, tagged; README absent.
@@ -223,10 +221,6 @@ fn bash_preexec_loads_identically_to_manual_sourcing() {
         stdout_text(&add).contains("Installed source 'bash-preexec'"),
         "{}",
         stdout_text(&add)
-    );
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "bash-preexec"], &sandbox.envs),
-        "trust",
     );
     assert_success(
         &run_niu_with_env(
@@ -311,10 +305,6 @@ fn bpkg_package_adoption_uses_manifest_scripts_and_per_package_ids() {
     assert!(
         spec.contains("target =") && !spec.contains("id = 'bpkg'"),
         "spec entry leaves the id to sync (derived per package): {spec}"
-    );
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "mypkg"], &sandbox.envs),
-        "trust",
     );
 
     // Manifest scripts are the candidates (tree-relative paths, tagged).
@@ -402,10 +392,6 @@ fn bashmarks_keeps_manual_source_fidelity_no_shim() {
         stdout_text(&add).contains("Installed source 'oh-my-bash'"),
         "manager fingerprint wins for manager-shaped trees: {}",
         stdout_text(&add)
-    );
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &sandbox.envs),
-        "trust",
     );
 
     // The supported path first: enable bashmarks through the manager's
@@ -531,10 +517,6 @@ fn unknown_shape_repos_list_tagged_candidates_or_fail_honestly() {
 
     let add = run_niu_with_env(&["plugin", "add", &origin.to_string_lossy()], &sandbox.envs);
     assert_success(&add, "plugin add unknown-shape");
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "unknown-shape"], &sandbox.envs),
-        "trust",
-    );
 
     // install.sh is a candidate — visible, tagged as installer-like.
     let list = run_niu_with_env(&["plugin", "list"], &sandbox.envs);

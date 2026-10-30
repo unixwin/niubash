@@ -2,7 +2,7 @@
 //! download retraction 2026-10-04) — one binary-level pass over every leg
 //! the release claims, in the order of the release checklist:
 //!
-//! * A. install chain — `niu plugin add --path` → trust → enable → the
+//! * A. install chain — `niu plugin add --path` → enable → the
 //!   managed rc block actually takes effect in a fresh `niu -c` shell
 //!   (oh-my-bash `OSH_THEME`, bash-it theme PS1), and the declarative spec
 //!   round-trips through `niu plugin sync` byte-idempotently;
@@ -282,7 +282,7 @@ fn boot_interactive(sandbox: &Sandbox, stdin_script: &str) -> Output {
 
 // ── A. install chain ─────────────────────────────────────────────────────────
 
-/// oh-my-bash: catalog add (offline fixture) → trust → enable source+theme →
+/// oh-my-bash: catalog add (offline fixture) → enable source+theme →
 /// a fresh `niu -c '. ~/.niubash/generated/plugins.niu; echo $OSH_THEME'`
 /// (the manual-source path a user opts into) sees the theme the generation
 /// declared. This is the literal 1.3.0 checklist leg, loader-era.
@@ -306,8 +306,6 @@ fn a1_oh_my_bash_install_chain_theme_takes_effect() {
         stdout_text(&add)
     );
 
-    let trust = run_niu(&["plugin", "trust", "oh-my-bash"], &sandbox.envs);
-    assert_success(&trust, "plugin trust oh-my-bash");
     let enable = run_niu(&["plugin", "enable", "oh-my-bash"], &sandbox.envs);
     assert_success(&enable, "plugin enable oh-my-bash");
     let theme = run_niu(&["plugin", "enable", "agnoster"], &sandbox.envs);
@@ -345,8 +343,6 @@ fn a2_bash_it_install_chain_theme_takes_effect() {
         &sandbox.envs,
     );
     assert_success(&add, "plugin add bash-it --path");
-    let trust = run_niu(&["plugin", "trust", "bash-it"], &sandbox.envs);
-    assert_success(&trust, "plugin trust bash-it");
     let plugin = run_niu(&["plugin", "enable", "base"], &sandbox.envs);
     assert_success(&plugin, "plugin enable base");
     let theme = run_niu(&["plugin", "enable", "demox"], &sandbox.envs);
@@ -385,7 +381,6 @@ fn a3_spec_sync_is_idempotent() {
             "--path",
             &fixture("oh-my-bash").to_string_lossy(),
         ],
-        vec!["plugin", "trust", "oh-my-bash"],
         vec!["plugin", "enable", "oh-my-bash"],
         vec!["plugin", "enable", "git"],
     ] {
@@ -549,7 +544,6 @@ fn c1_external_theme_claims_then_releases_the_prompt_slot() {
             "--path",
             &fixture("oh-my-bash").to_string_lossy(),
         ],
-        vec!["plugin", "trust", "oh-my-bash"],
         vec!["plugin", "enable", "oh-my-bash"],
         vec!["plugin", "enable", "agnoster"],
     ] {
@@ -695,8 +689,8 @@ fn seed_mirror_repo(git: &std::path::Path, src: &std::path::Path, dest: &std::pa
 
 /// d2 — owner ruling 2026-10-03 (装完即选主题): a fresh user picks the
 /// recommended collection and gets the theme pick in the SAME `niu setup`
-/// run — empty gallery at Q1 → recommended → Apply → untrusted install →
-/// trust-now question → pick agnoster → rc rewritten → a fresh `niu -c`
+/// run — empty gallery at Q1 → recommended → Apply → install →
+/// pick agnoster → rc rewritten → a fresh `niu -c`
 /// shows OSH_THEME=agnoster. Drives the real interactive wizard under a
 /// pseudo terminal (ConPTY). Fully offline: the collection's git clones
 /// resolve through a seeded local mirror (`NIU_MIRRORS` insteadOf — the
@@ -819,6 +813,11 @@ fn d2_wizard_one_run_theme_journey() {
     // pre-highlighted, so Enter keeps it (a no-op pick writes no rc line).
     s.expect("TAB completion style?");
     answer(&mut s, "\r");
+    // Q2.7 (niubash#631): TAB completion interaction — same discipline:
+    // the current effective interaction (the cycle default) is
+    // pre-highlighted, so Enter keeps it and writes no rc line.
+    s.expect("TAB completion interaction?");
+    answer(&mut s, "\r");
     // Q3 (Windows only): niu-git — asked once per lasting answer and skipped
     // entirely when the running installation already bundles niugit
     // (niubash#230: never re-offer what is already there). Whether it
@@ -853,11 +852,9 @@ fn d2_wizard_one_run_theme_journey() {
     // Apply gate: Apply is the highlighted default.
     s.expect("Apply this configuration?");
     answer(&mut s, "\r");
-    // Post-install trust question (the wizard question IS the trust verb).
-    s.expect("to list its themes?");
-    answer(&mut s, "2\r"); // Trust now
-                           // The gallery built from the freshly trusted source: agnoster is the
-                           // first entry after Skip.
+    // niubash#647: no trust question — the post-install theme gallery
+    // opens straight after the install. agnoster is the
+    // first entry after Skip.
     s.expect("Pick a theme");
     answer(&mut s, "2\r"); // agnoster
     let finish = s.expect("Change things later:");
@@ -988,13 +985,11 @@ fn d3_setup_rerun_applies_in_the_live_session() {
         ("NIU_ENV", String::new()),
     ];
 
-    // A trusted fixture source, so the rerun wizard's Q1 gallery is
+    // An installed fixture source, so the rerun wizard's Q1 gallery is
     // non-empty and a theme different from the current look is pickable.
     let fixture_str = fixture("oh-my-bash").to_string_lossy().into_owned();
     let add = run_niu(&["plugin", "source", "add", &fixture_str], &envs);
     assert_success(&add, "plugin source add (fixture oh-my-bash)");
-    let trust = run_niu(&["plugin", "source", "trust", "oh-my-bash"], &envs);
-    assert_success(&trust, "plugin source trust oh-my-bash");
 
     // PATH must carry the niu binary so the live session can spawn
     // `niu setup` as its child (the wizard of this journey).
@@ -1042,6 +1037,12 @@ fn d3_setup_rerun_applies_in_the_live_session() {
     // no-op pick writes no rc line). Without this answer the wizard waits
     // on the menu and the journey dead-ends at its 180s session timeout.
     s.expect("TAB completion style?");
+    answer(&mut s, "\r");
+    // Q2.7 (niubash#631): TAB completion interaction — runs on re-runs
+    // too, current effective value pre-highlighted; Enter keeps it.
+    // Without this answer the wizard waits on the menu and the journey
+    // dead-ends, exactly like the Q2.6 note above.
+    s.expect("TAB completion interaction?");
     answer(&mut s, "\r");
     // Q3 (Windows only): niu-git — the default (Skip) is highlighted.
     #[cfg(windows)]

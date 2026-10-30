@@ -16,9 +16,8 @@
 //! The spec (`plugins.toml`), the lock (`registry.toml`) and recipe URLs
 //! keep canonical GitHub origins, so a tree installed through a mirror
 //! stays identical to a direct install and the lockfile remains portable
-//! across machines and networks. Mirroring is also never a trust signal:
-//! checksums and the trust protocol are unaffected. No auto-select, no
-//! probing: the user pastes the URL they trust.
+//! across machines and networks. No auto-select, no
+//! probing: the user pastes their own mirror URL.
 //!
 //! Degrade discipline: a missing file, unknown `active` name, or malformed
 //! TOML degrades to direct connection in the transport (a mirror config

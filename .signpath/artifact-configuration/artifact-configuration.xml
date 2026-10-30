@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  niubash — SignPath artifact configuration.
+
+  This file is the source of truth for what SignPath signs in a niubash
+  release. It is uploaded to the SignPath project ONCE during org setup
+  (SignPath web UI: Project > Artifact configurations > upload, or paste
+  this XML into the live editor) and is referenced from there — the CI
+  submission carries only the artifact zip, never this file. See the
+  README.md next to this file for the setup walkthrough.
+
+  The submitted artifact is a zip (actions/upload-artifact wraps our input
+  zip), so the root element MUST be <zip-file> — this matches SignPath's
+  GitHub trusted-build guidance that upload-artifact-produced archives use
+  a zip-file-rooted configuration. Entry names are NORMALIZED by
+  scripts/release/build-signpath-artifact-zip.ps1 so this file never needs
+  a version-specific path:
+
+      setup.exe                          the Inno Setup installer (signed whole)
+      niu.exe                            the shell
+      winuxcmd/...                       the portable package's winuxcmd tree
+                                         (usr\bin faces + wpm shims, opt\ payloads)
+
+  Signing scope decision (docs/planning/code-signing-free-options.md §7):
+  every Authenticode PE in the Windows package is submitted, including the
+  winuxcmd\opt\ payloads, because usr\bin wpm shims are NTFS hardlinks of
+  their opt\ payload bytes — signing one side of a family and not the
+  other would make the family members diverge. Whether the Foundation's
+  "upstream OSS binaries must not be signed" clause (signpath.org/terms)
+  excludes some opt\ payloads is an open question for the setup review;
+  narrowing this later is a one-line change (drop the include below).
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+
+    <!--
+      The Inno Setup installer, signed as a whole PE AFTER compilation.
+      This is the simple SignPath shape: the finished setup.exe is a
+      normal Authenticode PE, so it needs no Inno SignTool integration.
+      Trade off (accepted, documented in the README): the uninstaller exe
+      Inno embeds at compile time stays unsigned — Windows does not check
+      it for reputation, and compile-time signing would require the
+      SignTool/Get-SigningData integration SignPath documents for that
+      case. Revisit only if SmartScreen ever surfaces it.
+    -->
+    <pe-file path="setup.exe">
+      <authenticode-sign />
+    </pe-file>
+
+    <!-- The shell itself. -->
+    <pe-file path="niu.exe">
+      <authenticode-sign />
+    </pe-file>
+
+    <!--
+      Every PE under the bundled winuxcmd tree, one signing op per file:
+      usr\bin\winuxcmd.exe, the bash.exe / sh.exe / niu-shim.exe faces,
+      winuxcmd-shim.exe and any wpm-made command shims, plus the winuxcmd\opt\
+      package payloads (gawk, niugit's git.exe family, ...). The tree always
+      carries at least usr\bin\winuxcmd.exe, so min-matches stays at the
+      default of 1: an empty package fails the signing request loudly
+      instead of silently signing nothing.
+    -->
+    <pe-file-set>
+      <include path="winuxcmd/**/*.exe" min-matches="1" max-matches="unbounded" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+
+    <!--
+      Payload DLLs (gawk and niugit ship some under winuxcmd\opt\). Absent
+      DLLs are fine (min-matches="0"); present ones must be signed like
+      their exes.
+    -->
+    <pe-file-set>
+      <include path="winuxcmd/**/*.dll" min-matches="0" max-matches="unbounded" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+
+    <!--
+      PENDING SIGNPATH FOUNDATION METADATA REVIEW — intentionally not
+      enforced yet. The Foundation terms (signpath.org/terms.html) require
+      signed binaries to "set and enforce metadata attributes via file
+      metadata restrictions", with product name = the project's name and
+      product version identical across the build. niu.exe (cargo build)
+      and the winuxcmd/shim binaries currently embed NO VERSIONINFO
+      resource, so declaring pe-file-set restrictions such as
+
+          <pe-file-set product-name="niubash" product-version="${version}" ...>
+
+      would fail every signing request until those resources exist (e.g.
+      an embed-resource / winres step in build.rs). Add VERSIONINFO first,
+      then tighten this configuration — tracked in the planning doc §7.
+    -->
+
+  </zip-file>
+</artifact-configuration>

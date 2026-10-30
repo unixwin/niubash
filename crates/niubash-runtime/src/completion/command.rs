@@ -7,8 +7,40 @@ use std::sync::Mutex;
 use crate::completion::{CompletionContext, CompletionResult};
 use anyhow::Result;
 
-/// Cache of PATH commands to avoid scanning on every keystroke.
-static PATH_CMD_CACHE: Mutex<Option<(Vec<String>, Vec<String>)>> = Mutex::new(None);
+/// Fingerprint of the process environment the PATH caches below are
+/// scanned under: PATH + PATHEXT, joined the way
+/// `syntax_highlighting::process_env_fingerprint` builds it. The
+/// completer's PATH universe is read from the process env, which the
+/// host keeps synced with the executor's PATH, so a PATH assignment
+/// retires the caches by key mismatch. Filesystem-only changes under
+/// an unchanged PATH (a package install into an existing PATH dir)
+/// are invisible to the fingerprint; those retire explicitly through
+/// [`CommandCompleter::invalidate_command_caches`], the same hook the
+/// #574 command probe uses after `hash` / `wpm` lines.
+fn path_cache_fingerprint() -> String {
+    let mut fingerprint = String::new();
+    for key in ["PATH", "PATHEXT"] {
+        if let Ok(value) = env::var(key) {
+            fingerprint.push_str(&value);
+        }
+        fingerprint.push('\u{1e}');
+    }
+    fingerprint
+}
+
+/// PATH command scan, cached under the env fingerprint (audit item
+/// C1). The previous shape scanned once and cached forever — a PATH
+/// assignment mid-session never reached command completion — and its
+/// tuple's second element was never read at all.
+static PATH_CMD_CACHE: Mutex<Option<(String, Vec<String>)>> = Mutex::new(None);
+
+/// The merged all-commands list (builtins + common + PATH, sorted and
+/// deduped), cached under the same fingerprint (audit item C1): the
+/// merge inputs other than the PATH scan are process-constant, so the
+/// fingerprint fully determines the result. Callers used to re-run
+/// the whole clone + sort + dedup on every TAB (and on every
+/// highlighter repaint, which builds its command set from this list).
+static ALL_COMMANDS_CACHE: Mutex<Option<(String, Vec<String>)>> = Mutex::new(None);
 
 /// Command completer
 pub struct CommandCompleter;
@@ -16,12 +48,37 @@ pub struct CommandCompleter;
 impl CommandCompleter {
     /// Get all available commands (built-in + common + PATH)
     pub fn get_all_commands() -> Vec<String> {
+        let fingerprint = path_cache_fingerprint();
+        if let Ok(cache) = ALL_COMMANDS_CACHE.lock() {
+            if let Some((cached_fingerprint, commands)) = &*cache {
+                if *cached_fingerprint == fingerprint {
+                    return commands.clone();
+                }
+            }
+        }
         let mut commands = Self::get_builtin_commands();
         commands.extend(Self::get_common_commands());
         commands.extend(Self::get_path_commands_cached());
         commands.sort();
         commands.dedup();
+        if let Ok(mut cache) = ALL_COMMANDS_CACHE.lock() {
+            *cache = Some((fingerprint, commands.clone()));
+        }
         commands
+    }
+
+    /// Forget both PATH caches (audit item C1): called after submitted
+    /// lines that can change command resolution without moving the env
+    /// fingerprint — `hash` mutations and `wpm` install/remove — next
+    /// to the #574 command probe's explicit clear, which exists for
+    /// exactly the same blind spot.
+    pub(crate) fn invalidate_command_caches() {
+        if let Ok(mut cache) = PATH_CMD_CACHE.lock() {
+            *cache = None;
+        }
+        if let Ok(mut cache) = ALL_COMMANDS_CACHE.lock() {
+            *cache = None;
+        }
     }
 
     /// Get shell builtins owned by rubash.
@@ -256,16 +313,19 @@ impl CommandCompleter {
         ]
     }
 
-    /// Get cached PATH commands (scans once, caches forever)
+    /// Get cached PATH commands (one scan per env fingerprint)
     fn get_path_commands_cached() -> Vec<String> {
+        let fingerprint = path_cache_fingerprint();
         if let Ok(cache) = PATH_CMD_CACHE.lock() {
-            if let Some((ref cmds, _)) = *cache {
-                return cmds.clone();
+            if let Some((cached_fingerprint, commands)) = &*cache {
+                if *cached_fingerprint == fingerprint {
+                    return commands.clone();
+                }
             }
         }
         let cmds = Self::get_path_commands();
         if let Ok(mut cache) = PATH_CMD_CACHE.lock() {
-            *cache = Some((cmds.clone(), Vec::new()));
+            *cache = Some((fingerprint, cmds.clone()));
         }
         cmds
     }
@@ -418,6 +478,13 @@ mod tests {
 
     #[test]
     fn test_command_exists() {
+        // Serialized with the C1 cache test below: it reassigns the
+        // process PATH under this lock, and the sample-then-reprobe
+        // shape here must not straddle that mutation (the sampled name
+        // can belong to a PATH dir that exists only mid-mutation).
+        let _process_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         assert!(CommandCompleter::command_exists("cd"));
         assert!(!CommandCompleter::command_exists(
             "__niubash_missing_command_for_completion_test__"
@@ -427,6 +494,86 @@ mod tests {
         if let Some(any_path_cmd) = CommandCompleter::get_path_commands().first() {
             assert!(CommandCompleter::command_exists(any_path_cmd));
         }
+    }
+
+    struct PathEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl PathEnvGuard {
+        /// Prepend `dir` to the process PATH (the real PATH stays
+        /// reachable, so concurrent tests keep resolving real tools).
+        fn prepend(dir: &std::path::Path) -> Self {
+            let previous = std::env::var_os("PATH");
+            let mut paths = vec![dir.to_path_buf()];
+            if let Some(old) = &previous {
+                paths.extend(std::env::split_paths(old));
+            }
+            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+            Self { previous }
+        }
+    }
+
+    impl Drop for PathEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn fake_executable(dir: &std::path::Path, base: &str) {
+        // Unix admits the extensionless name; Windows admits the .exe
+        // twin and strips the extension to the same completion name.
+        for name in [base.to_string(), format!("{base}.exe")] {
+            let path = dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn path_command_cache_retires_on_path_change_and_explicit_invalidation() {
+        // Audit item C1: a PATH assignment mid-session must reach
+        // command completion (the old cache scanned once and served
+        // forever), and a filesystem change under an unchanged PATH
+        // must land after the explicit invalidation the shell runs on
+        // `hash` / `wpm` lines.
+        let _process_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        fake_executable(dir_a.path(), "niu-c1-probe-alpha");
+        fake_executable(dir_b.path(), "niu-c1-probe-beta");
+
+        let path_a = PathEnvGuard::prepend(dir_a.path());
+        let commands = CommandCompleter::get_all_commands();
+        assert!(commands.contains(&"niu-c1-probe-alpha".to_string()));
+        assert!(!commands.contains(&"niu-c1-probe-beta".to_string()));
+        drop(path_a);
+
+        // Reassigning PATH moves the fingerprint: beta's universe
+        // replaces alpha's without any explicit invalidation.
+        let _path_b = PathEnvGuard::prepend(dir_b.path());
+        let commands = CommandCompleter::get_all_commands();
+        assert!(commands.contains(&"niu-c1-probe-beta".to_string()));
+        assert!(!commands.contains(&"niu-c1-probe-alpha".to_string()));
+
+        // A new file in an already-listed PATH dir does not move the
+        // fingerprint, so the cache keeps serving the scanned universe
+        // until the shell's explicit invalidation runs.
+        fake_executable(dir_b.path(), "niu-c1-probe-gamma");
+        let commands = CommandCompleter::get_all_commands();
+        assert!(!commands.contains(&"niu-c1-probe-gamma".to_string()));
+        CommandCompleter::invalidate_command_caches();
+        let commands = CommandCompleter::get_all_commands();
+        assert!(commands.contains(&"niu-c1-probe-gamma".to_string()));
     }
 
     #[test]

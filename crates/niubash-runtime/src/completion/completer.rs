@@ -3,7 +3,6 @@
 
 use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
 use crate::completion::path::PathCompleter;
-use crate::completion::runtime::{command_words_before_cursor, comp_cword};
 use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
@@ -77,6 +76,19 @@ pub struct CompletionState {
     pub env_vars: HashMap<String, String>,
     pub aliases: HashSet<String>,
     pub functions: HashSet<String>,
+    /// The session's open fd numbers, synced from the engine's fd
+    /// table by `Shell::update_completion_state`. The path
+    /// completer's dynamic tier lists these under `/dev/fd/`
+    /// (niubash#627).
+    pub open_fds: Vec<u32>,
+    /// The backing directory for the session's `/tmp`, resolved by
+    /// the engine from the session env (session TMPDIR wins) and
+    /// synced by `Shell::update_completion_state`. The path
+    /// completer and the syntax highlighter root `/tmp` spellings
+    /// here so both follow a session `TMPDIR` assignment immediately
+    /// (niubash#627 G2). Starts at the process temp dir, the pre-sync
+    /// fallback.
+    pub tmp_base: PathBuf,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -107,6 +119,8 @@ impl CompletionState {
             env_vars: HashMap::new(),
             aliases: HashSet::new(),
             functions: HashSet::new(),
+            open_fds: Vec::new(),
+            tmp_base: std::env::temp_dir(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
             command_probe: CommandProbe::default(),
@@ -177,36 +191,6 @@ impl CompletionState {
         }
     }
 
-    /// Replace the bundle-provided definitions inside the external
-    /// completion plugin.
-    ///
-    /// The initial definition set is installed at `Shell::new`, before any
-    /// startup rc runs — so packs enabled later by the rc (the
-    /// `NIU_PLUGINS=(...)` line the setup wizard writes) would never
-    /// contribute completions: aliases and functions load through the rc,
-    /// but completion TOMLs were snapshotted too early. Official pack names
-    /// are masked by the compiled-in fallback; third-party and newly added
-    /// packs are not. Rebuilding the external plugin from the recorded user
-    /// directories keeps overrides intact; callers recompute only when the
-    /// enabled-pack set changes, so steady-state prompt cost is unchanged.
-    pub fn refresh_bundle_definitions(&mut self, bundle_definitions: Vec<CommandDef>) {
-        let dirs = self.completion_dirs.clone();
-        let mut external = ExternalCompletionPlugin::new();
-        external.replace_definitions(bundle_definitions);
-        for dir in &dirs {
-            external.load_dir(dir);
-        }
-        if let Some(slot) = self.plugins.iter_mut().rev().find(|p| {
-            p.as_any()
-                .downcast_ref::<ExternalCompletionPlugin>()
-                .is_some()
-        }) {
-            *slot = Arc::new(external);
-        } else {
-            self.add_plugin(Arc::new(external));
-        }
-    }
-
     /// Collect command names known to loaded completion plugins.
     ///
     /// External TOML definitions (from oh-my-niu, user overrides, etc.)
@@ -257,13 +241,15 @@ impl NiubashCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, behavior, plugins) =
+        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, plugins) =
             if let Ok(state) = self.state.lock() {
                 (
                     state.current_dir.clone(),
                     state.env_vars.clone(),
                     state.aliases.clone(),
                     state.functions.clone(),
+                    state.open_fds.clone(),
+                    state.tmp_base.clone(),
                     state.behavior,
                     state.plugins.clone(),
                 )
@@ -271,9 +257,24 @@ impl NiubashCompleter {
                 return Vec::new();
             };
 
-        let context =
+        let mut context =
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
+        context.open_fds = open_fds;
+        context.tmp_base = tmp_base;
         let mut all_suggestions = Vec::new();
+
+        // GNU programmable completion owns a command's arguments whenever a
+        // compspec is registered (`complete`, bash-completion, an inputrc
+        // rule). Decide that once, up front: the static definition tables
+        // and the path fallback are overlays for commands WITHOUT a
+        // compspec, and must not be merged into its candidates.
+        let first_word = input.split_whitespace().next().unwrap_or_default();
+        let has_compspec = !context.is_command_position()
+            && !first_word.is_empty()
+            && crate::shell::with_completion_bridge(|shell| {
+                shell.session().has_compspec(first_word)
+            })
+            .unwrap_or(false);
 
         // Shell-function completions (`NIU_COMPDEFS`): only available while
         // the interactive REPL has installed the shell bridge.
@@ -285,14 +286,18 @@ impl NiubashCompleter {
         // working directory ahead of PATH command matches. This mirrors the
         // Windows-shell expectation that `win` in a folder containing
         // `./niubash/` should offer `./niubash/` first, instead of only showing
-        // PATH executables like `winver` or `winrm`.
+        // PATH executables like `winver` or `winrm`. Only entries that could
+        // actually run from the command slot qualify — directories and
+        // executable files (niubash#671); plain data files are not commands
+        // and readline/GNU never offer them here.
         let cwd_path_suggestions = self.cwd_path_suggestions_at_command_position(&context);
         let alias_suggestions = self.alias_suggestions_at_command_position(&context, &aliases);
         let function_suggestions =
             self.function_suggestions_at_command_position(&context, &functions);
 
-        // Try each plugin in order; only the first non-None result is used
-        for plugin in &plugins {
+        // Try each plugin in order; only the first non-None result is used.
+        // Skipped when a compspec owns the command (GNU precedence).
+        for plugin in plugins.iter().filter(|_| !has_compspec) {
             if let Some(result) = plugin.complete(&context) {
                 // Found a result, format it
                 let formatted = self.format_completions(result, input, cursor_pos);
@@ -326,7 +331,7 @@ impl NiubashCompleter {
                     return self.format_completions(result, input, cursor_pos);
                 }
             }
-            if context.is_path_completion() {
+            if context.is_path_completion() && !has_compspec {
                 if let Ok(Some(result)) = PathCompleter::complete(&context) {
                     all_suggestions.extend(self.format_completions(result, input, cursor_pos));
                 }
@@ -335,22 +340,21 @@ impl NiubashCompleter {
 
         // GNU programmable completion (rubash engine): when the command has a
         // compspec registered via the `complete` builtin, argument candidates
-        // come from `Executor::complete_line` through the shell bridge. The
+        // come from `Session::complete` through the shell bridge. The
         // completion *engine* lives in rubash while niubash keeps its
         // cwd-priority, common-command, and file overlays for everything else.
         // The `has_compspec` gate keeps this free for commands without a
         // compspec (the hook's fallback would rescan PATH uncached and emit
         // raw-unquoted file names that duplicate the path completer above).
-        if !context.is_command_position() {
-            let first_word = input.split_whitespace().next().unwrap_or_default();
-            let has_compspec = !first_word.is_empty()
-                && crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.has_compspec(first_word)
-                })
-                .unwrap_or(false);
+        {
             if has_compspec {
                 if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
-                    shell.executor.complete_line(input, cursor_pos)
+                    shell
+                        .session_mut()
+                        .complete(input, cursor_pos)
+                        .into_iter()
+                        .map(|candidate| candidate.text)
+                        .collect::<Vec<String>>()
                 }) {
                     if !cands.is_empty() {
                         let result = CompletionResult::new(cands);
@@ -401,6 +405,13 @@ impl NiubashCompleter {
                 continue;
             }
             let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            // niubash#671: a non-directory qualifies for the command
+            // slot only when it is executable — offering plain files
+            // (`notes.txt`) as `./notes.txt` manufactures commands the
+            // shell would never resolve at this position.
+            if !is_dir && !Self::is_command_file(&entry) {
+                continue;
+            }
             if file_name.starts_with('.') && !word.starts_with('.') {
                 continue;
             }
@@ -440,6 +451,40 @@ impl NiubashCompleter {
                 match_indices: None,
             })
             .collect()
+    }
+
+    /// niubash#671: whether a non-directory cwd entry could actually
+    /// run from the command slot. Platform rule: on Unix, any execute
+    /// bit; on Windows, an extension listed in PATHEXT (the same list
+    /// command resolution uses; the Windows default applies when the
+    /// variable is unset).
+    fn is_command_file(entry: &std::fs::DirEntry) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            entry
+                .metadata()
+                .map(|md| md.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+        #[cfg(windows)]
+        {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                return false;
+            };
+            let pathext =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            pathext
+                .split(';')
+                .filter(|item| !item.is_empty())
+                .any(|item| item.trim_start_matches('.').eq_ignore_ascii_case(ext))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = entry;
+            false
+        }
     }
 
     fn alias_suggestions_at_command_position(
@@ -623,6 +668,81 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
     ))
 }
 
+/// Words of the current command segment before the cursor (the compdef
+/// bridge's COMP_WORDS/COMP_CWORD inputs). Moved here from the retired
+/// completion::runtime module — this file is their only consumer.
+fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String>> {
+    let pos = context.cursor_pos.min(context.input.len());
+    let pos = floor_char_boundary(&context.input, pos);
+    let before_cursor = &context.input[..pos];
+    let start = before_cursor
+        .rfind([';', '|', '&', '\n'])
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let segment = before_cursor[start..].trim_start();
+    let words = split_shell_words(segment);
+    (!words.is_empty()).then_some(words)
+}
+
+fn comp_cword(context: &CompletionContext) -> usize {
+    let Some(words) = command_words_before_cursor(context) else {
+        return 0;
+    };
+    if context
+        .input
+        .get(..context.cursor_pos.min(context.input.len()))
+        .and_then(|input| input.chars().last())
+        .is_some_and(char::is_whitespace)
+    {
+        words.len()
+    } else {
+        words.len().saturating_sub(1)
+    }
+}
+
+fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            ch if ch.is_whitespace() && !single && !double => {
+                if !current.is_empty() {
+                    words.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn floor_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut p = pos;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct CwdPathCandidate {
     is_dir: bool,
@@ -672,6 +792,9 @@ mod tests {
     fn shell_bridge_compdef_produces_candidates() {
         use crate::test_support::PROCESS_STATE_LOCK;
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Dropping this Shell must not take the test process's PATH
+        // with it (see ProcessEnvRestore).
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
 
         let mut shell = crate::shell::Shell::new().unwrap();
         assert!(shell
@@ -697,12 +820,19 @@ niu_git_comp() {
             .unwrap_or_else(|| panic!("missing compdef candidate, got {suggestions:?}"));
         assert_eq!(alpha.description.as_deref(), Some("First"));
         assert!(suggestions.iter().any(|s| s.value == "beta"));
+        // Drop the Shell inside this test, while _env_restore is still
+        // armed (the thread-local bridge would otherwise defer the drop
+        // to thread teardown).
+        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
     fn compspec_candidates_flow_through_rubash_hook() {
         use crate::test_support::PROCESS_STATE_LOCK;
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Dropping this Shell must not take the test process's PATH
+        // with it (see ProcessEnvRestore).
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
 
         let mut shell = crate::shell::Shell::new().unwrap();
         // Register a GNU compspec on the rubash executor via the `complete`
@@ -722,6 +852,37 @@ niu_git_comp() {
         assert!(
             suggestions.iter().any(|s| s.value == "alpha"),
             "missing compspec candidate alpha, got {suggestions:?}"
+        );
+        // Drop the Shell inside this test, while _env_restore is still
+        // armed (the thread-local bridge would otherwise defer the drop
+        // to thread teardown).
+        crate::shell::uninstall_completion_bridge();
+    }
+
+    #[test]
+    fn compspec_owns_the_command_over_static_definition_tables() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        // `git` ships a static definition table (subcommands + flags) in the
+        // embedded assets. A compspec registered for it must own the command:
+        // the static table contributes nothing.
+        assert!(shell.execute_script("complete -W 'zzz' git").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("git ", 4);
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zzz"],
+            "a compspec must suppress the static table and the path fallback"
         );
     }
 
@@ -804,9 +965,23 @@ mod cwd_priority_tests {
 
     #[test]
     fn command_position_offers_matching_cwd_file_with_dot_slash() {
+        // niubash#671 revised this pin: the fixture used to be a plain
+        // data file (`winuxfile.txt`), which the command slot must NOT
+        // offer — only an executable file qualifies. The `./` shape and
+        // span contract for qualifying files are unchanged.
         let temp_dir = unique_temp_dir("niubash-cwd-priority-files");
         std::fs::create_dir_all(&temp_dir).unwrap();
         std::fs::write(temp_dir.join("winuxfile.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("winuxrun.exe"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                temp_dir.join("winuxrun.exe"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
 
         let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
         let mut completer = NiubashCompleter::new(state);
@@ -814,11 +989,59 @@ mod cwd_priority_tests {
 
         let file_suggestion = suggestions
             .iter()
-            .find(|suggestion| suggestion.value == "./winuxfile.txt")
+            .find(|suggestion| suggestion.value == "./winuxrun.exe")
             .unwrap_or_else(|| panic!("expected cwd file with ./, got {suggestions:?}"));
         assert_eq!(file_suggestion.span.start, 0);
         assert_eq!(file_suggestion.span.end, 3);
         assert!(file_suggestion.append_whitespace);
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./winuxfile.txt"),
+            "plain data file leaked into command position: {suggestions:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn issue671_command_position_skips_plain_files_keeps_dirs_and_executables() {
+        let temp_dir = unique_temp_dir("niubash-issue671");
+        std::fs::create_dir_all(temp_dir.join("rundir")).unwrap();
+        std::fs::write(temp_dir.join("runnotes.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("runapp.exe"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                temp_dir.join("runapp.exe"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("run", 3);
+
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./rundir/"),
+            "directory must stay offered: {suggestions:?}"
+        );
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./runapp.exe"),
+            "executable file must stay offered: {suggestions:?}"
+        );
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./runnotes.txt"),
+            "plain data file must not be offered at command position: {suggestions:?}"
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -840,11 +1063,14 @@ mod cwd_priority_tests {
             .unwrap_or_else(|| panic!("expected cwd dir on empty Tab, got {suggestions:?}"));
         assert!(!dir_suggestion.append_whitespace);
 
-        let file_suggestion = suggestions
-            .iter()
-            .find(|suggestion| suggestion.value == "./localfile.txt")
-            .unwrap_or_else(|| panic!("expected cwd file on empty Tab, got {suggestions:?}"));
-        assert!(file_suggestion.append_whitespace);
+        // niubash#671 revised this pin: a plain data file is not a
+        // command and must not be dumped into the empty-prompt list.
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "./localfile.txt"),
+            "plain data file leaked into empty-input command position: {suggestions:?}"
+        );
         assert!(
             !suggestions
                 .iter()

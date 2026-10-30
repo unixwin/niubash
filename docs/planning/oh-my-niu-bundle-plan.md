@@ -1,12 +1,15 @@
 ---
-tags: [niubash, plugins, oh-my-winuxsh, bundle, roadmap]
+tags: [niubash, plugins, oh-my-niu, bundle, roadmap]
 created: 2026-07-30
 status: draft
 ---
 
 # Oh My Niubash Bundle Plan
 
-`oh-my-winuxsh` is the official Niubash plugin bundle.
+`oh-my-niu` is the official Niubash plugin bundle.
+
+(Renamed with the bundle in the 1.5.0 rename cleanup: this plan and the
+bundle it describes carry the oh-my-niu name throughout.)
 
 The synchronized execution plan is in
 [Plugin System Roadmap](plugin-system-roadmap.md).
@@ -23,7 +26,7 @@ niubash release
   niu.exe
   winuxcmd/
   bundles/
-    oh-my-winuxsh/
+    oh-my-niu/
       bundle.toml
       packs/
 ```
@@ -33,8 +36,8 @@ baseline bundle. Network access is only needed for later bundle updates.
 
 ## Repository Reset Policy
 
-The existing `unixwin/oh-my-winuxsh` repository is legacy content. Do not
-delete repository history. Instead:
+The bundle previously lived in a pre-rename repository, kept as legacy
+content. Do not delete repository history. Instead:
 
 1. clone the repository;
 2. tag the current state as `legacy-pre-niubash-plugin-system`;
@@ -48,7 +51,7 @@ clean.
 ## Bundle Layout
 
 ```text
-oh-my-winuxsh/
+oh-my-niu/
   README.md
   bundle.toml
   index.toml
@@ -91,7 +94,7 @@ oh-my-winuxsh/
 ## Bundle Metadata
 
 ```toml
-name = "oh-my-winuxsh"
+name = "oh-my-niu"
 version = "1.0.0"
 publisher = "unixwin"
 api = "niubash:plugin-bundle@0.1.0"
@@ -100,8 +103,8 @@ channel = "stable"
 
 [update]
 source = "github-release"
-repo = "unixwin/oh-my-winuxsh"
-asset = "oh-my-winuxsh-{version}.zip"
+repo = "unixwin/oh-my-niu"
+asset = "oh-my-niu-{version}.zip"
 
 [packs]
 default = ["git", "prompts", "keybindings"]
@@ -138,15 +141,15 @@ external commands must stay explicit opt-in.
 ## Local Install State
 
 ```text
-%LOCALAPPDATA%/Niubash/bundles/oh-my-winuxsh/<version>/
-%LOCALAPPDATA%/Niubash/bundles/oh-my-winuxsh/current
-<niubash install dir>/bundles/oh-my-winuxsh
+%LOCALAPPDATA%/Niubash/bundles/oh-my-niu/<version>/
+%LOCALAPPDATA%/Niubash/bundles/oh-my-niu/current
+<niubash install dir>/bundles/oh-my-niu
 ~/.niubash/plugin-lock.toml
 ```
 
 The app-bundled path is the offline baseline that ships with Niubash installers
 and portable zips. User-managed bundle installs and the lock file take priority
-so `niu plugin update oh-my-winuxsh ...` can move independently of app
+so `niu plugin update oh-my-niu ...` can move independently of app
 updates.
 
 `plugin-lock.toml` should record:
@@ -176,10 +179,10 @@ niu plugin plan enable git
 niu plugin install git
 niu plugin enable git
 niu plugin disable zoxide
-niu plugin update oh-my-winuxsh --from dist\oh-my-winuxsh-1.0.0.zip --checksum-file dist\oh-my-winuxsh-1.0.0.zip.sha256
-niu plugin update oh-my-winuxsh --github-release latest
-niu plugin update oh-my-winuxsh --github-release v1.0.0 --json
-niu plugin rollback oh-my-winuxsh
+niu plugin update oh-my-niu --from dist\oh-my-niu-1.0.0.zip --checksum-file dist\oh-my-niu-1.0.0.zip.sha256
+niu plugin update oh-my-niu --github-release latest
+niu plugin update oh-my-niu --github-release v1.0.0 --json
+niu plugin rollback oh-my-niu
 ```
 
 The plan/apply behavior should mirror safe managed-config updates:
@@ -193,7 +196,7 @@ The manifest-backed registry records managed plugin CLI state:
 ```toml
 [plugins]
 enabled = true
-bundles = ["oh-my-winuxsh"]
+bundles = ["oh-my-niu"]
 load = ["git", "prompts", "keybindings"]
 
 [plugins.git]
@@ -219,14 +222,14 @@ state for CLI-managed permissions, bundle versions, tests, and rollback.
 2. Add plugin registry entries for existing built-in packs.
 3. Add `[plugins]` config as the managed machine-editable surface.
 4. Update docs and CLI help to say "official Niubash plugins".
-5. Add `oh-my-winuxsh` bundle update support.
+5. Add `oh-my-niu` bundle update support.
 
 ## Repository Status
 
 The remote repository has been cloned locally at:
 
 ```text
-C:\Users\caomengxuan\repo\oh-my-winuxsh
+C:\Users\caomengxuan\repo\oh-my-niu
 ```
 
 Current branch:

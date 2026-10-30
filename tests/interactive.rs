@@ -478,6 +478,41 @@ fn ctrl_c_interrupts_builtin_sleep() {
     s.expect_prompt();
 }
 
+/// niubash#669: Ctrl+C during a foreground `sleep` must return the
+/// prompt with `$?` = 130. On the reporter's real-machine PTY harness
+/// the press never reached the shell at all (no reaction, the sleep ran
+/// to completion) while GNU in the same harness settled 130 at once:
+/// a Ctrl+C that reaches the console as a queued input record is never
+/// translated into the CTRL_C_EVENT the host's console handler waits
+/// for. The host now watches the input queue during foreground
+/// execution and synthesizes the delivery (`ForegroundWatch`). Like
+/// the rest of this suite it skips on hosted CI
+/// (`require_pty_or_skip`); it guards desktop / real-machine runs.
+#[test]
+fn issue669_ctrl_c_during_sleep_returns_prompt_with_130() {
+    if !require_pty_or_skip("issue669_ctrl_c_during_sleep_returns_prompt_with_130") {
+        return;
+    }
+    let mut s = NiuSession::spawn_custom(
+        "ctrlc-sleep-669",
+        &driver::default_rc(),
+        &[],
+        (120, 30),
+        HEAVY_TIMEOUT,
+    );
+    s.wait_ready();
+    s.send_line("sleep 30");
+    std::thread::sleep(Duration::from_millis(700));
+    s.send(CTRL_C);
+    s.expect_prompt();
+    s.send_line("echo st:$?");
+    s.expect("st:130");
+    s.expect_prompt();
+    s.send_line("echo still-alive-669");
+    s.expect("still-alive-669");
+    s.expect_prompt();
+}
+
 /// Ctrl-D on an empty line exits the shell with status 0.
 #[test]
 fn ctrl_d_on_empty_line_exits() {
@@ -543,6 +578,58 @@ fn ctrl_d_after_background_job_exits() {
     s.send(CTRL_D);
     let code = s.wait_exit();
     assert_eq!(code, 0, "expected exit code 0 after Ctrl-D with bg job");
+}
+
+/// niubash#684 (ConPTY face, REPL route): Ctrl-D while a plain `read`
+/// builtin waits on the console must be the EOF for that read — rc 1,
+/// empty assignment — and must NOT exit the shell: the EOF ends only
+/// the current input (GNU: kernel VEOF → zread 0 → read.def:767
+/// eof=1, :949 EXECUTION_FAILURE, shell survives). The engine fix is
+/// rubash-side (canonical-console VEOF translation + the
+/// EOF-verdict cascade gate); this pin covers the host route the
+/// engine pins cannot see: reedline hands the console back cooked for
+/// the command, so the byte reaches the engine's fd-0 transports.
+///
+/// Echo-proofing (niubash#367/#368): the asserted marker `D0#RC=1 X=[]`
+/// never appears in the submitted text (which carries `$?`/`$x`
+/// literals), so terminal echo cannot satisfy it. The trailing Enter
+/// completes the cooked console line the Ctrl-D sits in — the harness
+/// shape pkg9 A6 used (psmux hex injection + line completion).
+#[test]
+fn issue684_ctrld_during_read_ends_read_not_shell() {
+    if !require_pty_or_skip("issue684_ctrld_during_read_ends_read_not_shell") {
+        return;
+    }
+    let mut s = NiuSession::spawn("ctrld-read684");
+    s.wait_ready();
+    s.send_line("read x; echo \"D0#RC=$? X=[$x]\"");
+    std::thread::sleep(Duration::from_millis(700));
+    s.send(CTRL_D);
+    s.send("\r");
+    s.expect("D0#RC=1 X=[]");
+    s.expect_prompt();
+    // The EOF ended only the read: the shell takes the next command.
+    s.send_line("echo alive-684");
+    s.expect("alive-684");
+    s.expect_prompt();
+}
+
+/// niubash#684: Ctrl-D in the middle of a `read` line is the VEOF
+/// flush, not an EOF and not data — the buffered prefix and the rest
+/// of the line form one record (GNU: `abc` ^D `def` reads "abcdef",
+/// rc 0).
+#[test]
+fn issue684_ctrld_midline_flushes_read_line() {
+    if !require_pty_or_skip("issue684_ctrld_midline_flushes_read_line") {
+        return;
+    }
+    let mut s = NiuSession::spawn("ctrld-flush684");
+    s.wait_ready();
+    s.send_line("read y; echo \"DM#RC=$? Y=[$y]\"");
+    std::thread::sleep(Duration::from_millis(700));
+    s.send("abc\u{4}def\r");
+    s.expect("DM#RC=0 Y=[abcdef]");
+    s.expect_prompt();
 }
 
 /// Ctrl-Z at the prompt is a documented gap: reedline's `Signal` has no
@@ -1016,6 +1103,11 @@ fn tab_completion_empty_set_enter_still_submits() {
 /// dismissal prefix made the first Enter close the menu and run `cat
 /// m486-` (a "No such file" error); pinned for all four interactive menu
 /// styles (`column` — the default, `list`, `ide`, `inline`).
+///
+/// niubash#631: this is the *insert* interaction's contract, so the
+/// sessions pin `NIU_COMPLETION_INTERACTION=insert` — since 1.5.0 the
+/// default interaction is cycle, whose Enter accepts AND runs in one
+/// press (pinned in tests/issue631_completion_interaction.rs).
 #[test]
 fn completion_menu_enter_commits_highlighted_candidate() {
     if !require_pty_or_skip("completion_menu_enter_commits_highlighted_candidate") {
@@ -1025,7 +1117,13 @@ fn completion_menu_enter_commits_highlighted_candidate() {
         let mut s = NiuSession::spawn_custom(
             "menu-enter-486",
             &driver::default_rc(),
-            &[("NIU_COMPLETION_STYLE".to_string(), style.to_string())],
+            &[
+                ("NIU_COMPLETION_STYLE".to_string(), style.to_string()),
+                (
+                    "NIU_COMPLETION_INTERACTION".to_string(),
+                    "insert".to_string(),
+                ),
+            ],
             (120, 30),
             DEFAULT_TIMEOUT,
         );
@@ -1155,8 +1253,10 @@ fn history_file_persists_across_sessions() {
 }
 
 /// `set +o history` stops recording new entries into the history file.
+/// (The recording veto was wired by niubash#660: the editor history
+/// instance consults the `history` option snapshot the host refreshes
+/// at every prompt boundary.)
 #[test]
-#[ignore = "rubash#1248 follow-up: expansion is wired (execute_interactive_line drives pre_process_interactive_line), but the `set +o history` RECORDING veto is not - reedline owns the history instance and the engine's interactive_history_veto_recording is not consulted yet"]
 fn set_plus_o_history_stops_recording() {
     if !require_pty_or_skip("set_plus_o_history_stops_recording") {
         return;

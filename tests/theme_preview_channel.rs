@@ -74,7 +74,7 @@ impl Drop for EnvGuard {
     }
 }
 
-/// A sandbox with the fixture oh-my-bash tree installed and trusted, plus
+/// A sandbox with the fixture oh-my-bash tree installed, plus
 /// the representative preview themes written into the installed copy.
 struct PreviewSandbox {
     _guards: Vec<EnvGuard>,
@@ -133,7 +133,6 @@ impl PreviewSandbox {
             credential_guard: false,
         })
         .expect("fixture source add must succeed");
-        sources::trust_source("oh-my-bash").expect("fixture trust must succeed");
 
         PreviewSandbox {
             _guards,
@@ -268,7 +267,7 @@ fn hung_theme_is_killed_at_the_render_timeout() {
     );
 }
 
-/// Unknown/untrusted sources degrade with a nameable reason before any
+/// Unknown sources report a nameable reason before any
 /// child is spawned.
 #[test]
 fn unknown_source_degrades_without_spawning() {

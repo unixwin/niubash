@@ -93,13 +93,15 @@ fn cleared_lines_stay_cleared_in_the_session_list() {
         "the -c line itself was cleared too:\n{listing}"
     );
 
-    // The file face is unchanged (#569): seeds plus post-clear lines.
+    // The file face (#569, extended by #642): the session-end write
+    // removes every cleared line — the session's own lines AND the
+    // seeds it loaded at startup — and keeps the post-clear lines.
     // The `history > ...` line replaces the bare `history` of the #569
     // grid as the recorded post-clear list command.
     let contents = std::fs::read_to_string(home.join(".niubash_history")).unwrap();
     assert!(
-        contents.starts_with("SEEDONE\nSEEDTWO\n"),
-        "seeds must survive the session-end write:\n{contents}"
+        !contents.contains("SEEDONE") && !contents.contains("SEEDTWO"),
+        "cleared seeds must not survive the session-end write (niubash#642):\n{contents}"
     );
     assert!(
         !contents.contains("MARKER614") && !contents.contains("history -c"),

@@ -81,8 +81,6 @@ impl KeymapMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserBindingVia {
-    /// `config.toml`'s `[keymap]` rules (the K4 config slice).
-    ConfigToml,
     /// The `NIU_BINDKEYS` rc variable.
     NiuBindkeys,
 }
@@ -105,16 +103,13 @@ pub enum KeymapSource {
 }
 
 impl KeymapSource {
-    /// The bracket label used in listings: `[script]`, `[user: config.toml]`, …
+    /// The bracket label used in listings: `[script]`, `[user: NIU_BINDKEYS]`, …
     pub fn label(&self) -> String {
         match self {
             KeymapSource::Default => "default".to_string(),
             KeymapSource::HostBaseline => "host default".to_string(),
             KeymapSource::Bundle { .. } => "bundle".to_string(),
             KeymapSource::Script => "script".to_string(),
-            KeymapSource::User {
-                via: UserBindingVia::ConfigToml,
-            } => "user: config.toml".to_string(),
             KeymapSource::User {
                 via: UserBindingVia::NiuBindkeys,
             } => "user: NIU_BINDKEYS".to_string(),
@@ -264,28 +259,13 @@ impl DroppedBind {
         }
     }
 
-    /// The persistent-form fix for this record (DESIGN §8.1/§5.2).
+    /// The persistent-form fix for this record (DESIGN §8.1/§5.2):
+    /// GNU-shaped rules belong in the rc (`bind`) or `~/.inputrc`.
     pub fn persist_fix(&self) -> String {
-        match self.reason {
-            DroppedReason::ModeToggleFunction => {
-                format!("put `{}` in ~/.niubashrc", self.session_fix())
-            }
-            _ => format!(
-                "add {} to [keymap].bind in ~/.niubash/config.toml",
-                self.session_spec()
-            ),
-        }
-    }
-
-    /// The bind spec string the persistent form stores: the session
-    /// fix is a full `bind '<spec>'` call; the stored form is `<spec>`.
-    fn session_spec(&self) -> String {
-        let fix = self.session_fix();
-        let arg = fix.strip_prefix("bind ").unwrap_or(&fix);
-        arg.strip_prefix('\'')
-            .and_then(|rest| rest.strip_suffix('\''))
-            .map(|spec| spec.to_string())
-            .unwrap_or_else(|| arg.to_string())
+        format!(
+            "add `{}` to ~/.niubashrc (or ~/.inputrc)",
+            self.session_fix()
+        )
     }
 }
 
@@ -387,7 +367,7 @@ pub fn is_script_macro_text(text: &str) -> bool {
 pub fn dropped_reason(
     structural: Option<DroppedReason>,
     keyseq: &str,
-    kind: &rubash::shell::bind_registry::BindKind,
+    kind: &crate::bind_surface::EngineBindKind,
 ) -> DroppedReason {
     if let Some(reason) = structural {
         return reason;
@@ -399,24 +379,24 @@ pub fn dropped_reason(
         return DroppedReason::ResponseSequence;
     }
     match kind {
-        rubash::shell::bind_registry::BindKind::Function { .. } => DroppedReason::UnknownFunction,
+        crate::bind_surface::EngineBindKind::Function { .. } => DroppedReason::UnknownFunction,
         _ => DroppedReason::UnparseableKeyseq,
     }
 }
 
 /// Build a dropped record from an engine bind entry and its reason.
 pub fn dropped_bind_for(
-    entry: &rubash::shell::bind_registry::BindEntry,
+    entry: &crate::bind_surface::EngineBindEntry,
     reason: DroppedReason,
 ) -> DroppedBind {
     let (kind, target_name) = match &entry.kind {
-        rubash::shell::bind_registry::BindKind::Execute { command } => {
+        crate::bind_surface::EngineBindKind::Execute { command } => {
             (DroppedKind::Execute, Some(command.clone()))
         }
-        rubash::shell::bind_registry::BindKind::Function { name } => {
+        crate::bind_surface::EngineBindKind::Function { name } => {
             (DroppedKind::Function, Some(name.clone()))
         }
-        rubash::shell::bind_registry::BindKind::Macro { text } => {
+        crate::bind_surface::EngineBindKind::Macro { text } => {
             (DroppedKind::Macro, Some(text.clone()))
         }
     };
@@ -491,7 +471,7 @@ pub fn key_display(modifiers: KeyModifiers, code: KeyCode) -> String {
 /// the engine snapshot to the command they run.
 pub fn action_summary(
     event: &ReedlineEvent,
-    engine_bindings: &[rubash::shell::bind_registry::BindEntry],
+    engine_bindings: &[crate::bind_surface::EngineBindEntry],
 ) -> String {
     match event {
         ReedlineEvent::ExecuteHostCommand(payload) => {
@@ -501,7 +481,7 @@ pub fn action_summary(
             {
                 match engine_bindings.get(index) {
                     Some(entry) => match &entry.kind {
-                        rubash::shell::bind_registry::BindKind::Execute { command } => {
+                        crate::bind_surface::EngineBindKind::Execute { command } => {
                             format!("host command: {command}")
                         }
                         _ => format!("host command (bind #{index})"),
@@ -609,7 +589,7 @@ pub type KeymapStacks = Vec<((KeyModifiers, KeyCode), Vec<(KeymapSource, Reedlin
 pub fn entries_from_stacks(
     mode: KeymapMode,
     stacks: KeymapStacks,
-    engine_bindings: &[rubash::shell::bind_registry::BindEntry],
+    engine_bindings: &[crate::bind_surface::EngineBindEntry],
 ) -> Vec<KeymapEntry> {
     let mut entries: Vec<KeymapEntry> = stacks
         .into_iter()
@@ -685,10 +665,12 @@ pub fn startup_notices(new_dropped: &[DroppedBind]) -> Vec<String> {
     lines
 }
 
-/// Where the runtime state file lives: beside `config.toml` (the
-/// `NIU_CONFIG` override moves the directory with it).
+/// Where the runtime state file lives: `~/.niubash/state.toml`.
 pub fn state_path() -> PathBuf {
-    crate::config::user_config_path().with_file_name("state.toml")
+    crate::path_utils::shell_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".niubash")
+        .join("state.toml")
 }
 
 /// Load the persisted state; a missing or corrupt file is simply
@@ -736,7 +718,9 @@ pub fn publish_at(path: &std::path::Path, registry: KeymapRegistry) -> Vec<Strin
     if let Ok(mut slot) = CURRENT.lock() {
         *slot = Some(registry.clone());
     }
-    let reminded: HashSet<(String, DroppedReason, Option<String>)> = load_state_from(path)
+    let previous = load_state_from(path);
+    let reminded: HashSet<(String, DroppedReason, Option<String>)> = previous
+        .as_ref()
         .map(|state| {
             state
                 .dropped
@@ -868,26 +852,38 @@ fn dropped_listing_line(bind: &DroppedBind) -> String {
 pub fn how_to_change_block() -> String {
     let (style, source) = crate::config::resolve_completion_style();
     let style_origin = match source {
-        crate::config::CompletionStyleSource::Env => "NIU_COMPLETION_STYLE",
-        crate::config::CompletionStyleSource::ConfigFile => "config file",
-        crate::config::CompletionStyleSource::Default => "default",
+        crate::config::SettingSource::Env => "NIU_COMPLETION_STYLE",
+        crate::config::SettingSource::Inputrc => "inputrc",
+        crate::config::SettingSource::Default => "default",
+    };
+    // The interaction axis rides beside the style axis (niubash#631,
+    // design §7.5): the guide names both, each with its own origin and
+    // its own change command.
+    let (interaction, interaction_source) = crate::config::resolve_completion_interaction();
+    let interaction_origin = match interaction_source {
+        crate::config::SettingSource::Env => "NIU_COMPLETION_INTERACTION",
+        crate::config::SettingSource::Inputrc => "inputrc",
+        crate::config::SettingSource::Default => "default",
     };
     format!(
         "How to change bindings\n  \
          session only : bind '\"\\C-x\": <function>'  ·  bind -x '\"\\C-x\": <command>'\n  \
-         persistent   : add the same bind spec under [keymap] in ~/.niubash/config.toml,\n                 \
-         or drive shell-function widgets with NIU_BINDKEYS in ~/.niubashrc\n  \
-         completion   : style = {} ({}) — change with: \
-         niu config set completion.style <gnu|ide|column|list|inline>\n",
+         persistent   : put the same bind line in ~/.niubashrc (or ~/.inputrc)\n                 \
+         remove a key  : bind -r '\"\\C-t\"' in ~/.niubashrc (or ~/.inputrc)\n                 \
+         shell-function widgets can also ride NIU_BINDKEYS in ~/.niubashrc\n  \
+         completion   : completion.style = {} ({}) — set NIU_COMPLETION_STYLE in the environment or ~/.niubashrc\n                 \
+         interaction  : completion.interaction = {} ({}) — set NIU_COMPLETION_INTERACTION in the environment or ~/.niubashrc\n",
         style.as_str(),
-        style_origin
+        style_origin,
+        interaction.as_str(),
+        interaction_origin
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rubash::shell::bind_registry::{BindEntry, BindKind};
+    use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
 
     fn engine_entry(keyseq: &str, kind: BindKind) -> BindEntry {
         BindEntry {
@@ -1029,7 +1025,7 @@ mod tests {
         assert!(lines.len() >= 4, "{lines:?}");
         assert!(lines[1].contains("not applied"));
         assert!(lines[2].contains("fix (session): bind -x"));
-        assert!(lines[3].contains("[keymap].bind"));
+        assert!(lines[3].contains("~/.niubashrc"));
         // The topic pointer is built from the single constant.
         assert!(lines[4].contains(&format!("niu help {KEYMAP_HELP_TOPIC}")));
     }
@@ -1150,5 +1146,14 @@ mod tests {
         let rendered = render_keymap_help(Some(&state));
         assert!(rendered.contains("Not applied (1)"));
         assert!(rendered.contains("chained key sequence"));
+    }
+
+    #[test]
+    fn issue631_how_to_change_block_shows_both_completion_axes() {
+        let block = how_to_change_block();
+        assert!(block.contains("completion.style"), "{block}");
+        assert!(block.contains("completion.interaction"), "{block}");
+        assert!(block.contains("NIU_COMPLETION_INTERACTION"), "{block}");
+        assert!(block.contains("~/.inputrc"), "{block}");
     }
 }

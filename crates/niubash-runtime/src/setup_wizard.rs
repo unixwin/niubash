@@ -6,7 +6,7 @@
 //!
 //! Minimal external-first flow (niubash#145 owner decision 2026-09-28): the
 //! built-in theme/plugin stack is retired, so the wizard writes a clean rc
-//! and, when trusted external plugin-manager sources are installed, offers
+//! and, when external plugin-manager sources are installed, offers
 //! their themes (oh-my-bash) through the bash-compatible PS1 channel. Every
 //! question defaults to "no change", nothing is installed without an
 //! explicit pick. Presets stay available non-interactively via
@@ -479,6 +479,9 @@ pub struct WizardConfig {
     pub theme_source_id: Option<String>,
     pub cwd_style: String,
     pub completion_style: String,
+    /// The Q2.7 pick (niubash#631): the `NIU_COMPLETION_INTERACTION`
+    /// value; empty means no override, like `completion_style`.
+    pub completion_interaction: String,
     /// Extra `alias name='cmd'` lines appended to the generated rc.
     pub aliases: Vec<(String, String)>,
     /// Opt-in (default off): append the standard carapace-bin integration
@@ -505,9 +508,9 @@ struct ThemeGalleryEntry {
     pub adapter: String,
 }
 
-/// The theme gallery: themes from trusted external plugin-manager sources
-/// (oh-my-bash), sorted by name. The built-in/user TOML theme layers are
-/// retired with the plugin stack (niubash#145).
+/// The theme gallery: themes from installed external plugin-manager
+/// sources (oh-my-bash), sorted by name. The built-in/user TOML theme
+/// layers are retired with the plugin stack (niubash#145).
 #[derive(Debug, Clone)]
 struct ThemeGallery {
     entries: Vec<ThemeGalleryEntry>,
@@ -626,7 +629,8 @@ fn ask_theme_question(
             }
         }
     };
-    let hint = t.tr("  │  external themes from your trusted plugin sources; Skip changes nothing");
+    let hint =
+        t.tr("  │  external themes from your installed plugin sources; Skip changes nothing");
     let idx = io.choice_preview(
         t.tr("  \u{1f3a8}  Pick a theme"),
         0,
@@ -1235,8 +1239,8 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // --- Q2.5: plugin collection (only when the ecosystem is empty) ---
     // LazyVim-style progressive disclosure (study §10.2): first run offers
     // one bundled starting point; everything else stays behind `niu plugin
-    // recipe list` / `niu plugin ui`. Applying only installs (untrusted);
-    // trust and activation stay explicit user verbs.
+    // recipe list` / `niu plugin ui`. Applying only installs;
+    // activation stays an explicit user verb.
     let collection_pick = ask_plugin_collection(&mut io, &t);
 
     // --- Q2.6: TAB completion shape (2026-10-12 discovery surface) ---
@@ -1249,6 +1253,20 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // differs — never forced over an existing configuration).
     let current_completion_style = crate::config::resolve_completion_style().0;
     let completion_style_pick = ask!(ask_completion_style(&mut io, &t, current_completion_style));
+
+    // --- Q2.7: TAB completion interaction (niubash#631) ---
+    // The interaction axis joined the style axis in 1.5.0 with a new
+    // default (cycle), so it gets the same discovery discipline as
+    // Q2.6: asked on first install AND on every `niu setup` re-run,
+    // the current effective value pre-highlighted, written only when
+    // the pick differs. The question names the axis in one line apart
+    // from Q2.6's shape question, per the ruling.
+    let current_completion_interaction = crate::config::resolve_completion_interaction().0;
+    let completion_interaction_pick = ask!(ask_completion_interaction(
+        &mut io,
+        &t,
+        current_completion_interaction
+    ));
 
     // --- Q3: niu-git, offered once (never auto-installed, never nagged) ---
     // Windows-only question: niu-git is Windows-native git, and Linux/macOS
@@ -1285,6 +1303,9 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // untouched so the runtime default can keep evolving.
     if completion_style_pick != current_completion_style.as_str() {
         cfg.completion_style = completion_style_pick;
+    }
+    if completion_interaction_pick != current_completion_interaction.as_str() {
+        cfg.completion_interaction = completion_interaction_pick;
     }
     cfg.external_completion_snippet = external_completions;
     print_config_summary(
@@ -1326,7 +1347,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     }
 
     // The collection apply lands after the rc write: it installs sources
-    // (untrusted) and prints executable-tool recommendations, collecting
+    // and prints executable-tool recommendations, collecting
     // per-entry failures the way lazy.nvim collects spec errors (study
     // §10.1) — a failed entry never fails the wizard run.
     let collection_journal = collection_pick
@@ -1411,7 +1432,7 @@ fn apply_plugin_collection(name: &str, lang: Lang) -> Option<CollectionJournal> 
                 println!(
                     "  {}  {}",
                     lang.tr("plugin collection"),
-                    lang.tr("installed — review with `niu plugin trust <id>`")
+                    lang.tr("installed — themes and assets are listed by `niu plugin list`")
                 );
             } else {
                 println!(
@@ -1490,23 +1511,20 @@ fn adopt_installed_sources_into_spec(lang: Lang) {
 //
 // After the wizard applies a collection that installs theme-bearing
 // sources, the SAME run offers the theme gallery built from the fresh
-// source — one run, out-of-the-box. Trust stays explicit: the gallery
-// lists trusted sources only, so the flow first asks the trust question
-// (the wizard question IS the trust verb, same checksum tier as
-// `niu plugin trust <id>`); declined → the exact one-liner to run later,
-// nothing changes. The pick then goes through the same ThemePick →
-// build_config → rc path as a Q1 pick, so the journal/undo contract
-// covers it identically.
+// source — one run, out-of-the-box. The pick then goes through the same
+// ThemePick → build_config → rc path as a Q1 pick, so the journal/undo
+// contract covers it identically (niubash#647: there is no trust step
+// anywhere in this flow — installed sources list their themes directly).
 
-/// The freshly installed sources that can bear themes: untrusted, healthy,
-/// and their adapter lists at least one theme asset (`asset_kinds` carries
-/// `SourceAssetKind::as_str()` values — "theme"). Only these are named by
-/// the trust question; bash-completion and friends stay out of it.
-fn theme_bearing_untrusted_sources(installed: &[String]) -> Vec<String> {
+/// The freshly installed sources that can bear themes: tree present, and
+/// their adapter lists at least one theme asset (`asset_kinds` carries
+/// `SourceAssetKind::as_str()` values — "theme"). Only these trigger the
+/// post-install gallery offer; bash-completion and friends stay out of it.
+fn theme_bearing_installed_sources(installed: &[String]) -> Vec<String> {
     crate::plugins::sources::list_sources()
         .into_iter()
         .filter(|status| installed.contains(&status.record.id))
-        .filter(|status| !status.degraded && !status.record.trusted)
+        .filter(|status| !status.missing)
         .filter(|status| status.asset_kinds.iter().any(|kind| kind == "theme"))
         .map(|status| status.record.id)
         .collect()
@@ -1518,20 +1536,20 @@ fn post_install_theme_candidates(collection: Option<&CollectionJournal>) -> Vec<
     let Some(collection) = collection else {
         return Vec::new();
     };
-    theme_bearing_untrusted_sources(&collection.sources)
+    theme_bearing_installed_sources(&collection.sources)
 }
 
-/// Run the post-install flow: the trust question, then (when trusted) the
-/// theme gallery built from the freshly installed source. On a pick the
-/// rc is rewritten through the same [`write_rc_and_mark_done`] path as a
-/// Q1 pick (the intermediate backup of the theme-less rc is additive
-/// history; the journal keeps pointing at the pre-run backup) and the
-/// caller folds the returned `(name, source_id)` into the journal.
+/// Run the post-install flow: the theme gallery built from the freshly
+/// installed sources. On a pick the rc is rewritten through the same
+/// [`write_rc_and_mark_done`] path as a Q1 pick (the intermediate backup
+/// of the theme-less rc is additive history; the journal keeps pointing
+/// at the pre-run backup) and the caller folds the returned
+/// `(name, source_id)` into the journal.
 ///
-/// Returns `None` when nothing changed (declined, skipped, trust failed,
-/// no gallery). Ctrl-C after Apply does NOT cancel the wizard: state was
-/// already written, so the run still lands on the finish screen with its
-/// undo receipts — the flow prints a skip note instead.
+/// Returns `None` when nothing changed (skipped, no gallery). Ctrl-C
+/// after Apply does NOT cancel the wizard: state was already written, so
+/// the run still lands on the finish screen with its undo receipts — the
+/// flow prints a skip note instead.
 fn run_post_install_theme_pick(
     io: &mut WizardIo,
     lang: Lang,
@@ -1540,86 +1558,15 @@ fn run_post_install_theme_pick(
     cfg: &mut WizardConfig,
 ) -> Option<(String, String)> {
     let t = lang;
-    let options = [
-        format!(
-            "{}  {}",
-            pad_display(t.tr("Skip"), 14),
-            t.tr("default — stay untrusted; nothing changes")
-        ),
-        format!(
-            "{}  {}",
-            pad_display(t.tr("Trust now"), 14),
-            fill(
-                t.tr("verify the checksum, then list themes from {}"),
-                &[&fresh_ids.join(", ")]
-            )
-        ),
-    ];
-    let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
-    let label = if fresh_ids.len() == 1 {
-        fill(
-            t.tr("  \u{1f510}  Trust '{}' now to list its themes?"),
-            &[&fresh_ids[0]],
-        )
-    } else {
-        t.tr("  \u{1f510}  Trust the freshly installed sources now to list their themes?")
-            .to_string()
-    };
-    let idx = match io.choice(
-        &label,
-        0,
-        &option_refs,
-        t.tr("  |  this question is the `niu plugin trust` verb; Skip leaves the source untrusted"),
-    ) {
-        Some(idx) => idx,
-        None => {
-            println!();
-            println!(
-                "  \u{23ed}\u{fe0f}  {}",
-                t.tr("Theme pick skipped — this run's summary follows")
-            );
-            return None;
-        }
-    };
-
-    if idx == 0 {
-        print_post_install_trust_hint(&t, fresh_ids);
-        return None;
-    }
-
-    // Trust: `trust_source` re-verifies the tree checksum itself and
-    // refuses on mismatch/degraded (the same gate `niu plugin trust`
-    // runs), so a failure here names its repair verb and nothing flips.
-    let mut trusted: Vec<String> = Vec::new();
-    for id in fresh_ids {
-        match crate::plugins::sources::trust_source(id) {
-            Ok(record) => {
-                println!(
-                    "  \u{2705}  {}",
-                    fill(
-                        t.tr("trusted '{}' — its themes join the catalog"),
-                        &[&record.id]
-                    )
-                );
-                trusted.push(record.id);
-            }
-            Err(err) => println!(
-                "  \u{26a0}\u{fe0f}  {}",
-                fill(t.tr("could not trust '{}': {}"), &[id, &err])
-            ),
-        }
-    }
-    if trusted.is_empty() {
-        print_post_install_trust_hint(&t, fresh_ids);
-        return None;
-    }
-
     let gallery = theme_gallery();
     if gallery.entries.is_empty() {
         println!();
         println!(
             "  {}",
-            t.tr("no themes appeared after trust — pick later with `niu plugin enable <theme>`")
+            fill(
+                t.tr("no themes appeared from {} — pick later with `niu plugin enable <theme>`"),
+                &[&fresh_ids.join(", ")]
+            )
         );
         return None;
     }
@@ -1653,23 +1600,6 @@ fn run_post_install_theme_pick(
             None
         }
     }
-}
-
-/// The exact one-liner to run later when the trust question is declined
-/// (or fails): trust the source, then re-run the wizard or enable a theme.
-fn print_post_install_trust_hint(t: &Lang, ids: &[String]) {
-    println!();
-    println!(
-        "  \u{21a9}\u{fe0f}  {}",
-        t.tr("Theme pick skipped — trust later, then pick:")
-    );
-    for id in ids {
-        println!("  \u{2502}    niu plugin trust {id}");
-    }
-    println!(
-        "  \u{2502}    {}",
-        t.tr("then re-run `niu setup` (or `niu plugin enable <theme>`)")
-    );
 }
 
 /// Short human description of a theme pick ("classic", "robbyrussell ·
@@ -1888,7 +1818,7 @@ fn ask_plugin_collection(io: &mut WizardIo, t: &Lang) -> Option<Option<String>> 
         t.tr("  \u{1f9f0}  Plugin collection?"),
         0,
         &option_refs,
-        t.tr("  |  installs stay untrusted until `niu plugin trust`; Skip changes nothing"),
+        t.tr("  |  installs only — activation stays an explicit verb; Skip changes nothing"),
     )?; // cancelled
     let name = match idx {
         1 => Some("minimal"),
@@ -1951,7 +1881,50 @@ fn ask_completion_style(
         t.tr("  \u{2328}\u{fe0f}  TAB completion style?"),
         default_idx,
         &option_refs,
-        t.tr("  |  change any time with `niu config set completion.style <name>` or NIU_COMPLETION_STYLE"),
+        t.tr("  |  change any time with `export NIU_COMPLETION_STYLE=<name>` (environment or ~/.niubashrc)"),
+    )?; // cancelled
+    Some(entries[idx].1.to_string())
+}
+
+/// The TAB completion interaction question (niubash#631, Q2.7 — asked
+/// immediately after Q2.6). Where Q2.6 asks how the candidates *look*,
+/// this asks what TAB *does* with the line; each entry is described by
+/// the observable TAB/Enter/Esc behavior so the axis is legible in one
+/// line, distinct from the style question. The user's current
+/// effective interaction is pre-highlighted, exactly like Q2.6.
+/// `None` = Ctrl-C.
+fn ask_completion_interaction(
+    io: &mut WizardIo,
+    t: &Lang,
+    current: crate::config::CompletionInteraction,
+) -> Option<String> {
+    use crate::config::CompletionInteraction;
+    let entries = [
+        (
+            CompletionInteraction::Cycle,
+            "cycle",
+            t.tr("default — TAB cycles candidates into the line, Enter accepts and runs, Esc rolls back"),
+        ),
+        (
+            CompletionInteraction::Insert,
+            "insert",
+            t.tr("TAB completes the prefix and opens the menu, Enter confirms the pick, Esc keeps the text"),
+        ),
+    ];
+    let default_idx = entries
+        .iter()
+        .position(|(interaction, _, _)| *interaction == current)
+        .unwrap_or(0);
+    let options: Vec<String> = entries
+        .iter()
+        .map(|(_, name, description)| format!("{}  {}", pad_display(name, 10), description))
+        .collect();
+    let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let idx = io.choice(
+        t.tr("  \u{2328}\u{fe0f}  TAB completion interaction?"),
+        default_idx,
+        &option_refs,
+        t.tr("  |  change any time with `export NIU_COMPLETION_INTERACTION=<name>` (environment or ~/.niubashrc)"),
     )?; // cancelled
     Some(entries[idx].1.to_string())
 }
@@ -2157,7 +2130,7 @@ fn print_config_summary(
             Some(name) => format!(
                 "{} ({})",
                 name,
-                t.tr("installs stay untrusted until reviewed")
+                t.tr("installed; activation stays an explicit verb")
             ),
             None => t.tr("unchanged").to_string(),
         },
@@ -2387,14 +2360,20 @@ fn generate_rc(cfg: &WizardConfig) -> String {
     let mut header = String::new();
     if !cfg.cwd_style.is_empty() {
         header.push_str(&format!(
-            "NIU_PROMPT_CWD_STYLE={}\n",
+            "export NIU_PROMPT_CWD_STYLE={}\n",
             shell_quote(cfg.cwd_style.as_str())
         ));
     }
     if !cfg.completion_style.is_empty() {
         header.push_str(&format!(
-            "NIU_COMPLETION_STYLE={}\n",
+            "export NIU_COMPLETION_STYLE={}\n",
             shell_quote(cfg.completion_style.as_str())
+        ));
+    }
+    if !cfg.completion_interaction.is_empty() {
+        header.push_str(&format!(
+            "export NIU_COMPLETION_INTERACTION={}\n",
+            shell_quote(cfg.completion_interaction.as_str())
         ));
     }
     let alias_block = if cfg.aliases.is_empty() {
@@ -2467,7 +2446,7 @@ unset __niubash_home_drive __niubash_home_rest
 #   niu plugin discover          see external sources & themes (read-only)
 #   niu plugin add <target>      declare + install a plugin source
 #   niu plugin sync              reconcile ~/.niubash/plugins.toml with reality
-#   niu plugin source trust      review and activate a source's assets
+#   niu plugin enable <target>   activate a source's assets
 #   niu plugin migrate-rc        review legacy managed blocks (read-only;
 #                                niu never edits this file)
 #   niu setup                    re-run this guide
@@ -2643,8 +2622,8 @@ fn zh(en: &str) -> Option<&'static str> {
         "  \u{1f3a8}  Pick a theme" => "  \u{1f3a8}  选择主题",
         "  │  external themes come first; entries marked 'built-in fallback' are the safe built-ins\n  \u{2502}  Skip changes nothing" =>
             "  \u{2502}  外部主题排在前面；标注“内置保底”的是安全内置项\n  \u{2502}  跳过则不做任何改动",
-        "  │  external themes from your trusted plugin sources; Skip changes nothing" =>
-            "  \u{2502}  来自你已信任插件源的外部主题；跳过则不做任何改动",
+        "  │  external themes from your installed plugin sources; Skip changes nothing" =>
+            "  \u{2502}  来自你已安装插件源的外部主题；跳过则不做任何改动",
         "No external themes installed yet - keeping the default look." =>
             "尚未安装外部主题 —— 保持默认外观。",
         "Browse the ecosystem any time with `niu plugin discover` (read-only)." =>
@@ -2660,8 +2639,8 @@ fn zh(en: &str) -> Option<&'static str> {
         "both frameworks + hooks + curated bash plugins; fzf/starship \
                  are suggested installs (niu downloads nothing)" =>
             "双框架 + 钩子 + 精选 bash 插件；fzf/starship 仅为安装建议（niu 不下载任何东西）",
-        "  |  installs stay untrusted until `niu plugin trust`; Skip changes nothing" =>
-            "  |  安装后保持未信任，待 `niu plugin trust` 审阅；跳过则不做任何改动",
+        "  |  installs only — activation stays an explicit verb; Skip changes nothing" =>
+            "  |  只安装 —— 启用仍是显式动作；跳过则不做任何改动",
 
         // External completion providers question (Q4, opt-in)
         "  \u{1f50c}  External completion providers (carapace-bin)?" =>
@@ -2674,25 +2653,13 @@ fn zh(en: &str) -> Option<&'static str> {
             "  \u{2502}  只写入一段 rc 片段 —— 任何说 bash completion 协议的工具都能以同样方式接入",
         "carapace rc snippet" => "carapace rc 片段",
 
-        // Post-install theme pick (owner ruling 2026-10-03)
-        "Trust now" => "现在信任",
-        "default — stay untrusted; nothing changes" => "默认 —— 保持未信任，不做任何改动",
-        "verify the checksum, then list themes from {}" => "校验 checksum，然后列出 {} 的主题",
-        "  \u{1f510}  Trust '{}' now to list its themes?" =>
-            "  \u{1f510}  现在信任 '{}' 以列出它的主题？",
-        "  \u{1f510}  Trust the freshly installed sources now to list their themes?" =>
-            "  \u{1f510}  现在信任新安装的源以列出它们的主题？",
-        "  |  this question is the `niu plugin trust` verb; Skip leaves the source untrusted" =>
-            "  |  这一问就是 `niu plugin trust` 动作本身；跳过则保持未信任",
+        // Post-install theme pick (owner ruling 2026-10-03; niubash#647
+        // removed the trust question — installed sources list themes
+        // directly)
         "Theme pick skipped — this run's summary follows" =>
             "已跳过主题选择 —— 接下来显示本次运行的摘要",
-        "trusted '{}' — its themes join the catalog" => "已信任 '{}' —— 其主题加入目录",
-        "could not trust '{}': {}" => "无法信任 '{}'：{}",
-        "no themes appeared after trust — pick later with `niu plugin enable <theme>`" =>
-            "信任后没有出现主题 —— 以后用 `niu plugin enable <主题>` 选择",
-        "Theme pick skipped — trust later, then pick:" => "已跳过主题选择 —— 以后信任后再选：",
-        "then re-run `niu setup` (or `niu plugin enable <theme>`)" =>
-            "然后重新运行 `niu setup`（或 `niu plugin enable <主题>`）",
+        "no themes appeared from {} — pick later with `niu plugin enable <theme>`" =>
+            "{} 没有出现主题 —— 以后用 `niu plugin enable <主题>` 选择",
         "current look unchanged" => "当前外观保持不变",
         "keep" => "保留",
         "default" => "默认",
@@ -2736,10 +2703,10 @@ fn zh(en: &str) -> Option<&'static str> {
         "Summary" => "配置摘要",
         "theme" => "主题",
         "plugins" => "插件",
-        "installs stay untrusted until reviewed" => "安装后保持未信任，待审阅",
+        "installed; activation stays an explicit verb" => "已安装；启用仍是显式动作",
         "plugin collection" => "插件合集",
-        "installed — review with `niu plugin trust <id>`" =>
-            "已安装 —— 用 `niu plugin trust <id>` 审阅启用",
+        "installed — themes and assets are listed by `niu plugin list`" =>
+            "已安装 —— 主题与资产见 `niu plugin list`",
         "plugin spec written — {} source(s) declared; `niu plugin sync` keeps them in sync" =>
             "插件规格已写入 —— 已声明 {} 个源；`niu plugin sync` 保持同步",
         "could not write the plugin spec" => "无法写入插件规格",
@@ -2948,13 +2915,13 @@ mod tests {
         let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&temp));
         let _userprofile = EnvGuard::unset("USERPROFILE");
         let ignored = "OSH_THEME='ignored'\n";
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             std::fs::write(temp.join(name), ignored).unwrap();
         }
         assert!(is_first_run());
         assert!(!temp.join(PRIMARY_RC_FILE).exists());
         assert!(!temp.join(".niubash").exists());
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             assert_eq!(std::fs::read_to_string(temp.join(name)).unwrap(), ignored);
         }
         std::fs::write(temp.join(PRIMARY_RC_FILE), "").unwrap();
@@ -3276,6 +3243,96 @@ mod tests {
         assert!(rc.contains("NIU_COMPLETION_STYLE='ide'"), "{rc}");
     }
 
+    /// The interaction step (niubash#631, Q2.7) pre-highlights the
+    /// user's current effective interaction exactly like Q2.6 does for
+    /// the style: Enter means "no change", the other row is a
+    /// deliberate move, and a non-interactive run answers the current
+    /// value so a piped `niu setup` never flips the axis.
+    #[test]
+    fn issue631_completion_interaction_step_preselects_the_effective_interaction() {
+        use crate::config::CompletionInteraction;
+        // Row 0 is cycle: with current=cycle, row 0 keeps it.
+        let mut io = WizardIo::scripted(&[0]);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).unwrap();
+        assert_eq!(pick, "cycle");
+        // With current=insert, row 0 is the user explicitly moving to cycle.
+        let mut io = WizardIo::scripted(&[0]);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Insert).unwrap();
+        assert_eq!(pick, "cycle");
+        // Row 1 is insert.
+        let mut io = WizardIo::scripted(&[1]);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).unwrap();
+        assert_eq!(pick, "insert");
+        // Non-interactive io answers the default — the current value.
+        let mut io = WizardIo::new(false);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Insert).unwrap();
+        assert_eq!(pick, "insert");
+        // Ctrl-C cancels.
+        let mut io = WizardIo::scripted(&[usize::MAX]);
+        assert!(
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).is_none()
+        );
+    }
+
+    /// The Q2.7 write path is the same rule as Q2.6's: a differing pick
+    /// lands in the rc as an `export NIU_COMPLETION_INTERACTION=...` line
+    /// (the one env-layer source); keeping the effective value writes
+    /// nothing.
+    #[test]
+    fn issue631_completion_interaction_pick_lands_in_the_rc_only_when_it_differs() {
+        let mut cfg = build_config(&ThemePick::Keep);
+        assert!(
+            cfg.completion_interaction.is_empty(),
+            "a fresh wizard config carries no interaction override"
+        );
+        assert!(
+            !generate_rc(&cfg).contains("NIU_COMPLETION_INTERACTION="),
+            "no rc line without an override: {}",
+            generate_rc(&cfg)
+        );
+
+        // The user moved off the effective interaction: the rc line appears.
+        cfg.completion_interaction = "insert".into();
+        let rc = generate_rc(&cfg);
+        assert!(rc.contains("NIU_COMPLETION_INTERACTION='insert'"), "{rc}");
+    }
+
+    /// The rc line the wizard writes is read back by the interaction
+    /// resolver as an env-layer value (DESIGN §9 K5's readback pin):
+    /// wizard write → rc → shell env → resolve, one chain.
+    #[test]
+    fn issue631_wizard_rc_line_reads_back_through_the_resolver_as_env() {
+        use crate::config::{resolve_completion_interaction, CompletionInteraction, SettingSource};
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous_config = std::env::var_os("NIU_CONFIG");
+        let previous_interaction = std::env::var_os("NIU_COMPLETION_INTERACTION");
+        // No config file in play: only the wizard's env line speaks.
+        std::env::set_var(
+            "NIU_CONFIG",
+            std::env::temp_dir().join("niu-wizard-readback-absent-config.toml"),
+        );
+        std::env::set_var("NIU_COMPLETION_INTERACTION", "insert");
+        let resolved = resolve_completion_interaction();
+        match previous_config {
+            Some(value) => std::env::set_var("NIU_CONFIG", value),
+            None => std::env::remove_var("NIU_CONFIG"),
+        }
+        match previous_interaction {
+            Some(value) => std::env::set_var("NIU_COMPLETION_INTERACTION", value),
+            None => std::env::remove_var("NIU_COMPLETION_INTERACTION"),
+        }
+        assert_eq!(
+            resolved,
+            (CompletionInteraction::Insert, SettingSource::Env)
+        );
+    }
+
     #[test]
     fn generated_rc_is_clean_of_the_retired_stack() {
         let rc = generate_rc(&clean_cfg());
@@ -3418,11 +3475,12 @@ mod tests {
             "  \u{1f9f0}  Plugin collection?",
             "default — browse later with `niu plugin recipe list`",
             "plugin collection",
-            "  \u{1f510}  Trust '{}' now to list its themes?",
-            "Trust now",
-            "default — stay untrusted; nothing changes",
-            "Theme pick skipped — trust later, then pick:",
-            "then re-run `niu setup` (or `niu plugin enable <theme>`)",
+            "no themes appeared from {} — pick later with `niu plugin enable <theme>`",
+            "Theme pick skipped — this run's summary follows",
+            "installed — themes and assets are listed by `niu plugin list`",
+            "  |  installs only — activation stays an explicit verb; Skip changes nothing",
+            "installed; activation stays an explicit verb",
+            "  │  external themes from your installed plugin sources; Skip changes nothing",
             "plugin spec written — {} source(s) declared; `niu plugin sync` keeps them in sync",
             "could not write the plugin spec",
             "Collection entries failed — retry with:",
@@ -3449,7 +3507,7 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/sources/oh-my-bash")
     }
 
-    fn install_trusted_omb_fixture(root: &std::path::Path) {
+    fn install_omb_fixture_at(root: &std::path::Path) {
         crate::plugins::sources::add_source(crate::plugins::sources::SourceInstallRequest {
             adapter: None,
             origin: omb_fixture_path().to_string_lossy().into_owned(),
@@ -3462,17 +3520,16 @@ mod tests {
             credential_guard: false,
         })
         .expect("fixture source add must succeed");
-        crate::plugins::sources::trust_source("oh-my-bash").expect("fixture trust must succeed");
         let _ = root;
     }
 
     #[test]
-    fn theme_gallery_lists_trusted_external_sources_only() {
+    fn theme_gallery_lists_installed_external_sources() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = unique_temp_dir("wizard-gallery");
         let root = temp.join("sources");
         let _sources = EnvGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root.to_string_lossy());
-        install_trusted_omb_fixture(&root);
+        install_omb_fixture_at(&root);
 
         let gallery = theme_gallery();
         assert!(!gallery.entries.is_empty(), "{gallery:?}");
@@ -3509,7 +3566,7 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/sources/bash-it")
     }
 
-    fn install_trusted_bash_it_fixture(root: &std::path::Path) {
+    fn install_bash_it_fixture_at(root: &std::path::Path) {
         let _ = root;
         crate::plugins::sources::add_source(crate::plugins::sources::SourceInstallRequest {
             adapter: None,
@@ -3523,7 +3580,6 @@ mod tests {
             credential_guard: false,
         })
         .expect("bash-it fixture source add must succeed");
-        crate::plugins::sources::trust_source("bash-it").expect("bash-it fixture trust");
     }
 
     /// J5 gap (journey run-13, 2026-10-04), both halves in one fixture pass
@@ -3553,8 +3609,8 @@ mod tests {
         let _userprofile = EnvGuard::unset("USERPROFILE");
         // Register bash-it FIRST on purpose: the old bug kept whichever
         // source happened to list first, so the hostile order is the proof.
-        install_trusted_bash_it_fixture(&root);
-        install_trusted_omb_fixture(&root);
+        install_bash_it_fixture_at(&root);
+        install_omb_fixture_at(&root);
 
         // (1) The gallery resolves the shared name once, to oh-my-bash.
         let gallery = theme_gallery();
@@ -3632,8 +3688,8 @@ mod tests {
         );
         // Register bash-it FIRST: the hostile order is the proof (the old
         // bug flipped the rc toward whichever source the spec favored).
-        install_trusted_bash_it_fixture(&root);
-        install_trusted_omb_fixture(&root);
+        install_bash_it_fixture_at(&root);
+        install_omb_fixture_at(&root);
         // One ranking authority for shared theme names — the gallery dedupe
         // and the spec-layer reconciliation must never disagree.
         assert_eq!(
@@ -3731,7 +3787,7 @@ mod tests {
             "NIU_PLUGIN_DISTROS_ROOT",
             &temp.join("distros").to_string_lossy(),
         );
-        install_trusted_omb_fixture(&temp.join("sources"));
+        install_omb_fixture_at(&temp.join("sources"));
 
         let source = temp.join("collection-src");
         std::fs::create_dir_all(&source).unwrap();
@@ -3844,7 +3900,7 @@ mod tests {
         let temp = unique_temp_dir("wizard-omb-theme");
         let root = temp.join("sources");
         let _sources = EnvGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root.to_string_lossy());
-        install_trusted_omb_fixture(&root);
+        install_omb_fixture_at(&root);
 
         let cfg = WizardConfig {
             theme: "robbyrussell".to_string(),
@@ -3879,8 +3935,8 @@ mod tests {
     }
 
     /// The state `apply_plugin_collection` leaves behind, without any
-    /// network: the fixture source installed UNTRUSTED from a local path.
-    fn install_untrusted_omb_fixture() {
+    /// network: the fixture source installed from a local path.
+    fn install_omb_fixture() {
         crate::plugins::sources::add_source(crate::plugins::sources::SourceInstallRequest {
             adapter: None,
             origin: omb_fixture_path().to_string_lossy().into_owned(),
@@ -3895,19 +3951,12 @@ mod tests {
         .expect("fixture source add must succeed");
     }
 
-    fn source_is_trusted(id: &str) -> bool {
-        crate::plugins::sources::read_source_registry()
-            .into_iter()
-            .find(|record| record.id == id)
-            .map(|record| record.trusted)
-            .unwrap_or(false)
-    }
-
-    /// (a) recommended + trust-yes + theme picked: the same run trusts the
-    /// fresh source and records the pick — journal/undo cover it exactly
-    /// like a Q1 pick; the rc keeps zero activation content (niubash#359).
+    /// (a) recommended + theme picked: the same run records the pick —
+    /// journal/undo cover it exactly like a Q1 pick; the rc keeps zero
+    /// activation content (niubash#359). niubash#647: there is no trust
+    /// question in front of the gallery any more.
     #[test]
-    fn post_install_pick_trusts_then_records_the_theme_pick() {
+    fn post_install_pick_records_the_theme_pick() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = unique_temp_dir("wizard-post-install");
         let root = temp.join("sources");
@@ -3916,7 +3965,7 @@ mod tests {
         let _sources = EnvGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root.to_string_lossy());
         let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&home));
         let _userprofile = EnvGuard::unset("USERPROFILE");
-        install_untrusted_omb_fixture();
+        install_omb_fixture();
 
         // Post-apply wizard state: rc already written theme-less, cfg from
         // build_config(Keep), collection journal naming the fresh source.
@@ -3930,10 +3979,10 @@ mod tests {
         }));
         assert_eq!(candidates, vec!["oh-my-bash".to_string()], "{candidates:?}");
 
-        // Answers (0-based indices, like every choice_inner return): Trust
-        // now (1), then the gallery's first theme — the fixture lists
-        // agnoster + robbyrussell sorted, so Skip=0, agnoster=1.
-        let mut io = WizardIo::scripted(&[1, 1]);
+        // Answers (0-based indices, like every choice_inner return): the
+        // gallery's first theme — the fixture lists agnoster +
+        // robbyrussell sorted, so Skip=0, agnoster=1.
+        let mut io = WizardIo::scripted(&[1]);
         let picked = run_post_install_theme_pick(&mut io, Lang::En, &home, &candidates, &mut cfg);
         assert_eq!(
             picked,
@@ -3942,10 +3991,6 @@ mod tests {
         );
         assert_eq!(cfg.theme, "agnoster");
         assert_eq!(cfg.theme_source_id.as_deref(), Some("oh-my-bash"));
-        assert!(
-            source_is_trusted("oh-my-bash"),
-            "the pick must have trusted it"
-        );
 
         // The rc on disk stays EXACTLY the Apply-time bytes (niubash#359
         // create-only): the post-install pick must not rewrite an existing
@@ -4018,11 +4063,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
-    /// (b) trust declined: no theme question at all, the hint is the only
-    /// output, and the rc/registry stay exactly as the collection apply
-    /// left them.
+    /// (b) gallery Skip: the pick is declined at the gallery itself, and
+    /// the rc/registry stay exactly as the collection apply left them.
     #[test]
-    fn post_install_declined_trust_changes_nothing() {
+    fn post_install_gallery_skip_changes_nothing() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = unique_temp_dir("wizard-post-decline");
         let root = temp.join("sources");
@@ -4031,7 +4075,7 @@ mod tests {
         let _sources = EnvGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root.to_string_lossy());
         let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&home));
         let _userprofile = EnvGuard::unset("USERPROFILE");
-        install_untrusted_omb_fixture();
+        install_omb_fixture();
 
         let mut cfg = build_config(&ThemePick::Keep);
         std::fs::write(home.join(PRIMARY_RC_FILE), generate_rc(&cfg)).unwrap();
@@ -4049,22 +4093,23 @@ mod tests {
         assert!(picked.is_none(), "{picked:?}");
         assert!(cfg.theme.is_empty());
         assert!(cfg.theme_source_id.is_none());
-        assert!(!source_is_trusted("oh-my-bash"));
         assert_eq!(
             std::fs::read_to_string(home.join(PRIMARY_RC_FILE)).unwrap(),
             rc_before,
-            "the rc must stay byte-identical when trust is declined"
+            "the rc must stay byte-identical when the pick is skipped"
         );
-        // Exactly one question was asked (the trust one) — no gallery.
+        // Exactly one question was asked (the gallery).
         #[cfg(test)]
-        assert!(io.script.is_empty(), "the theme question must not appear");
+        assert!(
+            io.script.is_empty(),
+            "exactly the gallery question is asked"
+        );
 
         // The non-interactive default is the same Skip.
         let mut io = WizardIo::new(false);
         assert!(
             run_post_install_theme_pick(&mut io, Lang::En, &home, &candidates, &mut cfg).is_none()
         );
-        assert!(!source_is_trusted("oh-my-bash"));
 
         // Ctrl-C after Apply skips the pick too — state is already written,
         // so the flow must return (the finish screen follows), not cancel.
@@ -4082,7 +4127,7 @@ mod tests {
     }
 
     /// F4 (1.3.1): a collection apply ends SPEC-MANAGED. The journey state
-    /// after the post-install theme pick — trusted oh-my-bash with the
+    /// after the post-install theme pick — oh-my-bash with the
     /// guarded theme block in the rc, no spec — is declared by the same
     /// adoption `niu plugin sync --adopt` runs, so a fresh wizard user
     /// never lands in the 1.3.0 nag state and no migration verb is needed.
@@ -4101,12 +4146,10 @@ mod tests {
             &home.join(".niubash/plugins.toml").to_string_lossy(),
         );
 
-        // The journey's end state: collection installed the fixture
-        // (untrusted), the trust question trusted it, the theme pick was
-        // recorded (niubash#359: the pick lands in the spec, the rc gets
-        // only the note).
-        install_untrusted_omb_fixture();
-        crate::plugins::sources::trust_source("oh-my-bash").expect("fixture trust");
+        // The journey's end state: collection installed the fixture,
+        // the theme pick was recorded (niubash#359: the pick lands in
+        // the spec, the rc gets only the note).
+        install_omb_fixture();
         let cfg = WizardConfig {
             theme: "agnoster".to_string(),
             theme_source_id: Some("oh-my-bash".to_string()),
@@ -4321,12 +4364,12 @@ mod tests {
         let _userprofile = EnvGuard::unset("USERPROFILE");
         assert_eq!(current_theme_pick(&temp), ThemePick::Keep);
         let ignored = "OSH_THEME='ignored'\n";
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             std::fs::write(temp.join(name), ignored).unwrap();
         }
         assert_eq!(current_theme_pick(&temp), ThemePick::Keep);
         assert!(!temp.join(PRIMARY_RC_FILE).exists());
-        for name in [".winuxshrc", ".winshrc", ".bashrc"] {
+        for name in [".zshrc", ".kshrc", ".bashrc"] {
             assert_eq!(std::fs::read_to_string(temp.join(name)).unwrap(), ignored);
         }
 

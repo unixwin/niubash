@@ -5,8 +5,7 @@
 //!
 //! The catalog is a *shorthand table*, the same role `owner/repo` plays for
 //! vim-plug/lazy.nvim: `niu plugin add oh-my-bash` resolves to the official
-//! origin and clones it. It confers no trust — every catalog install still
-//! lands untrusted and waits for `niu plugin trust`/`sign` (§12.2).
+//! origin and clones it.
 
 use super::sources::{builtin_source_adapters, PluginSourceAdapter};
 
@@ -45,14 +44,6 @@ pub fn catalog_entries() -> Vec<CatalogEntry> {
 /// Look up a catalog entry by id.
 pub fn catalog_entry(id: &str) -> Option<CatalogEntry> {
     catalog_entries().into_iter().find(|entry| entry.id == id)
-}
-
-/// True when the origin is one of the curated catalog origins (niubash#298):
-/// its first fetch rides a compiled-in, reviewed origin, so the delivery has
-/// an integrity reference a wild URL lacks.
-pub fn is_catalog_origin(origin: &str) -> bool {
-    let origin = origin.trim();
-    catalog_entries().iter().any(|entry| entry.origin == origin)
 }
 
 #[cfg(test)]

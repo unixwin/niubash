@@ -2,7 +2,7 @@
 //! (owner rulings 2026-10-02): `niu plugin add/list/enable/disable` over
 //! the *real* manager assets — oh-my-bash rc arrays, bash-it enabled/
 //! entries, bash-completion whole-source activation — plus the graded
-//! trust protocol (hash lock -> local signature) and the lockfile verbs
+//! and the lockfile verbs
 //! (restore/sync/clean).
 use std::fs;
 use std::path::PathBuf;
@@ -110,8 +110,9 @@ fn loader_path_of(sandbox: &Sandbox) -> std::path::PathBuf {
 }
 
 /// Full OMB first-class lifecycle: catalog add (`--path` keeps it offline)
-/// -> trust -> enable plugin/alias/completion/theme through the manager's
+/// -> enable plugin/alias/completion/theme through the manager's
 /// own rc arrays -> engine load of the enabled plugin -> undo.
+/// (niubash#647: no trust step exists in the chain.)
 #[test]
 fn oh_my_bash_assets_enable_disable_through_rc_arrays() {
     let (sandbox, envs) = Sandbox::new("omb-assets");
@@ -134,26 +135,25 @@ fn oh_my_bash_assets_enable_disable_through_rc_arrays() {
         add_out.contains("Installed source 'oh-my-bash'"),
         "{add_out}"
     );
-    assert!(add_out.contains("niu plugin trust oh-my-bash"), "{add_out}");
-
-    // Untrusted: list hides assets and enable refuses.
-    let list_untrusted = run_niu_with_env(&["plugin", "list"], &envs);
-    assert_success(&list_untrusted, "plugin list untrusted");
     assert!(
-        stdout_text(&list_untrusted).contains("assets hidden until trust"),
-        "{}",
-        stdout_text(&list_untrusted)
-    );
-    let gate = run_niu_with_env(&["plugin", "enable", "oh-my-bash"], &envs);
-    assert!(!gate.status.success(), "untrusted enable must fail");
-    assert!(
-        String::from_utf8_lossy(&gate.stderr).contains("untrusted"),
-        "{}",
-        String::from_utf8_lossy(&gate.stderr)
+        add_out.contains("niu plugin enable oh-my-bash"),
+        "{add_out}"
     );
 
-    let trust = run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &envs);
-    assert_success(&trust, "plugin trust");
+    // niubash#647: no trust gate — list shows the assets right away and
+    // enable works immediately after the add.
+    let list_fresh = run_niu_with_env(&["plugin", "list"], &envs);
+    assert_success(&list_fresh, "plugin list fresh");
+    assert!(
+        stdout_text(&list_fresh).contains("agnoster"),
+        "{}",
+        stdout_text(&list_fresh)
+    );
+    assert!(
+        !stdout_text(&list_fresh).contains("assets hidden"),
+        "{}",
+        stdout_text(&list_fresh)
+    );
 
     // Enable: source, plugin, alias, completion, theme.
     for target in ["oh-my-bash", "git", "cargo", "gradle", "agnoster"] {
@@ -238,10 +238,6 @@ fn bash_it_assets_activate_through_enabled_dir() {
     );
     assert_success(&add, "plugin add bash-it");
     assert!(stdout_text(&add).contains("Installed source 'bash-it'"));
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "bash-it"], &envs),
-        "trust bash-it",
-    );
 
     // Plugin with a declared priority + theme.
     assert_success(
@@ -310,15 +306,11 @@ fn bash_completion_activates_as_a_whole_source() {
         &envs,
     );
     assert_success(&add, "plugin add bash-completion");
-    // License honesty at the trust boundary (fetch-on-demand GPL).
+    // License honesty at the fetch notice (fetch-on-demand GPL).
     assert!(
         stdout_text(&add).contains("GPL-2.0-or-later"),
         "{}",
         stdout_text(&add)
-    );
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "bash-completion"], &envs),
-        "trust",
     );
     assert_success(
         &run_niu_with_env(&["plugin", "enable", "bash-completion"], &envs),
@@ -348,74 +340,11 @@ fn bash_completion_activates_as_a_whole_source() {
     let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
 }
 
-/// Graded trust: hash lock by default; the local-signature tier pins the
-/// exact tree and re-gates updates until re-signed.
-#[test]
-fn trust_tiers_from_hash_lock_to_local_signature() {
-    let (sandbox, envs) = Sandbox::new("trust-tiers");
-    assert_success(
-        &run_niu_with_env(
-            &[
-                "plugin",
-                "add",
-                "oh-my-bash",
-                "--path",
-                &fixture("oh-my-bash").to_string_lossy(),
-            ],
-            &envs,
-        ),
-        "add",
-    );
-    // Default tier on trust.
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &envs),
-        "trust",
-    );
-    let list = run_niu_with_env(&["plugin", "list"], &envs);
-    assert!(
-        stdout_text(&list).contains("trusted: checksum"),
-        "{}",
-        stdout_text(&list)
-    );
-
-    // Signature tier: verify passes and the listing shows it.
-    assert_success(
-        &run_niu_with_env(&["plugin", "source", "sign", "oh-my-bash"], &envs),
-        "sign",
-    );
-    let sign_list = run_niu_with_env(&["plugin", "list"], &envs);
-    assert!(
-        stdout_text(&sign_list).contains("trusted: local"),
-        "{}",
-        stdout_text(&sign_list)
-    );
-    assert_success(
-        &run_niu_with_env(&["plugin", "source", "verify", "oh-my-bash"], &envs),
-        "verify signed",
-    );
-
-    // Tampering: trust-gate repairs refuse, doctor-visible via verify.
-    let theme = sandbox
-        .sources_root
-        .join("oh-my-bash/themes/robbyrussell/robbyrussell.theme.sh");
-    fs::write(&theme, "PS1='tampered'\n").unwrap();
-    let verify_bad = run_niu_with_env(&["plugin", "source", "verify", "oh-my-bash"], &envs);
-    assert!(
-        !verify_bad.status.success(),
-        "tampered tree must fail verify"
-    );
-
-    // The local signing key lives in the (overridden) sources root.
-    assert!(sandbox.sources_root.join("signing-key.ed25519").is_file());
-
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
-}
-
-/// Degraded sources surface honestly everywhere and restore repairs them
+/// Missing sources surface honestly everywhere and restore repairs them
 /// (for git origins; local snapshots explain instead).
 #[test]
-fn degraded_source_is_reported_and_local_restore_explains() {
-    let (sandbox, envs) = Sandbox::new("degraded-cli");
+fn missing_source_is_reported_and_local_restore_explains() {
+    let (sandbox, envs) = Sandbox::new("missing-cli");
     assert_success(
         &run_niu_with_env(
             &[
@@ -432,9 +361,9 @@ fn degraded_source_is_reported_and_local_restore_explains() {
     fs::remove_dir_all(sandbox.sources_root.join("oh-my-bash")).unwrap();
 
     let list = run_niu_with_env(&["plugin", "list"], &envs);
-    assert_success(&list, "list degraded");
+    assert_success(&list, "list missing");
     let list_out = stdout_text(&list);
-    assert!(list_out.contains("degraded"), "{list_out}");
+    assert!(list_out.contains("missing"), "{list_out}");
     assert!(
         list_out.contains("niu plugin restore oh-my-bash"),
         "{list_out}"
@@ -442,10 +371,10 @@ fn degraded_source_is_reported_and_local_restore_explains() {
 
     // doctor names the fallback explicitly (iron law 2).
     let doctor = run_niu_with_env(&["doctor"], &envs);
-    assert_success(&doctor, "doctor with degraded source");
+    assert_success(&doctor, "doctor with missing source");
     let doctor_out = stdout_text(&doctor);
-    assert!(doctor_out.contains("source degraded"), "{doctor_out}");
-    assert!(doctor_out.contains("fallback active"), "{doctor_out}");
+    assert!(doctor_out.contains("source missing"), "{doctor_out}");
+    assert!(doctor_out.contains("tree missing"), "{doctor_out}");
 
     // Local snapshots cannot rebuild from upstream: restore explains.
     let restore = run_niu_with_env(&["plugin", "restore", "oh-my-bash"], &envs);
@@ -484,7 +413,6 @@ fn plugin_add_catalog_id_resolves_and_hints_the_next_steps() {
     assert_success(&add, "catalog add");
     let out = stdout_text(&add);
     assert!(out.contains("license"), "{out}");
-    assert!(out.contains("niu plugin trust bash-it"), "{out}");
     assert!(out.contains("niu plugin enable bash-it"), "{out}");
 
     // The curated catalog is visible in discover with official origins.
@@ -573,10 +501,6 @@ fn omb_framework_assets_enable_only_through_the_native_loader() {
         &envs,
     );
     assert_success(&add, "plugin add oh-my-bash --path");
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &envs),
-        "plugin trust oh-my-bash",
-    );
     let enable = run_niu_with_env(&["plugin", "enable", "oh-my-bash/bashmarks"], &envs);
     assert_success(&enable, "enable oh-my-bash/bashmarks");
 
@@ -646,10 +570,6 @@ fn independent_assets_source_directly_and_framework_deps_stay_honest() {
         &envs,
     );
     assert_success(&add, "plugin add oh-my-bash --path");
-    assert_success(
-        &run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &envs),
-        "plugin trust oh-my-bash",
-    );
 
     // Lib-free asset (the fixture bashmarks core): manual direct source
     // works — this is the sanctioned independent path.

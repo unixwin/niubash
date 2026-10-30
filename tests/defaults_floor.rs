@@ -167,7 +167,7 @@ fn omb_fixture() -> PathBuf {
         .join("oh-my-bash")
 }
 
-fn install_trusted_omb(sandbox: &Sandbox) {
+fn install_omb(sandbox: &Sandbox) {
     let add = run_niu_with_env(
         &[
             "plugin",
@@ -179,13 +179,11 @@ fn install_trusted_omb(sandbox: &Sandbox) {
         &sandbox.envs,
     );
     assert_success(&add, "plugin add oh-my-bash --path");
-    let trust = run_niu_with_env(&["plugin", "trust", "oh-my-bash"], &sandbox.envs);
-    assert_success(&trust, "plugin trust oh-my-bash");
 }
 
 /// The shipped example rc must sell the post-migration shape only: zero
 /// retired-stack fields (niubash#145: NIU_THEME/NIU_THEME_PLUGIN/
-/// NIU_PLUGINS/NIU_BANNER/NIUBASH + `oh-my-niu.winux` chain), floor knobs
+/// NIU_PLUGINS/NIU_BANNER/NIUBASH + the old oh-my-niu pack chain), floor knobs
 /// documented as floor-only, HOME bootstrap, and the loader/migrate-rc
 /// contract (niubash#359/#499: activation lives in the generated loader —
 /// the example carries NO managed-block sample for `niu plugin` to write).
@@ -251,7 +249,7 @@ fn example_rc_sells_no_retired_stack_fields() {
 #[test]
 fn omb_theme_claims_the_prompt_slot_end_to_end() {
     let sandbox = Sandbox::new("omb-claim");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     for target in ["oh-my-bash", "agnoster"] {
         let enable = run_niu_with_env(&["plugin", "enable", target], &sandbox.envs);
         assert_success(&enable, &format!("enable {target}"));
@@ -277,7 +275,7 @@ fn omb_theme_claims_the_prompt_slot_end_to_end() {
 #[test]
 fn disabling_the_source_releases_the_prompt_slot() {
     let sandbox = Sandbox::new("omb-release");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     for target in ["oh-my-bash", "agnoster"] {
         let enable = run_niu_with_env(&["plugin", "enable", target], &sandbox.envs);
         assert_success(&enable, &format!("enable {target}"));
@@ -313,7 +311,7 @@ fn disabling_the_source_releases_the_prompt_slot() {
 #[test]
 fn enable_never_rewrites_the_rc_and_the_loader_carries_the_framework() {
     let sandbox = Sandbox::new("rc-order");
-    install_trusted_omb(&sandbox);
+    install_omb(&sandbox);
     let user_rc = "# my rc\nNIU_PROMPT_CWD_STYLE='home'\nalias ll='ls -la'\n";
     fs::write(sandbox.home.join(".niubashrc"), user_rc).unwrap();
 
