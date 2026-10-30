@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::interactive_menu::{self, pad_display, Selection};
 use crate::path_utils::shell_home_dir;
@@ -36,7 +36,7 @@ const SETUP_DONE_FILE: &str = ".setup-done";
 /// only a setup that ran while the session was live triggers the re-apply.
 const APPLY_PENDING_FILE: &str = "setup-apply-pending";
 
-/// Schema marker for the wizard answers file (`~/.niubash/wizard-answers.toml`).
+/// Schema marker for the wizard answers file (`~/.niubash/wizard-answers.json`).
 const WIZARD_ANSWERS_SCHEMA: &str = "niubash:wizard-answers@0.1.0";
 
 /// Schema marker for the setup journal (`~/.niubash/setup-journal.json`).
@@ -1810,6 +1810,13 @@ fn ask_external_completion_provider(io: &mut WizardIo, t: &Lang) -> Option<bool>
 }
 
 fn wizard_answers_path(home: &std::path::Path) -> PathBuf {
+    home.join(".niubash").join("wizard-answers.json")
+}
+
+/// The pre-1.5.0 home of the wizard answers. Read only by the one-shot
+/// load-path conversion ([`migrate_legacy_wizard_answers`]); the runtime
+/// itself never reads the TOML form.
+fn legacy_wizard_answers_path(home: &std::path::Path) -> PathBuf {
     home.join(".niubash").join("wizard-answers.toml")
 }
 
@@ -1963,25 +1970,39 @@ fn ask_completion_interaction(
     Some(entries[idx].1.to_string())
 }
 
+/// The on-disk form of the wizard's lasting answers
+/// (`~/.niubash/wizard-answers.json`). The field names are the ones the
+/// pre-1.5.0 TOML file used — only the syntax changed (the 1.5.0
+/// product-TOML deletion). Today the one lasting answer is the niu-git
+/// one; the struct is the whole file, so a future lasting answer is a
+/// new field, not a new format.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct WizardAnswers {
+    #[serde(default = "default_wizard_answers_schema")]
+    schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    niu_git: Option<String>,
+}
+
+fn default_wizard_answers_schema() -> String {
+    WIZARD_ANSWERS_SCHEMA.to_string()
+}
+
 /// The recorded niu-git answer, when the user gave a lasting one ("never",
 /// "recommended" after a pick, or "installed" when the release bundle
 /// already ships niu-git). While `None` the wizard may
 /// offer the choice again on the next explicit `niu setup` run — a wizard
 /// re-run is user-initiated, never a nag.
 fn read_niu_git_answer(home: &std::path::Path) -> Option<String> {
+    // One-shot bridge: a pre-1.5.0 TOML answers file still on disk is
+    // converted by this first load after the upgrade (see
+    // migrate_legacy_wizard_answers). The runtime proper reads JSON only.
+    migrate_legacy_wizard_answers(home);
     let text = std::fs::read_to_string(wizard_answers_path(home)).ok()?;
-    for raw in text.lines() {
-        let line = raw.trim();
-        let Some(rest) = line.strip_prefix("niu_git") else {
-            continue;
-        };
-        let value = rest.trim().strip_prefix('=')?.trim();
-        let value = value.trim_matches('"').trim_matches('\'');
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    None
+    let answers: WizardAnswers = serde_json::from_str(&text).ok()?;
+    // The pre-JSON line scanner skipped an empty value; keep that
+    // reading so an empty answer never counts as a lasting one.
+    answers.niu_git.filter(|value| !value.is_empty())
 }
 
 fn write_niu_git_answer(home: &std::path::Path, value: &str) {
@@ -1989,18 +2010,198 @@ fn write_niu_git_answer(home: &std::path::Path, value: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let body = format!(
-        "# Answers the user gave explicitly during `niu setup`.\n\
-         schema = \"{}\"\n\
-         niu_git = \"{}\"\n",
-        WIZARD_ANSWERS_SCHEMA, value
-    );
+    let answers = WizardAnswers {
+        schema: WIZARD_ANSWERS_SCHEMA.to_string(),
+        niu_git: Some(value.to_string()),
+    };
+    let body = match serde_json::to_string_pretty(&answers) {
+        Ok(mut body) => {
+            body.push('\n');
+            body
+        }
+        Err(err) => {
+            println!(
+                "  \u{26a0}\u{fe0f}  {} {err}",
+                Lang::detect().tr("could not write")
+            );
+            return;
+        }
+    };
     if let Err(err) = std::fs::write(&path, body) {
         println!(
             "  \u{26a0}\u{fe0f}  {} {err}",
             Lang::detect().tr("could not write")
         );
     }
+}
+
+/// One-shot conversion of the pre-1.5.0 `wizard-answers.toml`, run on
+/// the wizard's load path (the answers belong to the wizard subsystem,
+/// not the plugin faces, so this bridge lives here rather than in
+/// `niu plugin migrate`). The first load that still finds the TOML
+/// file converts it: the answers are written to `wizard-answers.json`
+/// and the legacy file is renamed to
+/// `wizard-answers.toml.migrated-<UTC timestamp>`, never deleted; a
+/// later load finds no TOML and does nothing. A legacy file that does
+/// not parse is left exactly where it is — the answers then read as
+/// not given, and `niu doctor` names the file (see
+/// [`wizard_answers_problem`]). Best-effort throughout: a conversion
+/// hiccup must never fail the wizard run that triggered the load.
+fn migrate_legacy_wizard_answers(home: &std::path::Path) {
+    let legacy_path = legacy_wizard_answers_path(home);
+    let Ok(text) = std::fs::read_to_string(&legacy_path) else {
+        return;
+    };
+    // Typed parse of the legacy form (the same struct shape — the
+    // record did not change, only its syntax). Anything else is a bad
+    // legacy file: leave it untouched for the doctor to name.
+    let Ok(legacy) = toml::from_str::<WizardAnswers>(&text) else {
+        return;
+    };
+    let json_path = wizard_answers_path(home);
+    if json_path.is_file() {
+        // An answers JSON already there wins whole (the mirrors
+        // discipline). The legacy file is set aside only once that
+        // JSON is known readable, so a corrupt JSON never strands the
+        // last good copy of the answers.
+        let json_readable = std::fs::read_to_string(&json_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<WizardAnswers>(&text).ok())
+            .is_some();
+        if json_readable {
+            let _ = rename_legacy_answers_file(&legacy_path);
+        }
+        return;
+    }
+    let answers = WizardAnswers {
+        schema: WIZARD_ANSWERS_SCHEMA.to_string(),
+        niu_git: legacy.niu_git.filter(|value| !value.is_empty()),
+    };
+    let Ok(mut body) = serde_json::to_string_pretty(&answers) else {
+        return;
+    };
+    body.push('\n');
+    if let Some(parent) = json_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(&json_path, body).is_ok() {
+        let _ = rename_legacy_answers_file(&legacy_path);
+    }
+}
+
+/// Rename a converted legacy answers file aside:
+/// `<name>.migrated-<UTC stamp>` (the same backup shape as the other
+/// pre-1.5.0 TOML faces' one-shot migrations).
+fn rename_legacy_answers_file(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let stamp = utc_timestamp();
+    let mut candidate = PathBuf::from(format!("{}.migrated-{stamp}", path.display()));
+    let mut suffix = 1u32;
+    while candidate.exists() {
+        candidate = PathBuf::from(format!("{}.migrated-{stamp}-{suffix}", path.display()));
+        suffix += 1;
+    }
+    std::fs::rename(path, &candidate)?;
+    Ok(candidate)
+}
+
+/// UTC timestamp shaped for a filename: `YYYYMMDD-HHMMSSZ`.
+fn utc_timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Howard Hinnant's days-from-civil inverse (proleptic Gregorian).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + i64::from(m <= 2);
+    (year, m as u32, d as u32)
+}
+
+/// What `niu doctor` names about the wizard answers files, when there
+/// is something to name. Pure inspection: the doctor never converts or
+/// repairs, it reports the state the load path left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WizardAnswersProblem {
+    /// A legacy TOML answers file that parses fine but no wizard load
+    /// has converted yet (it converts on the next `niu setup` run).
+    LegacyPending(PathBuf),
+    /// A legacy TOML answers file that does not parse: conversion
+    /// refused it, the file is left untouched, and its answers are
+    /// ignored until the user fixes or removes it.
+    LegacyUnreadable(PathBuf),
+    /// The JSON answers file exists but does not parse: the recorded
+    /// answers read as not given.
+    AnswersUnreadable(PathBuf),
+}
+
+impl WizardAnswersProblem {
+    /// The advisory rows are informational; the unreadable states are
+    /// the warnings.
+    pub(crate) fn is_warning(&self) -> bool {
+        !matches!(self, Self::LegacyPending(_))
+    }
+
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::LegacyPending(path) => format!(
+                "legacy {} — converts on the next `niu setup` run",
+                path.display()
+            ),
+            Self::LegacyUnreadable(path) => format!(
+                "legacy {} could not be converted — left in place, its answers are ignored (fix or delete it)",
+                path.display()
+            ),
+            Self::AnswersUnreadable(path) => format!(
+                "{} is unreadable — recorded answers are treated as not given (fix or delete it)",
+                path.display()
+            ),
+        }
+    }
+}
+
+pub(crate) fn wizard_answers_problem(home: &std::path::Path) -> Option<WizardAnswersProblem> {
+    let json_path = wizard_answers_path(home);
+    if json_path.is_file() {
+        let json_readable = std::fs::read_to_string(&json_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<WizardAnswers>(&text).ok())
+            .is_some();
+        if !json_readable {
+            return Some(WizardAnswersProblem::AnswersUnreadable(json_path));
+        }
+    }
+    let legacy_path = legacy_wizard_answers_path(home);
+    if legacy_path.is_file() {
+        let legacy_readable = std::fs::read_to_string(&legacy_path)
+            .ok()
+            .and_then(|text| toml::from_str::<WizardAnswers>(&text).ok())
+            .is_some();
+        return Some(if legacy_readable {
+            WizardAnswersProblem::LegacyPending(legacy_path)
+        } else {
+            WizardAnswersProblem::LegacyUnreadable(legacy_path)
+        });
+    }
+    None
 }
 
 /// Print the niu-git install recommendation the user explicitly picked
@@ -4380,8 +4581,150 @@ mod tests {
         write_niu_git_answer(&temp, "never");
         assert_eq!(read_niu_git_answer(&temp).as_deref(), Some("never"));
         let text = std::fs::read_to_string(wizard_answers_path(&temp)).unwrap();
-        assert!(text.contains("niu_git = \"never\""), "{text}");
+        assert!(text.contains("\"niu_git\": \"never\""), "{text}");
         assert!(text.contains(WIZARD_ANSWERS_SCHEMA), "{text}");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Sorted file names inside `home/.niubash`, for the conversion
+    /// pins' before/after comparisons.
+    fn answers_dir_names(home: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(home.join(".niubash"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Seed the answers file exactly as the pre-1.5.0 hand renderer
+    /// wrote it (comment header, schema line, one answer).
+    fn seed_legacy_wizard_answers(home: &std::path::Path, body: &str) {
+        let dir = home.join(".niubash");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wizard-answers.toml"), body).unwrap();
+    }
+
+    const LEGACY_ANSWERS_NEVER: &str = "# Answers the user gave explicitly during `niu setup`.\n\
+         schema = \"niubash:wizard-answers@0.1.0\"\n\
+         niu_git = \"never\"\n";
+
+    #[test]
+    fn legacy_wizard_answers_toml_converts_on_first_load() {
+        let temp = unique_temp_dir("wizard-answers-convert");
+        seed_legacy_wizard_answers(&temp, LEGACY_ANSWERS_NEVER);
+        // The doctor names the pending conversion until a load runs.
+        assert!(matches!(
+            wizard_answers_problem(&temp),
+            Some(WizardAnswersProblem::LegacyPending(_))
+        ));
+        assert_eq!(read_niu_git_answer(&temp).as_deref(), Some("never"));
+        let dir = temp.join(".niubash");
+        let json_text = std::fs::read_to_string(dir.join("wizard-answers.json")).unwrap();
+        assert!(json_text.contains("\"niu_git\": \"never\""), "{json_text}");
+        assert!(json_text.contains(WIZARD_ANSWERS_SCHEMA), "{json_text}");
+        assert!(
+            !dir.join("wizard-answers.toml").exists(),
+            "the converted legacy file is renamed aside"
+        );
+        let names = answers_dir_names(&temp);
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.starts_with("wizard-answers.toml.migrated-"))
+                .count(),
+            1,
+            "converted file set aside, never deleted: {names:?}"
+        );
+        // Second load is a no-op: same answer, no new files, nothing
+        // left for the doctor to name.
+        assert_eq!(read_niu_git_answer(&temp).as_deref(), Some("never"));
+        assert_eq!(answers_dir_names(&temp), names);
+        assert_eq!(wizard_answers_problem(&temp), None);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn bad_legacy_wizard_answers_left_in_place_and_named() {
+        let temp = unique_temp_dir("wizard-answers-bad-legacy");
+        seed_legacy_wizard_answers(&temp, "niu_git = \n");
+        assert_eq!(
+            read_niu_git_answer(&temp),
+            None,
+            "an unconvertible legacy file reads as no answer given"
+        );
+        let dir = temp.join(".niubash");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("wizard-answers.toml")).unwrap(),
+            "niu_git = \n",
+            "the bad legacy file is left exactly in place"
+        );
+        assert!(
+            !dir.join("wizard-answers.json").exists(),
+            "no JSON is written for a refused conversion"
+        );
+        match wizard_answers_problem(&temp) {
+            Some(WizardAnswersProblem::LegacyUnreadable(path)) => {
+                assert!(path.ends_with("wizard-answers.toml"), "{path:?}");
+            }
+            other => panic!("doctor must name the bad legacy file, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn wizard_answers_json_wins_over_legacy_toml() {
+        let temp = unique_temp_dir("wizard-answers-json-wins");
+        write_niu_git_answer(&temp, "installed");
+        seed_legacy_wizard_answers(&temp, LEGACY_ANSWERS_NEVER);
+        assert_eq!(read_niu_git_answer(&temp).as_deref(), Some("installed"));
+        let dir = temp.join(".niubash");
+        let json_text = std::fs::read_to_string(dir.join("wizard-answers.json")).unwrap();
+        assert!(
+            json_text.contains("\"niu_git\": \"installed\""),
+            "the existing JSON is kept whole: {json_text}"
+        );
+        assert!(
+            !dir.join("wizard-answers.toml").exists(),
+            "the superseded legacy file is renamed aside"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn wizard_answers_json_round_trip_field_for_field() {
+        let temp = unique_temp_dir("wizard-answers-round-trip");
+        for value in ["never", "recommended", "installed"] {
+            write_niu_git_answer(&temp, value);
+            let text =
+                std::fs::read_to_string(temp.join(".niubash").join("wizard-answers.json")).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed["schema"], WIZARD_ANSWERS_SCHEMA, "{text}");
+            assert_eq!(parsed["niu_git"], value, "{text}");
+            assert_eq!(read_niu_git_answer(&temp).as_deref(), Some(value));
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn wizard_answers_problem_names_a_corrupt_json() {
+        let temp = unique_temp_dir("wizard-answers-corrupt-json");
+        let dir = temp.join(".niubash");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("wizard-answers.json"), "{ not json").unwrap();
+        assert_eq!(read_niu_git_answer(&temp), None);
+        match wizard_answers_problem(&temp) {
+            Some(problem @ WizardAnswersProblem::AnswersUnreadable(_)) => {
+                assert!(problem.is_warning());
+                assert!(
+                    problem.describe().contains("wizard-answers.json"),
+                    "{}",
+                    problem.describe()
+                );
+            }
+            other => panic!("doctor must name the corrupt JSON, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 
