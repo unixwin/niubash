@@ -1,7 +1,7 @@
 //! Reedline REPL loop
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};
@@ -418,6 +418,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         );
     }
 
+    // readline's `keyseq-timeout` for the chord layer, resolved once per
+    // editor build. The standby machine gets the same value so a mode flip
+    // keeps the wait the user configured.
+    let keyseq_timeout = crate::config::resolve_keyseq_timeout();
+
     let mut editor = Reedline::create()
         .with_validator(Box::new(ReplValidator))
         .with_history(Box::new(history))
@@ -479,6 +484,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             chord_bindings,
             alt_keys,
             Some(Box::new(live_lookahead)),
+            keyseq_timeout,
         )))
         .with_additional_edit_mode(Box::new(ChordEditMode::new(
             Box::new(
@@ -488,6 +494,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             standby_chord_bindings,
             standby_alt_keys,
             Some(Box::new(live_lookahead)),
+            keyseq_timeout,
         )));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
@@ -2632,6 +2639,53 @@ struct ChordBinding {
     event: ReedlineEvent,
 }
 
+/// Lookup index over [`ChordBinding`]s.
+///
+/// Chords are few (a handful of `bind` sequences in a typical rc), so this
+/// is deliberately flat rather than a trie: a hash lookup per keypress
+/// replaces the old linear `exact()`/`is_prefix()` scans while keeping the
+/// exact-match and prefix sets explicit and easy to audit. The maps are
+/// built once at editor build, where the old code scanned on every key.
+#[derive(Default)]
+struct ChordIndex {
+    /// Full sequences. Duplicates keep the FIRST binding, matching the old
+    /// `iter().find()` priority.
+    exact: HashMap<Vec<(KeyModifiers, KeyCode)>, ReedlineEvent>,
+    /// Every proper prefix of every chord. A full sequence that is also a
+    /// prefix of a longer chord belongs here too (readline waits for the
+    /// longer binding).
+    prefixes: HashSet<Vec<(KeyModifiers, KeyCode)>>,
+}
+
+impl ChordIndex {
+    fn new(chords: &[ChordBinding]) -> Self {
+        let mut index = Self::default();
+        if !chords.is_empty() {
+            // The old `is_prefix(&[])` scan returned true for any non-empty
+            // chord set; keep that edge case exact.
+            index.prefixes.insert(Vec::new());
+        }
+        for chord in chords {
+            for len in 1..chord.keys.len() {
+                index.prefixes.insert(chord.keys[..len].to_vec());
+            }
+            index
+                .exact
+                .entry(chord.keys.clone())
+                .or_insert_with(|| chord.event.clone());
+        }
+        index
+    }
+
+    fn exact(&self, keys: &[(KeyModifiers, KeyCode)]) -> Option<ReedlineEvent> {
+        self.exact.get(keys).cloned()
+    }
+
+    fn is_prefix(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
+        self.prefixes.contains(keys)
+    }
+}
+
 /// Collect the engine `bind` entries that are chords (two or more key
 /// units) into the layer `ChordEditMode` walks. `Execute` entries keep the
 /// same `bind -x` index the flat keymap would have used; macros insert
@@ -2694,17 +2748,20 @@ fn collect_chord_bindings(
 /// (`\C-x\C-e`, fzf's `\C-\e(`) used to be dropped. This layer buffers the
 /// first unit only when some chord starts with it, completes on an exact
 /// match, and — on a mismatch — replays the buffered keys through the inner
-/// machine before the current one, so nothing is swallowed. There is no
-/// keyseq timeout yet: a lone prefix waits for the next key (readline's
-/// `keyseq-timeout` default is 500 ms; the upstream chord design is
-/// nushell/reedline#1204).
+/// machine before the current one, so nothing is swallowed. A lone prefix
+/// waits for the next key up to `keymap.keyseq-timeout` (readline's
+/// `keyseq-timeout`: 500 ms by default, `0` waits forever; the upstream
+/// chord design is nushell/reedline#1204).
 struct ChordEditMode {
     inner: Box<dyn EditMode>,
-    chords: Vec<ChordBinding>,
+    chords: ChordIndex,
+    /// The configured chord wait. `Duration::ZERO` is readline's `0`:
+    /// wait forever (no expiry).
+    keyseq_timeout: Duration,
     pending: Vec<crossterm29::event::Event>,
     /// When the first pending unit was parked. readline's
-    /// `keyseq-timeout` (500 ms default) applies here too: a prefix that
-    /// does not complete inside the window stops being a chord prefix.
+    /// `keyseq-timeout` applies here too: a prefix that does not complete
+    /// inside the window stops being a chord prefix.
     pending_since: Option<std::time::Instant>,
     /// Keys that carry a real ALT binding: terminals spell Alt-C as
     /// `ESC c`, and emacs-mode readline treats ESC as the meta prefix.
@@ -2713,8 +2770,6 @@ struct ChordEditMode {
     lookahead: Option<Lookahead>,
 }
 
-/// readline's `keyseq-timeout` default.
-const KEYSEQ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// How long to wait for the ESC partner. A terminal sends `ESC c` back to
 /// back; a human pressing Escape alone does not.
 const ESC_META_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
@@ -2725,10 +2780,12 @@ impl ChordEditMode {
         chords: Vec<ChordBinding>,
         alt_keys: std::collections::HashSet<KeyCode>,
         lookahead: Option<Lookahead>,
+        keyseq_timeout: Duration,
     ) -> Self {
         Self {
             inner,
-            chords,
+            chords: ChordIndex::new(&chords),
+            keyseq_timeout,
             pending: Vec::new(),
             pending_since: None,
             alt_keys,
@@ -2737,16 +2794,11 @@ impl ChordEditMode {
     }
 
     fn exact(&self, keys: &[(KeyModifiers, KeyCode)]) -> Option<ReedlineEvent> {
-        self.chords
-            .iter()
-            .find(|chord| chord.keys == keys)
-            .map(|chord| chord.event.clone())
+        self.chords.exact(keys)
     }
 
     fn is_prefix(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
-        self.chords
-            .iter()
-            .any(|chord| chord.keys.len() > keys.len() && chord.keys.starts_with(keys))
+        self.chords.is_prefix(keys)
     }
 
     fn forward(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
@@ -2844,9 +2896,11 @@ impl ChordEditMode {
         }
         // A prefix older than readline's keyseq-timeout stops being a
         // prefix: replay it on its own, then treat the current key fresh.
-        if self
-            .pending_since
-            .is_some_and(|since| since.elapsed() > KEYSEQ_TIMEOUT)
+        // `0` is readline's "wait forever" spelling.
+        if self.keyseq_timeout != Duration::ZERO
+            && self
+                .pending_since
+                .is_some_and(|since| since.elapsed() > self.keyseq_timeout)
         {
             let mut events = Vec::new();
             for parked in std::mem::take(&mut self.pending) {
@@ -5253,6 +5307,9 @@ mod tests {
         ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
     }
 
+    const TEST_KEYSEQ_TIMEOUT: Duration =
+        Duration::from_millis(crate::config::DEFAULT_KEYSEQ_TIMEOUT_MS);
+
     #[test]
     fn escape_partner_without_a_meta_binding_is_delivered_now() {
         use crossterm29::event::{Event, KeyEvent};
@@ -5261,7 +5318,13 @@ mod tests {
         let alt: HashSet<KeyCode> = [KeyCode::Char('c')].into_iter().collect();
         let partner = Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let lookahead: Lookahead = Box::new(move |_| Some(partner.clone()));
-        let mut mode = ChordEditMode::new(Box::new(inner), Vec::new(), alt, Some(lookahead));
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            Vec::new(),
+            alt,
+            Some(lookahead),
+            TEST_KEYSEQ_TIMEOUT,
+        );
 
         let event = mode.parse_event(chord_test_key(KeyCode::Esc, KeyModifiers::NONE));
         match event {
@@ -5290,8 +5353,13 @@ mod tests {
             ],
             event: edit_event(EditCommand::InsertString("QUICK".to_string())),
         }];
-        let mut mode =
-            ChordEditMode::new(Box::new(inner), chords, HashSet::new(), None);
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
 
         // The key is parked even though it has its own binding.
         assert_eq!(
@@ -5308,7 +5376,7 @@ mod tests {
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
             ReedlineEvent::None
         );
-        std::thread::sleep(KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         match mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)) {
             ReedlineEvent::Multiple(events) => assert!(
                 events.contains(&edit_event(EditCommand::InsertString("SINGLE".to_string()))),
@@ -5329,7 +5397,13 @@ mod tests {
             ],
             event: edit_event(EditCommand::InsertString("QUICK".to_string())),
         }];
-        let mut mode = ChordEditMode::new(Box::new(inner), chords, HashSet::new(), None);
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
         let key = |code, modifiers| {
             ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
         };
@@ -5347,12 +5421,120 @@ mod tests {
             mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
             ReedlineEvent::None
         );
-        std::thread::sleep(KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         let event = mode.parse_event(key(Code::Char('z'), Mods::NONE));
         assert_ne!(
             event,
             edit_event(EditCommand::InsertString("QUICK".to_string())),
             "an expired prefix must not complete a chord"
+        );
+    }
+
+    #[test]
+    fn chord_index_matches_exact_prefix_and_mismatch() {
+        let chord = |keys: &[(KeyModifiers, KeyCode)], text: &str| ChordBinding {
+            keys: keys.to_vec(),
+            event: edit_event(EditCommand::InsertString(text.to_string())),
+        };
+        let ctrl_x = (KeyModifiers::CONTROL, KeyCode::Char('x'));
+        let z = (KeyModifiers::NONE, KeyCode::Char('z'));
+        let e = (KeyModifiers::NONE, KeyCode::Char('e'));
+        let ctrl_a = (KeyModifiers::CONTROL, KeyCode::Char('a'));
+        let b = (KeyModifiers::NONE, KeyCode::Char('b'));
+        let index = ChordIndex::new(&[
+            chord(&[ctrl_x, z], "first"),
+            // Duplicate sequences keep the first binding, like the old
+            // `iter().find()` scan.
+            chord(&[ctrl_x, z], "second"),
+            chord(&[ctrl_x, z, e], "longer"),
+            chord(&[ctrl_a, b], "other"),
+        ]);
+
+        assert_eq!(
+            index.exact(&[ctrl_x, z]),
+            Some(edit_event(EditCommand::InsertString("first".to_string())))
+        );
+        assert_eq!(
+            index.exact(&[ctrl_x, z, e]),
+            Some(edit_event(EditCommand::InsertString("longer".to_string())))
+        );
+        assert_eq!(index.exact(&[ctrl_x]), None, "only full sequences match");
+        assert_eq!(index.exact(&[ctrl_x, z, e, z]), None);
+
+        assert!(index.is_prefix(&[ctrl_x]));
+        assert!(
+            index.is_prefix(&[]),
+            "the empty prefix keeps the old scan's edge case"
+        );
+        assert!(
+            index.is_prefix(&[ctrl_x, z]),
+            "an exact sequence that prefixes a longer chord still waits"
+        );
+        assert!(index.is_prefix(&[ctrl_a]));
+        assert!(
+            !index.is_prefix(&[ctrl_x, z, e]),
+            "a leaf chord is not a prefix"
+        );
+        assert!(!index.is_prefix(&[ctrl_x, b]), "mismatched tail");
+        assert!(!index.is_prefix(&[e]), "unrelated key");
+    }
+
+    #[test]
+    fn zero_keyseq_timeout_waits_forever() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            edit_event(EditCommand::InsertString("QUICK".to_string())),
+            "0 is readline's wait-forever spelling"
+        );
+    }
+
+    #[test]
+    fn custom_keyseq_timeout_replaces_the_default_window() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            Duration::from_millis(40),
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(Duration::from_millis(80));
+        let event = mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_ne!(
+            event,
+            edit_event(EditCommand::InsertString("QUICK".to_string())),
+            "the configured 40 ms window must expire before 80 ms"
         );
     }
 
