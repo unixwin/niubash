@@ -983,13 +983,10 @@ mod tests {
                     .replace('\\', "/")
             );
             fs::write(
-                self.root.join("mirrors.toml"),
+                self.root.join("mirrors.json"),
                 format!(
-                    "# offline apply test: rewrite GitHub fetches to the seeded local mirror\n\
-                     schema = \"niubash:mirrors@0.1.0\"\n\
-                     active = \"custom\"\n\n\
-                     [github]\n\
-                     git_instead_of = \"{mirror_base}\"\n"
+                    "{{\"schema\": \"niubash:mirrors@0.1.0\", \"active\": \"custom\", \
+                     \"github\": {{\"git_instead_of\": \"{mirror_base}\"}}}}"
                 ),
             )
             .unwrap();
@@ -1005,7 +1002,7 @@ mod tests {
                 (
                     "NIU_MIRRORS",
                     self.root
-                        .join("mirrors.toml")
+                        .join("mirrors.json")
                         .to_string_lossy()
                         .into_owned(),
                 ),

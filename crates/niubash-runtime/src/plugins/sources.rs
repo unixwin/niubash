@@ -2346,14 +2346,13 @@ mod tests {
     fn git_clone_args_carry_instead_of_mirror_for_github_origins_only() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = unique_temp_dir("mirror-args");
-        let config = temp.join("mirrors.toml");
+        let config = temp.join("mirrors.json");
         fs::write(
             &config,
             concat!(
-                "schema = \"niubash:mirrors@0.1.0\"\n",
-                "active = \"custom\"\n",
-                "\n[github]\n",
-                "git_instead_of = \"https://git.example.com/github.com\"\n",
+                "{ \"schema\": \"niubash:mirrors@0.1.0\", ",
+                "\"active\": \"custom\", ",
+                "\"github\": { \"git_instead_of\": \"https://git.example.com/github.com\" } }",
             ),
         )
         .unwrap();
