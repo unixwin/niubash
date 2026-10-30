@@ -1881,7 +1881,7 @@ fn ask_completion_style(
         t.tr("  \u{2328}\u{fe0f}  TAB completion style?"),
         default_idx,
         &option_refs,
-        t.tr("  |  change any time with `niu config set completion.style <name>` or NIU_COMPLETION_STYLE"),
+        t.tr("  |  change any time with `export NIU_COMPLETION_STYLE=<name>` (environment or ~/.niubashrc)"),
     )?; // cancelled
     Some(entries[idx].1.to_string())
 }
@@ -1924,7 +1924,7 @@ fn ask_completion_interaction(
         t.tr("  \u{2328}\u{fe0f}  TAB completion interaction?"),
         default_idx,
         &option_refs,
-        t.tr("  |  change any time with `niu config set completion.interaction <name>` or NIU_COMPLETION_INTERACTION"),
+        t.tr("  |  change any time with `export NIU_COMPLETION_INTERACTION=<name>` (environment or ~/.niubashrc)"),
     )?; // cancelled
     Some(entries[idx].1.to_string())
 }
@@ -2360,19 +2360,19 @@ fn generate_rc(cfg: &WizardConfig) -> String {
     let mut header = String::new();
     if !cfg.cwd_style.is_empty() {
         header.push_str(&format!(
-            "NIU_PROMPT_CWD_STYLE={}\n",
+            "export NIU_PROMPT_CWD_STYLE={}\n",
             shell_quote(cfg.cwd_style.as_str())
         ));
     }
     if !cfg.completion_style.is_empty() {
         header.push_str(&format!(
-            "NIU_COMPLETION_STYLE={}\n",
+            "export NIU_COMPLETION_STYLE={}\n",
             shell_quote(cfg.completion_style.as_str())
         ));
     }
     if !cfg.completion_interaction.is_empty() {
         header.push_str(&format!(
-            "NIU_COMPLETION_INTERACTION={}\n",
+            "export NIU_COMPLETION_INTERACTION={}\n",
             shell_quote(cfg.completion_interaction.as_str())
         ));
     }
@@ -3279,10 +3279,9 @@ mod tests {
     }
 
     /// The Q2.7 write path is the same rule as Q2.6's: a differing pick
-    /// lands in the rc as the env-layer line of the one resolve chain
-    /// (DESIGN §7.6 — the wizard writes env, `niu config set` writes
-    /// config.toml, one resolve reads both); keeping the effective
-    /// value writes nothing.
+    /// lands in the rc as an `export NIU_COMPLETION_INTERACTION=...` line
+    /// (the one env-layer source); keeping the effective value writes
+    /// nothing.
     #[test]
     fn issue631_completion_interaction_pick_lands_in_the_rc_only_when_it_differs() {
         let mut cfg = build_config(&ThemePick::Keep);
@@ -3307,9 +3306,7 @@ mod tests {
     /// wizard write → rc → shell env → resolve, one chain.
     #[test]
     fn issue631_wizard_rc_line_reads_back_through_the_resolver_as_env() {
-        use crate::config::{
-            resolve_completion_interaction, CompletionInteraction, CompletionInteractionSource,
-        };
+        use crate::config::{resolve_completion_interaction, CompletionInteraction, SettingSource};
         let _env_lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3332,10 +3329,7 @@ mod tests {
         }
         assert_eq!(
             resolved,
-            (
-                CompletionInteraction::Insert,
-                CompletionInteractionSource::Env
-            )
+            (CompletionInteraction::Insert, SettingSource::Env)
         );
     }
 

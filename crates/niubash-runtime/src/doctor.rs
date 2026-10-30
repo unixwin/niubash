@@ -389,15 +389,15 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     // names every switch, so the five shapes are discoverable.
     let (style, source) = crate::config::resolve_completion_style();
     let origin = match source {
-        crate::config::CompletionStyleSource::Env => " (NIU_COMPLETION_STYLE override)",
-        crate::config::CompletionStyleSource::ConfigFile => " (persisted)",
-        crate::config::CompletionStyleSource::Default => " (default)",
+        crate::config::SettingSource::Env => " (NIU_COMPLETION_STYLE override)",
+        crate::config::SettingSource::Inputrc => " (inputrc)",
+        crate::config::SettingSource::Default => " (default)",
     };
     writeln!(
         out,
         "  {info} completion style    {}{origin} — change with: \
-         `niu config set completion.style ide|column|list|inline|gnu` \
-         (or NIU_COMPLETION_STYLE)",
+         `export NIU_COMPLETION_STYLE=ide|column|list|inline|gnu` \
+         in the environment or ~/.niubashrc",
         style.as_str()
     )?;
 
@@ -407,15 +407,15 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     // precedence display (env > config > default).
     let (interaction, interaction_source) = crate::config::resolve_completion_interaction();
     let interaction_origin = match interaction_source {
-        crate::config::CompletionInteractionSource::Env => " (NIU_COMPLETION_INTERACTION override)",
-        crate::config::CompletionInteractionSource::ConfigFile => " (persisted)",
-        crate::config::CompletionInteractionSource::Default => " (default)",
+        crate::config::SettingSource::Env => " (NIU_COMPLETION_INTERACTION override)",
+        crate::config::SettingSource::Inputrc => " (inputrc)",
+        crate::config::SettingSource::Default => " (default)",
     };
     writeln!(
         out,
         "  {info} completion interact {}{interaction_origin} — change with: \
-         `niu config set completion.interaction insert|cycle` \
-         (or NIU_COMPLETION_INTERACTION)",
+         `export NIU_COMPLETION_INTERACTION=insert|cycle` \
+         in the environment or ~/.niubashrc",
         interaction.as_str()
     )?;
 

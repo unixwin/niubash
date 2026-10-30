@@ -3142,16 +3142,12 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-/// `niu config` — persisted user settings (`~/.niubash/config.toml`, the
-/// mirrors.toml convention). Deliberately tiny: one flat file, a handful
-/// of settings (the niubash#249 command-not-found hint policy, since
-/// 1.4.1 the `completion.style` TAB shape, niubash#359's
-/// `startup.rc-policy`, the niubash#630 keymap rules, and — niubash#631 —
-/// the `completion.interaction` axis beside the style).
-/// Any read problem degrades to the default in the runtime; `get`/`list`
-/// surface values as resolved (file, overridden by the `NIU_` env variable).
-/// `startup.rc-policy` is displayed but owned by `niu setup --rc-policy` —
-/// other config commands preserve it without changing its value.
+/// `niu config` — a read-only view of effective settings and their single
+/// source (`env`, `inputrc`, or `default`). Since 1.5.0 there is no
+/// `~/.niubash/config.toml`: GNU-shaped knobs live in rc `bind`/`set`/
+/// `shopt` or `$INPUTRC`/`~/.inputrc`, and niu-proprietary knobs live in
+/// `NIU_*` environment variables. `migrate` is the one-time bridge for an
+/// old config.toml.
 /// The `niu help` verb (niubash#630): host-side help topics, kept in a
 /// niu-side topic table — this is deliberately NOT the shell's `help`
 /// builtin (whose bytes are GNU's) and does not touch the engine's
@@ -3181,327 +3177,146 @@ fn run_help_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_config_command(args: &[String]) -> anyhow::Result<()> {
-    use niubash_runtime::config::{
-        add_keymap_bind_rule, add_keymap_unbind_rule, resolve_command_not_found_hint,
-        resolve_completion_interaction, resolve_completion_style, resolve_keymap_rule_specs,
-        resolve_rc_policy, set_command_not_found_hint, set_completion_interaction,
-        set_completion_style, user_config_path, CommandNotFoundHint, CompletionInteraction,
-        CompletionInteractionSource, CompletionStyle, CompletionStyleSource,
-        COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_INTERACTION_KEY, COMPLETION_STYLE_KEY,
-        KEYMAP_BIND_KEY, KEYMAP_UNBIND_KEY, RC_POLICY_KEY,
-    };
-    // One line describing where the effective completion style came from —
-    // the precedence (env > config > default) is part of the contract, so
-    // every mutating command prints it.
-    fn print_completion_style_outcome(style: CompletionStyle, source: CompletionStyleSource) {
-        let origin = match source {
-            CompletionStyleSource::Env => " (NIU_COMPLETION_STYLE overrides the file)",
-            CompletionStyleSource::ConfigFile => " (persisted)",
-            CompletionStyleSource::Default => " (built-in default)",
-        };
-        println!("{COMPLETION_STYLE_KEY} = {}{origin}", style.as_str());
-    }
-    // The interaction axis (niubash#631) prints the same outcome line —
-    // the two axes resolve on the same precedence chain.
-    fn print_completion_interaction_outcome(
-        interaction: CompletionInteraction,
-        source: CompletionInteractionSource,
-    ) {
-        let origin = match source {
-            CompletionInteractionSource::Env => " (NIU_COMPLETION_INTERACTION overrides the file)",
-            CompletionInteractionSource::ConfigFile => " (persisted)",
-            CompletionInteractionSource::Default => " (built-in default)",
-        };
-        println!(
-            "{COMPLETION_INTERACTION_KEY} = {}{origin}",
-            interaction.as_str()
-        );
-    }
+    use niubash_runtime::config::{setting_row, setting_rows};
     match args.first().map(String::as_str) {
-        None | Some("-h" | "--help" | "help") => {
-            print_config_usage();
-            Ok(())
-        }
-        Some("list" | "show") => {
-            println!("Settings (persisted in {}):", user_config_path().display());
+        None | Some("list" | "show") => {
+            println!("Effective settings (source: env, inputrc, or default):");
+            for row in setting_rows() {
+                println!("  {}", row.render());
+            }
+            println!();
             println!(
-                "  {COMMAND_NOT_FOUND_HINT_KEY} = {}",
-                resolve_command_not_found_hint().as_str()
+                "Key bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; \
+                 they are not a niu setting."
             );
-            let (style, source) = resolve_completion_style();
-            println!("  {COMPLETION_STYLE_KEY} = {}", style.as_str());
-            if source == CompletionStyleSource::Env {
-                println!("    (overridden by NIU_COMPLETION_STYLE)");
-            }
-            let (interaction, interaction_source) = resolve_completion_interaction();
-            println!("  {COMPLETION_INTERACTION_KEY} = {}", interaction.as_str());
-            if interaction_source == CompletionInteractionSource::Env {
-                println!("    (overridden by NIU_COMPLETION_INTERACTION)");
-            }
-            println!("  {RC_POLICY_KEY} = {}", resolve_rc_policy().as_str());
-            println!("    (owned by `niu setup --rc-policy`; `niu config` preserves it)");
-            let (bind_rules, unbind_rules) = resolve_keymap_rule_specs();
-            println!("  {KEYMAP_BIND_KEY} = {} rule(s)", bind_rules.len());
-            for rule in &bind_rules {
-                println!("    {rule}");
-            }
-            println!("  {KEYMAP_UNBIND_KEY} = {} rule(s)", unbind_rules.len());
-            for rule in &unbind_rules {
-                println!("    {rule}");
-            }
             Ok(())
         }
         Some("get") => {
             let Some(key) = args.get(1) else {
                 anyhow::bail!("config get requires a key (`niu config list` shows them)")
             };
-            match key.as_str() {
-                COMMAND_NOT_FOUND_HINT_KEY => {
-                    println!("{}", resolve_command_not_found_hint().as_str());
-                    Ok(())
-                }
-                COMPLETION_STYLE_KEY => {
-                    println!("{}", resolve_completion_style().0.as_str());
-                    Ok(())
-                }
-                COMPLETION_INTERACTION_KEY => {
-                    println!("{}", resolve_completion_interaction().0.as_str());
-                    Ok(())
-                }
-                RC_POLICY_KEY => {
-                    println!("{}", resolve_rc_policy().as_str());
-                    Ok(())
-                }
-                KEYMAP_BIND_KEY => {
-                    let (rules, _) = resolve_keymap_rule_specs();
-                    for rule in &rules {
-                        println!("{rule}");
-                    }
-                    if rules.is_empty() {
-                        println!("(no rules)");
-                    }
-                    Ok(())
-                }
-                KEYMAP_UNBIND_KEY => {
-                    let (_, rules) = resolve_keymap_rule_specs();
-                    for rule in &rules {
-                        println!("{rule}");
-                    }
-                    if rules.is_empty() {
-                        println!("(no rules)");
-                    }
-                    Ok(())
-                }
-                unknown => anyhow::bail!(
-                    "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
-                ),
-            }
+            let Some(row) = setting_row(key) else {
+                anyhow::bail!("unknown config key '{key}' (`niu config list` shows the valid keys)")
+            };
+            println!("{}", row.render());
+            Ok(())
         }
         Some("set") => {
-            let Some(key) = args.get(1) else {
-                anyhow::bail!(
-                    "config set requires a key and a value (`niu config list` shows them)"
-                )
-            };
-            let Some(value) = args.get(2) else {
-                anyhow::bail!("config set {key} requires a value")
-            };
-            match key.as_str() {
-                RC_POLICY_KEY => {
-                    // niubash#359: only explicit setup may persist or revoke
-                    // the personal-rc policy — `niu config` preserves it.
-                    anyhow::bail!(
-                        "{RC_POLICY_KEY} is owned by explicit setup: run \
-                         `niu setup --rc-policy {value}` (the current value is preserved)"
-                    )
-                }
-                COMMAND_NOT_FOUND_HINT_KEY => {
-                    let Some(hint) = CommandNotFoundHint::parse(value) else {
-                        anyhow::bail!(
-                            "invalid value '{value}' for {COMMAND_NOT_FOUND_HINT_KEY}: expected off or wpm"
-                        )
-                    };
-                    set_command_not_found_hint(hint)?;
-                    println!(
-                        "{} {COMMAND_NOT_FOUND_HINT_KEY} = {}",
-                        niubash_runtime::text_style::green("Set:"),
-                        hint.as_str()
-                    );
-                    if hint == CommandNotFoundHint::Wpm {
-                        println!("  new niu sessions suggest one `wpm search --name` line after a");
-                        println!(
-                            "  high-confidence near-miss (wpm only — never winget/scoop/choco)."
-                        );
-                    } else {
-                        println!("  command not found prints only the GNU one-liner (default).");
-                    }
-                    Ok(())
-                }
-                COMPLETION_STYLE_KEY => {
-                    let Some(style) = CompletionStyle::parse(value) else {
-                        anyhow::bail!(
-                            "invalid value '{value}' for {COMPLETION_STYLE_KEY}: expected gnu, ide, column, list or inline"
-                        )
-                    };
-                    set_completion_style(style)?;
-                    println!(
-                        "{} {COMPLETION_STYLE_KEY} = {}",
-                        niubash_runtime::text_style::green("Set:"),
-                        style.as_str()
-                    );
-                    match style {
-                        CompletionStyle::Gnu => println!(
-                            "  TAB completes the common prefix; a second TAB lists the candidates"
-                        ),
-                        CompletionStyle::Ide => {
-                            println!("  TAB opens the VS Code-style popup with descriptions")
-                        }
-                        CompletionStyle::Column => println!("  TAB opens a zsh-style column grid"),
-                        CompletionStyle::List => println!("  TAB opens a fish-style vertical list"),
-                        CompletionStyle::Inline => println!(
-                            "  TAB inserts the first match and cycles (bash menu-complete)"
-                        ),
-                    }
-                    // The env variable outranks the file, so a stale
-                    // NIU_COMPLETION_STYLE would silently swallow this pick.
-                    let (effective, source) = resolve_completion_style();
-                    if source == CompletionStyleSource::Env {
-                        println!(
-                            "  note: NIU_COMPLETION_STYLE is set in this environment and wins:"
-                        );
-                    }
-                    print_completion_style_outcome(effective, source);
-                    Ok(())
-                }
-                COMPLETION_INTERACTION_KEY => {
-                    let Some(interaction) = CompletionInteraction::parse(value) else {
-                        anyhow::bail!(
-                            "invalid value '{value}' for {COMPLETION_INTERACTION_KEY}: expected insert or cycle"
-                        )
-                    };
-                    set_completion_interaction(interaction)?;
-                    println!(
-                        "{} {COMPLETION_INTERACTION_KEY} = {}",
-                        niubash_runtime::text_style::green("Set:"),
-                        interaction.as_str()
-                    );
-                    match interaction {
-                        CompletionInteraction::Cycle => println!(
-                            "  TAB cycles candidates into the line; Enter accepts and runs, Esc rolls back"
-                        ),
-                        CompletionInteraction::Insert => println!(
-                            "  TAB completes the common prefix and opens the menu; Enter confirms the pick"
-                        ),
-                    }
-                    // Same env-outranks-file note as the style axis.
-                    let (effective, source) = resolve_completion_interaction();
-                    if source == CompletionInteractionSource::Env {
-                        println!(
-                            "  note: NIU_COMPLETION_INTERACTION is set in this environment and wins:"
-                        );
-                    }
-                    print_completion_interaction_outcome(effective, source);
-                    Ok(())
-                }
-                KEYMAP_BIND_KEY => {
-                    // niubash#630: the value is ONE bind argument
-                    // string; it is validated by the loader's parser
-                    // before anything is written, then appended to
-                    // the [keymap].bind array (duplicates ignored).
-                    let path = add_keymap_bind_rule(value)?;
-                    println!(
-                        "{} {KEYMAP_BIND_KEY} += {value}",
-                        niubash_runtime::text_style::green("Set:")
-                    );
-                    println!(
-                        "  persisted in {}; applies at the next prompt rebuild, \
-                         over any script or NIU_BINDKEYS binding on the same key.",
-                        path.display()
-                    );
-                    Ok(())
-                }
-                KEYMAP_UNBIND_KEY => {
-                    let path = add_keymap_unbind_rule(value)?;
-                    println!(
-                        "{} {KEYMAP_UNBIND_KEY} += {value}",
-                        niubash_runtime::text_style::green("Set:")
-                    );
-                    println!(
-                        "  persisted in {}; the key is unbound outright at the next \
-                         prompt rebuild, whatever layer bound it.",
-                        path.display()
-                    );
-                    Ok(())
-                }
-                unknown => anyhow::bail!(
-                    "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
-                ),
-            }
+            anyhow::bail!(
+                "`niu config set` was removed in 1.5.0: niu no longer writes a config file.\n\
+                 GNU-shaped settings: put `bind ...`, `set ...`, or `shopt ...` in ~/.niubashrc\n\
+                 (or the readline variable/binding in $INPUTRC / ~/.inputrc).\n\
+                 niu settings: export NIU_COMPLETION_STYLE, NIU_COMPLETION_INTERACTION,\n\
+                 NIU_COMMAND_NOT_FOUND_HINT, or NIU_RC_POLICY in the environment or ~/.niubashrc.\n\
+                 Migrating an old ~/.niubash/config.toml: run `niu config migrate`."
+            )
         }
+        Some("-h" | "--help" | "help") => {
+            print_config_usage();
+            Ok(())
+        }
+        Some("migrate") => run_config_migrate(),
         Some(unknown) => {
             anyhow::bail!("unknown config subcommand '{unknown}' (try: niu config help)")
         }
     }
 }
 
+/// `niu config migrate` — the one-time bridge from the retired
+/// `~/.niubash/config.toml`. The runtime never reads that file; this verb
+/// translates it, appends a marked rc block, and renames the old file.
+fn run_config_migrate() -> anyhow::Result<()> {
+    use niubash_runtime::config::{legacy_config_path, migrate_legacy_config};
+    let Some(report) = migrate_legacy_config()? else {
+        println!(
+            "No legacy config.toml found at {} — nothing to migrate.",
+            legacy_config_path().display()
+        );
+        return Ok(());
+    };
+    if report.lines.is_empty() {
+        println!(
+            "No translatable settings in {}; the file was renamed to {}.",
+            report.legacy_path.display(),
+            report
+                .backup_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(unknown)".to_string())
+        );
+    } else {
+        println!(
+            "Migrated {} setting(s) from {} to {}:",
+            report.lines.len(),
+            report.legacy_path.display(),
+            report.rc_path.display()
+        );
+        for line in &report.lines {
+            println!("  {line}");
+        }
+        if let Some(backup) = &report.backup_path {
+            println!("Old file renamed to {}.", backup.display());
+        }
+        if !report.rc_changed {
+            println!("The rc block was already up to date; nothing was appended twice.");
+        }
+    }
+    if !report.skipped.is_empty() {
+        println!("Skipped {} unrecognized value(s):", report.skipped.len());
+        for skipped in &report.skipped {
+            println!("  {skipped}");
+        }
+    }
+    println!();
+    println!(
+        "Start a new session (or `source {}`) to apply.",
+        report.rc_path.display()
+    );
+    if report
+        .lines
+        .iter()
+        .any(|line| line.contains("NIU_RC_POLICY"))
+    {
+        println!(
+            "note: NIU_RC_POLICY is read from the environment at startup; the rc line \
+             applies to sessions started from a shell that has it exported."
+        );
+    }
+    Ok(())
+}
+
 fn print_config_usage() {
+    use niubash_runtime::config::{
+        COMPLETION_INTERACTION_KEY, COMPLETION_STYLE_KEY, EDITOR_MODE_KEY, KEYSEQ_TIMEOUT_KEY,
+        RC_POLICY_KEY,
+    };
     println!("Usage:  niu config <command>");
     println!();
-    println!("Persisted user settings (~/.niubash/config.toml).");
+    println!("Read-only view of effective settings. Since 1.5.0 niu has no");
+    println!("~/.niubash/config.toml: GNU-shaped knobs come from rc `bind`/`set`/");
+    println!("`shopt` or $INPUTRC/~/.inputrc, and niu-proprietary knobs come from");
+    println!("NIU_* environment variables.");
     println!();
-    println!("  get <key>          Print a setting's effective value");
-    println!("  set <key> <value>  Persist a setting");
-    println!("  list               Show every setting and its current value");
+    println!("  list               Show every effective value and its source");
+    println!("  get <key>          Print one effective value and its source");
+    println!("  migrate            One-time: translate an old config.toml into");
+    println!("                     rc lines, then rename the old file");
+    println!();
+    println!("Sources: env | inputrc | default.");
     println!();
     println!("Settings:");
-    println!(
-        "  {k}",
-        k = niubash_runtime::config::COMMAND_NOT_FOUND_HINT_KEY
-    );
-    println!("      Package-search suggestion printed after \"command not found\".");
-    println!("      off (default) | wpm — wpm suggests one `wpm search --name`");
-    println!("      line for high-confidence near-misses; third-party managers are");
-    println!("      never recommended (niubash#249).");
+    println!("  {COMPLETION_STYLE_KEY}       NIU_COMPLETION_STYLE (gnu|ide|column|list|inline)");
+    println!("  {COMPLETION_INTERACTION_KEY} NIU_COMPLETION_INTERACTION (insert|cycle)");
+    println!("  command-not-found-hint      NIU_COMMAND_NOT_FOUND_HINT (off|wpm)");
+    println!("  {RC_POLICY_KEY}     NIU_RC_POLICY (primary-only|bashrc-fallback)");
+    println!("  {EDITOR_MODE_KEY}           $INPUTRC/~/.inputrc `set editing-mode vi|emacs`");
+    println!("  {KEYSEQ_TIMEOUT_KEY}        $INPUTRC/~/.inputrc `set keyseq-timeout <ms>`");
     println!();
-    println!("  {k}", k = niubash_runtime::config::COMPLETION_STYLE_KEY);
-    println!("      Shape of the TAB completion UI. column (default) — TAB shows");
-    println!("      the candidates at once, several per row (GNU listing look).");
-    println!("      Alternatives: gnu (GNU readline literal), ide (VS Code popup),");
-    println!("      list (fish vertical), inline (bash menu-complete).");
-    println!("      NIU_COMPLETION_STYLE overrides this file.");
-    println!();
-    println!(
-        "  {k}",
-        k = niubash_runtime::config::COMPLETION_INTERACTION_KEY
-    );
-    println!("      How TAB drives the line while candidates are shown");
-    println!("      (niubash#631). cycle (default) — TAB puts candidates into");
-    println!("      the line one at a time, Enter accepts and runs, Esc rolls");
-    println!("      back to the pre-completion line. insert — the pre-#631");
-    println!("      behavior: TAB completes the common prefix, Enter confirms");
-    println!("      the menu's pick. The gnu style ignores this axis.");
-    println!("      NIU_COMPLETION_INTERACTION overrides this file.");
-    println!();
-    println!("  {k}", k = niubash_runtime::config::RC_POLICY_KEY);
-    println!("      Personal-rc selection for interactive shells. primary-only");
-    println!("      (default) — ~/.niubashrc only; bashrc-fallback — an explicit");
-    println!("      opt-in that lets ~/.bashrc fill the slot when ~/.niubashrc is");
-    println!("      genuinely absent. Owned by `niu setup --rc-policy`; `niu config`");
-    println!("      shows and preserves it but cannot set it (niubash#359).");
-    println!();
-    println!("  {k}", k = niubash_runtime::config::KEYMAP_BIND_KEY);
-    println!("      Persistent key-binding rules (niubash#630). The value is one");
-    println!("      GNU bind argument string — '\"\\C-g\": redisplay', or with -x:");
-    println!("      '-x \"\\C-t\": my-cmd' — validated, then appended to the");
-    println!("      [keymap] bind array. Rules apply after startup scripts and");
-    println!("      NIU_BINDKEYS, so they win on their key; a script rebinding");
-    println!("      the same key mid-session cannot override them. Remove a");
-    println!("      rule by editing ~/.niubash/config.toml.");
-    println!();
-    println!("  {k}", k = niubash_runtime::config::KEYMAP_UNBIND_KEY);
-    println!("      Persistent key removals (niubash#630). The value names one");
-    println!("      key in bind spelling ('\"\\C-t\"'); the key is unbound");
-    println!("      outright — it does not fall back to a lower layer's binding.");
+    println!("Changing a value:");
+    println!("  GNU-shaped: add `bind ...`, `set ...`, or `shopt ...` to ~/.niubashrc,");
+    println!("              or a readline variable/binding to $INPUTRC / ~/.inputrc.");
+    println!("  niu-shaped: export NIU_* in the environment or ~/.niubashrc.");
+    println!("  Old file:   run `niu config migrate` (one time).");
 }
 
 fn print_plugin_mirror_usage() {
@@ -4178,14 +3993,13 @@ fn setup_rc_policy_arg(args: &[String]) -> anyhow::Result<Option<String>> {
 }
 
 /// `niu setup --rc-policy <primary-only|bashrc-fallback>` (niubash#359):
-/// explicit setup is the ONLY writer of `startup.rc-policy` in
-/// `~/.niubash/config.toml`. Persisting (or revoking, via the built-in
-/// default) touches NO rc file — selecting the fallback must not create an
-/// empty `~/.niubashrc`, which would suppress the selected fallback — and
-/// a failed persistence (unparseable config, IO error) leaves the previous
-/// policy and both rc files exactly as they were.
+/// the policy is read from `NIU_RC_POLICY` at startup. An existing
+/// `~/.niubashrc` receives a marked `export NIU_RC_POLICY=...` block; when
+/// no primary exists, selecting the fallback must NOT create one (that
+/// would suppress the very fallback being selected), so the command prints
+/// the export line for the user's environment instead.
 fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
-    use niubash_runtime::config::{set_rc_policy, RcPolicy};
+    use niubash_runtime::config::{persist_rc_policy, RcPolicy, RcPolicyWrite};
     let Some(policy) = RcPolicy::parse(value) else {
         anyhow::bail!("unknown rc policy '{value}' — valid values: primary-only, bashrc-fallback");
     };
@@ -4194,24 +4008,33 @@ fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
     if setup_preset_arg(args).is_some() {
         anyhow::bail!("--rc-policy and --preset are separate runs: pick one");
     }
-    let path = set_rc_policy(policy)?;
-    match policy {
-        RcPolicy::PrimaryOnly => {
-            println!("startup.rc-policy = primary-only");
-            println!("  ~/.niubashrc is the only personal rc; ~/.bashrc is never considered.");
-            println!(
-                "  (the built-in default — no key is pinned in {})",
-                path.display()
-            );
+    match persist_rc_policy(policy)? {
+        RcPolicyWrite::Written(path) => {
+            println!("NIU_RC_POLICY = {}", policy.as_str());
+            println!("  persisted in {}", path.display());
+            println!("  the variable is read at startup; a new session picks it up.");
         }
+        RcPolicyWrite::Instruction(line) => {
+            println!("NIU_RC_POLICY = {}", policy.as_str());
+            println!("  No ~/.niubashrc exists, and creating one would suppress the");
+            println!("  fallback it selects. Export this line in your terminal");
+            println!("  environment (or Windows user environment / shell profile):");
+            println!("    {line}");
+        }
+        RcPolicyWrite::Default => {
+            println!("NIU_RC_POLICY = primary-only (the built-in default)");
+            println!("  ~/.niubashrc is the only personal rc; ~/.bashrc is never considered.");
+            println!("  Any setup-persisted policy block was removed.");
+        }
+    }
+    match policy {
+        RcPolicy::PrimaryOnly => {}
         RcPolicy::BashrcFallback => {
-            println!("startup.rc-policy = bashrc-fallback");
             println!("  only while ~/.niubashrc is genuinely absent, ~/.bashrc fills the slot.");
             println!("  WARNING: a .bashrc is arbitrary shell code — sourcing it executes");
             println!("  it in this shell. niu cannot review or sandbox it, and did not read it.");
         }
     }
-    println!("  No rc file was created or modified.");
     Ok(())
 }
 
@@ -4243,12 +4066,13 @@ fn show_setup_usage() {
     println!("  niu setup                       Re-run the interactive setup wizard");
     println!("  niu setup --preset <name>       Apply a preset non-interactively");
     println!("                                  (e.g. recommended, minimal)");
-    println!("  niu setup --rc-policy <policy>  Persist the personal-rc policy in");
-    println!("                                  ~/.niubash/config.toml without running");
-    println!("                                  the wizard: primary-only (default) |");
-    println!("                                  bashrc-fallback — ~/.bashrc fills the");
-    println!("                                  slot only while ~/.niubashrc is absent.");
-    println!("                                  No rc file is created or modified.");
+    println!("  niu setup --rc-policy <policy>  Persist NIU_RC_POLICY in ~/.niubashrc");
+    println!("                                  without running the wizard: primary-only");
+    println!("                                  (default) | bashrc-fallback — ~/.bashrc");
+    println!("                                  fills the slot only while ~/.niubashrc");
+    println!("                                  is absent. If no rc exists, the export");
+    println!("                                  line is printed instead (creating one");
+    println!("                                  would suppress the fallback).");
     println!("  niu setup --help                Show this help (plain text)");
     println!();
     println!("The wizard creates ~/.niubashrc only when it is missing (create-only:");

@@ -30,10 +30,6 @@ thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
-# Surgical config.toml edits (niubash#359): the document-preserved variant
-# keeps unrelated keys, comments and layout when `niu config`/`niu setup`
-# persist one setting — the old typed-subset render dropped them.
-toml_edit = "0.22"
 dirs = "5.0"
 filetime = "0.2"
 sha2 = "0.10"

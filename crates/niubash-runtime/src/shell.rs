@@ -184,8 +184,8 @@ pub struct Shell {
     pub editor_mode: EditorMode,
     /// Command-not-found package-search hint policy (niubash#249): off by
     /// default — a typo prints only the GNU one-liner;
-    /// `niu config set command-not-found-hint wpm` opts in to a wpm-only
-    /// near-miss suggestion.
+    /// `NIU_COMMAND_NOT_FOUND_HINT=wpm` opts in to a wpm-only near-miss
+    /// suggestion.
     pub command_not_found_hint: CommandNotFoundHint,
     /// Last observed engine `set -o emacs` / `set -o vi` flag pair, used by
     /// [`Shell::refresh_edit_mode`] to recover which of the two the user
@@ -211,18 +211,6 @@ pub struct Shell {
     /// mirrored keymaps (GNU takes effect immediately; reedline
     /// keymaps are baked at editor build time).
     pub engine_bind_generation: u64,
-    /// The user's persistent `[keymap].bind` rules from config.toml
-    /// (niubash#630, K4), parsed into bind-surface mirror entries by
-    /// [`Shell::load_user_keymap_rules`]. The editor build applies
-    /// them inside the user layer, after `NIU_BINDKEYS`; their
-    /// `bind -x` triggers resolve through [`Shell::run_bind_x_command`]
-    /// at indices offset past `engine_bindings`, so this list and the
-    /// snapshot together form the one resolution list.
-    pub user_keymap_rules: Vec<crate::bind_surface::EngineBindEntry>,
-    /// The user's persistent `[keymap].unbind` keys from config.toml
-    /// (niubash#630, K4): slots the editor build removes outright at
-    /// the end of the user layer.
-    pub user_keymap_unbinds: Vec<(reedline::KeyModifiers, reedline::KeyCode)>,
     /// User-declared completion functions parsed from `NIU_COMPDEFS` in the
     /// startup rc: `(command, function)` pairs.
     pub compdefs: Vec<(String, String)>,
@@ -361,20 +349,6 @@ fn default_script_name_from(raw: Option<String>) -> String {
     }
 }
 
-/// Report a `[keymap]` rule that cannot be used (niubash#630, K4):
-/// once per process per distinct message. The loader reruns whenever
-/// the engine bind generation forces an editor rebuild, and a config
-/// error must be *reported* (DESIGN §5.2) without becoming
-/// per-rebuild noise.
-fn report_keymap_rule_error(message: &str) {
-    static REPORTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
-    let mut guard = REPORTED.lock().unwrap_or_else(|err| err.into_inner());
-    let seen = guard.get_or_insert_with(Default::default);
-    if seen.insert(message.to_string()) {
-        eprintln!("{message}");
-    }
-}
-
 impl Shell {
     /// The live engine session (the 1.5.0 Session contract).
     pub fn session(&self) -> &Session {
@@ -486,7 +460,7 @@ impl Shell {
         // apply here.)
         let config = load_config();
         // niubash#249: resolve the opt-in hint policy once at startup
-        // (config.toml, overridden by NIU_COMMAND_NOT_FOUND_HINT).
+        // (NIU_COMMAND_NOT_FOUND_HINT only; there is no config file).
         let command_not_found_hint = crate::config::resolve_command_not_found_hint();
         crate::startup_trace::tick("config loaded");
 
@@ -830,8 +804,6 @@ impl Shell {
             native_widget_bindings: Vec::new(),
             user_widget_bindings: Vec::new(),
             engine_bindings: Vec::new(),
-            user_keymap_rules: Vec::new(),
-            user_keymap_unbinds: Vec::new(),
             engine_bind_generation: 0,
             compdefs: Vec::new(),
             config_completion_dirs: config.completion_dirs.clone(),
@@ -1576,10 +1548,11 @@ impl Shell {
     /// Source the user's REPL startup file once before the first prompt.
     ///
     /// `~/.niubashrc` is the automatic interactive rc entry point. Under
-    /// the default `startup.rc-policy = "primary-only"` a missing primary
-    /// leaves native defaults and no other rc is searched; an explicit
-    /// `bashrc-fallback` setup pick makes `~/.bashrc` eligible only when
-    /// the primary is genuinely absent (niubash#359; the two never stack).
+    /// the default `NIU_RC_POLICY=primary-only` a missing primary leaves
+    /// native defaults and no other rc is searched; an explicit
+    /// `NIU_RC_POLICY=bashrc-fallback` makes `~/.bashrc` eligible only
+    /// when the primary is genuinely absent (niubash#359; the two never
+    /// stack).
     /// The rc is ordinary shell code: the built-in plugin/theme
     /// stack is retired (niubash#145), so NIU_PLUGINS / NIU_THEME lines in
     /// an old rc are inert assignments the host no longer reads. Returns
@@ -1588,8 +1561,41 @@ impl Shell {
     /// status instead of drawing a prompt or running the command line.
     pub fn run_startup_rc(&mut self) -> Option<i32> {
         let exit = self.run_startup_files(true);
+        self.sync_niu_environment_from_engine();
         self.finish_startup();
         exit
+    }
+
+    /// Mirror the niu-proprietary `NIU_*` knobs the rc assigned into the
+    /// process environment, then re-resolve the settings computed before
+    /// the rc ran. This is what makes `export NIU_COMPLETION_STYLE=...`
+    /// (and the migration's `export NIU_*` lines) take effect in the
+    /// session that sourced them, not only in child processes.
+    pub fn sync_niu_environment_from_engine(&mut self) {
+        const NAMES: &[&str] = &[
+            "NIU_COMPLETION_STYLE",
+            "NIU_COMPLETION_INTERACTION",
+            "NIU_COMMAND_NOT_FOUND_HINT",
+            "NIU_RC_POLICY",
+            "NIU_PROMPT_CWD_STYLE",
+            "NIU_AUTOSUGGEST_STRATEGY",
+            "NIU_AUTOSUGGEST_HIGHLIGHT_STYLE",
+            "NIU_AUTOSUGGEST_BUFFER_MAX_SIZE",
+            "NIU_HIGHLIGHT_HIGHLIGHTERS",
+            "NIU_HIGHLIGHT_MAXLENGTH",
+            "NIU_HIGHLIGHT_STYLES",
+        ];
+        for name in NAMES {
+            if let Some(value) = self.executor().get_env(name) {
+                if !value.is_empty() {
+                    std::env::set_var(name, value);
+                }
+            }
+        }
+        self.menu_config = self.menu_config.with_env_overrides();
+        self.command_not_found_hint = crate::config::resolve_command_not_found_hint();
+        self.autosuggest = self.autosuggest.clone().with_env_overrides();
+        self.syntax_highlighting = self.syntax_highlighting.clone().with_env_overrides();
     }
 
     /// niubash#180 session side: a finished `niu setup` run (a child
@@ -1638,6 +1644,7 @@ impl Shell {
             // rc did not take.
             Ok(0) => {
                 self.sync_process_path_from_executor_path();
+                self.sync_niu_environment_from_engine();
                 self.update_completion_state();
                 println!("{}", crate::setup_wizard::session_apply_notice());
             }
@@ -1669,6 +1676,7 @@ impl Shell {
     /// terminate instead of running the command line.
     pub fn run_interactive_startup_rc(&mut self) -> Option<i32> {
         let exit = self.run_startup_files(false);
+        self.sync_niu_environment_from_engine();
         self.finish_startup();
         exit
     }
@@ -2307,8 +2315,8 @@ impl Shell {
         if primary.exists() {
             return Some(primary);
         }
-        // niubash#359 `startup.rc-policy`: only an explicit setup-persisted
-        // `bashrc-fallback` pick lets ~/.bashrc fill the personal-rc slot,
+        // niubash#359 `NIU_RC_POLICY`: only an explicit `bashrc-fallback`
+        // environment pick lets ~/.bashrc fill the personal-rc slot,
         // and only when the primary is GENUINELY absent — symlink_metadata
         // does not follow the final entry away, so a dangling/cyclic
         // .niubashrc symlink still owns the slot, and any non-NotFound
@@ -2653,13 +2661,12 @@ impl Shell {
     /// — a disable-only flip keeps the current mode instead (documented
     /// follow-up, niubash#184).
     ///
-    /// inputrc dependency (niubash#185's lane): GNU also seeds the editing
-    /// mode from readline's `set editing-mode` in INPUTRC (~/.inputrc,
-    /// bound.c:2992), which this product does not read yet. Until that
-    /// surface lands, the startup mode comes from the engine flags alone;
-    /// when #185 adds an inputrc reader, its result must feed the same
-    /// initial observation (the `None` branch below) rather than a second
-    /// resolver.
+    /// inputrc: GNU seeds the editing mode from readline's
+    /// `set editing-mode` in INPUTRC (~/.inputrc, bound.c:2992), read
+    /// after the rc. The engine exposes the value through
+    /// `Executor::bind_editing_mode()`; it feeds the same initial
+    /// observation (the `None` branch below), with the rc's `set -o`
+    /// flags as the fallback.
     pub fn refresh_edit_mode(&mut self) -> Option<EditorMode> {
         // Value check mirrors rubash set/options.rs shell_option_enabled:
         // the key holds "1"/"0" and a missing key falls back to the option
@@ -2677,12 +2684,22 @@ impl Shell {
             .as_deref()
             == Some("1");
         let now = (emacs_on, vi_on);
+        // readline's inputrc `set editing-mode` is read after the rc and
+        // therefore wins over the rc's `set -o vi|emacs` flags on the
+        // first observation (GNU order: startup files, then inputrc).
+        let inputrc_mode = self
+            .executor()
+            .bind_editing_mode()
+            .and_then(|value| EditorMode::parse(&value));
         let resolved = match self.edit_flags_seen.replace(now) {
-            // First observation (startup, after the rc has run): the bashrc
-            // idiom is `set -o vi`; an emacs-only flag or the all-off
-            // default keeps the configured mode.
+            // First observation (startup, after the rc has run): inputrc
+            // `set editing-mode` first, then the bashrc idiom `set -o vi`;
+            // an emacs-only flag or the all-off default keeps the
+            // configured mode.
             None => {
-                if vi_on {
+                if let Some(mode) = inputrc_mode {
+                    mode
+                } else if vi_on {
                     EditorMode::Vi
                 } else if emacs_on {
                     EditorMode::Emacs
@@ -2731,6 +2748,14 @@ impl Shell {
     /// line editor is built, and again whenever the registry generation
     /// moved so a runtime `bind` call mirrors into the next prompt.
     pub fn load_engine_bindings(&mut self) {
+        // GNU's readline initialization order (bashline.c:451): the
+        // inputrc file ($INPUTRC, else ~/.inputrc) is read once per
+        // process, AFTER the startup files, so rc `bind` commands run
+        // first and inputrc overrides them. The engine's
+        // `initialize_readline` is idempotent; calling it here — after
+        // the rc, before the snapshot — is what makes inputrc variables
+        // and bindings visible to the mirrored keymaps.
+        self.executor_mut().initialize_readline();
         // The registry itself is Tier C: the snapshot arrives
         // through the gated bind surface, already converted to
         // niu-owned mirror types (PLAN row 11, M-3).
@@ -2744,40 +2769,6 @@ impl Shell {
     /// probe, routed through the same gated surface).
     pub fn engine_bindings_stale(&self) -> bool {
         crate::bind_surface::current_generation(self.executor()) != self.engine_bind_generation
-    }
-
-    /// Load the user's persistent keymap rules from config.toml's
-    /// `[keymap]` section (niubash#630, K4). Each `bind` element is a
-    /// GNU bind argument string, parsed by the engine's own bind
-    /// parsers (see `crate::repl::parse_keymap_bind_rule`); each
-    /// `unbind` element names one key. A rule that does not parse is
-    /// reported once per process — its exact text and the reason —
-    /// and skipped: it never breaks startup and never applies
-    /// silently. Called wherever the engine snapshot is (re)taken, so
-    /// a rebuild always adjudicates script registrations against the
-    /// current user rules.
-    pub fn load_user_keymap_rules(&mut self) {
-        let (bind_specs, unbind_specs) = crate::config::resolve_keymap_rule_specs();
-        let mut rules = Vec::new();
-        for spec in &bind_specs {
-            match crate::repl::parse_keymap_bind_rule(spec) {
-                Ok(entry) => rules.push(entry),
-                Err(reason) => report_keymap_rule_error(&format!(
-                    "niubash: [keymap].bind rule '{spec}' ignored: {reason}"
-                )),
-            }
-        }
-        let mut unbinds = Vec::new();
-        for spec in &unbind_specs {
-            match crate::repl::parse_keymap_unbind_key(spec) {
-                Ok(key) => unbinds.push(key),
-                Err(reason) => report_keymap_rule_error(&format!(
-                    "niubash: [keymap].unbind entry '{spec}' ignored: {reason}"
-                )),
-            }
-        }
-        self.user_keymap_rules = rules;
-        self.user_keymap_unbinds = unbinds;
     }
 
     /// Run an engine `bind -x` command for a keypress and produce the
@@ -2801,14 +2792,10 @@ impl Shell {
         buffer: &str,
         cursor_byte: usize,
     ) -> WidgetOutcome {
-        // One resolution list (niubash#630, K4): the engine snapshot
-        // at its own indices, the `[keymap]` user rules right behind
-        // it — the indices the editor build baked into the triggers.
-        let entry = self.engine_bindings.get(index).or_else(|| {
-            index
-                .checked_sub(self.engine_bindings.len())
-                .and_then(|offset| self.user_keymap_rules.get(offset))
-        });
+        // The engine snapshot is the one resolution list: rc `bind` and
+        // inputrc rules both live in it, at the indices the editor build
+        // baked into the triggers.
+        let entry = self.engine_bindings.get(index);
         let Some(entry) = entry else {
             return WidgetOutcome::default();
         };
@@ -5074,9 +5061,8 @@ where
 /// niubash#249: the unsolicited "package search hints" block is gone. The
 /// recipe/wpm install hints stay (they fire only for exact, known tool
 /// names — targeted advice, not a typo-triggered advertisement). The
-/// search suggestion itself is opt-in (`niu config set
-/// command-not-found-hint wpm`) and names only niu's own wpm — never
-/// winget/scoop/choco.
+/// search suggestion itself is opt-in (`NIU_COMMAND_NOT_FOUND_HINT=wpm`)
+/// and names only niu's own wpm — never winget/scoop/choco.
 #[cfg_attr(not(windows), allow(unused_mut))]
 fn native_command_not_found_hint_lines_with_policy<F>(
     command: &str,
@@ -6875,62 +6861,56 @@ __fzf_history_stub() {
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    // niubash#630, K4: the [keymap] loader parses config.toml's rules
-    // into the user layer (bad rules reported + skipped, never fatal),
-    // and a user rule's `bind -x` resolves behind the engine snapshot:
-    // index 0 is the engine's command, index 1 the user's.
+    /// GNU's readline order: the rc runs first, then `$INPUTRC` /
+    /// `~/.inputrc` is read, so its variables and bindings are in the
+    /// engine snapshot the editor mirrors and its `set editing-mode`
+    /// seeds the startup mode.
     #[test]
-    fn issue630_user_keymap_rules_load_and_bindx_resolves_behind_engine() {
+    fn inputrc_variables_and_bindings_apply_after_the_rc() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("niubash-keymap-rules");
+        let temp = unique_temp_dir("niubash-inputrc");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(NIU_RC_FILE), r#"bind '"\C-g": redisplay'"#).unwrap();
         std::fs::write(
-            home.join(NIU_RC_FILE),
-            r#"
-bind -x '"\C-r": __engine_stub'
-__engine_stub() { READLINE_LINE="engine:$READLINE_LINE"; READLINE_POINT=${#READLINE_LINE}; }
-__user_stub() { READLINE_LINE="user:$READLINE_LINE"; READLINE_POINT=${#READLINE_LINE}; }
-"#,
+            home.join(".inputrc"),
+            "set editing-mode vi\nset keyseq-timeout 120\n\"\\C-t\": transpose-chars\n",
         )
         .unwrap();
-        let config_path = temp.join("config.toml");
-        std::fs::write(
-            &config_path,
-            "[keymap]\n\
-             bind = ['-x \"\\C-g\": __user_stub', '\"\\C-x\\C-f\": redisplay', 'bogus rule']\n\
-             unbind = ['\"\\C-a\"']\n",
-        )
-        .unwrap();
-        let _config_guard = EnvVarGuard::set_value(
-            "NIU_CONFIG",
-            config_path.to_str().expect("temp path is UTF-8"),
-        );
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _inputrc_guard = EnvVarGuard::unset("INPUTRC");
 
         let mut shell = Shell::new().unwrap();
         shell.home_dir = home;
         shell.run_startup_rc();
         shell.load_engine_bindings();
-        shell.load_user_keymap_rules();
+        shell.refresh_edit_mode();
 
-        assert_eq!(shell.engine_bindings.len(), 1);
-        // The chained rule parses (mirroring drops it later, by
-        // shape); the bogus rule was reported and skipped.
-        assert_eq!(shell.user_keymap_rules.len(), 2);
-        assert_eq!(shell.user_keymap_unbinds.len(), 1);
-
-        // Index 0 runs the engine's command…
-        let outcome = shell.run_bind_x_command(0, "buf", 3);
-        assert_eq!(outcome.buffer.as_deref(), Some("engine:buf"));
-        // …and index 1 — the offset the editor build bakes into a
-        // user rule's trigger — runs the USER command, never the
-        // engine entry's.
-        let outcome = shell.run_bind_x_command(1, "buf", 3);
-        assert_eq!(outcome.buffer.as_deref(), Some("user:buf"));
-        // Past the end of the combined list: a no-op.
-        let outcome = shell.run_bind_x_command(2, "buf", 3);
-        assert_eq!(outcome.buffer, None);
+        assert_eq!(shell.editor_mode, EditorMode::Vi);
+        assert_eq!(
+            shell
+                .executor()
+                .bind_readline_variable("keyseq-timeout")
+                .as_deref(),
+            Some("120")
+        );
+        assert!(
+            shell
+                .engine_bindings
+                .iter()
+                .any(|entry| entry.keyseq == r"\C-t"),
+            "the inputrc binding must be in the mirrored snapshot: {:?}",
+            shell.engine_bindings
+        );
+        assert!(
+            shell
+                .engine_bindings
+                .iter()
+                .any(|entry| entry.keyseq == r"\C-g"),
+            "the rc binding must still be present: {:?}",
+            shell.engine_bindings
+        );
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -7204,7 +7184,7 @@ complete -F _envtooldyn_hook envtooldyn
 
     #[test]
     fn command_not_found_hint_wpm_opt_in_suggests_only_wpm_for_near_misses() {
-        // Opt-in channel (`niu config set command-not-found-hint wpm`):
+        // Opt-in channel (`NIU_COMMAND_NOT_FOUND_HINT=wpm`):
         // only wpm is ever named, and only when the word is a
         // high-confidence near-miss — dropping the last character hits a
         // known package command name (jq) or an installed command (rg).
@@ -9568,8 +9548,6 @@ complete -F _envtooldyn_hook envtooldyn
             native_widget_bindings: Vec::new(),
             user_widget_bindings: Vec::new(),
             engine_bindings: Vec::new(),
-            user_keymap_rules: Vec::new(),
-            user_keymap_unbinds: Vec::new(),
             engine_bind_generation: 0,
             compdefs: Vec::new(),
             config_completion_dirs: Vec::new(),
@@ -9692,7 +9670,7 @@ complete -F _envtooldyn_hook envtooldyn
 
 #[cfg(test)]
 mod invocation_name_tests {
-    use super::tests::{test_shell, CwdGuard};
+    use super::tests::test_shell;
     use super::{default_script_name_from, HookConfig};
     use crate::test_support::PROCESS_STATE_LOCK;
 
