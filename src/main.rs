@@ -3820,7 +3820,7 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
     if !stray.is_empty() {
         eprintln!(
             "niu plugin sync: found hand-written theme assignment(s) outside the managed \
-             blocks: {}. The supported channel is {} as `"theme": \"...\"` on the source \
+             blocks: {}. The supported channel is {} as `\"theme\": \"...\"` on the source \
              entry; your hand-written line runs after the generated plugin loader, so it \
              wins at startup — keep it only if you intend that override.",
             stray.join("; "),
