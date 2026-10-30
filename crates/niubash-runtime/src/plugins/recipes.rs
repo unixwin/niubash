@@ -26,7 +26,7 @@ use super::sources;
 
 /// Generated seed index, compiled in (regenerate with
 /// `scripts/gen-plugin-recipes.py`).
-const RECIPES_TOML: &str = include_str!("../../assets/plugins/recipes.toml");
+const RECIPES_JSON: &str = include_str!("../../assets/plugins/recipes.json");
 
 /// Recipe categories (the index's five classes plus `alias`, which oh-my-bash
 /// and bash-it both ship as a distinct asset class).
@@ -77,7 +77,7 @@ pub enum RecipeDriver {
 }
 
 /// Catalog metadata for one platform row of an executable-tool recipe.
-/// The generated recipes.toml rows carry more fields (archive kind, pinned
+/// The generated recipes.json rows carry more fields (archive kind, pinned
 /// sha256, bins) from the download-driver era; they parse compatibly and
 /// are ignored — niu no longer downloads, so nothing needs them.
 #[derive(Debug, Clone, Deserialize)]
@@ -190,14 +190,14 @@ pub fn recipes() -> &'static [Recipe] {
             #[serde(default)]
             recipe: Vec<RawRecipe>,
         }
-        let parsed: Registry = toml::from_str(RECIPES_TOML)
-            .unwrap_or_else(|err| panic!("compiled-in recipes.toml must parse: {err}"));
+        let parsed: Registry = serde_json::from_str(RECIPES_JSON)
+            .unwrap_or_else(|err| panic!("compiled-in recipes.json must parse: {err}"));
         let mut all: Vec<Recipe> = parsed
             .recipe
             .into_iter()
             .map(|raw| {
                 raw.try_into()
-                    .unwrap_or_else(|err| panic!("compiled-in recipes.toml is invalid: {err}"))
+                    .unwrap_or_else(|err| panic!("compiled-in recipes.json is invalid: {err}"))
             })
             .collect();
         // Manager rows derive from the adapters (single source of truth —

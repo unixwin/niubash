@@ -1,9 +1,11 @@
 //! Plugin collections — the LazyVim extras pattern for niu (study §8,
 //! §10.2): a collection ("distro") is a *data manifest* listing recipe ids;
-//! built-in collections ship in the product, imported collections are the
-//! same format from a repo or directory, byte-identical in shape
-//! (LazyVim's user-extras rule: anything the distro can do, a user repo
-//! can do). `apply` walks the entries through [`super::recipes::install`]
+//! built-in collections ship in the product, imported collections come
+//! from a repo or directory with the same manifest shape (LazyVim's
+//! user-extras rule: anything the distro can do, a user repo can do).
+//! The built-ins are compiled in as JSON since the 1.5.0 product-TOML
+//! deletion; imported collections keep the TOML manifest form.
+//! `apply` walks the entries through [`super::recipes::install`]
 //! — sources land installed; activation stays a separate explicit verb.
 //!
 //! Imported collections live under `~/.niubash/distros/<name>/` with a
@@ -27,19 +29,21 @@ pub const COLLECTION_SCHEMA: &str = "niubash:plugin-collection@1";
 /// Manifest file name inside a collection repo/directory.
 pub const COLLECTION_MANIFEST: &str = "niu-collection.toml";
 
-/// Built-in official collections (compiled in, same format as imports).
+/// Built-in official collections (compiled in). Since the 1.5.0
+/// product-TOML deletion the built-ins ship as JSON; imported collections
+/// keep the TOML manifest format (`COLLECTION_MANIFEST` below).
 const BUILTIN_COLLECTIONS: &[(&str, &str)] = &[
     (
         "minimal",
-        include_str!("../../assets/plugins/collections/minimal.toml"),
+        include_str!("../../assets/plugins/collections/minimal.json"),
     ),
     (
         "recommended",
-        include_str!("../../assets/plugins/collections/recommended.toml"),
+        include_str!("../../assets/plugins/collections/recommended.json"),
     ),
     (
         "full",
-        include_str!("../../assets/plugins/collections/full.toml"),
+        include_str!("../../assets/plugins/collections/full.json"),
     ),
 ];
 
@@ -75,6 +79,19 @@ pub struct CollectionListing {
 
 fn parse_manifest(text: &str) -> anyhow::Result<Collection> {
     let collection: Collection = toml::from_str(text).context("parsing the collection manifest")?;
+    validate_manifest(collection)
+}
+
+/// Built-in collections ship as JSON (the 1.5.0 product-TOML deletion);
+/// the manifest shape and validation are identical to the imported TOML
+/// form parsed by [`parse_manifest`].
+fn parse_builtin_manifest(text: &str) -> anyhow::Result<Collection> {
+    let collection: Collection =
+        serde_json::from_str(text).context("parsing the built-in collection manifest")?;
+    validate_manifest(collection)
+}
+
+fn validate_manifest(collection: Collection) -> anyhow::Result<Collection> {
     if let Some(schema) = &collection.schema {
         if schema != COLLECTION_SCHEMA {
             bail!("unsupported collection schema '{schema}' (expected '{COLLECTION_SCHEMA}')");
@@ -109,7 +126,7 @@ pub fn validate_collection(collection: &Collection) -> anyhow::Result<()> {
 pub fn collections() -> Vec<CollectionListing> {
     let mut out = Vec::new();
     for (_, text) in BUILTIN_COLLECTIONS {
-        if let Ok(collection) = parse_manifest(text) {
+        if let Ok(collection) = parse_builtin_manifest(text) {
             out.push(CollectionListing {
                 collection,
                 origin: CollectionOrigin::Builtin,

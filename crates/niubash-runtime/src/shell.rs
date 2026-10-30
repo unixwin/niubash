@@ -5177,7 +5177,7 @@ where
 /// Application tools that own a compiled-in plugin executable-tool recipe:
 /// their install hint names the recipe's package-manager recommendation
 /// (cross-platform — wpm first on Windows, native managers elsewhere).
-/// Keep in sync with `assets/plugins/recipes.toml`: an entry here without a
+/// Keep in sync with `assets/plugins/recipes.json`: an entry here without a
 /// recipe row would print a dead verb.
 fn plugin_recipe_for_command(command: &str) -> Option<&'static str> {
     match command {

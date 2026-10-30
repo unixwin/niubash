@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
-"""Generate the niu plugin recipe seed index (recipes.toml).
+"""Generate the niu plugin recipe seed index (recipes.json).
 
 The recipe registry is pure data (mason-registry pattern: one registry file,
 one row per asset, no behavior code). This script derives the bulk of the
 seed — oh-my-bash and bash-it asset inventories — from the corpus
 checkouts, plus a hand-curated standalone set (managers, prompts, tools).
 
+Data shape (see docs/planning/lazy-family-source-study.md §6): each row of
+the top-level "recipe" array carries
+  id          unique recipe id (`niu plugin add <id>`)
+  category    manager | theme | plugin | alias | completion | prompt
+  driver      git (tree source) | download (direct binary) | absent (info-only)
+  manager/asset_kind/asset  asset recipes riding on a manager source
+  kind/entry  source adapter kind + entry file (generic sources)
+  downloads.<platform>  per-platform download rows (url/archive/sha256)
+
+Manager rows for oh-my-bash / bash-it / bash-completion are derived from
+the compiled-in adapters at runtime (single source of truth); this file
+only carries their per-asset rows and standalone ecosystem entries.
+
 Usage:
     python scripts/gen-plugin-recipes.py \
         --corpus D:/repo/rubash/target-ecosys/repos \
-        --out crates/niubash-runtime/assets/plugins/recipes.toml
+        --out crates/niubash-runtime/assets/plugins/recipes.json
 
-Re-run when the corpus moves; the committed TOML is the artifact.
+Re-run when the corpus moves; the committed JSON is the artifact.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -217,10 +231,6 @@ STANDALONE = [
 ]
 
 
-def toml_str(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
 def first_summary(path: Path, pattern: re.Pattern) -> str | None:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -235,47 +245,35 @@ def first_summary(path: Path, pattern: re.Pattern) -> str | None:
 
 
 def emit(out, recipe: dict) -> None:
-    out.append("[[recipe]]")
-    for key in ("id", "category", "summary", "license", "url"):
-        if key in recipe:
-            out.append(f"{key} = {toml_str(recipe[key])}")
-    if recipe.get("driver"):
-        out.append(f"driver = {toml_str(recipe['driver'])}")
-    if recipe.get("kind"):
-        out.append(f"kind = {toml_str(recipe['kind'])}")
-    if recipe.get("entry"):
-        out.append(f"entry = {toml_str(recipe['entry'])}")
-    if recipe.get("version"):
-        out.append(f"version = {toml_str(recipe['version'])}")
-    if recipe.get("manager"):
-        out.append(f"manager = {toml_str(recipe['manager'])}")
-    if recipe.get("asset_kind"):
-        out.append(f"asset_kind = {toml_str(recipe['asset_kind'])}")
-    if recipe.get("asset"):
-        out.append(f"asset = {toml_str(recipe['asset'])}")
-    if recipe.get("origin"):
-        out.append(f"origin = {toml_str(recipe['origin'])}")
+    row: dict = {}
+    for key in (
+        "id", "category", "summary", "license", "url", "driver", "kind",
+        "entry", "version", "manager", "asset_kind", "asset", "origin",
+    ):
+        if recipe.get(key):
+            row[key] = recipe[key]
     bins = recipe.get("bins") or []
     if bins:
-        out.append("bins = [" + ", ".join(toml_str(b) for b in bins) + "]")
+        row["bins"] = list(bins)
     # Asset rows: (url, archive, sha256) or (url, archive, sha256, bins) —
     # per-platform bins override the recipe-level `bins` when archives nest
     # the binary under different directory names per platform (ripgrep,
     # fd, bat, dust) or ship bare executables (raw assets).
+    downloads: dict = {}
     for platform, asset in (recipe.get("assets") or {}).items():
         url, archive, sha = asset[0], asset[1], asset[2]
-        asset_bins = list(asset[3]) if len(asset) > 3 else None
-        out.append(f"[recipe.downloads.{platform}]")
-        out.append(f"url = {toml_str(url)}")
-        out.append(f"archive = {toml_str(archive)}")
+        asset_row: dict = {"url": url, "archive": archive}
         if sha:
-            out.append(f"sha256 = {toml_str(sha)}")
-        if asset_bins:
-            out.append("bins = [" + ", ".join(toml_str(b) for b in asset_bins) + "]")
-    out.append("")
+            asset_row["sha256"] = sha
+        if len(asset) > 3:
+            asset_row["bins"] = list(asset[3])
+        downloads[platform] = asset_row
+    if downloads:
+        row["downloads"] = downloads
+    out.append(row)
 
 
-def omb_assets(corpus: Path, out: list[str]) -> tuple[int, set[str]]:
+def omb_assets(corpus: Path, out: list[dict]) -> tuple[int, set[str]]:
     root = corpus / "oh-my-bash"
     count = 0
     seen: set[str] = set()
@@ -335,7 +333,7 @@ def omb_assets(corpus: Path, out: list[str]) -> tuple[int, set[str]]:
     return count, seen
 
 
-def bash_it_assets(corpus: Path, out: list[str]) -> tuple[int, set[str]]:
+def bash_it_assets(corpus: Path, out: list[dict]) -> tuple[int, set[str]]:
     root = corpus / "bash-it"
     count = 0
     seen: set[str] = set()
@@ -395,7 +393,7 @@ def bash_it_assets(corpus: Path, out: list[str]) -> tuple[int, set[str]]:
     return count, seen
 
 
-def standalone(out: list[str]) -> int:
+def standalone(out: list[dict]) -> int:
     count = 0
     for recipe_id, category, summary, license_, url, extra in STANDALONE:
         recipe = {
@@ -422,32 +420,15 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
-    header = [
-        "# niubash plugin recipe seed index (generated — do not hand-edit bulk rows).",
-        "# Regenerate: python scripts/gen-plugin-recipes.py --corpus <ecosys-repos> --out <this file>",
-        "#",
-        "# Data shape (mason-registry pattern; see docs/planning/lazy-family-source-study.md §6):",
-        "#   id          unique recipe id (`niu plugin add <id>`)",
-        "#   category    manager | theme | plugin | alias | completion | prompt",
-        "#   driver      git (tree source) | download (direct binary) | absent (info-only)",
-        "#   manager/asset_kind/asset  asset recipes riding on a manager source",
-        "#   kind/entry  source adapter kind + entry file (generic sources)",
-        "#   downloads.<platform>  per-platform download rows (url/archive/sha256)",
-        "#",
-        "# Manager rows for oh-my-bash / bash-it / bash-completion are derived from",
-        "# the compiled-in adapters at runtime (single source of truth); this file",
-        "# only carries their per-asset rows and standalone ecosystem entries.",
-        "",
-    ]
+    rows: list[dict] = []
+    omb_count, _ = omb_assets(args.corpus, rows)
+    bashit_count, _ = bash_it_assets(args.corpus, rows)
+    standalone_count = standalone(rows)
 
-    out: list[str] = list(header)
-    omb_count, _ = omb_assets(args.corpus, out)
-    bashit_count, _ = bash_it_assets(args.corpus, out)
-    standalone_count = standalone(out)
-
-    text = "\n".join(out).rstrip() + "\n"
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(text, encoding="utf-8", newline="\n")
+    with args.out.open("w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"recipe": rows}, fh, ensure_ascii=False, indent=1)
+        fh.write("\n")
     print(
         f"wrote {args.out}: {omb_count} oh-my-bash, {bashit_count} bash-it, "
         f"{standalone_count} standalone recipes"
