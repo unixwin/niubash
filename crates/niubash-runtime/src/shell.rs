@@ -641,6 +641,14 @@ impl Shell {
             builder = builder.env("BASH_ARGV0", script_name);
         }
         builder = builder.env("NIU_PROMPT_SYMBOL", config.shell.prompt_symbol.as_str());
+        // niubash#567 (FFI route registration): install the FFI
+        // provider on the engine's external-route seam. The
+        // registration is unconditional — the provider itself
+        // declines every call while its master switch is off, so
+        // an off session is byte-identical to an unregistered
+        // one, and the dispatcher's consult costs one trait call
+        // per foreground external.
+        builder = builder.external_route_provider(crate::ffi::route_provider());
         let mut session = builder
             .build()
             .map_err(|error| anyhow::anyhow!("session build failed: {error:?}"))?;

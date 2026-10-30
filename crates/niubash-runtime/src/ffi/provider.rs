@@ -143,20 +143,42 @@ fn locale_stamp() -> Option<Vec<u16>> {
     None
 }
 
-/// The ABI cancellation trampoline: reads the provider's flag
-/// through the opaque user-data pointer.
+/// The cancellation sources the ABI trampoline polls through
+/// the one user-data slot the ABI offers: the provider's own
+/// prompt-interrupt flag, plus — when the call arrives through
+/// the engine's route seam (niubash#567 registration) — the
+/// engine-side pending-interrupt check the dispatcher supplied.
+/// Either source reporting "cancel" cancels the call: niu's
+/// prompt funnel sets the flag; the engine check lets a SIGINT
+/// the ENGINE recorded (its mailbox, not niu's prompt funnel)
+/// reach an in-process call exactly as it reaches a blocked
+/// spawn wait.
+struct CancelSources<'a> {
+    own: &'a AtomicBool,
+    engine: Option<&'a (dyn Fn() -> bool + 'a)>,
+}
+
+/// The ABI cancellation trampoline: reads the installed
+/// [`CancelSources`] through the opaque user-data pointer.
 ///
 /// # Safety
-/// `user_data` must be the `Arc<AtomicBool>` pointer the provider
-/// installed, or NULL.
+/// `user_data` must be the `CancelSources` pointer the provider
+/// installed for the call in flight, or NULL.
 unsafe extern "C" fn cancel_trampoline(user_data: *mut c_void) -> i32 {
     if user_data.is_null() {
         return 0;
     }
-    // SAFETY: the provider passes `Arc::as_ptr` of its flag and
-    // keeps the Arc alive for the whole call.
-    let flag = unsafe { &*(user_data as *const AtomicBool) };
-    flag.load(Ordering::SeqCst) as i32
+    // SAFETY: the provider assembles the CancelSources on its
+    // stack for the call and keeps it (and the flag's Arc) alive
+    // for the whole call.
+    let sources = unsafe { &*(user_data as *const CancelSources<'_>) };
+    if sources.own.load(Ordering::SeqCst) {
+        return 1;
+    }
+    match sources.engine {
+        Some(check) => check() as i32,
+        None => 0,
+    }
 }
 
 impl<B: FfiBackend> FfiProvider<B> {
@@ -285,6 +307,32 @@ impl<B: FfiBackend> FfiProvider<B> {
     /// `emulation_available` mirrors the session's emulation-layer
     /// state for the tier-1 decision.
     pub fn execute(&mut self, request: &FfiRequest, emulation_available: bool) -> FfiOutcome {
+        self.execute_impl(request, emulation_available, None)
+    }
+
+    /// The engine route seam's form (niubash#567 registration):
+    /// the dispatcher's pending-interrupt check joins the
+    /// provider's own flag as a cancellation source — polled at
+    /// entry (a pending engine interrupt cancels the call before
+    /// the backend is touched, like a pending own flag) and
+    /// through the ABI cancel callback for the call's duration.
+    /// The check PEEKS (the engine's mailbox keeps its records
+    /// for the dispatcher's own adjudication after the call).
+    pub fn execute_with_engine_cancel(
+        &mut self,
+        request: &FfiRequest,
+        emulation_available: bool,
+        engine_check: &dyn Fn() -> bool,
+    ) -> FfiOutcome {
+        self.execute_impl(request, emulation_available, Some(engine_check))
+    }
+
+    fn execute_impl(
+        &mut self,
+        request: &FfiRequest,
+        emulation_available: bool,
+        engine_check: Option<&dyn Fn() -> bool>,
+    ) -> FfiOutcome {
         self.probe();
         let decision = route::route_for(
             &request.name,
@@ -302,8 +350,11 @@ impl<B: FfiBackend> FfiProvider<B> {
         }
         // An interrupt already pending means this command must
         // not run at all (spawn would be equally wrong); consume
-        // the flag and report the cancellation.
-        if self.cancel.swap(false, Ordering::SeqCst) {
+        // the flag and report the cancellation. The engine check
+        // is a peek: its records stay the dispatcher's to
+        // adjudicate after the call.
+        let own_pending = self.cancel.swap(false, Ordering::SeqCst);
+        if own_pending || engine_check.is_some_and(|check| check()) {
             return FfiOutcome::Cancelled;
         }
         if let Err(reason) = self.ensure_backend() {
@@ -318,7 +369,11 @@ impl<B: FfiBackend> FfiProvider<B> {
             Ok(context) => context,
             Err(err) => return self.fallback(format!("context: {}", err.describe())),
         };
-        let cancel_data = Arc::as_ptr(&self.cancel) as *mut c_void;
+        let sources = CancelSources {
+            own: &self.cancel,
+            engine: engine_check,
+        };
+        let cancel_data = &sources as *const CancelSources<'_> as *mut c_void;
         let call_result = {
             // The §5 borrow window: exactly one FFI call in
             // flight per process. The guard drops at the end of
@@ -513,6 +568,8 @@ grep\ttier2\t-\tTier-2\n";
         init_rc: i32,
         call_rc: i32,
         set_flag_during_call: bool,
+        set_engine_flag_during_call: bool,
+        engine_flag: Option<Arc<AtomicBool>>,
         calls: usize,
         captured_applet: String,
         captured_argv: Vec<String>,
@@ -574,8 +631,13 @@ grep\ttier2\t-\tTier-2\n";
                 state.captured_env = ctx.env_block().to_vec();
                 state.captured_handles = (raw.stdin, raw.stdout, raw.stderr);
                 if state.set_flag_during_call {
-                    let flag = &*(cancel_user_data as *const AtomicBool);
-                    flag.store(true, Ordering::SeqCst);
+                    let sources = &*(cancel_user_data as *const CancelSources);
+                    sources.own.store(true, Ordering::SeqCst);
+                }
+                if state.set_engine_flag_during_call {
+                    if let Some(flag) = &state.engine_flag {
+                        flag.store(true, Ordering::SeqCst);
+                    }
                 }
                 state.cancel_observed = cancel(cancel_user_data);
             }
@@ -695,6 +757,43 @@ grep\ttier2\t-\tTier-2\n";
         let mut provider = provider_with_mock(state.clone(), on());
         assert_eq!(
             provider.execute(&grep_request(), true),
+            FfiOutcome::Cancelled
+        );
+        assert_eq!(state.lock().unwrap().cancel_observed, 1);
+    }
+
+    #[test]
+    fn engine_interrupt_pending_at_entry_cancels_before_the_backend() {
+        let state = mock_state(FFI_ABI_VERSION, 42);
+        let mut provider = provider_with_mock(state.clone(), on());
+        let engine_flag = AtomicBool::new(true);
+        let check = || engine_flag.load(Ordering::SeqCst);
+        assert_eq!(
+            provider.execute_with_engine_cancel(&grep_request(), true, &check),
+            FfiOutcome::Cancelled
+        );
+        assert_eq!(state.lock().unwrap().calls, 0);
+        // The engine check is a peek: the engine's own record is
+        // not the provider's to consume — the flag still reads
+        // true afterwards, and the provider's own flag was the
+        // only one swapped.
+        assert!(engine_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn engine_interrupt_during_call_is_observed_by_the_callback() {
+        let state = mock_state(FFI_ABI_VERSION, ERR_CANCELLED);
+        let engine_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut guard = state.lock().unwrap();
+            guard.set_engine_flag_during_call = true;
+            guard.engine_flag = Some(engine_flag.clone());
+        }
+        let mut provider = provider_with_mock(state.clone(), on());
+        let flag = engine_flag.clone();
+        let check = move || flag.load(Ordering::SeqCst);
+        assert_eq!(
+            provider.execute_with_engine_cancel(&grep_request(), true, &check),
             FfiOutcome::Cancelled
         );
         assert_eq!(state.lock().unwrap().cancel_observed, 1);
