@@ -20,10 +20,15 @@
 //! blindness.
 //!
 //! The registry is published in-process at every editor build and
-//! persisted to `~/.niubash/state.toml` (machine state, not user
+//! persisted to `~/.niubash/state.json` (machine state, not user
 //! configuration: the program writes it, a corrupt file is simply
 //! rebuilt). The CLI faces (`niu help keys`, doctor) read the
-//! persisted snapshot and say which build it came from.
+//! persisted snapshot and say which build it came from. The snapshot
+//! is JSON since the 1.5.0 product-TOML deletion; the pre-1.5.0
+//! `state.toml` is not converted — under this module's own contract a
+//! state file that does not load is rebuilt at the next editor build,
+//! so a format switch costs one re-reminder of already-dropped binds,
+//! never data.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -665,31 +670,31 @@ pub fn startup_notices(new_dropped: &[DroppedBind]) -> Vec<String> {
     lines
 }
 
-/// Where the runtime state file lives: `~/.niubash/state.toml`.
+/// Where the runtime state file lives: `~/.niubash/state.json`.
 pub fn state_path() -> PathBuf {
     crate::path_utils::shell_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".niubash")
-        .join("state.toml")
+        .join("state.json")
 }
 
 /// Load the persisted state; a missing or corrupt file is simply
 /// "no state" (it is rebuilt at the next editor build).
 pub fn load_state_from(path: &std::path::Path) -> Option<KeymapState> {
     let text = std::fs::read_to_string(path).ok()?;
-    toml::from_str(&text).ok()
+    serde_json::from_str(&text).ok()
 }
 
 /// Persist the state (best effort: state is a cache, never a reason
 /// to fail a build).
 pub fn save_state_to(path: &std::path::Path, state: &KeymapState) {
-    let Ok(text) = toml::to_string(state) else {
+    let Ok(text) = serde_json::to_string_pretty(state) else {
         return;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = path.with_extension("toml.tmp");
+    let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, text).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
@@ -1052,7 +1057,7 @@ mod tests {
             std::env::temp_dir().join(format!("niu-keymap-state-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("state.toml");
+        let path = dir.join("state.json");
         let registry = KeymapRegistry {
             generation: 3,
             editor_mode: "emacs".to_string(),
@@ -1087,10 +1092,11 @@ mod tests {
     }
 
     #[test]
-    fn issue630_state_toml_roundtrip() {
-        // The persisted snapshot must survive TOML with every source
-        // shape present — including a bundle row whose file/line were
-        // never recorded (None fields inside an enum variant).
+    fn issue630_state_json_roundtrip() {
+        // The persisted snapshot must round-trip through the persisted
+        // JSON with every source shape present — including a bundle row
+        // whose file/line were never recorded (None fields inside an
+        // enum variant).
         let state = KeymapState {
             registry_generation: 7,
             editor_mode: "vi".to_string(),
@@ -1121,8 +1127,8 @@ mod tests {
                 "find-file",
             )],
         };
-        let text = toml::to_string(&state).expect("state serializes to TOML");
-        let back: KeymapState = toml::from_str(&text).expect("state parses back");
+        let text = serde_json::to_string(&state).expect("state serializes to JSON");
+        let back: KeymapState = serde_json::from_str(&text).expect("state parses back");
         assert_eq!(back, state);
     }
 
