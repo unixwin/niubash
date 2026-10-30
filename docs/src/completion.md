@@ -66,12 +66,17 @@ editor, including the two shapes a flat keymap cannot express on its own
   chord layer above the editor. The first unit is held only when a chord
   starts with it; a matching second unit fires the binding, and a
   non-matching one replays the held key followed by the new one, so
-  nothing is swallowed. There is no `keyseq-timeout` yet: a lone prefix
-  waits for the next key (readline's default is 500 ms).
+  nothing is swallowed. The window is readline's `keyseq-timeout`
+  (500 ms): past it the prefix is replayed on its own and the key stands
+  alone.
 * **Editing-mode toggles** (`vi-editing-mode` / `emacs-editing-mode`):
   these switch the session's machine for real. The other mode is built as
   a standby with the same widgets, `bind -m` entries and user keymap
   rules, so a flip keeps your bindings.
+
+In emacs mode a bare `ESC` followed within ~50 ms by a key is read as the
+meta prefix, the way a terminal sends `M-x` (`ESC x`); pressing Escape
+alone keeps its immediate meaning.
 
 Anything genuinely unusable — an unparseable sequence, an unknown
 function — still produces a startup warning, with a per-item fix. Example:

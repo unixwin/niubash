@@ -361,7 +361,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         shell_ref.engine_bind_generation,
         menu_config.completion_interaction,
     );
-    let (edit_mode, keymap_registry, chord_bindings) = build_edit_mode(
+    let (edit_mode, keymap_registry, chord_bindings, alt_keys) = build_edit_mode(
         shell_ref.editor_mode,
         build_args.0,
         build_args.1,
@@ -381,7 +381,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // `bind -m` entries and user rules — so a flip keeps the user's
     // bindings in the target keymap. Its registry snapshot is discarded:
     // the published one describes the active mode.
-    let (standby_edit_mode, _, standby_chord_bindings) = build_edit_mode(
+    let (standby_edit_mode, _, standby_chord_bindings, standby_alt_keys) = build_edit_mode(
         match shell_ref.editor_mode {
             EditorMode::Emacs => EditorMode::Vi,
             EditorMode::Vi => EditorMode::Emacs,
@@ -477,6 +477,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
                     .with_cycle_session(cycle_session.clone()),
             ),
             chord_bindings,
+            alt_keys,
         )))
         .with_additional_edit_mode(Box::new(ChordEditMode::new(
             Box::new(
@@ -484,6 +485,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
                     .with_cycle_session(cycle_session),
             ),
             standby_chord_bindings,
+            standby_alt_keys,
         )));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
@@ -885,6 +887,7 @@ fn build_edit_mode(
     Box<dyn EditMode>,
     crate::keymap_registry::KeymapRegistry,
     Vec<ChordBinding>,
+    std::collections::HashSet<KeyCode>,
 ) {
     use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
@@ -901,6 +904,7 @@ fn build_edit_mode(
                 user_keymap_unbinds,
                 completion_interaction,
             );
+            let alt_keys = alt_bound_keys(&keybindings);
             (
                 Box::new(Emacs::new(keybindings)),
                 KeymapRegistry {
@@ -919,6 +923,7 @@ fn build_edit_mode(
                     ));
                     chords
                 },
+                alt_keys,
             )
         }
         EditorMode::Vi => {
@@ -952,6 +957,7 @@ fn build_edit_mode(
                     dropped.push(bind);
                 }
             }
+            let alt_keys = alt_bound_keys(&insert_keybindings);
             (
                 Box::new(Vi::new(
                     insert_keybindings,
@@ -979,6 +985,7 @@ fn build_edit_mode(
                     }
                     chords
                 },
+                alt_keys,
             )
         }
     }
@@ -2628,6 +2635,17 @@ struct ChordBinding {
 /// same `bind -x` index the flat keymap would have used; macros insert
 /// their text; function names go through [`native_widget_event`] and fall
 /// back to the shell-function sentinel like any other widget.
+/// The key codes that carry a real ALT binding in this keymap — the set the
+/// ESC-prefix logic may synthesize a meta key for.
+fn alt_bound_keys(keybindings: &Keybindings) -> std::collections::HashSet<KeyCode> {
+    keybindings
+        .get_keybindings()
+        .keys()
+        .filter(|combination| combination.modifier.contains(KeyModifiers::ALT))
+        .map(|combination| combination.key_code)
+        .collect()
+}
+
 fn collect_chord_bindings(
     entries: &[crate::bind_surface::EngineBindEntry],
     target: NativeKeymapTarget,
@@ -2682,14 +2700,40 @@ struct ChordEditMode {
     inner: Box<dyn EditMode>,
     chords: Vec<ChordBinding>,
     pending: Vec<crossterm29::event::Event>,
+    /// When the first pending unit was parked. readline's
+    /// `keyseq-timeout` (500 ms default) applies here too: a prefix that
+    /// does not complete inside the window stops being a chord prefix.
+    pending_since: Option<std::time::Instant>,
+    /// Keys that carry a real ALT binding: terminals spell Alt-C as
+    /// `ESC c`, and emacs-mode readline treats ESC as the meta prefix.
+    alt_keys: std::collections::HashSet<KeyCode>,
+    /// Peek for the ESC partner without consuming the input stream.
+    lookahead: Option<Lookahead>,
+    /// Events the peek consumed but the decision did not need, replayed
+    /// before the next real event.
+    pushback: std::collections::VecDeque<crossterm29::event::Event>,
 }
 
+/// readline's `keyseq-timeout` default.
+const KEYSEQ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long to wait for the ESC partner. A terminal sends `ESC c` back to
+/// back; a human pressing Escape alone does not.
+const ESC_META_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
 impl ChordEditMode {
-    fn new(inner: Box<dyn EditMode>, chords: Vec<ChordBinding>) -> Self {
+    fn new(
+        inner: Box<dyn EditMode>,
+        chords: Vec<ChordBinding>,
+        alt_keys: std::collections::HashSet<KeyCode>,
+    ) -> Self {
         Self {
             inner,
             chords,
             pending: Vec::new(),
+            pending_since: None,
+            alt_keys,
+            lookahead: Some(Box::new(live_lookahead)),
+            pushback: std::collections::VecDeque::new(),
         }
     }
 
@@ -2736,25 +2780,88 @@ fn push_event(events: &mut Vec<ReedlineEvent>, event: ReedlineEvent) {
 
 impl EditMode for ChordEditMode {
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
-        let raw = crossterm29::event::Event::from(event);
+        // Replay anything the ESC peek consumed earlier, in order.
+        if let Some(parked) = self.pushback.pop_front() {
+            self.pushback.push_front(crossterm29::event::Event::from(event));
+            return self.dispatch(parked);
+        }
+        self.dispatch(crossterm29::event::Event::from(event))
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
+        self.inner.handle_mode_specific_event(event)
+    }
+}
+
+impl ChordEditMode {
+    fn dispatch(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
         let Some(key) = chord_key(&raw) else {
             return self.forward(ReedlineRawEvent::try_from(raw).expect("non-key event"));
         };
+        // ESC as readline's meta prefix (emacs mode only: vi uses ESC to
+        // leave insert mode). Only when the peeked partner actually has an
+        // ALT binding, so a bare Escape keeps its immediate meaning.
+        if key == (KeyModifiers::NONE, KeyCode::Esc)
+            && self.inner.edit_mode() == PromptEditMode::Emacs
+            && !self.alt_keys.is_empty()
+        {
+            if let Some(partner) = self.lookahead.as_mut().and_then(|peek| peek(ESC_META_BUDGET)) {
+                if let Some((code, extra)) = chord_key(&partner).filter(|(_, code)| {
+                    self.alt_keys.contains(code)
+                }).map(|(mods, code)| (code, mods)) {
+                    let _ = extra;
+                    let synthetic = crossterm29::event::Event::Key(
+                        crossterm29::event::KeyEvent::new(code, KeyModifiers::ALT),
+                    );
+                    return self.forward(
+                        ReedlineRawEvent::try_from(synthetic).expect("synthetic meta key"),
+                    );
+                }
+                self.pushback.push_back(partner);
+            }
+            return self.forward(ReedlineRawEvent::try_from(raw).expect("escape"));
+        }
         if self.pending.is_empty() {
             if self.is_prefix(std::slice::from_ref(&key)) {
                 if let Some(event) = self.exact(std::slice::from_ref(&key)) {
                     return event;
                 }
                 self.pending.push(raw);
+                self.pending_since = Some(std::time::Instant::now());
                 return ReedlineEvent::None;
             }
             return self.forward(ReedlineRawEvent::try_from(raw).expect("key event"));
+        }
+        // A prefix older than readline's keyseq-timeout stops being a
+        // prefix: replay it on its own, then treat the current key fresh.
+        if self
+            .pending_since
+            .is_some_and(|since| since.elapsed() > KEYSEQ_TIMEOUT)
+        {
+            let mut events = Vec::new();
+            for parked in std::mem::take(&mut self.pending) {
+                let event = self.forward(ReedlineRawEvent::try_from(parked).expect("parked key"));
+                push_event(&mut events, event);
+            }
+            self.pending_since = None;
+            let current = self.dispatch(raw);
+            push_event(&mut events, current);
+            return match events.len() {
+                0 => ReedlineEvent::None,
+                1 => events.pop().expect("one event"),
+                _ => ReedlineEvent::Multiple(events),
+            };
         }
         let mut candidate: Vec<(KeyModifiers, KeyCode)> =
             self.pending.iter().filter_map(chord_key).collect();
         candidate.push(key);
         if let Some(event) = self.exact(&candidate) {
             self.pending.clear();
+            self.pending_since = None;
             return event;
         }
         if self.is_prefix(&candidate) {
@@ -2774,14 +2881,6 @@ impl EditMode for ChordEditMode {
             1 => events.pop().expect("one event"),
             _ => ReedlineEvent::Multiple(events),
         }
-    }
-
-    fn edit_mode(&self) -> PromptEditMode {
-        self.inner.edit_mode()
-    }
-
-    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
-        self.inner.handle_mode_specific_event(event)
     }
 }
 
@@ -4293,6 +4392,7 @@ fn flush_repl_output() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use reedline::Menu;
 
     #[test]
@@ -5140,6 +5240,44 @@ mod tests {
         assert_eq!(parse_chord_sequence(r"\C-x"), None);
         assert_eq!(parse_chord_sequence(r"\C-x\C-"), None);
         assert_eq!(parse_chord_sequence(""), None);
+    }
+
+    #[test]
+    fn chord_prefix_expires_after_the_keyseq_timeout() {
+        use crossterm29::event::{Event, KeyCode as Code, KeyEvent, KeyModifiers as Mods};
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (Mods::CONTROL, Code::Char('x')),
+                (Mods::NONE, Code::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(Box::new(inner), chords, HashSet::new());
+        let key = |code, modifiers| {
+            ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
+        };
+        // Inside the window: parked, then completed.
+        assert_eq!(
+            mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(key(Code::Char('z'), Mods::NONE)),
+            edit_event(EditCommand::InsertString("QUICK".to_string()))
+        );
+        // Past the window: the prefix is replayed on its own, the key is fresh.
+        assert_eq!(
+            mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        let event = mode.parse_event(key(Code::Char('z'), Mods::NONE));
+        assert_ne!(
+            event,
+            edit_event(EditCommand::InsertString("QUICK".to_string())),
+            "an expired prefix must not complete a chord"
+        );
     }
 
     #[test]
