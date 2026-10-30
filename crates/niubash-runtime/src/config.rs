@@ -1499,7 +1499,14 @@ unbind = ['"\C-a"']
             .unwrap()
             .expect("legacy file exists");
         assert_eq!(report.legacy_path, legacy);
-        assert_eq!(report.rc_path, home.join(".niubashrc"));
+        // The shared home resolver normalizes an existing home before
+        // joining (on Windows that expands the temp dir's 8.3 short name,
+        // e.g. RUNNER~1 -> runneradmin), so the expectation must be
+        // normalized the same way before comparing paths.
+        assert_eq!(
+            report.rc_path,
+            crate::path_utils::normalize_existing_host_path(home.join(".niubashrc"))
+        );
         assert!(report.rc_changed);
         assert_eq!(
             report.lines,
@@ -1611,14 +1618,18 @@ unbind = ['"\C-a"']
         std::fs::write(home.join(".niubashrc"), "# mine\n").unwrap();
         assert_eq!(
             persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
-            RcPolicyWrite::Written(home.join(".niubashrc"))
+            RcPolicyWrite::Written(crate::path_utils::normalize_existing_host_path(
+                home.join(".niubashrc")
+            ))
         );
         let rc = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
         assert!(rc.starts_with("# mine\n"), "{rc}");
         assert!(rc.contains("export NIU_RC_POLICY=bashrc-fallback"), "{rc}");
         assert_eq!(
             persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
-            RcPolicyWrite::Written(home.join(".niubashrc"))
+            RcPolicyWrite::Written(crate::path_utils::normalize_existing_host_path(
+                home.join(".niubashrc")
+            ))
         );
         let rc_again = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
         assert_eq!(rc, rc_again, "the same pick is idempotent");
