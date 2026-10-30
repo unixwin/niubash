@@ -6,10 +6,10 @@ pub mod column_menu;
 pub mod command;
 pub mod common_assets;
 pub mod completer;
+pub mod cycle_menu;
 pub mod external;
 pub mod gnu_menu;
 pub mod path;
-pub mod runtime;
 pub mod variables;
 pub mod winuxcmd_assets;
 
@@ -63,6 +63,18 @@ pub struct CompletionContext {
     pub cursor_pos: usize,
     /// User-configurable matching behavior.
     pub behavior: CompletionBehavior,
+    /// The session's open fd numbers at snapshot time, from the
+    /// engine's fd table (`Executor::open_fds`) via `CompletionState`.
+    /// The path completer's dynamic tier lists these under `/dev/fd/`
+    /// (niubash#627).
+    pub open_fds: Vec<u32>,
+    /// The backing directory for the session's `/tmp` at snapshot
+    /// time, resolved by the engine from the session env (session
+    /// TMPDIR wins) via `CompletionState`. The path completer's
+    /// logical resolver roots `/tmp` spellings here (niubash#627 G2).
+    /// Contexts built without session state keep the process temp
+    /// dir — the fallback for the stateless case only.
+    pub tmp_base: PathBuf,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -96,6 +108,8 @@ impl CompletionContext {
             input,
             cursor_pos,
             behavior,
+            open_fds: Vec::new(),
+            tmp_base: std::env::temp_dir(),
         }
     }
 

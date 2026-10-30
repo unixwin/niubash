@@ -9,7 +9,9 @@
 //! via TOML.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
@@ -175,16 +177,23 @@ fn preset_colour(preset: SegmentPreset, segment: &SegmentId) -> SegmentColour {
 ///
 /// `vcs_stamp` is the calling prompt's per-pass Vcs stamp (niubash#592,
 /// S2): a stamped prompt's Vcs segment re-reads the stamp, an unstamped
-/// prompt falls back to computing at render time.
+/// prompt falls back to computing at render time. `dir_memo` is the
+/// calling prompt's Dir memo (audit item A2), the same per-pass shape
+/// for the one other segment that touches the file system; `None`
+/// (direct callers in tests) computes uncached.
 fn render_content(
     segment: &SegmentId,
     config: &SegmentPromptConfig,
     vcs_stamp: Option<&VcsPassStamp>,
+    dir_memo: Option<&DirMemoCell>,
 ) -> Option<String> {
     match segment {
         SegmentId::Dir => {
             let cwd = std::env::current_dir().ok()?;
-            Some(short_dir(&cwd))
+            Some(match dir_memo {
+                Some(memo) => short_dir_memoized(&cwd, memo),
+                None => short_dir(&cwd),
+            })
         }
         SegmentId::Status => {
             let code = std::env::var("NIU_LAST_EXIT_CODE")
@@ -218,13 +227,15 @@ fn render_content(
             let ms = std::env::var("NIU_CMD_EXEC_TIME_MS").ok();
             ms.filter(|m| !m.is_empty()).map(|m| format!("{}ms", m))
         }
-        // niubash#592 (S2): a stamped prompt re-reads its pass's computed
-        // value — repaints never spawn. `None` in the stamp is a computed
-        // result ("no segment this pass"), not a missing value, so it is
-        // re-read too. The compute-at-render fallback remains only for
-        // unstamped prompts; in production the one unstamped renderer is
-        // the --noediting loop's resident prompt, which renders once per
-        // pass exactly as it did before S2.
+        // niubash#592 (S2): a stamped prompt re-reads its pass's stamped
+        // value — repaints never spawn. `None` in the stamp is the
+        // pass's read result ("no segment this pass"), not a missing
+        // value, so it is re-read too. The read-at-render fallback
+        // remains only for unstamped prompts; in production the one
+        // unstamped renderer is the --noediting loop's resident prompt,
+        // which renders once per pass exactly as it did before S2.
+        // Since niubash#685 the fallback reads the cross-pass segment
+        // cache: it can launch a background refresh but never waits.
         SegmentId::Vcs => match vcs_stamp {
             Some(stamp) => stamp.value.clone(),
             None => vcs_segment_content(),
@@ -235,6 +246,51 @@ fn render_content(
             std::env::var(&env_name).ok()
         }
     }
+}
+
+/// The Dir segment's memo (audit item A2): the shortened cwd plus the
+/// inputs it was computed from — the cwd itself and the raw `HOME` /
+/// `USERPROFILE` values `shell_home_dir` resolves from (its
+/// `dirs::home_dir()` fallback when both are unset is process-stable
+/// and needs no key component). Keyed on all of them, a hit can never
+/// serve a value computed under different inputs.
+#[derive(Debug)]
+struct DirMemo {
+    cwd: PathBuf,
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    text: String,
+}
+
+/// Shared Dir memo cell, cloned with the prompt (like the template
+/// prompt's cwd memo): per-pass clones share it, and the key check is
+/// what keeps a shared cell honest across passes.
+type DirMemoCell = Arc<Mutex<Option<DirMemo>>>;
+
+/// `short_dir` through the prompt's Dir memo. Within a pass the cwd
+/// cannot move — it changes only when a command runs, which ends the
+/// pass — so repaints reuse the one `canonicalize(home)` result
+/// instead of paying it per repaint.
+fn short_dir_memoized(cwd: &Path, memo: &DirMemoCell) -> String {
+    let home = std::env::var_os("HOME");
+    let userprofile = std::env::var_os("USERPROFILE");
+    if let Ok(guard) = memo.lock() {
+        if let Some(memo) = guard.as_ref() {
+            if memo.cwd == cwd && memo.home == home && memo.userprofile == userprofile {
+                return memo.text.clone();
+            }
+        }
+    }
+    let text = short_dir(cwd);
+    if let Ok(mut guard) = memo.lock() {
+        *guard = Some(DirMemo {
+            cwd: cwd.to_path_buf(),
+            home,
+            userprofile,
+            text: text.clone(),
+        });
+    }
+    text
 }
 
 /// Shorten a directory path by replacing `$HOME` with `~`.
@@ -255,10 +311,11 @@ fn short_dir(path: &Path) -> String {
 }
 
 /// The Vcs segment body: `branch` / `branch*` (dirty) / short SHA (detached),
-/// `None` (empty segment) outside a repository — the #292 renderer, now backed
-/// by the user's own git (see git_prompt.rs for the isolation rules and the
-/// #145 relationship: one scoped child that nothing waits on, killed past its
-/// timeout, and no spawn at all outside a repository).
+/// `None` (empty segment) outside a repository — the #292 renderer, backed
+/// by the user's own git through git_prompt's cross-pass cache (see
+/// git_prompt.rs for the isolation rules and the #145 relationship: the
+/// one scoped child runs on a refresh thread no draw waits on, killed
+/// past its timeout, and no spawn at all outside a repository).
 #[cfg(windows)]
 fn vcs_segment_content() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
@@ -352,13 +409,15 @@ impl SegmentPromptConfig {
 
 // ---- Prompt engine ----
 
-/// The Vcs value one prompt pass computed for its prompt clone
+/// The Vcs value one prompt pass stamped onto its prompt clone
 /// (niubash#592, S2). `seq` is the pass's monotonic sequence number —
-/// probe/debugging identity for "which pass computed this value", never
-/// a freshness input (every pass recomputes unconditionally). `value`
-/// is the segment body exactly as `git_prompt::branch_segment` returned
-/// it; `None` is a computed result — outside a repository, git
-/// unavailable, or the read failed — not the absence of a computation.
+/// probe/debugging identity for "which pass stamped this value", never
+/// a freshness input. `value` is the segment body exactly as
+/// `git_prompt::branch_segment` returned it at stamp time; since
+/// niubash#685 that call is a cross-pass cache read, so `None` can
+/// mean a cold or stale entry whose background refresh has not landed
+/// yet, as well as a computed "no segment" (outside a repository, git
+/// unavailable, or the last read failed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VcsPassStamp {
     pub seq: u64,
@@ -371,13 +430,20 @@ pub struct SegmentPrompt {
     config: SegmentPromptConfig,
     /// The per-pass Vcs stamp (niubash#592, S2), tri-state: `None` =
     /// unstamped (a prompt no pass has handed out — the shell's resident
-    /// prompt, whose renders fall back to computing at render time);
-    /// `Some(stamp)` = stamped by `Shell::prompt_for_display` for one
-    /// pass, and this clone's renders re-read `stamp.value` instead of
-    /// spawning. The resident prompt in `Shell` is never stamped, so a
-    /// stamp physically cannot outlive the pass that computed it: the
-    /// clone carrying it is dropped when the pass's read_line returns.
+    /// prompt, whose renders fall back to reading the segment cache at
+    /// render time); `Some(stamp)` = stamped by
+    /// `Shell::prompt_for_display` for one pass, and this clone's
+    /// renders re-read `stamp.value` instead of touching the cache.
+    /// The resident prompt in `Shell` is never stamped, so a stamp
+    /// physically cannot outlive the pass that stamped it: the clone
+    /// carrying it is dropped when the pass's read_line returns.
     vcs_stamp: Option<VcsPassStamp>,
+    /// The Dir segment's memo (audit item A2), the Vcs stamp's sibling
+    /// for the one other file-system-touching segment: shared across
+    /// clones and keyed by (cwd, HOME, USERPROFILE), so repaints in a
+    /// pass reuse the shortened cwd instead of re-canonicalizing home
+    /// per repaint.
+    dir_memo: DirMemoCell,
 }
 
 impl SegmentPrompt {
@@ -385,11 +451,12 @@ impl SegmentPrompt {
         Self {
             config,
             vcs_stamp: None,
+            dir_memo: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Whether this prompt's configuration draws the Vcs segment on
-    /// either side (niubash#592: the per-pass computation only runs for
+    /// either side (niubash#592: the per-pass cache read only runs for
     /// prompts that can show it). The production caller is the
     /// Windows-gated stamp in `Shell::prompt_for_display`.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -402,8 +469,9 @@ impl SegmentPrompt {
     }
 
     /// Stamp this prompt (a per-pass clone) with the Vcs value its pass
-    /// computed (niubash#592, S2). Called exactly once per pass by
-    /// `Shell::prompt_for_display`, after the precmd hooks have run.
+    /// read from the segment cache (niubash#592, S2; niubash#685).
+    /// Called exactly once per pass by `Shell::prompt_for_display`,
+    /// after the precmd hooks have run.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn stamp_vcs(&mut self, seq: u64, value: Option<String>) {
         self.vcs_stamp = Some(VcsPassStamp { seq, value });
@@ -452,7 +520,12 @@ impl SegmentPrompt {
             if *element == SegmentId::Newline {
                 break;
             }
-            if let Some(content) = render_content(element, &self.config, self.vcs_stamp.as_ref()) {
+            if let Some(content) = render_content(
+                element,
+                &self.config,
+                self.vcs_stamp.as_ref(),
+                Some(&self.dir_memo),
+            ) {
                 let (fg, bg) = self.colour_for(element, &content);
                 segments.push(RenderedSegment { content, fg, bg });
             }
@@ -493,7 +566,12 @@ impl SegmentPrompt {
                 current = Vec::new();
                 continue;
             }
-            if let Some(content) = render_content(element, &self.config, self.vcs_stamp.as_ref()) {
+            if let Some(content) = render_content(
+                element,
+                &self.config,
+                self.vcs_stamp.as_ref(),
+                Some(&self.dir_memo),
+            ) {
                 let (fg, bg) = self.colour_for(element, &content);
                 current.push(RenderedSegment { content, fg, bg });
             }
@@ -700,6 +778,48 @@ mod tests {
     }
 
     #[test]
+    fn dir_segment_memo_misses_when_cwd_or_home_moves() {
+        // Audit item A2: the Dir memo must never serve a value computed
+        // under different inputs — moving cwd (same home) and moving
+        // HOME (same cwd) both have to miss and recompute.
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = unique_temp_dir("niubash-segment-memo-home");
+        let other_home = unique_temp_dir("niubash-segment-memo-other");
+        std::fs::create_dir_all(home.join("proj-a")).unwrap();
+        std::fs::create_dir_all(home.join("proj-b")).unwrap();
+        std::fs::create_dir_all(&other_home).unwrap();
+        let cfg = default_cfg();
+        let cell: DirMemoCell = Arc::new(Mutex::new(None));
+        let previous = std::env::current_dir().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let _home = EnvGuard::set("HOME", &home.to_string_lossy());
+        let _userprofile = EnvGuard::set("USERPROFILE", &home.to_string_lossy());
+        // short_dir compares against the canonicalized home.
+        let canonical_home = shell_home_dir().unwrap();
+        let canon_a = canonical_home.join("proj-a");
+        let canon_b = canonical_home.join("proj-b");
+
+        std::env::set_current_dir(&canon_a).unwrap();
+        let first = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        let again = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        std::env::set_current_dir(&canon_b).unwrap();
+        let moved = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        let foreign = {
+            let _home2 = EnvGuard::set("HOME", &other_home.to_string_lossy());
+            render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap()
+        };
+        std::env::set_current_dir(previous).unwrap();
+
+        assert_eq!(first, format!("~{sep}proj-a"));
+        assert_eq!(again, first);
+        assert_eq!(moved, format!("~{sep}proj-b"));
+        assert!(!foreign.starts_with('~'), "{foreign}");
+        assert!(foreign.ends_with("proj-b"), "{foreign}");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&other_home);
+    }
+
+    #[test]
     fn short_dir_preserves_non_home_paths() {
         let p = Path::new("C:\\");
         let s = short_dir(p);
@@ -725,7 +845,7 @@ mod tests {
     #[test]
     fn time_content_renders_hhmm() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg, None);
+        let content = render_content(&SegmentId::Time, &cfg, None, None);
         assert!(content.is_some());
         let s = content.unwrap();
         assert_eq!(s.len(), 5);
@@ -735,7 +855,7 @@ mod tests {
     #[test]
     fn time_segment_renders_system_local_clock() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg, None).unwrap();
+        let content = render_content(&SegmentId::Time, &cfg, None, None).unwrap();
         let expected = format_local_time();
         if content != expected {
             let expected = format_local_time();
@@ -746,7 +866,7 @@ mod tests {
     #[test]
     fn prompt_char_is_symbol() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::PromptChar, &cfg, None);
+        let content = render_content(&SegmentId::PromptChar, &cfg, None, None);
         assert_eq!(content.as_deref(), Some("\u{276f}"));
     }
 
@@ -757,7 +877,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::remove_var("NIU_LAST_EXIT_CODE");
-        let content = render_content(&SegmentId::Status, &cfg, None);
+        let content = render_content(&SegmentId::Status, &cfg, None, None);
         assert!(content.is_none());
     }
 
@@ -766,7 +886,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::set_var("NIU_LAST_EXIT_CODE", "1");
-        let content = render_content(&SegmentId::Status, &cfg, None);
+        let content = render_content(&SegmentId::Status, &cfg, None, None);
         assert!(content.is_some());
         assert!(content.unwrap().contains("1"));
         std::env::remove_var("NIU_LAST_EXIT_CODE");
@@ -775,7 +895,7 @@ mod tests {
     #[test]
     fn newline_renders_empty() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Newline, &cfg, None);
+        let content = render_content(&SegmentId::Newline, &cfg, None, None);
         assert_eq!(content, Some(String::new()));
     }
 
@@ -984,6 +1104,13 @@ mod tests {
     fn vcs_content_in(dir: &Path) -> Option<String> {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd = CwdGuard::enter(dir);
+        // The segment is served from the #685 cross-pass cache: a cold
+        // read returns None and lands its value from a background
+        // refresh. Drive the read to its settled value the way
+        // git_prompt's own probes do — trigger, wait for the landing
+        // (event-driven, never a poll), read again.
+        let _ = vcs_segment_content();
+        let _ = crate::git_prompt::wait_for_segment_cache_idle(std::time::Duration::from_secs(30));
         vcs_segment_content()
     }
 
@@ -1080,6 +1207,13 @@ mod tests {
             let left = {
                 let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
                 let _cwd = CwdGuard::enter(tmp.path());
+                // Warm the #685 segment cache to its settled value
+                // first: render_left reads the cache and never waits,
+                // so a cold render would show no Vcs segment at all.
+                let _ = crate::git_prompt::branch_segment(tmp.path());
+                let _ = crate::git_prompt::wait_for_segment_cache_idle(
+                    std::time::Duration::from_secs(30),
+                );
                 prompt.render_left()
             };
             let ansi = if expected == Color::Cyan {
@@ -1190,11 +1324,12 @@ mod tests {
     #[test]
     fn vcs_segment_per_pass_computation_p50_within_the_budget() {
         // Issue #331 scope 4 originally held p50 <= 10ms around the in-process
-        // git2 read. The segment now runs the user's own git by design (see
+        // git2 read. The segment runs the user's own git by design (see
         // git_prompt.rs: fidelity is the point): one bounded
-        // `status --porcelain=v2 --branch` per prompt inside a repository —
-        // the same as the bare git call, so the segment adds no overhead of
-        // its own (the earlier CREATE_NO_WINDOW flag alone cost 28 ms by
+        // `status --porcelain=v2 --branch` per command cycle per
+        // repository, in the background since #685 — the same call as
+        // the bare git baseline, so the refresh adds no overhead of its
+        // own (the earlier CREATE_NO_WINDOW flag alone cost 28 ms by
         // forcing a fresh hidden console for the child). Git Bash's
         // `__git_ps1` forks three to five times for the same answer
         // (100-300 ms).
@@ -1232,6 +1367,15 @@ mod tests {
         // per-pass computation. (The gate's previous name,
         // `vcs_segment_render_p50_within_the_render_budget`, changed with
         // its subject.)
+        //
+        // niubash#685 premise change, stated as openly: the sampled call
+        // no longer computes on the pass at all — it reads the cross-pass
+        // segment cache, so after warm-up the samples are cache hits and
+        // the timing doors guard the READ (a regression that re-blocks
+        // the pass on git would still trip the hard cap on a loaded
+        // runner, but the sharp door is the new count assertion below:
+        // the 21 sampled reads must add ZERO `read_status` calls for
+        // this worktree).
         let tmp = tempfile::tempdir().unwrap();
         if !init_clean_repo(tmp.path()) {
             return;
@@ -1242,6 +1386,13 @@ mod tests {
         for _ in 0..3 {
             let _ = crate::git_prompt::branch_segment(tmp.path()); // warm-up
         }
+        // Settle the warm-up's background refresh so the samples below
+        // are pure cache reads (#685), then snapshot the spawn count.
+        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
+        let key = crate::git_prompt::worktree_key_for(tmp.path()).unwrap();
+        let spawns_before = crate::git_prompt::read_status_call_count(&key);
         const SAMPLES: usize = 21;
         let mut baseline: Vec<std::time::Duration> = Vec::with_capacity(SAMPLES);
         let mut samples: Vec<std::time::Duration> = Vec::with_capacity(SAMPLES);
@@ -1251,6 +1402,11 @@ mod tests {
             let _ = crate::git_prompt::branch_segment(tmp.path());
             samples.push(start.elapsed());
         }
+        assert_eq!(
+            crate::git_prompt::read_status_call_count(&key),
+            spawns_before,
+            "sampled segment reads must be cache hits — a pass never spawns"
+        );
         baseline.sort();
         samples.sort();
         let baseline_p50 = baseline[SAMPLES / 2];

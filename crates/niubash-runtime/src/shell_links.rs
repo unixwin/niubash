@@ -128,7 +128,7 @@ pub fn find_installation_root(exe: &Path) -> PathBuf {
 /// The real shell binary of the installation the running executable belongs
 /// to. Reached as a `bash`/`sh` face - a hardlink, or the forwarding shim's
 /// re-exec - the running path is the face, not the shell, which is why the
-/// contract variables (`NIU_SHELL`, `WINUXSH_SHELL`) and the shim's own target
+/// contract variable (`NIU_SHELL`) and the shim's own target
 /// search must resolve this way. Without an installation to point at, the
 /// invoked path is the best answer available.
 pub fn resolved_shell_path(invoked: &Path) -> PathBuf {

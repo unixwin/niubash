@@ -17,7 +17,7 @@ any more — they are inert, not errors.
 ```sh
 # ~/.niubashrc — the shape `niu setup` generates
 NIU_PROMPT_CWD_STYLE='home'      # floor knob: cwd shape in the default prompt
-NIU_COMPLETION_STYLE='column'    # floor knob: completion menu (also `niu config set completion.style`)
+NIU_COMPLETION_STYLE='column'    # floor knob: completion menu (export in ~/.niubashrc)
 
 # ... HOME normalization bootstrap (wizard-managed), then your own lines:
 

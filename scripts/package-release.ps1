@@ -321,6 +321,50 @@ try {
         Copy-Item -LiteralPath $iconFile -Destination (Join-Path $stageDir "assets") -Force
     }
 
+    # Payload license hygiene: the Windows bundle ships GPL payloads through
+    # the pre-install step (gawk GPL-3.0-or-later incl. its libreadline8 DLL
+    # closure, niugit GPL-2.0-only) beside permissive ones (ripgrep, fd,
+    # WinuxCmd), so the package carries every component's canonical license
+    # text. scripts/release/licenses/ holds one subdirectory per
+    # preinstall.json package entry (LICENSE + PROVENANCE.md each) and is
+    # REQUIRED: a manifest entry whose directory is missing fails packaging
+    # here — the same fail-closed shape the x64 pre-install leg follows
+    # (niubash#468) — rather than shipping an undisclosed GPL bundle. The
+    # tree is staged verbatim as licenses\ in the package root, next to
+    # niubash's own README.md and LICENSE (the Unix tarball legs already
+    # ship those two at their roots, docs/release.md).
+    $preinstallManifestPath = Join-Path $RepoRoot "scripts\release\preinstall.json"
+    if (-not (Test-Path -LiteralPath $preinstallManifestPath)) {
+        throw "preinstall manifest not found at $preinstallManifestPath"
+    }
+    $preinstallManifest = Get-Content -LiteralPath $preinstallManifestPath -Raw | ConvertFrom-Json
+    $licensesSource = Join-Path $RepoRoot "scripts\release\licenses"
+    if (-not (Test-Path -LiteralPath $licensesSource)) {
+        throw "scripts/release/licenses not found; every preinstall.json package entry's license text must be staged there (see the manifest's license/source fields)"
+    }
+    $licenseDirs = @(Get-ChildItem -LiteralPath $licensesSource -Directory)
+    if ($licenseDirs.Count -eq 0) {
+        throw "scripts/release/licenses is empty; it must carry one subdirectory per preinstall.json package entry (LICENSE + PROVENANCE.md each)"
+    }
+    foreach ($package in $preinstallManifest.packages) {
+        if (-not $package.license) { continue }
+        $entryDir = Join-Path $licensesSource $package.name
+        foreach ($required in @("LICENSE", "PROVENANCE.md")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $entryDir $required))) {
+                throw "preinstall package '$($package.name)' declares license '$($package.license)' but scripts/release/licenses/$($package.name)/$required is missing; refusing to package an undisclosed payload license"
+            }
+        }
+    }
+    Copy-Item -LiteralPath $licensesSource -Destination (Join-Path $stageDir "licenses") -Recurse -Force
+    foreach ($rootDoc in @("README.md", "LICENSE")) {
+        $docPath = Join-Path $RepoRoot $rootDoc
+        if (-not (Test-Path -LiteralPath $docPath)) {
+            throw "Repository file $rootDoc not found at $docPath"
+        }
+        Copy-Item -LiteralPath $docPath -Destination (Join-Path $stageDir $rootDoc) -Force
+    }
+    Write-Host "Staged licenses: $($licenseDirs.Name -join ', ')"
+
     # niubash#470: restore the real install layout before any archive is
     # written. wpm installs hardlink their payloads, but the Copy-Item sweep
     # above flattens every link into an independent full copy (PowerShell

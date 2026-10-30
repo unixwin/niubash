@@ -6,8 +6,18 @@ rust-version = "1.95"
 license = "MIT"
 description = "Runtime crate for niubash: rubash-backed shell REPL on Windows"
 
+[features]
+# The gated Tier C internals surface (1.5.0 PLAN row 11, M-3):
+# the engine bind registry is consumed only through
+# `src/bind_surface.rs`, behind this feature. The default build
+# enables it (the editor mirrors runtime `bind` entries); a
+# `--no-default-features` build compiles and runs without any
+# Tier C reference, on the built-in keybindings alone.
+default = ["internals"]
+internals = []
+
 [dependencies]
-rubash = { version = "1.3.4", git = "https://github.com/unixwin/rubash.git", branch = "master" }
+rubash = { version = "1.4.3", git = "https://github.com/unixwin/rubash.git", branch = "master" }
 # niubash#373: 0.52 anchors the prompt without turning a missing
 # cursor-position reply into a read_line abort — a DSR-silent terminal
 # (dumb terminals, script(1) recordings, some serial/tmux links) gets its
@@ -20,18 +30,9 @@ thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
-# Surgical config.toml edits (niubash#359): the document-preserved variant
-# keeps unrelated keys, comments and layout when `niu config`/`niu setup`
-# persist one setting — the old typed-subset render dropped them.
-toml_edit = "0.22"
 dirs = "5.0"
 filetime = "0.2"
 sha2 = "0.10"
-# Local trust-signature tier for plugin sources (`niu plugin source sign`):
-# ed25519 over the tree digest with a machine-local key. rand_core (OS RNG)
-# is only used for one-time key generation.
-ed25519-dalek = { version = "2", default-features = false, features = ["rand_core", "fast"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
 colored = "2.1"
 log = "0.4"
 env_logger = "0.10"
@@ -54,6 +55,12 @@ crossterm29 = { package = "crossterm", version = "0.29", default-features = fals
 # extension installation entry is `niu plugin add <git-url>` (git clone),
 # and executable tools/fonts are package-manager recommendations.
 
+[target.'cfg(unix)'.dependencies]
+# niubash#616: the prompt Ctrl+C path delivers one real SIGINT to the
+# engine's kernel-signal backend (libc::raise) — a delivery through the
+# engine's own disposition, not a host signal registration.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # The prompt's git segment runs the user's own git through one bounded,
 # isolated child (src/git_prompt.rs) instead of an in-process library: the
@@ -63,7 +70,7 @@ crossterm29 = { package = "crossterm", version = "0.29", default-features = fals
 # Win32_System_Com + Win32_UI_Shell: the niubash#211 shortcut channel
 # (CoCreateInstance(ShellLink) + SHGetKnownFolderPath) — windows-sys carries
 # the COM free functions only, the shell-link vtables live in src/shortcut.rs.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security_Authorization", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Registry", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security_Authorization", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Registry", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # reedline's system_clipboard pulls arboard, which has no android backend and
 # does not compile for aarch64-linux-android / armv7-linux-androideapi. Gate

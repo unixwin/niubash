@@ -1,6 +1,6 @@
 //! `niu doctor`: one-command health check for a Niubash installation.
 //!
-//! Reuses the same probes the setup wizard trusts (winuxcmd discovery,
+//! Reuses the same probes the setup wizard uses (winuxcmd discovery,
 //! command links, nerd font) and prints a compact report with fix hints.
 //! Critical checks decide the trailing count; advisory rows (font, shims,
 //! language) never fail the run.
@@ -286,9 +286,9 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     if crate::plugins::assets::rc_has_migrated_debris() {
         writeln!(
             out,
-            "  {warn} rc moved-out debris stale moved-out drift-guard remnants found in the rc \
-             (an older niu's write-era damage, niubash#324) — niu never repairs your rc; \
-             review the moved-out sections by hand"
+            "  {warn} rc moved-out debris stale moved-out remnants of the retired drift guard \
+             found in the rc (an older niu's write-era damage, niubash#324/#647) — niu never \
+             repairs your rc; review the moved-out sections by hand"
         )?;
     }
 
@@ -382,6 +382,24 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     };
     writeln!(out, "  {mark}{row}")?;
 
+    // ── Advisory: WinuxCmd FFI acceleration (niubash#567) ─────────────────
+    // The probe resolves discovery and (this being a short-lived
+    // doctor process) attempts the DLL load + ABI handshake, so
+    // the row distinguishes "not installed" from "loadable". The
+    // row helper owns the off-Windows n/a shape.
+    let ffi_status = if platform.checks_windows_command_layer() {
+        Some(crate::ffi::probe_for_status())
+    } else {
+        None
+    };
+    let (tone, row) = ffi_status_row(ffi_status.as_ref(), platform);
+    let mark = match tone {
+        RowTone::Ok => ok,
+        RowTone::Warn => warn,
+        RowTone::Info => info,
+    };
+    writeln!(out, "  {mark}{row}")?;
+
     // ── Advisory: TAB completion shape (2026-10-12 discovery surface) ─────
     // The completion style was invisible config before 1.4.1 — the wizard
     // never asked and the env variable was hidden knowledge. The doctor
@@ -389,17 +407,75 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     // names every switch, so the five shapes are discoverable.
     let (style, source) = crate::config::resolve_completion_style();
     let origin = match source {
-        crate::config::CompletionStyleSource::Env => " (NIU_COMPLETION_STYLE override)",
-        crate::config::CompletionStyleSource::ConfigFile => " (persisted)",
-        crate::config::CompletionStyleSource::Default => " (default)",
+        crate::config::SettingSource::Env => " (NIU_COMPLETION_STYLE override)",
+        crate::config::SettingSource::Inputrc => " (inputrc)",
+        crate::config::SettingSource::Default => " (default)",
     };
     writeln!(
         out,
         "  {info} completion style    {}{origin} — change with: \
-         `niu config set completion.style ide|column|list|inline|gnu` \
-         (or NIU_COMPLETION_STYLE)",
+         `export NIU_COMPLETION_STYLE=ide|column|list|inline|gnu` \
+         in the environment or ~/.niubashrc",
         style.as_str()
     )?;
+
+    // ── Advisory: TAB completion interaction (niubash#631) ──────────────
+    // The second completion axis rides beside the style row: how TAB
+    // drives the line while candidates are shown, with the same
+    // precedence display (env > config > default).
+    let (interaction, interaction_source) = crate::config::resolve_completion_interaction();
+    let interaction_origin = match interaction_source {
+        crate::config::SettingSource::Env => " (NIU_COMPLETION_INTERACTION override)",
+        crate::config::SettingSource::Inputrc => " (inputrc)",
+        crate::config::SettingSource::Default => " (default)",
+    };
+    writeln!(
+        out,
+        "  {info} completion interact {}{interaction_origin} — change with: \
+         `export NIU_COMPLETION_INTERACTION=insert|cycle` \
+         in the environment or ~/.niubashrc",
+        interaction.as_str()
+    )?;
+
+    // ── Advisory: key bindings (niubash#630) ─────────────────────────────
+    // The doctor is the standing face of the unified keymap registry:
+    // the effective table itself is the help topic's job, but the
+    // dropped records (with one-line fixes) live here permanently, so
+    // a bind that never landed is discoverable without waiting for a
+    // startup reminder. The snapshot is the last interactive build's;
+    // doctor never sources rc files to rebuild it.
+    match crate::keymap_registry::load_state_from(&crate::keymap_registry::state_path()) {
+        Some(state) => {
+            writeln!(
+                out,
+                "  {info} key bindings      {} effective ({} mode, registry generation {}), \
+                 {} dropped — full table and fixes: `{}`",
+                state.entries.len(),
+                state.editor_mode,
+                state.registry_generation,
+                state.dropped.len(),
+                crate::keymap_registry::keymap_help_command()
+            )?;
+            for bind in &state.dropped {
+                writeln!(
+                    out,
+                    "  {info}   dropped '{}' ({}) — {}; fix: {}",
+                    bind.keyseq,
+                    bind.target_name.as_deref().unwrap_or(""),
+                    bind.reason.why(),
+                    bind.session_fix()
+                )?;
+            }
+        }
+        None => {
+            writeln!(
+                out,
+                "  {info} key bindings      no interactive session has built a keymap yet \
+                 — `{}` explains the binding layers",
+                crate::keymap_registry::keymap_help_command()
+            )?;
+        }
+    }
 
     // ── Advisory: timing scripts (niubash#201) ────────────────────────────
     // `date` is an external program: each `$(date +%s%N)` pays Windows
@@ -414,8 +490,9 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     )?;
 
     // ── Advisory: external plugin sources (iron law 2: fallback explicit) ──
-    // Degraded sources must be *visible*: the guarded loaders fell back to
-    // the niubash defaults at startup and the user deserves to know.
+    // Sources whose tree is gone must be *visible*: the guarded loaders
+    // fell back to the niubash defaults at startup and the user deserves
+    // to know.
     let sources = crate::plugins::sources::list_sources();
     // niubash#178: an unparsable registry silently reads as "none installed"
     // everywhere, so the doctor must call it out explicitly — naming the bad
@@ -424,7 +501,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     if let Some(corruption) = crate::plugins::sources::registry_corruption() {
         writeln!(
             out,
-            "  {warn} plugin registry     UNPARSABLE ({}) — every pin/trust \
+            "  {warn} plugin registry     UNPARSABLE ({}) — every registry \
              record in it is UNLOADED and sync/install are refused until you \
              fix or remove the file; the original is preserved at {}",
             corruption.error.lines().next().unwrap_or("parse error"),
@@ -437,42 +514,19 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
             "  {info} plugin sources      none installed — browse with `niu plugin discover`"
         )?;
     } else {
-        let ready = sources.iter().filter(|s| s.state == "ready").count();
-        let untrusted = sources.iter().filter(|s| s.state == "untrusted").count();
-        let degraded = sources.iter().filter(|s| s.state == "degraded").count();
+        let ready = sources.iter().filter(|s| !s.missing).count();
+        let missing = sources.iter().filter(|s| s.missing).count();
         writeln!(
             out,
-            "  {info} plugin sources      {ready} ready, {untrusted} untrusted, {degraded} degraded \
+            "  {info} plugin sources      {ready} ready, {missing} missing \
              (`niu plugin list` for assets)"
         )?;
-        for status in sources.iter().filter(|s| s.state == "degraded") {
-            // niubash#297: drift (a trusted tree that no longer matches its
-            // lockfile pin) is a different failure than a missing tree —
-            // name it, and point at the verify verb that reports the
-            // checksums before the repair.
-            let drifted = status.degraded_reason.as_deref()
-                == Some(crate::plugins::sources::DEGRADED_DRIFTED);
+        for status in sources.iter().filter(|s| s.missing) {
             writeln!(
                 out,
-                "  {warn} source degraded     '{}' {} — {}; {}",
-                status.record.id,
-                status
-                    .degraded_reason
-                    .as_deref()
-                    .unwrap_or(crate::plugins::sources::DEGRADED_MISSING),
-                if drifted {
-                    "its assets stay unloaded"
-                } else {
-                    "fallback active"
-                },
-                if drifted {
-                    format!(
-                        "review with `niu plugin source verify {}`; repair with `niu plugin restore {}`",
-                        status.record.id, status.record.id
-                    )
-                } else {
-                    format!("repair with `niu plugin restore {}`", status.record.id)
-                }
+                "  {warn} source missing      '{}' tree missing — its assets stay unloaded; \
+                 repair with `niu plugin restore {}`",
+                status.record.id, status.record.id
             )?;
         }
     }
@@ -526,7 +580,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
 
     // ── Advisory: git mirroring (§14.8, China-network comfort) ──
     // Report-only — the product never auto-switches a mirror; the user
-    // pastes the URL they trust (`niu plugin mirror set <url>`). niu has
+    // pastes their own mirror URL (`niu plugin mirror set <url>`). niu has
     // no HTTP transport to probe (download retraction 2026-10-04), so the
     // row states the active channel instead of probing GitHub.
     match crate::plugins::mirrors::load_mirror_config() {
@@ -557,7 +611,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
                 writeln!(
                     out,
                     "  {info}                     if GitHub fetches stall (e.g. mainland China), \
-                     set one you trust: `niu plugin mirror set <url>`"
+                     point git at a mirror of your choice: `niu plugin mirror set <url>`"
                 )?;
             }
         }
@@ -735,6 +789,71 @@ fn elevation_channel_row(provider: ElevationProvider, platform: Platform) -> (Ro
              niu's builtin sudo is opt-in only (NIU_ENABLE_RUBASH_SUDO=1)"
                 .to_string(),
         ),
+    }
+}
+
+/// The `winuxcmd FFI` advisory row (niubash#567; without the
+/// leading two-space indent; the caller prepends the tone
+/// marker). FFI is an opt-in accelerator beside the PATH route:
+/// off or unavailable leaves every command fully served by spawn,
+/// so the row is advisory in every state — but honest: a
+/// fallen-back FFI reads "unavailable" with its reason, never
+/// "enabled". Non-Windows platforms reuse the shared n/a wording:
+/// `winuxcore.dll` is a Windows component.
+fn ffi_status_row(status: Option<&crate::ffi::FfiStatus>, platform: Platform) -> (RowTone, String) {
+    if !platform.checks_windows_command_layer() {
+        return (
+            RowTone::Info,
+            format!(" winuxcmd FFI        {WINDOWS_COMPONENT_NA}"),
+        );
+    }
+    let Some(status) = status else {
+        return (RowTone::Info, " winuxcmd FFI        not probed".to_string());
+    };
+    use crate::ffi::config::SwitchState;
+    use crate::ffi::ProviderState;
+    match status.state {
+        ProviderState::Disabled => {
+            let how = match status.switch {
+                SwitchState::ExplicitOff => {
+                    "off — NIU_WINUXCMD_FFI=0 (kill switch); the PATH route serves every command"
+                }
+                _ => {
+                    "off — default (the #567 zero-problem gate has not passed); \
+                      the PATH route serves every command"
+                }
+            };
+            (RowTone::Info, format!(" winuxcmd FFI        {how}"))
+        }
+        ProviderState::EnabledUnprobed => (
+            RowTone::Info,
+            " winuxcmd FFI        enabled — not probed in this process".to_string(),
+        ),
+        ProviderState::Unavailable => {
+            let reason = status.reason.as_deref().unwrap_or("unknown reason");
+            (
+                RowTone::Warn,
+                format!(
+                    " winuxcmd FFI        unavailable — {reason}; \
+                     the PATH route serves every command"
+                ),
+            )
+        }
+        ProviderState::Ready => {
+            let version = status.winuxcmd_version.as_deref().unwrap_or("unknown");
+            let abi = status
+                .loaded_abi
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "not loaded yet".to_string());
+            (
+                RowTone::Ok,
+                format!(
+                    " winuxcmd FFI        ready — winuxcmd {version}, ABI {abi}, \
+                     {} tier-2 names claimable",
+                    status.tier_counts.1
+                ),
+            )
+        }
     }
 }
 
@@ -991,5 +1110,62 @@ mod tests {
         if !cfg!(windows) {
             assert_eq!(windows_build_number(), None);
         }
+    }
+
+    fn ffi_status(state: crate::ffi::ProviderState) -> crate::ffi::FfiStatus {
+        crate::ffi::FfiStatus {
+            switch: crate::ffi::config::SwitchState::Default,
+            enabled: false,
+            state,
+            reason: None,
+            dll_path: None,
+            version_dir: None,
+            winuxcmd_version: None,
+            loaded_abi: None,
+            tier_counts: (0, 0, 0),
+            tier1_claimable: false,
+            last_fallback: None,
+        }
+    }
+
+    /// niubash#567: off Windows the FFI row is the shared n/a —
+    /// winuxcore.dll is a Windows component, whatever the probe
+    /// state would say.
+    #[test]
+    fn ffi_row_is_na_off_windows() {
+        let status = ffi_status(crate::ffi::ProviderState::Ready);
+        let (tone, row) = ffi_status_row(Some(&status), Platform::Unix);
+        assert_eq!(tone, RowTone::Info);
+        assert!(row.contains(WINDOWS_COMPONENT_NA), "{row}");
+    }
+
+    /// niubash#567: the FFI row is honest in every state — the
+    /// default-off state names the gate, an unavailable state
+    /// carries its reason, and a ready state carries the loaded
+    /// DLL's version facts. A fallen-back FFI never reads as
+    /// enabled.
+    #[test]
+    fn ffi_row_reports_each_state_honestly() {
+        let (tone, row) = ffi_status_row(
+            Some(&ffi_status(crate::ffi::ProviderState::Disabled)),
+            Platform::Windows,
+        );
+        assert_eq!(tone, RowTone::Info);
+        assert!(row.contains("off — default"), "{row}");
+
+        let mut unavailable = ffi_status(crate::ffi::ProviderState::Unavailable);
+        unavailable.reason = Some("ffi pointer missing: current.txt".to_string());
+        let (tone, row) = ffi_status_row(Some(&unavailable), Platform::Windows);
+        assert_eq!(tone, RowTone::Warn);
+        assert!(row.contains("unavailable — ffi pointer missing"), "{row}");
+
+        let mut ready = ffi_status(crate::ffi::ProviderState::Ready);
+        ready.winuxcmd_version = Some("1.2.0".to_string());
+        ready.loaded_abi = Some(2);
+        ready.tier_counts = (176, 12, 10);
+        let (tone, row) = ffi_status_row(Some(&ready), Platform::Windows);
+        assert_eq!(tone, RowTone::Ok);
+        assert!(row.contains("winuxcmd 1.2.0"), "{row}");
+        assert!(row.contains("12 tier-2 names claimable"), "{row}");
     }
 }

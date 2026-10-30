@@ -6,6 +6,8 @@
     {
       "name": "gawk",
       "version": "5.4.1-unixwin2",
+      "license": "GPL-3.0-or-later",
+      "source": "https://www.gnu.org/software/gawk/ (GNU gawk 5.4.1; the payload's DLL closure libreadline8/libncurses6/libmpfr-6/libgmp-10 is GPL-covered and ships under the same license)",
       "commands": [
         "gawk"
       ],
@@ -16,19 +18,23 @@
     },
     {
       "name": "niugit",
-      "version": "2.56.0.2",
+      "version": "2.56.0.3",
+      "license": "GPL-2.0-only",
+      "source": "https://github.com/git-for-windows/git — Corresponding Source for this build: the Git for Windows v2.56.0.windows.4 source tarball, rebuilt by unixwin/niu-git (patches/ + scripts/build.py recipe: https://github.com/unixwin/niu-git)",
       "commands": [
         "git"
       ],
       "sha256": {
-        "windows-x64": "fce603d3c9a3e8119a3df1c559322651e53185eecce4c90a8efe36844bd268dc",
-        "windows-arm64": "e2fb43b0ec80e427e4e7268fd72ea54851ab3558090bddf107ffc8eebf11de5a"
+        "windows-x64": "fc700ae92fb50209344ad7d18649e1fc1cb5cba21ffe75d95ec5668fd1e625a1",
+        "windows-arm64": "490fc3c2abf5da6b5441b8717ce8f22d187b74cd7f04aed6abc4ed50f9f4b12f"
       },
-      "purpose": "Niu-git 2.56.0.2 (native Windows git without MSYS; real git-for-windows C source built with MSVC, no POSIX layer). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. 2.56.0.2 is layout=flat: the payload lands under <root>\\opt\\niugit (mingw64/ + etc/) and mingw64/bin/git.exe is mapped straight onto usr\\bin\\git.exe, so the git on PATH IS the git binary - no launcher, no winuxcmd dispatch hop, and git --version drops from 72-83 ms to ~14 ms (Git Bash: 45-103 ms). Requires WinuxCmd 1.1.9 or newer in the same release (wpm#1183: POSIX-unlink hardlink break, without which the flat mapping cannot replace the usr\\bin hardlink). It is schannel-only TLS with no bundled shell/perl (shell-script parts of git run on niubash's sh) and accepts POSIX-shaped (/d/...) path args."
+      "purpose": "Niu-git 2.56.0.3 (native Windows git without MSYS; real git-for-windows C source built with MSVC, no POSIX layer). 2.56.0.3 is the Git for Windows 2.56.0.windows.4 security rebuild (brotli 1.2.1, fixing CVE-2026-111497). The full plugin distro (oh-my-bash, omb-theme-robbyrussell, bash-it, bash-completion, bash-preexec) installs every entry through git clone/pull, so a fresh machine without git.exe on PATH failed all five with 'failed to run git; is git.exe on PATH?' (niubash#209). Bundling niugit removes the hard dependency on the user's environment. 2.56.0.3 is layout=flat: the payload lands under <root>\\opt\\niugit (mingw64/ + etc/) and mingw64/bin/git.exe is mapped straight onto usr\\bin\\git.exe, so the git on PATH IS the git binary - no launcher, no winuxcmd dispatch hop, and git --version drops from 72-83 ms to ~14 ms (Git Bash: 45-103 ms). Requires WinuxCmd 1.1.9 or newer in the same release (wpm#1183: POSIX-unlink hardlink break, without which the flat mapping cannot replace the usr\\bin hardlink). It is schannel-only TLS with no bundled shell/perl (shell-script parts of git run on niubash's sh) and accepts POSIX-shaped (/d/...) path args."
     },
     {
       "name": "ripgrep",
       "version": "15.2.0",
+      "license": "MIT OR Unlicense",
+      "source": "https://github.com/BurntSushi/ripgrep",
       "commands": [
         "rg"
       ],
@@ -41,6 +47,8 @@
     {
       "name": "fd",
       "version": "10.4.2",
+      "license": "MIT OR Apache-2.0",
+      "source": "https://github.com/sharkdp/fd",
       "commands": [
         "fd"
       ],
@@ -61,6 +69,7 @@
   "notes": [
     "x64 fail-closed, other legs fail-open (owner decision, niubash#468): on the windows-x64 release leg every manifest package MUST pass its pin check and install, and every manifest shim MUST materialize — any failure fails the release job outright. A silently skipped gawk preinstall once shipped a 1.4.1 without opt\\gawk or the usr\\bin shims and left 1.4.0-era awk.exe/gawk.exe copies behind (niubash#468). Non-primary legs keep the fail-open contract: a failed install is a loud warning (GITHUB_STEP_SUMMARY + ::warning), never a release blocker; users can always run `winuxcmd wpm install <name>` against an installed package, and arm64 legs skip gawk/niugit by design (no arm64 artifacts in the index).",
     "Pin contract (niubash#312): every package entry carries `version` plus a `sha256` map keyed by wpm arch (windows-x64 / windows-arm64). The release workflow refuses to install a package whose live-index artifact digest does not equal the pin — that failure takes the same loud fail-open path as a transport failure, so a release's contents cannot silently drift with the index state of the build minute. Pins were recorded from unixwin/wpm-source main @ dbf971d (official-2026.10.13); bump them deliberately, together with `version`.",
+    "License contract (payload license hygiene): every package entry carries `license` (an SPDX expression covering the shipped payload and its private DLL closure) and `source` (upstream project URL; for niugit, the Corresponding Source recipe pointer). The canonical license text and build provenance for each entry live in scripts/release/licenses/<name>/ (LICENSE + PROVENANCE.md) — package-release.ps1 stages that tree as licenses\\ in the package root and fails closed if a manifest entry's directory is missing, and the release body's Licenses & Source section is generated from these fields, so adding a package without its license text cannot ship silently.",
     "Commands contract: every package entry carries `commands`, mirroring the wpm index's `commands` field — wpm materializes a usr\\bin shim per registered command (niugit ships git.exe, ripgrep ships rg.exe), never per package name, and the release verify step asserts on these (plus the shims entries), not on package names.",
     "Architecture: niugit and gawk exist as windows-x64 artifacts only in the wpm index; on the arm64 release leg those installs fail by design and the leg ships without them. ripgrep and fd carry windows-arm64 artifacts and pre-install on both legs. The post-package verify step hard-asserts only what the pre-install step reported as installed, per the fail-open contract.",
     "No symlinks, ever: shims are winuxcmd.exe hardlinks (copies on file systems without hardlink support). The issue red lines stand - no archive formats are added, no symbolic links are created, and the runtime never downloads binaries (the assembly happens here, in CI).",

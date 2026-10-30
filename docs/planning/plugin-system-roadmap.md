@@ -9,7 +9,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
   enable/disable control plane exist.
 - `oh-my-niu` is the official bundled distribution.
 - First-party packs are being moved behind manifests so their aliases,
-  completions, prompt segments, hooks, and optional `.winux` startup code are
+  completions, prompt segments, hooks, and optional `.niu` startup code are
   visible and reviewable.
 - `~/.niubashrc` is the user-authored interactive entry point.
 - Manifest-backed registry files hold structured plugin state.
@@ -19,7 +19,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
 1. Keep `builtin` packs for host-owned behavior that still belongs in Rust.
 2. Use asset-only packs for aliases, completions, themes, prompt presets, and
    keybinding metadata.
-3. Use `source` packs for reviewed bundle-local `.winux` shell helpers.
+3. Use `source` packs for reviewed bundle-local `.niu` shell helpers.
 4. Use `bridge` packs when the manifest exposes a host-owned capability.
 5. Use `process` packs for external tool adapters that need explicit command
    permissions, timeouts, stdout/stderr capture, or interactive process launch.
@@ -43,7 +43,7 @@ design direction is in [Plugin System Direction](plugin-system-direction.md).
 | Prompt layout themes | Theme asset pack. |
 | Prompt data providers | `builtin` or `bridge` when host-owned, `process` when delegated to an external binary. |
 | External command wrappers | `process` with explicit `process:run:<name>` permissions. |
-| Shell-mutating helpers | Reviewed `.winux` `source` pack. |
+| Shell-mutating helpers | Reviewed `.niu` `source` pack. |
 | Core shell behavior | Niubash core, not a plugin. |
 
 ## Verification

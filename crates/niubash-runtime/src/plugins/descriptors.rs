@@ -466,7 +466,7 @@ impl super::sources::PluginSourceAdapter for FileSourceAdapter {
         "standalone bash files"
     }
     fn license(&self) -> &'static str {
-        "unknown (review before trust)"
+        "unknown (depends on the file's own project)"
     }
     fn default_origin(&self) -> Option<&'static str> {
         None

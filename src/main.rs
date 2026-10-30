@@ -223,7 +223,7 @@ fn run_main() -> ExitCode {
     // wrapper role when both channels agree, keeping the #737
     // dies-with-the-wrapper cascade live for niu the way rubash's own
     // main() has it. For plain invocations this is just the env scrub.
-    rubash::builtins::kill::consume_background_wrapper_handshake(&mut args);
+    rubash::script_driver::consume_background_wrapper_handshake(&mut args);
     piped_stdout::install_for_argv(&args);
 
     // Initialize logging (only error level by default)
@@ -238,7 +238,6 @@ fn run_main() -> ExitCode {
     niubash_runtime::console_guard::enable_vt_output();
 
     // Expose the host binary path so rubash's bash shim can forward to niu.
-    // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.
     // Invoked through a `bash`/`sh` hardlink, `current_exe()` is that face; the
     // contract these variables carry is the shell itself, so report the real
     // `niu.exe` of this installation while `$BASH`/`$SHELL` keep following the
@@ -247,7 +246,6 @@ fn run_main() -> ExitCode {
         let shell = niubash_runtime::shell_links::resolved_shell_path(&invoked);
         if let Some(path) = shell.to_str() {
             std::env::set_var("NIU_SHELL", path);
-            std::env::set_var("WINUXSH_SHELL", path);
         }
     }
 
@@ -374,6 +372,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             "font" => return niubash_runtime::fonts::run_font_command(),
             "doctor" => return niubash_runtime::doctor::run_doctor(skill::SKILL_FILES),
             "config" => return run_config_command(&args[2..]),
+            "help" => return run_help_command(&args[2..]),
             "plugin" => return run_plugin_command(args),
             "skill" => return skill::run_skill_command(args),
             // Anything else is a script name, for every face.
@@ -385,7 +384,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         let mut shell = niubash_runtime::Shell::new()?;
         let content = read_script_operand(&shell, first)?;
         shell.set_script_name(first);
-        shell.executor.inherit_process_stdin();
+        shell.session_mut().inherit_process_stdin();
         shell.enable_process_stdin_pipeline_bridge();
         // niubash#399: a login-marked argv[0] (`-niu script`) sources the
         // login profile chain here, and an `exit` in any sourced startup
@@ -393,9 +392,9 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         if let Some(status) = shell.source_non_interactive_env() {
             finish_startup_exit(&mut shell, status);
         }
-        shell.executor.set_positional_params(args[2..].to_vec());
+        shell.session_mut().set_positional(args[2..].to_vec());
         let code = shell.execute_script(&content)?;
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         finish_one_shot(&shell, code);
         Ok(())
     }
@@ -410,16 +409,20 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 /// (shell.c:1572-1601, findcmd.c find_path_file — that is how `bash ls`
 /// finds and then refuses the binary /usr/bin/ls); refuse a missing
 /// name with EX_NOTFOUND (127), a directory or an unreadable file with
-/// 126, and a binary / non-UTF-8 file with EX_BINARY_FILE (126,
+/// 126, and a binary file with EX_BINARY_FILE (126,
 /// general.c:718-741 check_binary_file: NUL in the first line(s) or an
-/// ELF image). A missing/unreadable operand is the SHELL's diagnostic
+/// ELF image). Non-UTF-8 bytes are NOT a refusal: check_binary_file is
+/// GNU's only script rejection gate, and the bytes then decode through
+/// the engine's script-text decoding (raw-byte markers, rubash#132),
+/// exactly as rubash's own main opens operands (niubash#654).
+/// A missing/unreadable operand is the SHELL's diagnostic
 /// with the shell's statuses, never a raw `(os error N)` + rc 1
 /// (niubash#406, niubash#547). Refusals exit the process directly, as
 /// both routes always did inline.
 fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Result<String> {
     let mut script = script_arg_to_host_path(name);
     if !script.exists() && !name.contains('/') && !name.contains('\\') {
-        if let Some(found) = shell.executor.find_script_on_path(name) {
+        if let Some(found) = shell.executor().find_script_on_path(name) {
             script = found;
         }
     }
@@ -444,11 +447,17 @@ fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Re
         }
         Err(error) => return Err(error.into()),
     };
-    if rubash::script_driver::check_binary_file(&bytes) || std::str::from_utf8(&bytes).is_err() {
+    // niubash#654: the two GNU gates stay separate — binary
+    // determination (check_binary_file) is the only refusal; byte
+    // decoding goes through bytes_to_script_text, which carries
+    // invalid UTF-8 sequences as raw-byte markers the engine executes
+    // (rubash#132). Merging them refused every Latin-1 script with
+    // rc 126 while rubash and GNU ran it fine.
+    if rubash::script_driver::check_binary_file(&bytes) {
         eprintln!("cannot execute binary file");
         piped_stdout::finish_and_exit(126);
     }
-    Ok(String::from_utf8(bytes).unwrap_or_default())
+    Ok(rubash::script_driver::bytes_to_script_text(&bytes))
 }
 
 /// The shell face of this invocation, when `argv[0]` (or the forwarding shim's
@@ -668,40 +677,45 @@ fn dispatch_launcher_word(args: &[String], index: usize) -> anyhow::Result<()> {
             let command_mode = parse_legacy_command_mode(rest)?;
             let mut shell = niubash_runtime::Shell::new_one_shot()?;
             niubash_runtime::startup_trace::tick("-c: Shell::new");
-            shell.executor.inherit_process_stdin();
+            shell.session_mut().inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
             if command_mode.login {
                 // niubash#587: the legacy `-c -l` shape used to swallow
                 // the login flag whole — no login mark, no profile
                 // chain, no env file, silently diverging from the same
                 // spelling on the engine route (`-lc`). Converge: mark
-                // login (the carrier + login_shell shopt pair, so `$-`
-                // gains `l`) and run the same non-interactive startup
-                // chain (profile chain, then the env file, #399/#402)
-                // before the command string; an `exit` in a startup
-                // file ends the invocation with its status. The order
-                // matches the engine route: the startup chain runs
-                // before BASH_EXECUTION_STRING is set below.
-                shell.executor.mark_login_shell();
+                // login (the host classification plus the carrier +
+                // login_shell shopt pair, so `$-` gains `l`) and run
+                // the same non-interactive startup chain (profile
+                // chain, then the env file, #399/#402) before the
+                // command string; an `exit` in a startup file ends the
+                // invocation with its status. The order matches the
+                // engine route: the startup chain runs before
+                // BASH_EXECUTION_STRING is set below. rubash#2129: the
+                // mark goes through the host door so the funnel's
+                // classification (host state) and the engine's carrier
+                // projection move together.
+                shell.mark_own_login_shell();
                 if let Some(status) = shell.source_non_interactive_env() {
                     finish_startup_exit(&mut shell, status);
                 }
             }
             shell
-                .executor
-                .set_env("BASH_EXECUTION_STRING", command_mode.command);
+                .session_mut()
+                .variables()
+                .set("BASH_EXECUTION_STRING", command_mode.command);
             // Same -c diagnostic tag as the plain invocation route
             // (niubash#160): `$0: -c: line N:` parser diagnostics.
-            shell.executor.set_env("__RUBASH_IS_C", "1");
+            shell.session_mut().variables().set("__RUBASH_IS_C", "1");
             if let Some(command_name) = command_mode.command_name {
                 shell.set_script_name(command_name);
                 shell
-                    .executor
-                    .set_positional_params(command_mode.positional_params.to_vec());
+                    .session_mut()
+                    .set_positional(command_mode.positional_params.to_vec());
             }
             let code = shell.execute_script(command_mode.command)?;
             niubash_runtime::startup_trace::tick("-c: execute_script");
-            let code = shell.finish_with_exit_trap(code)?;
+            let code = shell.finish_with_engine_finish(code);
             niubash_runtime::startup_trace::tick("-c: exit trap");
             finish_one_shot(&shell, code);
             Ok(())
@@ -751,6 +765,33 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     let invocation =
         ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("niu: {}", error))?;
 
+    // 1.5.0 PLAN row 11 (niu host wiring for the debugger
+    // faces): the invocation layer registers both flags, and
+    // this host dispatches them to the engine's frontends —
+    // the same session core the rubash binary fronts, so the
+    // two binaries cannot drift into two debugger behaviors.
+    // `--dap` hands the process stdio to the adapter (the
+    // editor launch form); `--debug` with a script operand and
+    // no `-c`/interactive form opens the interactive CLI
+    // frontend. Every other `--debug` form keeps the
+    // recorded-flag + extdebug behavior of the normal route
+    // below.
+    if invocation.dap {
+        piped_stdout::finish_and_exit(rubash::run_dap_stdio(rubash::DapLaunchPreset {
+            program: invocation.script.clone(),
+            args: invocation.positional_params.clone(),
+        }));
+    }
+    if invocation.debug && invocation.command.is_none() && !invocation.interactive {
+        if let Some(script) = &invocation.script {
+            piped_stdout::finish_and_exit(rubash::run_debug_cli(rubash::DebugCliPreset {
+                program: Some(script.clone()),
+                args: invocation.positional_params.clone(),
+                startup_file: debug_startup_file(&invocation),
+            }));
+        }
+    }
+
     if invocation.dump_strings {
         let input = invocation_input(&invocation)?;
         let source_name = invocation_source_name(&invocation);
@@ -759,7 +800,17 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     }
     if invocation.pretty_print {
         let input = invocation_input(&invocation)?;
-        pretty_print_script(&input);
+        if !pretty_print_script(&input) {
+            // GNU pretty_print_loop returns EXECUTION_FAILURE when the
+            // input stops at a parse error (eval.c:215-253).
+            // niubash#656: leave through the drain like every other
+            // post-execution exit funnel — a bare `process::exit` skips
+            // the piped-stdout pump drain in `main` and raced it,
+            // intermittently dropping the already-printed commands on
+            // Windows (CI sampled this face red 2 of 4 runs with stdout
+            // completely empty while the exit code stayed 1).
+            piped_stdout::finish_and_exit(1);
+        }
         return Ok(());
     }
 
@@ -802,7 +853,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             }
             anyhow::anyhow!("niu: {error}")
         })?;
-    shell.executor.inherit_process_stdin();
+    shell.session_mut().inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
 
     if let Some(command) = invocation.command {
@@ -830,7 +881,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         } else if let Some(name) = invocation.command_name.clone() {
             shell.set_script_name(&name);
         }
-        shell.executor.set_env("BASH_EXECUTION_STRING", &command);
+        shell
+            .session_mut()
+            .variables()
+            .set("BASH_EXECUTION_STRING", &command);
         // __RUBASH_IS_C is already live here: invocation.apply_to_executor_before_startup
         // (rubash invocation.rs:273-275) sets it for every command string,
         // so parser diagnostics take the `$0: -c: line N:` shape (error.c
@@ -851,7 +905,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         if std::env::var_os(niubash_runtime::plugins::theme_preview::PRINT_RENDERED_PS1_ENV)
             .is_some_and(|value| value == "1")
         {
-            shell.executor.set_env("__RUBASH_INTERACTIVE", "1");
+            shell
+                .session_mut()
+                .variables()
+                .set("__RUBASH_INTERACTIVE", "1");
         }
         let code = shell.execute_script(&command)?;
         niubash_runtime::startup_trace::tick("invocation: execute_script");
@@ -860,7 +917,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         {
             shell.print_rendered_prompt_for_preview();
         }
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         niubash_runtime::startup_trace::tick("invocation: exit trap");
         finish_one_shot(&shell, code);
         return Ok(());
@@ -888,7 +945,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // parsed as script text, rc 127).
         let content = read_script_operand(&shell, &script_name)?;
         let code = shell.execute_script(&content)?;
-        let code = shell.finish_with_exit_trap(code)?;
+        let code = shell.finish_with_engine_finish(code);
         finish_one_shot(&shell, code);
         return Ok(());
     }
@@ -899,7 +956,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     // without a terminal, so delegate to the engine's interactive stdin
     // driver instead of enter_interactive()/run_repl.
     if invocation.interactive && !niubash_runtime::terminal::stdio_is_interactive() {
-        shell.executor.set_env("__RUBASH_INTERACTIVE", "1");
+        shell
+            .session_mut()
+            .variables()
+            .set("__RUBASH_INTERACTIVE", "1");
         // This path renders prompts through the engine's interactive stdin
         // driver (which expands executor-env PS1 itself), so the foreign
         // inherited PS1 must be discarded here too, before run_startup_rc
@@ -915,9 +975,14 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         if let Some(status) = shell.run_startup_rc() {
             finish_startup_exit(&mut shell, status);
         }
-        rubash::script_driver::prepare_interactive_history(&mut shell.executor);
-        let code = rubash::script_driver::run_interactive_stdin(&mut shell.executor);
-        piped_stdout::finish_and_exit(code);
+        // 1.5.0 migration: the Session contract's interactive
+        // stdin route (it runs the driver's interactive-history
+        // preparation itself, then the same driver).
+        let outcome = shell
+            .session_mut()
+            .run_interactive_stdin()
+            .map_err(|error| anyhow::anyhow!("session stdin run failed: {error:?}"))?;
+        piped_stdout::finish_and_exit(outcome.status);
     }
     // Bash -i forces an interactive shell even when stdin is not a terminal;
     // with no command or script, a terminal (or -i) means the REPL.
@@ -936,7 +1001,14 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     // parser buffer). A read_to_string slurp here feeds every later
     // consumer (exec cat / read / a top-level exec) EOF and pushes the
     // unconsumed tail back as code - data-as-code.
-    let code = rubash::script_driver::run_stdin_script(&mut shell.executor);
+    // 1.5.0 migration: the Session contract's stdin route (the same
+    // driver, with the contract's exit/errexit flow classification
+    // folded into the returned status).
+    let code = shell
+        .session_mut()
+        .run_stdin()
+        .map_err(|error| anyhow::anyhow!("session stdin run failed: {error:?}"))?
+        .status;
     let code = shell.finish_with_exit_trap(code)?;
     if code != 0 {
         finish_one_shot(&shell, code);
@@ -944,43 +1016,123 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// niubash#692: the `--debug` CLI route's startup file — the
+/// invocation's explicit `--rcfile`, gated by `--norc` exactly
+/// the way every other route gates rc reading through
+/// `Shell::no_rc`. Before this mapping existed, the debug
+/// dispatch dropped the flag silently: the rc never loaded, so
+/// its function and trap definitions never reached the
+/// debuggee (the niubash#681 repro was written against this
+/// face). The engine sources the file into the debug session
+/// ahead of the program (`DebugCliPreset::startup_file`); a
+/// missing file surfaces as the source builtin's diagnostic
+/// there — visible, never silent. Only the explicit flag is
+/// mapped: the debug route keeps the script route's contract
+/// for the default rc (a non-interactive script run does not
+/// source it), and `--dap` launches keep the editor-owned
+/// startup model.
+fn debug_startup_file(invocation: &ShellInvocation) -> Option<String> {
+    if invocation.no_rc {
+        None
+    } else {
+        invocation.rc_file.clone()
+    }
+}
+
+/// The input text for the one-shot text faces. Census of the
+/// faces fed by this helper (niubash#694) — exactly two callers,
+/// both one-shot and file-fed:
+///   * `--dump-strings` / `--dump-po-strings` (one arm), and
+///   * `--pretty-print`.
+/// Per input source:
+///   * `-c` command string: argv text, no file access, unchanged.
+///   * script operand: read with the execution path's open
+///     discipline (`read_invocation_script_operand`) — before
+///     #694 this arm's `read_to_string` error rode the anyhow
+///     chain out of `main` and landed as a bare rc 1 with no
+///     diagnostic, where the execution path (and GNU, for these
+///     same faces) answers 127/126 with the file named.
+///   * stdin: raw bytes decoded like script bytes — a non-UTF-8
+///     stream used to fail the read the same flattened way,
+///     where GNU dumps/pretty-prints it fine.
 fn invocation_input(invocation: &ShellInvocation) -> anyhow::Result<String> {
     if let Some(command) = &invocation.command {
         return Ok(command.clone());
     }
     if let Some(script_name) = &invocation.script {
-        let path = script_arg_to_host_path(script_name);
-        return Ok(std::fs::read_to_string(&path)?);
+        return read_invocation_script_operand(script_name);
     }
-    let mut content = String::new();
-    std::io::stdin().read_to_string(&mut content)?;
-    Ok(content)
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes)?;
+    Ok(rubash::script_driver::bytes_to_script_text(&bytes))
+}
+
+/// niubash#694: read a script operand for the one-shot text
+/// faces with the execution path's open discipline (the
+/// `read_script_operand` caliber, niubash#591/#547/#654):
+/// $PATH search for a slash-less name, a missing file answered
+/// `niu: <file>: No such file or directory` with status 127, a
+/// directory or a permission failure answered with status 126,
+/// each naming the operand as given. Bytes are decoded through
+/// `bytes_to_script_text`, never `read_to_string`, so a
+/// non-UTF-8 script dumps and pretty-prints instead of failing
+/// its read. Unclassified read errors keep the caller's anyhow
+/// path, exactly as the execution path leaves them.
+fn read_invocation_script_operand(name: &str) -> anyhow::Result<String> {
+    let mut script = script_arg_to_host_path(name);
+    if !script.exists() && !name.contains('/') && !name.contains('\\') {
+        // A bare executor only to borrow the engine's own $PATH
+        // script search — the same lookup `read_script_operand`
+        // runs through the live shell.
+        let executor = rubash::Executor::new();
+        if let Some(found) = executor.find_script_on_path(name) {
+            script = found;
+        }
+    }
+    if !script.exists() {
+        eprintln!("niu: {name}: No such file or directory");
+        piped_stdout::finish_and_exit(127);
+    }
+    if script.is_dir() {
+        eprintln!("niu: {name}: Is a directory");
+        piped_stdout::finish_and_exit(126);
+    }
+    match std::fs::read(&script) {
+        Ok(bytes) => Ok(rubash::script_driver::bytes_to_script_text(&bytes)),
+        Err(error) => match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                eprintln!("niu: {name}: No such file or directory");
+                piped_stdout::finish_and_exit(127);
+            }
+            std::io::ErrorKind::PermissionDenied => {
+                eprintln!("niu: {name}: Permission denied");
+                piped_stdout::finish_and_exit(126);
+            }
+            std::io::ErrorKind::IsADirectory => {
+                eprintln!("niu: {name}: Is a directory");
+                piped_stdout::finish_and_exit(126);
+            }
+            _ => Err(error.into()),
+        },
+    }
 }
 
 /// -D / --dump-strings: list every locale string ($"...") without executing,
 /// the way GNU bash's dump-strings option does. --dump-po-strings selects the
-/// GNU gettext PO output format.
-///
-/// GNU recognizes a locale string only where the word lexer reads `$` followed
-/// by `"` while scanning a word (parse.y read_token_word's
-/// `character == '$' && peek_char == '"'` branch; the dump itself is
-/// locale.c locale_expand: printf("\"%s\"\n")). Comment text and here-doc
-/// bodies are never lexed as words, so they never dump; single-quoted text,
-/// double-quoted spans and backtick bodies are skipped as units; word-
-/// embedded, quoted and arithmetic-embedded command substitutions are
-/// re-lexed, so locale strings inside them do dump (parse.y:4100 processes
-/// `$(` units encountered inside a matched pair).
-///
-/// This pass therefore walks the rubash token stream -- which already
-/// excludes the comment and here-doc-body classes structurally, since the
-/// lexer never yields word-shaped tokens from them -- and applies the
-/// word-level quote rules to the raw spelling of word-shaped tokens. The
-/// old implementation byte-scanned the raw script instead and misfired in
-/// exactly those positions.
+/// GNU gettext PO output format. The collection and rendering live in the
+/// engine library (`rubash::locale::collect_locale_strings` /
+/// `render_locale_string_dump`, rubash#1977) — this face used to be a
+/// host-only implementation while the rubash binary accepted the flag
+/// and dropped it; both binaries now run the one library pass, whose
+/// doc carries the GNU recognition rules (parse.y read_token_word,
+/// locale.c locale_expand).
 fn print_locale_strings(input: &str, po: bool, source_name: &str) {
     let mut strings = Vec::new();
-    collect_locale_strings(input, 1, &mut strings);
-    print!("{}", render_locale_string_dump(&strings, po, source_name));
+    rubash::locale::collect_locale_strings(input, 1, &mut strings);
+    print!(
+        "{}",
+        rubash::locale::render_locale_string_dump(&strings, po, source_name)
+    );
 }
 
 /// The `#: name:lineno` anchor GNU bash prints in --dump-po-strings entries
@@ -997,400 +1149,24 @@ fn invocation_source_name(invocation: &ShellInvocation) -> String {
     process_argv0()
 }
 
-/// Collects `(line, raw body)` for every locale string in `input`, in source
-/// order. `base_line` is the line the token stream's own numbering starts
-/// from: top-level tokens carry real script lines in `token.position`, while
-/// a re-lexed substitution body restarts at 1, so nested strings are mapped
-/// back with `base_line + position - 1`. GNU reports the physical line of
-/// each nested string; the two agree whenever the substitution body starts
-/// on its token's start line (the overwhelmingly common single-line word).
-fn collect_locale_strings(input: &str, base_line: usize, out: &mut Vec<(usize, String)>) {
-    for token in rubash::lexer::tokenize(input) {
-        let line = base_line + token.position.saturating_sub(1);
-        match token.kind {
-            rubash::TokenKind::Word
-            | rubash::TokenKind::Assignment
-            | rubash::TokenKind::BraceExpand => scan_locale_words(&token.raw, line, out),
-            rubash::TokenKind::CommandSubst => match substitution_span(&token.raw) {
-                SubstitutionSpan::Command(body) => collect_locale_strings(&body, line, out),
-                SubstitutionSpan::Arithmetic(body) => scan_arithmetic_text(&body, line, out),
-                SubstitutionSpan::None => {}
-            },
-            _ => {}
-        }
-    }
-}
-
-/// Word-level scan of one token's raw spelling, mirroring where GNU's word
-/// lexer recognizes `$"`: outside single quotes, double-quoted spans,
-/// backtick bodies and `${...}`/`$'...'` units. `\"` at word level escapes
-/// the next character, so `\$"x"` is not a locale string introducer.
-fn scan_locale_words(raw: &str, line: usize, out: &mut Vec<(usize, String)>) {
-    let bytes = raw.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => i = skip_single_quoted(bytes, i + 1),
-            b'`' => i = skip_backquoted(bytes, i + 1),
-            b'"' => i = scan_double_quoted(raw, i + 1, line, out),
-            b'$' => match bytes.get(i + 1) {
-                Some(b'"') => {
-                    let close = locale_body_end(raw, i + 2, line, out);
-                    out.push((line, raw[i + 2..close].to_string()));
-                    i = close + 1;
-                }
-                Some(b'\'') => i = skip_ansi_c_quoted(bytes, i + 2),
-                Some(b'{') => i = skip_dollar_brace(bytes, i + 2),
-                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
-                _ => i += 1,
-            },
-            b'\\' => i = (i + 2).min(bytes.len()),
-            _ => i += 1,
-        }
-    }
-}
-
-/// Byte index of the closing `"` of a locale string body whose text starts at
-/// `start` (just past the opening quote). Nested `${...}`/`` `...` ``/`$(...)`
-/// units are skipped the way GNU parse_matched_pair skips them while it
-/// extracts the pair, and command-substitution units are re-lexed so their
-/// own locale strings dump first (GNU order: inner before outer). The
-/// surrounding body is reported verbatim: GNU additionally rewrites nested
-/// `$"..."` units to `"..."` inside the body it dumps, which needs a
-/// byte-exact body serializer rubash does not expose (host-semantic-layer
-/// plan, C1 residual).
-fn locale_body_end(raw: &str, start: usize, line: usize, out: &mut Vec<(usize, String)>) -> usize {
-    let bytes = raw.as_bytes();
-    let mut i = start;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return i,
-            b'\\' => i = (i + 2).min(bytes.len()),
-            b'`' => i = skip_backquoted(bytes, i + 1),
-            b'$' => match bytes.get(i + 1) {
-                Some(b'{') => i = skip_dollar_brace(bytes, i + 2),
-                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
-                _ => i += 1,
-            },
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-/// Walks a double-quoted span. `$` followed by `"` is literal data here (GNU
-/// dumps nothing for `echo "$"dqp" tail"`), while `$(...)` units are re-lexed
-/// (parse.y:4100) and their locale strings dump.
-fn scan_double_quoted(
-    raw: &str,
-    start: usize,
-    line: usize,
-    out: &mut Vec<(usize, String)>,
-) -> usize {
-    let bytes = raw.as_bytes();
-    let mut i = start;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return i + 1,
-            b'\\' => i = (i + 2).min(bytes.len()),
-            b'`' => i = skip_backquoted(bytes, i + 1),
-            b'$' => match bytes.get(i + 1) {
-                Some(b'{') => i = skip_dollar_brace(bytes, i + 2),
-                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
-                _ => i += 1,
-            },
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-/// Extracts the span of a `$(...)` / `$((...))` unit whose `(` sits at `open`
-/// and dispatches it: command-substitution bodies are re-lexed (GNU dumps
-/// their locale strings, unquoted, word-embedded or double-quoted alike) and
-/// arithmetic bodies keep dumping only through the quoted command
-/// substitutions they contain.
-fn scan_substitution_unit(
-    raw: &str,
-    open: usize,
-    line: usize,
-    out: &mut Vec<(usize, String)>,
-) -> usize {
-    let bytes = raw.as_bytes();
-    let Some(close) = paren_close(bytes, open) else {
-        return bytes.len();
-    };
-    if bytes.get(open + 1) == Some(&b'(') {
-        scan_arithmetic_text(&raw[open + 2..close - 1], line, out);
-    } else {
-        collect_locale_strings(&raw[open + 1..close], line, out);
-    }
-    close + 1
-}
-
-/// Arithmetic text (`$(( ... ))` inner span): `$"..."` never fires here, but
-/// quoted command substitutions are parsed by GNU and their locale strings
-/// dump (GNU 5.3.0: `$(( "$(echo $"x")" + 1 ))` dumps `"x"`).
-fn scan_arithmetic_text(text: &str, line: usize, out: &mut Vec<(usize, String)>) {
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => i = scan_double_quoted(text, i + 1, line, out),
-            b'`' => i = skip_backquoted(bytes, i + 1),
-            b'$' if bytes.get(i + 1) == Some(&b'(') => {
-                if bytes.get(i + 2) == Some(&b'(') {
-                    // Nested arithmetic span: no locale recognition inside.
-                    i += 3;
-                } else {
-                    i = scan_substitution_unit(text, i + 1, line, out);
-                }
-            }
-            b'\\' => i = (i + 2).min(bytes.len()),
-            _ => i += 1,
-        }
-    }
-}
-
-enum SubstitutionSpan {
-    Command(String),
-    Arithmetic(String),
-    None,
-}
-
-/// Classifies a CommandSubst token's raw spelling: a `` `...` `` token shares
-/// the kind but never starts with `$(`, and its body must not be re-lexed
-/// (GNU keeps backtick bodies verbatim at parse time, so `echo `echo $"x"``
-/// dumps nothing). `$((...))` yields its arithmetic inner span.
-fn substitution_span(raw: &str) -> SubstitutionSpan {
-    let bytes = raw.as_bytes();
-    if bytes.first() != Some(&b'$') || bytes.get(1) != Some(&b'(') {
-        return SubstitutionSpan::None;
-    }
-    let Some(close) = paren_close(bytes, 1) else {
-        return SubstitutionSpan::None;
-    };
-    if bytes.get(2) == Some(&b'(') {
-        SubstitutionSpan::Arithmetic(raw[3..close - 1].to_string())
-    } else {
-        SubstitutionSpan::Command(raw[2..close].to_string())
-    }
-}
-
-/// Byte index of the `)` matching the `(` at `open`, honoring quoting the way
-/// GNU parse_matched_pair does while it extracts a substitution span. Returns
-/// None when the span never closes; callers then treat the rest of the text
-/// as the unit, which keeps the scan total on malformed input.
-fn paren_close(bytes: &[u8], open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => {
-                depth += 1;
-                i += 1;
-            }
-            b')' => {
-                depth -= 1;
-                i += 1;
-                if depth == 0 {
-                    return Some(i - 1);
-                }
-            }
-            b'\'' => i = skip_single_quoted(bytes, i + 1),
-            b'"' => i = skip_double_span(bytes, i + 1),
-            b'`' => i = skip_backquoted(bytes, i + 1),
-            b'\\' => i = (i + 2).min(bytes.len()),
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-fn skip_single_quoted(bytes: &[u8], mut i: usize) -> usize {
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            return i + 1;
-        }
-        i += 1;
-    }
-    bytes.len()
-}
-
-fn skip_ansi_c_quoted(bytes: &[u8], mut i: usize) -> usize {
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => return i + 1,
-            b'\\' => i += 2,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn skip_backquoted(bytes: &[u8], mut i: usize) -> usize {
-    while i < bytes.len() {
-        match bytes[i] {
-            b'`' => return i + 1,
-            b'\\' => i += 2,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn skip_double_span(bytes: &[u8], mut i: usize) -> usize {
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return i + 1,
-            b'\\' => i = (i + 2).min(bytes.len()),
-            b'`' => i = skip_backquoted(bytes, i + 1),
-            b'$' if bytes.get(i + 1) == Some(&b'{') => i = skip_dollar_brace(bytes, i + 2),
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn skip_dollar_brace(bytes: &[u8], mut i: usize) -> usize {
-    let mut depth = 1usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => {
-                depth += 1;
-                i += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                i += 1;
-                if depth == 0 {
-                    return i;
-                }
-            }
-            b'\'' => i = skip_single_quoted(bytes, i + 1),
-            b'"' => i = skip_double_span(bytes, i + 1),
-            b'`' => i = skip_backquoted(bytes, i + 1),
-            b'\\' => i = (i + 2).min(bytes.len()),
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-/// Renders collected locale strings exactly the way GNU bash prints them
-/// (locale.c locale_expand): plain mode is `"body"` with the raw body text
-/// verbatim (escapes stay escaped, embedded newlines split the output line),
-/// and PO mode is the mk_msgstr form anchored by `#: name:lineno`.
-fn render_locale_string_dump(strings: &[(usize, String)], po: bool, source_name: &str) -> String {
-    let mut out = String::new();
-    for (line, body) in strings {
-        if po {
-            let mut escaped = String::new();
-            let mut multiline = false;
-            for ch in body.chars() {
-                match ch {
-                    '\n' => {
-                        escaped.push_str("\\n\"\n\"");
-                        multiline = true;
-                    }
-                    '"' | '\\' => {
-                        escaped.push('\\');
-                        escaped.push(ch);
-                    }
-                    _ => escaped.push(ch),
-                }
-            }
-            if multiline {
-                out.push_str(&format!(
-                    "#: {source_name}:{line}\nmsgid \"\"\n\"{escaped}\"\nmsgstr \"\"\n"
-                ));
-            } else {
-                out.push_str(&format!(
-                    "#: {source_name}:{line}\nmsgid \"{escaped}\"\nmsgstr \"\"\n"
-                ));
-            }
-        } else {
-            out.push('"');
-            out.push_str(body);
-            out.push_str("\"\n");
-        }
-    }
-    out
-}
-
-/// --pretty-print: GNU pretty_print_loop (eval.c:215-253) reads one command
-/// at a time: a blank input line ends the current command, an empty parse
-/// prints one newline (suppressed right after another newline), and each
-/// parsed command prints as its canonical text plus one newline. Mirrors the
-/// engine's rubash main.rs implementation over the public parser API.
-fn pretty_print_script(input: &str) {
+/// --pretty-print: GNU pretty_print_loop (eval.c:215-253). The loop
+/// lives in the engine library (`rubash::parser::ast_print::
+/// pretty_print_input`, rubash#1977 / niubash#656) so this host prints
+/// exactly what the rubash binary prints; the mirror that used to live
+/// here had a 16-field emptiness table — subshell, background,
+/// inverted and time commands were judged empty and printed nothing —
+/// and no parse-error arm. Returns false when the loop stopped at a
+/// parse-error command (GNU's loop returns EXECUTION_FAILURE there);
+/// the caller then exits 1. This host has no executor at this
+/// dispatch point, so the parser diagnostic itself is not rendered —
+/// the printed output still stops at the same command.
+fn pretty_print_script(input: &str) -> bool {
     let posix = std::env::var("__RUBASH_POSIX_MODE").as_deref() == Ok("1");
-    let mut output = String::new();
-    let mut pending = String::new();
-    let mut last_was_newline = false;
-    for line in input.lines() {
-        if line.trim().is_empty() && !rubash::lexer::has_unclosed_input_syntax(&pending) {
-            last_was_newline =
-                flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
-            pending.clear();
-            if !last_was_newline {
-                output.push('\n');
-                last_was_newline = true;
-            }
-            continue;
-        }
-        if !pending.is_empty() {
-            pending.push('\n');
-        }
-        pending.push_str(line);
-    }
-    last_was_newline = flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
-    if !last_was_newline && !output.is_empty() {
-        output.push('\n');
-    }
-    print!("{output}");
-}
-
-fn flush_pretty_print_chunk(
-    chunk: &str,
-    posix: bool,
-    output: &mut String,
-    last_was_newline: bool,
-) -> bool {
-    let tokens = rubash::lexer::tokenize_with_initial_posix(chunk, posix);
-    let ast = rubash::parser::parse(&tokens);
-    let mut printed = false;
-    for command in &ast.commands {
-        if is_pretty_print_empty(command) {
-            continue;
-        }
-        output.push_str(&rubash::parser::ast_print::pretty_print_command(command));
-        output.push('\n');
-        printed = true;
-    }
-    if printed {
-        return false;
-    }
-    last_was_newline
-}
-
-fn is_pretty_print_empty(command: &rubash::parser::CommandNode) -> bool {
-    command.words.is_empty()
-        && command.assignments.is_empty()
-        && command.compound_assignments.is_empty()
-        && command.array_element_assignments.is_empty()
-        && command.for_command.is_none()
-        && command.select_command.is_none()
-        && command.loop_command.is_none()
-        && command.if_command.is_none()
-        && command.case_command.is_none()
-        && command.function_command.is_none()
-        && command.arithmetic_command.is_none()
-        && command.conditional_command.is_none()
-        && command.coproc_command.is_none()
-        && command.brace_group.is_none()
-        && command.pipeline_command.is_none()
-        && command.and_or_list.is_none()
+    let outcome = rubash::parser::ast_print::pretty_print_input(input, posix);
+    print!("{}", outcome.output);
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    outcome.parse_error.is_none()
 }
 
 fn script_arg_to_host_path(value: &str) -> PathBuf {
@@ -1469,11 +1245,11 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
             })?;
     }
     shell.enter_interactive();
-    shell.executor.inherit_process_stdin();
+    shell.session_mut().inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
     if let Some(command_name) = rest.get(1) {
         shell.set_script_name(command_name);
-        shell.executor.set_positional_params(rest[2..].to_vec());
+        shell.session_mut().set_positional(rest[2..].to_vec());
     }
     if let Some(status) = shell.run_startup_rc() {
         finish_startup_exit(&mut shell, status);
@@ -1496,15 +1272,16 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // and skip the REPL-only initialization (prompt backend, completion
     // directory scan, completion snapshot) the full constructor pays.
     let mut shell = niubash_runtime::Shell::new_for_stdin_script_fast()?;
-    shell.executor.inherit_process_stdin();
+    shell.session_mut().inherit_process_stdin();
     // niubash#548: this reader is niu's own stdin driver, so it owes the
     // marker the engine's driver arms in its run_stdin_script
     // (shell.c:780-786 read_from_stdin): without it `$-` lacks `s` even
     // though every command arrives on stdin (`printf 'echo $-' | niu`
     // printed `hB` where GNU and standalone rubash print `hBs`).
     shell
-        .executor
-        .set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
+        .session_mut()
+        .variables()
+        .set(rubash::script_driver::READ_STDIN_MARKER, "1");
     // unixwin/niubash#431: bind the diagnostic/$0 name the way the engine's
     // own stdin driver does for `-s` (rubash script_driver run_stdin_script):
     // GNU never rebinds $0 for a stdin script (shell.c:1613 is the
@@ -1513,14 +1290,20 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // `bash: <message>` fallback, which also drops the line segment. Only
     // bind when absent: internal respawns carry the parent's name through
     // init.rs exactly as for `-s`.
-    if shell.executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
+    if shell
+        .session_mut()
+        .variables()
+        .resolved_value("__RUBASH_SCRIPT_NAME")
+        .is_none()
+    {
         let argv0 = std::env::args_os()
             .next()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "bash".to_string());
         shell
-            .executor
-            .set_env("__RUBASH_SCRIPT_NAME", argv0.as_str());
+            .session_mut()
+            .variables()
+            .set("__RUBASH_SCRIPT_NAME", argv0.as_str());
     }
     // niubash#399: a login-marked argv[0] (`-niu < script`) sources the
     // login profile chain; an `exit` in any sourced startup file ends the
@@ -1555,7 +1338,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
         // fd also avoids StdinLock prefetch stealing bytes from `&`
         // children that inherit fd 0 (redir1.sub, redir.tests heredocs).
         match shell
-            .executor
+            .executor_mut()
             .script_fd0_line(&mut line)
             .map(Ok)
             .unwrap_or_else(|| read_unbuffered_line(&mut line))?
@@ -1604,21 +1387,21 @@ fn run_stdin_script() -> anyhow::Result<()> {
         // exempts a `!`-inverted command). An ordinary nonzero status
         // just becomes the new last status and reading continues.
         let jumped = shell.take_script_exit_jump();
-        let engine_jumped = shell.executor.take_exit_jump_pending();
-        let parse_error = shell.executor.take_parse_error();
+        let engine_jumped = shell.executor_mut().take_exit_jump_pending();
+        let parse_error = shell.executor_mut().take_parse_error();
         if jumped
             || engine_jumped
             || parse_error
             || (code != 0
-                && rubash::script_driver::stdin_script_errexit_enabled(&shell.executor)
-                && !shell.executor.last_command_inverted())
+                && rubash::script_driver::stdin_script_errexit_enabled(shell.executor())
+                && !shell.executor_mut().last_command_inverted())
         {
             break;
         }
         pending.clear();
     }
 
-    let code = shell.finish_with_exit_trap(last_code)?;
+    let code = shell.finish_with_engine_finish(last_code);
     finish_one_shot(&shell, code);
     Ok(())
 }
@@ -1856,26 +1639,25 @@ fn print_usage() {
     println!("  update-niubash            Alias for self-update");
     println!();
     println!("  plugin add <id|owner/repo|url|path>");
-    println!("                            Install an external plugin source (untrusted)");
+    println!("                            Install an external plugin source");
     println!("  plugin list [--json]      Sources, their assets, activation state");
     println!("  plugin enable|disable <t> Activate or deactivate a source or asset");
     println!("  plugin update|sync|restore|rollback|clean");
     println!("                            Lockfile verbs (vim-plug/lazy.nvim-style)");
-    println!("  plugin trust <id>         Review and activate a source's assets");
     println!("  plugin migrate-rc [--diff]");
     println!("                            Read-only migration report for legacy managed");
     println!("                            blocks (never writes the rc)");
     println!("  plugin discover [--verbose]");
     println!("                            Read-only overview of external plugin sources");
-    println!("  plugin source <command>   Full source protocol (add/trust/sign/verify/");
-    println!("                            remove/update/rollback/list)");
+    println!("  plugin source <command>   Full source protocol (add/remove/update/");
+    println!("                            rollback/list)");
     println!("  plugin recipe <command>   Recipe index (list/show/add)");
     println!("  plugin distro <command>   Collections (list/import/remove/apply)");
     println!("  plugin mirror <command>   Git fetch mirroring (list/show/set)");
     println!("  plugin ui                 Menu UI (sections by state, same verbs)");
     println!();
     println!("  skill install|status      Install/check the AI agent skill bundle");
-    println!("                            ([--target claude|zcode|cursor|all|<dir>])");
+    println!("                            ([--target codex|claude|zcode|cursor|all|<dir>])");
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
@@ -1894,6 +1676,13 @@ fn print_usage() {
     println!("  BASH_ENV=<file>         GNU bash compatible: same as NIU_ENV, lower precedence.");
     println!("  NIU_LANG=<lang>         Setup wizard language (zh / en). Falls back to the");
     println!("                          Windows UI language, then LC_ALL/LANG.");
+    println!();
+    // Host help topics (niubash#630): the section text is generated from
+    // the runtime's single topic table so this face cannot drift from
+    // the `niu help` verb or the keymap reminder text.
+    for line in niubash_runtime::keymap_registry::help_topics_section().lines() {
+        println!("{line}");
+    }
     println!();
     // GNU --help convention: the portal lines close the output (bash ends its
     // --help with "bash home page: <…>"). Kept identical to the --version
@@ -1920,7 +1709,7 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         // package-manager recommendation (download retraction 2026-10-04).
         "recipe" | "recipes" => run_plugin_recipe_command(&args[3..]),
         // Collections (LazyVim extras pattern): data manifests of recipe
-        // ids, built-in or imported, applied without auto-trust.
+        // ids, built-in or imported.
         "distro" | "distros" | "collection" | "collections" => {
             run_plugin_distro_command(&args[3..])
         }
@@ -1941,7 +1730,6 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         // legacy managed blocks, publishes the candidate loader generation,
         // and NEVER writes the rc.
         "migrate-rc" => run_plugin_migrate_rc_command(&args[3..]),
-        "trust" => run_plugin_source_trust_command(&args[3..]),
         "update" => run_plugin_source_update_command(&args[3..]),
         "rollback" => run_plugin_source_rollback_command(&args[3..]),
         "restore" => run_plugin_restore_command(&args[3..]),
@@ -1971,9 +1759,9 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `niu plugin discover`: a dry, read-only overview of the external plugin
-/// ecosystem. Shows installed sources (with their ready/untrusted/degraded
-/// state) and the known plugin managers that are *not* installed yet —
-/// without installing, trusting, sourcing, or writing anything. Every
+/// ecosystem. Shows installed sources (with their ready/missing state)
+/// and the known plugin managers that are *not* installed yet —
+/// without installing, sourcing, or writing anything. Every
 /// install stays an explicit command the user runs.
 fn run_plugin_discover_command(args: &[String]) -> anyhow::Result<()> {
     for arg in args {
@@ -2005,29 +1793,23 @@ fn run_plugin_discover_command(args: &[String]) -> anyhow::Result<()> {
     for status in &statuses {
         let marker = match status.state.as_str() {
             "ready" => niubash_runtime::text_style::green("ready"),
-            "untrusted" => niubash_runtime::text_style::yellow("untrusted"),
-            _ => niubash_runtime::text_style::red("degraded"),
+            _ => niubash_runtime::text_style::red("missing"),
         };
         let assets = status
             .asset_count
             .map(|count| format!(" ({count} assets)"))
             .unwrap_or_default();
         let gutted_hint = if status.state == "ready" && status.asset_count == Some(0) {
-            niubash_runtime::text_style::dim(&format!(
-                "\n     no assets found in the tree — verify with `niu plugin source verify {}`",
-                status.record.id
-            ))
+            niubash_runtime::text_style::dim(
+                "\n     no assets found in the tree — check the tree contents",
+            )
         } else {
             String::new()
         };
-        // niubash#297: a drifted trusted tree is named as such, with the way
-        // out — not folded into the generic degraded marker.
-        let drift_hint = if status.degraded_reason.as_deref()
-            == Some(niubash_runtime::plugins::sources::DEGRADED_DRIFTED)
-        {
+        let missing_hint = if status.missing {
             niubash_runtime::text_style::yellow(&format!(
-                "\n     tree drifted from the lockfile pin — review: niu plugin source verify {}; repair: niu plugin restore {}",
-                status.record.id, status.record.id
+                "\n     tree missing — repair: niu plugin restore {}",
+                status.record.id
             ))
         } else {
             String::new()
@@ -2040,7 +1822,7 @@ fn run_plugin_discover_command(args: &[String]) -> anyhow::Result<()> {
             status.record.license,
             assets,
             gutted_hint,
-            drift_hint
+            missing_hint
         );
     }
     println!();
@@ -2091,15 +1873,13 @@ fn run_plugin_discover_command(args: &[String]) -> anyhow::Result<()> {
     // themes — so discover must actually enumerate the theme layer.
     println!(
         "{}",
-        niubash_runtime::text_style::cyan("Themes (from trusted sources)")
+        niubash_runtime::text_style::cyan("Themes (from installed sources)")
     );
     let themes = niubash_runtime::plugins::sources::source_theme_entries();
     if themes.is_empty() {
         println!(
             "  {}",
-            niubash_runtime::text_style::dim(
-                "(none yet — install a source with `niu plugin add`, then `niu plugin trust <id>`)"
-            )
+            niubash_runtime::text_style::dim("(none yet — install a source with `niu plugin add`)")
         );
     }
     for theme in &themes {
@@ -2138,12 +1918,9 @@ fn run_plugin_source_command(args: &[String]) -> anyhow::Result<()> {
         }
         "list" => run_plugin_source_list_command(&args[1..]),
         "add" => run_plugin_source_add_command(&args[1..]),
-        "trust" => run_plugin_source_trust_command(&args[1..]),
         "remove" => run_plugin_source_remove_command(&args[1..]),
         "update" => run_plugin_source_update_command(&args[1..]),
         "rollback" => run_plugin_source_rollback_command(&args[1..]),
-        "verify" => run_plugin_source_verify_command(&args[1..]),
-        "sign" => run_plugin_source_sign_command(&args[1..]),
         unknown => anyhow::bail!("unknown plugin source subcommand '{}'", unknown),
     }
 }
@@ -2152,56 +1929,19 @@ fn print_plugin_source_usage() {
     println!("Usage:  niu plugin source <command>");
     println!();
     println!("External plugin-manager sources (oh-my-bash loader, bash-it, bpkg).");
-    println!("Sources install untrusted; assets activate only after trust.");
     println!();
     println!("Commands:");
     println!("  list [--json]           List installed sources and their state");
     println!("  add <id|url|path> [--ref <ref>] [--checksum <sha256>]");
-    println!("                          Install a source tree (untrusted). <path> is a");
+    println!("                          Install a source tree. <path> is a");
     println!("                          local directory or .sh/.bash file — snapshot-");
     println!("                          copied in; file:///<path> clones via git");
     println!("                          instead (niubash#300)");
-    println!("  trust <id>              Review and activate a source's assets");
     println!("  remove <id>             Uninstall a source tree and its record");
     println!("  update [<id>] [--ref <ref>] [--checksum <sha256>]");
     println!("                          Update source(s) to the ref tip (no id =");
     println!("                          all); previous state kept");
     println!("  rollback <id>           Restore the previous source state");
-    println!("  verify <id>             Re-check the source tree checksum");
-    println!("  sign <id>               Pin trust with a local ed25519 signature");
-    println!("                          (updates then re-gate until re-signed)");
-}
-
-/// `niu plugin source sign <id>` — the local-signature trust tier: verify
-/// the tree, sign its digest with the machine-local key, and mark the
-/// source trusted at the stricter policy.
-fn run_plugin_source_sign_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(id) = args.first() else {
-        anyhow::bail!("plugin source sign requires a source id");
-    };
-    let record = niubash_runtime::plugins::sources::sign_source(id)?;
-    println!(
-        "{} source '{}' at the local-signature tier",
-        niubash_runtime::text_style::green("Signed"),
-        record.id
-    );
-    println!(
-        "  key fingerprint {}",
-        niubash_runtime::text_style::dim(
-            record
-                .signature
-                .as_ref()
-                .map(|s| s.public_key.as_str())
-                .unwrap_or("?")
-        )
-    );
-    println!(
-        "  {}",
-        niubash_runtime::text_style::dim(
-            "any update that changes the tree re-enters the trust gate until re-signed"
-        )
-    );
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -2351,7 +2091,7 @@ fn resolve_source_install_request(args: PluginSourceArgs) -> anyhow::Result<Plug
             // niubash#300: a bare LOCAL PATH is a first-class form —
             // snapshot-copied in like `file://`, no git semantics. One that
             // does not exist must fail honestly here, not as a baffling
-            // `git clone` status 128 after the trust-boundary banner —
+            // `git clone` status 128 after the fetch notice —
             // unless the spec already declares that spelling, which is the
             // more accurate diagnosis (the stranded-declaration refusal
             // with the `sync --prune` hint, niubash#174/#176) and fires
@@ -2432,13 +2172,13 @@ fn supported_sources_hint() -> String {
     format!("supported plugin-manager sources: {}", ids.join(", "))
 }
 
-/// Trust-boundary notice printed before fetching third-party shell code
-/// (§12.2 fetch gate). Fetching never executes the fetched code and the
-/// result registers untrusted, so non-interactive runs stay safe.
-fn print_source_trust_boundary(id: &str, request: &PluginSourceRequest) {
+/// Fetch notice printed before fetching third-party shell code: the
+/// fetch itself sources nothing — a source's code runs only once its
+/// assets are enabled (the enable verb is the activation step).
+fn print_source_fetch_notice(id: &str, request: &PluginSourceRequest) {
     println!(
         "{}: fetching third-party shell code",
-        niubash_runtime::text_style::yellow("Trust boundary")
+        niubash_runtime::text_style::yellow("Note")
     );
     println!("  source:   {}", id);
     println!("  origin:   {}", request.origin);
@@ -2452,12 +2192,15 @@ fn print_source_trust_boundary(id: &str, request: &PluginSourceRequest) {
             .unwrap_or("(detected after fetch)")
     );
     if let Some(checksum) = &request.expected_checksum {
-        println!("  checksum: {}", checksum);
+        println!(
+            "  checksum: {} (install-time pin, checked against the fetch)",
+            checksum
+        );
     }
     println!(
         "  {}",
         niubash_runtime::text_style::dim(
-            "fetched code is inert until you review and trust it; nothing is sourced yet"
+            "the fetch sources nothing; a source's assets load once you enable them"
         )
     );
 }
@@ -2469,7 +2212,7 @@ fn run_plugin_source_add_command(args: &[String]) -> anyhow::Result<()> {
         .adapter
         .clone()
         .unwrap_or_else(|| "(auto-detect)".to_string());
-    print_source_trust_boundary(&display_id, &request);
+    print_source_fetch_notice(&display_id, &request);
     let record = niubash_runtime::plugins::sources::add_source(request.to_install_request())?;
     println!(
         "{} source '{}' ({}) into {}",
@@ -2480,39 +2223,13 @@ fn run_plugin_source_add_command(args: &[String]) -> anyhow::Result<()> {
     );
     println!(
         "license {} | tree sha256 {}",
-        record.license, record.checksum_sha256
+        record.license,
+        niubash_runtime::plugins::sources::tree_pin_digest(&record)
+            .unwrap_or_else(|_| "unavailable".to_string())
     );
-    print_first_fetch_warning(&record);
-    println!("the source is untrusted; review it, then run:");
-    println!("  niu plugin source trust {}", record.id);
+    println!("browse its assets with `niu plugin list`; enable with:");
+    println!("  niu plugin enable {}", record.id);
     Ok(())
-}
-
-/// niubash#298: the checksum pin covers every fetch AFTER the first — the
-/// first delivery itself only had one when the user pinned `--checksum` or
-/// the origin is a curated catalog entry. A remote unpinned non-catalog
-/// first fetch is warned about here, and the state stays recorded in the
-/// registry (`first_fetch_verified`, visible in `plugin list --json`).
-/// Local snapshots have no network delivery, so they are recorded but not
-/// nagged about.
-fn print_first_fetch_warning(record: &niubash_runtime::plugins::sources::SourceRecord) {
-    if record.first_fetch_verified {
-        return;
-    }
-    let remote = record.url.contains("://") || record.url.starts_with("git@");
-    if !remote {
-        return;
-    }
-    println!(
-        "  {}",
-        niubash_runtime::text_style::yellow(&format!(
-            "first fetch of '{}' was NOT integrity-verified (no --checksum pin, non-catalog \
-             origin): the recorded checksum now locks this exact tree — review it with \
-             `niu plugin source verify {}`; a plaintext/mirrored transport could have \
-             rewritten the first delivery",
-            record.url, record.id
-        ))
-    );
 }
 
 fn run_plugin_source_list_command(args: &[String]) -> anyhow::Result<()> {
@@ -2528,22 +2245,17 @@ fn run_plugin_source_list_command(args: &[String]) -> anyhow::Result<()> {
     );
     println!(
         "{}",
-        niubash_runtime::text_style::dim("  (external plugin managers; untrusted until trusted)")
+        niubash_runtime::text_style::dim("  (external plugin managers)")
     );
     if statuses.is_empty() {
         println!("(no sources installed; add one with niu plugin source add <id|url|path>)");
         return Ok(());
     }
     for status in statuses {
-        let marker = match status.degraded_reason.as_deref() {
-            Some(reason) if reason == niubash_runtime::plugins::sources::DEGRADED_DRIFTED => {
-                niubash_runtime::text_style::red("drifted (pin mismatch)")
-            }
-            Some(_) => niubash_runtime::text_style::red("degraded (native fallback active)"),
-            None => match status.state.as_str() {
-                "ready" => niubash_runtime::text_style::green("ready"),
-                _ => niubash_runtime::text_style::yellow("untrusted"),
-            },
+        let marker = if status.missing {
+            niubash_runtime::text_style::red("missing (native fallback active)")
+        } else {
+            niubash_runtime::text_style::green("ready")
         };
         let assets = status
             .asset_count
@@ -2564,63 +2276,16 @@ fn run_plugin_source_list_command(args: &[String]) -> anyhow::Result<()> {
             niubash_runtime::text_style::dim(&assets),
             niubash_runtime::text_style::dim(&status.record.path.display().to_string())
         );
-        // niubash#297: the drift state must come with its way out, spelled
-        // the same way sync names it.
-        if status.degraded_reason.as_deref()
-            == Some(niubash_runtime::plugins::sources::DEGRADED_DRIFTED)
-        {
+        if status.missing {
             println!(
                 "     {}",
                 niubash_runtime::text_style::yellow(&format!(
-                    "tree no longer matches the lockfile pin — review: niu plugin source verify {}; repair: niu plugin restore {}",
-                    status.record.id, status.record.id
+                    "tree missing — repair: niu plugin restore {}",
+                    status.record.id
                 ))
             );
         }
     }
-    Ok(())
-}
-
-fn run_plugin_source_trust_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(id) = args.first() else {
-        anyhow::bail!("plugin source trust requires a source id");
-    };
-    // Review summary before flipping the execution gate (§12.2).
-    let statuses = niubash_runtime::plugins::sources::list_sources();
-    let Some(status) = statuses.iter().find(|status| status.record.id == *id) else {
-        anyhow::bail!("unknown source '{}'; run niu plugin source add first", id);
-    };
-    let verify = niubash_runtime::plugins::sources::verify_source(id)?;
-    println!(
-        "{} source '{}' review",
-        niubash_runtime::text_style::bold("Trust"),
-        status.record.id
-    );
-    println!("  origin:   {}", status.record.url);
-    println!("  version:  {}", status.record.version);
-    println!("  license:  {}", status.record.license);
-    println!(
-        "  checksum: {} ({})",
-        status.record.checksum_sha256,
-        if verify.verified {
-            niubash_runtime::text_style::green("verified")
-        } else if verify.degraded {
-            niubash_runtime::text_style::red("tree missing")
-        } else {
-            niubash_runtime::text_style::red("MISMATCH")
-        }
-    );
-    println!("  path:     {}", status.record.path.display());
-    if verify.degraded {
-        anyhow::bail!("cannot trust a degraded source (tree missing)");
-    }
-    let trusted = niubash_runtime::plugins::sources::trust_source(id)?;
-    println!(
-        "{} '{}' is now trusted; its themes/assets join the catalog",
-        niubash_runtime::text_style::green("Trusted:"),
-        trusted.id
-    );
-    println!("restart niu (or reload ~/.niubashrc) for the change to take effect");
     Ok(())
 }
 
@@ -2679,7 +2344,6 @@ fn run_plugin_source_update_command(args: &[String]) -> anyhow::Result<()> {
         summary.id,
         niubash_runtime::text_style::dim(&summary.version)
     );
-    println!("tree sha256 {}", summary.checksum_sha256);
     if summary.previous.is_some() {
         println!(
             "{} niu plugin source rollback {}",
@@ -2704,39 +2368,10 @@ fn run_plugin_source_rollback_command(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_plugin_source_verify_command(args: &[String]) -> anyhow::Result<()> {
-    let Some(id) = args.first() else {
-        anyhow::bail!("plugin source verify requires a source id");
-    };
-    let report = niubash_runtime::plugins::sources::verify_source(id)?;
-    if report.degraded {
-        anyhow::bail!(
-            "source '{}' tree is missing ({})",
-            report.id,
-            report.recorded_checksum
-        );
-    }
-    if !report.verified {
-        anyhow::bail!(
-            "checksum mismatch for source '{}': recorded {}, got {}",
-            report.id,
-            report.recorded_checksum,
-            report.actual_checksum.as_deref().unwrap_or("?")
-        );
-    }
-    println!(
-        "{} source '{}' tree checksum {}",
-        niubash_runtime::text_style::green("Verified"),
-        report.id,
-        report.recorded_checksum
-    );
-    Ok(())
-}
-
 /// `niu plugin add <catalog-id | owner/repo | url | path>` — the
 /// vim-plug/lazy.nvim front door, declarative since §14.6.3: the entry is
 /// appended to `~/.niubash/plugins.toml` and `niu plugin sync` installs it
-/// (fetch gate only; everything lands untrusted). Catalog ids resolve to
+/// (fetch only; activation is a separate enable verb). Catalog ids resolve to
 /// their official origin, `owner/repo` expands to GitHub; wild repos and
 /// bpkg trees come in the same way (auto-detected layout, per-plugin id).
 fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
@@ -2857,7 +2492,7 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
         });
     niubash_runtime::plugins::spec::save_spec(&spec)?;
 
-    // Fetch gate notice, then the reconciliation that installs it. The
+    // Fetch notice, then the reconciliation that installs it. The
     // registry snapshot taken first is how "declared (already installed)"
     // stays honest: a record whose (id, installed_at) predates this add was
     // adopted, never fetched — whatever spelling matched it (catalog id,
@@ -2872,7 +2507,7 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
         .adapter
         .clone()
         .unwrap_or_else(|| "(auto-detect)".to_string());
-    print_source_trust_boundary(&display_id, &request);
+    print_source_fetch_notice(&display_id, &request);
     // Failure rollback (wt83 #174): the entry above was persisted so the
     // reconciler could see it; any failure below takes it back out — a
     // failed add must not leave a spec strand no verb can remove.
@@ -2890,7 +2525,7 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
     // The user's `--checksum` rides into the reconciler's install request
     // (wt83 #173): the fetch refuses a mismatched tree, exactly like
     // `niu plugin source add --checksum` always did. Absent, the fetch
-    // gate + untrusted landing stay the only guards.
+    // lands unchecked.
     let report = match niubash_runtime::plugins::sync::sync_spec(
         niubash_runtime::plugins::sync::SyncOptions {
             prune: false,
@@ -2945,7 +2580,7 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
         Some(row.id.as_str()) == entry_id.as_deref() || row.id == entry_target
     };
     let eligible = |row: &niubash_runtime::plugins::sync::SyncRow| {
-        row.action == "awaiting-trust" || row.action == "activated" || row.action == "unchanged"
+        row.action == "installed" || row.action == "activated" || row.action == "unchanged"
     };
     let new_id = report
         .rows
@@ -2990,9 +2625,10 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
                 );
                 println!(
                     "license {} | tree sha256 {}",
-                    record.license, record.checksum_sha256
+                    record.license,
+                    niubash_runtime::plugins::sources::tree_pin_digest(&record)
+                        .unwrap_or_else(|_| "unavailable".to_string())
                 );
-                print_first_fetch_warning(&record);
                 if let Some(commit) = &record.commit_sha {
                     println!(
                         "pinned commit {} ({})",
@@ -3003,18 +2639,14 @@ fn run_plugin_add_command(args: &[String]) -> anyhow::Result<()> {
                     );
                 }
             }
-            if !record.trusted {
-                println!("the source is untrusted; review it, then run:");
-                println!("  niu plugin trust {}", record.id);
-                println!(
-                    "  {}",
-                    niubash_runtime::text_style::dim(&format!(
-                        "then activate it (or single assets) with `niu plugin enable {}` \
-                         (wild sources pick files: `niu plugin enable {}/<file>.bash`)",
-                        record.id, record.id
-                    ))
-                );
-            }
+            println!(
+                "  {}",
+                niubash_runtime::text_style::dim(&format!(
+                    "activate it (or single assets) with `niu plugin enable {}` \
+                     (wild sources pick files: `niu plugin enable {}/<file>.bash`)",
+                    record.id, record.id
+                ))
+            );
         }
     }
     print_undeclared_hints(&report);
@@ -3028,11 +2660,10 @@ fn print_sync_rows(rows: &[niubash_runtime::plugins::sync::SyncRow]) {
             "installed" | "activated" | "removed" => {
                 niubash_runtime::text_style::green(&row.action)
             }
-            "awaiting-trust" | "deactivated" | "unchanged" | "merged" | "reconciled" => {
+            "deactivated" | "unchanged" | "merged" | "reconciled" => {
                 niubash_runtime::text_style::yellow(&row.action)
             }
-            "degraded" => niubash_runtime::text_style::yellow(&row.action),
-            "deferred" => niubash_runtime::text_style::dim(&row.action),
+            "missing" => niubash_runtime::text_style::yellow(&row.action),
             _ => niubash_runtime::text_style::red(&row.action),
         };
         println!("  {marker} {:<18} {}", row.id, row.detail);
@@ -3221,8 +2852,7 @@ fn run_plugin_recipe_add(id: &str) -> anyhow::Result<()> {
 }
 
 /// `niu plugin distro <verb>` — collections (LazyVim extras pattern):
-/// data manifests of recipe ids; built-in or imported; apply never
-/// auto-trusts (study §8/§10.2).
+/// data manifests of recipe ids; built-in or imported (study §8/§10.2).
 fn run_plugin_distro_command(args: &[String]) -> anyhow::Result<()> {
     let Some(verb) = args.first() else {
         print_plugin_distro_usage();
@@ -3243,7 +2873,7 @@ fn run_plugin_distro_command(args: &[String]) -> anyhow::Result<()> {
             println!(
                 "{}",
                 niubash_runtime::text_style::dim(
-                    "  apply installs recipes; trust stays an explicit review step"
+                    "  apply installs recipes; activation stays an explicit step"
                 )
             );
             println!();
@@ -3328,7 +2958,7 @@ fn run_plugin_distro_apply(name: &str) -> anyhow::Result<()> {
     let landed = outcome.reports.iter().any(|report| !report.next.is_empty());
     if landed {
         println!("next:");
-        // Deduplicate the per-entry next verbs (trust/enable chains overlap).
+        // Deduplicate the per-entry next verbs (enable chains overlap).
         let mut seen: Vec<&String> = Vec::new();
         for report in &outcome.reports {
             for step in &report.next {
@@ -3340,9 +2970,7 @@ fn run_plugin_distro_apply(name: &str) -> anyhow::Result<()> {
         }
         println!(
             "{}",
-            niubash_runtime::text_style::dim(
-                "sources stay untrusted until reviewed; restart niu after enabling"
-            )
+            niubash_runtime::text_style::dim("restart niu after enabling")
         );
     } else if outcome.failures.is_empty() {
         println!("  everything already active");
@@ -3371,8 +2999,8 @@ fn print_plugin_distro_usage() {
 
 /// `niu plugin mirror` — the China-network git mirroring control face
 /// (§14.8, git-only since the download retraction 2026-10-04). The
-/// pipeline is configurable, not curated: the user pastes a mirror URL
-/// they trust, `set` makes every plugin git fetch go through it via
+/// pipeline is configurable, not curated: the user pastes their own
+/// mirror URL, `set` makes every plugin git fetch go through it via
 /// insteadOf, and the lockfile keeps canonical GitHub origins.
 fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
     use niubash_runtime::plugins::mirrors;
@@ -3476,7 +3104,7 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
                      '{target}' ships every fetch unencrypted (and unauthenticated — a \
                      network actor can rewrite the trees git downloads). Re-run with \
                      `niu plugin mirror set {target} --allow-plaintext` if you accept \
-                     this on a trusted network; prefer an https:// mirror."
+                     this on a network you control; prefer an https:// mirror."
                 );
             }
             let base = mirrors::set_custom_git_mirror(target)?;
@@ -3494,7 +3122,7 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
             println!(
                 "  {}",
                 niubash_runtime::text_style::dim(
-                    "community mirrors may disappear at any time — verify the one you pasted"
+                    "community mirrors may disappear at any time — double-check the one you pasted"
                 )
             );
             if plaintext && target.to_ascii_lowercase().starts_with("http://") {
@@ -3502,8 +3130,7 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
                     "  {}",
                     niubash_runtime::text_style::yellow(
                         "WARNING: plaintext http:// mirror — fetches are unencrypted and \
-                         unauthenticated; the tree checksum pin (`niu plugin source verify`) \
-                         is the only tamper tripwire."
+                         unauthenticated; a network actor can rewrite the trees git downloads."
                     )
                 );
             }
@@ -3513,193 +3140,181 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-/// `niu config` — persisted user settings (`~/.niubash/config.toml`, the
-/// mirrors.toml convention). Deliberately tiny: one flat file, three settings
-/// (the niubash#249 command-not-found hint policy, since 1.4.1 the
-/// `completion.style` TAB shape, and niubash#359's `startup.rc-policy`).
-/// Any read problem degrades to the default in the runtime; `get`/`list`
-/// surface values as resolved (file, overridden by the `NIU_` env variable).
-/// `startup.rc-policy` is displayed but owned by `niu setup --rc-policy` —
-/// other config commands preserve it without changing its value.
-fn run_config_command(args: &[String]) -> anyhow::Result<()> {
-    use niubash_runtime::config::{
-        resolve_command_not_found_hint, resolve_completion_style, resolve_rc_policy,
-        set_command_not_found_hint, set_completion_style, user_config_path, CommandNotFoundHint,
-        CompletionStyle, CompletionStyleSource, COMMAND_NOT_FOUND_HINT_KEY, COMPLETION_STYLE_KEY,
-        RC_POLICY_KEY,
-    };
-    // One line describing where the effective completion style came from —
-    // the precedence (env > config > default) is part of the contract, so
-    // every mutating command prints it.
-    fn print_completion_style_outcome(style: CompletionStyle, source: CompletionStyleSource) {
-        let origin = match source {
-            CompletionStyleSource::Env => " (NIU_COMPLETION_STYLE overrides the file)",
-            CompletionStyleSource::ConfigFile => " (persisted)",
-            CompletionStyleSource::Default => " (built-in default)",
-        };
-        println!("{COMPLETION_STYLE_KEY} = {}{origin}", style.as_str());
-    }
+/// `niu config` — a read-only view of effective settings and their single
+/// source (`env`, `inputrc`, or `default`). Since 1.5.0 there is no
+/// `~/.niubash/config.toml`: GNU-shaped knobs live in rc `bind`/`set`/
+/// `shopt` or `$INPUTRC`/`~/.inputrc`, and niu-proprietary knobs live in
+/// `NIU_*` environment variables. `migrate` is the one-time bridge for an
+/// old config.toml.
+/// The `niu help` verb (niubash#630): host-side help topics, kept in a
+/// niu-side topic table — this is deliberately NOT the shell's `help`
+/// builtin (whose bytes are GNU's) and does not touch the engine's
+/// generated topic table. `niu help` lists the topics; `niu help
+/// <topic>` renders one. The topic name comes from the single
+/// constant in the runtime so the reminder text, the `--help` topics
+/// section and this dispatch can never disagree.
+fn run_help_command(args: &[String]) -> anyhow::Result<()> {
+    use niubash_runtime::keymap_registry;
     match args.first().map(String::as_str) {
-        None | Some("-h" | "--help" | "help") => {
-            print_config_usage();
+        None => {
+            println!("Usage: niu help <topic>\n");
+            println!("{}", keymap_registry::help_topics_section());
             Ok(())
         }
-        Some("list" | "show") => {
-            println!("Settings (persisted in {}):", user_config_path().display());
-            println!(
-                "  {COMMAND_NOT_FOUND_HINT_KEY} = {}",
-                resolve_command_not_found_hint().as_str()
-            );
-            let (style, source) = resolve_completion_style();
-            println!("  {COMPLETION_STYLE_KEY} = {}", style.as_str());
-            if source == CompletionStyleSource::Env {
-                println!("    (overridden by NIU_COMPLETION_STYLE)");
+        Some(topic) if topic == keymap_registry::KEYMAP_HELP_TOPIC => {
+            let state = keymap_registry::load_state_from(&keymap_registry::state_path());
+            print!("{}", keymap_registry::render_keymap_help(state.as_ref()));
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("niu: help: no topic '{other}'\n");
+            eprintln!("{}", keymap_registry::help_topics_section());
+            std::process::exit(2);
+        }
+    }
+}
+
+fn run_config_command(args: &[String]) -> anyhow::Result<()> {
+    use niubash_runtime::config::{setting_row, setting_rows};
+    match args.first().map(String::as_str) {
+        None | Some("list" | "show") => {
+            println!("Effective settings (source: env, inputrc, or default):");
+            for row in setting_rows() {
+                println!("  {}", row.render());
             }
-            println!("  {RC_POLICY_KEY} = {}", resolve_rc_policy().as_str());
-            println!("    (owned by `niu setup --rc-policy`; `niu config` preserves it)");
+            println!();
+            println!(
+                "Key bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; \
+                 they are not a niu setting."
+            );
             Ok(())
         }
         Some("get") => {
             let Some(key) = args.get(1) else {
                 anyhow::bail!("config get requires a key (`niu config list` shows them)")
             };
-            match key.as_str() {
-                COMMAND_NOT_FOUND_HINT_KEY => {
-                    println!("{}", resolve_command_not_found_hint().as_str());
-                    Ok(())
-                }
-                COMPLETION_STYLE_KEY => {
-                    println!("{}", resolve_completion_style().0.as_str());
-                    Ok(())
-                }
-                RC_POLICY_KEY => {
-                    println!("{}", resolve_rc_policy().as_str());
-                    Ok(())
-                }
-                unknown => anyhow::bail!(
-                    "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
-                ),
-            }
+            let Some(row) = setting_row(key) else {
+                anyhow::bail!("unknown config key '{key}' (`niu config list` shows the valid keys)")
+            };
+            println!("{}", row.render());
+            Ok(())
         }
         Some("set") => {
-            let Some(key) = args.get(1) else {
-                anyhow::bail!(
-                    "config set requires a key and a value (`niu config list` shows them)"
-                )
-            };
-            let Some(value) = args.get(2) else {
-                anyhow::bail!("config set {key} requires a value")
-            };
-            match key.as_str() {
-                RC_POLICY_KEY => {
-                    // niubash#359: only explicit setup may persist or revoke
-                    // the personal-rc policy — `niu config` preserves it.
-                    anyhow::bail!(
-                        "{RC_POLICY_KEY} is owned by explicit setup: run \
-                         `niu setup --rc-policy {value}` (the current value is preserved)"
-                    )
-                }
-                COMMAND_NOT_FOUND_HINT_KEY => {
-                    let Some(hint) = CommandNotFoundHint::parse(value) else {
-                        anyhow::bail!(
-                            "invalid value '{value}' for {COMMAND_NOT_FOUND_HINT_KEY}: expected off or wpm"
-                        )
-                    };
-                    set_command_not_found_hint(hint)?;
-                    println!(
-                        "{} {COMMAND_NOT_FOUND_HINT_KEY} = {}",
-                        niubash_runtime::text_style::green("Set:"),
-                        hint.as_str()
-                    );
-                    if hint == CommandNotFoundHint::Wpm {
-                        println!("  new niu sessions suggest one `wpm search --name` line after a");
-                        println!(
-                            "  high-confidence near-miss (wpm only — never winget/scoop/choco)."
-                        );
-                    } else {
-                        println!("  command not found prints only the GNU one-liner (default).");
-                    }
-                    Ok(())
-                }
-                COMPLETION_STYLE_KEY => {
-                    let Some(style) = CompletionStyle::parse(value) else {
-                        anyhow::bail!(
-                            "invalid value '{value}' for {COMPLETION_STYLE_KEY}: expected gnu, ide, column, list or inline"
-                        )
-                    };
-                    set_completion_style(style)?;
-                    println!(
-                        "{} {COMPLETION_STYLE_KEY} = {}",
-                        niubash_runtime::text_style::green("Set:"),
-                        style.as_str()
-                    );
-                    match style {
-                        CompletionStyle::Gnu => println!(
-                            "  TAB completes the common prefix; a second TAB lists the candidates"
-                        ),
-                        CompletionStyle::Ide => {
-                            println!("  TAB opens the VS Code-style popup with descriptions")
-                        }
-                        CompletionStyle::Column => println!("  TAB opens a zsh-style column grid"),
-                        CompletionStyle::List => println!("  TAB opens a fish-style vertical list"),
-                        CompletionStyle::Inline => println!(
-                            "  TAB inserts the first match and cycles (bash menu-complete)"
-                        ),
-                    }
-                    // The env variable outranks the file, so a stale
-                    // NIU_COMPLETION_STYLE would silently swallow this pick.
-                    let (effective, source) = resolve_completion_style();
-                    if source == CompletionStyleSource::Env {
-                        println!(
-                            "  note: NIU_COMPLETION_STYLE is set in this environment and wins:"
-                        );
-                    }
-                    print_completion_style_outcome(effective, source);
-                    Ok(())
-                }
-                unknown => anyhow::bail!(
-                    "unknown config key '{unknown}' (`niu config list` shows the valid keys)"
-                ),
-            }
+            anyhow::bail!(
+                "`niu config set` was removed in 1.5.0: niu no longer writes a config file.\n\
+                 GNU-shaped settings: put `bind ...`, `set ...`, or `shopt ...` in ~/.niubashrc\n\
+                 (or the readline variable/binding in $INPUTRC / ~/.inputrc).\n\
+                 niu settings: export NIU_COMPLETION_STYLE, NIU_COMPLETION_INTERACTION,\n\
+                 NIU_COMMAND_NOT_FOUND_HINT, or NIU_RC_POLICY in the environment or ~/.niubashrc.\n\
+                 Migrating an old ~/.niubash/config.toml: run `niu config migrate`."
+            )
         }
+        Some("-h" | "--help" | "help") => {
+            print_config_usage();
+            Ok(())
+        }
+        Some("migrate") => run_config_migrate(),
         Some(unknown) => {
             anyhow::bail!("unknown config subcommand '{unknown}' (try: niu config help)")
         }
     }
 }
 
+/// `niu config migrate` — the one-time bridge from the retired
+/// `~/.niubash/config.toml`. The runtime never reads that file; this verb
+/// translates it, appends a marked rc block, and renames the old file.
+fn run_config_migrate() -> anyhow::Result<()> {
+    use niubash_runtime::config::{legacy_config_path, migrate_legacy_config};
+    let Some(report) = migrate_legacy_config()? else {
+        println!(
+            "No legacy config.toml found at {} — nothing to migrate.",
+            legacy_config_path().display()
+        );
+        return Ok(());
+    };
+    if report.lines.is_empty() {
+        println!(
+            "No translatable settings in {}; the file was renamed to {}.",
+            report.legacy_path.display(),
+            report
+                .backup_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(unknown)".to_string())
+        );
+    } else {
+        println!(
+            "Migrated {} setting(s) from {} to {}:",
+            report.lines.len(),
+            report.legacy_path.display(),
+            report.rc_path.display()
+        );
+        for line in &report.lines {
+            println!("  {line}");
+        }
+        if let Some(backup) = &report.backup_path {
+            println!("Old file renamed to {}.", backup.display());
+        }
+        if !report.rc_changed {
+            println!("The rc block was already up to date; nothing was appended twice.");
+        }
+    }
+    if !report.skipped.is_empty() {
+        println!("Skipped {} unrecognized value(s):", report.skipped.len());
+        for skipped in &report.skipped {
+            println!("  {skipped}");
+        }
+    }
+    println!();
+    println!(
+        "Start a new session (or `source {}`) to apply.",
+        report.rc_path.display()
+    );
+    if report
+        .lines
+        .iter()
+        .any(|line| line.contains("NIU_RC_POLICY"))
+    {
+        println!(
+            "note: NIU_RC_POLICY is read from the environment at startup; the rc line \
+             applies to sessions started from a shell that has it exported."
+        );
+    }
+    Ok(())
+}
+
 fn print_config_usage() {
+    use niubash_runtime::config::{
+        COMPLETION_INTERACTION_KEY, COMPLETION_STYLE_KEY, EDITOR_MODE_KEY, KEYSEQ_TIMEOUT_KEY,
+        RC_POLICY_KEY,
+    };
     println!("Usage:  niu config <command>");
     println!();
-    println!("Persisted user settings (~/.niubash/config.toml).");
+    println!("Read-only view of effective settings. Since 1.5.0 niu has no");
+    println!("~/.niubash/config.toml: GNU-shaped knobs come from rc `bind`/`set`/");
+    println!("`shopt` or $INPUTRC/~/.inputrc, and niu-proprietary knobs come from");
+    println!("NIU_* environment variables.");
     println!();
-    println!("  get <key>          Print a setting's effective value");
-    println!("  set <key> <value>  Persist a setting");
-    println!("  list               Show every setting and its current value");
+    println!("  list               Show every effective value and its source");
+    println!("  get <key>          Print one effective value and its source");
+    println!("  migrate            One-time: translate an old config.toml into");
+    println!("                     rc lines, then rename the old file");
+    println!();
+    println!("Sources: env | inputrc | default.");
     println!();
     println!("Settings:");
-    println!(
-        "  {k}",
-        k = niubash_runtime::config::COMMAND_NOT_FOUND_HINT_KEY
-    );
-    println!("      Package-search suggestion printed after \"command not found\".");
-    println!("      off (default) | wpm — wpm suggests one `wpm search --name`");
-    println!("      line for high-confidence near-misses; third-party managers are");
-    println!("      never recommended (niubash#249).");
+    println!("  {COMPLETION_STYLE_KEY}       NIU_COMPLETION_STYLE (gnu|ide|column|list|inline)");
+    println!("  {COMPLETION_INTERACTION_KEY} NIU_COMPLETION_INTERACTION (insert|cycle)");
+    println!("  command-not-found-hint      NIU_COMMAND_NOT_FOUND_HINT (off|wpm)");
+    println!("  {RC_POLICY_KEY}     NIU_RC_POLICY (primary-only|bashrc-fallback)");
+    println!("  {EDITOR_MODE_KEY}           $INPUTRC/~/.inputrc `set editing-mode vi|emacs`");
+    println!("  {KEYSEQ_TIMEOUT_KEY}        $INPUTRC/~/.inputrc `set keyseq-timeout <ms>`");
     println!();
-    println!("  {k}", k = niubash_runtime::config::COMPLETION_STYLE_KEY);
-    println!("      Shape of the TAB completion UI. column (default) — TAB shows");
-    println!("      the candidates at once, several per row (GNU listing look).");
-    println!("      Alternatives: gnu (GNU readline literal), ide (VS Code popup),");
-    println!("      list (fish vertical), inline (bash menu-complete).");
-    println!("      NIU_COMPLETION_STYLE overrides this file.");
-    println!();
-    println!("  {k}", k = niubash_runtime::config::RC_POLICY_KEY);
-    println!("      Personal-rc selection for interactive shells. primary-only");
-    println!("      (default) — ~/.niubashrc only; bashrc-fallback — an explicit");
-    println!("      opt-in that lets ~/.bashrc fill the slot when ~/.niubashrc is");
-    println!("      genuinely absent. Owned by `niu setup --rc-policy`; `niu config`");
-    println!("      shows and preserves it but cannot set it (niubash#359).");
+    println!("Changing a value:");
+    println!("  GNU-shaped: add `bind ...`, `set ...`, or `shopt ...` to ~/.niubashrc,");
+    println!("              or a readline variable/binding to $INPUTRC / ~/.inputrc.");
+    println!("  niu-shaped: export NIU_* in the environment or ~/.niubashrc.");
+    println!("  Old file:   run `niu config migrate` (one time).");
 }
 
 fn print_plugin_mirror_usage() {
@@ -3707,7 +3322,7 @@ fn print_plugin_mirror_usage() {
     println!();
     println!("Transport-layer git mirroring for plugin git fetches (the lockfile");
     println!("keeps canonical origins — the mirror only affects the network");
-    println!("request). Configure any mirror you trust; community mirror");
+    println!("request). Configure any mirror of your choice; community mirror");
     println!("services are unsupported and may disappear. niu has no HTTP");
     println!("download transport (download retraction 2026-10-04): mirrors are");
     println!("git-only.");
@@ -3751,47 +3366,20 @@ fn run_plugin_list_command(args: &[String]) -> anyhow::Result<()> {
         let status = &report.status;
         let marker = match status.state.as_str() {
             "ready" => niubash_runtime::text_style::green("ready"),
-            "untrusted" => niubash_runtime::text_style::yellow("untrusted"),
-            _ => niubash_runtime::text_style::red("degraded"),
-        };
-        let trust = if status.record.trusted {
-            format!("trusted: {}", status.record.trust_policy.as_str())
-        } else {
-            "untrusted".to_string()
+            _ => niubash_runtime::text_style::red("missing"),
         };
         println!(
-            "  {} {:<15} {:<12} {:<18} {}",
+            "  {} {:<15} {:<12} {}",
             marker,
             status.record.id,
             status.record.version,
-            trust,
             niubash_runtime::text_style::dim(&status.record.license)
         );
-        if status.degraded {
-            let drifted = status.degraded_reason.as_deref()
-                == Some(niubash_runtime::plugins::sources::DEGRADED_DRIFTED);
+        if status.missing {
             println!(
                 "     {}",
                 niubash_runtime::text_style::yellow(&format!(
-                    "{} — {}",
-                    status.degraded_reason.as_deref().unwrap_or("tree missing"),
-                    if drifted {
-                        format!(
-                            "review with `niu plugin source verify {}`, repair with `niu plugin restore {}`",
-                            status.record.id, status.record.id
-                        )
-                    } else {
-                        format!("repair with `niu plugin restore {}`", status.record.id)
-                    }
-                ))
-            );
-            continue;
-        }
-        if !status.record.trusted {
-            println!(
-                "     {}",
-                niubash_runtime::text_style::dim(&format!(
-                    "assets hidden until trust: `niu plugin trust {}`",
+                    "tree missing — repair with `niu plugin restore {}`",
                     status.record.id
                 ))
             );
@@ -3817,14 +3405,12 @@ fn run_plugin_list_command(args: &[String]) -> anyhow::Result<()> {
             }
         }
         // niubash#179 L05-3: a *gutted* tree (directory present, contents
-        // emptied) still reads "ready" here — the checksum state is the
-        // only remaining truth, so name the verb that reports it.
+        // emptied) still reads "ready" here — say so plainly.
         if lines.is_empty() {
             println!(
                 "     {}",
                 niubash_runtime::text_style::dim(&format!(
-                    "no assets found in the tree — verify with `niu plugin source verify {}`",
-                    status.record.id
+                    "no assets found in the tree — check the tree contents"
                 ))
             );
         }
@@ -4061,8 +3647,8 @@ fn run_plugin_restore_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `niu plugin sync` — reconcile the declarative spec with the machine
-/// (§14.6.3; lazy.nvim `:Lazy sync`): install declared-but-missing sources
-/// (fetch gate only — trust never auto-flips), materialize the managed rc
+/// (§14.6.3; lazy.nvim `:Lazy sync`): install declared-but-missing sources,
+/// materialize the managed rc
 /// blocks from the spec idempotently, and suggest cleanup for installed
 /// sources the spec no longer declares (`--prune` is the explicit confirm).
 /// `--timeout <seconds>` (`niu plugin sync` / `niu plugin add`, niubash#293):
@@ -4113,7 +3699,6 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
         niubash_runtime::plugins::sync::sync_spec(niubash_runtime::plugins::sync::SyncOptions {
             prune,
             adopt,
-            startup: false,
             checksum_pin: None,
             timeout,
         })?;
@@ -4281,7 +3866,7 @@ fn print_plugin_add_usage() {
     println!("Usage:  niu plugin add <id|owner/repo|url|path> [options]");
     println!();
     println!("Declare a source in the spec (~/.niubash/plugins.toml) and install it");
-    println!("(fetch gate only; everything lands untrusted until you trust it).");
+    println!("(fetch only; activation is a separate `niu plugin enable` step).");
     println!();
     println!("Target forms:");
     println!("  <id>                    A curated catalog id (oh-my-bash, bash-it,");
@@ -4292,7 +3877,7 @@ fn print_plugin_add_usage() {
     println!("                          file:///<path> — file:// clones via git)");
     println!("  <path>                  A local directory (snapshot-copied in) or a");
     println!("                          single .sh/.bash file (its own one-file source");
-    println!("                          tree); the copy is registered untrusted —");
+    println!("                          tree); the copy is registered as-is —");
     println!("                          niubash#300, the bare-path form is first-class");
     println!();
     println!("Options:");
@@ -4306,7 +3891,6 @@ fn print_plugin_add_usage() {
     println!("                         declaration rolls back, nothing hangs)");
     println!();
     println!("After adding:");
-    println!("  niu plugin trust <id>      Review and activate the source");
     println!("  niu plugin enable <target> Pick assets (or the whole source)");
     println!("  niu plugin sync --prune    Remove a stranded declaration");
 }
@@ -4319,8 +3903,7 @@ fn print_plugin_usage() {
     println!("and arbitrary wild plugins (single files, gist-style .bash, any");
     println!("repo). The declarative spec ~/.niubash/plugins.toml is the source");
     println!("of truth; these verbs are sugar over it plus `niu plugin sync`.");
-    println!("Sources install untrusted and activate only after an explicit");
-    println!("trust review.");
+    println!("Sources install as-is; activation is an explicit enable step.");
     println!();
     println!("Commands:");
     println!("  add <id|owner/repo|url|path> [--id <name>] [--ref <ref>]");
@@ -4328,8 +3911,8 @@ fn print_plugin_usage() {
     println!("                           [--url <git-url>]");
     println!("                           Declare + install a source (catalog id,");
     println!("                           GitHub shorthand, git url — file:// works,");
-    println!("                           or a local dir / .sh file copied in as an");
-    println!("                           untrusted snapshot; the entry lands in the");
+    println!("                           or a local dir / .sh file copied in as a");
+    println!("                           snapshot; the entry lands in the");
     println!("                           spec; recipe ids route through their driver)");
     println!("  list [--json]            Sources, their assets, activation state");
     println!("  enable <target>          Activate a source or asset (wild sources");
@@ -4349,7 +3932,6 @@ fn print_plugin_usage() {
     println!("  rollback <id>            Restore the previous source state");
     println!("  clean [--orphans]        Remove staging leftovers; list orphan dirs");
     println!("                           (--orphans deletes them, niubash#299)");
-    println!("  trust <id>               Review and activate a source's assets");
     println!("  discover [--verbose]     Dry ecosystem overview (read-only)");
     println!("  migrate-rc [--diff]      Read-only diagnostic: scan the rc for legacy");
     println!("                           `# >>> niu source` managed blocks that keep");
@@ -4363,8 +3945,8 @@ fn print_plugin_usage() {
     println!("  mirror <command>         Git fetch mirroring: list,");
     println!("                           set <url|none> (insteadOf, git-only)");
     println!();
-    println!("  source <command>         Full source protocol (add/trust/sign/");
-    println!("                           verify/remove/update/rollback/list)");
+    println!("  source <command>         Full source protocol (add/remove/update/");
+    println!("                           rollback/list)");
     println!();
     println!("Spec (single source of truth, edit it directly):");
     println!("  [[sources]]");
@@ -4409,14 +3991,13 @@ fn setup_rc_policy_arg(args: &[String]) -> anyhow::Result<Option<String>> {
 }
 
 /// `niu setup --rc-policy <primary-only|bashrc-fallback>` (niubash#359):
-/// explicit setup is the ONLY writer of `startup.rc-policy` in
-/// `~/.niubash/config.toml`. Persisting (or revoking, via the built-in
-/// default) touches NO rc file — selecting the fallback must not create an
-/// empty `~/.niubashrc`, which would suppress the selected fallback — and
-/// a failed persistence (unparseable config, IO error) leaves the previous
-/// policy and both rc files exactly as they were.
+/// the policy is read from `NIU_RC_POLICY` at startup. An existing
+/// `~/.niubashrc` receives a marked `export NIU_RC_POLICY=...` block; when
+/// no primary exists, selecting the fallback must NOT create one (that
+/// would suppress the very fallback being selected), so the command prints
+/// the export line for the user's environment instead.
 fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
-    use niubash_runtime::config::{set_rc_policy, RcPolicy};
+    use niubash_runtime::config::{persist_rc_policy, RcPolicy, RcPolicyWrite};
     let Some(policy) = RcPolicy::parse(value) else {
         anyhow::bail!("unknown rc policy '{value}' — valid values: primary-only, bashrc-fallback");
     };
@@ -4425,24 +4006,33 @@ fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
     if setup_preset_arg(args).is_some() {
         anyhow::bail!("--rc-policy and --preset are separate runs: pick one");
     }
-    let path = set_rc_policy(policy)?;
-    match policy {
-        RcPolicy::PrimaryOnly => {
-            println!("startup.rc-policy = primary-only");
-            println!("  ~/.niubashrc is the only personal rc; ~/.bashrc is never considered.");
-            println!(
-                "  (the built-in default — no key is pinned in {})",
-                path.display()
-            );
+    match persist_rc_policy(policy)? {
+        RcPolicyWrite::Written(path) => {
+            println!("NIU_RC_POLICY = {}", policy.as_str());
+            println!("  persisted in {}", path.display());
+            println!("  the variable is read at startup; a new session picks it up.");
         }
+        RcPolicyWrite::Instruction(line) => {
+            println!("NIU_RC_POLICY = {}", policy.as_str());
+            println!("  No ~/.niubashrc exists, and creating one would suppress the");
+            println!("  fallback it selects. Export this line in your terminal");
+            println!("  environment (or Windows user environment / shell profile):");
+            println!("    {line}");
+        }
+        RcPolicyWrite::Default => {
+            println!("NIU_RC_POLICY = primary-only (the built-in default)");
+            println!("  ~/.niubashrc is the only personal rc; ~/.bashrc is never considered.");
+            println!("  Any setup-persisted policy block was removed.");
+        }
+    }
+    match policy {
+        RcPolicy::PrimaryOnly => {}
         RcPolicy::BashrcFallback => {
-            println!("startup.rc-policy = bashrc-fallback");
             println!("  only while ~/.niubashrc is genuinely absent, ~/.bashrc fills the slot.");
             println!("  WARNING: a .bashrc is arbitrary shell code — sourcing it executes");
             println!("  it in this shell. niu cannot review or sandbox it, and did not read it.");
         }
     }
-    println!("  No rc file was created or modified.");
     Ok(())
 }
 
@@ -4474,12 +4064,13 @@ fn show_setup_usage() {
     println!("  niu setup                       Re-run the interactive setup wizard");
     println!("  niu setup --preset <name>       Apply a preset non-interactively");
     println!("                                  (e.g. recommended, minimal)");
-    println!("  niu setup --rc-policy <policy>  Persist the personal-rc policy in");
-    println!("                                  ~/.niubash/config.toml without running");
-    println!("                                  the wizard: primary-only (default) |");
-    println!("                                  bashrc-fallback — ~/.bashrc fills the");
-    println!("                                  slot only while ~/.niubashrc is absent.");
-    println!("                                  No rc file is created or modified.");
+    println!("  niu setup --rc-policy <policy>  Persist NIU_RC_POLICY in ~/.niubashrc");
+    println!("                                  without running the wizard: primary-only");
+    println!("                                  (default) | bashrc-fallback — ~/.bashrc");
+    println!("                                  fills the slot only while ~/.niubashrc");
+    println!("                                  is absent. If no rc exists, the export");
+    println!("                                  line is printed instead (creating one");
+    println!("                                  would suppress the fallback).");
     println!("  niu setup --help                Show this help (plain text)");
     println!();
     println!("The wizard creates ~/.niubashrc only when it is missing (create-only:");
@@ -5176,6 +4767,10 @@ mod launcher_dispatch_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The dump face's implementation lives in the engine library
+    // (rubash#1977); these tests pin the library entry through the
+    // same call shapes the host used when it owned the code.
+    use rubash::locale::{collect_locale_strings, render_locale_string_dump};
 
     fn dumped_bodies(input: &str) -> Vec<String> {
         let mut strings = Vec::new();
@@ -5290,6 +4885,19 @@ mod tests {
         invocation.command = None;
         invocation.script = Some("D:/repo/probe.sh".to_string());
         assert_eq!(invocation_source_name(&invocation), "D:/repo/probe.sh");
+    }
+
+    /// niubash#692: the --debug dispatch must hand the invocation's
+    /// explicit --rcfile to the engine preset — dropping it was the
+    /// defect — and --norc must gate it like every other route.
+    #[test]
+    fn debug_startup_file_maps_rcfile_unless_norc() {
+        let mut invocation = ShellInvocation::parse(&[]).unwrap();
+        assert_eq!(debug_startup_file(&invocation), None);
+        invocation.rc_file = Some("rc.sh".to_string());
+        assert_eq!(debug_startup_file(&invocation), Some("rc.sh".to_string()));
+        invocation.no_rc = true;
+        assert_eq!(debug_startup_file(&invocation), None);
     }
 }
 

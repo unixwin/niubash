@@ -1,16 +1,18 @@
 //! Reedline REPL loop
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};
 use std::{borrow::Cow, io::Write};
 
 use crate::autosuggest::HistoryAutosuggestHinter;
+use crate::completion::cycle_menu::SharedCycleSession;
 use crate::completion::NiubashCompleter;
 use crate::config::{
-    CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding, NativeWidgetConfig,
+    CompletionInteraction, CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding,
+    NativeWidgetConfig,
 };
 use crate::history::LiveFileBackedHistory;
 use crate::shell::Shell;
@@ -209,6 +211,10 @@ fn repl_exit_status(line: &str) -> Option<i32> {
 /// provider's `Drop`), and leave with the trap's status as the process code.
 fn end_repl_session(shell: &mut Shell, status: i32) -> ! {
     let code = shell.finish_with_exit_trap(status).unwrap_or(status);
+    // niubash#646: the session-end write consults the HIST* values as
+    // the EXIT trap left them — GNU reads HISTFILESIZE/histappend at
+    // the write itself (bashhist.c maybe_save_shell_history).
+    shell.refresh_history_settings();
     shell.flush_session_history();
     flush_repl_output();
     std::process::exit(code);
@@ -255,26 +261,62 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // account for lines the editor recorded. Edit-mode rebuilds re-adopt
     // the same ledger, so the sharing survives refreshes.
     let shared_ledger = shell_ref.history_ledger();
-    let mut history = match shared_ledger {
-        Some(ledger) => LiveFileBackedHistory::with_shared_ledger(
+    // niubash#646: the editor adopts the provider's settings cell the
+    // same way, so the lines it records are filtered/stifled by the
+    // same HIST* snapshot the provider's builtins consult.
+    let shared_settings = shell_ref.history_settings();
+    let mut history = match (shared_ledger, shared_settings) {
+        (Some(ledger), Some(settings)) => LiveFileBackedHistory::with_shared_ledger_and_settings(
+            shell_ref.history_max_size,
+            shell_ref.history_path.clone(),
+            ledger,
+            settings,
+        ),
+        (Some(ledger), None) => LiveFileBackedHistory::with_shared_ledger(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
             ledger,
         ),
-        None => LiveFileBackedHistory::with_file(
+        _ => LiveFileBackedHistory::with_file(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
         ),
     };
-    // Explicitly rebuild the editor history from disk at construction so a
-    // fresh process starts with persisted cross-session entries.
-    let _ = history.reload_from_file();
+    // niubash#660: this instance is the one reedline records typed
+    // lines into, so it carries the `history` option gate — its saves
+    // are dropped while `set +o history` is in effect. The provider
+    // instance is never gated, so `history -s` keeps adding, as in GNU.
+    history.set_history_option_gate();
+    // No construction-time reload (audit item H-01): every constructor
+    // above already loads the backing file into the store, so a second
+    // full read here bought nothing — and on an editor rebuild after
+    // `history -c` it silently undid the ledger's view hide (#614) and
+    // cleared-base accounting (#642) that the provider twin maintains.
 
     let completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     // Shell-function completions reach the engine through the main-thread
     // bridge installed here; reedline completers must stay `Send`.
     crate::shell::install_completion_bridge(shell);
     let menu_config = shell_ref.menu_config;
+
+    // niubash#631: the cycle interaction's shared session cell. The
+    // CycleMenu publishes its session (pre-completion snapshot, "a
+    // candidate is in the line") into it; the edit-mode wrapper
+    // consumes it at key-translation time for the two keys a menu
+    // cannot finish itself — Esc (roll the line back to the snapshot)
+    // and Enter (accept the candidate and run). Only built when the
+    // interaction applies: `cycle` on a non-GNU style (the GNU style's
+    // literal readline interaction is inert to the axis by design).
+    let cycle_session: Option<SharedCycleSession> = if menu_config.completion_interaction
+        == CompletionInteraction::Cycle
+        && menu_config.completion_style != CompletionStyle::Gnu
+    {
+        Some(Arc::new(std::sync::Mutex::new(
+            crate::completion::cycle_menu::CycleSession::default(),
+        )))
+    } else {
+        None
+    };
 
     // The GNU completion style redraws the prompt unchanged while its list
     // is up; reedline replaces the prompt indicator with the active menu's
@@ -299,6 +341,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             menu_config,
             &gnu_indicator,
             menu_open.clone(),
+            cycle_session.clone(),
         ),
         completer: Box::new(completer),
     };
@@ -307,6 +350,61 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         menu_config.history_page_size,
         menu_config,
     )));
+
+    let build_args = (
+        &shell_ref.native_widgets,
+        &shell_ref.native_widget_bindings,
+        &shell_ref.user_widget_bindings,
+        &shell_ref.engine_bindings,
+        shell_ref.engine_bind_generation,
+        menu_config.completion_interaction,
+    );
+    let (edit_mode, keymap_registry, chord_bindings, alt_keys) = build_edit_mode(
+        shell_ref.editor_mode,
+        build_args.0,
+        build_args.1,
+        build_args.2,
+        build_args.3,
+        build_args.4,
+        build_args.5,
+    );
+    // niubash#630: the other machine, registered as a standby so a startup
+    // `bind` of `vi-editing-mode` / `emacs-editing-mode` (GNU's two
+    // editing-mode toggles) can actually reach it via
+    // `ReedlineEvent::SwitchMode`. Without a standby the engine has nothing
+    // to switch *to* and declines the event. Its keymap is built the same
+    // way as the configured mode's — the same native widgets, engine
+    // `bind -m` entries and user rules — so a flip keeps the user's
+    // bindings in the target keymap. Its registry snapshot is discarded:
+    // the published one describes the active mode.
+    let (standby_edit_mode, _, standby_chord_bindings, standby_alt_keys) = build_edit_mode(
+        match shell_ref.editor_mode {
+            EditorMode::Emacs => EditorMode::Vi,
+            EditorMode::Vi => EditorMode::Emacs,
+        },
+        build_args.0,
+        build_args.1,
+        build_args.2,
+        build_args.3,
+        build_args.4,
+        build_args.5,
+    );
+    // Publish the unified keymap registry (niubash#630): this build's
+    // effective table and dropped records become the one snapshot the
+    // viewing faces read, and the reminder pass surfaces the binds
+    // this build newly failed to mirror, with their fixes (DESIGN §8 —
+    // it replaces the old per-build warning pass).
+    for notice in crate::keymap_registry::publish(keymap_registry) {
+        eprintln!("{notice}");
+    }
+    // readline's `keyseq-timeout` for the chord layer, resolved once per
+    // editor build. The standby machine gets the same value so a mode flip
+    // keeps the wait the user configured.
+    // GNU's `set keyseq-timeout` (rc `bind 'set ...'` or ~/.inputrc) is the
+    // only surface for this knob — no config duplication. rubash's table
+    // already defaults to 500, so an unset variable keeps readline's value.
+    let keyseq_timeout = engine_keyseq_timeout(&shell_ref)
+        .unwrap_or(std::time::Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS));
 
     let mut editor = Reedline::create()
         .with_validator(Box::new(ReplValidator))
@@ -361,15 +459,25 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         // normally (niubash#284). Ctrl+V (PasteSystem, bound below)
         // remains the one-shot clipboard path.
         .use_bracketed_paste(cfg!(not(target_os = "windows")))
-        .with_edit_mode(Box::new(PasteChunkEditMode::new(
-            build_edit_mode(
-                shell_ref.editor_mode,
-                &shell_ref.native_widgets,
-                &shell_ref.native_widget_bindings,
-                &shell_ref.user_widget_bindings,
-                &shell_ref.engine_bindings,
+        .with_edit_mode(Box::new(ChordEditMode::new(
+            Box::new(
+                PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
+                    .with_cycle_session(cycle_session.clone()),
             ),
-            menu_config.completion_style,
+            chord_bindings,
+            alt_keys,
+            Some(Box::new(live_lookahead)),
+            keyseq_timeout,
+        )))
+        .with_additional_edit_mode(Box::new(ChordEditMode::new(
+            Box::new(
+                PasteChunkEditMode::new(standby_edit_mode, menu_config.completion_style)
+                    .with_cycle_session(cycle_session),
+            ),
+            standby_chord_bindings,
+            standby_alt_keys,
+            Some(Box::new(live_lookahead)),
+            keyseq_timeout,
         )));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
@@ -379,7 +487,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         )));
     }
     if shell_ref.syntax_highlighting.main_highlighter_enabled() {
-        let functions = shell_ref.executor.functions_snapshot();
+        let functions = shell_ref.session().functions();
         let commands = shell_ref
             .aliases
             .keys()
@@ -415,7 +523,24 @@ fn configured_completion_menu(
     config: MenuConfig,
     gnu_indicator: &str,
     menu_open: Arc<AtomicBool>,
+    cycle_session: Option<SharedCycleSession>,
 ) -> Box<dyn reedline::Menu> {
+    // niubash#631: under the cycle interaction the CycleMenu serves
+    // every non-GNU style — it renders its own candidate grid and
+    // splices candidates into the line itself, which no stock menu
+    // exposes the control for (see `completion::cycle_menu`). The
+    // GNU style is exempt: its interaction stays the literal readline
+    // shape whatever the axis says. Under `insert`, the per-style
+    // menus below are exactly the pre-#631 behavior.
+    if let Some(session) = cycle_session {
+        if config.completion_style != CompletionStyle::Gnu {
+            return Box::new(
+                crate::completion::cycle_menu::CycleMenu::new(session)
+                    .with_name(name)
+                    .with_menu_open_flag(menu_open),
+            );
+        }
+    }
     match config.completion_style {
         CompletionStyle::Gnu => {
             // GNU readline literal semantics (opt-in, `completion.style gnu`):
@@ -552,89 +677,227 @@ fn run_host_sentinel(
     }
 }
 
+/// One editor keymap under construction, remembering which registry
+/// layer last wrote each slot (niubash#630). The layer closures are the
+/// same `add_*_keybindings` passes the editor was always built with;
+/// the wrapper only observes their effects, diffing the map around
+/// each pass so the registry can attribute every slot's winner (and
+/// the layer it shadowed) without the passes changing shape.
+struct LayeredKeymap {
+    keybindings: Keybindings,
+    // Keyed by the (modifiers, key code) pair: reedline 0.52 does not
+    // export its combination type name.
+    stacks: std::collections::HashMap<
+        (KeyModifiers, KeyCode),
+        Vec<(crate::keymap_registry::KeymapSource, ReedlineEvent)>,
+    >,
+}
+
+impl LayeredKeymap {
+    fn new(defaults: Keybindings) -> Self {
+        let stacks = defaults
+            .bindings
+            .iter()
+            .map(|(combo, event)| {
+                (
+                    (combo.modifier, combo.key_code),
+                    vec![(crate::keymap_registry::KeymapSource::Default, event.clone())],
+                )
+            })
+            .collect();
+        Self {
+            keybindings: defaults,
+            stacks,
+        }
+    }
+
+    fn layer<R>(
+        &mut self,
+        source: crate::keymap_registry::KeymapSource,
+        apply: impl FnOnce(&mut Keybindings) -> R,
+    ) -> R {
+        let before = self.keybindings.bindings.clone();
+        let out = apply(&mut self.keybindings);
+        for (combo, event) in &self.keybindings.bindings {
+            if before.get(combo) != Some(event) {
+                self.stacks
+                    .entry((combo.modifier, combo.key_code))
+                    .or_default()
+                    .push((source.clone(), event.clone()));
+            }
+        }
+        out
+    }
+
+    fn finish(self) -> (Keybindings, crate::keymap_registry::KeymapStacks) {
+        (self.keybindings, self.stacks.into_iter().collect())
+    }
+}
+
+/// Build one target keymap in the registry's precedence order
+/// (niubash#630, DESIGN §5.3): reedline defaults < host baseline
+/// (menus, clipboard, native-widget presets) < bundle < script
+/// (engine `bind`) < user. User bindings used to be applied *before*
+/// the engine pass, so a startup script silently overrode the user's
+/// own `NIU_BINDKEYS` — that inversion was a defect, not a baseline,
+/// and this order is the fix. The adjudication happens here, at build
+/// (registration) time: every rebuild reapplies the user layer over
+/// whatever the script layer registered, so a mid-session script
+/// rebind of a user-widget key can never take effect — it is recorded
+/// as shadowed instead. Returns the map plus the registry rows and
+/// dropped-bind records the build produced.
+#[allow(clippy::too_many_arguments)]
+fn build_keymap_for_target(
+    defaults: Keybindings,
+    target: NativeKeymapTarget,
+    mode: crate::keymap_registry::KeymapMode,
+    native_widgets: &NativeWidgetConfig,
+    native_widget_bindings: &[NativeWidgetBinding],
+    user_widget_bindings: &[NativeWidgetBinding],
+    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    completion_interaction: CompletionInteraction,
+) -> (
+    Keybindings,
+    Vec<crate::keymap_registry::KeymapEntry>,
+    Vec<crate::keymap_registry::DroppedBind>,
+) {
+    use crate::keymap_registry::{entries_from_stacks, KeymapSource, UserBindingVia};
+    let mut builder = LayeredKeymap::new(defaults);
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_menu_keybindings(keybindings, completion_interaction)
+    });
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_system_clipboard_keybindings(keybindings)
+    });
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_native_widget_keybindings(keybindings, target, native_widgets, native_widget_bindings)
+    });
+    if native_widgets.import_bindkeys {
+        for binding in native_widget_bindings {
+            let source = KeymapSource::Bundle {
+                file: binding
+                    .source_file
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                line: binding.line,
+            };
+            builder.layer(source, |keybindings| {
+                apply_bundle_widget_binding(keybindings, target, binding)
+            });
+        }
+    }
+    let dropped = builder
+        .layer(KeymapSource::Script, |keybindings| {
+            add_engine_bind_keybindings_recorded(keybindings, target, engine_bindings, 0)
+        })
+        .1;
+    builder.layer(
+        KeymapSource::User {
+            via: UserBindingVia::NiuBindkeys,
+        },
+        |keybindings| add_user_widget_keybindings(keybindings, user_widget_bindings),
+    );
+    let (keybindings, stacks) = builder.finish();
+    (
+        keybindings,
+        entries_from_stacks(mode, stacks, engine_bindings),
+        dropped,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_edit_mode(
     mode: EditorMode,
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
-    engine_bindings: &[rubash::shell::bind_registry::BindEntry],
-) -> Box<dyn EditMode> {
+    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    engine_bind_generation: u64,
+    completion_interaction: CompletionInteraction,
+) -> (
+    Box<dyn EditMode>,
+    crate::keymap_registry::KeymapRegistry,
+    Vec<ChordBinding>,
+    std::collections::HashSet<KeyCode>,
+) {
+    use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
         EditorMode::Emacs => {
-            let mut keybindings = default_emacs_keybindings();
-            add_menu_keybindings(&mut keybindings);
-            add_system_clipboard_keybindings(&mut keybindings);
-            add_native_widget_keybindings(
-                &mut keybindings,
+            let (keybindings, entries, dropped) = build_keymap_for_target(
+                default_emacs_keybindings(),
                 NativeKeymapTarget::Emacs,
+                KeymapMode::Emacs,
                 native_widgets,
                 native_widget_bindings,
-            );
-            add_bundle_widget_keybindings(
-                &mut keybindings,
-                NativeKeymapTarget::Emacs,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_user_widget_keybindings(&mut keybindings, user_widget_bindings);
-            warn_unusable_engine_bindings(add_engine_bind_keybindings(
-                &mut keybindings,
-                NativeKeymapTarget::Emacs,
+                user_widget_bindings,
                 engine_bindings,
-            ));
-            Box::new(Emacs::new(keybindings))
+                completion_interaction,
+            );
+            let alt_keys = alt_bound_keys(&keybindings);
+            (
+                Box::new(Emacs::new(keybindings)),
+                KeymapRegistry {
+                    generation: engine_bind_generation,
+                    editor_mode: "emacs".to_string(),
+                    entries,
+                    dropped,
+                },
+                collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0),
+                alt_keys,
+            )
         }
         EditorMode::Vi => {
-            let mut insert_keybindings = default_vi_insert_keybindings();
-            let mut normal_keybindings = default_vi_normal_keybindings();
-            add_menu_keybindings(&mut insert_keybindings);
-            add_menu_keybindings(&mut normal_keybindings);
-            add_system_clipboard_keybindings(&mut insert_keybindings);
-            add_system_clipboard_keybindings(&mut normal_keybindings);
-            add_native_widget_keybindings(
-                &mut insert_keybindings,
+            let (insert_keybindings, mut entries, mut dropped) = build_keymap_for_target(
+                default_vi_insert_keybindings(),
                 NativeKeymapTarget::ViInsert,
+                KeymapMode::ViInsert,
                 native_widgets,
                 native_widget_bindings,
-            );
-            add_native_widget_keybindings(
-                &mut normal_keybindings,
-                NativeKeymapTarget::ViNormal,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_bundle_widget_keybindings(
-                &mut insert_keybindings,
-                NativeKeymapTarget::ViInsert,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_bundle_widget_keybindings(
-                &mut normal_keybindings,
-                NativeKeymapTarget::ViNormal,
-                native_widgets,
-                native_widget_bindings,
-            );
-            add_user_widget_keybindings(&mut insert_keybindings, user_widget_bindings);
-            add_user_widget_keybindings(&mut normal_keybindings, user_widget_bindings);
-            warn_unusable_engine_bindings(add_engine_bind_keybindings(
-                &mut insert_keybindings,
-                NativeKeymapTarget::ViInsert,
+                user_widget_bindings,
                 engine_bindings,
-            ));
-            warn_unusable_engine_bindings(add_engine_bind_keybindings(
-                &mut normal_keybindings,
+                completion_interaction,
+            );
+            let (normal_keybindings, normal_entries, normal_dropped) = build_keymap_for_target(
+                default_vi_normal_keybindings(),
                 NativeKeymapTarget::ViNormal,
+                KeymapMode::ViNormal,
+                native_widgets,
+                native_widget_bindings,
+                user_widget_bindings,
                 engine_bindings,
-            ));
-            Box::new(Vi::new(
-                insert_keybindings,
-                normal_keybindings,
-                // reedline 0.52 added visual mode with its own keybinding
-                // set; niubash has never bound visual keys of its own, so
-                // the upstream defaults are the faithful choice.
-                default_vi_visual_keybindings(),
-            ))
+                completion_interaction,
+            );
+            entries.extend(normal_entries);
+            for bind in normal_dropped {
+                if !dropped.contains(&bind) {
+                    dropped.push(bind);
+                }
+            }
+            let alt_keys = alt_bound_keys(&insert_keybindings);
+            (
+                Box::new(Vi::new(
+                    insert_keybindings,
+                    normal_keybindings,
+                    // reedline 0.52 added visual mode with its own keybinding
+                    // set; niubash has never bound visual keys of its own, so
+                    // the upstream defaults are the faithful choice.
+                    default_vi_visual_keybindings(),
+                )),
+                KeymapRegistry {
+                    generation: engine_bind_generation,
+                    editor_mode: "vi".to_string(),
+                    entries,
+                    dropped,
+                },
+                {
+                    let mut chords = Vec::new();
+                    for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                        chords.extend(collect_chord_bindings(engine_bindings, target, 0));
+                    }
+                    chords
+                },
+                alt_keys,
+            )
         }
     }
 }
@@ -768,6 +1031,17 @@ struct PasteChunkEditMode {
     /// into the editable line — the 1.1.0 behavior niubash#486 restores —
     /// and a second Enter submits.
     enter_dismisses_menu: bool,
+    /// niubash#631: the cycle interaction's shared session cell, when
+    /// this editor was built for `completion.interaction = cycle` on a
+    /// non-GNU style. The CycleMenu publishes its session (snapshot +
+    /// spliced flag) there; this wrapper consumes it in
+    /// [`Self::delegate`] for the keys a menu cannot finish itself:
+    /// Esc rolls the line back to the snapshot, an Enter inside a live
+    /// session accepts the candidate in the line and submits in the
+    /// same press, and any other edit key ends the session as
+    /// accepted-in-place. `None` under `insert` and for the GNU style
+    /// — every #631 path is inert then.
+    cycle_session: Option<SharedCycleSession>,
     /// niubash#420: put probe-consumed events BACK into the input stream.
     /// The live console cannot unread, so the events are written back into
     /// the kernel input queue (`WriteConsoleInputW`, the #417 reinjection
@@ -1028,6 +1302,62 @@ impl PasteChunkEditMode {
         )
     }
 
+    /// Attach the cycle interaction's shared session cell
+    /// (niubash#631) — see the `cycle_session` field.
+    fn with_cycle_session(mut self, cycle_session: Option<SharedCycleSession>) -> Self {
+        self.cycle_session = cycle_session;
+        self
+    }
+
+    /// Whether the attached cycle session is live right now.
+    fn cycle_session_open(&self) -> bool {
+        self.cycle_session
+            .as_ref()
+            .and_then(|session| session.lock().ok())
+            .is_some_and(|state| state.is_open())
+    }
+
+    /// niubash#631: the navigation splice for a TAB (`delta` +1) or
+    /// Shift-TAB (-1) inside a live cycle session, as the edit batch
+    /// that replaces the current candidate with the next one
+    /// (wrap-around). Issued HERE, at key-translation time, because
+    /// the menu cannot: a menu-side splice runs at paint time in
+    /// `update_working_details`, and the painter composes the frame's
+    /// input line before that hook — the line would lag the grid's
+    /// highlight by a full paint on every TAB. The batch is the
+    /// rollback's proven whole-line shape (Clear + InsertString +
+    /// MoveToPosition): mid-session the buffer is always the snapshot
+    /// with its span replaced by the current candidate, so the next
+    /// buffer is a pure string computation over the shared cell,
+    /// which this also advances (index, region, nav_seq — the menu
+    /// consumes one nav_seq per Edit echo the engine reports back).
+    /// `None` when no live session can navigate (the key then takes
+    /// its normal translation: TAB #1 opens the menu through the
+    /// bindings, and the menu begins the session itself).
+    fn cycle_navigation_edits(&self, delta: isize) -> Option<Vec<EditCommand>> {
+        let session = self.cycle_session.as_ref()?;
+        let mut state = session.lock().ok()?;
+        if !state.is_open() || state.candidates.len() < 2 {
+            return None;
+        }
+        let snapshot = state.snapshot.clone()?;
+        let len = state.candidates.len() as isize;
+        state.index = (state.index as isize + delta).rem_euclid(len) as usize;
+        let text = state.candidates[state.index].splice_text();
+        let (start, span_end) = state.span;
+        let mut new_buffer = String::with_capacity(snapshot.buffer.len() + text.len());
+        new_buffer.push_str(&snapshot.buffer[..start]);
+        new_buffer.push_str(&text);
+        new_buffer.push_str(&snapshot.buffer[span_end..]);
+        state.region = (start, start + text.len());
+        state.nav_seq += 1;
+        state.spliced = true;
+        Some(crate::completion::cycle_menu::whole_line_edits(
+            &new_buffer,
+            start + text.len(),
+        ))
+    }
+
     /// The test constructor: a scripted lookahead queue in place of the
     /// live console queue. The requeue pushes FRONT — the same head slot
     /// the production face guarantees by draining the pending tail and
@@ -1071,6 +1401,7 @@ impl PasteChunkEditMode {
             lookahead,
             menu_possible: false,
             enter_dismisses_menu: matches!(completion_style, CompletionStyle::Gnu),
+            cycle_session: None,
             unread,
         }
     }
@@ -1287,6 +1618,14 @@ fn is_bare_enter_press(raw: &crossterm29::event::Event) -> bool {
 }
 
 impl EditMode for PasteChunkEditMode {
+    /// The paste layer carries no mode semantics of its own, so a
+    /// mode-specific event — in particular `ReedlineEvent::SwitchMode`,
+    /// which is how the engine asks a machine to become the vi/emacs
+    /// machine a `bind` target names — belongs to the wrapped machine.
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
+        self.inner.handle_mode_specific_event(event)
+    }
+
     fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
         let raw = crossterm29::event::Event::from(event);
         // Events the Enter lookahead read but did not consume entered the
@@ -1503,6 +1842,100 @@ impl PasteChunkEditMode {
 
     /// Hand the raw event to the wrapped edit mode unchanged.
     fn delegate(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
+        // niubash#631: a TAB / Shift-TAB inside a live cycle session
+        // IS the navigation splice, issued here at translation time
+        // (see `cycle_navigation_edits`) — the key never reaches the
+        // menu bindings, whose MenuNext the menu could only apply at
+        // paint time, one frame behind the grid's highlight. With no
+        // live session the key falls through to its normal
+        // translation (TAB #1 opens the menu through the bindings).
+        if let crossterm29::event::Event::Key(key) = &raw {
+            if key.kind == crossterm29::event::KeyEventKind::Press {
+                let delta = match (key.code, key.modifiers) {
+                    (crossterm29::event::KeyCode::Tab, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some(1)
+                    }
+                    (crossterm29::event::KeyCode::BackTab, _) => Some(-1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    if let Some(edits) = self.cycle_navigation_edits(delta) {
+                        self.menu_possible = true;
+                        return ReedlineEvent::Edit(edits);
+                    }
+                }
+            }
+        }
+        // niubash#631: classify the raw key against a live cycle
+        // session BEFORE anything else translates it. This wrapper is
+        // the only component that sees raw keys synchronously — the
+        // CycleMenu learns of a key a paint later — so the session's
+        // end states are decided here: deciding them in the menu would
+        // let an Esc in the same key burst be translated before the
+        // menu knew the session had been edited or rolled back.
+        // Navigation keys (TAB / Shift-TAB) leave the session to the
+        // menu; Enter is decided with the submit shape below; a bare
+        // Esc consumes the session and (when a candidate was spliced)
+        // arms the rollback edits; every other editing key ends the
+        // session as accepted-in-place. Only key presses and pastes
+        // classify — non-key events (ConPTY's focus flicker rides this
+        // path between real keys) and key releases leave the session
+        // untouched.
+        let mut cycle_rollback: Option<Vec<EditCommand>> = None;
+        if let Some(session) = &self.cycle_session {
+            enum CycleKey {
+                Navigate,
+                Accept,
+                Rollback,
+                EndSession,
+                Ignore,
+            }
+            let classification = match &raw {
+                crossterm29::event::Event::Key(key)
+                    if key.kind == crossterm29::event::KeyEventKind::Press =>
+                {
+                    match (key.code, key.modifiers) {
+                        (crossterm29::event::KeyCode::Tab, modifiers)
+                            if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                        {
+                            CycleKey::Navigate
+                        }
+                        (crossterm29::event::KeyCode::BackTab, _) => CycleKey::Navigate,
+                        (crossterm29::event::KeyCode::Esc, modifiers)
+                            if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                        {
+                            CycleKey::Rollback
+                        }
+                        (crossterm29::event::KeyCode::Enter, modifiers)
+                            if !modifiers.contains(crossterm29::event::KeyModifiers::CONTROL) =>
+                        {
+                            CycleKey::Accept
+                        }
+                        _ => CycleKey::EndSession,
+                    }
+                }
+                crossterm29::event::Event::Paste(_) => CycleKey::EndSession,
+                _ => CycleKey::Ignore,
+            };
+            match classification {
+                CycleKey::Rollback => {
+                    if let Ok(mut state) = session.lock() {
+                        if let Some(snapshot) = state.take_rollback() {
+                            cycle_rollback =
+                                Some(crate::completion::cycle_menu::rollback_edits(&snapshot));
+                        }
+                    }
+                }
+                CycleKey::EndSession => {
+                    if let Ok(mut state) = session.lock() {
+                        state.end_if_open();
+                    }
+                }
+                CycleKey::Navigate | CycleKey::Accept | CycleKey::Ignore => {}
+            }
+        }
         // Track the menu window (niubash#373) for every key that actually
         // dispatches — a TAB may leave the completion menu alive, a CONTROL
         // chord hands the next Enter to a verb (history search, cancel,
@@ -1580,14 +2013,53 @@ impl PasteChunkEditMode {
             }
             return ReedlineEvent::Multiple(events);
         }
+        // niubash#631: under the cycle interaction, an Enter inside a
+        // live session accepts the candidate already in the line AND
+        // runs the command in the same press (DESIGN §7.2) — a
+        // `MenuAccept` rides ahead of the submit: the engine's accept
+        // closes the menu over the spliced candidate (the CycleMenu's
+        // `replace_in_buffer` is a no-op; the text is already there)
+        // and the Enter then submits the accepted line. A bare Enter
+        // would die in the engine's first-refusal instead (the #486
+        // two-Enter shape, which is the *insert* interaction's
+        // contract, not cycle's). The gates mirror the GNU wrap above:
+        // `submit_carries_enter` + `enter_press` + the TAB window keep
+        // the `Multiple` out of Ctrl+R search, and the live-session
+        // check keeps every non-completion submit byte-identical
+        // (`MenuAccept` is inapplicable without an open menu, but the
+        // wrap itself must not exist outside a session).
+        if submit_carries_enter && enter_press && self.menu_possible && self.cycle_session_open() {
+            self.menu_possible = false;
+            let mut events = vec![ReedlineEvent::MenuAccept];
+            match translated {
+                ReedlineEvent::Enter => events.push(ReedlineEvent::Enter),
+                ReedlineEvent::Multiple(rest) => events.extend(rest),
+                _ => unreachable!("checked above"),
+            }
+            return ReedlineEvent::Multiple(events);
+        }
+        // niubash#631: an Esc that consumed a spliced cycle session
+        // carries the rollback edits ahead of its own translation, so
+        // the pre-completion line is restored in the same engine batch
+        // that closes the menu, restore first.
+        if let Some(edits) = cycle_rollback {
+            let mut events = vec![ReedlineEvent::Edit(edits)];
+            match translated {
+                ReedlineEvent::Multiple(rest) => events.extend(rest),
+                other => events.push(other),
+            }
+            return ReedlineEvent::Multiple(events);
+        }
         translated
     }
 }
 
 /// A bind entry the editor cannot mirror, classified by *why*
 /// (niubash#612). Every unusable entry is recorded in this list — it
-/// is the bridge's diagnostic record — but only the actionable class
-/// is printed as a startup warning (see `warn_unusable_engine_bindings`).
+/// is the bridge's diagnostic record — and, since niubash#630, also
+/// lands as a persistent record in the unified keymap registry
+/// (see `crate::keymap_registry`), whose reminder pass decides what
+/// is surfaced at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnusableBind {
     keyseq: String,
@@ -1605,9 +2077,6 @@ struct UnusableBind {
 /// is new, actionable information and keeps the warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnusableBindReason {
-    /// Multi-key / chained sequence: reedline bindings are a single
-    /// (modifiers, key) pair, so a chain has no equivalent.
-    ChainedSequence,
     /// A readline editing-mode toggle function: switching keymaps is
     /// a session-level choice in niu (the configured `EditorMode`),
     /// not a per-key widget the bridge can deliver.
@@ -1617,25 +2086,11 @@ enum UnusableBindReason {
 }
 
 impl UnusableBindReason {
+    /// Retained for the #612 test surface (the production surfacing
+    /// decision lives in the registry's reminder pass, niubash#630).
+    #[cfg(test)]
     fn is_structural(self) -> bool {
-        matches!(
-            self,
-            UnusableBindReason::ChainedSequence | UnusableBindReason::ModeToggleFunction
-        )
-    }
-}
-
-/// One warning per *actionable* unusable sequence. Structural entries
-/// (see `UnusableBindReason`) stay in the recorded list for
-/// diagnostics but are not printed.
-fn warn_unusable_engine_bindings(unusable: Vec<UnusableBind>) {
-    for bind in &unusable {
-        if !bind.reason.is_structural() {
-            eprintln!(
-                "niubash: bind: key sequence '{}' cannot be mirrored to the line editor",
-                bind.keyseq
-            );
-        }
+        matches!(self, UnusableBindReason::ModeToggleFunction)
     }
 }
 
@@ -1659,75 +2114,31 @@ fn unusable_function_reason(name: &str) -> UnusableBindReason {
     }
 }
 
-/// Whether a raw bind sequence is a chain of two or more key units
-/// (e.g. `\C-x\C-f`, `\C-\e(`). Lexical only: the string must split
-/// cleanly into units; a malformed sequence stalls the scan and is
-/// *not* a chain (it is reported as unparseable instead).
-fn is_chained_key_sequence(value: &str) -> bool {
-    let chars: Vec<char> = value.chars().collect();
-    let mut pos = 0;
-    let mut units = 0;
-    while pos < chars.len() {
-        match key_unit_len(&chars[pos..]) {
-            Some(len) if len > 0 => {
-                pos += len;
-                units += 1;
-            }
-            _ => return false,
-        }
-    }
-    units >= 2
-}
-
-/// Length in chars of the first key unit of a raw bind sequence:
-/// a `\C-`/`\M-` chord, an `\e` chord or CSI form, a caret-notation
-/// key, a backslash escape, or a single plain char.
-fn key_unit_len(chars: &[char]) -> Option<usize> {
-    match chars {
-        ['\\', 'C', '-', ..] | ['\\', 'M', '-', ..] => {
-            char_spec_len(&chars[3..]).map(|len| 3 + len)
-        }
-        ['\\', 'e', '[', ..] => {
-            // CSI form: consume through the final byte (letter or '~').
-            let mut i = 3;
-            while i < chars.len() {
-                let c = chars[i];
-                i += 1;
-                if c.is_ascii_alphabetic() || c == '~' {
-                    return Some(i);
-                }
-            }
-            None
-        }
-        ['\\', 'e', ..] => char_spec_len(&chars[1..]).map(|len| 1 + len),
-        ['^', _, ..] => Some(2),
-        ['\\', _, ..] => Some(2),
-        [_, ..] => Some(1),
-        [] => None,
-    }
-}
-
-/// Length of the char spec a modifier prefix applies to: an escaped
-/// char (`\e`, `\\`, ...) or one plain char.
-fn char_spec_len(chars: &[char]) -> Option<usize> {
-    match chars {
-        ['\\', _, ..] => Some(2),
-        [c, ..] if *c != '\\' => Some(1),
-        _ => None,
-    }
-}
-
 /// Record an entry the editor cannot mirror, classified by reason
-/// (niubash#612).
+/// (niubash#612). The entry also lands in the unified keymap
+/// registry's dropped records (niubash#630), with the coarse reason
+/// refined by payload shape (DESIGN §6.1: a response sequence, an
+/// unknown function, an undeliverable sequence shape).
 fn note_unusable_bind(
     unusable: &mut Vec<UnusableBind>,
-    entry: &rubash::shell::bind_registry::BindEntry,
+    dropped: &mut Vec<crate::keymap_registry::DroppedBind>,
+    entry: &crate::bind_surface::EngineBindEntry,
     reason: UnusableBindReason,
 ) {
     unusable.push(UnusableBind {
         keyseq: entry.keyseq.clone(),
         reason,
     });
+    let structural = match reason {
+        UnusableBindReason::ModeToggleFunction => {
+            Some(crate::keymap_registry::DroppedReason::ModeToggleFunction)
+        }
+        UnusableBindReason::Other => None,
+    };
+    dropped.push(crate::keymap_registry::dropped_bind_for(
+        entry,
+        crate::keymap_registry::dropped_reason(structural, &entry.keyseq, &entry.kind),
+    ));
 }
 
 /// Apply user-declared widget bindings from `NIU_BINDKEYS`.
@@ -1759,41 +2170,83 @@ fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[Native
 /// insert their translated text. Entries the editor cannot mirror
 /// are reported back classified by reason (niubash#612): structural
 /// classes (chained sequences, editing-mode toggle functions) are
-/// recorded but not warned about; the rest are warned about once.
+/// recorded silently; the records feed the keymap registry's
+/// reminder pass (niubash#630).
+///
+/// This coarse view is retained for the #612 test surface; production
+/// builds go through [`add_engine_bind_keybindings_recorded`].
+#[cfg(test)]
 fn add_engine_bind_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
-    entries: &[rubash::shell::bind_registry::BindEntry],
+    entries: &[crate::bind_surface::EngineBindEntry],
 ) -> Vec<UnusableBind> {
+    add_engine_bind_keybindings_recorded(keybindings, target, entries, 0).0
+}
+
+/// [`add_engine_bind_keybindings`], additionally returning the
+/// dropped-bind records for the unified keymap registry
+/// (niubash#630): every unusable entry, refined by shape, plus
+/// key-script macros — mirrored today (their text inserts literally)
+/// but recorded as *mirrored with loss*, since the host has no
+/// key-script executor (DESIGN §4 R1). Recording a macro does not
+/// change its translation here; the translation widening is the K3
+/// slice's business.
+///
+/// `index_base` is where this slice's `bind -x` indices live in the
+/// shell's combined resolution list: the engine snapshot resolves at
+/// its own positions (base 0); the `[keymap]` user rules resolve
+/// right behind it (base = the snapshot's length), so a user rule's
+/// trigger can never run an engine entry's command.
+fn add_engine_bind_keybindings_recorded(
+    keybindings: &mut Keybindings,
+    target: NativeKeymapTarget,
+    entries: &[crate::bind_surface::EngineBindEntry],
+    index_base: usize,
+) -> (Vec<UnusableBind>, Vec<crate::keymap_registry::DroppedBind>) {
     let mut unusable = Vec::new();
+    let mut dropped = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         if !engine_keymap_applies(entry.keymap.as_deref(), target) {
             continue;
         }
         let Some((modifiers, key_code)) = parse_key_sequence(&entry.keyseq) else {
-            // A clean chain of key units is structural (reedline binds
-            // single keys); anything else that fails to parse is
-            // malformed and stays actionable (niubash#612).
-            let reason = if is_chained_key_sequence(&entry.keyseq) {
-                UnusableBindReason::ChainedSequence
-            } else {
-                UnusableBindReason::Other
-            };
-            note_unusable_bind(&mut unusable, entry, reason);
+            // A clean chain of key units is a chord: `ChordEditMode`
+            // delivers those (niubash#630), so it is neither dropped nor
+            // reported. Anything else that fails to parse is malformed
+            // and stays actionable (niubash#612).
+            if parse_chord_sequence(&entry.keyseq).is_some() {
+                continue;
+            }
+            note_unusable_bind(
+                &mut unusable,
+                &mut dropped,
+                entry,
+                UnusableBindReason::Other,
+            );
             continue;
         };
         let event = match &entry.kind {
-            rubash::shell::bind_registry::BindKind::Execute { .. } => {
-                ReedlineEvent::ExecuteHostCommand(format!("{BINDX_HOST_COMMAND_PREFIX}{index}"))
+            crate::bind_surface::EngineBindKind::Execute { .. } => {
+                ReedlineEvent::ExecuteHostCommand(format!(
+                    "{BINDX_HOST_COMMAND_PREFIX}{}",
+                    index_base + index
+                ))
             }
-            rubash::shell::bind_registry::BindKind::Macro { text } => {
+            crate::bind_surface::EngineBindKind::Macro { text } => {
+                if crate::keymap_registry::is_script_macro_text(text) {
+                    dropped.push(crate::keymap_registry::dropped_bind_for(
+                        entry,
+                        crate::keymap_registry::DroppedReason::ScriptMacro,
+                    ));
+                }
                 edit_event(EditCommand::InsertString(text.clone()))
             }
             // A readline function name the editor cannot deliver is
             // skipped; the sentinel fallthrough of native_widget_event is
             // for zsh-style shell-function widgets, which `bind` to a
             // readline function position has no meaning for.
-            rubash::shell::bind_registry::BindKind::Function { name } => {
+            crate::bind_surface::EngineBindKind::Function { name } => {
                 match native_widget_event(name) {
                     // native_widget_event's sentinel fallthrough means
                     // "unknown readline function": skipped, like GNU's
@@ -1801,12 +2254,22 @@ fn add_engine_bind_keybindings(
                     Some(ReedlineEvent::ExecuteHostCommand(payload))
                         if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
                     {
-                        note_unusable_bind(&mut unusable, entry, unusable_function_reason(name));
+                        note_unusable_bind(
+                            &mut unusable,
+                            &mut dropped,
+                            entry,
+                            unusable_function_reason(name),
+                        );
                         continue;
                     }
                     Some(event) => event,
                     None => {
-                        note_unusable_bind(&mut unusable, entry, unusable_function_reason(name));
+                        note_unusable_bind(
+                            &mut unusable,
+                            &mut dropped,
+                            entry,
+                            unusable_function_reason(name),
+                        );
                         continue;
                     }
                 }
@@ -1814,7 +2277,7 @@ fn add_engine_bind_keybindings(
         };
         keybindings.add_binding(modifiers, key_code, event);
     }
-    unusable
+    (unusable, dropped)
 }
 
 /// Keymap targeting for engine bind entries: GNU's emacs maps land on the
@@ -1846,15 +2309,31 @@ pub(crate) fn char_offset_to_byte(buffer: &str, chars: usize) -> usize {
         .unwrap_or(buffer.len())
 }
 
-fn add_menu_keybindings(keybindings: &mut Keybindings) {
-    keybindings.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
+fn add_menu_keybindings(
+    keybindings: &mut Keybindings,
+    completion_interaction: CompletionInteraction,
+) {
+    // niubash#631: TAB's shape follows the interaction axis. Under
+    // `insert` it is the pre-#631 binding: open the menu, falling back
+    // to the engine's own `Complete` edit when no menu takes it. Under
+    // `cycle`, TAB is the cycle key: while the CycleMenu is open it is
+    // `MenuNext` (advance + splice the next candidate); with no menu
+    // open `MenuNext` is inapplicable and the `UntilFound` falls
+    // through to opening the menu, whose activation splices the first
+    // candidate. The `Edit(Complete)` fallback is insert-only — under
+    // cycle it would splice the common prefix behind the menu's back
+    // and desync the frozen candidate set.
+    let tab_event = match completion_interaction {
+        CompletionInteraction::Insert => ReedlineEvent::UntilFound(vec![
             ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
             ReedlineEvent::Edit(vec![EditCommand::Complete]),
         ]),
-    );
+        CompletionInteraction::Cycle => ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::MenuNext,
+            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+        ]),
+    };
+    keybindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, tab_event);
     keybindings.add_binding(
         KeyModifiers::SHIFT,
         KeyCode::BackTab,
@@ -1901,6 +2380,11 @@ fn add_native_widget_keybindings(
 /// Apply bundle-declared widget bindings (from pack `keybindings/*.toml`
 /// assets). Gated only by `import_bindkeys`; the pack-level decision gate
 /// happens when the bindings are loaded into the shell.
+///
+/// The batch form is retained for the test surface; the registry
+/// build applies bindings one by one through
+/// [`apply_bundle_widget_binding`] for per-binding attribution.
+#[cfg(test)]
 fn add_bundle_widget_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
@@ -1912,17 +2396,28 @@ fn add_bundle_widget_keybindings(
     }
 
     for binding in bindings {
-        if !native_widget_keymap_applies(binding.keymap.as_deref(), target) {
-            continue;
-        }
-        let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
-            continue;
-        };
-        let Some(event) = native_widget_event(&binding.widget) else {
-            continue;
-        };
-        keybindings.add_binding(key.0, key.1, event);
+        apply_bundle_widget_binding(keybindings, target, binding);
     }
+}
+
+/// Apply one bundle-declared widget binding (the per-binding form of
+/// [`add_bundle_widget_keybindings`], so the keymap registry build
+/// can attribute each slot to its declaring file and line).
+fn apply_bundle_widget_binding(
+    keybindings: &mut Keybindings,
+    target: NativeKeymapTarget,
+    binding: &NativeWidgetBinding,
+) {
+    if !native_widget_keymap_applies(binding.keymap.as_deref(), target) {
+        return;
+    }
+    let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
+        return;
+    };
+    let Some(event) = native_widget_event(&binding.widget) else {
+        return;
+    };
+    keybindings.add_binding(key.0, key.1, event);
 }
 
 fn add_native_widget_preset_keybindings(keybindings: &mut Keybindings, presets: &[String]) {
@@ -1981,6 +2476,41 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "backward-delete-char" => Some(edit_event(EditCommand::Backspace)),
         "delete-char" => Some(edit_event(EditCommand::Delete)),
         "backward-kill-word" => Some(edit_event(EditCommand::CutWordLeft)),
+        // GNU readline names for the two word-case transforms and the
+        // transpose. The editor delivers all three (emacs Ctrl+T is
+        // `SwapGraphemes` in reedline's own table), so a user re-binding
+        // them in an rc file must mirror instead of being reported as
+        // "not in the host's deliverable set" (niubash#630 gap list).
+        "upcase-word" => Some(edit_event(EditCommand::UppercaseWord)),
+        "downcase-word" => Some(edit_event(EditCommand::LowercaseWord)),
+        "transpose-chars" => Some(edit_event(EditCommand::SwapGraphemes)),
+        // GNU `unix-word-rubout` (Ctrl+W) is the same "kill the word
+        // before the cursor into the cut buffer" gesture as
+        // `backward-kill-word`; readline keeps both names.
+        "unix-word-rubout" => Some(edit_event(EditCommand::CutWordLeft)),
+        // `previous-history` / `next-history` are GNU's one-step
+        // history moves — the same shape as the `*-line-or-history`
+        // aliases above.
+        "previous-history" => Some(ReedlineEvent::Up),
+        "next-history" => Some(ReedlineEvent::Down),
+        // GNU's Ctrl+R (`reverse-search-history`) and the interactive
+        // search spelling niu already carried are one action.
+        "reverse-search-history" => Some(ReedlineEvent::SearchHistory),
+        // PgUp/PgDn in bash's default map: history jumps (the reedline
+        // fork pinned in Cargo.toml carries these two events).
+        "beginning-of-history" => Some(ReedlineEvent::FirstHistoryEntry),
+        "end-of-history" => Some(ReedlineEvent::LastHistoryEntry),
+        // GNU's editing-mode toggles: session-level mode switches, which
+        // reedline delivers as `SwitchMode` (the standby machine built in
+        // `build_line_editor` is what accepts the target).
+        "vi-editing-mode" => Some(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
+            PromptViMode::Insert,
+        ))),
+        "emacs-editing-mode" => Some(ReedlineEvent::SwitchMode(PromptEditMode::Emacs)),
+        // `complete` is readline's "complete as TAB would"; the host's
+        // completion event is exactly that (menu first, then the
+        // editor's own completion).
+        "complete" => Some(completion_event()),
         "kill-word" => Some(edit_event(EditCommand::CutWordRight)),
         "kill-line" => Some(edit_event(EditCommand::CutToLineEnd)),
         "backward-kill-line" | "unix-line-discard" => {
@@ -1991,7 +2521,7 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "undo" => Some(edit_event(EditCommand::Undo)),
         "redo" => Some(edit_event(EditCommand::Redo)),
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
-        "redisplay" => Some(ReedlineEvent::Repaint),
+        "redisplay" | "redraw-current-line" => Some(ReedlineEvent::Repaint),
         "expand-or-complete" | "complete-word" => Some(completion_event()),
         "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
@@ -2005,6 +2535,335 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
     }
 }
 
+/// One multi-key binding: the key units and the event the last unit fires.
+struct ChordBinding {
+    keys: Vec<(KeyModifiers, KeyCode)>,
+    event: ReedlineEvent,
+}
+
+/// Lookup index over [`ChordBinding`]s.
+///
+/// Chords are few (a handful of `bind` sequences in a typical rc), so this
+/// is deliberately flat rather than a trie: a hash lookup per keypress
+/// replaces the old linear `exact()`/`is_prefix()` scans while keeping the
+/// exact-match and prefix sets explicit and easy to audit. The maps are
+/// built once at editor build, where the old code scanned on every key.
+#[derive(Default)]
+struct ChordIndex {
+    /// Full sequences. Duplicates keep the FIRST binding, matching the old
+    /// `iter().find()` priority.
+    exact: HashMap<Vec<(KeyModifiers, KeyCode)>, ReedlineEvent>,
+    /// Every proper prefix of every chord. A full sequence that is also a
+    /// prefix of a longer chord belongs here too (readline waits for the
+    /// longer binding).
+    prefixes: HashSet<Vec<(KeyModifiers, KeyCode)>>,
+}
+
+impl ChordIndex {
+    fn new(chords: &[ChordBinding]) -> Self {
+        let mut index = Self::default();
+        if !chords.is_empty() {
+            // The old `is_prefix(&[])` scan returned true for any non-empty
+            // chord set; keep that edge case exact.
+            index.prefixes.insert(Vec::new());
+        }
+        for chord in chords {
+            for len in 1..chord.keys.len() {
+                index.prefixes.insert(chord.keys[..len].to_vec());
+            }
+            index
+                .exact
+                .entry(chord.keys.clone())
+                .or_insert_with(|| chord.event.clone());
+        }
+        index
+    }
+
+    fn exact(&self, keys: &[(KeyModifiers, KeyCode)]) -> Option<ReedlineEvent> {
+        self.exact.get(keys).cloned()
+    }
+
+    fn is_prefix(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
+        self.prefixes.contains(keys)
+    }
+}
+
+/// Collect the engine `bind` entries that are chords (two or more key
+/// units) into the layer `ChordEditMode` walks. `Execute` entries keep the
+/// same `bind -x` index the flat keymap would have used; macros insert
+/// their text; function names go through [`native_widget_event`] and fall
+/// back to the shell-function sentinel like any other widget.
+/// The key codes that carry a real ALT binding in this keymap — the set the
+/// ESC-prefix logic may synthesize a meta key for.
+fn alt_bound_keys(keybindings: &Keybindings) -> std::collections::HashSet<KeyCode> {
+    keybindings
+        .get_keybindings()
+        .keys()
+        .filter(|combination| combination.modifier.contains(KeyModifiers::ALT))
+        .map(|combination| combination.key_code)
+        .collect()
+}
+
+fn collect_chord_bindings(
+    entries: &[crate::bind_surface::EngineBindEntry],
+    target: NativeKeymapTarget,
+    index_base: usize,
+) -> Vec<ChordBinding> {
+    let mut chords = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+            continue;
+        }
+        let Some(keys) = parse_chord_sequence(&entry.keyseq) else {
+            continue;
+        };
+        let event = match &entry.kind {
+            crate::bind_surface::EngineBindKind::Execute { .. } => {
+                ReedlineEvent::ExecuteHostCommand(format!(
+                    "{BINDX_HOST_COMMAND_PREFIX}{}",
+                    index_base + index
+                ))
+            }
+            crate::bind_surface::EngineBindKind::Macro { text } => {
+                edit_event(EditCommand::InsertString(text.clone()))
+            }
+            crate::bind_surface::EngineBindKind::Function { name } => {
+                match native_widget_event(name) {
+                    Some(ReedlineEvent::ExecuteHostCommand(payload))
+                        if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                    {
+                        continue
+                    }
+                    Some(event) => event,
+                    None => continue,
+                }
+            }
+        };
+        chords.push(ChordBinding { keys, event });
+    }
+    chords
+}
+
+/// Multi-key (chord) dispatch, layered above the paste/typeahead machine.
+///
+/// reedline's flat keymap binds one key at a time, so a readline chord
+/// (`\C-x\C-e`, fzf's `\C-\e(`) used to be dropped. This layer buffers the
+/// first unit only when some chord starts with it, completes on an exact
+/// match, and — on a mismatch — replays the buffered keys through the inner
+/// machine before the current one, so nothing is swallowed. A lone prefix
+/// waits for the next key up to `keymap.keyseq-timeout` (readline's
+/// `keyseq-timeout`: 500 ms by default, `0` waits forever; the upstream
+/// chord design is nushell/reedline#1204).
+struct ChordEditMode {
+    inner: Box<dyn EditMode>,
+    chords: ChordIndex,
+    /// The configured chord wait. `Duration::ZERO` is readline's `0`:
+    /// wait forever (no expiry).
+    keyseq_timeout: Duration,
+    pending: Vec<crossterm29::event::Event>,
+    /// When the first pending unit was parked. readline's
+    /// `keyseq-timeout` applies here too: a prefix that does not complete
+    /// inside the window stops being a chord prefix.
+    pending_since: Option<std::time::Instant>,
+    /// Keys that carry a real ALT binding: terminals spell Alt-C as
+    /// `ESC c`, and emacs-mode readline treats ESC as the meta prefix.
+    alt_keys: std::collections::HashSet<KeyCode>,
+    /// Peek for the ESC partner without consuming the input stream.
+    lookahead: Option<Lookahead>,
+}
+
+/// How long to wait for the ESC partner. A terminal sends `ESC c` back to
+/// back; a human pressing Escape alone does not.
+const ESC_META_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+impl ChordEditMode {
+    fn new(
+        inner: Box<dyn EditMode>,
+        chords: Vec<ChordBinding>,
+        alt_keys: std::collections::HashSet<KeyCode>,
+        lookahead: Option<Lookahead>,
+        keyseq_timeout: Duration,
+    ) -> Self {
+        Self {
+            inner,
+            chords: ChordIndex::new(&chords),
+            keyseq_timeout,
+            pending: Vec::new(),
+            pending_since: None,
+            alt_keys,
+            lookahead,
+        }
+    }
+
+    fn exact(&self, keys: &[(KeyModifiers, KeyCode)]) -> Option<ReedlineEvent> {
+        self.chords.exact(keys)
+    }
+
+    fn is_prefix(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
+        self.chords.is_prefix(keys)
+    }
+
+    fn forward(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
+        self.inner.parse_event(event)
+    }
+}
+
+fn chord_key(event: &crossterm29::event::Event) -> Option<(KeyModifiers, KeyCode)> {
+    match event {
+        crossterm29::event::Event::Key(key)
+            if key.kind == crossterm29::event::KeyEventKind::Press =>
+        {
+            Some((key.modifiers, key.code))
+        }
+        _ => None,
+    }
+}
+
+fn push_event(events: &mut Vec<ReedlineEvent>, event: ReedlineEvent) {
+    match event {
+        ReedlineEvent::None => {}
+        ReedlineEvent::Multiple(inner) => {
+            for event in inner {
+                push_event(events, event);
+            }
+        }
+        other => events.push(other),
+    }
+}
+
+impl EditMode for ChordEditMode {
+    fn parse_event(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
+        self.dispatch(crossterm29::event::Event::from(event))
+    }
+
+    fn edit_mode(&self) -> PromptEditMode {
+        self.inner.edit_mode()
+    }
+
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
+        self.inner.handle_mode_specific_event(event)
+    }
+}
+
+impl ChordEditMode {
+    fn dispatch(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
+        let Some(key) = chord_key(&raw) else {
+            return self.forward(ReedlineRawEvent::try_from(raw).expect("non-key event"));
+        };
+        // ESC as readline's meta prefix (emacs mode only: vi uses ESC to
+        // leave insert mode). Only when the peeked partner actually has an
+        // ALT binding, so a bare Escape keeps its immediate meaning.
+        if key == (KeyModifiers::NONE, KeyCode::Esc)
+            && self.inner.edit_mode() == PromptEditMode::Emacs
+            && !self.alt_keys.is_empty()
+        {
+            if let Some(partner) = self
+                .lookahead
+                .as_mut()
+                .and_then(|peek| peek(ESC_META_BUDGET))
+            {
+                if let Some((_mods, code)) =
+                    chord_key(&partner).filter(|(_, code)| self.alt_keys.contains(code))
+                {
+                    let synthetic = crossterm29::event::Event::Key(
+                        crossterm29::event::KeyEvent::new(code, KeyModifiers::ALT),
+                    );
+                    return self.forward(
+                        ReedlineRawEvent::try_from(synthetic).expect("synthetic meta key"),
+                    );
+                }
+                // The peeked event is not a meta partner: deliver ESC and it
+                // in order, now. Parking it would delay the key until the
+                // *next* keystroke (reedline only calls us when input
+                // arrives).
+                let esc = self.forward(ReedlineRawEvent::try_from(raw).expect("escape"));
+                let partner = self.dispatch(partner);
+                let mut events = Vec::new();
+                push_event(&mut events, esc);
+                push_event(&mut events, partner);
+                return match events.len() {
+                    0 => ReedlineEvent::None,
+                    1 => events.pop().expect("one event"),
+                    _ => ReedlineEvent::Multiple(events),
+                };
+            }
+            return self.forward(ReedlineRawEvent::try_from(raw).expect("escape"));
+        }
+        if self.pending.is_empty() {
+            // A key that starts a chord waits, even when it also has its own
+            // binding: readline fires the single binding only after
+            // `keyseq-timeout` expires, which the flush below reproduces.
+            if self.is_prefix(std::slice::from_ref(&key)) {
+                self.pending.push(raw);
+                self.pending_since = Some(std::time::Instant::now());
+                return ReedlineEvent::None;
+            }
+            return self.forward(ReedlineRawEvent::try_from(raw).expect("key event"));
+        }
+        // A prefix older than readline's keyseq-timeout stops being a
+        // prefix: replay it on its own, then treat the current key fresh.
+        // `0` is readline's "wait forever" spelling.
+        if self.keyseq_timeout != Duration::ZERO
+            && self
+                .pending_since
+                .is_some_and(|since| since.elapsed() > self.keyseq_timeout)
+        {
+            let mut events = Vec::new();
+            for parked in std::mem::take(&mut self.pending) {
+                let event = self.forward(ReedlineRawEvent::try_from(parked).expect("parked key"));
+                push_event(&mut events, event);
+            }
+            self.pending_since = None;
+            let current = self.dispatch(raw);
+            push_event(&mut events, current);
+            return match events.len() {
+                0 => ReedlineEvent::None,
+                1 => events.pop().expect("one event"),
+                _ => ReedlineEvent::Multiple(events),
+            };
+        }
+        let mut candidate: Vec<(KeyModifiers, KeyCode)> =
+            self.pending.iter().filter_map(chord_key).collect();
+        candidate.push(key);
+        if let Some(event) = self.exact(&candidate) {
+            self.pending.clear();
+            self.pending_since = None;
+            return event;
+        }
+        if self.is_prefix(&candidate) {
+            self.pending.push(raw);
+            return ReedlineEvent::None;
+        }
+        // Mismatch: replay the parked keys, then the current one, in order.
+        let mut events = Vec::new();
+        for parked in std::mem::take(&mut self.pending) {
+            let event = self.forward(ReedlineRawEvent::try_from(parked).expect("parked key"));
+            push_event(&mut events, event);
+        }
+        let event = self.forward(ReedlineRawEvent::try_from(raw).expect("key event"));
+        push_event(&mut events, event);
+        match events.len() {
+            0 => ReedlineEvent::None,
+            1 => events.pop().expect("one event"),
+            _ => ReedlineEvent::Multiple(events),
+        }
+    }
+}
+
+/// readline's `keyseq-timeout` default, in milliseconds.
+const DEFAULT_KEYSEQ_TIMEOUT_MS: u64 = 500;
+
+/// `set keyseq-timeout` as the engine recorded it (`bind 'set
+/// keyseq-timeout 250'` in the rc, or `~/.inputrc`). `None` when the engine
+/// has no such variable (older revision).
+fn engine_keyseq_timeout(shell: &Shell) -> Option<std::time::Duration> {
+    let raw = shell.executor().bind_readline_variable("keyseq-timeout")?;
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_millis)
+}
+
 fn edit_event(command: EditCommand) -> ReedlineEvent {
     ReedlineEvent::Edit(vec![command])
 }
@@ -2016,7 +2875,139 @@ fn completion_event() -> ReedlineEvent {
     ])
 }
 
-fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+/// Parse one GNU `bind` argument string, restricted to the options that
+/// register a binding (`-m`, `-x`). The binding spec itself goes through
+/// the engine's own parsers — the same functions the `bind` builtin
+/// dispatches to — so a rule means exactly what the same text means at
+/// the shell prompt; there is no second grammar. Failures carry the
+/// reason verbatim: `niu config migrate` refuses a legacy rule with it
+/// instead of writing an unusable rc line.
+pub(crate) fn parse_keymap_bind_rule(
+    spec: &str,
+) -> Result<crate::bind_surface::EngineBindEntry, String> {
+    use crate::bind_surface::{EngineBindEntry, EngineBindKind};
+    let mut rest = spec.trim();
+    if rest.is_empty() {
+        return Err("the rule is empty".to_string());
+    }
+    let mut keymap: Option<String> = None;
+    let mut execute = false;
+    // Leading registration options, in bind's own getopt shape: `-m`
+    // takes the keymap name (attached or as the next word), `-x` takes
+    // the rest of the string as its spec. Anything else that looks
+    // like an option cannot register a binding and is refused.
+    loop {
+        if rest == "-x" || rest.starts_with("-x ") || rest.starts_with("-x\t") {
+            execute = true;
+            rest = rest[2..].trim_start();
+            break;
+        }
+        if rest == "-m" || rest.starts_with("-m ") || rest.starts_with("-m\t") {
+            let after = rest[2..].trim_start();
+            let name = after.split_whitespace().next().unwrap_or_default();
+            if name.is_empty() {
+                return Err("-m requires a keymap name".to_string());
+            }
+            keymap = Some(name.to_string());
+            rest = after[name.len()..].trim_start();
+            continue;
+        }
+        if rest.starts_with('-') && rest.len() > 2 {
+            // Attached-value forms: `-x"…"` takes the rest as its
+            // spec; `-m<name>` takes the rest of the word as the name.
+            if let Some(attached) = rest.strip_prefix("-x") {
+                execute = true;
+                rest = attached.trim_start();
+                break;
+            }
+            if let Some(attached) = rest.strip_prefix("-m") {
+                let name = attached.split_whitespace().next().unwrap_or_default();
+                keymap = Some(name.to_string());
+                rest = attached[name.len()..].trim_start();
+                continue;
+            }
+            let option = rest.chars().nth(1).unwrap_or_default();
+            return Err(unsupported_keymap_rule_option(option));
+        }
+        if rest.starts_with('-') {
+            let option = rest.chars().nth(1).unwrap_or_default();
+            return Err(unsupported_keymap_rule_option(option));
+        }
+        break;
+    }
+    if let Some(name) = &keymap {
+        if !crate::bind_surface::is_known_keymap(name) {
+            return Err(rubash::builtins::bind::format_invalid_keymap(name));
+        }
+    }
+    // The engine's errors carry, for the positional channel, the
+    // `readline: …` text GNU itself prints; prefer it when present —
+    // it names the defect in the rule author's own spelling.
+    let reason =
+        |err: rubash::builtins::bind::BindSpecError| err.readline_message.unwrap_or(err.message);
+    if execute {
+        let (keyseq, command) =
+            rubash::builtins::bind::parse_unix_command_spec(rest).map_err(reason)?;
+        return Ok(EngineBindEntry {
+            keyseq,
+            kind: EngineBindKind::Execute { command },
+            keymap,
+        });
+    }
+    if rubash::builtins::bind::strip_set_keyword(rest).is_some() {
+        return Err(
+            "`set …` rules set readline variables; [keymap] carries key bindings only".to_string(),
+        );
+    }
+    let parsed = rubash::builtins::bind::parse_positional_binding(rest).map_err(reason)?;
+    let kind = match parsed.spec {
+        rubash::builtins::bind::BindingSpec::Function { name } => EngineBindKind::Function { name },
+        rubash::builtins::bind::BindingSpec::Macro { text } => EngineBindKind::Macro { text },
+    };
+    Ok(EngineBindEntry {
+        keyseq: parsed.keyseq,
+        kind,
+        keymap,
+    })
+}
+
+/// Why a would-be option in a `[keymap].bind` rule is refused: only
+/// `-m` and `-x` register bindings; `-r` in particular is a removal,
+/// and removals live in their own array by design (DESIGN §5.2).
+fn unsupported_keymap_rule_option(option: char) -> String {
+    if option == 'r' {
+        "removals are not bind rules — list the key under [keymap].unbind instead".to_string()
+    } else {
+        format!(
+            "unsupported bind option '-{option}' in a keymap rule \
+             (only -m and -x register bindings)"
+        )
+    }
+}
+
+/// Parse one `[keymap].unbind` entry (niubash#630, K4): a keyseq in
+/// bind's written spelling, optionally wrapped in the double quotes
+/// the listing form shows (`"\C-t"`). An unbind names exactly one
+/// key — the same single-key parser the bridge mirrors binds with
+/// decides, and it rejects multi-key sequences whole.
+pub(crate) fn parse_keymap_unbind_key(spec: &str) -> Result<(KeyModifiers, KeyCode), String> {
+    let trimmed = spec.trim();
+    let inner = trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    if inner.is_empty() {
+        return Err("the entry is empty".to_string());
+    }
+    parse_key_sequence(inner).ok_or_else(|| {
+        format!(
+            "'{spec}' does not name a single key the editor can bind \
+             (unbind takes one keyseq in bind spelling)"
+        )
+    })
+}
+
+pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     if let Some(key) = parse_named_key_sequence(value) {
         return Some(key);
     }
@@ -2025,12 +3016,97 @@ fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
         "^[[B" | "\\e[B" | "\\eOB" => Some((KeyModifiers::NONE, KeyCode::Down)),
         "^[[C" | "\\e[C" | "\\eOC" => Some((KeyModifiers::NONE, KeyCode::Right)),
         "^[[D" | "\\e[D" | "\\eOD" => Some((KeyModifiers::NONE, KeyCode::Left)),
+        // The VT100/xterm keypad and editing-key spellings real terminals
+        // send, which GNU's own default map binds (`bind -p` on bash 5.3:
+        // `"\e[1~": beginning-of-line`, `"\e[4~": end-of-line`,
+        // `"\e[3~": delete-char`, ...). Both the `~`-numbered and the
+        // `O`/`[` letter forms are accepted; `\e[7~`/`\e[8~` are the rxvt
+        // spellings of Home/End.
+        "\\e[1~" | "^[[1~" | "\\e[7~" | "^[[7~" | "\\e[H" | "^[[H" | "\\eOH" => {
+            Some((KeyModifiers::NONE, KeyCode::Home))
+        }
+        "\\e[4~" | "^[[4~" | "\\e[8~" | "^[[8~" | "\\e[F" | "^[[F" | "\\eOF" => {
+            Some((KeyModifiers::NONE, KeyCode::End))
+        }
+        "\\e[2~" | "^[[2~" => Some((KeyModifiers::NONE, KeyCode::Insert)),
+        "\\e[3~" | "^[[3~" => Some((KeyModifiers::NONE, KeyCode::Delete)),
+        "\\e[5~" | "^[[5~" | "\\e[I" | "^[[I" => Some((KeyModifiers::NONE, KeyCode::PageUp)),
+        "\\e[6~" | "^[[6~" | "\\e[G" | "^[[G" => Some((KeyModifiers::NONE, KeyCode::PageDown)),
+        // A bare ESC is one of GNU's default binds (`"\e": emacs-editing-mode`).
+        // It arrives here only when it is the whole keyseq; `\e[...` forms
+        // were matched above.
+        "\\e" | "^[" => Some((KeyModifiers::NONE, KeyCode::Esc)),
         "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
         _ => parse_alt_key_sequence(value)
             .or_else(|| parse_meta_key_sequence(value))
             .or_else(|| parse_control_key_sequence(value))
             .or_else(|| parse_plain_key_sequence(value)),
     }
+}
+
+/// Split a readline keyseq into per-key units and parse each unit.
+///
+/// The flat keymap owns single-key sequences; this returns `Some` only for
+/// a clean chain of two or more units (niubash#630: bash's
+/// `\C-x\C-e`-style chords, fzf's `\C-\e(`). A token that does not parse
+/// makes the whole sequence unparseable — the caller keeps reporting those
+/// (they are typos, not chords).
+fn parse_chord_sequence(value: &str) -> Option<Vec<(KeyModifiers, KeyCode)>> {
+    let units = split_key_units(value)?;
+    if units.len() < 2 {
+        return None;
+    }
+    units
+        .into_iter()
+        .map(parse_key_sequence)
+        .collect::<Option<Vec<_>>>()
+}
+
+/// Split a readline keyseq into its written units without interpreting
+/// them: `\C-x`, `\M-x`, `\e` (ESC), `\e[...]` terminal sequences, `^X`,
+/// and single literal characters.
+fn split_key_units(value: &str) -> Option<Vec<&str>> {
+    let mut rest = value;
+    let mut units = Vec::new();
+    while !rest.is_empty() {
+        let (unit, tail) = if let Some(tail) = rest
+            .strip_prefix("\\C-")
+            .or_else(|| rest.strip_prefix("\\M-"))
+        {
+            // The unit is the prefix plus one (possibly escaped) character.
+            let ch = tail.chars().next()?;
+            let end = rest.len() - tail.len() + ch.len_utf8();
+            (&rest[..end], &rest[end..])
+        } else if rest.starts_with("\\e[") {
+            let end = rest
+                .char_indices()
+                .skip(2)
+                .find(|(_, c)| c.is_ascii_alphabetic() || *c == '~')
+                .map(|(i, c)| i + c.len_utf8())?;
+            (&rest[..end], &rest[end..])
+        } else if let Some(tail) = rest.strip_prefix("\\e") {
+            // `\e` alone is ESC; `\eX` is the meta form one key (the same
+            // shape `parse_key_sequence` accepts as ALT+X), so it is not a
+            // chord unit boundary.
+            let mut chars = tail.chars();
+            let end = match (chars.next(), chars.next()) {
+                (Some('['), _) => unreachable!("handled above"),
+                (Some(ch), None) => rest.len() - tail.len() + ch.len_utf8(),
+                _ => rest.len() - tail.len(),
+            };
+            (&rest[..end], &rest[end..])
+        } else if let Some(tail) = rest.strip_prefix('^') {
+            let ch = tail.chars().next()?;
+            let end = 1 + ch.len_utf8();
+            (&rest[..end], &rest[end..])
+        } else {
+            let ch = rest.chars().next()?;
+            (&rest[..ch.len_utf8()], &rest[ch.len_utf8()..])
+        };
+        units.push(unit);
+        rest = tail;
+    }
+    Some(units)
 }
 
 /// GNU bind/inputrc `\C-x` / `\M-x` forms (readline rl_translate_keyseq).
@@ -2910,12 +3986,9 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // its status before the first prompt, the same shape as the
         // PROMPT_COMMAND jump handled in the loop below (GNU
         // jump_to_top_level unwinds reader_loop; no prompt is rendered).
-        let code = shell
-            .borrow_mut()
-            .finish_with_exit_trap(status)
-            .unwrap_or(status);
-        flush_repl_output();
-        std::process::exit(code);
+        // niubash#642: through the shared funnel, so the session-end
+        // history write runs on this path too (it used to skip it).
+        end_repl_session(&mut shell.borrow_mut(), status);
     }
     let no_editing = shell.borrow().no_editing;
     if no_editing {
@@ -2927,6 +4000,12 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // the line editor is built. Engine `bind` registrations (bind -x,
     // macros, function bindings) come from the same rc and snapshot at
     // the same point (niubash#185).
+    // A leftover pre-1.5.0 ~/.niubash/config.toml is never read. Say so
+    // once per interactive session, with the one-time migration command;
+    // the file itself never affects startup.
+    if let Some(notice) = crate::config::legacy_config_notice() {
+        eprintln!("{notice}");
+    }
     shell.borrow_mut().load_user_widget_bindings();
     shell.borrow_mut().load_user_compdefs();
     shell.borrow_mut().load_engine_bindings();
@@ -2939,7 +4018,10 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // the field.
     shell.borrow_mut().refresh_edit_mode();
     let mut line_editor = build_line_editor(&shell)?;
-    let mut engine_bind_generation = shell.borrow().engine_bind_generation;
+    // (The loop used to snapshot the engine-bind generation here
+    // and compare it against the executor between prompts; it
+    // now asks Shell::engine_bindings_stale, which reads the
+    // generation through the bind surface — row 11.)
     let mut pending = PendingReplInput::default();
 
     loop {
@@ -2952,10 +4034,24 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // editor before the next prompt. The buffer is empty at this
         // boundary (the previous line was submitted or interrupted) and
         // history writes through to the file, so the rebuild is lossless.
-        if shell.borrow().executor.bind_registry_generation() != engine_bind_generation {
+        if shell.borrow().engine_bindings_stale() {
             shell.borrow_mut().load_engine_bindings();
             line_editor = build_line_editor(&shell)?;
-            engine_bind_generation = shell.borrow().engine_bind_generation;
+        }
+        // niubash#646: refresh the HIST* settings snapshot before the
+        // line is read, so the record-time filters, the list stifle,
+        // and the session-end write all see the values the previous
+        // command (or PROMPT_COMMAND) left in the environment — GNU
+        // reads each variable at the moment of its operation.
+        shell.borrow_mut().refresh_history_settings();
+        // niubash#661: the refresh followed a live `HISTFILE` redirect
+        // on the provider side; the editor's history instance still
+        // backs the old file, so rebuild the editor over the new one —
+        // the same lossless construction path as the rebuilds below
+        // (the buffer is empty at this boundary and history state
+        // lives in the file and the shared ledger/settings cells).
+        if shell.borrow_mut().take_history_redirect() {
+            line_editor = build_line_editor(&shell)?;
         }
         let signal = if pending.is_empty() {
             drain_pending_notices();
@@ -2971,19 +4067,17 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // jump's status (last_exit_code, e.g. `exit 5`) is carried out
             // through the EXIT trap.
             if shell.borrow_mut().run_precmd_hooks() {
-                let status = shell.borrow().executor.last_exit_code();
-                let code = shell
-                    .borrow_mut()
-                    .finish_with_exit_trap(status)
-                    .unwrap_or(status);
+                let status = shell.borrow().session().last_status();
                 // The jump's status IS the session status (GNU's
                 // jump_to_top_level unwinds reader_loop and exit_shell
                 // carries it); the REPL's Ok(()) return otherwise always
                 // maps to rc 0 in main, so carry the status out directly —
                 // the same shape as the engine's piped `-i` route
                 // (src/main.rs run_interactive_stdin).
-                flush_repl_output();
-                std::process::exit(code);
+                // niubash#642: through the shared funnel, so the
+                // session-end history write runs on this path too (it
+                // used to skip it, resurrecting every cleared line).
+                end_repl_session(&mut shell.borrow_mut(), status);
             }
             // GNU readline starts every fresh line in insert mode, even in
             // vi editing mode (lib/readline/readline.c:1243-1249: "Each
@@ -3028,6 +4122,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // terminal: the guard stays disarmed until the next prompt
         // rebuild at the top of the loop.
         typeahead.disarm_and_reinject();
+
+        // niubash#669: while the foreground work below runs, watch the
+        // console input queue for a Ctrl+C that arrived as a raw input
+        // record — those never become a CTRL_C_EVENT, so the console
+        // handler cannot fire for them and a foreground command would
+        // run to completion uninterruptible. The watch synthesizes the
+        // missing delivery (engine note + group broadcast) and drops
+        // when this iteration ends. Windows-only effect.
+        let _foreground_ctrl_c_watch = crate::ctrl_c::ForegroundWatch::arm();
 
         match signal {
             Ok(Signal::HostCommand(payload)) => {
@@ -3094,7 +4197,11 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 if pending.is_empty() {
                     if let Some(args) = self_update_command_args(line) {
                         if let Some(code) = spawn_self_update(&args) {
-                            std::process::exit(code);
+                            // niubash#642: self-update ends the session
+                            // like any other exit — EXIT trap and the
+                            // session-end history write included (this
+                            // path used to skip both).
+                            end_repl_session(&mut shell.borrow_mut(), code);
                         }
                     }
                 }
@@ -3146,18 +4253,32 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 // prompt, like GNU.
                 print!("^C");
                 println!();
-                if crate::ctrl_c::consume_ctrl_c() {
+                let handler_queued = crate::ctrl_c::consume_ctrl_c();
+                if handler_queued {
                     flush_repl_output();
                 }
-                // niubash#611: a prompt Ctrl-C discards the line, and
-                // GNU leaves $? = 130 (128+SIGINT) for it. Reedline runs
-                // the tty in raw mode, so no kernel SIGINT reaches the
-                // engine at the prompt and nothing else records the
-                // status — set it here, before the next loop iteration's
-                // PROMPT_COMMAND pass (which reads this value and then
-                // preserves it across the hook).
-                shell.borrow_mut().executor.set_last_exit_code(130);
+                // niubash#616: GNU runs a trapped INT at the prompt
+                // immediately, before the next prompt. Reedline runs the
+                // tty in raw mode, so no kernel SIGINT reaches the engine
+                // at the prompt — deliver exactly one through the queue
+                // helper and let the engine's own boundary dispatch
+                // adjudicate it: a trapped INT runs its action now, an
+                // untrapped one lands as the DISCARD classification
+                // (#610). The dispatch also settles the status half of
+                // this arm: $? = 130 (128+SIGINT) on trap entry and again
+                // after the trap, which is #611's bookkeeping for the
+                // untrapped case and GNU's rule for both.
+                crate::ctrl_c::queue_prompt_sigint(handler_queued);
+                shell.borrow_mut().dispatch_prompt_interrupt();
+                flush_repl_output();
                 pending.clear();
+                // A trap action that itself exits (`trap 'exit 3' INT`)
+                // ends the session with its status, like a submitted
+                // line's top-level exit (niubash R1).
+                let jump = shell.borrow_mut().take_session_exit_jump();
+                if let Some(status) = jump {
+                    end_repl_session(&mut shell.borrow_mut(), status);
+                }
                 continue;
             }
             Ok(_) => continue,
@@ -3185,13 +4306,15 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         crate::console_guard::restore(&console_baseline);
         // niubash#180: same live-session apply as the line-editor loop.
         shell.apply_setup_config_if_pending();
+        // niubash#646: same settings refresh as the line-editor loop.
+        shell.refresh_history_settings();
         // niubash#191: same exit-jump consumption as the line-editor loop —
         // a PC `exit` ends the session before the next prompt is printed.
+        // niubash#642: through the shared funnel, so the session-end
+        // history write runs on this path too (it used to skip it).
         if shell.run_precmd_hooks() {
-            let status = shell.executor.last_exit_code();
-            let code = shell.finish_with_exit_trap(status).unwrap_or(status);
-            flush_repl_output();
-            std::process::exit(code);
+            let status = shell.session().last_status();
+            end_repl_session(shell, status);
         }
         let prompt = if pending.is_empty() {
             shell.prompt.render_prompt_left().to_string()
@@ -3247,11 +4370,12 @@ fn flush_repl_output() {
 mod tests {
     use super::*;
     use reedline::Menu;
+    use std::collections::HashSet;
 
     #[test]
     fn emacs_keybindings_keep_ctrl_r_history_search_and_tab_completion() {
         let mut keybindings = default_emacs_keybindings();
-        add_menu_keybindings(&mut keybindings);
+        add_menu_keybindings(&mut keybindings, CompletionInteraction::Insert);
         assert_eq!(
             keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
             Some(ReedlineEvent::SearchHistory)
@@ -3318,6 +4442,7 @@ mod tests {
                 history_page_size: 7,
                 max_entry_lines: 3,
                 completion_style: CompletionStyle::default(),
+                completion_interaction: CompletionInteraction::Insert,
             },
         );
 
@@ -3490,8 +4615,8 @@ mod tests {
     fn vi_keybindings_keep_ctrl_r_history_search_and_tab_completion() {
         let mut insert = default_vi_insert_keybindings();
         let mut normal = default_vi_normal_keybindings();
-        add_menu_keybindings(&mut insert);
-        add_menu_keybindings(&mut normal);
+        add_menu_keybindings(&mut insert, CompletionInteraction::Insert);
+        add_menu_keybindings(&mut normal, CompletionInteraction::Insert);
 
         for keybindings in [insert, normal] {
             assert_eq!(
@@ -3760,6 +4885,7 @@ mod tests {
             "history-substring-search-up",
             "history-search-backward",
             "up-line-or-history",
+            "previous-history",
         ] {
             assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Up));
         }
@@ -3767,9 +4893,123 @@ mod tests {
             "history-substring-search-down",
             "history-search-forward",
             "down-line-or-history",
+            "next-history",
         ] {
             assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Down));
         }
+    }
+
+    /// niubash#630 gap list: the **whole GNU default bind table** must
+    /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
+    /// is the table `bind -p` prints for a fresh bash 5.3, so feeding it
+    /// through the bridge is the compatibility gate for "GNU habits as the
+    /// default".
+    ///
+    /// With the reedline fork pinned in Cargo.toml (EventStatus re-export +
+    /// history-jump events) the whole table lands: no entry may stay
+    /// unmapped. Everything — Home/End/Delete spellings, `\C-r`
+    /// reverse-search, `\C-t` transpose, `\e` emacs-editing-mode and the
+    /// PgUp/PgDn history jumps — must reach the keybindings.
+    #[test]
+    fn gnu_default_bind_table_mirrors_except_known_gaps() {
+        let entries: Vec<crate::bind_surface::EngineBindEntry> =
+            rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
+                .iter()
+                .map(|(keyseq, name)| crate::bind_surface::EngineBindEntry {
+                    keyseq: (*keyseq).to_string(),
+                    kind: crate::bind_surface::EngineBindKind::Function {
+                        name: (*name).to_string(),
+                    },
+                    keymap: Some("emacs-standard".to_string()),
+                })
+                .collect();
+
+        let mut keybindings = default_emacs_keybindings();
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+        let mut unmapped: Vec<String> = unusable.into_iter().map(|bind| bind.keyseq).collect();
+        unmapped.sort();
+        assert_eq!(
+            unmapped,
+            Vec::<String>::new(),
+            "GNU default table must mirror except the documented gaps"
+        );
+
+        // Spot-check the terminal spellings that used to be rejected: the
+        // action, not just "no warning".
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Home),
+            Some(edit_event(EditCommand::MoveToLineStart { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::End),
+            Some(edit_event(EditCommand::MoveToLineEnd { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Delete),
+            Some(edit_event(EditCommand::Delete))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            Some(ReedlineEvent::SearchHistory)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
+            Some(edit_event(EditCommand::SwapGraphemes))
+        );
+    }
+
+    /// niubash#630 gap list: GNU readline functions the editor can already
+    /// deliver must mirror when a user re-binds them in an rc file. Before
+    /// this, `bind '"\C-t": transpose-chars'` (and the word-case pair, and
+    /// `unix-word-rubout`) landed in the unknown-widget sentinel and were
+    /// reported as "function is not in the host's deliverable set".
+    #[test]
+    fn native_widget_maps_deliverable_gnu_readline_names() {
+        assert_eq!(
+            native_widget_event("transpose-chars"),
+            Some(edit_event(EditCommand::SwapGraphemes))
+        );
+        assert_eq!(
+            native_widget_event("upcase-word"),
+            Some(edit_event(EditCommand::UppercaseWord))
+        );
+        assert_eq!(
+            native_widget_event("downcase-word"),
+            Some(edit_event(EditCommand::LowercaseWord))
+        );
+        assert_eq!(
+            native_widget_event("unix-word-rubout"),
+            Some(edit_event(EditCommand::CutWordLeft))
+        );
+        // `complete` shares the TAB completion event (menu first, then the
+        // editor's own completion), never the host-command sentinel.
+        match native_widget_event("complete") {
+            Some(ReedlineEvent::UntilFound(events)) => {
+                assert!(matches!(events.first(), Some(ReedlineEvent::Menu(_))));
+            }
+            other => panic!("complete must map to the completion event, got {other:?}"),
+        }
+        // GNU's editing-mode toggles are session-level switches, delivered
+        // as `SwitchMode` (the standby machine built by `build_line_editor`
+        // accepts the target).
+        assert_eq!(
+            native_widget_event("vi-editing-mode"),
+            Some(ReedlineEvent::SwitchMode(PromptEditMode::Vi(
+                PromptViMode::Insert
+            )))
+        );
+        assert_eq!(
+            native_widget_event("emacs-editing-mode"),
+            Some(ReedlineEvent::SwitchMode(PromptEditMode::Emacs))
+        );
+
+        // A genuinely undeliverable name still falls through to the
+        // shell-function-widget sentinel (the bridge reports those).
+        assert!(matches!(
+            native_widget_event("no_such_readline_fn"),
+            Some(ReedlineEvent::ExecuteHostCommand(_))
+        ));
     }
 
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
@@ -3944,6 +5184,315 @@ mod tests {
     }
 
     #[test]
+    fn parse_chord_sequence_splits_readline_chains() {
+        // bash's `\C-x\C-e` and fzf's `\C-\e(` are chords; single units are
+        // the flat keymap's business.
+        assert_eq!(
+            parse_chord_sequence(r"\C-x\C-e"),
+            Some(vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::CONTROL, KeyCode::Char('e')),
+            ])
+        );
+        assert_eq!(
+            parse_chord_sequence(r"\C-\e("),
+            // Readline semantics: `\\C-\\` consumes the escape, so this is
+            // Ctrl-\\ then the *literal* `e` and `(` — the "impossible to
+            // type" marker fzf picked.
+            Some(vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('\\')),
+                (KeyModifiers::NONE, KeyCode::Char('e')),
+                (KeyModifiers::NONE, KeyCode::Char('(')),
+            ])
+        );
+        // Terminal-sequence units split correctly.
+        assert_eq!(
+            parse_chord_sequence(r"\e[1~\C-a"),
+            Some(vec![
+                (KeyModifiers::NONE, KeyCode::Home),
+                (KeyModifiers::CONTROL, KeyCode::Char('a')),
+            ])
+        );
+        // Single key, malformed tail, empty: not chords.
+        assert_eq!(parse_chord_sequence(r"\C-x"), None);
+        assert_eq!(parse_chord_sequence(r"\C-x\C-"), None);
+        assert_eq!(parse_chord_sequence(""), None);
+    }
+
+    fn chord_test_key(code: KeyCode, modifiers: KeyModifiers) -> ReedlineRawEvent {
+        use crossterm29::event::{Event, KeyEvent};
+        ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
+    }
+
+    const TEST_KEYSEQ_TIMEOUT: Duration = Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS);
+
+    #[test]
+    fn escape_partner_without_a_meta_binding_is_delivered_now() {
+        use crossterm29::event::{Event, KeyEvent};
+        let inner = Emacs::new(default_emacs_keybindings());
+        // Only `c` has an ALT binding, so ESC + Down is not a meta fold.
+        let alt: HashSet<KeyCode> = [KeyCode::Char('c')].into_iter().collect();
+        let partner = Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let lookahead: Lookahead = Box::new(move |_| Some(partner.clone()));
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            Vec::new(),
+            alt,
+            Some(lookahead),
+            TEST_KEYSEQ_TIMEOUT,
+        );
+
+        let event = mode.parse_event(chord_test_key(KeyCode::Esc, KeyModifiers::NONE));
+        match event {
+            ReedlineEvent::Multiple(events) => assert_eq!(
+                events.len(),
+                2,
+                "ESC and the peeked key must both be delivered at once"
+            ),
+            other => panic!("expected ESC + Down as one batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_key_that_is_both_binding_and_prefix_waits_for_the_chord() {
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('x'),
+            edit_event(EditCommand::InsertString("SINGLE".to_string())),
+        );
+        let inner = Emacs::new(keybindings);
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
+
+        // The key is parked even though it has its own binding.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            edit_event(EditCommand::InsertString("QUICK".to_string()))
+        );
+
+        // Past the timeout the single binding fires, then the key stands alone.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        match mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)) {
+            ReedlineEvent::Multiple(events) => assert!(
+                events.contains(&edit_event(EditCommand::InsertString("SINGLE".to_string()))),
+                "the expired prefix replays its own binding: {events:?}"
+            ),
+            other => panic!("expected the single binding then the key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chord_prefix_expires_after_the_keyseq_timeout() {
+        use crossterm29::event::{Event, KeyCode as Code, KeyEvent, KeyModifiers as Mods};
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (Mods::CONTROL, Code::Char('x')),
+                (Mods::NONE, Code::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        let key = |code, modifiers| {
+            ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
+        };
+        // Inside the window: parked, then completed.
+        assert_eq!(
+            mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(key(Code::Char('z'), Mods::NONE)),
+            edit_event(EditCommand::InsertString("QUICK".to_string()))
+        );
+        // Past the window: the prefix is replayed on its own, the key is fresh.
+        assert_eq!(
+            mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        let event = mode.parse_event(key(Code::Char('z'), Mods::NONE));
+        assert_ne!(
+            event,
+            edit_event(EditCommand::InsertString("QUICK".to_string())),
+            "an expired prefix must not complete a chord"
+        );
+    }
+
+    #[test]
+    fn chord_index_matches_exact_prefix_and_mismatch() {
+        let chord = |keys: &[(KeyModifiers, KeyCode)], text: &str| ChordBinding {
+            keys: keys.to_vec(),
+            event: edit_event(EditCommand::InsertString(text.to_string())),
+        };
+        let ctrl_x = (KeyModifiers::CONTROL, KeyCode::Char('x'));
+        let z = (KeyModifiers::NONE, KeyCode::Char('z'));
+        let e = (KeyModifiers::NONE, KeyCode::Char('e'));
+        let ctrl_a = (KeyModifiers::CONTROL, KeyCode::Char('a'));
+        let b = (KeyModifiers::NONE, KeyCode::Char('b'));
+        let index = ChordIndex::new(&[
+            chord(&[ctrl_x, z], "first"),
+            // Duplicate sequences keep the first binding, like the old
+            // `iter().find()` scan.
+            chord(&[ctrl_x, z], "second"),
+            chord(&[ctrl_x, z, e], "longer"),
+            chord(&[ctrl_a, b], "other"),
+        ]);
+
+        assert_eq!(
+            index.exact(&[ctrl_x, z]),
+            Some(edit_event(EditCommand::InsertString("first".to_string())))
+        );
+        assert_eq!(
+            index.exact(&[ctrl_x, z, e]),
+            Some(edit_event(EditCommand::InsertString("longer".to_string())))
+        );
+        assert_eq!(index.exact(&[ctrl_x]), None, "only full sequences match");
+        assert_eq!(index.exact(&[ctrl_x, z, e, z]), None);
+
+        assert!(index.is_prefix(&[ctrl_x]));
+        assert!(
+            index.is_prefix(&[]),
+            "the empty prefix keeps the old scan's edge case"
+        );
+        assert!(
+            index.is_prefix(&[ctrl_x, z]),
+            "an exact sequence that prefixes a longer chord still waits"
+        );
+        assert!(index.is_prefix(&[ctrl_a]));
+        assert!(
+            !index.is_prefix(&[ctrl_x, z, e]),
+            "a leaf chord is not a prefix"
+        );
+        assert!(!index.is_prefix(&[ctrl_x, b]), "mismatched tail");
+        assert!(!index.is_prefix(&[e]), "unrelated key");
+    }
+
+    #[test]
+    fn zero_keyseq_timeout_waits_forever() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            edit_event(EditCommand::InsertString("QUICK".to_string())),
+            "0 is readline's wait-forever spelling"
+        );
+    }
+
+    #[test]
+    fn custom_keyseq_timeout_replaces_the_default_window() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            Duration::from_millis(40),
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(Duration::from_millis(80));
+        let event = mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_ne!(
+            event,
+            edit_event(EditCommand::InsertString("QUICK".to_string())),
+            "the configured 40 ms window must expire before 80 ms"
+        );
+    }
+
+    #[test]
+    fn collect_chord_bindings_carries_events_and_bindx_indices() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        let entries = vec![
+            BindEntry {
+                keyseq: r"\C-t".to_string(),
+                kind: BindKind::Execute {
+                    command: "flat".to_string(),
+                },
+                keymap: None,
+            },
+            BindEntry {
+                keyseq: r"\C-x\C-e".to_string(),
+                kind: BindKind::Execute {
+                    command: "chord".to_string(),
+                },
+                keymap: None,
+            },
+            BindEntry {
+                keyseq: r"\C-x\C-r".to_string(),
+                kind: BindKind::Macro {
+                    text: "reload".to_string(),
+                },
+                keymap: None,
+            },
+        ];
+        let chords = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs, 0);
+        assert_eq!(chords.len(), 2);
+        assert_eq!(
+            chords[0].event,
+            ReedlineEvent::ExecuteHostCommand(format!("{BINDX_HOST_COMMAND_PREFIX}1"))
+        );
+        assert_eq!(
+            chords[1].event,
+            edit_event(EditCommand::InsertString("reload".to_string()))
+        );
+    }
+
+    #[test]
     fn char_offset_to_byte_walks_multibyte_boundaries() {
         assert_eq!(char_offset_to_byte("", 0), 0);
         assert_eq!(char_offset_to_byte("abc", 1), 1);
@@ -3958,40 +5507,40 @@ mod tests {
     fn engine_bind_entries_mirror_into_reedline_keybindings() {
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-r"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Execute {
+                kind: crate::bind_surface::EngineBindKind::Execute {
                     command: "__fzf_history__".to_string(),
                 },
                 keymap: Some("emacs-standard".to_string()),
             },
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-t"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Macro {
+                kind: crate::bind_surface::EngineBindKind::Macro {
                     text: "ins-macro".to_string(),
                 },
                 keymap: None,
             },
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-o"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Function {
+                kind: crate::bind_surface::EngineBindKind::Function {
                     name: "accept-line".to_string(),
                 },
                 keymap: None,
             },
             // Unknown readline function name: GNU silently drops it
             // (wt100 probe), so the bridge reports it unusable.
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-g"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Function {
+                kind: crate::bind_surface::EngineBindKind::Function {
                     name: "no-such-fn".to_string(),
                 },
                 keymap: None,
             },
             // Multi-key sequence: reedline cannot represent it.
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-x\C-f"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Execute {
+                kind: crate::bind_surface::EngineBindKind::Execute {
                     command: "multi".to_string(),
                 },
                 keymap: None,
@@ -3999,9 +5548,9 @@ mod tests {
             // vi-insert keymap entry must not land on the emacs keymap
             // (\C-6 is unbound in the emacs defaults, so a hit would be
             // ours and ours alone).
-            rubash::shell::bind_registry::BindEntry {
+            crate::bind_surface::EngineBindEntry {
                 keyseq: r#"\C-6"#.to_string(),
-                kind: rubash::shell::bind_registry::BindKind::Execute {
+                kind: crate::bind_surface::EngineBindKind::Execute {
                     command: "vi-only".to_string(),
                 },
                 keymap: Some("vi-insert".to_string()),
@@ -4034,18 +5583,11 @@ mod tests {
         );
         assert_eq!(
             unusable,
-            vec![
-                UnusableBind {
-                    keyseq: r"\C-g".to_string(),
-                    reason: UnusableBindReason::Other,
-                },
-                // Multi-key sequences are recorded but, since
-                // niubash#612, classified structural (no warning).
-                UnusableBind {
-                    keyseq: r"\C-x\C-f".to_string(),
-                    reason: UnusableBindReason::ChainedSequence,
-                },
-            ]
+            vec![UnusableBind {
+                keyseq: r"\C-g".to_string(),
+                reason: UnusableBindReason::Other,
+            }],
+            "the chord entry is delivered by the chord layer, not dropped"
         );
     }
 
@@ -4066,7 +5608,7 @@ mod tests {
     // entries still mirror.
     #[test]
     fn issue612_fzf_workaround_binds_drop_silently() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let function = |keyseq: &str, keymap: &str, name: &str| BindEntry {
             keyseq: keyseq.to_string(),
             kind: BindKind::Function {
@@ -4081,29 +5623,25 @@ mod tests {
             function(r"\C-z", "vi-insert", "emacs-editing-mode"),
             function(r"\C-z", "emacs-standard", "vi-editing-mode"),
         ];
-        let chained = UnusableBind {
-            keyseq: r"\C-\e(".to_string(),
-            reason: UnusableBindReason::ChainedSequence,
-        };
-        let toggle = UnusableBind {
-            keyseq: r"\C-z".to_string(),
-            reason: UnusableBindReason::ModeToggleFunction,
-        };
+        // Nothing in fzf's workaround set is dropped any more: the `\C-z`
+        // toggles map onto `SwitchMode`, and the `\C-\e(` chord is
+        // delivered by `ChordEditMode`.
+
         for (target, mut keybindings, expected) in [
             (
                 NativeKeymapTarget::Emacs,
                 default_emacs_keybindings(),
-                vec![chained.clone(), toggle.clone()],
+                Vec::new(),
             ),
             (
                 NativeKeymapTarget::ViInsert,
                 default_vi_insert_keybindings(),
-                vec![toggle.clone()],
+                Vec::new(),
             ),
             (
                 NativeKeymapTarget::ViNormal,
                 default_vi_normal_keybindings(),
-                vec![toggle.clone()],
+                Vec::new(),
             ),
         ] {
             let unusable = add_engine_bind_keybindings(&mut keybindings, target, &workarounds);
@@ -4165,19 +5703,17 @@ mod tests {
         );
     }
 
-    // niubash#612: the structural classes are judged by the bind's own
-    // shape and function category, never by which tool emitted it.
-    // These entries are invented shapes (no tool's actual script):
-    // chained sequences and editing-mode toggles from a hypothetical
-    // third-party integration are just as silent, while an unknown
-    // function, a malformed sequence, and a real-but-unmirrored
-    // non-toggle function still warn.
+    // niubash#630 closed both structural classes: chained sequences are
+    // delivered by `ChordEditMode` (the chord layer), editing-mode toggles
+    // by `SwitchMode`, and `redraw-current-line` maps to `Repaint`. What
+    // still warns is exactly what a user can act on: an unknown function
+    // and a malformed sequence.
     #[test]
-    fn issue612_structural_silence_is_source_agnostic() {
-        use rubash::shell::bind_registry::{BindEntry, BindKind};
+    fn issue612_structural_classes_are_gone() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
-            // Invented chained Execute bind.
+            // A chord: delivered by the chord layer, never dropped.
             BindEntry {
                 keyseq: r"\C-x\C-a".to_string(),
                 kind: BindKind::Execute {
@@ -4185,7 +5721,7 @@ mod tests {
                 },
                 keymap: None,
             },
-            // Invented chained Macro bind.
+            // A chord macro, same.
             BindEntry {
                 keyseq: r"\C-b\C-b".to_string(),
                 kind: BindKind::Macro {
@@ -4193,7 +5729,7 @@ mod tests {
                 },
                 keymap: Some("emacs-standard".to_string()),
             },
-            // Invented mode toggles: keys/keymaps no real script uses.
+            // A mode toggle: maps to SwitchMode.
             BindEntry {
                 keyseq: r"\C-q".to_string(),
                 kind: BindKind::Function {
@@ -4201,12 +5737,13 @@ mod tests {
                 },
                 keymap: None,
             },
+            // A deliverable readline function: maps to Repaint.
             BindEntry {
-                keyseq: r"\eg".to_string(),
+                keyseq: r"\C-y".to_string(),
                 kind: BindKind::Function {
-                    name: "emacs-editing-mode".to_string(),
+                    name: "redraw-current-line".to_string(),
                 },
-                keymap: None,
+                keymap: Some("emacs-standard".to_string()),
             },
             // Unknown function name: actionable, still warns.
             BindEntry {
@@ -4216,8 +5753,7 @@ mod tests {
                 },
                 keymap: None,
             },
-            // Malformed sequence (dangling modifier): not a chain,
-            // still warns.
+            // Malformed sequence (dangling modifier): still warns.
             BindEntry {
                 keyseq: r"\C-".to_string(),
                 kind: BindKind::Execute {
@@ -4225,46 +5761,15 @@ mod tests {
                 },
                 keymap: None,
             },
-            // A real readline function niu does not mirror, but not a
-            // mode toggle: still warns (only the toggle class is
-            // structural on the function axis).
-            BindEntry {
-                keyseq: r"\C-y".to_string(),
-                kind: BindKind::Function {
-                    name: "redraw-current-line".to_string(),
-                },
-                keymap: Some("emacs-standard".to_string()),
-            },
         ];
         let unusable =
             add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
         let reasons: Vec<UnusableBindReason> = unusable.iter().map(|bind| bind.reason).collect();
         assert_eq!(
             reasons,
-            vec![
-                UnusableBindReason::ChainedSequence,
-                UnusableBindReason::ChainedSequence,
-                UnusableBindReason::ModeToggleFunction,
-                UnusableBindReason::ModeToggleFunction,
-                UnusableBindReason::Other,
-                UnusableBindReason::Other,
-                UnusableBindReason::Other,
-            ]
+            vec![UnusableBindReason::Other, UnusableBindReason::Other]
         );
-        assert_eq!(warned_keyseqs(&unusable), vec![r"\C-g", r"\C-", r"\C-y"]);
-    }
-
-    // niubash#612: the chain scan is lexical — a malformed sequence
-    // must not be misread as a chain (it warns as unparseable).
-    #[test]
-    fn issue612_chained_sequence_scan() {
-        assert!(is_chained_key_sequence(r"\C-x\C-f"));
-        assert!(is_chained_key_sequence(r"\C-\e("));
-        assert!(is_chained_key_sequence("ab"));
-        assert!(!is_chained_key_sequence(r"\C-z"));
-        assert!(!is_chained_key_sequence(r"\C-"));
-        assert!(!is_chained_key_sequence(r"\e[A"));
-        assert!(!is_chained_key_sequence(""));
+        assert_eq!(warned_keyseqs(&unusable), vec![r"\C-g", r"\C-"]);
     }
 
     #[test]
@@ -4291,6 +5796,290 @@ mod tests {
             Some("emacs-meta"),
             NativeKeymapTarget::Emacs
         ));
+    }
+
+    // niubash#630, Appendix A snapshot-equivalence pin: with no
+    // engine binds and no precedence overlap, the layered registry
+    // build must produce exactly the keymap the pre-registry build
+    // order produced — the refactor is a move, not a behavior change.
+    #[test]
+    fn issue630_layered_build_matches_legacy_order() {
+        let config = NativeWidgetConfig {
+            enabled: true,
+            presets: vec!["autosuggestions".to_string()],
+            import_bindkeys: true,
+        };
+        let bundle = vec![native_widget_binding("^ ", None, "autosuggest-accept")];
+        let user = vec![native_widget_binding("^F", None, "autosuggest-accept")];
+        for (defaults, target, mode) in [
+            (
+                default_emacs_keybindings(),
+                NativeKeymapTarget::Emacs,
+                crate::keymap_registry::KeymapMode::Emacs,
+            ),
+            (
+                default_vi_insert_keybindings(),
+                NativeKeymapTarget::ViInsert,
+                crate::keymap_registry::KeymapMode::ViInsert,
+            ),
+            (
+                default_vi_normal_keybindings(),
+                NativeKeymapTarget::ViNormal,
+                crate::keymap_registry::KeymapMode::ViNormal,
+            ),
+        ] {
+            // The pre-registry build order, verbatim.
+            let mut legacy = defaults.clone();
+            add_menu_keybindings(&mut legacy, CompletionInteraction::Insert);
+            add_system_clipboard_keybindings(&mut legacy);
+            add_native_widget_keybindings(&mut legacy, target, &config, &bundle);
+            add_bundle_widget_keybindings(&mut legacy, target, &config, &bundle);
+            add_user_widget_keybindings(&mut legacy, &user);
+            add_engine_bind_keybindings(&mut legacy, target, &[]);
+
+            let (built, entries, dropped) = build_keymap_for_target(
+                defaults,
+                target,
+                mode,
+                &config,
+                &bundle,
+                &user,
+                &[],
+                CompletionInteraction::Insert,
+            );
+            assert_eq!(
+                built.get_keybindings(),
+                legacy.get_keybindings(),
+                "keymap drift on {target:?}"
+            );
+            assert!(dropped.is_empty(), "no drops without engine binds");
+            assert_eq!(
+                entries.len(),
+                built.get_keybindings().len(),
+                "the registry lists exactly the effective table on {target:?}"
+            );
+        }
+    }
+
+    // niubash#630, the one deliberate precedence change (DESIGN §5.3):
+    // a user binding (NIU_BINDKEYS) now beats a script `bind` on the
+    // same key — before the registry build, the engine pass ran last
+    // and silently overrode the user. The registry records the win
+    // and what it shadowed.
+    #[test]
+    fn issue630_user_binding_beats_script_binding() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        let config = NativeWidgetConfig::default();
+        let engine = vec![BindEntry {
+            keyseq: r"\C-g".to_string(),
+            kind: BindKind::Execute {
+                command: "script-widget".to_string(),
+            },
+            keymap: None,
+        }];
+        let user = vec![native_widget_binding("^G", None, "accept-line")];
+        let (built, entries, dropped) = build_keymap_for_target(
+            default_emacs_keybindings(),
+            NativeKeymapTarget::Emacs,
+            crate::keymap_registry::KeymapMode::Emacs,
+            &config,
+            &[],
+            &user,
+            &engine,
+            CompletionInteraction::Insert,
+        );
+        assert!(dropped.is_empty());
+        assert_eq!(
+            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(ReedlineEvent::Enter),
+            "the user's binding wins the slot"
+        );
+        let row = entries
+            .iter()
+            .find(|entry| entry.key_display == "\"\\C-g\"")
+            .expect("registry row for the contested key");
+        assert_eq!(
+            row.source,
+            crate::keymap_registry::KeymapSource::User {
+                via: crate::keymap_registry::UserBindingVia::NiuBindkeys
+            }
+        );
+        assert_eq!(
+            row.shadowed,
+            Some(crate::keymap_registry::KeymapSource::Script)
+        );
+        assert_eq!(row.action, "accept line");
+    }
+
+    // niubash#630: the recorded half of the bridge — dropped records
+    // classify by shape (DESIGN §6.1), and a key-script macro is
+    // recorded as mirrored-with-loss while its translation stays the
+    // pre-K3 literal insert.
+    #[test]
+    fn issue630_dropped_records_classify_by_shape() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use crate::keymap_registry::{DroppedKind, DroppedReason};
+        let entry = |keyseq: &str, kind: BindKind| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind,
+            keymap: None,
+        };
+        let engine = vec![
+            entry(
+                r"\C-\e(",
+                BindKind::Function {
+                    name: "redraw-current-line".to_string(),
+                },
+            ),
+            entry(
+                r"\C-z",
+                BindKind::Function {
+                    name: "vi-editing-mode".to_string(),
+                },
+            ),
+            // zoxide's response-sequence trick (DESIGN §3 #5).
+            entry(
+                r"\e[0n",
+                BindKind::Execute {
+                    command: "__zoxide_hook".to_string(),
+                },
+            ),
+            entry(
+                r"\C-g",
+                BindKind::Function {
+                    name: "no-such-readline-function".to_string(),
+                },
+            ),
+            // fzf's Alt-C macro (DESIGN §3 #7): control escapes and a
+            // command substitution — a key script, not text.
+            entry(
+                r"\ec",
+                BindKind::Macro {
+                    text: r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string(),
+                },
+            ),
+            // The same macro in its stored form: the engine has
+            // already translated the escapes to raw control bytes.
+            entry(
+                r"\C-x",
+                BindKind::Macro {
+                    text: " \u{2}\u{b} __fzf_cd__".to_string(),
+                },
+            ),
+        ];
+        let (built, _entries, dropped) = build_keymap_for_target(
+            default_emacs_keybindings(),
+            NativeKeymapTarget::Emacs,
+            crate::keymap_registry::KeymapMode::Emacs,
+            &NativeWidgetConfig::default(),
+            &[],
+            &[],
+            &engine,
+            CompletionInteraction::Insert,
+        );
+        let shapes: Vec<(&str, DroppedReason)> = dropped
+            .iter()
+            .map(|bind| (bind.keyseq.as_str(), bind.reason))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (r"\e[0n", DroppedReason::ResponseSequence),
+                (r"\C-g", DroppedReason::UnknownFunction),
+                (r"\ec", DroppedReason::ScriptMacro),
+                (r"\C-x", DroppedReason::ScriptMacro),
+            ],
+            "the chord and the mode toggle are delivered now, not dropped"
+        );
+        assert_eq!(dropped[0].kind, DroppedKind::Execute);
+        // K1 records the macro; the translation is unchanged until K3.
+        assert_eq!(
+            built.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
+            Some(edit_event(EditCommand::InsertString(
+                r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string()
+            )))
+        );
+    }
+
+    // niubash#630, K4: the `[keymap].bind` rule parser takes the bind
+    // builtin's own argument strings — plain, macro, -x and -m forms —
+    // through the engine's parsers (no second grammar), and refuses
+    // everything that cannot register a binding, with the reason.
+    #[test]
+    fn issue630_keymap_bind_rule_parser_forms() {
+        use crate::bind_surface::EngineBindKind as BindKind;
+        let entry = parse_keymap_bind_rule(r#""\C-g": redisplay"#).expect("function form");
+        assert_eq!(entry.keyseq, r"\C-g");
+        assert_eq!(
+            entry.kind,
+            BindKind::Function {
+                name: "redisplay".to_string()
+            }
+        );
+        assert_eq!(entry.keymap, None);
+
+        let entry = parse_keymap_bind_rule(r#""\C-g": "ins-text""#).expect("macro form");
+        assert_eq!(
+            entry.kind,
+            BindKind::Macro {
+                text: "ins-text".to_string()
+            }
+        );
+
+        let entry = parse_keymap_bind_rule(r#"-x "\C-t": my-cmd"#).expect("-x form");
+        assert_eq!(entry.keyseq, r"\C-t");
+        assert_eq!(
+            entry.kind,
+            BindKind::Execute {
+                command: "my-cmd".to_string()
+            }
+        );
+
+        let entry = parse_keymap_bind_rule(r#"-m vi-insert "\C-g": redisplay"#).expect("-m form");
+        assert_eq!(entry.keymap.as_deref(), Some("vi-insert"));
+
+        let entry = parse_keymap_bind_rule(r#"-m emacs-standard -x "\C-r": hist-widget"#)
+            .expect("-m + -x form");
+        assert_eq!(entry.keymap.as_deref(), Some("emacs-standard"));
+        assert_eq!(
+            entry.kind,
+            BindKind::Execute {
+                command: "hist-widget".to_string()
+            }
+        );
+
+        // Refusals: each names why; none of them parses partially.
+        for (spec, needle) in [
+            ("", "empty"),
+            ("hello", "missing separator"),
+            (r#"-r "\C-t""#, "unbind"),
+            ("-p", "unsupported bind option"),
+            (
+                r#"-m no-such-keymap "\C-g": redisplay"#,
+                "invalid keymap name",
+            ),
+            ("set completion-ignore-case on", "readline variables"),
+            (r#""\C-g""#, "no key sequence terminator"),
+        ] {
+            let err = parse_keymap_bind_rule(spec).expect_err("must refuse");
+            assert!(
+                err.contains(needle),
+                "spec {spec:?} refused with {err:?}, expected a mention of {needle:?}"
+            );
+        }
+
+        // The unbind parser: one key, in bind spelling, quoted or bare;
+        // a chain names no single key and is refused whole.
+        assert_eq!(
+            parse_keymap_unbind_key(r#""\C-t""#),
+            Ok((KeyModifiers::CONTROL, KeyCode::Char('t')))
+        );
+        assert_eq!(
+            parse_keymap_unbind_key(r"\C-t"),
+            Ok((KeyModifiers::CONTROL, KeyCode::Char('t')))
+        );
+        assert!(parse_keymap_unbind_key(r#""\C-x\C-f""#).is_err());
+        assert!(parse_keymap_unbind_key("").is_err());
     }
 
     #[test]
@@ -5732,5 +7521,230 @@ mod tests {
                 "the follow-up submit stays bare ({completion_style:?}): {event:?}"
             );
         }
+    }
+
+    /// niubash#631: a detector carrying a cycle session cell, plus the
+    /// cell itself so a test can publish the session state the
+    /// CycleMenu would have published.
+    fn cycle_detector() -> (PasteChunkEditMode, SharedCycleSession) {
+        let (detector, _queue) =
+            paste_detector_and_queue_for_style(Vec::new(), CompletionStyle::Column);
+        let session: SharedCycleSession = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::completion::cycle_menu::CycleSession::default(),
+        ));
+        (detector.with_cycle_session(Some(session.clone())), session)
+    }
+
+    /// Publish a live, spliced cycle session over the line `git ch`
+    /// (the state the CycleMenu leaves after TAB #1 on `git ch`).
+    fn arm_cycle_session(session: &SharedCycleSession, spliced: bool) {
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "git ch".to_string(),
+            cursor: 6,
+        });
+        state.spliced = spliced;
+    }
+
+    fn esc() -> ReedlineRawEvent {
+        paste_key(
+            crossterm29::event::KeyCode::Esc,
+            crossterm29::event::KeyModifiers::NONE,
+        )
+    }
+
+    #[test]
+    fn issue631_tab_binding_shape_follows_the_interaction_axis() {
+        // insert: the pre-#631 binding, byte for byte — open the menu,
+        // falling back to the engine's Complete edit.
+        let mut insert_map = default_emacs_keybindings();
+        add_menu_keybindings(&mut insert_map, CompletionInteraction::Insert);
+        assert_eq!(
+            insert_map.find_binding(KeyModifiers::NONE, KeyCode::Tab),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+                ReedlineEvent::Edit(vec![EditCommand::Complete]),
+            ]))
+        );
+        // cycle: TAB is MenuNext first (advance an open menu), falling
+        // through to opening the menu when none is open.
+        let mut cycle_map = default_emacs_keybindings();
+        add_menu_keybindings(&mut cycle_map, CompletionInteraction::Cycle);
+        assert_eq!(
+            cycle_map.find_binding(KeyModifiers::NONE, KeyCode::Tab),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuNext,
+                ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+            ]))
+        );
+        // Shift-TAB navigates backwards under both interactions.
+        for map in [insert_map, cycle_map] {
+            assert_eq!(
+                map.find_binding(KeyModifiers::SHIFT, KeyCode::BackTab),
+                Some(ReedlineEvent::MenuPrevious)
+            );
+        }
+    }
+
+    #[test]
+    fn issue631_wrapper_esc_rolls_back_a_spliced_cycle_session() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, true);
+        detector.parse_event(tab());
+        let event = detector.parse_event(esc());
+        match &event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(events.len(), 2, "{event:?}");
+                // Restore first, then the Esc that closes the menu.
+                assert_eq!(
+                    events[0],
+                    ReedlineEvent::Edit(crate::completion::cycle_menu::rollback_edits(
+                        &crate::completion::cycle_menu::CycleSnapshot {
+                            buffer: "git ch".to_string(),
+                            cursor: 6,
+                        },
+                    ))
+                );
+                assert!(matches!(&events[1], ReedlineEvent::Esc));
+            }
+            other => panic!("expected rollback + Esc, got {other:?}"),
+        }
+        // The session was consumed: no second rollback can fire.
+        assert!(!session.lock().unwrap().is_open());
+    }
+
+    #[test]
+    fn issue631_wrapper_esc_without_a_splice_stays_a_plain_esc() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, false);
+        detector.parse_event(tab());
+        let event = detector.parse_event(esc());
+        assert!(
+            matches!(event, ReedlineEvent::Esc),
+            "nothing was spliced, so nothing rolls back: {event:?}"
+        );
+        assert!(!session.lock().unwrap().is_open());
+    }
+
+    #[test]
+    fn issue631_wrapper_enter_accepts_and_submits_inside_a_live_cycle_session() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, true);
+        detector.parse_event(tab());
+        let event = detector.parse_event(cr());
+        match &event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(events.len(), 2, "{event:?}");
+                assert!(matches!(&events[0], ReedlineEvent::MenuAccept));
+                assert!(matches!(&events[1], ReedlineEvent::Enter));
+            }
+            other => panic!("expected accept + submit, got {other:?}"),
+        }
+
+        // No live session (cell attached but closed): the Enter stays
+        // bare — the #486 first-refusal shape decides, not a wrap.
+        let (mut detector, session) = cycle_detector();
+        assert!(!session.lock().unwrap().is_open());
+        detector.parse_event(tab());
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "no live cycle session, no accept wrap: {event:?}"
+        );
+    }
+
+    /// Publish a live cycle session the way the CycleMenu leaves it
+    /// after TAB #1 on `git ch`: candidates frozen, candidate 1 in
+    /// the line (region 4..12), snapshot span 4..6.
+    fn arm_cycle_session_with_candidates(session: &SharedCycleSession) {
+        use crate::completion::cycle_menu::CycleCandidate;
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "git ch".to_string(),
+            cursor: 6,
+        });
+        state.spliced = true;
+        state.candidates = vec![
+            CycleCandidate {
+                value: "checkout".to_string(),
+                append_whitespace: false,
+            },
+            CycleCandidate {
+                value: "cherry".to_string(),
+                append_whitespace: false,
+            },
+        ];
+        state.span = (4, 6);
+        state.index = 0;
+        state.region = (4, 12);
+        state.nav_seq = 0;
+    }
+
+    #[test]
+    fn issue631_wrapper_tab_issues_the_navigation_splice_itself() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_candidates(&session);
+
+        // TAB: the wrapper returns the whole-line splice to candidate
+        // 2 directly — no MenuNext reaches the bindings, so the line
+        // and the grid highlight can never sit a paint apart.
+        let event = detector.parse_event(tab());
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        {
+            let state = session.lock().unwrap();
+            assert_eq!(state.index, 1);
+            assert_eq!(state.region, (4, 10));
+            assert_eq!(state.nav_seq, 1);
+        }
+        // TAB again wraps to candidate 1; Shift-TAB wraps back.
+        let event = detector.parse_event(tab());
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git checkout",
+                12,
+            ))
+        );
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::BackTab,
+            crossterm29::event::KeyModifiers::SHIFT,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        let state = session.lock().unwrap();
+        assert_eq!(state.index, 1);
+        assert_eq!(state.nav_seq, 3);
+    }
+
+    #[test]
+    fn issue631_wrapper_edit_key_ends_the_cycle_session_as_accepted() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session(&session, true);
+        // A plain character is an edit on the spliced candidate: the
+        // session ends (accepted in place) at translation time, so a
+        // following Esc is a plain menu-close Esc with no rollback.
+        detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Char('x'),
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert!(!session.lock().unwrap().is_open());
+        let event = detector.parse_event(esc());
+        assert!(
+            matches!(event, ReedlineEvent::Esc),
+            "the accepted session leaves nothing to roll back: {event:?}"
+        );
     }
 }

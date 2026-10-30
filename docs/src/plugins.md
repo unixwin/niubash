@@ -2,9 +2,9 @@
 
 Niubash does not vendor a plugin framework. The plugin system is the **external
 bash ecosystem as first-class content**: oh-my-bash, bash-it and
-bash-completion install over `git clone`, earn activation through an explicit
-trust review, and expose their real themes/plugins/aliases/completions through
-their own selection mechanisms. Nothing is sourced until you say so.
+bash-completion install over `git clone` and expose their real
+themes/plugins/aliases/completions through
+their own selection mechanisms. Nothing is sourced until you enable it.
 
 This page is the user guide; the last section is a compact quick reference for
 AI agents driving niu on a user's behalf.
@@ -31,16 +31,17 @@ in the index as catalog metadata and `add` prints the commands.
 
 ```console
 $ niu plugin discover              # read-only: what's out there
-$ niu plugin add oh-my-bash        # git-clones the manager (UNTRUSTED)
-$ niu plugin trust oh-my-bash      # review checksum, flip the execution gate
+$ niu plugin add oh-my-bash        # git-clones the manager
 $ niu plugin list                  # sources, assets, activation state
 $ niu plugin enable agnoster      # activate a theme through oh-my-bash
 ```
 
-The trust gate is the load-bearing rule: **install and activation are separate
+The load-bearing rule: **install and activation are separate
 verbs**. `add`/`apply` land content on disk but nothing from it executes in
-your shell until `niu plugin trust <id>` succeeds (checksum review) or you
-`enable` an asset explicitly. Collection applies honor the same rule.
+your shell until you `enable` an asset explicitly. Collection applies honor
+the same rule. (There is no trust/review gate — niubash#647 removed it;
+what you install is what runs once enabled, exactly like cloning a repo
+and sourcing it by hand.)
 
 Manager sources (catalog ids like `oh-my-bash`) are also declared in the
 spec `~/.niubash/plugins.toml` — the single source of truth for what is
@@ -126,8 +127,8 @@ recipe = "starship"
 ```
 
 Imports are first-class: anything the built-ins can do, your own repo can do,
-byte-identically. `apply` installs every entry through its recipe driver and
-**never grants trust** — you review afterwards. Failures are collected per
+byte-identically. `apply` installs every entry through its recipe driver —
+installation only; activation stays an explicit `enable`. Failures are collected per
 entry (a bad entry never kills the rest) and reported with the retry verb.
 The first-run wizard's plugin-collection question is a LazyVim-style
 progressive-disclosure hook: it only appears when the ecosystem is empty, and
@@ -135,14 +136,11 @@ Skip is the default.
 
 When the picked collection installs a theme-bearing source (`recommended`/
 `full`), the same wizard run immediately offers the theme pick — one run,
-out of the box. The gallery lists trusted sources only, so the flow first
-asks a single trust question (the wizard's phrasing of
-`niu plugin trust`, same checksum tier); answering it lists the fresh
+out of the box. The gallery lists the fresh
 source's themes, and the pick lands through the same manifest +
 generated-loader path a later `niu plugin enable <theme>` uses, journaled
 with its own undo line. Declining (or Esc) changes nothing — the run prints
-the exact
-`niu plugin trust <id>` command plus the re-run/enable follow-up instead.
+the re-run/enable follow-up instead.
 
 ## Tools: package-manager recommendations
 
@@ -160,8 +158,8 @@ removed by deleting the directory.
 ## The menu UI
 
 `niu plugin ui` opens a menu-level UI (needs an interactive terminal):
-sections ordered by what needs attention — untrusted sources first, then
-ready sources, installable recipes, collections, global verbs. Every
+sections ordered by what needs attention — sources whose tree is missing
+first, then ready sources, installable recipes, collections, global verbs. Every
 action in the menu is the same verb the CLI runs (the footer shows the CLI
 equivalent of each); there is no UI-only logic. Rows read
 `[state] id — hint`.
@@ -172,12 +170,12 @@ When driving niu on a user's machine:
 
 - Prefer `niu plugin recipe list --json` and `niu plugin list [--json]` for
   state; plain-text output is for humans and changes freely.
-- **Never auto-trust.** `niu plugin add ...` / `distro apply ...` are safe
-  (content lands but does not execute). `niu plugin trust <id>` flips the
-  execution gate — that is a human review step. Report untrusted ids to the
-  user with the exact command they should run.
-- Trust requires an intact tree; a degraded source (missing directory) cannot
-  be trusted — suggest `niu plugin restore <id>`.
+- **Install is not activation.** `niu plugin add ...` / `distro apply ...`
+  land content on disk but nothing executes until an explicit
+  `niu plugin enable ...`. There is no trust gate (niubash#647): once the
+  user enables an asset, it runs as-is.
+- A source whose tree is missing cannot activate — suggest
+  `niu plugin restore <id>`.
 - Mutations print their undo (`disable`, `source remove`,
   `source rollback <id>`). Surface those undo verbs to the user.
 - `niu plugin update <id>` moves a source to its ref tip (no id = every

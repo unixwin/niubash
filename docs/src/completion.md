@@ -19,21 +19,40 @@ TAB never shows you things you did not ask for:
    `rubash/` and `repro/`), there is nothing to complete, so the grid
    acts as the disambiguation aid right away.
 
+## Where candidates come from
+
+GNU surfaces are authoritative, in this order:
+
+1. shell-function completers (`NIU_COMPDEFS`, compdef protocol) — opt-in;
+2. a GNU compspec registered by `complete` (bash-completion included) — when
+   it exists it owns the command's arguments, and neither the static tables
+   nor the path fallback contribute;
+3. niu's embedded completion tables (winuxcmd applets and common commands,
+   then bundle and user completion dirs) — only for commands without a
+   compspec;
+4. path / variable / command-name completion.
+
+The embedded tables are generated data (`assets/completions/*.toml`), not
+configuration: nothing about them is user-editable, and they never override
+what `complete` registered.
+
 ## Completion styles
 
 Five shapes, one TAB contract. Switch any time; it takes effect on the
 next prompt:
 
 ```sh
-niu config set completion.style column   # default: multi-per-row grid
-niu config set completion.style gnu      # GNU readline: printed transcript list
-niu config set completion.style ide      # VS Code-style popup with descriptions
-niu config set completion.style list     # fish-style vertical list
-niu config set completion.style inline   # cycle candidates in place (bash menu-complete)
+export NIU_COMPLETION_STYLE=column   # default: multi-per-row grid
+export NIU_COMPLETION_STYLE=gnu      # GNU readline: printed transcript list
+export NIU_COMPLETION_STYLE=ide      # VS Code-style popup with descriptions
+export NIU_COMPLETION_STYLE=list     # fish-style vertical list
+export NIU_COMPLETION_STYLE=inline   # cycle candidates in place (bash menu-complete)
 ```
 
-`NIU_COMPLETION_STYLE` overrides the file for one session. Setting the
-default (`column`) removes the saved key again.
+Put the line in `~/.niubashrc` (or export it in the environment). The
+environment is the only source for this knob — there is no config file
+since 1.5.0. See
+[Configuration Sources & Precedence](configuration.md).
 
 ## Ghost text (history autosuggest)
 
@@ -59,20 +78,28 @@ Enter always submits what you see.
 ## Key bindings from other tools
 
 niu mirrors GNU `bind` entries from your startup files into its line
-editor, but two classes of binding cannot be mirrored by design and
-are dropped silently (niubash#612):
+editor, including the two shapes a flat keymap cannot express on its own
+(niubash#630):
 
-* **Multi-key sequences** (e.g. `"\C-x\C-f"`): the editor binds one
-  key (with modifiers) at a time, so a chained sequence has no
-  equivalent.
+* **Multi-key sequences** (`"\C-x\C-e"`, fzf's `"\C-\e("`): delivered by a
+  chord layer above the editor. The first unit is held only when a chord
+  starts with it; a matching second unit fires the binding, and a
+  non-matching one replays the held key followed by the new one, so
+  nothing is swallowed. The window is readline's `keyseq-timeout`
+  (500 ms): past it the prefix is replayed on its own and the key stands
+  alone.
 * **Editing-mode toggles** (`vi-editing-mode` / `emacs-editing-mode`):
-  switching keymaps is a session-level choice in niu, not a per-key
-  action.
+  these switch the session's machine for real. The other mode is built as
+  a standby with the same widgets, `bind -m` entries and user keymap
+  rules, so a flip keeps your bindings.
 
-This applies to bindings from any tool, and any other unusable `bind`
-entry — an unparseable sequence, an unknown function — still produces
-a startup warning. Example: `eval "$(fzf --bash)"` registers one
-binding of each class (a multi-key `redraw-current-line` binding and
-`"\C-z"` mode toggles for its fallback macros); both are dropped,
-and the rest of the integration works in full: Ctrl+T (file widget),
-Ctrl+R (history widget) and Alt+C (cd widget).
+In emacs mode a bare `ESC` followed within ~50 ms by a key is read as the
+meta prefix, the way a terminal sends `M-x` (`ESC x`); pressing Escape
+alone keeps its immediate meaning.
+
+Anything genuinely unusable — an unparseable sequence, an unknown
+function — still produces a startup warning, with a per-item fix. Example:
+`eval "$(fzf --bash)"` registers one binding of each shape (a multi-key
+`redraw-current-line` binding and `"\C-z"` mode toggles for its fallback
+macros); both now apply, and the rest of the integration works in full:
+Ctrl+T (file widget), Ctrl+R (history widget) and Alt+C (cd widget).

@@ -134,7 +134,7 @@ fn preview_niu_exe() -> Option<PathBuf> {
 pub fn render_theme(request: &ThemePreviewRequest) -> PreviewOutcome {
     let Some(block) = assets::build_theme_block(&request.source_id, &request.name) else {
         return PreviewOutcome::Unavailable(format!(
-            "source '{}' is not installed or not trusted",
+            "source '{}' is not installed",
             request.source_id
         ));
     };

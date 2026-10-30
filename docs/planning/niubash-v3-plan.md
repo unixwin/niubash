@@ -14,13 +14,13 @@ niubash = rubash + winuxcmd + reedline + oh-my-niu
 - `reedline` owns interactive editing primitives.
 - Niubash owns Windows host integration, prompt rendering, plugin loading, and
   configuration.
-- `oh-my-niu` owns first-party plugin assets and reviewed `.winux` helper
+- `oh-my-niu` owns first-party plugin assets and reviewed `.niu` helper
   scripts.
 
 ## Configuration
 
 - `~/.niubashrc` is the primary interactive startup file.
-- `~/.winshrc` remains an old fallback only when `~/.niubashrc` does not exist.
+- No fallback startup file is read when `~/.niubashrc` does not exist.
 - Plugin CLI operations, bundle versions, tests, and advanced overrides use
   the manifest-backed registry.
 
@@ -29,7 +29,7 @@ niubash = rubash + winuxcmd + reedline + oh-my-niu
 - Load named packs from `oh-my-niu`.
 - Keep pack manifests auditable.
 - Use asset packs for aliases, completions, themes, and keybinding metadata.
-- Use `.winux` source packs for reviewed shell mutation.
+- Use `.niu` source packs for reviewed shell mutation.
 - Use process adapters for external tools.
 - Keep prompt layout owned by the selected theme; segment providers only supply
   data.

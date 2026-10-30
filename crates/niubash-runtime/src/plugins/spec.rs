@@ -4,7 +4,7 @@
 //!
 //! The spec is the single source of truth for *what should be installed and
 //! enabled*; the source registry (`plugins::sources`) stays the lockfile
-//! for *what is installed* (commit + tree checksum pins) — the same
+//! for *what is installed* (commit pins) — the same
 //! spec+lock pair lazy.nvim/vim-plug use (`lazy-lock.json`). `niu plugin
 //! sync` (and the CLI verbs, which are sugar over spec edits + sync)
 //! reconciles the two and materializes the managed rc blocks from the spec.

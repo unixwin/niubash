@@ -1,0 +1,23 @@
+This directory covers several licenses -- one per DLL shipped inside the
+gawk payload. `LICENSE` is an index; the full canonical texts are the
+LICENSE-*.txt files beside it (see PROVENANCE.md for the DLL-to-license
+mapping).
+
+  libreadline8.dll      -> LICENSE-GPL-3.0.txt
+                           (GNU GPL v3; readline is GPL-3.0-or-later)
+  libgmp-10.dll         -> LICENSE-LGPL-3.0.txt and LICENSE-GPL-2.0.txt
+                           (GMP's standard dual license: LGPL-3.0 / GPL-2.0)
+  libmpfr-6.dll         -> LICENSE-LGPL-3.0.txt
+  libncurses6.dll       -> LICENSE-NCURSES.txt
+                           (MIT-style ncurses COPYRIGHT NOTICE)
+  libgcc_s_dw2-1.dll    -> LICENSE-GPL-3.0.txt together with
+                           LICENSE-GCC-RUNTIME-EXCEPTION-3.1.txt
+                           (GPL-3.0 with the GCC Runtime Library Exception)
+
+The exception file applies to libgcc only, in combination with the GPL v3
+text; it is not a standalone license. The GPL-2.0 text applies to libgmp
+only, as the second alternative of its dual license.
+
+The ncurses notice must accompany the distribution and its documentation;
+staging this directory into the archive as `licenses\dll-closure\`
+satisfies that requirement.

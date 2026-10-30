@@ -553,7 +553,7 @@ class NiuSession:
         # Ambient overrides must not leak into the sandbox (journey rule).
         for key in ("NIU_PLUGIN_SOURCES_ROOT", "NIU_PLUGIN_SPEC",
                     "NIU_MIRRORS", "NIU_PLUGIN_BOOTSTRAP",
-                    "NIU_REPL_STARTUP", "BASH_ENV", "WINUXSH_ROOT",
+                    "NIU_REPL_STARTUP", "BASH_ENV",
                     "NIU_THEME", "OSH_THEME", "BASH_IT_THEME"):
             env.pop(key, None)
         (home / "tmp").mkdir(parents=True, exist_ok=True)

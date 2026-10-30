@@ -3,15 +3,13 @@
 //!
 //! The spec (`plugins::spec`, `~/.niubash/plugins.toml`) declares *what
 //! should exist*; the registry (`plugins::sources`) locks *what exists*
-//! (commit + tree checksum). Sync is the only thing that moves the two
+//! (commit pins). Sync is the only thing that moves the two
 //! towards each other:
 //!
-//! 1. **declared, not installed** → fetch through the add pipeline
-//!    (fetch gate only; the trust gate is never automatic — the new source
-//!    lands untrusted and sync prints the exact `niu plugin trust <id>`);
+//! 1. **declared, not installed** → fetch through the add pipeline;
 //!    an install identity that is already registered is adopted, not
 //!    refused;
-//! 2. **declared, installed, trusted** → materialize the generated loader
+//! 2. **declared, installed** → materialize the generated loader
 //!    section *from the spec*, idempotently (`plugins::assets::
 //!    compute_spec_selection`, hand-added entries preserved) and publish
 //!    ONE `generated/plugins.niu` generation for the whole pass
@@ -28,10 +26,13 @@
 //!    snapshotting the live selection so the spec round-trips) or a
 //!    hand-written starter spec.
 //!
-//! `niu plugin sync --bootstrap` is the same reconciliation in its quiet
-//! startup form (clean machine → zero output), wired into the rc by the
-//! setup wizard as a single bootstrap line. Startup installs that fail are
-//! memoized and deferred on later startups — only explicit verbs retry.
+//! `niu plugin sync --bootstrap` (the legacy rc bootstrap line) is a
+//! silent compatibility no-op in the binary: startup never reconciles —
+//! sync runs only as an explicit verb. The startup form that once
+//! memoized failed installs and deferred their retry is gone with its
+//! trigger surface; a failure ledger an old version left behind is still
+//! read here, so `--prune` can clean the declarations it stranded and an
+//! explicit retry clears its entry.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -51,10 +52,6 @@ pub struct SyncOptions {
     /// imperative → declarative migration): each entry snapshots the live
     /// selection (`enable`/`theme`) so the adopted spec round-trips.
     pub adopt: bool,
-    /// The rc startup form (`niu plugin sync --bootstrap`): failed installs
-    /// are memoized and not retried on later startups (explicit verbs
-    /// retry), so one bad origin can never clone on every terminal.
-    pub startup: bool,
     /// A checksum pin handed in by `niu plugin add --checksum` (wt83 #173):
     /// `(target, sha256)` applied to the declared entry whose target (or
     /// resolved origin) matches — the fetch is refused on mismatch, exactly
@@ -67,16 +64,15 @@ pub struct SyncOptions {
     /// <seconds>` / `niu plugin add --timeout <seconds>`, niubash#293):
     /// bounds each declared entry's git transport so one bad origin costs
     /// its own budget instead of hanging the verb. `None` runs the default
-    /// verb budget (`sources::verb_fetch_budget`); the startup form keeps
-    /// its tighter `STARTUP_FETCH_BUDGET` regardless.
+    /// verb budget (`sources::verb_fetch_budget`).
     pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SyncRow {
     pub id: String,
-    /// installed | awaiting-trust | activated | unchanged | deactivated |
-    /// degraded | drift | failed | removed | unsupported | deferred | merged
+    /// installed | activated | unchanged | deactivated |
+    /// missing | failed | removed | unsupported | merged
     pub action: String,
     pub detail: String,
 }
@@ -91,13 +87,13 @@ pub struct SyncReport {
     /// Sources this run declared into the spec: `--adopt` snapshots and
     /// `add`-time adoptions of already-installed sources.
     pub adopted: Vec<String>,
-    /// True when nothing needed doing (the bootstrap fast path).
+    /// True when nothing needed doing.
     pub clean: bool,
 }
 
 impl SyncReport {
     /// True when the reconciler did (or would do) nothing: no installs, no
-    /// materialization changes, no drift, no undeclared sources.
+    /// materialization changes, no changes, no undeclared sources.
     fn compute_clean(&self) -> bool {
         self.rows.iter().all(|row| row.action == "unchanged") && self.undeclared.is_empty()
     }
@@ -296,10 +292,10 @@ pub fn adopt_installed_sources() -> anyhow::Result<Vec<String>> {
     Ok(adopted)
 }
 
-/// A declared-but-never-installed entry whose last startup install attempt
-/// failed — the memoized `deferred` population (wt83 #174): a legacy
-/// failed `niu plugin add` left it stranded, no verb could remove it, and
-/// every startup printed the deferred line. `--prune` is its way out.
+/// A declared-but-never-installed entry whose install failure an old
+/// startup form memoized (wt83 #174): the memo is what marks it stranded
+/// rather than merely not-yet-synced — without it, no verb could tell it
+/// apart from a fresh declaration. `--prune` is its way out.
 struct StrandedEntry {
     label: String,
     target: String,
@@ -321,7 +317,7 @@ fn sync_with_spec(
     // Entries that resolved to a source an earlier entry already claimed
     // (the same tree declared under two spellings); dropped after the pass.
     let mut merged: Vec<usize> = Vec::new();
-    // Snapshot the stranded declarations BEFORE the pass — a non-startup
+    // Snapshot the stranded declarations BEFORE the pass — the pass's own
     // retry clears the failure memo on the way in, and the memo is what
     // marks the entry as stranded rather than merely not-yet-synced.
     let mut stranded: Vec<StrandedEntry> = Vec::new();
@@ -378,7 +374,7 @@ fn sync_with_spec(
     // niubash#359: the pass COMPUTES every declared source's selection and
     // publishes ONE generated-loader generation at the end
     // (validate-then-atomic; the user rc is never written). Ids the pass
-    // skipped (awaiting-trust, degraded, drift, failures) keep their
+    // skipped (missing trees, failures) keep their
     // current section verbatim — a skip never deactivates anything.
     let mut computed: Vec<(String, assets::ComputedSelection)> = Vec::new();
     let mut keep_current: BTreeSet<String> = BTreeSet::new();
@@ -405,28 +401,12 @@ fn sync_with_spec(
         let record = match existing {
             Some(record) => record.clone(),
             None => {
-                // Startup guard (1.3.1): a declared-but-missing source whose
-                // last startup install attempt failed is not retried here —
-                // one memoized line, no fetch churn. Explicit verbs (a plain
-                // `niu plugin sync`, `niu plugin add`) retry and clear the
-                // memo on the way in.
-                if options.startup && bootstrap_failure_recorded(&origin, &entry.ref_name) {
-                    rows.push(SyncRow {
-                        id: entry.id.clone().unwrap_or_else(|| entry.target.clone()),
-                        action: "deferred".to_string(),
-                        detail: "install not retried at startup (last attempt failed); \
-                                 `niu plugin sync` retries"
-                            .to_string(),
-                    });
-                    continue;
-                }
-                // Declared but not installed: fetch (fetch gate only —
-                // trust is never automatic). An install identity that is
-                // already registered is ADOPTED, not refused — the spec
-                // declares what exists.
-                if !options.startup {
-                    clear_bootstrap_failure(&origin, &entry.ref_name);
-                }
+                // Declared but not installed: fetch it. An install identity
+                // that is already registered is ADOPTED, not refused — the
+                // spec declares what exists. A legacy failure memo for this
+                // entry (written by the retired startup form) is cleared on
+                // the way in: this explicit pass IS the retry.
+                clear_bootstrap_failure(&origin, &entry.ref_name);
                 // The `niu plugin add --checksum` hand-off (wt83 #173): the
                 // pin applies to the entry whose target (or resolved
                 // origin) it names — a one-entry scope, so other pending
@@ -444,25 +424,19 @@ fn sync_with_spec(
                     expected_checksum,
                     id: entry.id.clone(),
                     entry: None,
-                    // Every sync form is budgeted (niubash#293): the
-                    // startup form under its hard wall-clock budget
-                    // (sources::STARTUP_FETCH_BUDGET), the explicit verbs
-                    // under the verb budget (`--timeout`-overridable) — a
-                    // bad network day (TLS resets, blackholes, dead
-                    // origins) costs one bounded attempt per source, not
-                    // an unbounded hang the user can only escape by
+                    // Every sync fetch is budgeted (niubash#293): the
+                    // verb budget (`--timeout`-overridable) bounds each
+                    // attempt — a bad network day (TLS resets, blackholes,
+                    // dead origins) costs one bounded attempt per source,
+                    // not an unbounded hang the user can only escape by
                     // killing niu. Per-entry (niubash#296): each source's
                     // fetch gets its own fresh budget, so one stalled
                     // origin never consumes the others' window.
-                    fetch_budget: Some(if options.startup {
-                        sources::startup_fetch_budget()
-                    } else {
-                        options.timeout.unwrap_or_else(sources::verb_fetch_budget)
-                    }),
-                    // Startup-only: an auth-demanding origin fails the
-                    // startup fetch instead of hanging behind a hidden
-                    // prompt. Explicit verbs keep git's prompting behavior.
-                    credential_guard: options.startup,
+                    fetch_budget: Some(options.timeout.unwrap_or_else(sources::verb_fetch_budget)),
+                    // Sync never guards credentials: an auth-demanding
+                    // origin keeps git's prompting behavior, as on every
+                    // other explicit verb.
+                    credential_guard: false,
                 };
                 match sources::install_or_adopt(request) {
                     Ok((record, already_installed)) => {
@@ -475,32 +449,10 @@ fn sync_with_spec(
                         if already_installed {
                             adopted.push(record.id.clone());
                         }
-                        if !record.trusted {
-                            rows.push(SyncRow {
-                                id: record.id.clone(),
-                                action: "awaiting-trust".to_string(),
-                                detail: if already_installed {
-                                    format!(
-                                        "already installed (untrusted) — review, then \
-                                         `niu plugin trust {}`",
-                                        record.id
-                                    )
-                                } else {
-                                    format!(
-                                        "installed {} (untrusted) — review, then \
-                                         `niu plugin trust {}`",
-                                        record.version, record.id
-                                    )
-                                },
-                            });
-                        }
                         registry = read_source_registry();
                         record
                     }
                     Err(err) => {
-                        if options.startup {
-                            record_bootstrap_failure(&origin, &entry.ref_name, &err.to_string());
-                        }
                         // niubash#295: an entry that just failed to install
                         // (explicit verb, bounded fetch) is stranded the
                         // moment the run ends — declared, never installed,
@@ -544,77 +496,17 @@ fn sync_with_spec(
         }
         declared_ids.push(record.id.clone());
 
-        if !record.trusted {
-            if !rows.iter().any(|row| row.id == record.id) {
-                rows.push(SyncRow {
-                    id: record.id.clone(),
-                    action: "awaiting-trust".to_string(),
-                    detail: format!(
-                        "installed but untrusted — review, then `niu plugin trust {}`",
-                        record.id
-                    ),
-                });
-            }
-            // A skip never deactivates: the current loader section stays.
-            keep_current.insert(record.id.clone());
-            continue;
-        }
         if !record.path.is_dir() {
-            let _ = sources::clear_drifted_source(&record.id);
             keep_current.insert(record.id.clone());
             rows.push(SyncRow {
                 id: record.id.clone(),
-                action: "degraded".to_string(),
+                action: "missing".to_string(),
                 detail: format!(
                     "tree missing — repair with `niu plugin restore {}` (native fallback active)",
                     record.id
                 ),
             });
             continue;
-        }
-        // Runtime tamper gate (niubash#297): a trusted tree must still match
-        // its lockfile pin. A drifted tree used to sail through as
-        // "unchanged" — the very sync pass that would have caught it only
-        // diffed the rc block text. Now the pin check runs here, the row
-        // says `drift`, the drift ledger records the id (the rc blocks'
-        // STATIC guard reads it and warns at every startup), and nothing is
-        // materialized off the modified tree until it is repaired.
-        match sources::verify_record(&record) {
-            Ok(report) if report.verified => {
-                let _ = sources::clear_drifted_source(&record.id);
-            }
-            Ok(report) => {
-                let _ = sources::record_drifted_source(&record.id);
-                keep_current.insert(record.id.clone());
-                let short = |pin: &str| pin.chars().take(12).collect::<String>();
-                rows.push(SyncRow {
-                    id: record.id.clone(),
-                    action: "drift".to_string(),
-                    detail: format!(
-                        "tree drifted from the lockfile pin (recorded {}, actual {}) — \
-                         review with `niu plugin source verify {}`, repair with \
-                         `niu plugin restore {}`",
-                        short(&record.checksum_sha256),
-                        report
-                            .actual_checksum
-                            .as_deref()
-                            .map(short)
-                            .unwrap_or_else(|| "?".to_string()),
-                        record.id,
-                        record.id,
-                    ),
-                });
-                continue;
-            }
-            Err(err) => {
-                keep_current.insert(record.id.clone());
-                rows.push(SyncRow {
-                    id: record.id.clone(),
-                    action: "failed".to_string(),
-                    detail: format!("pin check failed: {err}"),
-                });
-                continue;
-            }
         }
 
         // Compute the spec selection (idempotent; hand-added entries
@@ -835,9 +727,9 @@ fn reconcile_theme_claims(
         let Some(record) = record_for_entry(entry, registry) else {
             continue;
         };
-        // The same gate materialization applies: only a trusted, healthy
-        // source has a meaningful live state.
-        if !record.trusted || !record.path.is_dir() {
+        // The same gate materialization applies: only a source whose tree
+        // is present has a meaningful live state.
+        if !record.path.is_dir() {
             continue;
         }
         let live_theme = assets::live_managed_theme(record);
@@ -933,15 +825,16 @@ pub fn update_all_to_ref_tip() -> Vec<sources::SourceSyncOutcome> {
     sources::sync_sources()
 }
 
-// ── Startup install-failure memo (1.3.1) ─────────────────────────────────────
+// ── Legacy startup install-failure memo (1.3.1; writer retired) ─────────────
 //
-// The rc's bootstrap line runs on every terminal. When a declared source
-// cannot install (network offline, a moved origin, a fingerprint the
-// adapter rejects), retrying the full fetch each startup is unbounded
-// churn — the 1.3.0 dead end cloned bash-it on every new terminal. The
-// memo records (target, ref) → error at startup; later startups defer the
-// retry with one line; the explicit verbs (`niu plugin sync` / `add`)
-// clear the memo and attempt again.
+// Old versions ran a startup form of this reconciler from the rc's
+// bootstrap line on every terminal; when a declared source could not
+// install, the failure was memoized here so later startups deferred the
+// retry instead of re-fetching. The startup form is gone (startup never
+// syncs), so nothing writes this ledger anymore. It is still READ: the
+// memo marks the declarations an old version stranded (the `--prune`
+// snapshot above), and an explicit retry or a prune clears the entry it
+// resolves.
 
 const BOOTSTRAP_FAILURE_SCHEMA: &str = "niubash:plugin-bootstrap-failures@1";
 
@@ -952,9 +845,6 @@ struct BootstrapFailure {
     /// The entry's `ref`, when it declared one.
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     ref_name: Option<String>,
-    pub error: String,
-    #[serde(default)]
-    pub at: String,
 }
 
 fn bootstrap_failure_path() -> std::path::PathBuf {
@@ -983,7 +873,7 @@ fn write_bootstrap_failures(failures: &[BootstrapFailure]) {
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    let mut body = format!("# Startup install-failure memo (niu plugin sync --bootstrap).\n# Cleared by an explicit `niu plugin sync` / `niu plugin add` retry.\nschema = \"{BOOTSTRAP_FAILURE_SCHEMA}\"\n");
+    let mut body = format!("# Legacy startup install-failure memo (written by an old\n# niu version's startup sync; now read-only — entries are cleared by an\n# explicit `niu plugin sync` retry or by `sync --prune`).\nschema = \"{BOOTSTRAP_FAILURE_SCHEMA}\"\n");
     for failure in failures {
         let quote =
             |value: &str| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
@@ -994,11 +884,6 @@ fn write_bootstrap_failures(failures: &[BootstrapFailure]) {
         if let Some(ref_name) = &failure.ref_name {
             body.push_str(&format!("ref = {}\n", quote(ref_name)));
         }
-        body.push_str(&format!(
-            "error = {}\nat = {}\n",
-            quote(&failure.error),
-            quote(&failure.at)
-        ));
     }
     let _ = std::fs::write(path, body);
 }
@@ -1007,34 +892,13 @@ fn failure_key(target: &str, ref_name: &Option<String>) -> (String, Option<Strin
     (target.trim().to_string(), ref_name.clone())
 }
 
-/// True when the last startup attempt for this (target, ref) failed.
+/// True when a legacy startup attempt for this (target, ref) is memoized
+/// as failed.
 fn bootstrap_failure_recorded(target: &str, ref_name: &Option<String>) -> bool {
     let key = failure_key(target, ref_name);
     read_bootstrap_failures()
         .iter()
         .any(|failure| failure_key(&failure.target, &failure.ref_name) == key)
-}
-
-/// Memo a startup install failure (upsert by target+ref).
-fn record_bootstrap_failure(target: &str, ref_name: &Option<String>, error: &str) {
-    let key = failure_key(target, ref_name);
-    let mut failures = read_bootstrap_failures();
-    match failures
-        .iter_mut()
-        .find(|failure| failure_key(&failure.target, &failure.ref_name) == key)
-    {
-        Some(slot) => {
-            slot.error = error.to_string();
-            slot.at = sources::now_timestamp();
-        }
-        None => failures.push(BootstrapFailure {
-            target: target.trim().to_string(),
-            ref_name: ref_name.clone(),
-            error: error.to_string(),
-            at: sources::now_timestamp(),
-        }),
-    }
-    write_bootstrap_failures(&failures);
 }
 
 /// Clear the memo for one (target, ref): the explicit retry is happening.
@@ -1226,29 +1090,20 @@ mod tests {
         })
         .unwrap();
 
-        // Sync 1: installs (fetch gate), lands untrusted.
+        // Sync 1: installs AND materializes in the same pass — there is
+        // no trust step (niubash#647); the spec selection lands in the
+        // generated loader immediately (the rc stays untouched —
+        // niubash#359).
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows.len(), 1, "{:?}", report.rows);
-        assert_eq!(report.rows[0].action, "awaiting-trust", "{:?}", report.rows);
-        assert!(
-            report.rows[0].detail.contains("niu plugin trust"),
-            "{:?}",
-            report.rows
-        );
-        assert!(rc_text().is_empty(), "untrusted sources activate nothing");
-
-        sources::trust_source("oh-my-bash").unwrap();
-
-        // Sync 2: materializes the spec into the generated loader (the rc
-        // stays untouched -- niubash#359).
-        let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "activated", "{:?}", report.rows);
         let loader = loader_section("oh-my-bash");
         assert!(loader.contains("OSH_THEME='agnoster'"), "{loader}");
         assert!(loader.contains("plugins=('git' 'npm')"), "{loader}");
         assert!(!report.clean, "{:?}", report);
+        assert!(rc_text().is_empty(), "the rc is never written");
 
-        // Sync 3 (idempotency, pinned by integration too): byte-identical
+        // Sync 2 (idempotency, pinned by integration too): byte-identical
         // loader, unchanged rows, clean report.
         let before = loader_text();
         let report = sync_spec(SyncOptions::default()).unwrap();
@@ -1362,7 +1217,6 @@ mod tests {
         })
         .unwrap();
         sync_spec(SyncOptions::default()).unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         sync_spec(SyncOptions::default()).unwrap();
         assert!(
             loader_section("oh-my-bash").contains("plugins=('git')"),
@@ -1456,14 +1310,13 @@ mod tests {
         write_omb_fixture(&origin);
         let box_ = sandbox("adopt");
 
-        // The wizard-shaped imperative state: installed + trusted + a live
+        // The wizard-shaped imperative state: installed + a live
         // managed block (theme pick + one enabled plugin), NO spec.
         sources::add_source(SourceInstallRequest {
             origin: origin.to_string_lossy().into_owned(),
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         let block = assets::build_theme_block("oh-my-bash", "agnoster").expect("theme block");
         let with_plugin = block.replacen(
             "OSH_THEME='agnoster'\n",
@@ -1530,17 +1383,18 @@ mod tests {
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
-    /// Untrusted imperative installs (the 1.3.0 wizard's bash-completion
-    /// state) adopt too: the declaration lands, the trust gate stays
-    /// visible, and plain syncs churn nothing.
+    /// Imperative installs (the 1.3.0 wizard's bash-completion state)
+    /// adopt too: the declaration lands, and plain syncs churn nothing
+    /// (nothing is enabled, so nothing materializes — there is no trust
+    /// gate to wait behind, niubash#647).
     #[test]
-    fn adopt_declares_untrusted_sources_without_activating() {
+    fn adopt_declares_sources_and_plain_syncs_churn_nothing() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let holder = unique_temp_dir("adopt-untrusted");
+        let holder = unique_temp_dir("adopt-undeclared");
         let origin = holder.join("wildy");
         fs::create_dir_all(&origin).unwrap();
         write_wild_fixture(&origin);
-        let box_ = sandbox("adopt-untrusted");
+        let box_ = sandbox("adopt-undeclared");
 
         sources::add_source(SourceInstallRequest {
             origin: origin.to_string_lossy().into_owned(),
@@ -1557,10 +1411,10 @@ mod tests {
         assert_eq!(declared[0].id.as_deref(), Some("wildy"));
         assert!(declared[0].enable.is_empty(), "nothing live to snapshot");
         assert!(declared[0].theme.is_none());
-        assert!(rc_text().is_empty(), "untrusted sources activate nothing");
+        assert!(rc_text().is_empty(), "the rc is never written");
 
-        // Plain sync: the awaiting-trust row stays honest (iron law 2), but
-        // the rc and the registry do not move.
+        // Plain sync: an "unchanged" row (nothing enabled, nothing to
+        // materialize), and the rc and the registry do not move.
         let registry_text =
             fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
@@ -1568,9 +1422,13 @@ mod tests {
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "wildy" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "wildy" && row.action == "unchanged"),
             "{:?}",
             report.rows
+        );
+        assert!(
+            loader_section("wildy").is_empty(),
+            "nothing enabled, no section"
         );
         assert!(rc_text().is_empty());
         assert_eq!(
@@ -1578,89 +1436,6 @@ mod tests {
             registry_text,
             "registry byte-stable across plain syncs"
         );
-
-        let _ = fs::remove_dir_all(&holder);
-        let _ = fs::remove_dir_all(&box_.temp);
-    }
-
-    /// The startup memo (F5): a declared-but-missing source whose startup
-    /// install fails is attempted ONCE; later startups defer the retry with
-    /// one line and no fetch churn; the explicit verb retries and clears.
-    #[test]
-    fn startup_bootstrap_defers_failed_installs_until_explicit_sync() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let holder = unique_temp_dir("defer-holder");
-        let origin = holder.join("not-bash-it");
-        fs::create_dir_all(&origin).unwrap();
-        // An OMB-shaped tree under a bash-it kind pin: the fingerprint check
-        // refuses it (the F6 failure shape, offline).
-        fs::write(origin.join("oh-my-bash.sh"), "#!/usr/bin/env bash\n").unwrap();
-        let box_ = sandbox("defer");
-        let ledger = box_.temp.join("sources/bootstrap-failures.toml");
-
-        spec::save_spec(&PluginSpec {
-            schema: None,
-            sources: vec![SpecSource {
-                target: origin.to_string_lossy().into_owned(),
-                id: Some("bash-it".to_string()),
-                kind: Some("bash-it".to_string()),
-                ref_name: None,
-                theme: None,
-                enable: vec![],
-            }],
-        })
-        .unwrap();
-
-        // Startup 1: attempted once, fails, memoized.
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
-        assert!(
-            report.rows.iter().any(|row| row.action == "failed"),
-            "{:?}",
-            report.rows
-        );
-        let text = fs::read_to_string(&ledger).unwrap();
-        assert!(text.contains("[[failure]]"), "{text}");
-        assert!(text.contains("bash-it"), "{text}");
-
-        // Startup 2: deferred — no second attempt (no failed row, no
-        // staging leftovers under the sources root).
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
-        assert!(
-            !report.rows.iter().any(|row| row.action == "failed"),
-            "no retry at startup: {:?}",
-            report.rows
-        );
-        assert_eq!(report.rows[0].action, "deferred", "{:?}", report.rows);
-        let leftovers: Vec<String> = fs::read_dir(box_.temp.join("sources"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            leftovers
-                .iter()
-                .all(|name| name == "bootstrap-failures.toml" || name == "registry.toml"),
-            "no staging churn: {leftovers:?}"
-        );
-
-        // The explicit verb retries (the failure repeats) and has cleared
-        // the memo on the way in — failures are only recorded at startup.
-        let report = sync_spec(SyncOptions::default()).unwrap();
-        assert!(
-            report.rows.iter().any(|row| row.action == "failed"),
-            "explicit sync must retry: {:?}",
-            report.rows
-        );
-        let text = fs::read_to_string(&ledger).unwrap();
-        assert!(!text.contains("[[failure]]"), "memo cleared: {text}");
 
         let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(&box_.temp);
@@ -1684,7 +1459,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         let alt = origin.to_string_lossy().replace('\\', "/");
         spec::save_spec(&PluginSpec {
             schema: None,
@@ -1734,7 +1508,7 @@ mod tests {
     /// niubash#178: a registry that fails to parse (one bad line among good
     /// pinned records) must never be silently rewritten by sync — the read
     /// gives an empty view, and a rewrite from that view would drop every
-    /// persisted pin/trust record. Sync's registry write is refused (a
+    /// persisted record. Sync's registry write is refused (a
     /// `failed` row, no data loss), the corrupt file survives byte-for-byte,
     /// and a human repair re-enables the normal sync.
     #[test]
@@ -1759,9 +1533,7 @@ mod tests {
                 "ref = \"local\"\n",
                 "version = \"git-abc123\"\n",
                 "path = \"{}\"\n",
-                "trusted = true\n",
                 "license = \"MIT\"\n",
-                "checksum_sha256 = \"cafe1234\"\n",
                 "installed_at = \"1700000000\"\n",
                 "commit_sha = \"abc123def456\"\n",
             ),
@@ -1808,7 +1580,7 @@ mod tests {
         );
 
         // Consent = a human repairs the file. The next sync proceeds
-        // normally (installs, lands untrusted) and the registry parses.
+        // normally (adopts the record) and the registry parses.
         let repaired = corrupt_text
             .split_once("\n[[sources]]\nid = \"broken-entry\"")
             .expect("the corrupt entry is present")
@@ -1817,20 +1589,11 @@ mod tests {
         assert!(repaired.contains("commit_sha"), "{repaired}");
         fs::write(&registry_path, &repaired).unwrap();
         // The pinned record points at a tree that was never fetched (the
-        // first sync refused before promotion), so restore it where the pin
-        // says it lives — then the repaired sync can adopt and activate it.
-        // (The record's checksum must be the REAL tree digest: since
-        // niubash#297 sync re-verifies a trusted record's pin, a synthetic
-        // fake would read as drift — honest, but not this test's point.)
+        // first sync refused before promotion), so restore it where the
+        // record says it lives — then the repaired sync can adopt and
+        // activate it.
         fs::create_dir_all(root.join("wildy")).unwrap();
         write_wild_fixture(&root.join("wildy"));
-        let real_checksum = sources::tree_sha256(&root.join("wildy")).unwrap();
-        let repaired = repaired.replace(
-            "checksum_sha256 = \"cafe1234\"",
-            &format!("checksum_sha256 = \"{real_checksum}\""),
-        );
-        assert!(repaired.contains(&real_checksum), "{repaired}");
-        fs::write(&registry_path, &repaired).unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert!(
             report
@@ -1878,8 +1641,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("bash-it").unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         spec::save_spec(&PluginSpec {
             schema: None,
             sources: vec![SpecSource {
@@ -2010,8 +1771,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("bash-it").unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
         spec::save_spec(&PluginSpec {
             schema: None,
             sources: vec![
@@ -2094,8 +1853,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sources::trust_source("bash-it").unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
 
         // The post-pick state: oh-my-bash owns the theme (rc block + spec
         // claim); bash-it stays declared but selection-less (no claim, no
@@ -2155,8 +1912,9 @@ mod tests {
 
     /// The `niu plugin add --checksum` hand-off (wt83 #173): the pin rides
     /// the options into the reconciler's install request. A mismatched tree
-    /// is refused and registers nothing, a matching one installs untrusted
-    /// (the fetch gate + trust flow unchanged), and the pin never leaks
+    /// is refused and registers nothing, a matching one installs (the
+    /// install-time pin is the only integrity check — niubash#647 kept
+    /// exactly this industry-standard shape), and the pin never leaks
     /// onto other pending declarations.
     #[test]
     fn checksum_pin_refuses_mismatch_honors_match_and_stays_scoped() {
@@ -2217,7 +1975,7 @@ mod tests {
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "unpinned" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "unpinned" && row.action == "unchanged"),
             "{:?}",
             report.rows
         );
@@ -2227,7 +1985,7 @@ mod tests {
             .collect();
         assert_eq!(registered, ["unpinned"], "refused fetch registers nothing");
 
-        // The correct pin installs — untrusted, fetch gate untouched.
+        // The correct pin installs.
         let good = sources::tree_sha256(&origin_a).unwrap();
         let report = sync_spec(SyncOptions {
             checksum_pin: Some((target_a, good)),
@@ -2238,7 +1996,7 @@ mod tests {
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "pinned" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "pinned" && row.action == "unchanged"),
             "{:?}",
             report.rows
         );
@@ -2246,18 +2004,18 @@ mod tests {
             .into_iter()
             .find(|record| record.id == "pinned")
             .expect("pinned installed");
-        assert!(!pinned.trusted, "fetch gate unchanged: lands untrusted");
-        assert!(rc_text().is_empty(), "untrusted sources activate nothing");
+        assert_eq!(pinned.id, "pinned");
+        assert!(rc_text().is_empty(), "nothing enabled, nothing in the rc");
 
         let _ = fs::remove_dir_all(&holder);
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
     /// Legacy stranded declarations (wt83 #174): a declared entry whose
-    /// startup install failed is memoized and deferred on every later
-    /// startup; `sync --prune` is its one-time removal, with a printed
-    /// row. A declared-but-never-synced entry (no failure memo) is never
-    /// touched by --prune, and an entry this pass installs is kept.
+    /// install failure an old startup form memoized; `sync --prune` is
+    /// its one-time removal, with a printed row. A declared-but-never-
+    /// synced entry (no failure memo) is never touched by --prune, and an
+    /// entry this pass installs is kept.
     #[test]
     fn prune_removes_stranded_declarations_and_keeps_pending_ones() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2291,41 +2049,19 @@ mod tests {
         })
         .unwrap();
 
-        // Startup 1: the broken declaration fails and is memoized; the
-        // healthy one installs (untrusted).
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
-        assert!(
-            report
-                .rows
-                .iter()
-                .any(|row| row.id == "stranded" && row.action == "failed"),
-            "{:?}",
-            report.rows
-        );
+        // Seed the legacy failure memo for the broken declaration (what
+        // the retired startup form would have written when its install
+        // failed); the memo is what marks the entry as stranded.
+        let (_, missing_origin) = resolve_spec_origin(&missing.to_string_lossy()).unwrap();
+        write_bootstrap_failures(&[BootstrapFailure {
+            target: missing_origin,
+            ref_name: None,
+        }]);
         assert!(
             fs::read_to_string(bootstrap_failure_path())
                 .unwrap()
                 .contains("missing-tree"),
-            "startup failure memoized"
-        );
-
-        // Startup 2: deferred — the every-startup line the issue records.
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
-        assert!(
-            report
-                .rows
-                .iter()
-                .any(|row| row.id == "stranded" && row.action == "deferred"),
-            "{:?}",
-            report.rows
+            "legacy failure memo seeded"
         );
 
         // --prune: the stranded declaration comes out of the spec with a
@@ -2362,12 +2098,8 @@ mod tests {
             "the memo goes with the stranded entry"
         );
 
-        // The healed spec is stable: next startup prints nothing about it.
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
+        // The healed spec is stable: the next sync prints nothing about it.
+        let report = sync_spec(SyncOptions::default()).unwrap();
         assert!(
             !report.rows.iter().any(|row| row.id == "stranded"),
             "{:?}",
@@ -2416,14 +2148,15 @@ mod tests {
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
-    /// The slowsource P0 pin (owner report 2026-10-04): an IN-SYNC startup
-    /// must not notice airplane mode. Every declared source is installed,
-    /// trusted, and materialized; the network is dead (all proxies point at
-    /// a refused port, so any fetch attempt would fail loudly into the
-    /// memo). The startup sync changes nothing, spawns no fetch, and stays
-    /// fast — the wall is bounded well under a second in-process.
+    /// The slowsource P0 pin (owner report 2026-10-04): an IN-SYNC pass
+    /// must not notice airplane mode. Every declared source is installed
+    /// and materialized; the network is dead (all proxies point at
+    /// a refused port, so any fetch attempt would fail loudly). The pass
+    /// changes nothing, spawns no fetch, and stays fast — the wall is
+    /// bounded well under a second in-process. (Written for the retired
+    /// startup form; the property belongs to every sync pass.)
     #[test]
-    fn startup_in_sync_survives_airplane_mode_untouched() {
+    fn in_sync_pass_survives_airplane_mode_untouched() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let holder = unique_temp_dir("airplane-holder");
         let origin = holder.join("oh-my-fixture");
@@ -2443,17 +2176,15 @@ mod tests {
             }],
         })
         .unwrap();
-        sync_spec(SyncOptions::default()).unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
-        // Materialize once, then confirm the steady state is reached (the
-        // second sync is the in-sync no-op the startup form must reproduce).
+        // niubash#647: the first sync installs AND materializes in one
+        // pass; the second reaches the steady state.
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "activated", "{:?}", report.rows);
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
 
         // Airplane mode: every proxy points at a refused port, so a single
-        // network touch would fail and land in the bootstrap-failure memo.
+        // network touch would fail loudly instead of passing silently.
         let _dead_http = EnvGuard::set("http_proxy", "http://127.0.0.1:9");
         let _dead_https = EnvGuard::set("https_proxy", "http://127.0.0.1:9");
         let _dead_upper_https = EnvGuard::set("HTTPS_PROXY", "http://127.0.0.1:9");
@@ -2466,16 +2197,12 @@ mod tests {
         let spec_before = fs::read_to_string(spec::spec_path()).unwrap();
 
         let start = std::time::Instant::now();
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
+        let report = sync_spec(SyncOptions::default()).unwrap();
         let elapsed = start.elapsed();
-        println!("airplane in-sync startup wall: {elapsed:?}");
+        println!("airplane in-sync pass wall: {elapsed:?}");
         assert!(
             elapsed < std::time::Duration::from_secs(5),
-            "in-sync startup must stay network-free and fast: {elapsed:?}"
+            "in-sync pass must stay network-free and fast: {elapsed:?}"
         );
         assert!(
             report.rows.iter().all(|row| row.action == "unchanged"),
@@ -2503,94 +2230,19 @@ mod tests {
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
-    /// The other half of the slowsource P0: when a declared source IS
-    /// missing and the network is blackholed, the startup fetch attempt is
-    /// BOUNDED (`sources::STARTUP_FETCH_BUDGET`, tuned down here via the
-    /// env override), the failure is memoized, and the next startup defers
-    /// instead of paying again. Unbounded, one TLS-burning attempt cost the
-    /// owner 5.26s and a dropped SYN would hang git for minutes.
+    /// THE #647 reversal, sync side (audit D-01): a tree modified after
+    /// install is NOT drift to sync — the pass reports the byte-stable
+    /// "unchanged" row, stays clean, and writes no drift ledger (the
+    /// #297 ledger and its rc guard are gone). What is on disk is what
+    /// loads.
     #[test]
-    fn startup_fetch_budget_bounds_the_first_attempt_and_memoizes() {
+    fn sync_treats_a_modified_tree_as_unchanged_and_writes_no_ledger() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let box_ = sandbox("budget");
-        let ledger = box_.temp.join("sources/bootstrap-failures.toml");
-
-        // RFC 5737 TEST-NET-3: never routable, so a plain git clone hangs
-        // in the connect phase instead of failing fast with a reset.
-        spec::save_spec(&PluginSpec {
-            schema: None,
-            sources: vec![SpecSource {
-                target: "https://203.0.113.1/repo.git".to_string(),
-                id: Some("blackhole".to_string()),
-                kind: None,
-                ref_name: None,
-                theme: None,
-                enable: vec![],
-            }],
-        })
-        .unwrap();
-        let _budget = EnvGuard::set("NIU_STARTUP_FETCH_BUDGET_MS", "300");
-
-        let start = std::time::Instant::now();
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
-        let elapsed = start.elapsed();
-        println!("budgeted startup attempt wall: {elapsed:?}");
-        // Bounded: the budget (300ms) plus process slack, never the
-        // minutes a blackholed TCP connect would otherwise cost.
-        assert!(
-            elapsed < std::time::Duration::from_secs(10),
-            "the startup fetch must respect the budget: {elapsed:?}"
-        );
-        assert!(
-            report.rows.iter().any(|row| row.action == "failed"),
-            "{:?}",
-            report.rows
-        );
-        let memo = fs::read_to_string(&ledger).unwrap();
-        // The memo keys by the resolved origin (what the deferral lookup
-        // matches), not the spec id.
-        assert!(memo.contains("203.0.113.1"), "{memo}");
-        assert!(memo.contains("[[failure]]"), "{memo}");
-
-        // The memo quiets the NEXT startup (no second attempt).
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
-        assert_eq!(report.rows[0].action, "deferred", "{:?}", report.rows);
-
-        // The explicit verb retries and clears the memo on the way in.
-        let report = sync_spec(SyncOptions::default()).unwrap();
-        assert!(
-            report.rows.iter().any(|row| row.action == "failed"),
-            "explicit sync must retry: {:?}",
-            report.rows
-        );
-        let memo = fs::read_to_string(&ledger).unwrap();
-        assert!(!memo.contains("[[failure]]"), "memo cleared: {memo}");
-
-        let _ = fs::remove_dir_all(&box_.temp);
-    }
-
-    /// THE #297 regression, sync side: a trusted tree modified after trust
-    /// used to sail through materialization as "unchanged" — the sync pass
-    /// only diffed rc block text. Now the pin check runs first: the row
-    /// says `drift`, the drift ledger records the id (the managed rc
-    /// blocks' STATIC guard reads it and warns at startup), nothing is
-    /// re-materialized, and a repaired tree clears the row and the ledger.
-    #[test]
-    fn sync_reports_drift_for_a_modified_trusted_tree_and_records_the_ledger() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let holder = unique_temp_dir("omb-drift-holder");
+        let holder = unique_temp_dir("omb-modified-holder");
         let origin = holder.join("oh-my-fixture");
         fs::create_dir_all(&origin).unwrap();
         write_omb_fixture(&origin);
-        let box_ = sandbox("omb-drift");
+        let box_ = sandbox("omb-modified");
 
         spec::save_spec(&PluginSpec {
             schema: Some(spec::PLUGIN_SPEC_SCHEMA.to_string()),
@@ -2605,18 +2257,16 @@ mod tests {
         })
         .unwrap();
 
-        // Sync 1 installs; trust via the imperative gate; sync 2 is the
-        // FIRST materialization ("activated"); sync 3 is byte-stable
-        // "unchanged" — the baseline the tamper must break.
-        sync_spec(SyncOptions::default()).unwrap();
-        sources::trust_source("oh-my-bash").unwrap();
+        // Sync 1 installs + materializes ("activated"); sync 2 is the
+        // byte-stable "unchanged" baseline.
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "activated", "{:?}", report.rows);
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
-        assert!(sources::drifted_source_ids().is_empty());
+        assert!(report.clean, "{:?}", report);
 
-        // Tamper the trusted tree, then sync: DRIFT, not "unchanged".
+        // Modify the installed tree, then sync: still "unchanged", still
+        // clean, and no drift ledger appears under the sources root.
         fs::write(
             sources::sources_root()
                 .join("oh-my-bash")
@@ -2625,45 +2275,16 @@ mod tests {
         )
         .unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
-        assert_eq!(report.rows[0].action, "drift", "{:?}", report.rows);
-        assert!(
-            report.rows[0].detail.contains("niu plugin source verify")
-                && report.rows[0].detail.contains("niu plugin restore"),
-            "the drift row must name the way out: {:?}",
-            report.rows[0]
-        );
-        assert!(!report.clean, "a drifted rc is not 'in sync'");
-        assert_eq!(
-            sources::drifted_source_ids(),
-            vec!["oh-my-bash".to_string()],
-            "the ledger entry is what the rc drift guard reads"
-        );
-        // The startup form surfaces it too (iron law 2: degraded is visible).
-        let report = sync_spec(SyncOptions {
-            startup: true,
-            ..SyncOptions::default()
-        })
-        .unwrap();
-        assert_eq!(report.rows[0].action, "drift", "{:?}", report.rows);
-
-        // Repair the tree in place (the pristine bytes restored): the next
-        // sync re-passes the pin check, clears the ledger, and reports the
-        // byte-stable unchanged row again. (A git-origin repair through
-        // `restore` is covered in the sources-side #297 test.)
-        fs::write(
-            sources::sources_root()
-                .join("oh-my-bash")
-                .join("plugins/git/git.plugin.sh"),
-            "alias gg='git status'\n",
-        )
-        .unwrap();
-        let report = sync_spec(SyncOptions::default()).unwrap();
         assert_eq!(report.rows[0].action, "unchanged", "{:?}", report.rows);
         assert!(
-            sources::drifted_source_ids().is_empty(),
-            "a re-verified tree must clear the ledger"
+            report.clean,
+            "a modified tree is 'in sync' now: {:?}",
+            report
         );
-
+        assert!(
+            !sources::sources_root().join("drifted-sources.txt").exists(),
+            "sync writes no drift ledger (niubash#647)"
+        );
         let _ = fs::remove_dir_all(&box_.temp);
         let _ = fs::remove_dir_all(&holder);
     }
@@ -2734,12 +2355,13 @@ mod tests {
             report.rows
         );
 
-        // The healthy entry installed despite the failure above it.
+        // The healthy entry installed (and materialized) despite the
+        // failure above it.
         assert!(
             report
                 .rows
                 .iter()
-                .any(|row| row.id == "healthy" && row.action == "awaiting-trust"),
+                .any(|row| row.id == "healthy" && row.action == "activated"),
             "{:?}",
             report.rows
         );

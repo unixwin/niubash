@@ -9,9 +9,9 @@
 //! - **Command table, not key handling** — [`UI_VERBS`] is one data table;
 //!   the verb menus and the help footer are generated from it, so UI and
 //!   help cannot drift (`lazy/view/config.lua:42 M.commands`).
-//! - **Sections by lifecycle state, attention-first** — untrusted sources
-//!   come before ready ones, ready before the not-yet-installed recipe
-//!   index (`lazy/view/sections.lua:16-120`).
+//! - **Sections by lifecycle state, attention-first** — sources whose
+//!   tree is missing come before ready ones, ready before the
+//!   not-yet-installed recipe index (`lazy/view/sections.lua:16-120`).
 //! - **Row anatomy** `[state] id — hint` (`lazy/view/render.lua:444`).
 //! - **Per-item verbs + global verbs** (lazy's `key_plugin` vs `key`).
 //!
@@ -37,11 +37,6 @@ pub struct UiVerb {
 /// The command table (lazy.nvim `view/config.lua:42` pattern). Help text
 /// and menus are generated from this one table.
 pub const UI_VERBS: &[UiVerb] = &[
-    UiVerb {
-        verb: "trust",
-        label: "trust — review checksum and activate",
-        cli: "niu plugin trust <id>",
-    },
     UiVerb {
         verb: "update",
         label: "update — move this source to its ref tip",
@@ -95,8 +90,7 @@ fn verb(verb_id: &str) -> &'static UiVerb {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiRowKind {
     Source {
-        trusted: bool,
-        degraded: bool,
+        missing: bool,
     },
     Recipe {
         installable: bool,
@@ -105,7 +99,7 @@ pub enum UiRowKind {
     Collection {
         builtin: bool,
     },
-    /// A theme asset from a trusted source (niubash#170): highlight previews
+    /// A theme asset from an installed source (niubash#170): highlight previews
     /// the theme's real PS1, Enter opens the activation verbs.
     Theme {
         source_id: String,
@@ -117,15 +111,12 @@ impl UiRowKind {
     /// `key_plugin` split).
     fn verbs(&self) -> Vec<&'static UiVerb> {
         match self {
-            Self::Source { trusted, degraded } => {
+            Self::Source { missing } => {
                 let mut verbs: Vec<&'static UiVerb> = Vec::new();
-                if !trusted {
-                    verbs.push(verb("trust"));
-                }
                 verbs.push(verb("update"));
                 verbs.push(verb("rollback"));
                 verbs.push(verb("disable"));
-                if *degraded {
+                if *missing {
                     verbs.push(verb("remove-source"));
                 }
                 verbs
@@ -149,7 +140,7 @@ impl UiRowKind {
 pub struct UiRow {
     pub id: String,
     pub kind: UiRowKind,
-    /// State mark shown in brackets ("ok", "untrusted", "available"...).
+    /// State mark shown in brackets ("ok", "missing", "available"...).
     pub state: String,
     /// Right-side hint: one-line summary or diagnostic.
     pub hint: String,
@@ -160,8 +151,7 @@ impl UiRow {
     pub fn line(&self) -> String {
         let mark = match self.state.as_str() {
             "ready" | "active" => text_style::green(&self.state),
-            "untrusted" => text_style::yellow(&self.state),
-            "degraded" => text_style::red(&self.state),
+            "missing" => text_style::red(&self.state),
             other => text_style::dim(other),
         };
         format!("[{mark}] {} \u{2014} {}", self.id, self.hint)
@@ -182,34 +172,24 @@ pub struct UiSection {
 pub fn inventory() -> Vec<UiSection> {
     let mut sections = Vec::new();
 
-    // Sources, split by state machine: untrusted (needs review) first,
-    // then ready; degraded rows join whichever bucket they fall in (the
-    // degraded mark is carried in the state string).
+    // Sources, split by state: trees gone missing (needs repair) first,
+    // then ready.
     let statuses = sources::list_sources();
-    let untrusted: Vec<&sources::SourceStatus> = statuses
-        .iter()
-        .filter(|status| status.state != "ready")
-        .collect();
-    let ready: Vec<&sources::SourceStatus> = statuses
-        .iter()
-        .filter(|status| status.state == "ready")
-        .collect();
+    let missing: Vec<&sources::SourceStatus> =
+        statuses.iter().filter(|status| status.missing).collect();
+    let ready: Vec<&sources::SourceStatus> =
+        statuses.iter().filter(|status| !status.missing).collect();
     let row_of = |status: &sources::SourceStatus| UiRow {
         id: status.record.id.clone(),
         kind: UiRowKind::Source {
-            trusted: status.state == "ready",
-            degraded: status.degraded,
+            missing: status.missing,
         },
-        state: if status.degraded {
-            "degraded".into()
-        } else {
-            status.state.clone()
-        },
+        state: status.state.clone(),
         hint: format!("{} · {}", status.record.version, status.adapter_display),
     };
     sections.push(UiSection {
-        title: "Needs review — untrusted sources".into(),
-        rows: untrusted.iter().map(|status| row_of(status)).collect(),
+        title: "Needs repair — sources whose tree is missing".into(),
+        rows: missing.iter().map(|status| row_of(status)).collect(),
         global: false,
     });
     sections.push(UiSection {
@@ -218,7 +198,7 @@ pub fn inventory() -> Vec<UiSection> {
         global: false,
     });
 
-    // Themes from trusted sources (niubash#170): a browsable section whose
+    // Themes from installed sources (niubash#170): a browsable section whose
     // highlighted row previews the theme's real PS1 (the same
     // `theme_preview::GalleryPreviews` cache the wizard's gallery uses).
     // Attention-first placement: right after the ready sources, before the
@@ -299,7 +279,7 @@ pub fn inventory() -> Vec<UiSection> {
 
     // Collections: built-in + imported.
     sections.push(UiSection {
-        title: "Collections — apply installs, never auto-trusts".into(),
+        title: "Collections — apply installs".into(),
         rows: distros::collections()
             .into_iter()
             .map(|listing| UiRow {
@@ -337,20 +317,9 @@ pub fn inventory() -> Vec<UiSection> {
 /// call — the menu is a view, not an engine (study §10.4).
 pub fn apply_verb(verb_id: &str, target: &str) -> anyhow::Result<String> {
     match verb_id {
-        "trust" => {
-            sources::verify_source(target)?;
-            let trusted = sources::trust_source(target)?;
-            Ok(format!(
-                "trusted '{}' — its themes/assets join the catalog; restart niu to load them",
-                trusted.id
-            ))
-        }
         "update" => {
             let summary = sources::update_source(target, sources::SourceInstallRequest::default())?;
-            Ok(format!(
-                "updated '{}' to {} ({})",
-                summary.id, summary.version, summary.checksum_sha256
-            ))
+            Ok(format!("updated '{}' to {}", summary.id, summary.version))
         }
         "rollback" => {
             let summary = sources::rollback_source(target)?;
@@ -634,35 +603,28 @@ mod tests {
     fn row_line_matches_the_lazy_anatomy() {
         let row = UiRow {
             id: "oh-my-bash".into(),
-            kind: UiRowKind::Source {
-                trusted: false,
-                degraded: false,
-            },
-            state: "untrusted".into(),
+            kind: UiRowKind::Source { missing: true },
+            state: "missing".into(),
             hint: "abc123 · oh-my-bash".into(),
         };
         let line = row.line();
-        assert!(line.contains("[untrusted]"), "{line}");
+        assert!(line.contains("[missing]"), "{line}");
         assert!(line.contains("oh-my-bash — "), "{line}");
         // Piped output must stay escape-free (text_style is TTY-gated).
         assert!(!line.contains('\x1b'), "{line:?}");
     }
 
     #[test]
-    fn verbs_for_source_respects_the_trust_gate() {
-        let untrusted = UiRowKind::Source {
-            trusted: false,
-            degraded: false,
-        };
-        let labels: Vec<&str> = untrusted.verbs().iter().map(|entry| entry.verb).collect();
-        assert!(labels.contains(&"trust"), "{labels:?}");
-        let ready = UiRowKind::Source {
-            trusted: true,
-            degraded: false,
-        };
+    fn verbs_for_source_follow_the_missing_state() {
+        // niubash#647: no trust verb exists; every source row offers the
+        // lifecycle verbs, and a missing tree additionally offers removal.
+        let ready = UiRowKind::Source { missing: false };
         let labels: Vec<&str> = ready.verbs().iter().map(|entry| entry.verb).collect();
-        assert!(!labels.contains(&"trust"), "{labels:?}");
         assert!(labels.contains(&"update"), "{labels:?}");
+        assert!(!labels.contains(&"remove-source"), "{labels:?}");
+        let missing = UiRowKind::Source { missing: true };
+        let labels: Vec<&str> = missing.verbs().iter().map(|entry| entry.verb).collect();
+        assert!(labels.contains(&"remove-source"), "{labels:?}");
     }
 
     #[test]
@@ -680,8 +642,8 @@ mod tests {
         let titles: Vec<&str> = sections.iter().map(|s| s.title.as_str()).collect();
         let needs = titles
             .iter()
-            .position(|t| t.starts_with("Needs review"))
-            .expect("untrusted section exists");
+            .position(|t| t.starts_with("Needs repair"))
+            .expect("missing-tree section exists");
         let ready = titles
             .iter()
             .position(|t| t.starts_with("Installed & ready"))
@@ -715,11 +677,11 @@ mod tests {
         assert!(labels.contains(&"disable"), "{labels:?}");
     }
 
-    /// niubash#170: a trusted theme-bearing source contributes a Themes
-    /// section whose rows are theme rows (the preview pane's subjects), one
-    /// per theme, sorted by name.
+    /// niubash#170: an installed theme-bearing source contributes a
+    /// Themes section whose rows are theme rows (the preview pane's
+    /// subjects), one per theme, sorted by name.
     #[test]
-    fn inventory_lists_a_themes_section_for_trusted_theme_sources() {
+    fn inventory_lists_a_themes_section_for_theme_sources() {
         use crate::test_support::PROCESS_STATE_LOCK;
         use std::path::PathBuf;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -751,13 +713,12 @@ mod tests {
                 credential_guard: false,
             })
             .expect("fixture source add must succeed");
-            crate::plugins::sources::trust_source("oh-my-bash").expect("fixture trust");
 
             let sections = inventory();
             let themes = sections
                 .iter()
                 .find(|section| section.title.starts_with("Themes"))
-                .expect("trusted theme source must contribute a Themes section");
+                .expect("installed theme source must contribute a Themes section");
             assert!(!themes.rows.is_empty(), "{:?}", themes.rows);
             let names: Vec<&str> = themes.rows.iter().map(|row| row.id.as_str()).collect();
             assert!(names.contains(&"robbyrussell"), "{names:?}");

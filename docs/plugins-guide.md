@@ -3,8 +3,8 @@
 The plugin system treats the **external bash ecosystem as first-class
 content**: any sourceable bash — a known plugin manager (oh-my-bash,
 bash-it, bash-completion), a tree installed by bpkg, or an arbitrary wild
-repo / single-file plugin — installs on explicit command, earns activation
-only through a trust review, and loads through its **own** loader, never
+repo / single-file plugin — installs on explicit command, activates only
+through an explicit enable, and loads through its **own** loader, never
 through a niubash re-implementation of it.
 
 The declarative spec `~/.niubash/plugins.toml` is the single source of
@@ -98,16 +98,16 @@ pair lazy.nvim/vim-plug use.
 | `niu plugin add rcaloras/bash-preexec` | `target = "rcaloras/bash-preexec"` | Wild source; id derived (`bash-preexec`) and bound at first sync |
 | `niu plugin add bpkg --path <dir>` | `target = "<dir>"`, `kind = "bpkg"` | Adopt a tree `bpkg install` already downloaded; per-package id; npm-shaped `package.json` is refused |
 
-Every `add` lands the source **untrusted**: nothing activates until you
-review and trust it. All three are one spec entry + one sync under the
+Every `add` only installs: nothing activates until you enable it.
+All three are one spec entry + one sync under the
 hood — you can equally hand-edit the spec and run `niu plugin sync`.
 
 ## Collections: the out-of-box sets
 
 A collection ("distro", the LazyVim extras pattern) is a **data manifest**
 listing recipe ids; `niu plugin distro apply <name>` walks the entries
-through the same add pipeline as `niu plugin add` — every source lands
-**untrusted**, failures are reported per entry (a bad entry never kills
+through the same add pipeline as `niu plugin add` — installation only,
+failures are reported per entry (a bad entry never kills
 the rest), and the setup wizard offers the same sets on first run. Three
 built-ins ship in the product (`niu plugin distro list`); the same
 manifest format can be imported from any repo or directory
@@ -143,34 +143,33 @@ The independent recipes in one line (upstream, license, entry file):
 `niu plugin sync` reconciles spec and machine (lazy.nvim `:Lazy sync`
 semantics):
 
-- **declared, not installed** → fetch through the add pipeline. The fetch
-  gate runs automatically; the **trust gate never does** — the source
-  lands untrusted and sync prints the exact `niu plugin trust <id>`.
-- **declared, installed, trusted** → the managed rc block / enabled tree
+- **declared, not installed** → fetch through the add pipeline and
+  materialize in the same pass.
+- **declared, installed** → the managed rc block / enabled tree
   is (re)materialized **from the spec, idempotently**: an unchanged spec
   produces a byte-identical rc.
-- **installed, untrusted** → reported as `awaiting-trust`.
 - **installed, not declared** → suggested for cleanup, never auto-deleted.
   `niu plugin sync --prune` is the explicit confirm.
 
-`niu plugin sync --bootstrap` is the same reconciliation in its quiet
-startup form — wired into `~/.niubashrc` by the setup wizard as a single
-line, silent when everything is in sync. Disable it by setting
-`NIU_PLUGIN_BOOTSTRAP=off`. `niu doctor` carries an advisory line showing
-the spec reconciliation state (declared / missing / undeclared / no spec).
+Sync runs only as an explicit verb — startup never reconciles.
+`niu plugin sync --bootstrap` (the bootstrap line old setup wizards wrote
+into `~/.niubashrc`) is accepted as a silent compatibility no-op, so a
+legacy rc line costs nothing and prints nothing. `niu doctor` carries an
+advisory line showing the spec reconciliation state (declared / missing /
+undeclared / no spec).
 
-Two 1.3.1 guarantees for the startup form:
+Two consequences of the explicit-only design:
 
-- **No spec → no startup nag.** Imperative mode (no `plugins.toml`) means
-  *nothing to reconcile*: installed-but-undeclared sources are the legacy
-  state, not drift, and `sync --bootstrap` stays silent about them. The
-  interactive `niu plugin sync` still lists them — with the migration verb.
-- **Failed startup installs are memoized.** When a declared source cannot
-  install at startup (offline, a moved origin, a fingerprint the adapter
-  rejects), the failure is recorded under the sources root
-  (`bootstrap-failures.toml`) and later startups defer the retry with one
-  line instead of re-fetching on every terminal. An explicit
-  `niu plugin sync` / `niu plugin add` clears the memo and retries.
+- **No spec → nothing to reconcile.** Imperative mode (no `plugins.toml`)
+  means installed-but-undeclared sources are the legacy state, not drift.
+  An explicit `niu plugin sync` lists them — with the migration verb.
+- **Failed installs are reported by the verb that ran them.** Nothing
+  retries in the background: re-run `niu plugin sync` / `niu plugin add`
+  when the network or the origin is back. A `bootstrap-failures.toml`
+  left under the sources root by an old version is still honored in one
+  way: it marks the declarations that version stranded, so
+  `niu plugin sync --prune` can remove them, and an explicit retry clears
+  the entry it resolves.
 
 ### Imperative mode → spec adoption (`niu plugin sync --adopt`)
 
@@ -195,7 +194,7 @@ source that is already installed declares it too (printed as `Declared …
 
 The setup wizard does the same adoption at the end of a collection apply
 (after the post-install theme pick), so a fresh 1.3.1+ wizard run ends
-**spec-managed**: sources, trust state and the picked theme are all
+**spec-managed**: sources and the picked theme are all
 described by `~/.niubash/plugins.toml`, and no migration verb is needed.
 
 ### Merge semantics: spec vs your hand edits
@@ -215,34 +214,28 @@ live block that is not in `prev` as **hand-added**:
 
 bash-it's `enabled/` directory is reconciled with the same rule.
 
-## The trust flow
+## The activation flow
 
 ```text
-niu plugin add <target>      # installs untrusted (fetch gate)
-niu plugin trust <id>        # review output, then activate the source
-                             # (hash-lock tier: tree checksum pinned)
+niu plugin add <target>      # installs the tree (nothing runs yet)
 niu plugin enable <id>[/<asset>]   # declare + materialize
 ```
 
-- **Trust review** (`niu plugin trust`) shows origin, version, license and
-  the tree checksum before flipping the gate.
-- The default tier is a checksum lock. `niu plugin source sign <id>`
-  pins the tree with a local signature; updates then re-gate until
-  re-signed (`niu plugin source verify <id>` checks either tier).
-- Untrusted sources never contribute assets: `niu plugin list` hides them
-  and `enable` refuses.
+- There is no trust/review gate (removed in niubash#647): an installed
+  source contributes its assets to `niu plugin list` immediately, and
+  `enable` activates them as-is — the same honesty model as cloning a
+  repo and sourcing it by hand.
 - Lockfile verbs: `update` moves the pin to the ref's tip, `restore`
   rebuilds the tree from the pin, `rollback` returns to the previous
   state, `clean` removes staging leftovers and orphaned trees.
 - **The setup wizard's post-install pick** (one run, out of the box): when
   a collection applied by `niu setup` installs a theme-bearing source
-  (e.g. the `recommended` collection's oh-my-bash), the same run asks one
-  trust question — the wizard's phrasing of `niu plugin trust`, same
-  checksum tier — and then offers the freshly trusted source's themes;
+  (e.g. the `recommended` collection's oh-my-bash), the same run offers
+  the freshly installed source's themes;
   the picked theme lands through the same guarded block `niu plugin
   enable <theme>` writes and gets its own undo line in the setup journal.
-  Declining changes nothing: the run prints the exact `niu plugin trust
-  <id>` command (plus the re-run / enable follow-up) to do it later.
+  Declining changes nothing: enable the theme later with
+  `niu plugin enable <theme>`.
 
 ## Troubleshooting
 
@@ -262,13 +255,8 @@ niu plugin enable <id>[/<asset>]   # declare + materialize
 - **`installed but not declared in the spec`** — an imperative install
   (`niu plugin source add`) with no spec entry; run `niu plugin sync
   --adopt` to declare everything installed (snapshots the live state), or
-  prune it explicitly. With no spec at all this is imperative mode and the
-  startup form stays silent about it.
-- **`deferred` rows at startup** — a declared source's install failed at a
-  previous startup and is not retried there; run `niu plugin sync` (the
-  explicit verb) to retry and see the failure.
-- **`awaiting-trust` rows after sync** — sync never flips the trust gate;
-  run the printed `niu plugin trust <id>` after reviewing.
+  prune it explicitly. With no spec at all this is imperative mode;
+  nothing runs at startup, so nothing nags about it there.
 - **`tree missing — repair with niu plugin restore <id>`** — the guarded
   loader no-ops silently at startup (the native fallback chain stays
   intact); restore rebuilds from the lockfile pin.
@@ -321,9 +309,8 @@ niu plugin mirror set none
 ```
 
 The mirror is a **transport concern only**: the spec and the lockfile
-keep canonical GitHub URLs, so a tree cloned through a mirror is
-byte-identical to a direct one (checksum verification is unaffected — a
-mirror is never a trust signal). Only `https://github.com/` origins are
+keep canonical GitHub URLs, so a tree cloned through a mirror is the same
+tree a direct clone produces. Only `https://github.com/` origins are
 rewritten, through git's own `insteadOf` mechanism; anything else passes
 through untouched.
 
