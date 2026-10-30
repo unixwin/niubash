@@ -86,7 +86,7 @@ dropped, tree kept), `missing` (tree missing → `niu plugin restore`),
    `cfg(windows)`-gated and never compile elsewhere), native managers
    (apt/dnf/yum/brew) on other platforms, upstream URL always printed.
    Fonts are detection+recommendation only (`niu font`).
-10. **Mirrors are transport-only (§14.8), git-only**: `~/.niubash/mirrors.toml`
+10. **Mirrors are transport-only (§14.8), git-only**: `~/.niubash/mirrors.json`
    (`NIU_MIRRORS`) injects `git -c url.<base>.insteadOf` for
    clone/fetch; spec/registry records keep canonical URLs;
    missing/malformed/unknown config degrades to direct; legacy
@@ -124,4 +124,4 @@ tree kept.
 
 `NIU_PLUGIN_SPEC` (spec path), `NIU_PLUGIN_SOURCES_ROOT` (install root),
 `NIU_PLUGIN_BOOTSTRAP=off` (disable rc bootstrap line), `NIU_MIRRORS`
-(mirror config path, default `~/.niubash/mirrors.toml`).
+(mirror config path, default `~/.niubash/mirrors.json`).

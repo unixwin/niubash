@@ -1648,7 +1648,8 @@ fn print_usage() {
     println!("                            Read-only migration report for legacy managed");
     println!("                            blocks (never writes the rc)");
     println!("  plugin migrate            One-time conversion of pre-1.5.0 TOML plugin");
-    println!("                            data (distros, spec, source registry) to JSON");
+    println!("                            data (distros, spec, source registry,");
+    println!("                            bootstrap ledger, mirrors) to JSON");
     println!("  plugin discover [--verbose]");
     println!("                            Read-only overview of external plugin sources");
     println!("  plugin source <command>   Full source protocol (add/remove/update/");
@@ -3024,7 +3025,7 @@ fn run_plugin_mirror_command(args: &[String]) -> anyhow::Result<()> {
             match mirrors::load_mirror_config() {
                 Err(err) => {
                     println!(
-                        "{} mirrors.toml unreadable: {err}",
+                        "{} mirrors.json unreadable: {err}",
                         niubash_runtime::text_style::yellow("!")
                     );
                     println!(
@@ -3343,10 +3344,11 @@ fn print_plugin_mirror_usage() {
     println!("ships every fetch unencrypted and unauthenticated — niubash#298).");
     println!();
     println!("Config file (edit directly for exact control):");
-    println!("  schema = \"niubash:mirrors@0.1.0\"");
-    println!("  active = \"custom\"");
-    println!("  [github]");
-    println!("  git_instead_of = \"https://your-git-mirror/\"    # git clone/fetch");
+    println!("  {{");
+    println!("    \"schema\": \"niubash:mirrors@0.1.0\",");
+    println!("    \"active\": \"custom\",");
+    println!("    \"github\": {{ \"git_instead_of\": \"https://your-git-mirror/\" }}");
+    println!("  }}");
 }
 
 /// `niu plugin list [--json]` — sources, their assets, and activation
@@ -3500,8 +3502,9 @@ fn run_plugin_enable_command(args: &[String], enable: bool) -> anyhow::Result<()
 /// `niu plugin migrate` — the one-time bridge from the pre-1.5.0 TOML
 /// plugin data. The runtime never reads those files; this verb converts
 /// every remaining TOML control face — the distros registry and imported
-/// collection manifests, the plugin spec, and the source registry — to
-/// JSON and renames the old files aside (never deletes them).
+/// collection manifests, the plugin spec, the source registry, the
+/// bootstrap-failure ledger, and the mirror config — to JSON and
+/// renames the old files aside (never deletes them).
 fn run_plugin_migrate_command(args: &[String]) -> anyhow::Result<()> {
     for arg in args {
         match arg.as_str() {
@@ -3511,8 +3514,12 @@ fn run_plugin_migrate_command(args: &[String]) -> anyhow::Result<()> {
                 println!("  one-time: converts pre-1.5.0 TOML plugin data — the distro");
                 println!("  registry (~/.niubash/distros/registry.toml) and every imported");
                 println!("  niu-collection.toml, the plugin spec (~/.niubash/plugins.toml),");
-                println!("  and the source registry (~/.niubash/sources/registry.toml) —");
-                println!("  to their JSON forms and renames the old files to");
+                println!("  the source registry (~/.niubash/sources/registry.toml), the");
+                println!(
+                    "  bootstrap-failure ledger (~/.niubash/sources/bootstrap-failures.toml),"
+                );
+                println!("  and the mirror config (~/.niubash/mirrors.toml) — to their JSON");
+                println!("  forms and renames the old files to");
                 println!("  <name>.migrated-<timestamp>. Nothing reads the TOML forms");
                 println!("  afterwards; safe to re-run (a second run is a no-op).");
                 return Ok(());
@@ -3521,12 +3528,21 @@ fn run_plugin_migrate_command(args: &[String]) -> anyhow::Result<()> {
         }
     }
     use niubash_runtime::plugins::distros::migrate_legacy_distros;
+    use niubash_runtime::plugins::mirrors::migrate_legacy_mirrors;
     use niubash_runtime::plugins::sources::migrate_legacy_source_registry;
     use niubash_runtime::plugins::spec::migrate_legacy_spec;
+    use niubash_runtime::plugins::sync::migrate_legacy_bootstrap_failures;
     let distro_report = migrate_legacy_distros()?;
     let spec_report = migrate_legacy_spec()?;
     let source_report = migrate_legacy_source_registry()?;
-    if distro_report.is_none() && spec_report.is_none() && source_report.is_none() {
+    let bootstrap_report = migrate_legacy_bootstrap_failures()?;
+    let mirror_report = migrate_legacy_mirrors()?;
+    if distro_report.is_none()
+        && spec_report.is_none()
+        && source_report.is_none()
+        && bootstrap_report.is_none()
+        && mirror_report.is_none()
+    {
         println!("No legacy TOML plugin data found — nothing to migrate.");
         return Ok(());
     }
@@ -3593,6 +3609,42 @@ fn run_plugin_migrate_command(args: &[String]) -> anyhow::Result<()> {
                 "Source registry converted to JSON; old file renamed to {}.",
                 backup.display()
             );
+        }
+    }
+    if let Some(report) = &bootstrap_report {
+        if !report.carried.is_empty() {
+            println!(
+                "Bootstrap failure(s) carried over from the legacy ledger: {}",
+                report.carried.join(", ")
+            );
+        }
+        if let Some(backup) = &report.backup {
+            println!(
+                "Bootstrap-failure ledger converted to JSON; old file renamed to {}.",
+                backup.display()
+            );
+        }
+    }
+    if let Some(report) = &mirror_report {
+        if let Some(backup) = &report.backup {
+            if report.kept_existing {
+                println!(
+                    "Existing mirrors.json kept; legacy mirror config renamed to {}.",
+                    backup.display()
+                );
+            } else {
+                println!(
+                    "Mirror config converted to JSON; old file renamed to {}.",
+                    backup.display()
+                );
+            }
+        }
+        if !report.skipped.is_empty() {
+            println!("Skipped the legacy mirror config, which could not be converted:");
+            for skipped in &report.skipped {
+                println!("  {skipped}");
+            }
+            println!("Fix or remove that file by hand, then re-run `niu plugin migrate`.");
         }
     }
     Ok(())

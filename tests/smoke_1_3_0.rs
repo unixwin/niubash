@@ -880,7 +880,10 @@ fn d2_wizard_one_run_theme_journey() {
     );
     let journal = fs::read_to_string(s.home().join(".niubash").join("setup-journal.json")).unwrap();
     assert!(journal.contains("\"theme\": \"agnoster\""), "{journal}");
-    assert!(journal.contains("\"collection\": \"recommended\""), "{journal}");
+    assert!(
+        journal.contains("\"collection\": \"recommended\""),
+        "{journal}"
+    );
 
     // 1.3.1: the journey ends SPEC-MANAGED. The post-pick adoption
     // declared the collection's sources with the live snapshot — canonical

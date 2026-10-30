@@ -167,11 +167,13 @@ Two consequences of the explicit-only design:
   An explicit `niu plugin sync` lists them — with the migration verb.
 - **Failed installs are reported by the verb that ran them.** Nothing
   retries in the background: re-run `niu plugin sync` / `niu plugin add`
-  when the network or the origin is back. A `bootstrap-failures.toml`
-  left under the sources root by an old version is still honored in one
-  way: it marks the declarations that version stranded, so
-  `niu plugin sync --prune` can remove them, and an explicit retry clears
-  the entry it resolves.
+  when the network or the origin is back. A `bootstrap-failures.json`
+  ledger under the sources root, left by an old version whose startup
+  sync memoized failed installs, is still honored in one way: it marks
+  the declarations that version stranded, so `niu plugin sync --prune`
+  can remove them, and an explicit retry clears the entry it resolves.
+  (A pre-1.5.0 `bootstrap-failures.toml` is converted by
+  `niu plugin migrate`.)
 
 ### Imperative mode → spec adoption (`niu plugin sync --adopt`)
 
@@ -317,20 +319,23 @@ rewritten, through git's own `insteadOf` mechanism; anything else passes
 through untouched.
 
 Mirrors are **git-only** since the retraction (the shell has no HTTP
-transport left). The config lives in `~/.niubash/mirrors.toml` (see
+transport left). The config lives in `~/.niubash/mirrors.json` (see
 `niu plugin mirror --help`):
 
-```toml
-schema = "niubash:mirrors@0.1.0"
-active = "custom"
-
-[github]
-git_instead_of = "https://your-git-mirror/"    # git clone/fetch
+```json
+{
+  "schema": "niubash:mirrors@0.1.0",
+  "active": "custom",
+  "github": { "git_instead_of": "https://your-git-mirror/" }
+}
 ```
 
 niubash ships **no bundled mirror list**: community mirror services are
-unsupported and may disappear at any time — the examples written as
-comments in the config file are starting points, not endorsements.
+unsupported and may disappear at any time. Two starting points that were
+verified live (git transport included) when this was written —
+`https://gitclone.com/github.com` and `https://ghproxy.net/github.com` —
+are starting points, not endorsements; verify a service works for you
+before relying on it.
 
 ## Environment overrides
 
@@ -339,7 +344,7 @@ comments in the config file are starting points, not endorsements.
 | `NIU_PLUGIN_SPEC` | Alternate spec file location |
 | `NIU_PLUGIN_SOURCES_ROOT` | Alternate install root (default `~/.niubash/sources`) |
 | `NIU_PLUGIN_BOOTSTRAP` | `off` disables the rc bootstrap line |
-| `NIU_MIRRORS` | Alternate mirror config (default `~/.niubash/mirrors.toml`) |
+| `NIU_MIRRORS` | Alternate mirror config (default `~/.niubash/mirrors.json`) |
 
 Design references: `docs/planning/oh-my-niu-ecosystem.md` §14.6 (three
 layers, descriptor table, declarative spec), §14.4 (no shims), §14.8

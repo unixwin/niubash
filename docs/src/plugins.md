@@ -136,7 +136,11 @@ bridge also converts the plugin spec (`~/.niubash/plugins.toml` →
 `plugins.json`, merged entry-by-entry by target) and the source registry
 (`~/.niubash/sources/registry.toml` → `registry.json`, merged by source
 id) — existing JSON entries win, legacy-only entries are carried over,
-and the old files are renamed aside, never deleted. `apply` installs every entry through its recipe driver —
+and the old files are renamed aside, never deleted. The same bridge also
+converts the bootstrap-failure ledger (`bootstrap-failures.toml` →
+`bootstrap-failures.json` under the sources root, merged by target) and
+the mirror config (`~/.niubash/mirrors.toml` → `mirrors.json`; an
+existing JSON config wins wholesale). `apply` installs every entry through its recipe driver —
 installation only; activation stays an explicit `enable`. Failures are collected per
 entry (a bad entry never kills the rest) and reported with the retry verb.
 The first-run wizard's plugin-collection question is a LazyVim-style
