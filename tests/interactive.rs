@@ -580,6 +580,58 @@ fn ctrl_d_after_background_job_exits() {
     assert_eq!(code, 0, "expected exit code 0 after Ctrl-D with bg job");
 }
 
+/// niubash#684 (ConPTY face, REPL route): Ctrl-D while a plain `read`
+/// builtin waits on the console must be the EOF for that read — rc 1,
+/// empty assignment — and must NOT exit the shell: the EOF ends only
+/// the current input (GNU: kernel VEOF → zread 0 → read.def:767
+/// eof=1, :949 EXECUTION_FAILURE, shell survives). The engine fix is
+/// rubash-side (canonical-console VEOF translation + the
+/// EOF-verdict cascade gate); this pin covers the host route the
+/// engine pins cannot see: reedline hands the console back cooked for
+/// the command, so the byte reaches the engine's fd-0 transports.
+///
+/// Echo-proofing (niubash#367/#368): the asserted marker `D0#RC=1 X=[]`
+/// never appears in the submitted text (which carries `$?`/`$x`
+/// literals), so terminal echo cannot satisfy it. The trailing Enter
+/// completes the cooked console line the Ctrl-D sits in — the harness
+/// shape pkg9 A6 used (psmux hex injection + line completion).
+#[test]
+fn issue684_ctrld_during_read_ends_read_not_shell() {
+    if !require_pty_or_skip("issue684_ctrld_during_read_ends_read_not_shell") {
+        return;
+    }
+    let mut s = NiuSession::spawn("ctrld-read684");
+    s.wait_ready();
+    s.send_line("read x; echo \"D0#RC=$? X=[$x]\"");
+    std::thread::sleep(Duration::from_millis(700));
+    s.send(CTRL_D);
+    s.send("\r");
+    s.expect("D0#RC=1 X=[]");
+    s.expect_prompt();
+    // The EOF ended only the read: the shell takes the next command.
+    s.send_line("echo alive-684");
+    s.expect("alive-684");
+    s.expect_prompt();
+}
+
+/// niubash#684: Ctrl-D in the middle of a `read` line is the VEOF
+/// flush, not an EOF and not data — the buffered prefix and the rest
+/// of the line form one record (GNU: `abc` ^D `def` reads "abcdef",
+/// rc 0).
+#[test]
+fn issue684_ctrld_midline_flushes_read_line() {
+    if !require_pty_or_skip("issue684_ctrld_midline_flushes_read_line") {
+        return;
+    }
+    let mut s = NiuSession::spawn("ctrld-flush684");
+    s.wait_ready();
+    s.send_line("read y; echo \"DM#RC=$? Y=[$y]\"");
+    std::thread::sleep(Duration::from_millis(700));
+    s.send("abc\u{4}def\r");
+    s.expect("DM#RC=0 Y=[abcdef]");
+    s.expect_prompt();
+}
+
 /// Ctrl-Z at the prompt is a documented gap: reedline's `Signal` has no
 /// suspend variant and the REPL ignores unknown signals, so there is no
 /// job-control suspend (and therefore no "there are stopped jobs" warning
