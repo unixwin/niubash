@@ -263,6 +263,19 @@ impl NiubashCompleter {
         context.tmp_base = tmp_base;
         let mut all_suggestions = Vec::new();
 
+        // GNU programmable completion owns a command's arguments whenever a
+        // compspec is registered (`complete`, bash-completion, an inputrc
+        // rule). Decide that once, up front: the static definition tables
+        // and the path fallback are overlays for commands WITHOUT a
+        // compspec, and must not be merged into its candidates.
+        let first_word = input.split_whitespace().next().unwrap_or_default();
+        let has_compspec = !context.is_command_position()
+            && !first_word.is_empty()
+            && crate::shell::with_completion_bridge(|shell| {
+                shell.session().has_compspec(first_word)
+            })
+            .unwrap_or(false);
+
         // Shell-function completions (`NIU_COMPDEFS`): only available while
         // the interactive REPL has installed the shell bridge.
         if let Some(result) = compdef_suggestions(&context) {
@@ -282,8 +295,9 @@ impl NiubashCompleter {
         let function_suggestions =
             self.function_suggestions_at_command_position(&context, &functions);
 
-        // Try each plugin in order; only the first non-None result is used
-        for plugin in &plugins {
+        // Try each plugin in order; only the first non-None result is used.
+        // Skipped when a compspec owns the command (GNU precedence).
+        for plugin in plugins.iter().filter(|_| !has_compspec) {
             if let Some(result) = plugin.complete(&context) {
                 // Found a result, format it
                 let formatted = self.format_completions(result, input, cursor_pos);
@@ -317,7 +331,7 @@ impl NiubashCompleter {
                     return self.format_completions(result, input, cursor_pos);
                 }
             }
-            if context.is_path_completion() {
+            if context.is_path_completion() && !has_compspec {
                 if let Ok(Some(result)) = PathCompleter::complete(&context) {
                     all_suggestions.extend(self.format_completions(result, input, cursor_pos));
                 }
@@ -332,13 +346,7 @@ impl NiubashCompleter {
         // The `has_compspec` gate keeps this free for commands without a
         // compspec (the hook's fallback would rescan PATH uncached and emit
         // raw-unquoted file names that duplicate the path completer above).
-        if !context.is_command_position() {
-            let first_word = input.split_whitespace().next().unwrap_or_default();
-            let has_compspec = !first_word.is_empty()
-                && crate::shell::with_completion_bridge(|shell| {
-                    shell.session().has_compspec(first_word)
-                })
-                .unwrap_or(false);
+        {
             if has_compspec {
                 if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
                     shell
@@ -849,6 +857,33 @@ niu_git_comp() {
         // armed (the thread-local bridge would otherwise defer the drop
         // to thread teardown).
         crate::shell::uninstall_completion_bridge();
+    }
+
+    #[test]
+    fn compspec_owns_the_command_over_static_definition_tables() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        // `git` ships a static definition table (subcommands + flags) in the
+        // embedded assets. A compspec registered for it must own the command:
+        // the static table contributes nothing.
+        assert!(shell.execute_script("complete -W 'zzz' git").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("git ", 4);
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zzz"],
+            "a compspec must suppress the static table and the path fallback"
+        );
     }
 
     #[test]

@@ -91,12 +91,25 @@ commands with no configuration at all:
 
 ## Priority
 
-Local definitions always win over external providers: the embedded applet
-and common-command definitions, bundle definitions, and user completion
-files are consulted before any rc-integrated provider fires, so a provider
-can never shadow a definition you already have. Within the file layers a
-later definition replaces an earlier one per command: embedded defaults →
-bundle definitions → user completion files.
+GNU's own surface comes first, and it **owns the command** when present:
+
+1. **Shell-function completers** (`NIU_COMPDEFS`, the compdef protocol) —
+   niu's own overlay; it is the only layer that runs ahead of GNU
+   programmable completion, and only because you opted into it.
+2. **GNU programmable completion** — a compspec registered with `complete`
+   (including bash-completion's own registrations and `inputrc` rules). When
+   one exists for the command, it is the only source of argument
+   candidates: the static definition tables and the path fallback do **not**
+   contribute, exactly as in bash.
+3. **Static definition tables** — for commands *without* a compspec. Within
+   these file layers a later definition replaces an earlier one per command:
+   embedded winuxcmd-applet and common-command defaults → bundle definitions
+   → user completion files.
+4. **Built-in path / variable / command-name completion** — the fallback of
+   last resort.
+
+So a provider can never shadow a compspec, and a compspec never has to
+compete with a table niu ships.
 
 ## Example: carapace-bin
 
