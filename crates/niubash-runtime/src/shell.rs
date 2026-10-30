@@ -656,6 +656,12 @@ impl Shell {
         let mut session = builder
             .build()
             .map_err(|error| anyhow::anyhow!("session build failed: {error:?}"))?;
+        // niubash#567 (FFI P4): resolve the FFI route provider's
+        // discovery + tier table now so the first external command
+        // does not pay for it. A no-op unless the master switch is
+        // on — session startup (including the non-interactive fast
+        // path) pays nothing for a disabled accelerator.
+        crate::ffi::warm_up();
         if posix_option_seed {
             session.options().set("posix", true);
         }

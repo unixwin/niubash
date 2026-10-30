@@ -74,7 +74,7 @@ libc = "0.2"
 # Win32_System_Com + Win32_UI_Shell: the niubash#211 shortcut channel
 # (CoCreateInstance(ShellLink) + SHGetKnownFolderPath) — windows-sys carries
 # the COM free functions only, the shell-link vtables live in src/shortcut.rs.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security_Authorization", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Registry", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security_Authorization", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Registry", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # reedline's system_clipboard pulls arboard, which has no android backend and
 # does not compile for aarch64-linux-android / armv7-linux-androideapi. Gate

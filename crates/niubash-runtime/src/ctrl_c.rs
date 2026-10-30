@@ -137,6 +137,14 @@ pub fn install() {
 /// user ignores SIGINT (`trap '' INT`), the kernel discards the raise
 /// before the engine ever sees it, matching GNU.
 pub fn queue_prompt_sigint(handler_already_queued: bool) {
+    // niubash#567 (FFI P4): even when the console handler already
+    // queued the engine delivery, the interrupt happened - an FFI
+    // call in flight must observe it through its cancel_check
+    // callback, and the next FFI call must decline as cancelled
+    // rather than run. This funnel is the one place every prompt
+    // Ctrl+C passes through, so the note goes before the
+    // already-queued early return.
+    crate::ffi::note_prompt_interrupt();
     if handler_already_queued {
         return;
     }

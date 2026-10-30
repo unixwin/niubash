@@ -68,6 +68,7 @@ pub mod console_guard;
 pub mod ctrl_c;
 pub mod doctor;
 pub(crate) mod easter_eggs;
+pub mod ffi;
 pub mod fonts;
 #[cfg(windows)]
 pub mod git_prompt;
