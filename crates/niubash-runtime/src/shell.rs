@@ -83,6 +83,20 @@ pub fn install_completion_bridge(shell: &Rc<RefCell<Shell>>) {
     });
 }
 
+/// Remove the completion bridge installed on this thread, dropping the
+/// bridged Shell if the caller holds no other `Rc` clone.
+///
+/// Test-only: the bridge is thread-local, so without an explicit
+/// uninstall the Shell outlives the test function and is dropped at
+/// thread teardown — after any test-local state restore has already
+/// run (see `test_support::ProcessEnvRestore`).
+#[cfg(test)]
+pub(crate) fn uninstall_completion_bridge() {
+    COMPLETION_BRIDGE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
 /// Run `f` with mutable access to the bridged shell, or `None` when no
 /// bridge is installed on this thread.
 pub(crate) fn with_completion_bridge<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
@@ -630,6 +644,12 @@ impl Shell {
         let mut session = builder
             .build()
             .map_err(|error| anyhow::anyhow!("session build failed: {error:?}"))?;
+        // niubash#567 (FFI P4): resolve the FFI route provider's
+        // discovery + tier table now so the first external command
+        // does not pay for it. A no-op unless the master switch is
+        // on — session startup (including the non-interactive fast
+        // path) pays nothing for a disabled accelerator.
+        crate::ffi::warm_up();
         if posix_option_seed {
             session.options().set("posix", true);
         }
@@ -8548,9 +8568,15 @@ complete -F _envtooldyn_hook envtooldyn
         std::fs::create_dir_all(&bin).unwrap();
         write_fake_cwd_probe(&bin, &host_display_path(&log));
 
-        let old_path = prepend_path_for_test(&bin);
-        let old_pathext = std::env::var_os("PATHEXT");
-        std::env::set_var("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        // RAII env guards: a panicking assert must not leak this
+        // test's PATH/PATHEXT into the shared test process.
+        let mut paths = vec![bin.clone()];
+        if let Some(old_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&old_path));
+        }
+        let new_path = std::env::join_paths(paths).unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", std::path::Path::new(&new_path));
+        let _pathext_guard = EnvVarGuard::set_value("PATHEXT", ".COM;.EXE;.BAT;.CMD");
         std::env::set_current_dir(&start).unwrap();
 
         let mut shell = test_shell(HookConfig::default());
@@ -8560,8 +8586,14 @@ complete -F _envtooldyn_hook envtooldyn
         let observed = std::fs::read_to_string(&log).unwrap();
         let observed = host_path_to_shell_path(observed.trim());
         let expected = shell_display_path(&target);
-        assert!(
-            same_shell_dir(&observed, &expected),
+        // temp_dir() may spell the fixture root with its 8.3 alias
+        // (RUNNER~1) while the child's %CD% reports the long form, so
+        // compare the canonicalized directories (the completion-cwd
+        // assert above does the same) instead of the spellings.
+        let observed_dir = std::path::PathBuf::from(shell_path_to_host_path(&observed));
+        assert_eq!(
+            observed_dir.canonicalize().unwrap(),
+            target.canonicalize().unwrap(),
             "native child cwd mismatch: observed={observed:?}, expected={expected:?}"
         );
         assert!(
@@ -8582,11 +8614,6 @@ complete -F _envtooldyn_hook envtooldyn
                 .as_deref()
         );
 
-        restore_path_for_test(old_path);
-        match old_pathext {
-            Some(value) => std::env::set_var("PATHEXT", value),
-            None => std::env::remove_var("PATHEXT"),
-        }
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -9590,24 +9617,6 @@ complete -F _envtooldyn_hook envtooldyn
 
     fn host_display_path(path: &std::path::Path) -> String {
         path.to_string_lossy().replace('\\', "/")
-    }
-
-    fn prepend_path_for_test(dir: &std::path::Path) -> Option<std::ffi::OsString> {
-        let old_path = std::env::var_os("PATH");
-        let mut paths = vec![dir.to_path_buf()];
-        if let Some(old_path) = &old_path {
-            paths.extend(std::env::split_paths(old_path));
-        }
-        let new_path = std::env::join_paths(paths).unwrap();
-        std::env::set_var("PATH", new_path);
-        old_path
-    }
-
-    fn restore_path_for_test(old_path: Option<std::ffi::OsString>) {
-        match old_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
     }
 
     struct EnvVarGuard {

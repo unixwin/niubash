@@ -61,6 +61,19 @@
 > it. The completeness red this raised on every rubash PR's
 > pairing job is what surfaced the gap.
 >
+> Addendum (bind_readline_variable record, 2026-10-30,
+> rubash#2183 / niubash#704): the Executor read probe
+> `bind_readline_variable` — niubash's REPL reads the
+> `keyseq-timeout` readline variable through it (via the §4
+> tier-C executor seam, alongside `bind_registry_snapshot` /
+> `bind_registry_generation`) — is recorded (§2.2 row, §6
+> entry). The method itself is new on the engine side in the
+> same rubash change (rubash#2183): niubash#704 was written
+> against it before it existed, and that PR's CI is the
+> E0599 that surfaced the gap. The record is staged ahead
+> of niubash#704's merge, like the kill-hook records before
+> it.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -241,7 +254,7 @@ Executor methods niubash still calls directly after the Session
 migration, reached through the `Session::executor` /
 `executor_mut` door (§4) or through `&mut Executor` helper
 parameters the host passes it to. Everything else the host used
-to call on the Executor moved to the Session faces (§2.3). 31
+to call on the Executor moved to the Session faces (§2.3). 32
 distinct methods, occurrence counts by the §0 rule at the v4
 census basis (the pre-migration table listed 41 entries; the
 RFC §3.2 top set it cites is pre-migration history).
@@ -263,7 +276,7 @@ RFC §3.2 top set it cites is pre-migration history).
 | `export_env` | 1 | `last_exit_code` | 1 |
 | `builtin_command_names` (assoc) | 1 | `find_script_on_path` | 1 |
 | `mark_login_shell` | 1 | `script_fd0_line` | 1 |
-| `last_command_inverted` | 1 |  |  |
+| `last_command_inverted` | 1 | `bind_readline_variable` | 1 |
 
 Two further non-`Executor` methods are consumed:
 `ShellInvocation::parse` (2) and `WordMetadata::literal` (1).
@@ -561,6 +574,7 @@ method rubash::api::VariablesView::resolved_value
 method rubash::api::VariablesView::set
 method rubash::api::VariablesView::unset
 method rubash::executor::Executor::alias_expansion_enabled
+method rubash::executor::Executor::bind_readline_variable
 method rubash::executor::Executor::bind_registry_generation
 method rubash::executor::Executor::bind_registry_snapshot
 method rubash::executor::Executor::builtin_command_names

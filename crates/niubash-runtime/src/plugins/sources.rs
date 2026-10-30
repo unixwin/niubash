@@ -1838,8 +1838,18 @@ mod tests {
     /// tests kill it).
     fn sleeping_command() -> Command {
         if cfg!(windows) {
-            let mut command = Command::new("cmd");
-            command.args(["/c", "ping", "-n", "30", "127.0.0.1", ">nul"]);
+            // Spawn ping directly rather than through `cmd /c`: cmd
+            // resolves `ping` through its own PATH lookup, so a
+            // PATH-less moment in the test process would end the
+            // "hung" child instantly and the budget assertion would
+            // exercise nothing. CreateProcess resolves a bare
+            // ping.exe from System32 without consulting PATH.
+            let mut command = Command::new("ping");
+            command
+                .args(["-n", "30", "127.0.0.1"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
             command
         } else {
             let mut command = Command::new("sleep");
