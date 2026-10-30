@@ -154,7 +154,7 @@ for that re-run, and the Android leg still ships build-verified only (see
 ## What keeps these numbers honest
 
 - The release pipeline runs the `perfbudget` gate — every asset in
-  `scripts/perf/budgets.toml` carries a measured budget (healthy themes
+  `scripts/perf/budgets.json` carries a measured budget (healthy themes
   re-render in 11-35 ms; the budget line is 120 ms; 5x over is a hard fail),
   and a breach fails the release. A nightly run watches the trend.
 - Perf canaries ride the engine's CI regression suite

@@ -44,7 +44,7 @@ Driver contract:
     verdict). `--record-baseline` freezes a run as the committed baseline;
     `--compare-baseline` diffs a run against it (informational; the budget
     check is the gate).
-  * budgets live in scripts/perf/budgets.toml — data, not code: adding an
+  * budgets live in scripts/perf/budgets.json — data, not code: adding an
     asset needs no change here. Any asset over budget fails the release
     gate with asset + measured ms + budget.
 
@@ -70,11 +70,6 @@ from pathlib import Path
 import pyte
 from winpty import PtyProcess
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - CI pins 3.12
-    tomllib = None
-
 REPO = Path(__file__).resolve().parents[2]
 
 # Sentinel strings must be unique enough that no theme/plugin output can
@@ -88,7 +83,7 @@ EXIT_GRACE_S = 3.0
 
 VERDICT_RANK = {"ok": 0, "over": 1, "timeout": 2, "hard-fail": 3, "n/a": 0}
 
-# Phase name -> budget key in budgets.toml.
+# Phase name -> budget key in budgets.json.
 BUDGET_KEY = {
     "source_wall": "source_ms",
     "first_prompt": "first_prompt_ms",
@@ -682,14 +677,11 @@ def run(args: argparse.Namespace) -> int:
         print(f"TOTAL\t{len(assets)}")
         return 0
 
-    if tomllib is None:
-        print("asset-timing: python 3.11+ (tomllib) required", file=sys.stderr)
-        return 2
     niu = args.niu.resolve()
     if not niu.is_file():
         print(f"asset-timing: niu binary not found: {niu}", file=sys.stderr)
         return 2
-    budgets = Budgets(tomllib.loads(Path(args.budgets).read_text(encoding="utf-8")))
+    budgets = Budgets(json.loads(Path(args.budgets).read_text(encoding="utf-8")))
     timeout_s = args.timeout if args.timeout is not None else budgets.phase_timeout_s
     settle_s = args.settle_ms / 1000.0
 
@@ -936,7 +928,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--bash-it", dest="bashit", type=Path, default=default_bashit,
                    help="bash-it root (NIU_PERF_BASHIT); pass '' to disable")
     p.add_argument("--budgets", type=Path,
-                   default=Path(__file__).parent / "budgets.toml")
+                   default=Path(__file__).parent / "budgets.json")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--record-baseline", type=Path, default=None,
                    help="also copy the run JSON to this path (the committed baseline)")
