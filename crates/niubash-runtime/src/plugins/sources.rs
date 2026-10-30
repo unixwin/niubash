@@ -440,12 +440,20 @@ pub struct RegistryCorruption {
     pub error: String,
 }
 
-/// Read the registry plus its corruption state, if any. A missing file is
-/// `(empty, None)` — only an existing, unparsable file is corruption.
+/// Read the registry plus its corruption state, if any. A missing or
+/// blank file is `(empty, None)` — only an existing, unparsable file is
+/// corruption.
 fn read_registry_state() -> (Vec<SourceRecord>, Option<RegistryCorruption>) {
     let Ok(text) = fs::read_to_string(registry_path()) else {
         return (Vec::new(), None);
     };
+    // A blank registry is an empty registry, not corruption: the TOML
+    // parser this replaced read an empty file as a valid empty registry,
+    // and a zero-byte file carries no persisted records for the #178
+    // consent gate to protect.
+    if text.trim().is_empty() {
+        return (Vec::new(), None);
+    }
     match serde_json::from_str::<SourceRegistry>(&text) {
         Ok(registry) => (registry.sources, None),
         Err(err) => (
@@ -3152,6 +3160,37 @@ mod tests {
             records[0].version, "git-abc123",
             "the record state round-trips"
         );
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// A zero-byte `registry.json` is an empty registry, not #178
+    /// corruption: the TOML parser this replaced read an empty file as a
+    /// valid empty registry, and a blank file carries no persisted
+    /// records for the consent gate to protect — reads see empty and
+    /// writes proceed (no sidecar, no refusal).
+    #[test]
+    fn blank_registry_reads_as_empty_and_stays_writable() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("blank-registry");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("registry.json");
+
+        fs::write(&path, "").unwrap();
+        assert!(registry_corruption().is_none(), "blank is not corruption");
+        assert!(read_source_registry().is_empty());
+        assert!(
+            !root.join("registry.json.corrupt").exists(),
+            "no sidecar for a blank file"
+        );
+        write_source_registry(&[]).expect("a blank registry must stay writable");
+
+        // Whitespace-only is the same blank document.
+        fs::write(&path, " \n").unwrap();
+        assert!(registry_corruption().is_none());
+        assert!(read_source_registry().is_empty());
 
         let _ = fs::remove_dir_all(&temp);
     }

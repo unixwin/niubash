@@ -102,16 +102,28 @@ pub struct SpecSource {
     pub enable: Vec<String>,
 }
 
+/// Parse spec JSON text. A blank document is the empty spec: the TOML
+/// parser this replaced read an empty file as a valid empty document,
+/// and a zero-byte `plugins.json` (touched into place, or truncated by a
+/// crashed editor) must not brick every verb with serde_json's
+/// `EOF while parsing a value` error.
+fn parse_spec_json(text: &str) -> anyhow::Result<PluginSpec> {
+    if text.trim().is_empty() {
+        return Ok(PluginSpec::default());
+    }
+    Ok(serde_json::from_str(text)?)
+}
+
 /// Read the spec. `Ok(None)` = no spec file yet (imperative/legacy mode:
-/// nothing is declared, sync only reports).
+/// nothing is declared, sync only reports). A blank spec file is
+/// present-but-empty, not missing.
 pub fn load_spec() -> anyhow::Result<Option<PluginSpec>> {
     let path = spec_path();
     if !path.is_file() {
         return Ok(None);
     }
     let text = fs::read_to_string(&path)?;
-    let spec: PluginSpec = serde_json::from_str(&text)?;
-    Ok(Some(spec))
+    Ok(Some(parse_spec_json(&text)?))
 }
 
 /// Render the spec document: pretty JSON with the schema marker stamped
@@ -204,7 +216,7 @@ pub fn migrate_legacy_spec() -> anyhow::Result<Option<SpecMigrationReport>> {
     let mut merged = PluginSpec::default();
     if json_path.is_file() {
         let existing_text = fs::read_to_string(&json_path)?;
-        merged = serde_json::from_str(&existing_text).with_context(|| {
+        merged = parse_spec_json(&existing_text).with_context(|| {
             format!(
                 "could not parse {} — fix or remove the file by hand; \
                  niu never rewrites a spec it cannot read",
@@ -369,6 +381,23 @@ mod tests {
         assert_eq!(text.trim(), "{}", "{text}");
         // An empty spec still parses as present-but-empty.
         assert_eq!(load_spec().unwrap().unwrap().sources, Vec::new());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn blank_spec_file_reads_as_present_but_empty() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (path, _guard) = temp_spec("blank");
+        // Zero-byte: the shape the TOML reader always accepted as an
+        // empty spec (the prune-hint sync in tests/plugin_spec_sync.rs
+        // writes exactly this file, then syncs against it).
+        fs::write(&path, "").unwrap();
+        assert_eq!(load_spec().unwrap(), Some(PluginSpec::default()));
+        // Whitespace-only is the same blank document.
+        fs::write(&path, "  \n").unwrap();
+        assert_eq!(load_spec().unwrap(), Some(PluginSpec::default()));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
