@@ -4,7 +4,7 @@
 //!
 //! Ownership split (the whole point of the redesign):
 //!
-//! * `~/.niubash/plugins.toml` (the spec) + `~/.niubash/sources/registry.toml`
+//! * `~/.niubash/plugins.json` (the spec) + `~/.niubash/sources/registry.json`
 //!   (the lockfile) are the *control plane* — explicit `niu plugin` verbs
 //!   write them.
 //! * `~/.niubash/generated/plugins.niu` is the *derived activation plane* —
@@ -151,7 +151,7 @@ pub fn render_document(sections: &[LoaderSection], superseded: &BTreeSet<String>
     out.push_str(LOADER_BANNER);
     out.push('\n');
     out.push_str(&format!("# schema: {LOADER_SCHEMA}\n"));
-    out.push_str("# generated from ~/.niubash/plugins.toml + ~/.niubash/sources/registry.toml\n");
+    out.push_str("# generated from ~/.niubash/plugins.json + ~/.niubash/sources/registry.json\n");
     out.push_str("# sourced by the host BEFORE the user rc; user overrides win.\n");
     if superseded.is_empty() {
         out.push_str("# superseded managed-block markers: (none recorded)\n");
@@ -493,7 +493,7 @@ pub struct LegacyBlock {
     /// False when the marker text drifted from the exact managed form
     /// (a hand edit) — the block still executes either way.
     pub exact: bool,
-    /// Whether the spec (`plugins.toml`) declares this source: a declared
+    /// Whether the spec (`plugins.json`) declares this source: a declared
     /// source's activation is carried by the loader generation; an
     /// undeclared one keeps living in the rc block alone until the user
     /// declares it.

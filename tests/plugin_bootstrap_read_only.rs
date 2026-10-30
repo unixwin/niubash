@@ -24,7 +24,7 @@ impl Sandbox {
             .current_dir(&self.0)
             .env("HOME", &self.0)
             .env("USERPROFILE", &self.0)
-            .env("NIU_PLUGIN_SPEC", self.0.join("plugins.toml"))
+            .env("NIU_PLUGIN_SPEC", self.0.join("plugins.json"))
             .env("NIU_PLUGIN_SOURCES_ROOT", self.0.join("sources"))
             .env_remove("NIU_PLUGIN_BOOTSTRAP")
             .output()
@@ -53,7 +53,7 @@ fn bootstrap_preserves_broken_configuration() {
     let sandbox = Sandbox::new();
     let files = [
         (".niubashrc", "if true; then\r\n"),
-        ("plugins.toml", "[invalid TOML\n"),
+        ("plugins.json", "{invalid JSON\n"),
         (".niubash/sources.lock", "invalid lock\n"),
         ("sources/existing/plugin.sh", "echo keep\n"),
     ];
@@ -83,7 +83,7 @@ fn bootstrap_preserves_broken_configuration() {
 #[test]
 fn explicit_sync_still_validates_the_spec() {
     let sandbox = Sandbox::new();
-    fs::write(sandbox.0.join("plugins.toml"), "[invalid TOML\n").unwrap();
+    fs::write(sandbox.0.join("plugins.json"), "{invalid JSON\n").unwrap();
     let output = sandbox.run(&[]);
     assert!(!output.status.success(), "{output:?}");
     assert!(!output.stderr.is_empty(), "{output:?}");

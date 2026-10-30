@@ -6,8 +6,8 @@ oh-my-niu-ecosystem.md` §14.6. All verbs: `niu plugin --help`.
 
 ## Model
 
-- **Spec = source of truth**: `~/.niubash/plugins.toml` declares what
-  should be installed/enabled. Registry (`~/.niubash/sources/registry.toml`,
+- **Spec = source of truth**: `~/.niubash/plugins.json` declares what
+  should be installed/enabled. Registry (`~/.niubash/sources/registry.json`,
   schema `niubash:plugin-source-registry@0.3.0`) pins what exists
   (commit sha + tree sha256) and the last spec-materialized selection
   (`spec_enabled`, `spec_theme`).
@@ -99,15 +99,20 @@ dropped, tree kept), `missing` (tree missing → `niu plugin restore`),
 
 ## Spec schema (`niubash:plugin-spec@0.1.0`)
 
-```toml
-[[sources]]
-target = "oh-my-bash"   # catalog id | owner/repo | url | path (reproducible origin)
-id = "..."              # optional; wild/bpkg ids bind at first sync
-kind = "bpkg"           # optional adapter pin; fingerprint must still match
-ref = "v1.2"            # optional; first fetch only
-enable = ["git"]        # manager-native asset names (wild: tree-relative paths)
-theme = "agnoster"      # optional; absent = unmanaged, '' = explicitly cleared
+```json
+{
+  "sources": [
+    { "target": "oh-my-bash", "id": "...", "kind": "bpkg", "ref": "v1.2", "enable": ["git"], "theme": "agnoster" }
+  ]
+}
 ```
+
+Field notes: `target` is the reproducible origin (catalog id | owner/repo |
+url | path); `id` is optional (wild/bpkg ids bind at first sync); `kind` is
+an optional adapter pin (the fingerprint must still match); `ref` is
+optional (first fetch only); `enable` lists manager-native asset names
+(wild: tree-relative paths); `theme` is optional (absent = unmanaged,
+`""` = explicitly cleared).
 
 Error/edge semantics: duplicate add → "already declared"; `--path` origin
 is stored as the target verbatim (never re-resolved to a network URL);

@@ -93,7 +93,7 @@ export EDITOR=vim
 
 Themes and plugins are enabled through `niu plugin`. Plugin verbs never write
 the rc (niubash#359, v1.4.2): they update the manifest
-(`~/.niubash/plugins.toml` + `~/.niubash/sources/registry.toml`) and
+(`~/.niubash/plugins.json` + `~/.niubash/sources/registry.json`) and
 regenerate `~/.niubash/generated/plugins.niu`, which the host sources
 read-only *before* your rc — so rc lines always win
 (see [Plugin Workflow](#plugin-workflow)).
@@ -454,7 +454,7 @@ niu plugin source remove oh-my-bash-fork   # delete tree + registry entry
 Notes:
 
 - Sources are cloned to `~/.niubash/sources/<id>` and registered in
-  `~/.niubash/sources/registry.toml`; the registry records the origin, ref,
+  `~/.niubash/sources/registry.json`; the registry records the origin, ref,
   and path.
 - `niu plugin update <id>` re-fetches the registered origin;
   `niu plugin rollback <id>` returns to the previous version.

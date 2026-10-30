@@ -10,7 +10,7 @@
 //!
 //! A *source* is a plugin manager's native tree (no `bundle.toml`); it
 //! installs under `~/.niubash/sources/<id>/`, registers in
-//! `~/.niubash/sources/registry.toml`, and contributes assets once enabled.
+//! `~/.niubash/sources/registry.json`, and contributes assets once enabled.
 //! Asset-level activation (the managed rc block, `niu plugin
 //! enable/disable`) lives in `plugins::assets`; the
 //! declarative spec and its reconciler live in `plugins::spec` and
@@ -52,7 +52,10 @@ pub use super::descriptors::{
 /// `checksum_sha256`, `trust_policy`, `signature` and
 /// `first_fetch_verified` record fields are gone. All older versions stay
 /// readable (dropped fields are ignored on parse), writes use the current
-/// one (§12.1 bump discipline).
+/// one (§12.1 bump discipline). The file itself is JSON since the 1.5.0
+/// product-TOML deletion; the pre-1.5.0 TOML form (`registry.toml`) is
+/// read exactly once — by [`migrate_legacy_source_registry`], through
+/// this same record shape — and no runtime path reads it.
 pub const SOURCE_REGISTRY_SCHEMA: &str = "niubash:plugin-source-registry@0.4.0";
 /// Ref recorded for local-directory installs (no git ref exists).
 pub const LOCAL_ORIGIN_REF: &str = "local";
@@ -178,7 +181,7 @@ pub struct SourcePreviousState {
     pub commit_sha: Option<String>,
 }
 
-/// One registered external source. Lives in `~/.niubash/sources/registry.toml`.
+/// One registered external source. Lives in `~/.niubash/sources/registry.json`.
 /// The registry doubles as the lockfile (lazy.nvim's lazy-lock.json): each
 /// git-origin record pins `commit_sha`, and `niu plugin restore` refetches
 /// exactly that state.
@@ -406,12 +409,21 @@ pub fn sources_root() -> PathBuf {
         .join("sources")
 }
 
+/// Pre-1.5.0 TOML registry name. Read exactly once, by
+/// [`migrate_legacy_source_registry`]; no runtime path looks for it.
+const LEGACY_SOURCE_REGISTRY: &str = "registry.toml";
+
 fn registry_path() -> PathBuf {
-    sources_root().join("registry.toml")
+    sources_root().join("registry.json")
+}
+
+/// Where the pre-1.5.0 TOML registry lived (migrate-only).
+fn legacy_registry_path() -> PathBuf {
+    sources_root().join(LEGACY_SOURCE_REGISTRY)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct SourceRegistryToml {
+struct SourceRegistry {
     schema: Option<String>,
     #[serde(default)]
     sources: Vec<SourceRecord>,
@@ -424,7 +436,7 @@ struct SourceRegistryToml {
 pub struct RegistryCorruption {
     /// The file's text, byte-for-byte as found on disk.
     pub raw_text: String,
-    /// The TOML parse error.
+    /// The JSON parse error.
     pub error: String,
 }
 
@@ -434,7 +446,7 @@ fn read_registry_state() -> (Vec<SourceRecord>, Option<RegistryCorruption>) {
     let Ok(text) = fs::read_to_string(registry_path()) else {
         return (Vec::new(), None);
     };
-    match toml::from_str::<SourceRegistryToml>(&text) {
+    match serde_json::from_str::<SourceRegistry>(&text) {
         Ok(registry) => (registry.sources, None),
         Err(err) => (
             Vec::new(),
@@ -452,13 +464,13 @@ pub fn registry_corruption() -> Option<RegistryCorruption> {
 }
 
 /// Sidecar holding the byte-for-byte snapshot of an unparsable registry
-/// (`registry.toml.corrupt`, next to the registry).
+/// (`registry.json.corrupt`, next to the registry).
 pub(crate) fn corrupt_registry_sidecar_path() -> PathBuf {
     corrupt_registry_backup_path()
 }
 
 fn corrupt_registry_backup_path() -> PathBuf {
-    registry_path().with_extension("toml.corrupt")
+    registry_path().with_extension("json.corrupt")
 }
 
 /// Warn-once ledger for corrupt-registry content: one warning per distinct
@@ -544,16 +556,77 @@ pub(crate) fn write_source_registry(sources: &[SourceRecord]) -> anyhow::Result<
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let text = toml::to_string_pretty(&SourceRegistryToml {
+    let mut text = serde_json::to_string_pretty(&SourceRegistry {
         schema: Some(SOURCE_REGISTRY_SCHEMA.to_string()),
         sources: sources.to_vec(),
     })?;
+    text.push('\n');
     // niubash#359 (design SS4.4): the registry is control-plane state, so
     // it gets the same #304 atomic swap the rc writers had - a concurrent
     // reader (the doctor, a sync in another terminal) sees the old or the
     // new full file, never a truncate window.
     crate::path_utils::write_file_atomic(&path, text.as_bytes())?;
     Ok(())
+}
+
+/// Outcome of [`migrate_legacy_source_registry`]: what the one-shot
+/// bridge moved.
+#[derive(Debug, Clone)]
+pub struct SourceRegistryMigrationReport {
+    /// The legacy registry file, renamed aside (present iff one existed).
+    pub registry_backup: Option<PathBuf>,
+    /// Ids of records the legacy registry carried that the JSON registry
+    /// did not already have (merged in by id).
+    pub sources: Vec<String>,
+}
+
+/// One-time migration from the pre-1.5.0 TOML source registry
+/// (`sources/registry.toml`) to the JSON registry (`registry.json`).
+/// This is the ONLY code that still reads the TOML form — the runtime
+/// never does (the same one-shot pattern as `niu config migrate` on the
+/// config face and `distros::migrate_legacy_distros` on the distro
+/// face). The legacy file is parsed through the very same record shape
+/// (serde ignores fields this build no longer models — the removed
+/// #647 trust fields ride along and drop, exactly as they did when the
+/// runtime still parsed the file directly). Records already in the JSON
+/// registry win by `id`; legacy records it does not know are carried
+/// over. The converted legacy file is renamed to
+/// `<name>.migrated-<UTC timestamp>`, never deleted. When there is no
+/// legacy registry this returns `Ok(None)`; a legacy registry that does
+/// not parse refuses the whole migration before anything on disk
+/// changes (the #178 consent posture: niu never rewrites a registry it
+/// cannot read — the write below also refuses over a corrupt JSON
+/// registry, leaving the legacy file in place for the retry).
+pub fn migrate_legacy_source_registry() -> anyhow::Result<Option<SourceRegistryMigrationReport>> {
+    let legacy_path = legacy_registry_path();
+    let text = match fs::read_to_string(&legacy_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("could not read {}", legacy_path.display()))
+        }
+    };
+    let legacy: SourceRegistry = toml::from_str(&text).with_context(|| {
+        format!(
+            "could not parse {} — fix or remove the file by hand; \
+             niu never rewrites a registry it cannot read",
+            legacy_path.display()
+        )
+    })?;
+    let mut merged = read_source_registry();
+    let mut carried = Vec::new();
+    for record in legacy.sources {
+        if !merged.iter().any(|existing| existing.id == record.id) {
+            carried.push(record.id.clone());
+            merged.push(record);
+        }
+    }
+    write_source_registry(&merged)?;
+    let backup = super::distros::rename_legacy_file(&legacy_path)?;
+    Ok(Some(SourceRegistryMigrationReport {
+        registry_backup: Some(backup),
+        sources: carried,
+    }))
 }
 
 pub(crate) fn now_timestamp() -> String {
@@ -2011,7 +2084,7 @@ mod tests {
         let temp = unique_temp_dir("verb-budget");
         let root = temp.join("sources");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
-        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.toml"));
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
         let _budget =
             EnvVarGuard::set_os("NIU_PLUGIN_FETCH_TIMEOUT_MS", std::ffi::OsStr::new("300"));
 
@@ -2041,7 +2114,7 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(
-            leftovers.iter().all(|name| name == "registry.toml"),
+            leftovers.iter().all(|name| name == "registry.json"),
             "no staging leftovers: {leftovers:?}"
         );
 
@@ -2234,7 +2307,7 @@ mod tests {
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
         // Removal is spec-aware since 1.3.1 (an uninstall drops the
         // declaration); keep the test off the real ~/.niubash spec.
-        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.toml"));
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
 
         let record = add_source(local_request(&origin)).expect("add must succeed");
         assert_eq!(record.id, "oh-my-bash");
@@ -2643,7 +2716,7 @@ mod tests {
         let root = temp.join("sources");
         write_omb_fixture(&origin, "v1");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
-        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.toml"));
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
         add_source(local_request(&origin)).unwrap();
         use crate::plugins::spec;
         spec::save_spec(&spec::PluginSpec {
@@ -2974,20 +3047,21 @@ mod tests {
         let _ = fs::remove_dir_all(&temp);
     }
 
-    /// A hand-written registry carrying one healthy pinned record plus one
-    /// line that fails to parse (niubash#178's shape: a hand edit or a
-    /// crashed write left garbage in `registry.toml`).
+    /// A hand-written registry carrying one healthy pinned record plus a
+    /// trailing fragment that fails to parse (niubash#178's shape: a hand
+    /// edit or a crashed write left garbage in `registry.json`).
     fn corrupt_registry_text(pinned: &SourceRecord) -> String {
-        let registry = SourceRegistryToml {
+        let registry = SourceRegistry {
             schema: Some(SOURCE_REGISTRY_SCHEMA.to_string()),
             sources: vec![pinned.clone()],
         };
-        let mut text = toml::to_string_pretty(&registry).expect("healthy records must serialize");
-        text.push_str("\n[[sources]]\nid = \"broken-entry\"\nthis line is not toml =\n");
+        let mut text =
+            serde_json::to_string_pretty(&registry).expect("healthy records must serialize");
+        text.push_str("\n{\"id\": \"broken-entry\", this is not json\n");
         text
     }
 
-    /// niubash#178: one unparsable line in `registry.toml` must never cost
+    /// niubash#178: one unparsable fragment in `registry.json` must never cost
     /// the user their persisted pins. The corrupt file is warned about
     /// exactly once, snapshotted byte-for-byte to a `.corrupt` sidecar, and
     /// NEVER rewritten by a registry write — only a human repair (fixing or
@@ -3013,7 +3087,7 @@ mod tests {
             spec_enabled: Some(vec!["git".to_string()]),
             spec_theme: Some("agnoster".to_string()),
         };
-        let path = root.join("registry.toml");
+        let path = root.join("registry.json");
         fs::create_dir_all(&root).unwrap();
         let corrupt_text = corrupt_registry_text(&pinned);
         fs::write(&path, &corrupt_text).unwrap();
@@ -3043,7 +3117,7 @@ mod tests {
 
         // The sidecar snapshot carries the original bytes verbatim —
         // the pin and record state survive any later repair.
-        let sidecar = root.join("registry.toml.corrupt");
+        let sidecar = root.join("registry.json.corrupt");
         assert_eq!(
             fs::read_to_string(&sidecar).unwrap(),
             corrupt_text,
@@ -3064,11 +3138,11 @@ mod tests {
 
         // Consent = a human repairs the file. Writes resume on a parseable
         // registry, and the healthy record round-trips.
-        let registry = SourceRegistryToml {
+        let registry = SourceRegistry {
             schema: Some(SOURCE_REGISTRY_SCHEMA.to_string()),
             sources: vec![pinned.clone()],
         };
-        fs::write(&path, toml::to_string_pretty(&registry).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(&registry).unwrap()).unwrap();
         assert!(registry_corruption().is_none(), "repaired file parses");
         write_source_registry(std::slice::from_ref(&pinned))
             .expect("post-repair write must succeed");
@@ -3216,7 +3290,9 @@ mod tests {
     /// source must list ready and contribute its themes, and a leftover
     /// drifted-sources.txt beside it is ignored without error. This
     /// fixture is the ONE test sample allowed to carry the removed
-    /// fields.
+    /// fields. Since the 1.5.0 product-TOML deletion the file on disk is
+    /// the pre-1.5.0 TOML form, so the load path is the one-shot
+    /// `niu plugin migrate` bridge: the runtime itself never reads it.
     #[test]
     fn registry_with_removed_trust_fields_still_loads() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -3263,10 +3339,19 @@ mod tests {
         // The retired drift ledger may still be on disk; it is ignored.
         fs::write(root.join("drifted-sources.txt"), "oh-my-bash\n").unwrap();
 
-        assert!(
-            registry_corruption().is_none(),
-            "the old-format registry must parse"
-        );
+        // The runtime reads only the JSON registry: the TOML form is
+        // invisible (and not corruption — it is simply not the file).
+        assert!(registry_corruption().is_none());
+        assert!(read_source_registry().is_empty());
+        // The one-shot bridge converts it; the trust fields drop on the
+        // way through the shared record shape.
+        let report = migrate_legacy_source_registry()
+            .unwrap()
+            .expect("the legacy registry migrates");
+        assert_eq!(report.sources, ["oh-my-bash"], "{report:?}");
+        assert!(root.join("registry.json").is_file());
+        assert!(!root.join("registry.toml").exists(), "renamed aside");
+
         let records = read_source_registry();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, "oh-my-bash");
@@ -3278,6 +3363,124 @@ mod tests {
             !source_theme_entries().is_empty(),
             "an upgraded install loads as usual"
         );
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    // ── 1.5.0 TOML deletion: the source-registry migrate bridge ──────────
+
+    fn legacy_record(id: &str, root: &Path) -> SourceRecord {
+        SourceRecord {
+            id: id.to_string(),
+            adapter: "file".to_string(),
+            url: "https://example.com/repo.git".to_string(),
+            ref_name: "local".to_string(),
+            version: "git-abc123".to_string(),
+            path: root.join(id),
+            license: "MIT".to_string(),
+            installed_at: "1700000000".to_string(),
+            commit_sha: Some("abc123def456".to_string()),
+            previous: Some(SourcePreviousState {
+                ref_name: "local".to_string(),
+                version: "git-000".to_string(),
+                commit_sha: None,
+            }),
+            spec_enabled: None,
+            spec_theme: None,
+        }
+    }
+
+    #[test]
+    fn migrate_converts_the_legacy_toml_registry() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("migrate-registry");
+        let root = temp.join("sources");
+        fs::create_dir_all(&root).unwrap();
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let pinned = legacy_record("wildy", &root);
+        let legacy = SourceRegistry {
+            schema: Some("niubash:plugin-source-registry@0.3.0".to_string()),
+            sources: vec![pinned.clone()],
+        };
+        let legacy_text = toml::to_string_pretty(&legacy).unwrap();
+        fs::write(root.join("registry.toml"), &legacy_text).unwrap();
+
+        // The runtime is blind to the TOML form until migrate runs.
+        assert!(read_source_registry().is_empty());
+
+        let report = migrate_legacy_source_registry()
+            .unwrap()
+            .expect("legacy registry migrates");
+        assert_eq!(report.sources, ["wildy"], "{report:?}");
+        let backup = report.registry_backup.expect("legacy renamed aside");
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("registry.toml.migrated-"),
+            "{backup:?}"
+        );
+        assert_eq!(fs::read_to_string(&backup).unwrap(), legacy_text);
+
+        let records = read_source_registry();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].commit_sha.as_deref(), Some("abc123def456"));
+        assert!(records[0].previous.is_some(), "previous state survives");
+
+        // Second run: nothing left to migrate.
+        assert!(migrate_legacy_source_registry().unwrap().is_none());
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn migrate_refuses_an_unreadable_legacy_registry() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("migrate-registry-bad");
+        let root = temp.join("sources");
+        fs::create_dir_all(&root).unwrap();
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        fs::write(root.join("registry.toml"), "this is [ not toml\n").unwrap();
+
+        let err = migrate_legacy_source_registry().unwrap_err().to_string();
+        assert!(err.contains("never rewrites a registry"), "{err}");
+        assert!(
+            root.join("registry.toml").is_file(),
+            "the unreadable legacy registry is left in place"
+        );
+        assert!(!root.join("registry.json").exists(), "nothing written");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn migrate_merges_with_the_existing_json_registry_by_id() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("migrate-registry-merge");
+        let root = temp.join("sources");
+        fs::create_dir_all(&root).unwrap();
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        // The JSON registry already carries `wildy` at a newer version;
+        // the legacy file re-declares it and adds `other`.
+        let mut current = legacy_record("wildy", &root);
+        current.version = "git-newer".to_string();
+        write_source_registry(std::slice::from_ref(&current)).unwrap();
+        let legacy = SourceRegistry {
+            schema: Some(SOURCE_REGISTRY_SCHEMA.to_string()),
+            sources: vec![legacy_record("wildy", &root), legacy_record("other", &root)],
+        };
+        fs::write(
+            root.join("registry.toml"),
+            toml::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let report = migrate_legacy_source_registry()
+            .unwrap()
+            .expect("legacy registry migrates");
+        assert_eq!(report.sources, ["other"], "{report:?}");
+        let records = read_source_registry();
+        assert_eq!(records.len(), 2);
+        let wildy = records.iter().find(|r| r.id == "wildy").unwrap();
+        assert_eq!(wildy.version, "git-newer", "the JSON record wins by id");
         let _ = fs::remove_dir_all(&temp);
     }
 

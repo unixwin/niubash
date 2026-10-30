@@ -1647,8 +1647,8 @@ fn print_usage() {
     println!("  plugin migrate-rc [--diff]");
     println!("                            Read-only migration report for legacy managed");
     println!("                            blocks (never writes the rc)");
-    println!("  plugin migrate            One-time conversion of pre-1.5.0 TOML distro");
-    println!("                            data (registry + collection manifests) to JSON");
+    println!("  plugin migrate            One-time conversion of pre-1.5.0 TOML plugin");
+    println!("                            data (distros, spec, source registry) to JSON");
     println!("  plugin discover [--verbose]");
     println!("                            Read-only overview of external plugin sources");
     println!("  plugin source <command>   Full source protocol (add/remove/update/");
@@ -2377,7 +2377,7 @@ fn run_plugin_source_rollback_command(args: &[String]) -> anyhow::Result<()> {
 
 /// `niu plugin add <catalog-id | owner/repo | url | path>` — the
 /// vim-plug/lazy.nvim front door, declarative since §14.6.3: the entry is
-/// appended to `~/.niubash/plugins.toml` and `niu plugin sync` installs it
+/// appended to `~/.niubash/plugins.json` and `niu plugin sync` installs it
 /// (fetch only; activation is a separate enable verb). Catalog ids resolve to
 /// their official origin, `owner/repo` expands to GitHub; wild repos and
 /// bpkg trees come in the same way (auto-detected layout, per-plugin id).
@@ -3498,60 +3498,102 @@ fn run_plugin_enable_command(args: &[String], enable: bool) -> anyhow::Result<()
 /// suggested post-migration rc under `~/.niubash/candidates/`. The user rc
 /// itself is NEVER modified — the removal is always the user's own edit.
 /// `niu plugin migrate` — the one-time bridge from the pre-1.5.0 TOML
-/// distro data. The runtime never reads those files; this verb converts
-/// the distros registry and every imported collection manifest to JSON
-/// and renames the old files aside (never deletes them).
+/// plugin data. The runtime never reads those files; this verb converts
+/// every remaining TOML control face — the distros registry and imported
+/// collection manifests, the plugin spec, and the source registry — to
+/// JSON and renames the old files aside (never deletes them).
 fn run_plugin_migrate_command(args: &[String]) -> anyhow::Result<()> {
     for arg in args {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!("usage: niu plugin migrate");
                 println!();
-                println!("  one-time: converts pre-1.5.0 TOML distro data — the registry");
-                println!("  ~/.niubash/distros/registry.toml and every imported");
-                println!("  niu-collection.toml — to their JSON forms and renames the");
-                println!("  old files to <name>.migrated-<timestamp>. Nothing reads the");
-                println!("  TOML forms afterwards; safe to re-run (a second run is a no-op).");
+                println!("  one-time: converts pre-1.5.0 TOML plugin data — the distro");
+                println!("  registry (~/.niubash/distros/registry.toml) and every imported");
+                println!("  niu-collection.toml, the plugin spec (~/.niubash/plugins.toml),");
+                println!("  and the source registry (~/.niubash/sources/registry.toml) —");
+                println!("  to their JSON forms and renames the old files to");
+                println!("  <name>.migrated-<timestamp>. Nothing reads the TOML forms");
+                println!("  afterwards; safe to re-run (a second run is a no-op).");
                 return Ok(());
             }
             unknown => anyhow::bail!("unknown plugin migrate option '{unknown}'"),
         }
     }
-    use niubash_runtime::plugins::distros::{distros_root, migrate_legacy_distros};
-    let Some(report) = migrate_legacy_distros()? else {
-        println!(
-            "No legacy TOML distro data found under {} — nothing to migrate.",
-            distros_root().display()
-        );
+    use niubash_runtime::plugins::distros::migrate_legacy_distros;
+    use niubash_runtime::plugins::sources::migrate_legacy_source_registry;
+    use niubash_runtime::plugins::spec::migrate_legacy_spec;
+    let distro_report = migrate_legacy_distros()?;
+    let spec_report = migrate_legacy_spec()?;
+    let source_report = migrate_legacy_source_registry()?;
+    if distro_report.is_none() && spec_report.is_none() && source_report.is_none() {
+        println!("No legacy TOML plugin data found — nothing to migrate.");
         return Ok(());
-    };
-    if !report.collections.is_empty() {
-        println!(
-            "Migrated {} imported collection(s) to JSON manifests:",
-            report.collections.len()
-        );
-        for name in &report.collections {
-            println!("  {name}");
+    }
+    if let Some(report) = &distro_report {
+        if !report.collections.is_empty() {
+            println!(
+                "Migrated {} imported collection(s) to JSON manifests:",
+                report.collections.len()
+            );
+            for name in &report.collections {
+                println!("  {name}");
+            }
+        }
+        if let Some(backup) = &report.registry_backup {
+            println!(
+                "Distro registry converted to JSON; old file renamed to {}.",
+                backup.display()
+            );
+        }
+        for backup in &report.manifest_backups {
+            println!("Old manifest renamed to {}.", backup.display());
+        }
+        if !report.skipped.is_empty() {
+            println!(
+                "Skipped {} legacy manifest(s) that could not be converted:",
+                report.skipped.len()
+            );
+            for skipped in &report.skipped {
+                println!("  {skipped}");
+            }
+            println!("Fix or remove those files by hand, then re-run `niu plugin migrate`.");
         }
     }
-    if let Some(backup) = &report.registry_backup {
-        println!(
-            "Distro registry converted to JSON; old file renamed to {}.",
-            backup.display()
-        );
-    }
-    for backup in &report.manifest_backups {
-        println!("Old manifest renamed to {}.", backup.display());
-    }
-    if !report.skipped.is_empty() {
-        println!(
-            "Skipped {} legacy manifest(s) that could not be converted:",
-            report.skipped.len()
-        );
-        for skipped in &report.skipped {
-            println!("  {skipped}");
+    if let Some(report) = &spec_report {
+        if let Some(backup) = &report.backup {
+            println!(
+                "Plugin spec converted to JSON; old file renamed to {}.",
+                backup.display()
+            );
         }
-        println!("Fix or remove those files by hand, then re-run `niu plugin migrate`.");
+        if !report.sources.is_empty() {
+            println!(
+                "Spec source(s) carried over from the legacy spec: {}",
+                report.sources.join(", ")
+            );
+        }
+        if !report.skipped.is_empty() {
+            println!("Skipped the legacy plugin spec, which could not be converted:");
+            for skipped in &report.skipped {
+                println!("  {skipped}");
+            }
+            println!("Fix or remove that file by hand, then re-run `niu plugin migrate`.");
+        }
+    }
+    if let Some(report) = &source_report {
+        if !report.sources.is_empty() {
+            println!(
+                "Source record(s) carried over from the legacy registry: {}",
+                report.sources.join(", ")
+            );
+        }
+        if let Some(backup) = &report.registry_backup {
+            println!(
+                "Source registry converted to JSON; old file renamed to {}.",
+                backup.display()
+            );
+        }
     }
     Ok(())
 }
@@ -3778,7 +3820,7 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
     if !stray.is_empty() {
         eprintln!(
             "niu plugin sync: found hand-written theme assignment(s) outside the managed \
-             blocks: {}. The supported channel is {} as `theme = \"...\"` on the source \
+             blocks: {}. The supported channel is {} as `"theme": \"...\"` on the source \
              entry; your hand-written line runs after the generated plugin loader, so it \
              wins at startup — keep it only if you intend that override.",
             stray.join("; "),
@@ -3803,10 +3845,8 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
             println!(
                 "  {}",
                 niubash_runtime::text_style::dim(&format!(
-                    "schema = \"{}\"\n\n[[sources]]\ntarget = \"oh-my-bash\"{}\
-                     \nenable = [\"git\", \"npm\"]\ntheme  = \"agnoster\"",
-                    niubash_runtime::plugins::spec::PLUGIN_SPEC_SCHEMA,
-                    "            # catalog id | owner/repo | url | path"
+                    "{{\n  \"schema\": \"{}\",\n  \"sources\": [\n    {{ \"target\": \"oh-my-bash\", \"enable\": [\"git\", \"npm\"], \"theme\": \"agnoster\" }}\n  ]\n}}",
+                    niubash_runtime::plugins::spec::PLUGIN_SPEC_SCHEMA
                 ))
             );
             println!(
@@ -3931,7 +3971,7 @@ fn stable_local_target(target: &str) -> String {
 fn print_plugin_add_usage() {
     println!("Usage:  niu plugin add <id|owner/repo|url|path> [options]");
     println!();
-    println!("Declare a source in the spec (~/.niubash/plugins.toml) and install it");
+    println!("Declare a source in the spec (~/.niubash/plugins.json) and install it");
     println!("(fetch only; activation is a separate `niu plugin enable` step).");
     println!();
     println!("Target forms:");
@@ -3967,7 +4007,7 @@ fn print_plugin_usage() {
     println!("External plugin ecosystem, first-class: any sourceable bash — the");
     println!("known managers (oh-my-bash, bash-it, bash-completion, bpkg trees)");
     println!("and arbitrary wild plugins (single files, gist-style .bash, any");
-    println!("repo). The declarative spec ~/.niubash/plugins.toml is the source");
+    println!("repo). The declarative spec ~/.niubash/plugins.json is the source");
     println!("of truth; these verbs are sugar over it plus `niu plugin sync`.");
     println!("Sources install as-is; activation is an explicit enable step.");
     println!();
@@ -4002,9 +4042,9 @@ fn print_plugin_usage() {
     println!("  migrate-rc [--diff]      Read-only diagnostic: scan the rc for legacy");
     println!("                           `# >>> niu source` managed blocks that keep");
     println!("                           the loader off; never edits the rc");
-    println!("  migrate                  One-time conversion of pre-1.5.0 TOML distro");
-    println!("                           data (registry + imported collection");
-    println!("                           manifests) to JSON; old files renamed aside");
+    println!("  migrate                  One-time conversion of pre-1.5.0 TOML plugin");
+    println!("                           data (distros, spec, source registry)");
+    println!("                           to JSON; old files renamed aside");
     println!("  ui                       Menu UI (sections by state, same verbs)");
     println!();
     println!("  recipe <command>         Recipe index: list [--category <c>]");
@@ -4018,13 +4058,14 @@ fn print_plugin_usage() {
     println!("                           rollback/list)");
     println!();
     println!("Spec (single source of truth, edit it directly):");
-    println!("  [[sources]]");
-    println!("  target = 'oh-my-bash'         # catalog id | owner/repo | url | path");
-    println!("  id    = 'bash-preexec'        # optional (wild sources: bound at first sync)");
-    println!("  kind  = 'bpkg'                # optional adapter pin (adopted bpkg trees)");
-    println!("  ref   = 'v1.2'                # optional (first fetch only)");
-    println!("  enable = ['git', 'npm']       # manager-native selection");
-    println!("  theme  = 'agnoster'           # optional (OSH_THEME/…; absent = unmanaged)");
+    println!("  {{ \"sources\": [ {{");
+    println!("    \"target\": \"oh-my-bash\",    # catalog id | owner/repo | url | path");
+    println!("    \"id\": \"bash-preexec\",      # optional (wild sources: bound at first sync)");
+    println!("    \"kind\": \"bpkg\",            # optional adapter pin (adopted bpkg trees)");
+    println!("    \"ref\": \"v1.2\",             # optional (first fetch only)");
+    println!("    \"enable\": [\"git\", \"npm\"],  # manager-native selection");
+    println!("    \"theme\": \"agnoster\"         # optional (OSH_THEME/…; absent = unmanaged)");
+    println!("  }} ] }}");
     println!();
     println!("Examples:");
     println!("  niu plugin add oh-my-bash        # catalog shorthand");
@@ -4145,7 +4186,7 @@ fn show_setup_usage() {
     println!("The wizard creates ~/.niubashrc only when it is missing (create-only:");
     println!("an existing rc is never modified — a proposed configuration is parked");
     println!("in ~/.niubash/candidates/ instead) and writes the plugin spec");
-    println!("(~/.niubash/plugins.toml).");
+    println!("(~/.niubash/plugins.json).");
 }
 
 #[cfg(windows)]

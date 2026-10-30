@@ -540,7 +540,7 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
             writeln!(
                 out,
                 "  {info} plugin spec         none — imperative mode \
-                 (`niu plugin add <target>` creates ~/.niubash/plugins.toml)"
+                 (`niu plugin add <target>` creates ~/.niubash/plugins.json)"
             )?;
         }
         Ok(Some(spec)) => {

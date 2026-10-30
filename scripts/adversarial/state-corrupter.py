@@ -25,7 +25,8 @@ Ops (composable, order = call order):
   hand-line-in-block       a user alias line inside the managed block
                            (the silent-drop shape of niu#176)
   truncate-rc              cut the last 4 lines of the rc
-  corrupt-spec-toml        append a broken TOML line to plugins.toml
+  corrupt-spec-toml        append broken content to plugins.json
+                           (invalid JSON; op name kept for matrix compat)
   stale-bootstrap-failure  seed bootstrap-failures.toml (real schema) with
                            an old failed-fetch memo (the F5 shape)
   rename-tree-file         oh-my-bash.sh -> oh-my-bash.sh.bak (damaged tree)
@@ -34,10 +35,10 @@ Ops (composable, order = call order):
   delete-tree-partial      remove themes/ only (partially-deleted tree)
   registry-attribution-flip  record's adapter flips oh-my-bash -> bash-it
                            (the #168 suspected mechanism)
-  registry-truncate        cut the registry mid-record (broken TOML)
+  registry-truncate        cut the registry mid-record (broken JSON)
   foreign-ps1              Git-Bash-shaped PS1/PROMPT_COMMAND planted in
                            the rc user area (the niu#117 class)
-  imperative-era           delete plugins.toml, keep the registry
+  imperative-era           delete plugins.json, keep the registry
                            (pre-1.3.1 shape, journey P9-S1)
   age-all                  curated week-old drift: crlf-mix +
                            hand-line-in-block + stale-bootstrap-failure +
@@ -143,7 +144,7 @@ def niu_dir(home: Path) -> Path:
 
 
 def spec_path(home: Path) -> Path:
-    return niu_dir(home) / "plugins.toml"
+    return niu_dir(home) / "plugins.json"
 
 
 def sources_root(home: Path) -> Path:
@@ -151,7 +152,7 @@ def sources_root(home: Path) -> Path:
 
 
 def registry_path(home: Path) -> Path:
-    return sources_root(home) / "registry.toml"
+    return sources_root(home) / "registry.json"
 
 
 def omb_tree(home: Path) -> Path:
@@ -227,8 +228,8 @@ def op_truncate_rc(home: Path, report) -> None:
 
 def op_corrupt_spec(home: Path, report) -> None:
     path = spec_path(home)
-    write_text(path, read_text(path) + "\n[[sources]\ntarget = oh-my-bash\n")
-    report("corrupt-spec-toml", f"{path} given unclosed [[sources] table")
+    write_text(path, read_text(path) + '\n{"sources": [ {"target": "oh-my-bash"\n')
+    report("corrupt-spec-toml", f"{path} given an unclosed JSON fragment")
 
 
 def op_stale_bootstrap(home: Path, report) -> None:
@@ -292,7 +293,7 @@ def op_registry_truncate(home: Path, report) -> None:
     text = read_text(path)
     cut = text.rindex("[[sources]]")
     write_text(path, text[:cut] + "[[sources]]\nadapter = \"wil")
-    report("registry-truncate", f"{path} cut mid-record (broken TOML)")
+    report("registry-truncate", f"{path} cut mid-record (broken JSON)")
 
 
 def op_foreign_ps1(home: Path, report) -> None:

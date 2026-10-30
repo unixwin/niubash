@@ -7,7 +7,7 @@
 //! ecosystem is the first-class content).
 //!
 //! Since §14.6.3 the CLI verbs are *sugar over the declarative spec*
-//! (`~/.niubash/plugins.toml`): `enable`/`disable` edit the spec and run
+//! (`~/.niubash/plugins.json`): `enable`/`disable` edit the spec and run
 //! the reconciler (`plugins::sync`), which materializes the managed blocks
 //! idempotently. The spec is the source of truth; the rc block is derived.
 //!
@@ -125,8 +125,8 @@ pub fn rc_file() -> PathBuf {
 
 /// Theme assignments (`OSH_THEME=`/`BASH_IT_THEME=`, with or without
 /// `export`) hand-written OUTSIDE any managed block (niubash#196). The
-/// supported channel is the `theme` field of a `[[sources]]` entry in
-/// `~/.niubash/plugins.toml`; a hand-written rc line is rewritten away
+/// supported channel is the `theme` field of a `sources` entry in
+/// `~/.niubash/plugins.json`; a hand-written rc line is rewritten away
 /// when the managed block materializes, so callers can warn about it.
 pub fn stray_theme_assignment_lines() -> Vec<String> {
     const THEME_VARS: [&str; 2] = ["OSH_THEME", "BASH_IT_THEME"];
@@ -1643,7 +1643,7 @@ pub fn live_selection(record: &SourceRecord) -> (Vec<String>, Option<String>) {
 }
 
 /// `niu plugin enable <target>` — spec sugar (§14.6.3): declare the source
-/// and/or asset in `~/.niubash/plugins.toml`, then sync, which materializes
+/// and/or asset in `~/.niubash/plugins.json`, then sync, which materializes
 /// the manager's own selection mechanism (rc arrays, enabled/ entries, or
 /// guarded per-file source lines).
 pub fn enable(name: &str) -> anyhow::Result<ActivationOutcome> {
@@ -1789,7 +1789,7 @@ pub fn disable(name: &str) -> anyhow::Result<ActivationOutcome> {
         Target::Asset { record, asset } => {
             // Edit (or create) the entry so the spec describes the new
             // state. Adopting the live selection first keeps everything the
-            // user already had; a theme disable pins `theme = ''` — the
+            // user already had; a theme disable pins `"theme": ""` — the
             // explicit "no theme" marker (absent would mean "unmanaged").
             let entry = upsert_spec_entry(&mut spec, &record);
             if asset.kind == SourceAssetKind::Theme {
@@ -1952,7 +1952,7 @@ pub fn compute_spec_selection(
                     final_names.push(hand);
                 }
             }
-            // Theme: the spec's pick wins (`theme = ''` explicitly clears
+            // Theme: the spec's pick wins (`"theme": ""` explicitly clears
             // it); a spec that declares none keeps the current one (manual
             // choice preserved).
             let theme = match entry.theme.as_deref() {
@@ -2486,7 +2486,7 @@ mod tests {
             ),
             _spec: EnvGuard::set(
                 "NIU_PLUGIN_SPEC",
-                &home.join(".niubash/plugins.toml").to_string_lossy(),
+                &home.join(".niubash/plugins.json").to_string_lossy(),
             ),
             temp,
         }
@@ -2610,7 +2610,7 @@ mod tests {
             rc_text()
         );
         let spec = spec_text();
-        assert!(spec.contains("target = '"), "{spec}");
+        assert!(spec.contains("\"target\": \""), "{spec}");
         assert!(spec.contains("'git'"), "{spec}");
         assert!(spec.contains("'agnoster'"), "{spec}");
 
@@ -2655,7 +2655,7 @@ mod tests {
             !loader.contains("niu plugin source: oh-my-bash"),
             "{loader}"
         );
-        assert!(!spec_text().contains("target ="), "{}", spec_text());
+        assert!(!spec_text().contains("\"target\""), "{}", spec_text());
         assert!(
             box_.temp.join("sources/oh-my-bash/oh-my-bash.sh").is_file(),
             "tree untouched"
@@ -2707,12 +2707,12 @@ mod tests {
         assert!(!loader_text().contains("OSH_THEME="), "{}", loader_text());
         let spec = spec_text();
         assert!(
-            spec.contains("theme = ''"),
+            spec.contains("\"theme\": \"\""),
             "theme pick explicitly cleared: {spec}"
         );
 
         // The claim is evidence, not a blanket pass: once cleared (theme
-        // = ''), the bare name is ambiguous again.
+        // = ""), the bare name is ambiguous again.
         let err = disable("agnoster").expect_err("cleared claim restores ambiguity");
         assert!(
             err.to_string().contains("exists in multiple sources"),
@@ -2949,8 +2949,16 @@ mod tests {
         enable("oh-my-bash/demox").expect("omb pick");
         let loader = loader_text();
         assert!(loader.contains("OSH_THEME='demox'"), "{loader}");
-        assert!(spec_text().contains("id = 'oh-my-bash'"), "{}", spec_text());
-        assert!(spec_text().contains("theme = 'demox'"), "{}", spec_text());
+        assert!(
+            spec_text().contains("\"id\": \"oh-my-bash\""),
+            "{}",
+            spec_text()
+        );
+        assert!(
+            spec_text().contains("\"theme\": \"demox\""),
+            "{}",
+            spec_text()
+        );
         let picked_loader = loader_text();
 
         // A plain sync is a no-op (byte-stable generation).
@@ -2972,9 +2980,9 @@ mod tests {
             "the losing framework's theme section must go: {loader}"
         );
         let spec = spec_text();
-        assert!(spec.contains("id = 'bash-it'"), "{spec}");
+        assert!(spec.contains("\"id\": \"bash-it\""), "{spec}");
         assert!(
-            !spec.contains("id = 'oh-my-bash'"),
+            !spec.contains("\"id\": \"oh-my-bash\""),
             "the theme-only loser declaration is gone: {spec}"
         );
         let moved_loader = loader_text();

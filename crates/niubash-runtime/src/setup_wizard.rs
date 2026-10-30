@@ -1475,7 +1475,7 @@ fn apply_plugin_collection(name: &str, lang: Lang) -> Option<CollectionJournal> 
 /// The end-of-run spec adoption (1.3.1): after a collection apply — and
 /// the post-install theme pick, so the chosen theme is part of the
 /// snapshot — declare every installed source into
-/// `~/.niubash/plugins.toml` by snapshotting the live selection
+/// `~/.niubash/plugins.json` by snapshotting the live selection
 /// (`plugins::sync::adopt_installed_sources`, a defensive merge that never
 /// clobbers pre-existing entries), then reconcile once so the run ends in
 /// the exact state a plain `niu plugin sync` keeps. 1.3.0 left the spec
@@ -2445,7 +2445,7 @@ unset __niubash_home_drive __niubash_home_rest
 # Change things later (nothing here runs automatically):
 #   niu plugin discover          see external sources & themes (read-only)
 #   niu plugin add <target>      declare + install a plugin source
-#   niu plugin sync              reconcile ~/.niubash/plugins.toml with reality
+#   niu plugin sync              reconcile ~/.niubash/plugins.json with reality
 #   niu plugin enable <target>   activate a source's assets
 #   niu plugin migrate-rc        review legacy managed blocks (read-only;
 #                                niu never edits this file)
@@ -3684,7 +3684,7 @@ mod tests {
         let _userprofile = EnvGuard::unset("USERPROFILE");
         let _spec = EnvGuard::set(
             "NIU_PLUGIN_SPEC",
-            &home.join(".niubash/plugins.toml").to_string_lossy(),
+            &home.join(".niubash/plugins.json").to_string_lossy(),
         );
         // Register bash-it FIRST: the hostile order is the proof (the old
         // bug flipped the rc toward whichever source the spec favored).
@@ -3730,11 +3730,11 @@ mod tests {
         // The spec names oh-my-bash (id pin — the ambiguous name is owned
         // unambiguously) and bash-it's theme-only era-1 claim moved away.
         let spec_text =
-            std::fs::read_to_string(home.join(".niubash/plugins.toml")).expect("spec written");
-        assert!(spec_text.contains("id = 'oh-my-bash'"), "{spec_text}");
-        assert!(spec_text.contains("theme = 'demox'"), "{spec_text}");
+            std::fs::read_to_string(home.join(".niubash/plugins.json")).expect("spec written");
+        assert!(spec_text.contains("\"id\": \"oh-my-bash\""), "{spec_text}");
+        assert!(spec_text.contains("\"theme\": \"demox\""), "{spec_text}");
         assert!(
-            !spec_text.contains("id = 'bash-it'"),
+            !spec_text.contains("\"id\": \"bash-it\""),
             "the theme-only era-1 declaration moved with the pick: {spec_text}"
         );
 
@@ -3777,7 +3777,7 @@ mod tests {
         let _userprofile = EnvGuard::set("USERPROFILE", &home.to_string_lossy());
         let _spec = EnvGuard::set(
             "NIU_PLUGIN_SPEC",
-            &temp.join("plugins.toml").to_string_lossy(),
+            &temp.join("plugins.json").to_string_lossy(),
         );
         let _sources = EnvGuard::set(
             "NIU_PLUGIN_SOURCES_ROOT",
@@ -4015,7 +4015,7 @@ mod tests {
         {
             let _spec_guard = EnvGuard::set(
                 "NIU_PLUGIN_SPEC",
-                &home.join(".niubash/plugins.toml").to_string_lossy(),
+                &home.join(".niubash/plugins.json").to_string_lossy(),
             );
             record_theme_pick_in_spec(&ThemePick::External {
                 name: "agnoster".to_string(),
@@ -4143,7 +4143,7 @@ mod tests {
         let _userprofile = EnvGuard::unset("USERPROFILE");
         let _spec = EnvGuard::set(
             "NIU_PLUGIN_SPEC",
-            &home.join(".niubash/plugins.toml").to_string_lossy(),
+            &home.join(".niubash/plugins.json").to_string_lossy(),
         );
 
         // The journey's end state: collection installed the fixture,
@@ -4163,10 +4163,10 @@ mod tests {
 
         adopt_installed_sources_into_spec(Lang::En);
 
-        let spec_text = std::fs::read_to_string(home.join(".niubash/plugins.toml"))
+        let spec_text = std::fs::read_to_string(home.join(".niubash/plugins.json"))
             .expect("the wizard wrote the spec");
-        assert!(spec_text.contains("id = 'oh-my-bash'"), "{spec_text}");
-        assert!(spec_text.contains("theme = 'agnoster'"), "{spec_text}");
+        assert!(spec_text.contains("\"id\": \"oh-my-bash\""), "{spec_text}");
+        assert!(spec_text.contains("\"theme\": \"agnoster\""), "{spec_text}");
         // The pick already published the loader generation
         // (record_theme_pick_in_spec runs the sync — niubash#359), and the
         // settled state round-trips: a plain sync is a no-op for the rc AND

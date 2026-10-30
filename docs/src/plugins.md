@@ -44,7 +44,7 @@ what you install is what runs once enabled, exactly like cloning a repo
 and sourcing it by hand.)
 
 Manager sources (catalog ids like `oh-my-bash`) are also declared in the
-spec `~/.niubash/plugins.toml` — the single source of truth for what is
+spec `~/.niubash/plugins.json` — the single source of truth for what is
 declared; `niu plugin sync` reconciles the spec with what is installed,
 and `niu plugin update <id>` (no id = all) moves sources to their ref tips.
 
@@ -131,7 +131,12 @@ Imports are first-class: anything the built-ins can do, your own repo can do,
 byte-identically. Upgrading from a pre-1.5.0 niu whose imported collections
 still use the TOML forms? Run `niu plugin migrate` once — it converts the
 distro registry and every imported manifest to JSON and renames the old
-files aside; nothing reads the TOML forms afterwards. `apply` installs every entry through its recipe driver —
+files aside; nothing reads the TOML forms afterwards. The same one-shot
+bridge also converts the plugin spec (`~/.niubash/plugins.toml` →
+`plugins.json`, merged entry-by-entry by target) and the source registry
+(`~/.niubash/sources/registry.toml` → `registry.json`, merged by source
+id) — existing JSON entries win, legacy-only entries are carried over,
+and the old files are renamed aside, never deleted. `apply` installs every entry through its recipe driver —
 installation only; activation stays an explicit `enable`. Failures are collected per
 entry (a bad entry never kills the rest) and reported with the retry verb.
 The first-run wizard's plugin-collection question is a LazyVim-style
@@ -185,7 +190,7 @@ When driving niu on a user's machine:
 - `niu plugin update <id>` moves a source to its ref tip (no id = every
   source); `niu plugin sync` reconciles the spec with reality;
   `niu plugin restore` rebuilds from the lockfile pin in
-  `~/.niubash/sources/registry.toml`.
+  `~/.niubash/sources/registry.json`.
 - Exit codes: success `0`; usage errors and refused operations (unknown id,
   builtin-name collision, non-tty `ui`) exit non-zero with a message that
   names the object and the repair verb.

@@ -223,7 +223,7 @@ fn example_rc_sells_no_retired_stack_fields() {
     );
     // The current model (niubash#359): manifest + generated loader, the
     // rollback switch, and the read-only migration verb for legacy blocks.
-    assert!(example.contains("plugins.toml"), "{example}");
+    assert!(example.contains("plugins.json"), "{example}");
     assert!(example.contains("generated/plugins.niu"), "{example}");
     assert!(example.contains("NIU_PLUGIN_LOADER"), "{example}");
     assert!(example.contains("migrate-rc"), "{example}");

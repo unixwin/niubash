@@ -1,7 +1,7 @@
 //! `niu plugin sync` — reconcile the declarative spec against the machine
 //! (design §14.6.3; lazy.nvim `:Lazy sync` semantics).
 //!
-//! The spec (`plugins::spec`, `~/.niubash/plugins.toml`) declares *what
+//! The spec (`plugins::spec`, `~/.niubash/plugins.json`) declares *what
 //! should exist*; the registry (`plugins::sources`) locks *what exists*
 //! (commit pins). Sync is the only thing that moves the two
 //! towards each other:
@@ -713,7 +713,7 @@ struct ThemeClaimMember {
     record_id: String,
     /// The theme the record's managed rc block currently carries.
     live_theme: Option<String>,
-    /// The entry's non-empty spec claim, if any (`theme = ''` is an
+    /// The entry's non-empty spec claim, if any (`"theme": ""` is an
     /// explicit "no theme here" and never joins a group).
     claim: Option<String>,
 }
@@ -976,7 +976,7 @@ mod tests {
             ),
             _spec: EnvGuard::set(
                 "NIU_PLUGIN_SPEC",
-                &home.join(".niubash/plugins.toml").to_string_lossy(),
+                &home.join(".niubash/plugins.json").to_string_lossy(),
             ),
             temp,
         }
@@ -1358,7 +1358,7 @@ mod tests {
         // rc, loader, spec, and registry (spec_enabled/spec_theme included).
         let spec_text = fs::read_to_string(spec::spec_path()).unwrap();
         let registry_text =
-            fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap();
+            fs::read_to_string(sources::sources_root().join("registry.json")).unwrap();
         let loader_before = loader_text();
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert!(report.clean, "{:?}", report);
@@ -1374,7 +1374,7 @@ mod tests {
             "spec byte-identical after plain sync"
         );
         assert_eq!(
-            fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap(),
+            fs::read_to_string(sources::sources_root().join("registry.json")).unwrap(),
             registry_text,
             "registry byte-identical after plain sync"
         );
@@ -1416,7 +1416,7 @@ mod tests {
         // Plain sync: an "unchanged" row (nothing enabled, nothing to
         // materialize), and the rc and the registry do not move.
         let registry_text =
-            fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap();
+            fs::read_to_string(sources::sources_root().join("registry.json")).unwrap();
         let report = sync_spec(SyncOptions::default()).unwrap();
         assert!(
             report
@@ -1432,7 +1432,7 @@ mod tests {
         );
         assert!(rc_text().is_empty());
         assert_eq!(
-            fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap(),
+            fs::read_to_string(sources::sources_root().join("registry.json")).unwrap(),
             registry_text,
             "registry byte-stable across plain syncs"
         );
@@ -1505,8 +1505,8 @@ mod tests {
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
-    /// niubash#178: a registry that fails to parse (one bad line among good
-    /// pinned records) must never be silently rewritten by sync — the read
+    /// niubash#178: a registry that fails to parse (one bad fragment among
+    /// good pinned records) must never be silently rewritten by sync — the read
     /// gives an empty view, and a rewrite from that view would drop every
     /// persisted record. Sync's registry write is refused (a
     /// `failed` row, no data loss), the corrupt file survives byte-for-byte,
@@ -1525,24 +1525,29 @@ mod tests {
         // entry (the issue's shape).
         let mut corrupt_text = format!(
             concat!(
-                "schema = \"niubash:plugin-source-registry@0.3.0\"\n",
-                "\n[[sources]]\n",
-                "id = \"wildy\"\n",
-                "adapter = \"file\"\n",
-                "url = \"{}\"\n",
-                "ref = \"local\"\n",
-                "version = \"git-abc123\"\n",
-                "path = \"{}\"\n",
-                "license = \"MIT\"\n",
-                "installed_at = \"1700000000\"\n",
-                "commit_sha = \"abc123def456\"\n",
+                "{{\n",
+                "  \"schema\": \"niubash:plugin-source-registry@0.3.0\",\n",
+                "  \"sources\": [\n",
+                "    {{\n",
+                "      \"id\": \"wildy\",\n",
+                "      \"adapter\": \"file\",\n",
+                "      \"url\": \"{}\",\n",
+                "      \"ref\": \"local\",\n",
+                "      \"version\": \"git-abc123\",\n",
+                "      \"path\": \"{}\",\n",
+                "      \"license\": \"MIT\",\n",
+                "      \"installed_at\": \"1700000000\",\n",
+                "      \"commit_sha\": \"abc123def456\"\n",
+                "    }}\n",
+                "  ]\n",
+                "}}\n",
             ),
             origin.to_string_lossy().replace('\\', "/"),
             root.join("wildy").to_string_lossy().replace('\\', "/"),
         );
-        corrupt_text.push_str("\n[[sources]]\nid = \"broken-entry\"\nthis line is not toml =\n");
+        corrupt_text.push_str("\n{\"id\": \"broken-entry\", this is not json\n");
         fs::create_dir_all(&root).unwrap();
-        let registry_path = root.join("registry.toml");
+        let registry_path = root.join("registry.json");
         fs::write(&registry_path, &corrupt_text).unwrap();
 
         // The spec declares the pinned source; sync cannot see it (the
@@ -1572,17 +1577,17 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&registry_path).unwrap(),
             corrupt_text,
-            "the corrupt registry (bad line + commit pin) must survive sync"
+            "the corrupt registry (bad fragment + commit pin) must survive sync"
         );
         assert!(
-            root.join("registry.toml.corrupt").is_file(),
+            root.join("registry.json.corrupt").is_file(),
             "sidecar snapshot"
         );
 
         // Consent = a human repairs the file. The next sync proceeds
         // normally (adopts the record) and the registry parses.
         let repaired = corrupt_text
-            .split_once("\n[[sources]]\nid = \"broken-entry\"")
+            .split_once("\n{\"id\": \"broken-entry\"")
             .expect("the corrupt entry is present")
             .0
             .to_string();
@@ -2192,7 +2197,7 @@ mod tests {
         let _dead_all = EnvGuard::set("ALL_PROXY", "http://127.0.0.1:9");
 
         let registry_before =
-            fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap();
+            fs::read_to_string(sources::sources_root().join("registry.json")).unwrap();
         let rc_before = rc_text();
         let spec_before = fs::read_to_string(spec::spec_path()).unwrap();
 
@@ -2215,7 +2220,7 @@ mod tests {
             "no fetch attempt may run, so no failure may be memoized"
         );
         assert_eq!(
-            fs::read_to_string(sources::sources_root().join("registry.toml")).unwrap(),
+            fs::read_to_string(sources::sources_root().join("registry.json")).unwrap(),
             registry_before,
             "registry byte-identical in airplane mode"
         );

@@ -13,7 +13,7 @@
 //! may die at any moment and are the user's to verify.
 //!
 //! Iron invariant (§14.8): **rewrites happen at the transport layer only.**
-//! The spec (`plugins.toml`), the lock (`registry.toml`) and recipe URLs
+//! The spec (`plugins.json`), the lock (`registry.json`) and recipe URLs
 //! keep canonical GitHub origins, so a tree installed through a mirror
 //! stays identical to a direct install and the lockfile remains portable
 //! across machines and networks. No auto-select, no

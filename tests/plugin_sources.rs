@@ -280,7 +280,7 @@ fn plugin_discover_is_read_only_and_lists_available_managers() {
     );
     // Read-only proof: no registry was created by a listing command.
     assert!(
-        !root.join("registry.toml").exists(),
+        !root.join("registry.json").exists(),
         "discover must not write the registry"
     );
 
@@ -429,7 +429,7 @@ fn tampered_source_is_unchanged_not_drift() {
     let repo_str = repo.to_string_lossy().into_owned();
     let envs: Vec<(&str, PathBuf)> = vec![
         ("NIU_PLUGIN_SOURCES_ROOT", root.clone()),
-        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.toml")),
+        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.json")),
         ("USERPROFILE", home.clone()),
         ("HOME", home.clone()),
     ];
@@ -584,7 +584,7 @@ fn add_bare_path_forms_snapshot_local_trees() {
     fs::create_dir_all(&home).unwrap();
     let envs: Vec<(&str, PathBuf)> = vec![
         ("NIU_PLUGIN_SOURCES_ROOT", root.clone()),
-        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.toml")),
+        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.json")),
         ("USERPROFILE", home.clone()),
         ("HOME", home.clone()),
     ];
@@ -634,7 +634,7 @@ fn add_bare_path_forms_snapshot_local_trees() {
     let err = String::from_utf8_lossy(&add_missing.stderr);
     assert!(err.contains("does not exist"), "{err}");
     assert!(!err.contains("git clone"), "{err}");
-    let spec = fs::read_to_string(home.join(".niubash/plugins.toml")).unwrap();
+    let spec = fs::read_to_string(home.join(".niubash/plugins.json")).unwrap();
     assert!(
         !spec.contains("no-such-dir"),
         "no stranded declaration: {spec}"
@@ -679,7 +679,7 @@ fn remote_git_origin_adds_without_a_first_fetch_record() {
     let file_url = format!("file:///{}", repo.to_string_lossy().replace('\\', "/"));
     let envs: Vec<(&str, PathBuf)> = vec![
         ("NIU_PLUGIN_SOURCES_ROOT", root.clone()),
-        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.toml")),
+        ("NIU_PLUGIN_SPEC", home.join(".niubash/plugins.json")),
         ("USERPROFILE", home.clone()),
         ("HOME", home.clone()),
     ];

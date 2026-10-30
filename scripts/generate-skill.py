@@ -193,7 +193,7 @@ def render_region(key: str, builtins: list[tuple[str, str]], applets: list[str],
             "`v1:` prefix guards MSYS-family rewriting in transit.",
             "- **Plugin system** — git-clone-only external sources (oh-my-bash, "
             "bash-it, bpkg) behind an explicit trust gate, driven by a "
-            "declarative spec (`~/.niubash/plugins.toml`) with lockfile verbs "
+            "declarative spec (`~/.niubash/plugins.json`) with lockfile verbs "
             "(`add/list/enable/disable/trust/sync/update/restore/rollback/"
             "clean/migrate-rc/source/recipe/distro/mirror/ui`).",
             "- **TUI surfaces** — `niu setup` wizard (theme/prompt/tools), "

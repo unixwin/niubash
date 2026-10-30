@@ -459,8 +459,11 @@ fn convert_legacy_manifest(text: &str) -> anyhow::Result<(String, String)> {
 }
 
 /// Rename a converted legacy file aside: `<name>.migrated-<UTC stamp>`
-/// (the same backup shape as `config::migrate_legacy_config`).
-fn rename_legacy_file(path: &Path) -> anyhow::Result<PathBuf> {
+/// (the same backup shape as `config::migrate_legacy_config`). Shared by
+/// the sibling one-shot migrations (`spec::migrate_legacy_spec`,
+/// `sources::migrate_legacy_source_registry`) so every pre-1.5.0 TOML
+/// face is set aside under the one backup shape.
+pub(super) fn rename_legacy_file(path: &Path) -> anyhow::Result<PathBuf> {
     let stamp = legacy_stamp();
     let mut candidate = PathBuf::from(format!("{}.migrated-{stamp}", path.display()));
     let mut suffix = 1u32;
@@ -1319,7 +1322,7 @@ mod tests {
         let _userprofile = EnvGuard::set("USERPROFILE", &home.to_string_lossy());
         let _spec = EnvGuard::set(
             "NIU_PLUGIN_SPEC",
-            &temp.join("plugins.toml").to_string_lossy(),
+            &temp.join("plugins.json").to_string_lossy(),
         );
         let _sources = EnvGuard::set(
             "NIU_PLUGIN_SOURCES_ROOT",

@@ -85,7 +85,7 @@ impl Sandbox {
         let sources_root = root.join("sources");
         fs::create_dir_all(home.join(".niubash")).unwrap();
         fs::create_dir_all(&sources_root).unwrap();
-        let spec_path = home.join(".niubash").join("plugins.toml");
+        let spec_path = home.join(".niubash").join("plugins.json");
         let envs = vec![
             ("HOME", home.to_string_lossy().into_owned()),
             ("USERPROFILE", home.to_string_lossy().into_owned()),
@@ -769,7 +769,7 @@ fn d2_wizard_one_run_theme_journey() {
         (
             "NIU_PLUGIN_SPEC".to_string(),
             home.join(".niubash")
-                .join("plugins.toml")
+                .join("plugins.json")
                 .to_string_lossy()
                 .into_owned(),
         ),
@@ -885,7 +885,7 @@ fn d2_wizard_one_run_theme_journey() {
     // 1.3.1: the journey ends SPEC-MANAGED. The post-pick adoption
     // declared the collection's sources with the live snapshot — canonical
     // origins (the mirror is transport-only) and the picked theme.
-    let spec = fs::read_to_string(home.join(".niubash").join("plugins.toml")).unwrap();
+    let spec = fs::read_to_string(home.join(".niubash").join("plugins.json")).unwrap();
     assert!(
         spec.contains("https://github.com/ohmybash/oh-my-bash.git"),
         "oh-my-bash declared by its canonical origin: {spec}"
@@ -908,14 +908,14 @@ fn d2_wizard_one_run_theme_journey() {
         spec.contains("https://github.com/junegunn/fzf-git.sh.git"),
         "fzf-git.sh declared: {spec}"
     );
-    assert!(spec.contains("theme = 'agnoster'"), "{spec}");
+    assert!(spec.contains("\"theme\": \"agnoster\""), "{spec}");
 
     // And a fresh shell sees the theme.
     let home_str = s.home().to_string_lossy().into_owned();
     let sources_str = sources.to_string_lossy().into_owned();
     let spec_str = home
         .join(".niubash")
-        .join("plugins.toml")
+        .join("plugins.json")
         .to_string_lossy()
         .into_owned();
     let probe_env: Vec<(&str, String)> = vec![
@@ -973,7 +973,7 @@ fn d3_setup_rerun_applies_in_the_live_session() {
     let rc_text = "PS1='OLD> '\nNIU_DISABLE_DEFAULT_PLUGINS=1\n";
     fs::write(home.join(".niubashrc"), rc_text).unwrap();
 
-    let spec_path = home.join(".niubash").join("plugins.toml");
+    let spec_path = home.join(".niubash").join("plugins.json");
     let envs: Vec<(&str, String)> = vec![
         ("HOME", home.to_string_lossy().into_owned()),
         ("USERPROFILE", home.to_string_lossy().into_owned()),

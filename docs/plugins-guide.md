@@ -7,7 +7,7 @@ repo / single-file plugin — installs on explicit command, activates only
 through an explicit enable, and loads through its **own** loader, never
 through a niubash re-implementation of it.
 
-The declarative spec `~/.niubash/plugins.toml` is the single source of
+The declarative spec `~/.niubash/plugins.json` is the single source of
 truth for *what should be installed and enabled*. The CLI verbs are sugar
 over the spec; `niu plugin sync` reconciles the spec with the machine.
 
@@ -35,21 +35,23 @@ This is byte-faithful to manually sourcing the file under GNU bash —
 including the errors a plugin produces when its framework is missing
 (§14.4, no shims; see *Troubleshooting*).
 
-## The spec: `~/.niubash/plugins.toml`
+## The spec: `~/.niubash/plugins.json`
 
-```toml
-schema = "niubash:plugin-spec@0.1.0"
-
-[[sources]]
-target = "oh-my-bash"            # catalog id | owner/repo | git url | local path
-enable = ["git", "npm"]          # manager-native selection (OMB: plugins=() rc arrays)
-theme  = "agnoster"              # optional: OSH_THEME / BASH_IT_THEME; absent = unmanaged
-
-[[sources]]
-target = "rcaloras/bash-preexec" # wild file source: GitHub shorthand
-id     = "bash-preexec"          # bound automatically at first sync
-enable = ["bash-preexec.sh"]     # asset names are tree-relative paths
+```json
+{
+  "schema": "niubash:plugin-spec@0.1.0",
+  "sources": [
+    { "target": "oh-my-bash", "enable": ["git", "npm"], "theme": "agnoster" },
+    { "target": "rcaloras/bash-preexec", "id": "bash-preexec", "enable": ["bash-preexec.sh"] }
+  ]
+}
 ```
+
+(`target` is a catalog id | owner/repo | git url | local path; `enable` is
+the manager-native selection — OMB: `plugins=()` rc arrays, wild sources:
+tree-relative paths; `theme` is optional — OSH_THEME / BASH_IT_THEME,
+absent = unmanaged; a wild source's `id` is bound automatically at first
+sync.)
 
 Fields:
 
@@ -85,7 +87,7 @@ claimed theme: a source with no selection of its own does not load its
 framework on top of another source's claimed theme.
 
 The spec declares *what should exist*; the registry
-(`~/.niubash/sources/registry.toml`, schema `@0.3.0`) locks *what exists*
+(`~/.niubash/sources/registry.json`, schema `@0.4.0`) locks *what exists*
 (commit + tree checksum pins) and remembers the last selection the spec
 materialized (`spec_enabled`/`spec_theme`). This is the same spec + lock
 pair lazy.nvim/vim-plug use.
@@ -160,7 +162,7 @@ undeclared / no spec).
 
 Two consequences of the explicit-only design:
 
-- **No spec → nothing to reconcile.** Imperative mode (no `plugins.toml`)
+- **No spec → nothing to reconcile.** Imperative mode (no `plugins.json`)
   means installed-but-undeclared sources are the legacy state, not drift.
   An explicit `niu plugin sync` lists them — with the migration verb.
 - **Failed installs are reported by the verb that ran them.** Nothing
@@ -175,7 +177,7 @@ Two consequences of the explicit-only design:
 
 Machines that installed sources before the spec existed (1.3.0's wizard
 collection apply, `niu plugin source add`) land in *imperative mode*: the
-registry has sources, `plugins.toml` does not exist. `niu plugin sync`
+registry has sources, `plugins.json` does not exist. `niu plugin sync`
 then reports the state and names the one-line migration:
 
 ```
@@ -195,7 +197,7 @@ source that is already installed declares it too (printed as `Declared …
 The setup wizard does the same adoption at the end of a collection apply
 (after the post-install theme pick), so a fresh 1.3.1+ wizard run ends
 **spec-managed**: sources and the picked theme are all
-described by `~/.niubash/plugins.toml`, and no migration verb is needed.
+described by `~/.niubash/plugins.json`, and no migration verb is needed.
 
 ### Merge semantics: spec vs your hand edits
 
