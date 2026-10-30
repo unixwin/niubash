@@ -111,12 +111,18 @@ struct SetupJournalRecord<'a> {
     niu_git: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     collection: Option<&'a str>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "string_list_is_empty")]
     collection_sources: &'a [String],
     // Honesty (journey run-13): a collection whose entries failed — or
     // whose whole apply errored — must never read back as a success.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "string_list_is_empty")]
     collection_failed: &'a [String],
+}
+
+/// `skip_serializing_if` predicate for the journal record's list fields
+/// (serde hands it a reference to the field, hence the double borrow).
+fn string_list_is_empty(list: &&[String]) -> bool {
+    list.is_empty()
 }
 
 /// Write the journal for the run that was just applied. Failures are
