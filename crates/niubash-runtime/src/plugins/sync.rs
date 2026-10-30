@@ -37,6 +37,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use anyhow::Context;
+
 use super::assets;
 use super::sources::{
     self, normalize_origin, read_source_registry, SourceInstallRequest, SourceRecord,
@@ -835,6 +837,11 @@ pub fn update_all_to_ref_tip() -> Vec<sources::SourceSyncOutcome> {
 // memo marks the declarations an old version stranded (the `--prune`
 // snapshot above), and an explicit retry or a prune clears the entry it
 // resolves.
+//
+// The ledger is JSON (`bootstrap-failures.json`) since the 1.5.0
+// product-TOML deletion; the pre-1.5.0 TOML form is converted exactly
+// once by [`migrate_legacy_bootstrap_failures`] (`niu plugin migrate`) —
+// no runtime path reads it.
 
 const BOOTSTRAP_FAILURE_SCHEMA: &str = "niubash:plugin-bootstrap-failures@1";
 
@@ -847,7 +854,24 @@ struct BootstrapFailure {
     ref_name: Option<String>,
 }
 
+/// The on-disk ledger document (one shape for both eras: the TOML form
+/// the bridge reads and the JSON form the runtime reads/writes carry the
+/// same fields — the record shape did not change, only the syntax).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct BootstrapFailureLedger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failure: Vec<BootstrapFailure>,
+}
+
 fn bootstrap_failure_path() -> std::path::PathBuf {
+    sources::sources_root().join("bootstrap-failures.json")
+}
+
+/// Where the pre-1.5.0 TOML ledger lived: the sibling of
+/// [`bootstrap_failure_path`] under its retired name (migrate-only).
+fn legacy_bootstrap_failure_path() -> std::path::PathBuf {
     sources::sources_root().join("bootstrap-failures.toml")
 }
 
@@ -855,12 +879,7 @@ fn read_bootstrap_failures() -> Vec<BootstrapFailure> {
     let Ok(text) = std::fs::read_to_string(bootstrap_failure_path()) else {
         return Vec::new();
     };
-    #[derive(serde::Deserialize)]
-    struct Ledger {
-        #[serde(default)]
-        failure: Vec<BootstrapFailure>,
-    }
-    toml::from_str::<Ledger>(&text)
+    serde_json::from_str::<BootstrapFailureLedger>(&text)
         .map(|ledger| ledger.failure)
         .unwrap_or_default()
 }
@@ -873,19 +892,87 @@ fn write_bootstrap_failures(failures: &[BootstrapFailure]) {
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    let mut body = format!("# Legacy startup install-failure memo (written by an old\n# niu version's startup sync; now read-only — entries are cleared by an\n# explicit `niu plugin sync` retry or by `sync --prune`).\nschema = \"{BOOTSTRAP_FAILURE_SCHEMA}\"\n");
-    for failure in failures {
-        let quote =
-            |value: &str| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
-        body.push_str(&format!(
-            "\n[[failure]]\ntarget = {}\n",
-            quote(&failure.target)
-        ));
-        if let Some(ref_name) = &failure.ref_name {
-            body.push_str(&format!("ref = {}\n", quote(ref_name)));
+    let ledger = BootstrapFailureLedger {
+        schema: Some(BOOTSTRAP_FAILURE_SCHEMA.to_string()),
+        failure: failures.to_vec(),
+    };
+    let Ok(mut body) = serde_json::to_string_pretty(&ledger) else {
+        return;
+    };
+    body.push('\n');
+    let _ = std::fs::write(path, body);
+}
+
+/// Outcome of [`migrate_legacy_bootstrap_failures`]: what the one-shot
+/// bridge moved.
+#[derive(Debug, Clone)]
+pub struct BootstrapFailureMigrationReport {
+    /// The legacy ledger file, renamed aside (present iff one was
+    /// converted).
+    pub backup: Option<std::path::PathBuf>,
+    /// Targets carried over from the legacy ledger that the JSON ledger
+    /// did not already carry (merged in by (target, ref) key).
+    pub carried: Vec<String>,
+}
+
+/// One-time migration from the pre-1.5.0 TOML failure ledger
+/// (`bootstrap-failures.toml`) to the JSON ledger
+/// (`bootstrap-failures.json`). This is the ONLY code that still reads
+/// the TOML form — the runtime never does (the same one-shot pattern as
+/// [`super::sources::migrate_legacy_source_registry`]). The legacy file
+/// is renamed to `<name>.migrated-<UTC timestamp>`, never deleted. When
+/// there is no legacy ledger this returns `Ok(None)`. The ledger is
+/// lock-grade state (prune decisions read it), so it follows the
+/// registry discipline, not the spec's named skip: a legacy ledger that
+/// does not parse — or an existing JSON ledger niu cannot read —
+/// refuses the conversion whole, before anything on disk changes.
+pub fn migrate_legacy_bootstrap_failures() -> anyhow::Result<Option<BootstrapFailureMigrationReport>>
+{
+    let legacy_path = legacy_bootstrap_failure_path();
+    let text = match std::fs::read_to_string(&legacy_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("could not read {}", legacy_path.display()))
+        }
+    };
+    let legacy_ledger: BootstrapFailureLedger = toml::from_str(&text).with_context(|| {
+        format!(
+            "could not parse {} — fix or remove the file by hand; \
+             niu never rewrites a failure ledger it cannot read",
+            legacy_path.display()
+        )
+    })?;
+    let json_path = bootstrap_failure_path();
+    let mut merged = BootstrapFailureLedger::default();
+    if json_path.is_file() {
+        let existing_text = std::fs::read_to_string(&json_path)?;
+        merged = serde_json::from_str(&existing_text).with_context(|| {
+            format!(
+                "could not parse {} — fix or remove the file by hand; \
+                 niu never rewrites a failure ledger it cannot read",
+                json_path.display()
+            )
+        })?;
+    }
+    let mut carried = Vec::new();
+    for failure in legacy_ledger.failure {
+        let key = failure_key(&failure.target, &failure.ref_name);
+        if !merged
+            .failure
+            .iter()
+            .any(|entry| failure_key(&entry.target, &entry.ref_name) == key)
+        {
+            carried.push(failure.target.clone());
+            merged.failure.push(failure);
         }
     }
-    let _ = std::fs::write(path, body);
+    write_bootstrap_failures(&merged.failure);
+    let backup = super::distros::rename_legacy_file(&legacy_path)?;
+    Ok(Some(BootstrapFailureMigrationReport {
+        backup: Some(backup),
+        carried,
+    }))
 }
 
 fn failure_key(target: &str, ref_name: &Option<String>) -> (String, Option<String>) {
@@ -2097,9 +2184,10 @@ mod tests {
             .collect();
         assert_eq!(targets, [origin.to_string_lossy().into_owned()]);
         assert!(
-            !fs::read_to_string(bootstrap_failure_path())
-                .unwrap()
-                .contains("[[failure]]"),
+            read_bootstrap_failures().is_empty()
+                && !fs::read_to_string(bootstrap_failure_path())
+                    .unwrap()
+                    .contains("missing-tree"),
             "the memo goes with the stranded entry"
         );
 
@@ -2112,6 +2200,104 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&holder);
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// The one-shot bridge converts a pre-1.5.0 TOML failure ledger:
+    /// entries (with their `ref` pins) survive, the runtime never read
+    /// the TOML form, the old file is renamed aside, a second run is a
+    /// no-op.
+    #[test]
+    fn legacy_toml_failure_ledger_migrates_to_json() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let box_ = sandbox("bootstrap-migrate");
+        let legacy = legacy_bootstrap_failure_path();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy,
+            concat!(
+                "schema = \"niubash:plugin-bootstrap-failures@1\"\n",
+                "\n[[failure]]\n",
+                "target = \"https://github.com/o/stranded.git\"\n",
+                "ref = \"v1.2.3\"\n",
+                "\n[[failure]]\n",
+                "target = \"D:/local/gone\"\n",
+            ),
+        )
+        .unwrap();
+        // Invisible to the runtime until the bridge runs.
+        assert!(read_bootstrap_failures().is_empty());
+        let report = migrate_legacy_bootstrap_failures().unwrap().unwrap();
+        assert_eq!(report.carried.len(), 2);
+        let backup = report.backup.expect("legacy ledger renamed aside");
+        assert!(backup.exists());
+        assert!(!legacy.exists());
+        let failures = read_bootstrap_failures();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].target, "https://github.com/o/stranded.git");
+        assert_eq!(failures[0].ref_name.as_deref(), Some("v1.2.3"));
+        assert_eq!(failures[1].target, "D:/local/gone");
+        assert!(failures[1].ref_name.is_none());
+        // A second run is a no-op.
+        assert!(migrate_legacy_bootstrap_failures().unwrap().is_none());
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// A legacy ledger that does not parse refuses the conversion
+    /// whole: the error names the refusal and the file is untouched
+    /// (the registry discipline — prune decisions read this ledger).
+    #[test]
+    fn migrate_refuses_an_unparseable_legacy_ledger() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let box_ = sandbox("bootstrap-migrate-bad");
+        let legacy = legacy_bootstrap_failure_path();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "failure = [ not a ledger").unwrap();
+        let err = migrate_legacy_bootstrap_failures().unwrap_err();
+        assert!(format!("{err:#}").contains("never rewrites"), "{err:#}");
+        assert!(legacy.exists(), "refused ledger stays put");
+        assert!(!bootstrap_failure_path().exists(), "no JSON written");
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// Entries already in the JSON ledger win by (target, ref) key;
+    /// legacy-only entries are appended.
+    #[test]
+    fn migrate_merges_legacy_failures_by_key() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let box_ = sandbox("bootstrap-migrate-merge");
+        write_bootstrap_failures(&[BootstrapFailure {
+            target: "https://github.com/o/kept.git".to_string(),
+            ref_name: None,
+        }]);
+        let legacy = legacy_bootstrap_failure_path();
+        fs::write(
+            &legacy,
+            concat!(
+                "schema = \"niubash:plugin-bootstrap-failures@1\"\n",
+                "\n[[failure]]\n",
+                "target = \"https://github.com/o/kept.git\"\n",
+                "\n[[failure]]\n",
+                "target = \"https://github.com/o/carried.git\"\n",
+                "ref = \"main\"\n",
+            ),
+        )
+        .unwrap();
+        let report = migrate_legacy_bootstrap_failures().unwrap().unwrap();
+        assert_eq!(
+            report.carried,
+            ["https://github.com/o/carried.git".to_string()]
+        );
+        let failures = read_bootstrap_failures();
+        assert_eq!(failures.len(), 2);
+        assert!(bootstrap_failure_recorded(
+            "https://github.com/o/kept.git",
+            &None
+        ));
+        assert!(bootstrap_failure_recorded(
+            "https://github.com/o/carried.git",
+            &Some("main".to_string())
+        ));
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
@@ -2216,7 +2402,7 @@ mod tests {
         );
         assert!(report.clean, "{:?}", report);
         assert!(
-            !box_.temp.join("sources/bootstrap-failures.toml").exists(),
+            !box_.temp.join("sources/bootstrap-failures.json").exists(),
             "no fetch attempt may run, so no failure may be memoized"
         );
         assert_eq!(
