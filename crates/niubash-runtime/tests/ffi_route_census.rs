@@ -163,7 +163,7 @@ fn every_fixture_row_routes_by_its_tier_in_both_states() {
             // bash keyword: the builtin/keyword route wins in both
             // states, which is itself part of the census: a
             // same-named applet is unreachable.)
-            let (route, reason) = decide(&config_off, Some(&table), &name, &[], true);
+            let (route, reason) = decide(&config_off, Some(&table), name, &[], true);
             let expected_off = if builtins.contains(&name) || KEYWORDS.contains(&name) {
                 (Route::Builtin, RouteReason::BuiltinOrKeyword)
             } else if IDENTITY_FASTPATH_NAMES.contains(&name) {
@@ -183,7 +183,7 @@ fn every_fixture_row_routes_by_its_tier_in_both_states() {
             if matches!(tier, Tier::Tier1) {
                 continue;
             }
-            let (route, reason) = decide(&config_on, Some(&table), &name, &[], true);
+            let (route, reason) = decide(&config_on, Some(&table), name, &[], true);
             let expected_on = if builtins.contains(&name) || KEYWORDS.contains(&name) {
                 (Route::Builtin, RouteReason::BuiltinOrKeyword)
             } else if IDENTITY_FASTPATH_NAMES.contains(&name) {

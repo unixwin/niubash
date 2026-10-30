@@ -143,7 +143,7 @@ mod tests {
         let cfg = config(&[]);
         assert_eq!(cfg.switch, SwitchState::Default);
         assert_eq!(cfg.enabled, DEFAULT_ENABLED);
-        assert!(!DEFAULT_ENABLED, "gate ①③ open: default must stay off");
+        assert!(!cfg.enabled, "gate ①③ open: default must stay off");
     }
 
     #[test]

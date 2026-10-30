@@ -139,7 +139,7 @@ pub struct RouteContext<'a> {
 /// Classify one call. Pure: no I/O, no process state — the census
 /// and the unit tests drive it directly.
 pub fn route_for(name: &str, args: &[String], ctx: &RouteContext<'_>) -> RouteDecision {
-    if ctx.builtins.iter().any(|b| *b == name) || KEYWORDS.contains(&name) {
+    if ctx.builtins.contains(&name) || KEYWORDS.contains(&name) {
         return RouteDecision::new(Route::Builtin, RouteReason::BuiltinOrKeyword);
     }
     if IDENTITY_FASTPATH_NAMES
@@ -285,7 +285,9 @@ base64\tspawn\t-\tunclassified\n";
     #[test]
     fn tier1_stays_on_emulation_while_its_gate_is_closed() {
         let table = TierTable::parse(TABLE).unwrap();
-        assert!(!TIER1_FFI_CLAIMABLE);
+        // Tier-1 is not FFI-claimable while its gate is closed
+        // (TIER1_FFI_CLAIMABLE == false); the route assertions below
+        // pin that behavior — flipping the constant turns them red.
         let cfg = on();
         let c = ctx(&cfg, Some(&table), true);
         assert_eq!(
