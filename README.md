@@ -33,9 +33,9 @@ niu is not MSYS2, Cygwin, Git Bash, or WSL — there is no POSIX emulation layer
 
 ## Quick start
 
-All downloads start at [unixwin.dev](https://unixwin.dev). Latest release: **v1.4.4**.
+All downloads start at [unixwin.dev](https://unixwin.dev). Latest release: **v1.4.4** (as of 2026-10-30; the [releases page](https://github.com/unixwin/niubash/releases) always carries the newest build).
 
-Windows via winget (installs **1.4.3** today; the 1.4.4 package update is in Microsoft review — until it lands, the installer below carries the newest build):
+Windows via winget (installs **1.4.4** today):
 
 ```powershell
 winget install --id Unixwin.Niubash
@@ -58,7 +58,7 @@ Configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — it is the **
 
 ## Why not Git Bash / MSYS2 / Cygwin
 
-**Git Bash** calls itself, verbatim, "a BASH emulation used to run Git from the command line" — an emulation built to run Git. The costs are structural. Console device redirects such as `echo >/dev/tty` fail outright with `Invalid argument` in its MSYS layer, where niubash matches GNU. Its bundled bash is on the 5.2 line, so bash 5.3's `${ cmd; }` nofork substitution does not exist. Its prompt runs `__git_ps1` — a git process — on every draw; niu computes its git segment in-process as part of drawing the prompt. And a real Git for Windows install is ≈440 MB plus a 20 MB simulation DLL, versus niu at ≈16 MB with zero DLLs (project-measured, as of 2026-10-25).
+**Git Bash** calls itself, verbatim, "a BASH emulation used to run Git from the command line" — an emulation built to run Git. The costs are structural. Console device redirects such as `echo >/dev/tty` fail outright with `Invalid argument` in its MSYS layer, where niubash matches GNU. Its bundled bash is on the 5.2 line, so bash 5.3's `${ cmd; }` nofork substitution does not exist. Its prompt runs `__git_ps1` — a git process — on every draw; niu's git segment asks your own git at most once per prompt pass — one bounded `status --porcelain=v2 --branch` query (2 s timeout) — and repaints within the pass reuse that result instead of spawning again (measured steady state inside a repository: 1.0 spawn per pass, p50 26 ms per pass; Windows, same machine). And a real Git for Windows install is ≈440 MB plus a 20 MB simulation DLL, versus niu at ≈16 MB with zero DLLs (project-measured, as of 2026-10-25).
 
 **MSYS2**'s own documentation concedes that arguments resembling Unix paths are automatically rewritten before being passed to native programs — and that the rewriting "isn't perfect," hitting arguments that aren't paths, or path lists that aren't. niubash keeps translation deliberately narrow: quoted arguments are never rewritten, and the only device translation is the exact token `/dev/null` → `nul`; every overreach ever found became a public issue and a pinned regression test.
 
@@ -72,7 +72,7 @@ Configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — it is the **
 | Bash language level | **GNU Bash 5.3** semantics — including 5.3-only syntax such as no-fork command substitution `${ cmd; }` ([rubash#195](https://github.com/unixwin/rubash/issues/195)) | GNU Bash **5.2** (the version Git for Windows bundles) |
 | Path handling | Windows paths are the native representation; argument translation is a deterministic, documented contract — quoted arguments never rewritten, no guessing | Heuristic path conversion of arguments, with `MSYS_NO_PATHCONV` as the documented opt-out |
 | `git` | Real git-for-windows C source built with MSVC ([niu-git](https://github.com/unixwin/niu-git)) — the binary itself; no MSYS runtime, no launcher hop | `git` launched through the MSYS runtime |
-| Prompt git segment | Computed in-process when the prompt is drawn | Runs `__git_ps1` — spawns git on every prompt |
+| Prompt git segment | Your own git, at most once per prompt pass (bounded porcelain query); repaints reuse the result | Runs `__git_ps1` — spawns git on every prompt |
 | Subshells | In-process — `( )` and `$( )` create no processes | `fork()` emulation |
 | Console devices | `/dev/tty` redirects behave like GNU — the engine splits `CON` into `CONIN$`/`CONOUT$` (see [Quick answers](#quick-answers)) | Console device redirects fail outright in the MSYS layer |
 | Install footprint | ≈16 MB, zero DLLs | ≈440 MB + 20 MB `msys-2.0.dll` (project-measured, real installs, as of 2026-10-25) |
@@ -111,7 +111,7 @@ niu's language semantics are the rubash engine's, and they are gated mechanicall
 - **Every fixed issue lands with a regression test** named for the issue, asserting the GNU behavior — on both the engine and the host side (`tests/compat.rs`, `tests/host_contract.rs`, and the per-capability fixtures in the [compatibility matrix](docs/src/rubash-bash-compat-matrix.md)).
 - **Releases are smoke-gated and budget-gated**: no artifact ships unless it runs on its own OS and stays inside the per-asset timing budgets (see [Receipts](#receipts)).
 
-As of 2026-10-25 the trackers carry the receipts: rubash 1,050 issues filed / 1,039 closed; niubash 292 filed / 285 closed.
+As of 2026-10-30 the trackers carry the receipts: rubash 1,440 issues filed / 1,408 closed; niubash 373 filed / 354 closed.
 
 ## Receipts
 
@@ -121,7 +121,7 @@ Each claim below links to the artifact that produced it: a committed log, a base
 
 **Framework assets are sourced and timed.** The timing baseline loads 437 real oh-my-bash and bash-it assets (166 themes plus plugins, completions, aliases) and measures three phases per asset (source, first prompt, re-render) as a median of three runs. That includes the nvm assets of both frameworks, and real users' dotfiles that load nvm.sh go through the same harness with per-phase timings on record ([baseline](scripts/perf/baselines/asset-timing-baseline.json), [snapshot](scripts/harvest/snapshots/wt92-local-20261005/)).
 
-**A release cannot ship slow.** Every asset in [budgets.toml](scripts/perf/budgets.toml) carries a measured budget (healthy themes re-render in 11–35 ms; the budget line is 120 ms; 5× over budget is a hard fail). The [release pipeline](.github/workflows/release.yml) runs the `perfbudget` gate and fails the release on a breach; a nightly run watches the trend.
+**A release cannot ship slow.** Every asset in [budgets.toml](scripts/perf/budgets.toml) carries a measured budget (healthy themes re-render in 11–35 ms and the budget line is 120 ms on the Windows reference baseline; 5× over budget is a hard fail). The [release pipeline](.github/workflows/release.yml) runs the `perfbudget` gate and fails the release on a breach; a nightly run watches the trend.
 
 ## Performance
 
@@ -159,15 +159,14 @@ Every number below comes from one published protocol — the 2026-10-25 baseline
 
 ## Known limitations, stated plainly
 
-- **The installer is not code-signed yet.** Windows SmartScreen will warn on first run ([#511](https://github.com/unixwin/niubash/issues/511) — a certificate has been selected and signing is planned). Verify downloads against the published SHA-256 sums in the meantime.
-- **`stty` does not work under niu yet.** The root cause is identified — the host does not yet hand the real console handle through to the engine's fd 0 — and the fix path is tracked in [#535](https://github.com/unixwin/niubash/issues/535).
+- **The installer is not code-signed yet.** Windows SmartScreen will warn on first run ([#511](https://github.com/unixwin/niubash/issues/511) — a SignPath signing route is set up; its production release-signing approval is still pending). Verify downloads against the published SHA-256 sums in the meantime.
 - **Interpreter speed is a measured, published gap** (see [Performance](#performance)) — not a hidden one. Process-bound workloads already lead; interpreter-bound micro-work is the flagship release's hard gate.
 
 ## Documentation
 
 [Docs site](https://unixwin.github.io/niubash/) · [Why niubash](docs/src/why-niubash.md) (the long version, with the agent casualties) · [Platform support](docs/src/platform-support.md) · [Bash compatibility matrix](docs/src/rubash-bash-compat-matrix.md) · [Roadmap](docs/src/niubash-roadmap.md)
 
-On the engine side, two items are **in design** (not shipped): the **1.5.0 embeddable engine API** ([rubash#595](https://github.com/unixwin/rubash/issues/595), finalized design in the rubash repo) and a **native script debugger** — `rubash --debug` for humans and `--dap` for editors, two front ends over one debug session ([rubash#497](https://github.com/unixwin/rubash/issues/497), finalized design in the rubash repo).
+On the engine side, 1.5.0 lands the **embeddable engine API** ([rubash#595](https://github.com/unixwin/rubash/issues/595)) and a **native script debugger** — `rubash --debug` for humans and `--dap` for editors, two front ends over one debug session ([rubash#497](https://github.com/unixwin/rubash/issues/497)).
 
 ---
 

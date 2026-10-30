@@ -33,9 +33,9 @@ niu 不是 MSYS2、Cygwin、Git Bash，也不是 WSL——没有 POSIX 模拟层
 
 ## 快速开始
 
-下载统一从 [unixwin.dev](https://unixwin.dev) 进入。最新版本：**v1.4.4**。
+下载统一从 [unixwin.dev](https://unixwin.dev) 进入。最新版本：**v1.4.4**（截至 2026-10-30；最新构建始终在 [Releases](https://github.com/unixwin/niubash/releases) 页）。
 
-Windows（winget，今天装到的是 **1.4.3**；1.4.4 的包更新正在微软审核中——落地前，最新构建在下面的安装器里）：
+Windows（winget，今天装到的是 **1.4.4**）：
 
 ```powershell
 winget install --id Unixwin.Niubash
@@ -58,7 +58,7 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
 
 ## 为什么不用 Git Bash / MSYS2 / Cygwin
 
-**Git Bash** 官网自称是「a BASH emulation used to run Git from the command line」——为跑 Git 而设的模拟。代价是结构性的：`echo >/dev/tty` 等控制台设备重定向在它的 MSYS 层直接 `Invalid argument` 失败，niubash 与 GNU 一致；它捆绑的 bash 停在 5.2 系，5.3 的 `${ cmd; }` 无 fork 命令替换不存在；它的提示符每一帧都跑 `__git_ps1`——一个 git 进程——niu 的 git 段在绘制提示符时进程内算出；真实安装的 Git for Windows 约 440 MB 外加 20 MB 模拟 DLL，niu 约 16 MB、零 DLL（项目自测口径，截至 2026-10-25）。
+**Git Bash** 官网自称是「a BASH emulation used to run Git from the command line」——为跑 Git 而设的模拟。代价是结构性的：`echo >/dev/tty` 等控制台设备重定向在它的 MSYS 层直接 `Invalid argument` 失败，niubash 与 GNU 一致；它捆绑的 bash 停在 5.2 系，5.3 的 `${ cmd; }` 无 fork 命令替换不存在；它的提示符每一帧都跑 `__git_ps1`——一个 git 进程；niu 的 git 段每遍至多问一次你自己的 git——一条有界的 `status --porcelain=v2 --branch` 查询（2 秒超时）——同遍重绘复用结果、不再重复 spawn（仓内稳态实测：1.0 次 spawn/遍、p50 26 ms/遍；Windows 同机口径）；真实安装的 Git for Windows 约 440 MB 外加 20 MB 模拟 DLL，niu 约 16 MB、零 DLL（项目自测口径，截至 2026-10-25）。
 
 **MSYS2** 的官方文档自承：参数只要像 Unix 路径，传给原生程序前就会被自动改写，而且「并不完美」——会命中根本不是路径的参数、或不是路径列表的参数。niubash 的翻译面刻意收窄：引号参数永不改写，唯一设备翻译是精确 token `/dev/null` → `nul`；每次被发现的过度翻译都立公开 issue 并固化回归。
 
@@ -72,7 +72,7 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
 | Bash 语言层级 | **GNU Bash 5.3** 语义——含 5.3 独有的无 fork 命令替换 `${ cmd; }`（[rubash#195](https://github.com/unixwin/rubash/issues/195)） | GNU Bash **5.2**（Git for Windows 捆绑版本） |
 | 路径处理 | Windows 路径即原生表示；参数翻译是确定性的成文契约——引号参数永不改写，不靠猜 | 对参数的启发式路径转换，官方逃生舱是 `MSYS_NO_PATHCONV` |
 | `git` | 用 MSVC 构建的 git-for-windows 真 C 源码（[niu-git](https://github.com/unixwin/niu-git)）——就是二进制本体；无 MSYS 运行时、无启动器跳板 | 经 MSYS 运行时启动的 `git` |
-| 提示符 git 段 | 绘制提示符时进程内算出 | 每个提示符都跑 `__git_ps1`——spawn 一个 git 进程 |
+| 提示符 git 段 | 你自己的 git，每遍至多一次（有界 porcelain 查询）；同遍重绘复用结果 | 每个提示符都跑 `__git_ps1`——spawn 一个 git 进程 |
 | 子壳 | 进程内——`( )` 与 `$( )` 不创建进程 | `fork()` 模拟 |
 | 控制台设备 | `/dev/tty` 重定向与 GNU 一致——引擎把 `CON` 拆为 `CONIN$`/`CONOUT$`（见[快答](#快答)） | 控制台设备重定向在 MSYS 层直接失败 |
 | 安装体积 | ≈16 MB，零 DLL | ≈440 MB + 20 MB `msys-2.0.dll`（项目自测口径，真实安装，截至 2026-10-25） |
@@ -111,7 +111,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 - **每个已修 issue 都带一条以它命名的回归测试**，断言 GNU 行为——引擎侧与宿主侧皆然（`tests/compat.rs`、`tests/host_contract.rs`，及[兼容性矩阵](docs/src/rubash-bash-compat-matrix.md)里的逐能力夹具）。
 - **发布过烟测门与预算门**：产物在自己的 OS 上跑不通、或超出逐资产计时预算，就发不出去（见[实证](#实证)）。
 
-截至 2026-10-25，账都在 tracker 上：rubash 累计 1,050 个 issue、已关 1,039；niubash 累计 292 个、已关 285。
+截至 2026-10-30，账都在 tracker 上：rubash 累计 1,440 个 issue、已关 1,408；niubash 累计 373 个、已关 354。
 
 ## 实证
 
@@ -121,7 +121,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 **生态框架是被 source、被计时的。** 逐资产计时基线加载 437 个真实 oh-my-bash / bash-it 资产（166 款主题加上 plugins、completions、aliases），每资产测三个阶段（source、首帧 prompt、重渲染），取三次运行的中位数。两个框架自带的 nvm 资产就在这份基线里；真实用户 dotfiles 里加载 nvm.sh 的链路也走同一套 harness，分相计时在案（[基线](scripts/perf/baselines/asset-timing-baseline.json)、[快照](scripts/harvest/snapshots/wt92-local-20261005/))。
 
-**慢的发布发不出去。** [budgets.toml](scripts/perf/budgets.toml) 里每个资产都带实测预算（健康主题重渲染 11–35 ms；预算线 120 ms；超预算 5 倍硬失败）。[发布流水线](.github/workflows/release.yml)跑 `perfbudget` 门禁，超限即 fail 本次发布；另有每夜趋势跑盯漂移。
+**慢的发布发不出去。** [budgets.toml](scripts/perf/budgets.toml) 里每个资产都带实测预算（Windows 参考基线口径下，健康主题重渲染 11–35 ms、预算线 120 ms；超预算 5 倍硬失败）。[发布流水线](.github/workflows/release.yml)跑 `perfbudget` 门禁，超限即 fail 本次发布；另有每夜趋势跑盯漂移。
 
 ## 性能
 
@@ -159,15 +159,14 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 ## 已知限制，明说
 
-- **安装器尚未代码签名。** 首次运行时 Windows SmartScreen 会警告（[#511](https://github.com/unixwin/niubash/issues/511)——证书已选定、签名在计划中）。在此之前，请对照发布的 SHA-256 校验和验证下载。
-- **`stty` 在 niu 下尚不可用。** 根因已定位——宿主尚未把真控制台句柄透传给引擎的 fd 0——修复路径在 [#535](https://github.com/unixwin/niubash/issues/535) 跟踪。
+- **安装器尚未代码签名。** 首次运行时 Windows SmartScreen 会警告（[#511](https://github.com/unixwin/niubash/issues/511)——SignPath 签名通道已就绪，其正式发布签名的批准仍在等待中）。在此之前，请对照发布的 SHA-256 校验和验证下载。
 - **解释器速度是一份实测在案、公开发布的差距**（见[性能](#性能)）——不是藏着的。进程受限负载已经领先；解释器受限的微观负载是旗舰版的硬门。
 
 ## 文档
 
 [文档站](https://unixwin.github.io/niubash/) · [Why niubash](docs/src/why-niubash.md)（长版论据 + agent 受害者案卷） · [平台支持](docs/src/platform-support.md) · [Bash 兼容性矩阵](docs/src/rubash-bash-compat-matrix.md) · [Roadmap](docs/src/niubash-roadmap.md)
 
-引擎侧有两项在设计阶段（尚未发布）：**1.5.0 可嵌入引擎 API**（[rubash#595](https://github.com/unixwin/rubash/issues/595)，定版设计在 rubash 仓）与**原生脚本调试器**——`rubash --debug` 给人用、`--dap` 给编辑器，同一调试会话的两个前端（[rubash#497](https://github.com/unixwin/rubash/issues/497)，定版设计在 rubash 仓）。
+引擎侧，1.5.0 落地**可嵌入引擎 API**（[rubash#595](https://github.com/unixwin/rubash/issues/595)）与**原生脚本调试器**——`rubash --debug` 给人用、`--dap` 给编辑器，同一调试会话的两个前端（[rubash#497](https://github.com/unixwin/rubash/issues/497)）。
 
 ---
 
