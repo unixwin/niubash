@@ -42,15 +42,17 @@ Five shapes, one TAB contract. Switch any time; it takes effect on the
 next prompt:
 
 ```sh
-niu config set completion.style column   # default: multi-per-row grid
-niu config set completion.style gnu      # GNU readline: printed transcript list
-niu config set completion.style ide      # VS Code-style popup with descriptions
-niu config set completion.style list     # fish-style vertical list
-niu config set completion.style inline   # cycle candidates in place (bash menu-complete)
+export NIU_COMPLETION_STYLE=column   # default: multi-per-row grid
+export NIU_COMPLETION_STYLE=gnu      # GNU readline: printed transcript list
+export NIU_COMPLETION_STYLE=ide      # VS Code-style popup with descriptions
+export NIU_COMPLETION_STYLE=list     # fish-style vertical list
+export NIU_COMPLETION_STYLE=inline   # cycle candidates in place (bash menu-complete)
 ```
 
-`NIU_COMPLETION_STYLE` overrides the file for one session. Setting the
-default (`column`) removes the saved key again.
+Put the line in `~/.niubashrc` (or export it in the environment). The
+environment is the only source for this knob — there is no config file
+since 1.5.0. See
+[Configuration Sources & Precedence](configuration.md).
 
 ## Ghost text (history autosuggest)
 

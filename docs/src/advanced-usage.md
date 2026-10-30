@@ -111,10 +111,10 @@ seat, your `$ENV` lines win over the loader just as rc lines do.
 Interactive shells read ONE startup file: `~/.niubashrc`. By default it
 is the only candidate: if it does not exist, the shell starts with no rc
 at all — `~/.bashrc` is not read. The single exception is opt-in: if you
-explicitly picked the `bashrc-fallback` rc policy during setup
-(`niu setup --rc-policy bashrc-fallback`), a genuinely absent
-`~/.niubashrc` lets `~/.bashrc` fill the slot instead (the migration path
-for existing bash configurations). Either way the two never stack — one
+explicitly picked the `bashrc-fallback` rc policy
+(`NIU_RC_POLICY=bashrc-fallback`, or `niu setup --rc-policy bashrc-fallback`),
+a genuinely absent `~/.niubashrc` lets `~/.bashrc` fill the slot instead
+(the migration path for existing bash configurations). Either way the two never stack — one
 config file, one blast radius, no implicit double-sourcing. Want the bash
 layer under niu? Add one visible line to `~/.niubashrc`:
 
@@ -169,10 +169,9 @@ use `NIU_ENV` / `BASH_ENV` to source a dedicated one-shot init file (see
 TAB completion comes in five shapes. The default since 1.4.0 is `column`
 (the GNU listing look, without GNU's two-TAB listing dance); before
 that it was `ide`. The literal GNU readline behavior is the opt-in `gnu`
-style below. Pick one with `niu config set completion.style <name>`
-(persisted in `~/.niubash/config.toml`) or `NIU_COMPLETION_STYLE=<name>`
-in `~/.niubashrc` or the environment — the env variable wins over the
-persisted value:
+style below. Pick one with `export NIU_COMPLETION_STYLE=<name>` in
+`~/.niubashrc` or the environment (see
+[Configuration Sources & Precedence](configuration.md)):
 
 - `gnu` — GNU readline: TAB completes the longest common prefix
   (a lone candidate completes outright); pressing TAB again on an unchanged
