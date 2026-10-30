@@ -81,8 +81,6 @@ impl KeymapMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserBindingVia {
-    /// `config.toml`'s `[keymap]` rules (the K4 config slice).
-    ConfigToml,
     /// The `NIU_BINDKEYS` rc variable.
     NiuBindkeys,
 }
@@ -105,16 +103,13 @@ pub enum KeymapSource {
 }
 
 impl KeymapSource {
-    /// The bracket label used in listings: `[script]`, `[user: config.toml]`, …
+    /// The bracket label used in listings: `[script]`, `[user: NIU_BINDKEYS]`, …
     pub fn label(&self) -> String {
         match self {
             KeymapSource::Default => "default".to_string(),
             KeymapSource::HostBaseline => "host default".to_string(),
             KeymapSource::Bundle { .. } => "bundle".to_string(),
             KeymapSource::Script => "script".to_string(),
-            KeymapSource::User {
-                via: UserBindingVia::ConfigToml,
-            } => "user: config.toml".to_string(),
             KeymapSource::User {
                 via: UserBindingVia::NiuBindkeys,
             } => "user: NIU_BINDKEYS".to_string(),
@@ -264,28 +259,13 @@ impl DroppedBind {
         }
     }
 
-    /// The persistent-form fix for this record (DESIGN §8.1/§5.2).
+    /// The persistent-form fix for this record (DESIGN §8.1/§5.2):
+    /// GNU-shaped rules belong in the rc (`bind`) or `~/.inputrc`.
     pub fn persist_fix(&self) -> String {
-        match self.reason {
-            DroppedReason::ModeToggleFunction => {
-                format!("put `{}` in ~/.niubashrc", self.session_fix())
-            }
-            _ => format!(
-                "add {} to [keymap].bind in ~/.niubash/config.toml",
-                self.session_spec()
-            ),
-        }
-    }
-
-    /// The bind spec string the persistent form stores: the session
-    /// fix is a full `bind '<spec>'` call; the stored form is `<spec>`.
-    fn session_spec(&self) -> String {
-        let fix = self.session_fix();
-        let arg = fix.strip_prefix("bind ").unwrap_or(&fix);
-        arg.strip_prefix('\'')
-            .and_then(|rest| rest.strip_suffix('\''))
-            .map(|spec| spec.to_string())
-            .unwrap_or_else(|| arg.to_string())
+        format!(
+            "add `{}` to ~/.niubashrc (or ~/.inputrc)",
+            self.session_fix()
+        )
     }
 }
 
@@ -312,17 +292,6 @@ pub struct KeymapState {
     pub entries: Vec<KeymapEntry>,
     #[serde(default)]
     pub dropped: Vec<DroppedBind>,
-    /// Whether the one-time completion-interaction disclosure
-    /// (niubash#631) has been shown. The interaction default flipped
-    /// to cycle in 1.5.0; a legacy config (no `completion.interaction`
-    /// key) gets exactly one summary line at its first interactive
-    /// startup, and this flag is what makes it exactly one. It lives
-    /// here — with the reminder state — not in config.toml: the config
-    /// file holds the user's picks, this file holds what the shell
-    /// has already told them. `publish_at` folds the flag forward, so
-    /// a publish never un-shows the disclosure.
-    #[serde(default)]
-    pub interaction_change_disclosed: bool,
 }
 
 impl From<&KeymapRegistry> for KeymapState {
@@ -332,7 +301,6 @@ impl From<&KeymapRegistry> for KeymapState {
             editor_mode: registry.editor_mode.clone(),
             entries: registry.entries.clone(),
             dropped: registry.dropped.clone(),
-            interaction_change_disclosed: false,
         }
     }
 }
@@ -697,10 +665,12 @@ pub fn startup_notices(new_dropped: &[DroppedBind]) -> Vec<String> {
     lines
 }
 
-/// Where the runtime state file lives: beside `config.toml` (the
-/// `NIU_CONFIG` override moves the directory with it).
+/// Where the runtime state file lives: `~/.niubash/state.toml`.
 pub fn state_path() -> PathBuf {
-    crate::config::user_config_path().with_file_name("state.toml")
+    crate::path_utils::shell_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".niubash")
+        .join("state.toml")
 }
 
 /// Load the persisted state; a missing or corrupt file is simply
@@ -775,49 +745,8 @@ pub fn publish_at(path: &std::path::Path, registry: KeymapRegistry) -> Vec<Strin
     }
     let mut state = KeymapState::from(&registry);
     state.dropped = dropped;
-    // The #631 disclosure flag folds forward with the reminded set:
-    // once shown, no later publish may un-show it.
-    state.interaction_change_disclosed = previous
-        .as_ref()
-        .is_some_and(|state| state.interaction_change_disclosed);
     save_state_to(path, &state);
     notices
-}
-
-/// The one-time completion-interaction disclosure line (niubash#631),
-/// in the §8 summary-line shape: what changed, and the command that
-/// changes it back. One definition — the REPL prints it.
-pub fn interaction_change_disclosure_line() -> &'static str {
-    "niubash: TAB completion changed — TAB now cycles candidates into the line \
-     (Enter accepts and runs, Esc rolls back). Revert with: \
-     niu config set completion.interaction insert"
-}
-
-/// Claim the one-time completion-interaction disclosure (niubash#631):
-/// returns true exactly once per state file — the first caller records
-/// the flag and may print [`interaction_change_disclosure_line`];
-/// every later caller gets false. Claiming before any publish writes
-/// a bare state whose flag the next publish folds forward.
-pub fn claim_interaction_change_disclosure() -> bool {
-    claim_interaction_change_disclosure_at(&state_path())
-}
-
-/// [`claim_interaction_change_disclosure`] against an explicit state
-/// path (the test seam).
-pub fn claim_interaction_change_disclosure_at(path: &std::path::Path) -> bool {
-    let mut state = load_state_from(path).unwrap_or(KeymapState {
-        registry_generation: 0,
-        editor_mode: String::new(),
-        entries: Vec::new(),
-        dropped: Vec::new(),
-        interaction_change_disclosed: false,
-    });
-    if state.interaction_change_disclosed {
-        return false;
-    }
-    state.interaction_change_disclosed = true;
-    save_state_to(path, &state);
-    true
 }
 
 /// Render the `niu help keys` topic from a persisted snapshot
@@ -923,29 +852,27 @@ fn dropped_listing_line(bind: &DroppedBind) -> String {
 pub fn how_to_change_block() -> String {
     let (style, source) = crate::config::resolve_completion_style();
     let style_origin = match source {
-        crate::config::CompletionStyleSource::Env => "NIU_COMPLETION_STYLE",
-        crate::config::CompletionStyleSource::ConfigFile => "config file",
-        crate::config::CompletionStyleSource::Default => "default",
+        crate::config::SettingSource::Env => "NIU_COMPLETION_STYLE",
+        crate::config::SettingSource::Inputrc => "inputrc",
+        crate::config::SettingSource::Default => "default",
     };
     // The interaction axis rides beside the style axis (niubash#631,
     // design §7.5): the guide names both, each with its own origin and
     // its own change command.
     let (interaction, interaction_source) = crate::config::resolve_completion_interaction();
     let interaction_origin = match interaction_source {
-        crate::config::CompletionInteractionSource::Env => "NIU_COMPLETION_INTERACTION",
-        crate::config::CompletionInteractionSource::ConfigFile => "config file",
-        crate::config::CompletionInteractionSource::Default => "default",
+        crate::config::SettingSource::Env => "NIU_COMPLETION_INTERACTION",
+        crate::config::SettingSource::Inputrc => "inputrc",
+        crate::config::SettingSource::Default => "default",
     };
     format!(
         "How to change bindings\n  \
          session only : bind '\"\\C-x\": <function>'  ·  bind -x '\"\\C-x\": <command>'\n  \
-         persistent   : niu config set keymap.bind '<bind spec>'   (writes [keymap] in ~/.niubash/config.toml)\n                 \
-         niu config set keymap.unbind '\"\\C-t\"' removes a key outright\n                 \
+         persistent   : put the same bind line in ~/.niubashrc (or ~/.inputrc)\n                 \
+         remove a key  : bind -r '\"\\C-t\"' in ~/.niubashrc (or ~/.inputrc)\n                 \
          shell-function widgets can also ride NIU_BINDKEYS in ~/.niubashrc\n  \
-         completion   : style = {} ({}) — change with: \
-         niu config set completion.style <gnu|ide|column|list|inline>\n                 \
-         interaction = {} ({}) — change with: \
-         niu config set completion.interaction <insert|cycle>\n",
+         completion   : completion.style = {} ({}) — set NIU_COMPLETION_STYLE in the environment or ~/.niubashrc\n                 \
+         interaction  : completion.interaction = {} ({}) — set NIU_COMPLETION_INTERACTION in the environment or ~/.niubashrc\n",
         style.as_str(),
         style_origin,
         interaction.as_str(),
@@ -1098,7 +1025,7 @@ mod tests {
         assert!(lines.len() >= 4, "{lines:?}");
         assert!(lines[1].contains("not applied"));
         assert!(lines[2].contains("fix (session): bind -x"));
-        assert!(lines[3].contains("[keymap].bind"));
+        assert!(lines[3].contains("~/.niubashrc"));
         // The topic pointer is built from the single constant.
         assert!(lines[4].contains(&format!("niu help {KEYMAP_HELP_TOPIC}")));
     }
@@ -1193,7 +1120,6 @@ mod tests {
                 r"\C-x\C-f",
                 "find-file",
             )],
-            interaction_change_disclosed: true,
         };
         let text = toml::to_string(&state).expect("state serializes to TOML");
         let back: KeymapState = toml::from_str(&text).expect("state parses back");
@@ -1216,7 +1142,6 @@ mod tests {
                 r"\C-x\C-f",
                 "find-file",
             )],
-            interaction_change_disclosed: false,
         };
         let rendered = render_keymap_help(Some(&state));
         assert!(rendered.contains("Not applied (1)"));
@@ -1224,67 +1149,11 @@ mod tests {
     }
 
     #[test]
-    fn issue631_disclosure_claim_fires_exactly_once() {
-        let dir =
-            std::env::temp_dir().join(format!("niu-keymap-disclosure-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("state.toml");
-        // No state file yet: the first claim wins and persists the flag.
-        assert!(claim_interaction_change_disclosure_at(&path));
-        let state = load_state_from(&path).expect("claim persists a state");
-        assert!(state.interaction_change_disclosed);
-        // Every later claim loses — the line prints exactly once.
-        assert!(!claim_interaction_change_disclosure_at(&path));
-        assert!(!claim_interaction_change_disclosure_at(&path));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn issue631_disclosure_flag_survives_publish() {
-        let dir = std::env::temp_dir().join(format!(
-            "niu-keymap-disclosure-publish-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("state.toml");
-        let registry = KeymapRegistry {
-            generation: 1,
-            editor_mode: "emacs".to_string(),
-            entries: vec![],
-            dropped: vec![],
-        };
-        // Publish first, then disclose, then publish again: the flag
-        // folds forward and the disclosure never re-fires.
-        publish_at(&path, registry.clone());
-        assert!(claim_interaction_change_disclosure_at(&path));
-        publish_at(&path, registry);
-        let state = load_state_from(&path).expect("state persisted");
-        assert!(state.interaction_change_disclosed);
-        assert!(!claim_interaction_change_disclosure_at(&path));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn issue631_disclosure_line_names_the_change_and_the_revert() {
-        let line = interaction_change_disclosure_line();
-        assert!(line.contains("cycle"), "{line}");
-        assert!(
-            line.contains("niu config set completion.interaction insert"),
-            "{line}"
-        );
-        assert!(!line.contains('\n'), "one line only: {line}");
-    }
-
-    #[test]
     fn issue631_how_to_change_block_shows_both_completion_axes() {
         let block = how_to_change_block();
         assert!(block.contains("completion.style"), "{block}");
         assert!(block.contains("completion.interaction"), "{block}");
-        assert!(
-            block.contains("niu config set completion.interaction <insert|cycle>"),
-            "{block}"
-        );
+        assert!(block.contains("NIU_COMPLETION_INTERACTION"), "{block}");
+        assert!(block.contains("~/.inputrc"), "{block}");
     }
 }

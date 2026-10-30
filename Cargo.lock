@@ -663,7 +663,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "toml",
- "toml_edit",
  "unicode-width",
  "windows-sys 0.59.0",
 ]

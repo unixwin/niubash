@@ -5,6 +5,7 @@
 - [Coding agents on Windows](agents.md)
 - [Getting Started](getting-started.md)
 - [Advanced Usage](advanced-usage.md)
+- [Configuration Sources & Precedence](configuration.md)
 - [Plugins & the Bash Ecosystem](plugins.md)
 - [External Completion Providers](external-completion-providers.md)
 - [TAB Completion & Ghost Text](completion.md)

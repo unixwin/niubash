@@ -2,9 +2,8 @@
 //! terminal — `completion.interaction = cycle` (the default since
 //! 1.5.0) cycles candidates into the line with TAB, Enter accepts the
 //! candidate in the line and runs it in the same press, Esc rolls the
-//! line back to its pre-completion snapshot, and a legacy config (an
-//! existing config.toml with no interaction key) gets the one-time
-//! disclosure line exactly once.
+//! line back to its pre-completion snapshot, and a leftover pre-1.5.0
+//! config.toml prints the one-time migration notice (it is never read).
 //!
 //! The candidate vehicle is `cd` into one of two same-prefix
 //! directories, asserted through `pwd`: builtins only (the driver
@@ -117,19 +116,16 @@ fn issue631_pty_esc_rolls_back_to_the_pre_completion_line() {
     s.expect_prompt();
 }
 
-/// The legacy-config disclosure: a config.toml that predates the key
-/// (a style pick, no interaction key) prints the one summary line at
-/// the first interactive startup — and never again, because the
-/// once-flag persisted into the sibling state.toml.
+/// A leftover pre-1.5.0 config.toml is never read, but its presence
+/// prints one migration notice per interactive session, naming the
+/// one-time `niu config migrate` command. The file itself changes no
+/// behavior.
 #[test]
-fn issue631_pty_legacy_config_disclosure_prints_exactly_once() {
-    if !require_pty_or_skip("issue631_pty_legacy_config_disclosure_prints_exactly_once") {
+fn issue631_pty_legacy_config_prints_migration_notice() {
+    if !require_pty_or_skip("issue631_pty_legacy_config_prints_migration_notice") {
         return;
     }
-    // A pre-#631 config, staged outside the session homes and pointed
-    // at by NIU_CONFIG (the documented override) so both sessions
-    // share it — and share the state.toml that lands beside it.
-    let dir = std::env::temp_dir().join(format!("niu-issue631-disclosure-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("niu-issue631-migrate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("config.toml");
@@ -139,43 +135,8 @@ fn issue631_pty_legacy_config_disclosure_prints_exactly_once() {
         config_path.to_string_lossy().into_owned(),
     )];
 
-    // First startup: the disclosure line is on the transcript, naming
-    // the change and the revert command.
     let mut s = NiuSession::spawn_custom(
-        "disclosure-631-first",
-        &driver::default_rc(),
-        &env,
-        (120, 30),
-        DEFAULT_TIMEOUT,
-    );
-    s.wait_ready();
-    let transcript = s.transcript();
-    assert!(
-        transcript.contains("TAB now cycles candidates"),
-        "the disclosure line must print at first startup:\n{transcript}"
-    );
-    assert!(
-        transcript.contains("niu config set completion.interaction insert"),
-        "the disclosure line must name the revert command:\n{transcript}"
-    );
-    // The once-flag is a physical artifact in the state file beside
-    // the config — not in the config itself.
-    let state = std::fs::read_to_string(dir.join("state.toml"))
-        .expect("the claim writes the sibling state.toml");
-    assert!(
-        state.contains("interaction_change_disclosed = true"),
-        "state.toml records the disclosure: {state}"
-    );
-    let config_text = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        !config_text.contains("interaction"),
-        "the user's config file is never polluted by the disclosure: {config_text}"
-    );
-    s.send_line("exit");
-
-    // Second startup over the same config + state: no line.
-    let mut s = NiuSession::spawn_custom(
-        "disclosure-631-second",
+        "migrate-notice-631",
         &driver::default_rc(),
         &env,
         (120, 30),
@@ -185,8 +146,12 @@ fn issue631_pty_legacy_config_disclosure_prints_exactly_once() {
     std::thread::sleep(SETTLE);
     let transcript = s.transcript();
     assert!(
-        !transcript.contains("TAB now cycles candidates"),
-        "the disclosure must print exactly once:\n{transcript}"
+        transcript.contains("niu config migrate"),
+        "the startup notice must name the migration command:\n{transcript}"
+    );
+    assert!(
+        config_path.exists(),
+        "the notice never renames or edits the old file"
     );
     s.send_line("exit");
     let _ = std::fs::remove_dir_all(&dir);

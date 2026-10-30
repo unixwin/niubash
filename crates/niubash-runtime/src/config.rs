@@ -1,7 +1,18 @@
-//! Runtime configuration defaults and environment overrides.
+//! Runtime configuration defaults and their single sources of truth.
+//!
+//! Since 1.5.0 niubash has no `config.toml`. Every setting resolves from
+//! exactly one place:
+//!
+//! * GNU-shaped knobs live in readline/rc: `bind`/`set`/`shopt` lines in
+//!   `~/.niubashrc`, or `$INPUTRC` / `~/.inputrc`.
+//! * niu-proprietary knobs live in `NIU_*` environment variables, normally
+//!   exported from the rc.
+//!
+//! [`migrate_legacy_config`] is the one-time bridge for a pre-1.5.0
+//! `~/.niubash/config.toml`; nothing on the runtime path reads that file.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 
@@ -56,7 +67,24 @@ pub enum EditorMode {
     Vi,
 }
 
-impl EditorMode {}
+impl EditorMode {
+    /// Parse readline's `editing-mode` value (the engine normalizes it to
+    /// lowercase before storing it).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "emacs" => Some(Self::Emacs),
+            "vi" => Some(Self::Vi),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Emacs => "emacs",
+            Self::Vi => "vi",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct EditorConfig {
@@ -66,14 +94,9 @@ pub struct EditorConfig {
 /// History configuration. There is deliberately no per-session sharing
 /// mode anymore (niubash#572): the retired `NIU_HISTORY_MODE`
 /// shared/session/private switch was a GNU-less invention whose documented
-/// behaviors did not match the implementation (an rc assignment could never
-/// take effect because the value was read before the rc ran, and the
-/// session mode's "builtins can observe later file updates" promise was
-/// false — refresh short-circuited for every non-shared mode). History now
-/// has exactly one semantics, GNU's: one live file every session appends
-/// to and refreshes from, with `history -a/-n/-r` as the explicit sync
-/// verbs. A `NIU_HISTORY_MODE` left in the environment is silently
-/// ignored (no startup diagnostic: `-c`/script stderr stays byte-stable).
+/// behaviors did not match the implementation. History now has exactly one
+/// semantics, GNU's: one live file every session appends to and refreshes
+/// from, with `history -a/-n/-r` as the explicit sync verbs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryConfig {
     pub path: Option<PathBuf>,
@@ -99,8 +122,7 @@ impl Default for HistoryConfig {
 /// GNU's printed listing without the two-TAB dance (a first TAB that
 /// completes nothing and stays silent read as "dead" at the prompt).
 /// [`CompletionStyle::Gnu`] remains available as the literal GNU readline
-/// behavior (`NIU_COMPLETION_STYLE=gnu` /
-/// `niu config set completion.style gnu`), and the Ide popup as `ide`.
+/// behavior (`NIU_COMPLETION_STYLE=gnu`), and the Ide popup as `ide`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionStyle {
     /// GNU readline literal: first TAB completes the common prefix (a lone
@@ -132,8 +154,8 @@ impl CompletionStyle {
         }
     }
 
-    /// The canonical spelling used by the persisted config file, env values
-    /// and every display surface (`niu doctor`, `niu config`).
+    /// The canonical spelling used by env values and every display surface
+    /// (`niu doctor`, `niu config`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gnu => "gnu",
@@ -147,27 +169,19 @@ impl CompletionStyle {
 
 /// How TAB completion interacts with the line while candidates are on
 /// display (niubash#631): the *interaction* axis, orthogonal to
-/// [`CompletionStyle`], which is the *presentation* axis (how the
-/// candidate set renders). The two keys name the two axes on every
-/// surface — `completion.interaction` here, `completion.style` there.
+/// [`CompletionStyle`], which is the *presentation* axis.
 ///
 /// The default is [`CompletionInteraction::Cycle`] (owner ruling
-/// 2026-10-28, superseding the keymap design draft's insert-first
-/// suggestion): TAB puts the first candidate into the line and further
-/// TABs cycle through the candidate set (the zsh menu-completion form);
-/// Enter accepts the candidate in the line and runs the command; Esc
-/// rolls the line back to its pre-completion snapshot.
-/// [`CompletionInteraction::Insert`] keeps the pre-#631 behavior as a
-/// first-class option: TAB completes the common prefix / opens the
-/// presentation menu, Enter confirms the pick, and Esc keeps what was
-/// already inserted.
+/// 2026-10-28): TAB puts the first candidate into the line and further
+/// TABs cycle through the candidate set; Enter accepts the candidate in
+/// the line and runs the command; Esc rolls the line back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionInteraction {
     /// zsh menu-completion form: TAB cycles candidates into the line.
     #[default]
     Cycle,
-    /// The pre-#631 interaction: TAB inserts the common prefix and the
-    /// presentation menu confirms a pick with Enter.
+    /// TAB completes the common prefix / opens the presentation menu,
+    /// Enter confirms the pick, and Esc keeps what was inserted.
     Insert,
 }
 
@@ -180,8 +194,6 @@ impl CompletionInteraction {
         }
     }
 
-    /// The canonical spelling used by the persisted config file, env
-    /// values and every display surface (`niu doctor`, `niu config`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cycle => "cycle",
@@ -213,13 +225,7 @@ impl Default for MenuConfig {
 
 impl MenuConfig {
     pub fn with_env_overrides(mut self) -> Self {
-        // Resolution order (owner ruling 2026-10-14): NIU_COMPLETION_STYLE env
-        // > persisted `completion.style` (config.toml) > the built-in default
-        // (column). `resolve_completion_style` warns once on a bad env value.
         self.completion_style = resolve_completion_style().0;
-        // The interaction axis resolves on the same chain (niubash#631):
-        // NIU_COMPLETION_INTERACTION env > persisted `completion.interaction`
-        // > the built-in default (cycle).
         self.completion_interaction = resolve_completion_interaction().0;
         self
     }
@@ -406,8 +412,7 @@ fn parse_style_map_value(value: &str) -> Vec<(String, String)> {
 
 /// Policy for the command-not-found package-search hint (niubash#249): a
 /// typo must never trigger an unsolicited package-manager advertisement,
-/// so the hint is off by default (GNU bash prints only the
-/// "command not found" line). The only opt-in channel names niu's own
+/// so the hint is off by default. The only opt-in channel names niu's own
 /// bundled manager (wpm); third-party managers are never recommended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommandNotFoundHint {
@@ -436,80 +441,52 @@ impl CommandNotFoundHint {
     }
 }
 
-/// Schema marker for the persisted user settings file
-/// (`~/.niubash/config.toml`), written by `niu config set`.
-pub const USER_CONFIG_SCHEMA: &str = "niubash:config@0.1.0";
+/// Where an effective setting came from. `rc` lines are not a separate
+/// source at read time: an rc `export NIU_*` is observed as [`Env`] after
+/// the shell mirrors it into the process environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingSource {
+    /// No override in effect.
+    Default,
+    /// A `NIU_*` environment variable.
+    Env,
+    /// A `$INPUTRC` / `~/.inputrc` readline variable.
+    Inputrc,
+}
 
-/// The command-not-found hint policy key (`niu config set
-/// command-not-found-hint`).
+impl SettingSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Env => "env",
+            Self::Inputrc => "inputrc",
+        }
+    }
+}
+
+/// User-facing config keys. The dotted spellings are retained from the
+/// config.toml era so existing muscle memory keeps working; `niu config set`
+/// no longer exists.
 pub const COMMAND_NOT_FOUND_HINT_KEY: &str = "command-not-found-hint";
-
-/// The TAB completion style key: `niu config set completion.style <value>`.
-/// In the file this is the TOML dotted key `completion.style` (a `[completion]`
-/// table with a `style` field), spelled with the dot on every command surface.
 pub const COMPLETION_STYLE_KEY: &str = "completion.style";
-
-/// The TAB completion interaction key (niubash#631): `niu config set
-/// completion.interaction <insert|cycle>`. In the file this is the
-/// `interaction` field of the same `[completion]` table that carries
-/// `style` — the two axes of TAB completion, one table.
 pub const COMPLETION_INTERACTION_KEY: &str = "completion.interaction";
-
-/// The personal-rc policy key (niubash#359): in the file this is the TOML
-/// dotted key `startup.rc-policy` (a `[startup]` table with an `rc-policy`
-/// field). Explicit `niu setup --rc-policy` owns the write; `niu config`
-/// reads and preserves it but never sets it — the doc allows no
-/// environment-based implicit grant and no competing booleans.
 pub const RC_POLICY_KEY: &str = "startup.rc-policy";
+pub const EDITOR_MODE_KEY: &str = "editing-mode";
+pub const KEYSEQ_TIMEOUT_KEY: &str = "keyseq-timeout";
 
-/// The persistent key-binding rules key (niubash#630, K4): in the file
-/// this is the `[keymap]` table's `bind` string array. Each element is
-/// the argument string of a GNU `bind` command (`'"\C-g": redisplay'`,
-/// `'-x "\C-t": my-cmd'`), parsed by the engine's own bind parsers
-/// at load — there is no second grammar. `niu config set keymap.bind`
-/// appends one validated rule.
-pub const KEYMAP_BIND_KEY: &str = "keymap.bind";
+/// The environment variables behind the niu-proprietary knobs.
+pub const COMMAND_NOT_FOUND_HINT_ENV: &str = "NIU_COMMAND_NOT_FOUND_HINT";
+pub const COMPLETION_STYLE_ENV: &str = "NIU_COMPLETION_STYLE";
+pub const COMPLETION_INTERACTION_ENV: &str = "NIU_COMPLETION_INTERACTION";
+pub const RC_POLICY_ENV: &str = "NIU_RC_POLICY";
 
-/// The persistent key-removal key (niubash#630, K4): the `[keymap]`
-/// table's `unbind` string array. Each element names one key in bind
-/// spelling (`"\C-t"`); at editor build the slot is removed outright —
-/// the key goes back to unbound, not to a lower layer's binding.
-pub const KEYMAP_UNBIND_KEY: &str = "keymap.unbind";
-
-/// The `[completion]` section of config.toml.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct CompletionConfigSection {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    style: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    interaction: Option<String>,
-}
-
-/// The `[startup]` section of config.toml.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct StartupConfigSection {
-    #[serde(rename = "rc-policy", default, skip_serializing_if = "Option::is_none")]
-    rc_policy: Option<String>,
-}
-
-/// The `[keymap]` section of config.toml (niubash#630, K4): the user's
-/// persistent key-binding rules. `bind` elements are GNU bind argument
-/// strings; `unbind` elements are single keyseqs. Both are raw strings
-/// here — parsing happens in `crate::repl` against the engine's own
-/// bind parsers, so resolve stays a pure read.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct KeymapConfigSection {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    bind: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    unbind: Option<Vec<String>>,
-}
+/// readline's `keyseq-timeout` default, in milliseconds.
+pub const DEFAULT_KEYSEQ_TIMEOUT_MS: u64 = 500;
 
 /// Which file may fill the default interactive personal-rc slot
-/// (niubash#359). Persisted as `startup.rc-policy` in config.toml; every
-/// read problem — missing key, unknown value, wrong type, duplicate keys,
-/// malformed TOML, unreadable file — fails closed to `primary-only`, and
-/// startup never repairs or rewrites that state.
+/// (niubash#359). Persisted as the `NIU_RC_POLICY` environment variable;
+/// every read problem — unknown value or absence — fails closed to
+/// `primary-only`, and startup never repairs or rewrites that state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RcPolicy {
     /// `~/.niubashrc` is the only personal rc; `~/.bashrc` is never
@@ -540,45 +517,207 @@ impl RcPolicy {
     }
 }
 
-/// Resolve the effective personal-rc policy. Deliberately has NO
-/// `NIU_`-prefixed override: the contract forbids environment-based
-/// implicit grants, so only a persisted explicit-setup pick flips the
-/// default. Anything unparseable fails closed to `primary-only`.
-pub fn resolve_rc_policy() -> RcPolicy {
-    read_user_config()
-        .startup
-        .and_then(|startup| startup.rc_policy)
-        .and_then(|value| RcPolicy::parse(&value))
-        .unwrap_or_default()
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
-/// Persist `startup.rc-policy` (the `niu setup --rc-policy` writer —
-/// explicit setup is the only command that may persist or revoke this
-/// policy). Setting the built-in default removes the key again so the
-/// file never pins a stale default. No rc file is touched: selecting the
-/// fallback must not create an empty primary rc, which would suppress
-/// the selected fallback (niubash#359).
-pub fn set_rc_policy(policy: RcPolicy) -> anyhow::Result<PathBuf> {
-    write_user_config(|doc| {
-        ensure_schema(doc);
-        if policy == RcPolicy::default() {
-            remove_table_key(doc, "startup", "rc-policy");
-            Ok(())
-        } else {
-            set_table_key(
-                doc,
-                "startup",
-                "rc-policy",
-                toml_edit::value(policy.as_str()),
-            )
+/// Resolve the effective command-not-found hint: `NIU_COMMAND_NOT_FOUND_HINT`
+/// env > built-in default (off). An invalid value warns once and falls back
+/// to the default — a config issue must never break the command-not-found
+/// path.
+pub fn resolve_command_not_found_hint_with_source() -> (CommandNotFoundHint, SettingSource) {
+    if let Some(value) = env_value(COMMAND_NOT_FOUND_HINT_ENV) {
+        match CommandNotFoundHint::parse(&value) {
+            Some(hint) => return (hint, SettingSource::Env),
+            None => eprintln!("niubash: {COMMAND_NOT_FOUND_HINT_ENV} must be one of: off, wpm"),
         }
-    })
+    }
+    (CommandNotFoundHint::default(), SettingSource::Default)
 }
 
-/// Where the persisted user settings live: `$NIU_CONFIG` overrides (tests,
-/// portable setups); default `~/.niubash/config.toml` (the mirrors.toml
-/// convention).
-pub fn user_config_path() -> PathBuf {
+pub fn resolve_command_not_found_hint() -> CommandNotFoundHint {
+    resolve_command_not_found_hint_with_source().0
+}
+
+/// Resolve the effective TAB completion style:
+/// `NIU_COMPLETION_STYLE` env > built-in default (column).
+pub fn resolve_completion_style() -> (CompletionStyle, SettingSource) {
+    if let Some(value) = env_value(COMPLETION_STYLE_ENV) {
+        match CompletionStyle::parse(&value) {
+            Some(style) => return (style, SettingSource::Env),
+            None => eprintln!(
+                "niubash: {COMPLETION_STYLE_ENV} must be one of: gnu, ide, column, list, inline"
+            ),
+        }
+    }
+    (CompletionStyle::default(), SettingSource::Default)
+}
+
+/// Resolve the effective TAB completion interaction:
+/// `NIU_COMPLETION_INTERACTION` env > built-in default (cycle).
+pub fn resolve_completion_interaction() -> (CompletionInteraction, SettingSource) {
+    if let Some(value) = env_value(COMPLETION_INTERACTION_ENV) {
+        match CompletionInteraction::parse(&value) {
+            Some(interaction) => return (interaction, SettingSource::Env),
+            None => {
+                eprintln!("niubash: {COMPLETION_INTERACTION_ENV} must be one of: insert, cycle")
+            }
+        }
+    }
+    (CompletionInteraction::default(), SettingSource::Default)
+}
+
+/// Resolve the effective personal-rc policy from `NIU_RC_POLICY` only.
+/// Anything unparseable fails closed to `primary-only`.
+pub fn resolve_rc_policy_with_source() -> (RcPolicy, SettingSource) {
+    if let Some(value) = env_value(RC_POLICY_ENV) {
+        match RcPolicy::parse(&value) {
+            Some(policy) => return (policy, SettingSource::Env),
+            None => {
+                eprintln!("niubash: {RC_POLICY_ENV} must be one of: primary-only, bashrc-fallback")
+            }
+        }
+    }
+    (RcPolicy::default(), SettingSource::Default)
+}
+
+pub fn resolve_rc_policy() -> RcPolicy {
+    resolve_rc_policy_with_source().0
+}
+
+/// The readline inputrc path: `$INPUTRC` when set and non-empty, else
+/// `~/.inputrc`. Mirrors the engine's `initialize_readline` resolution.
+pub fn inputrc_path() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os("INPUTRC") {
+        if !value.is_empty() {
+            return Some(PathBuf::from(value));
+        }
+    }
+    shell_home_dir().map(|home| home.join(".inputrc"))
+}
+
+/// The validated `set NAME VALUE` variables an inputrc file contributes,
+/// in file order. Missing/unreadable files are silent, exactly like
+/// readline's own startup read.
+pub fn inputrc_variables() -> Vec<(String, String)> {
+    let Some(path) = inputrc_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let term = std::env::var("TERM").ok();
+    let env = rubash::builtins::bind::InputrcEnv {
+        term: term.as_deref(),
+        editing_mode: None,
+    };
+    rubash::builtins::bind::parse_inputrc_with_env(
+        &text,
+        &path.display().to_string(),
+        &env,
+        &mut |name| std::fs::read_to_string(name).ok(),
+    )
+    .variables
+}
+
+fn inputrc_variable(name: &str) -> Option<String> {
+    inputrc_variables()
+        .into_iter()
+        .rev()
+        .find(|(variable, _)| variable == name)
+        .map(|(_, value)| value)
+}
+
+/// The effective editing mode as a standalone `niu config` process sees it:
+/// `$INPUTRC` / `~/.inputrc` `set editing-mode`, else the default (emacs).
+/// A running shell uses the engine's own `bind_editing_mode()` after
+/// `initialize_readline` instead, which also sees rc `bind 'set ...'` lines.
+pub fn resolve_editor_mode_from_inputrc() -> (EditorMode, SettingSource) {
+    if let Some(mode) = inputrc_variable(EDITOR_MODE_KEY) {
+        if let Some(parsed) = EditorMode::parse(&mode) {
+            return (parsed, SettingSource::Inputrc);
+        }
+    }
+    (EditorMode::default(), SettingSource::Default)
+}
+
+/// The effective `keyseq-timeout` as a standalone `niu config` process sees
+/// it: `$INPUTRC` / `~/.inputrc`, else readline's 500 ms default.
+pub fn resolve_keyseq_timeout_from_inputrc() -> (u64, SettingSource) {
+    if let Some(value) = inputrc_variable(KEYSEQ_TIMEOUT_KEY) {
+        if let Ok(parsed) = value.trim().parse::<u64>() {
+            return (parsed, SettingSource::Inputrc);
+        }
+    }
+    (DEFAULT_KEYSEQ_TIMEOUT_MS, SettingSource::Default)
+}
+
+/// One row of `niu config` / `niu config get` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingRow {
+    pub key: &'static str,
+    pub value: String,
+    pub source: SettingSource,
+}
+
+impl SettingRow {
+    /// Stable one-line format: `key = value (source)`.
+    pub fn render(&self) -> String {
+        format!("{} = {} ({})", self.key, self.value, self.source.as_str())
+    }
+}
+
+fn row(key: &'static str, value: impl Into<String>, source: SettingSource) -> SettingRow {
+    SettingRow {
+        key,
+        value: value.into(),
+        source,
+    }
+}
+
+/// Every effective setting and its source, in stable order.
+pub fn setting_rows() -> Vec<SettingRow> {
+    let (hint, hint_source) = resolve_command_not_found_hint_with_source();
+    let (style, style_source) = resolve_completion_style();
+    let (interaction, interaction_source) = resolve_completion_interaction();
+    let (policy, policy_source) = resolve_rc_policy_with_source();
+    let (editor_mode, editor_source) = resolve_editor_mode_from_inputrc();
+    let (timeout, timeout_source) = resolve_keyseq_timeout_from_inputrc();
+    vec![
+        row(COMMAND_NOT_FOUND_HINT_KEY, hint.as_str(), hint_source),
+        row(COMPLETION_STYLE_KEY, style.as_str(), style_source),
+        row(
+            COMPLETION_INTERACTION_KEY,
+            interaction.as_str(),
+            interaction_source,
+        ),
+        row(RC_POLICY_KEY, policy.as_str(), policy_source),
+        row(EDITOR_MODE_KEY, editor_mode.as_str(), editor_source),
+        row(KEYSEQ_TIMEOUT_KEY, timeout.to_string(), timeout_source),
+    ]
+}
+
+/// Look up one setting by its display key or its environment variable name.
+pub fn setting_row(key: &str) -> Option<SettingRow> {
+    let canonical = match key {
+        COMMAND_NOT_FOUND_HINT_KEY | COMMAND_NOT_FOUND_HINT_ENV => COMMAND_NOT_FOUND_HINT_KEY,
+        COMPLETION_STYLE_KEY | COMPLETION_STYLE_ENV => COMPLETION_STYLE_KEY,
+        COMPLETION_INTERACTION_KEY | COMPLETION_INTERACTION_ENV => COMPLETION_INTERACTION_KEY,
+        RC_POLICY_KEY | RC_POLICY_ENV => RC_POLICY_KEY,
+        EDITOR_MODE_KEY => EDITOR_MODE_KEY,
+        KEYSEQ_TIMEOUT_KEY => KEYSEQ_TIMEOUT_KEY,
+        _ => return None,
+    };
+    setting_rows().into_iter().find(|row| row.key == canonical)
+}
+
+/// The legacy `config.toml` path. Nothing on the runtime path reads it;
+/// [`migrate_legacy_config`] and the one-line startup notice do.
+/// `$NIU_CONFIG` overrides the path (tests, portable setups); the default
+/// is `~/.niubash/config.toml`.
+pub fn legacy_config_path() -> PathBuf {
     if let Some(value) = std::env::var_os("NIU_CONFIG") {
         let path = PathBuf::from(value);
         if !path.as_os_str().is_empty() {
@@ -591,445 +730,379 @@ pub fn user_config_path() -> PathBuf {
         .join("config.toml")
 }
 
-/// The parsed config.toml. Unknown keys a future version (or a hand edit)
-/// added parse compatibly and are ignored.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct UserConfigFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    schema: Option<String>,
-    #[serde(
-        rename = "command-not-found-hint",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+pub fn legacy_config_exists() -> bool {
+    legacy_config_path().exists()
+}
+
+/// The one-line interactive notice for a leftover legacy file. Returns
+/// `None` when there is nothing to migrate.
+pub fn legacy_config_notice() -> Option<String> {
+    let path = legacy_config_path();
+    if !path.exists() {
+        return None;
+    }
+    Some(format!(
+        "niubash: {} is no longer read — run `niu config migrate` to move its \
+         settings into ~/.niubashrc (the old file is then renamed)",
+        path.display()
+    ))
+}
+
+/// The primary rc every rc-policy/migration write targets.
+pub fn primary_rc_path() -> PathBuf {
+    shell_home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".niubashrc")
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "-_./:".contains(ch))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// The rc line that exports one niu-proprietary setting.
+pub fn export_line(name: &str, value: &str) -> String {
+    format!("export {name}={}", shell_quote(value))
+}
+
+/// The rc line that persists the personal-rc policy.
+pub fn rc_policy_export_line(policy: RcPolicy) -> String {
+    export_line(RC_POLICY_ENV, policy.as_str())
+}
+
+fn block_bounds(text: &str, marker: &str) -> Option<(usize, usize)> {
+    let start_tag = format!("# >>> {marker} >>>");
+    let end_tag = format!("# <<< {marker} <<<");
+    let start = text.find(&start_tag)?;
+    let end_rel = text[start..].find(&end_tag)?;
+    let end = start + end_rel + end_tag.len();
+    // Include the trailing newline in the replaced range when present.
+    let end = if text[end..].starts_with('\n') {
+        end + 1
+    } else {
+        end
+    };
+    Some((start, end))
+}
+
+fn render_block(marker: &str, comment: &str, lines: &[String]) -> String {
+    let mut block = format!("# >>> {marker} >>>\n");
+    if !comment.is_empty() {
+        block.push_str(&format!("# {comment}\n"));
+    }
+    for line in lines {
+        block.push_str(line);
+        block.push('\n');
+    }
+    block.push_str(&format!("# <<< {marker} <<<\n"));
+    block
+}
+
+/// Insert or replace one commented marker block in the primary rc. The
+/// block is idempotent: a second run with the same lines changes nothing,
+/// and a changed line rewrites only the marked region. An absent rc is
+/// created for migration; callers that must not create the primary (the
+/// bashrc-fallback policy) check [`primary_rc_path`] first.
+pub fn upsert_primary_rc_block(
+    marker: &str,
+    comment: &str,
+    lines: &[String],
+) -> anyhow::Result<(PathBuf, bool)> {
+    let path = primary_rc_path();
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
+    };
+    let block = render_block(marker, comment, lines);
+    let updated = match block_bounds(&existing, marker) {
+        Some((start, end)) => {
+            let mut next = String::with_capacity(existing.len() + block.len());
+            next.push_str(&existing[..start]);
+            next.push_str(&block);
+            next.push_str(&existing[end..]);
+            next
+        }
+        None => {
+            let mut next = existing.clone();
+            if !next.is_empty() && !next.ends_with('\n') {
+                next.push('\n');
+            }
+            if !next.is_empty() {
+                next.push('\n');
+            }
+            next.push_str(&block);
+            next
+        }
+    };
+    if updated == existing {
+        return Ok((path, false));
+    }
+    crate::path_utils::write_file_atomic(&path, updated.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()))?;
+    Ok((path, true))
+}
+
+/// Remove one marker block from the primary rc (revoking a setup pick).
+/// Returns `(path, changed)`; an absent rc or block is a no-op.
+pub fn remove_primary_rc_block(marker: &str) -> anyhow::Result<(PathBuf, bool)> {
+    let path = primary_rc_path();
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((path, false)),
+        Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
+    };
+    let Some((start, end)) = block_bounds(&existing, marker) else {
+        return Ok((path, false));
+    };
+    let mut next = String::with_capacity(existing.len());
+    next.push_str(&existing[..start]);
+    next.push_str(&existing[end..]);
+    crate::path_utils::write_file_atomic(&path, next.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()))?;
+    Ok((path, true))
+}
+
+/// How `niu setup --rc-policy` persisted (or could not persist) the pick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RcPolicyWrite {
+    /// The primary rc exists and now carries the policy block.
+    Written(PathBuf),
+    /// No primary rc exists, so writing one would suppress the very
+    /// fallback being selected. The caller prints this export line instead.
+    Instruction(String),
+    /// The default policy needs no persistence.
+    Default,
+}
+
+/// Persist an explicit `niu setup --rc-policy` pick into the primary rc.
+/// The policy itself is read from the environment at startup, so the line
+/// is an `export NIU_RC_POLICY=...` (a child session inherits it; a fresh
+/// terminal needs the variable exported by the environment).
+pub fn persist_rc_policy(policy: RcPolicy) -> anyhow::Result<RcPolicyWrite> {
+    const MARKER: &str = "niu setup rc-policy";
+    if policy == RcPolicy::default() {
+        remove_primary_rc_block(MARKER)?;
+        return Ok(RcPolicyWrite::Default);
+    }
+    if !primary_rc_path().exists() {
+        return Ok(RcPolicyWrite::Instruction(rc_policy_export_line(policy)));
+    }
+    let lines = vec![rc_policy_export_line(policy)];
+    let (path, _) = upsert_primary_rc_block(
+        MARKER,
+        "Personal-rc policy selected by `niu setup --rc-policy`.",
+        &lines,
+    )?;
+    Ok(RcPolicyWrite::Written(path))
+}
+
+/// Result of a one-time legacy migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationReport {
+    /// The old config.toml that was consumed.
+    pub legacy_path: PathBuf,
+    /// The rc file the translated lines were written to.
+    pub rc_path: PathBuf,
+    /// Where the old file was moved (`None` when nothing was renamed).
+    pub backup_path: Option<PathBuf>,
+    /// The rc lines the migration produced.
+    pub lines: Vec<String>,
+    /// Legacy keys/values that could not be translated.
+    pub skipped: Vec<String>,
+    /// Whether the marked rc block was created or changed.
+    pub rc_changed: bool,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct LegacyConfigFile {
+    #[serde(rename = "command-not-found-hint", default)]
     command_not_found_hint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    completion: Option<CompletionConfigSection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    startup: Option<StartupConfigSection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    keymap: Option<KeymapConfigSection>,
+    #[serde(default)]
+    completion: Option<LegacyCompletionSection>,
+    #[serde(default)]
+    startup: Option<LegacyStartupSection>,
+    #[serde(default)]
+    keymap: Option<LegacyKeymapSection>,
 }
 
-/// Read and parse the persisted user settings. Any problem — missing file,
-/// unreadable file, malformed TOML — degrades to an empty config: a config
-/// issue must never break the reading path.
-fn read_user_config() -> UserConfigFile {
-    std::fs::read_to_string(user_config_path())
-        .ok()
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default()
+#[derive(Debug, Default, serde::Deserialize)]
+struct LegacyCompletionSection {
+    #[serde(default)]
+    style: Option<String>,
+    #[serde(default)]
+    interaction: Option<String>,
 }
 
-/// Header notes for a freshly created config.toml (parsed into the new
-/// document so every later surgical edit lands after them). Existing files
-/// keep their own layout — these lines are never injected into one.
-const USER_CONFIG_NOTES: &str = "\
-# `niu config set <key> <value>` edits one key surgically; unrelated keys\n\
-# and comments are preserved, and setting a key back to its default\n\
-# removes the override again.\n\
-# command-not-found-hint: package-search suggestion printed after\n\
-#   \"command not found\". off (default) | wpm — wpm suggests one\n\
-#   `wpm search --name` line for high-confidence near-misses only;\n\
-#   third-party managers are never recommended (niubash#249).\n\
-# completion.style: TAB completion shape. column (default) | gnu |\n\
-#   ide | list | inline — `NIU_COMPLETION_STYLE` overrides this\n\
-#   file (env > config > default).\n\
-# completion.interaction: how TAB drives the line while candidates\n\
-#   are shown. cycle (default) | insert — cycle puts candidates into\n\
-#   the line one TAB at a time (Enter accepts and runs, Esc rolls\n\
-#   back); insert keeps the pre-#631 prefix-and-menu behavior.\n\
-#   `NIU_COMPLETION_INTERACTION` overrides this file.\n\
-# startup.rc-policy: which file fills the interactive personal-rc slot\n\
-#   when ~/.niubashrc is absent. primary-only (default) |\n\
-#   bashrc-fallback — explicit `niu setup --rc-policy` owns this key;\n\
-#   it is preserved, never set, by `niu config` (niubash#359).\n\
-# keymap.bind / keymap.unbind: persistent key-binding rules\n\
-#   (niubash#630). bind elements are GNU bind argument strings, e.g.\n\
-#   '\"\\C-g\": redisplay' or '-x \"\\C-t\": my-cmd'; unbind elements\n\
-#   name one key to remove outright, e.g. '\"\\C-t\"'. Rules apply at\n\
-#   editor build after scripts and NIU_BINDKEYS, so they win over\n\
-#   startup-file binds; add one with `niu config set keymap.bind`.\n";
-
-/// The document a first-time writer starts from (header notes + schema).
-fn fresh_user_config_doc() -> toml_edit::DocumentMut {
-    format!("{USER_CONFIG_NOTES}\nschema = \"{USER_CONFIG_SCHEMA}\"\n")
-        .parse()
-        .expect("the fresh config template is valid TOML")
+#[derive(Debug, Default, serde::Deserialize)]
+struct LegacyStartupSection {
+    #[serde(rename = "rc-policy", default)]
+    rc_policy: Option<String>,
 }
 
-/// Keep the managed schema marker current without moving user content.
-fn ensure_schema(doc: &mut toml_edit::DocumentMut) {
-    doc["schema"] = toml_edit::value(USER_CONFIG_SCHEMA);
+#[derive(Debug, Default, serde::Deserialize)]
+struct LegacyKeymapSection {
+    #[serde(default)]
+    bind: Option<Vec<String>>,
+    #[serde(default)]
+    unbind: Option<Vec<String>>,
 }
 
-/// Remove `key` from `doc[table]`; drop the table itself when the removal
-/// leaves it empty (a table carrying other keys — managed or unknown —
-/// is preserved untouched). Handles BOTH render shapes: a `[table]` header
-/// section and an inline `table = {…}` (a hand edit may use either — they
-/// are the same namespace to every TOML reader).
-fn remove_table_key(doc: &mut toml_edit::DocumentMut, table: &str, key: &str) {
-    let emptied = match doc.get_mut(table) {
-        Some(toml_edit::Item::Table(section)) => {
-            section.remove(key);
-            section.is_empty()
+fn legacy_lines(config: &LegacyConfigFile, skipped: &mut Vec<String>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(value) = config.command_not_found_hint.as_deref() {
+        match CommandNotFoundHint::parse(value) {
+            Some(hint) => lines.push(export_line(COMMAND_NOT_FOUND_HINT_ENV, hint.as_str())),
+            None => skipped.push(format!("{COMMAND_NOT_FOUND_HINT_KEY} = {value:?}")),
         }
-        Some(toml_edit::Item::Value(toml_edit::Value::InlineTable(section))) => {
-            section.remove(key);
-            section.is_empty()
-        }
-        // A wrong-typed or absent section has no such key to remove.
-        _ => false,
-    };
-    if emptied {
-        doc.remove(table);
     }
+    if let Some(completion) = &config.completion {
+        if let Some(value) = completion.style.as_deref() {
+            match CompletionStyle::parse(value) {
+                Some(style) => lines.push(export_line(COMPLETION_STYLE_ENV, style.as_str())),
+                None => skipped.push(format!("{COMPLETION_STYLE_KEY} = {value:?}")),
+            }
+        }
+        if let Some(value) = completion.interaction.as_deref() {
+            match CompletionInteraction::parse(value) {
+                Some(interaction) => lines.push(export_line(
+                    COMPLETION_INTERACTION_ENV,
+                    interaction.as_str(),
+                )),
+                None => skipped.push(format!("{COMPLETION_INTERACTION_KEY} = {value:?}")),
+            }
+        }
+    }
+    if let Some(startup) = &config.startup {
+        if let Some(value) = startup.rc_policy.as_deref() {
+            match RcPolicy::parse(value) {
+                Some(policy) => lines.push(rc_policy_export_line(policy)),
+                None => skipped.push(format!("{RC_POLICY_KEY} = {value:?}")),
+            }
+        }
+    }
+    if let Some(keymap) = &config.keymap {
+        for spec in keymap.bind.iter().flatten() {
+            match crate::repl::parse_keymap_bind_rule(spec) {
+                Ok(_) => lines.push(format!("bind {}", shell_quote(spec))),
+                Err(reason) => skipped.push(format!("keymap.bind {spec:?}: {reason}")),
+            }
+        }
+        for key in keymap.unbind.iter().flatten() {
+            match crate::repl::parse_keymap_unbind_key(key) {
+                Ok(_) => lines.push(format!("bind -r {}", shell_quote(key))),
+                Err(reason) => skipped.push(format!("keymap.unbind {key:?}: {reason}")),
+            }
+        }
+    }
+    lines
 }
 
-/// Set `table.key = value`, preserving the section's existing shape and
-/// its sibling keys: a missing section becomes a standard `[table]` header,
-/// an existing header or inline section keeps its form. A wrong-typed
-/// section (e.g. `table = "x"`) is a refusal, not a replacement — the
-/// bytes stay exactly as they were.
-fn set_table_key(
-    doc: &mut toml_edit::DocumentMut,
-    table: &str,
-    key: &str,
-    value: toml_edit::Item,
-) -> anyhow::Result<()> {
-    if !doc.contains_key(table) {
-        doc[table] = toml_edit::table();
-    }
-    match doc.get_mut(table) {
-        Some(toml_edit::Item::Table(section)) => {
-            section[key] = value;
-            Ok(())
-        }
-        Some(toml_edit::Item::Value(toml_edit::Value::InlineTable(section))) => {
-            section.insert(
-                key,
-                value
-                    .into_value()
-                    .map_err(|error| anyhow::anyhow!("could not encode {table}.{key}: {error}"))?,
-            );
-            Ok(())
-        }
-        _ => anyhow::bail!(
-            "could not save {}: `{table}` is not a table — fix it by hand; \
-             niu never replaces config content it cannot read as written",
-            user_config_path().display()
-        ),
-    }
-}
-
-/// Surgically persist one setting in config.toml (niubash#359): `edit`
-/// mutates the parsed document and the result publishes atomically.
-/// Unrelated keys, comments, ordering and layout survive — the pre-1.4.3
-/// writer rebuilt a typed subset and dropped them, which the rc-ownership
-/// contract forbids. A malformed or unreadable existing file is NEVER
-/// replaced with defaults: the error reports the inability to save and
-/// the bytes stay untouched.
-fn write_user_config(
-    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> anyhow::Result<()>,
-) -> anyhow::Result<PathBuf> {
-    let path = user_config_path();
-    let mut doc = match std::fs::read_to_string(&path) {
-        Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|err| {
-            anyhow::anyhow!(
-                "could not save {}: the file is not parseable TOML ({err}); \
-                 fix it by hand or remove it — niu never replaces a config it \
-                 cannot read",
-                path.display()
-            )
-        })?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => fresh_user_config_doc(),
+/// One-time migration from `~/.niubash/config.toml`:
+///
+/// 1. translate GNU-shaped keys to `bind`/`bind -r` rc lines,
+/// 2. translate niu-proprietary keys to `export NIU_*` rc lines,
+/// 3. append/update a commented marker block in `~/.niubashrc`,
+/// 4. rename the old file to `config.toml.migrated-<UTC timestamp>`.
+///
+/// A missing file returns `Ok(None)`. A malformed file is refused and
+/// left untouched. Re-running after a successful migration finds no
+/// config.toml and appends nothing; re-running with the same marker
+/// updates the block in place instead of duplicating it.
+pub fn migrate_legacy_config() -> anyhow::Result<Option<MigrationReport>> {
+    let legacy_path = legacy_config_path();
+    let text = match std::fs::read_to_string(&legacy_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
-            return Err(err).with_context(|| {
-                format!("could not save {}: cannot read the file", path.display())
-            })
+            return Err(err).with_context(|| format!("could not read {}", legacy_path.display()))
         }
     };
-    edit(&mut doc)?;
-    crate::path_utils::write_file_atomic(&path, doc.to_string().as_bytes())?;
-    Ok(path)
-}
-
-/// Resolve the effective hint policy: the persisted user setting
-/// (`niu config set command-not-found-hint`), overridden by
-/// `NIU_COMMAND_NOT_FOUND_HINT` (the env-over-file precedence every
-/// `NIU_` override uses). Any problem — missing file, unreadable TOML,
-/// unknown value — degrades to the default (off): a config issue must
-/// never break the command-not-found path.
-pub fn resolve_command_not_found_hint() -> CommandNotFoundHint {
-    let mut hint = read_user_config()
-        .command_not_found_hint
-        .and_then(|value| CommandNotFoundHint::parse(&value))
-        .unwrap_or_default();
-    if let Ok(value) = std::env::var("NIU_COMMAND_NOT_FOUND_HINT") {
-        match CommandNotFoundHint::parse(&value) {
-            Some(parsed) => hint = parsed,
-            None => eprintln!("niubash: NIU_COMMAND_NOT_FOUND_HINT must be one of: off, wpm"),
-        }
-    }
-    hint
-}
-
-/// Where the effective completion style came from. Display surfaces (doctor,
-/// `niu config`) use it to say whether a value is the built-in default, a
-/// persisted pick or an environment override.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionStyleSource {
-    /// No config file key and no env override.
-    Default,
-    /// `completion.style` in config.toml (env not set).
-    ConfigFile,
-    /// `NIU_COMPLETION_STYLE` set — wins over the config file.
-    Env,
-}
-
-/// Resolve the effective TAB completion style: `NIU_COMPLETION_STYLE` env >
-/// persisted `completion.style` (config.toml) > built-in default (column). An
-/// unparsable env value warns once (the shell's only completion-style
-/// diagnostic) and falls through to the lower-precedence source; an
-/// unparsable file value silently falls through like every other config
-/// degradation.
-pub fn resolve_completion_style() -> (CompletionStyle, CompletionStyleSource) {
-    let mut style = CompletionStyle::default();
-    let mut source = CompletionStyleSource::Default;
-    if let Some(parsed) = read_user_config()
-        .completion
-        .and_then(|completion| completion.style)
-        .and_then(|value| CompletionStyle::parse(&value))
-    {
-        style = parsed;
-        source = CompletionStyleSource::ConfigFile;
-    }
-    if let Ok(value) = std::env::var("NIU_COMPLETION_STYLE") {
-        match CompletionStyle::parse(&value) {
-            Some(parsed) => {
-                style = parsed;
-                source = CompletionStyleSource::Env;
-            }
-            None => eprintln!(
-                "niubash: NIU_COMPLETION_STYLE must be one of: gnu, ide, column, list, inline"
-            ),
-        }
-    }
-    (style, source)
-}
-
-/// Persist `completion.style` (the `niu config set completion.style`
-/// writer). Only that one key is touched; passing the current built-in
-/// default removes the key again so the file never pins a stale default.
-pub fn set_completion_style(style: CompletionStyle) -> anyhow::Result<PathBuf> {
-    write_user_config(|doc| {
-        ensure_schema(doc);
-        if style == CompletionStyle::default() {
-            remove_table_key(doc, "completion", "style");
-            Ok(())
-        } else {
-            set_table_key(doc, "completion", "style", toml_edit::value(style.as_str()))
-        }
-    })
-}
-
-/// Where the effective completion interaction came from (niubash#631).
-/// Display surfaces (doctor, `niu config`) use it to say whether the
-/// value is the built-in default, a persisted pick or an env override.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompletionInteractionSource {
-    /// No config file key and no env override.
-    Default,
-    /// `completion.interaction` in config.toml (env not set).
-    ConfigFile,
-    /// `NIU_COMPLETION_INTERACTION` set — wins over the config file.
-    Env,
-}
-
-/// Resolve the effective TAB completion interaction (niubash#631):
-/// `NIU_COMPLETION_INTERACTION` env > persisted `completion.interaction`
-/// (config.toml) > built-in default (cycle). An unparsable env value
-/// warns once and falls through to the lower-precedence source; an
-/// unparsable file value silently falls through like every other config
-/// degradation.
-pub fn resolve_completion_interaction() -> (CompletionInteraction, CompletionInteractionSource) {
-    let mut interaction = CompletionInteraction::default();
-    let mut source = CompletionInteractionSource::Default;
-    if let Some(parsed) = read_user_config()
-        .completion
-        .and_then(|completion| completion.interaction)
-        .and_then(|value| CompletionInteraction::parse(&value))
-    {
-        interaction = parsed;
-        source = CompletionInteractionSource::ConfigFile;
-    }
-    if let Ok(value) = std::env::var("NIU_COMPLETION_INTERACTION") {
-        match CompletionInteraction::parse(&value) {
-            Some(parsed) => {
-                interaction = parsed;
-                source = CompletionInteractionSource::Env;
-            }
-            None => eprintln!("niubash: NIU_COMPLETION_INTERACTION must be one of: insert, cycle"),
-        }
-    }
-    (interaction, source)
-}
-
-/// Persist `completion.interaction` (the `niu config set
-/// completion.interaction` writer, niubash#631). Only that one key is
-/// touched; passing the current built-in default removes the key again
-/// so the file never pins a stale default.
-pub fn set_completion_interaction(interaction: CompletionInteraction) -> anyhow::Result<PathBuf> {
-    write_user_config(|doc| {
-        ensure_schema(doc);
-        if interaction == CompletionInteraction::default() {
-            remove_table_key(doc, "completion", "interaction");
-            Ok(())
-        } else {
-            set_table_key(
-                doc,
-                "completion",
-                "interaction",
-                toml_edit::value(interaction.as_str()),
-            )
-        }
-    })
-}
-
-/// True when this user upgrades with a legacy configuration: a
-/// config.toml exists, but nothing — neither the file nor the env —
-/// picks a completion interaction, so the #631 default flip (to cycle)
-/// changes their TAB behavior without any action of theirs. The REPL
-/// prints the one-time disclosure for exactly this shape (and only when
-/// the interaction actually applies: the gnu style's literal readline
-/// interaction is inert to the axis, so a gnu user sees no change and
-/// gets no line).
-pub fn legacy_config_lacks_interaction_setting() -> bool {
-    if resolve_completion_interaction().1 != CompletionInteractionSource::Default {
-        return false;
-    }
-    if resolve_completion_style().0 == CompletionStyle::Gnu {
-        return false;
-    }
-    user_config_path().exists()
-}
-
-/// Persist `command-not-found-hint` (the `niu config set` writer). Only
-/// that one key is touched; the built-in default removes the override.
-pub fn set_command_not_found_hint(hint: CommandNotFoundHint) -> anyhow::Result<PathBuf> {
-    write_user_config(|doc| {
-        ensure_schema(doc);
-        if hint == CommandNotFoundHint::default() {
-            doc.remove(COMMAND_NOT_FOUND_HINT_KEY);
-        } else {
-            doc[COMMAND_NOT_FOUND_HINT_KEY] = toml_edit::value(hint.as_str());
-        }
-        Ok(())
-    })
-}
-
-/// The string array at `table.key` in a config document, in either
-/// section shape (a `[table]` header or an inline `table = {…}`); a
-/// missing or wrong-typed slot reads as empty — the write path never
-/// invents content it cannot see.
-fn table_string_array_in_doc(doc: &toml_edit::DocumentMut, table: &str, key: &str) -> Vec<String> {
-    let value = match doc.get(table) {
-        Some(toml_edit::Item::Table(section)) => section
-            .get(key)
-            .and_then(|item| item.as_value())
-            .and_then(|value| value.as_array()),
-        Some(toml_edit::Item::Value(toml_edit::Value::InlineTable(section))) => {
-            section.get(key).and_then(|value| value.as_array())
-        }
-        _ => None,
-    };
-    value
-        .map(|array| {
-            array
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Set `table.key` to a string array through [`set_table_key`], so the
-/// section's shape and siblings survive; an empty array removes the
-/// key again (the file never pins an empty rule list).
-fn set_table_string_array(
-    doc: &mut toml_edit::DocumentMut,
-    table: &str,
-    key: &str,
-    values: &[String],
-) -> anyhow::Result<()> {
-    if values.is_empty() {
-        remove_table_key(doc, table, key);
-        return Ok(());
-    }
-    let mut array = toml_edit::Array::new();
-    for value in values {
-        array.push(value.as_str());
-    }
-    set_table_key(
-        doc,
-        table,
-        key,
-        toml_edit::Item::Value(toml_edit::Value::Array(array)),
-    )
-}
-
-/// The raw `[keymap]` rule specs persisted in config.toml: the `bind`
-/// argument strings and the `unbind` keyseqs, in file order. Parsing
-/// is the loader's job (`crate::repl` against the engine's bind
-/// parsers); a file problem degrades to no rules, like every read here.
-pub fn resolve_keymap_rule_specs() -> (Vec<String>, Vec<String>) {
-    let keymap = read_user_config().keymap;
-    (
-        keymap
-            .as_ref()
-            .and_then(|section| section.bind.clone())
-            .unwrap_or_default(),
-        keymap
-            .and_then(|section| section.unbind)
-            .unwrap_or_default(),
-    )
-}
-
-/// Append one `[keymap].bind` rule (the `niu config set keymap.bind`
-/// writer, niubash#630). The spec is validated by the same parser the
-/// loader uses — a rule that can never apply is refused here, with the
-/// parser's reason, instead of erroring at every shell startup.
-/// Appending an already-present rule is a no-op; sibling keys and
-/// sections are preserved like every surgical write in this file.
-pub fn add_keymap_bind_rule(spec: &str) -> anyhow::Result<PathBuf> {
-    crate::repl::parse_keymap_bind_rule(spec)
-        .map_err(|reason| anyhow::anyhow!("invalid {KEYMAP_BIND_KEY} rule '{spec}': {reason}"))?;
-    write_user_config(|doc| {
-        ensure_schema(doc);
-        let mut rules = table_string_array_in_doc(doc, "keymap", "bind");
-        if !rules.iter().any(|rule| rule == spec) {
-            rules.push(spec.to_string());
-        }
-        set_table_string_array(doc, "keymap", "bind", &rules)
-    })
-}
-
-/// Append one `[keymap].unbind` entry (the `niu config set
-/// keymap.unbind` writer, niubash#630). The entry must name a single
-/// key the editor can bind — validated by the loader's parser, so a
-/// chained or unparseable keyseq is refused with its reason.
-pub fn add_keymap_unbind_rule(spec: &str) -> anyhow::Result<PathBuf> {
-    crate::repl::parse_keymap_unbind_key(spec).map_err(|reason| {
-        anyhow::anyhow!("invalid {KEYMAP_UNBIND_KEY} entry '{spec}': {reason}")
+    let parsed: LegacyConfigFile = toml::from_str(&text).with_context(|| {
+        format!(
+            "could not parse {} — fix or remove the file by hand; niu never \
+             rewrites a config it cannot read",
+            legacy_path.display()
+        )
     })?;
-    write_user_config(|doc| {
-        ensure_schema(doc);
-        let mut rules = table_string_array_in_doc(doc, "keymap", "unbind");
-        if !rules.iter().any(|rule| rule == spec) {
-            rules.push(spec.to_string());
-        }
-        set_table_string_array(doc, "keymap", "unbind", &rules)
-    })
+    let mut skipped = Vec::new();
+    let lines = legacy_lines(&parsed, &mut skipped);
+    let rc_path = primary_rc_path();
+    let rc_changed = if lines.is_empty() {
+        false
+    } else {
+        let (_, changed) = upsert_primary_rc_block(
+            "niu config migrate",
+            "Migrated from the retired ~/.niubash/config.toml (1.5.0).",
+            &lines,
+        )?;
+        changed
+    };
+    let backup_path = rename_legacy_config(&legacy_path)?;
+    Ok(Some(MigrationReport {
+        legacy_path,
+        rc_path,
+        backup_path: Some(backup_path),
+        lines,
+        skipped,
+        rc_changed,
+    }))
+}
+
+fn rename_legacy_config(path: &Path) -> anyhow::Result<PathBuf> {
+    let stamp = utc_timestamp();
+    let mut candidate = PathBuf::from(format!("{}.migrated-{stamp}", path.display()));
+    let mut suffix = 1u32;
+    while candidate.exists() {
+        candidate = PathBuf::from(format!("{}.migrated-{stamp}-{suffix}", path.display()));
+        suffix += 1;
+    }
+    std::fs::rename(path, &candidate).with_context(|| {
+        format!(
+            "could not rename {} to {}",
+            path.display(),
+            candidate.display()
+        )
+    })?;
+    Ok(candidate)
+}
+
+/// UTC timestamp shaped for a filename: `YYYYMMDD-HHMMSSZ`.
+fn utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Howard Hinnant's days-from-civil inverse (proleptic Gregorian).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + i64::from(m <= 2);
+    (year, m as u32, d as u32)
 }
 
 #[derive(Debug, Clone)]
@@ -1080,6 +1153,43 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    struct EnvRestore {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "niu-config-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     #[test]
     fn completion_style_parse_accepts_valid_values() {
         assert_eq!(CompletionStyle::parse("gnu"), Some(CompletionStyle::Gnu));
@@ -1128,11 +1238,6 @@ mod tests {
 
     #[test]
     fn completion_style_default_is_column() {
-        // Owner ruling 2026-10-14: the factory TAB shape is the multi-per-row
-        // grid (the GNU listing look, candidates immediately) — the 2026-10-12
-        // Gnu flip read as "dead" at the prompt (silent first TAB when the
-        // typed word already is the common prefix) and the Ide popup lost on
-        // looks. Gnu remains an opt-in.
         assert_eq!(CompletionStyle::default(), CompletionStyle::Column);
     }
 
@@ -1153,775 +1258,400 @@ mod tests {
     fn menu_config_default_completion_style() {
         let config = MenuConfig::default();
         assert_eq!(config.completion_style, CompletionStyle::Column);
+        assert_eq!(config.completion_interaction, CompletionInteraction::Cycle);
     }
 
     #[test]
-    fn completion_style_persists_and_env_wins_over_file() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+    fn completion_style_env_resolves_and_invalid_falls_back() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-style-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous_config = std::env::var_os("NIU_CONFIG");
-        let previous_env = std::env::var_os("NIU_COMPLETION_STYLE");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = (|| {
-            // No file, no env: the built-in default.
-            std::fs::remove_file(&temp).ok();
-            assert_eq!(CompletionStyle::parse("gnu"), Some(CompletionStyle::Gnu));
-            let (style, source) = resolve_completion_style();
-            assert_eq!(style, CompletionStyle::Column);
-            assert_eq!(source, CompletionStyleSource::Default);
-
-            // Persisted file beats the default.
-            set_completion_style(CompletionStyle::Ide)?;
-            let (style, source) = resolve_completion_style();
-            assert_eq!(style, CompletionStyle::Ide);
-            assert_eq!(source, CompletionStyleSource::ConfigFile);
-            // The written file parses as the documented schema and spells the
-            // key as the dotted `completion.style` namespace.
-            let text = std::fs::read_to_string(&temp)?;
-            let parsed: UserConfigFile = toml::from_str(&text)?;
-            assert_eq!(
-                parsed.completion.and_then(|c| c.style).as_deref(),
-                Some("ide")
-            );
-
-            // A second setter must not clobber the first key (merge write).
-            set_command_not_found_hint(CommandNotFoundHint::Wpm)?;
-            let text = std::fs::read_to_string(&temp)?;
-            let parsed: UserConfigFile = toml::from_str(&text)?;
-            assert_eq!(parsed.command_not_found_hint.as_deref(), Some("wpm"));
-            assert_eq!(
-                parsed.completion.and_then(|c| c.style).as_deref(),
-                Some("ide")
-            );
-
-            // Env beats the file.
-            std::env::set_var("NIU_COMPLETION_STYLE", "list");
-            let (style, source) = resolve_completion_style();
-            assert_eq!(style, CompletionStyle::List);
-            assert_eq!(source, CompletionStyleSource::Env);
-
-            // Setting the built-in default removes the key again.
-            std::env::remove_var("NIU_COMPLETION_STYLE");
-            set_completion_style(CompletionStyle::Column)?;
-            let text = std::fs::read_to_string(&temp)?;
-            let parsed: UserConfigFile = toml::from_str(&text)?;
-            assert!(parsed.completion.is_none(), "default must not be pinned");
-
-            // An unparsable file value falls through to the default, and an
-            // unparsable env value warns and falls through too (tested by the
-            // warning landing on stderr — the value result is what's pinned).
-            std::fs::write(&temp, "[completion]\nstyle = \"winget\"").unwrap();
-            let (style, source) = resolve_completion_style();
-            assert_eq!(style, CompletionStyle::Column);
-            assert_eq!(source, CompletionStyleSource::Default);
-            Ok::<(), anyhow::Error>(())
-        })();
-        match previous_config {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        match previous_env {
-            Some(value) => std::env::set_var("NIU_COMPLETION_STYLE", value),
-            None => std::env::remove_var("NIU_COMPLETION_STYLE"),
-        }
-        let _ = std::fs::remove_dir_all(
-            temp.parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        let _restore = EnvRestore::capture(&[COMPLETION_STYLE_ENV]);
+        std::env::remove_var(COMPLETION_STYLE_ENV);
+        assert_eq!(
+            resolve_completion_style(),
+            (CompletionStyle::Column, SettingSource::Default)
         );
-        let _ = std::fs::remove_file(&temp);
-        result.unwrap();
+        std::env::set_var(COMPLETION_STYLE_ENV, "list");
+        assert_eq!(
+            resolve_completion_style(),
+            (CompletionStyle::List, SettingSource::Env)
+        );
+        std::env::set_var(COMPLETION_STYLE_ENV, "winget");
+        assert_eq!(
+            resolve_completion_style(),
+            (CompletionStyle::Column, SettingSource::Default),
+            "an invalid env value falls back to the built-in default"
+        );
     }
 
-    /// niubash#630, K4: `[keymap]` rules persist by validated append —
-    /// the specs round-trip through the typed read, duplicates are
-    /// ignored, and sibling keys written before/after survive.
     #[test]
-    fn issue630_keymap_rules_persist_append_and_roundtrip() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+    fn completion_interaction_env_resolves_and_invalid_falls_back() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-keymap-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous_config = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = (|| {
-            std::fs::remove_file(&temp).ok();
-            assert_eq!(
-                resolve_keymap_rule_specs(),
-                (Vec::new(), Vec::new()),
-                "no file, no rules"
-            );
-            // A sibling key first: the keymap writes must preserve it.
-            set_completion_style(CompletionStyle::Ide)?;
-            add_keymap_bind_rule(r#""\C-g": redisplay"#)?;
-            assert_eq!(
-                resolve_keymap_rule_specs().0,
-                vec![r#""\C-g": redisplay"#.to_string()]
-            );
-            // Appending the same rule again is a no-op.
-            add_keymap_bind_rule(r#""\C-g": redisplay"#)?;
-            assert_eq!(resolve_keymap_rule_specs().0.len(), 1);
-            add_keymap_bind_rule(r#"-x "\C-t": my-cmd"#)?;
-            add_keymap_unbind_rule(r#""\C-a""#)?;
-            let (bind, unbind) = resolve_keymap_rule_specs();
-            assert_eq!(bind.len(), 2);
-            assert_eq!(unbind, vec![r#""\C-a""#.to_string()]);
-            // The typed view of the file: the section and the sibling
-            // are both present, spelled as the documented namespace.
-            let text = std::fs::read_to_string(&temp)?;
-            let parsed: UserConfigFile = toml::from_str(&text)?;
-            assert_eq!(
-                parsed.completion.and_then(|c| c.style).as_deref(),
-                Some("ide")
-            );
-            let keymap = parsed.keymap.expect("keymap section persisted");
-            assert_eq!(keymap.bind.as_ref().map(Vec::len), Some(2));
-            assert_eq!(keymap.unbind.as_ref().map(Vec::len), Some(1));
-            Ok::<(), anyhow::Error>(())
-        })();
-        match previous_config {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        let _ = std::fs::remove_file(&temp);
-        result.unwrap();
+        let _restore = EnvRestore::capture(&[COMPLETION_INTERACTION_ENV]);
+        std::env::remove_var(COMPLETION_INTERACTION_ENV);
+        assert_eq!(
+            resolve_completion_interaction(),
+            (CompletionInteraction::Cycle, SettingSource::Default)
+        );
+        std::env::set_var(COMPLETION_INTERACTION_ENV, "insert");
+        assert_eq!(
+            resolve_completion_interaction(),
+            (CompletionInteraction::Insert, SettingSource::Env)
+        );
+        std::env::set_var(COMPLETION_INTERACTION_ENV, "spiral");
+        assert_eq!(
+            resolve_completion_interaction(),
+            (CompletionInteraction::Cycle, SettingSource::Default)
+        );
     }
 
-    /// niubash#630, K4: the writers validate with the loader's parser —
-    /// a rule that can never apply is refused up front and nothing is
-    /// written at all (no half-created config file).
     #[test]
-    fn issue630_keymap_writers_refuse_unusable_rules() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+    fn command_not_found_hint_env_resolves_and_invalid_falls_back() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-keymap-refuse-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous_config = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        std::fs::remove_file(&temp).ok();
-        let refused = [
-            add_keymap_bind_rule("hello"),
-            add_keymap_bind_rule(r#"-r "\C-t""#),
-            add_keymap_bind_rule(r#""\C-g""#),
-            add_keymap_unbind_rule(r#""\C-x\C-f""#),
-            add_keymap_unbind_rule(""),
-        ];
-        match previous_config {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
+        let _restore = EnvRestore::capture(&[COMMAND_NOT_FOUND_HINT_ENV]);
+        std::env::remove_var(COMMAND_NOT_FOUND_HINT_ENV);
+        assert_eq!(
+            resolve_command_not_found_hint_with_source(),
+            (CommandNotFoundHint::Off, SettingSource::Default)
+        );
+        std::env::set_var(COMMAND_NOT_FOUND_HINT_ENV, "wpm");
+        assert_eq!(
+            resolve_command_not_found_hint_with_source(),
+            (CommandNotFoundHint::Wpm, SettingSource::Env)
+        );
+        std::env::set_var(COMMAND_NOT_FOUND_HINT_ENV, "winget");
+        assert_eq!(
+            resolve_command_not_found_hint_with_source(),
+            (CommandNotFoundHint::Off, SettingSource::Default)
+        );
+    }
+
+    #[test]
+    fn rc_policy_env_resolves_and_invalid_fails_closed() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvRestore::capture(&[RC_POLICY_ENV]);
+        std::env::remove_var(RC_POLICY_ENV);
+        assert_eq!(
+            resolve_rc_policy_with_source(),
+            (RcPolicy::PrimaryOnly, SettingSource::Default)
+        );
+        std::env::set_var(RC_POLICY_ENV, "bashrc-fallback");
+        assert_eq!(
+            resolve_rc_policy_with_source(),
+            (RcPolicy::BashrcFallback, SettingSource::Env)
+        );
+        for invalid in ["bashrc", "fallback", "", "primary-only; rm -rf"] {
+            std::env::set_var(RC_POLICY_ENV, invalid);
+            assert_eq!(
+                resolve_rc_policy_with_source(),
+                (RcPolicy::PrimaryOnly, SettingSource::Default),
+                "{invalid:?} must fail closed"
+            );
         }
+    }
+
+    #[test]
+    fn inputrc_sets_editor_mode_and_keyseq_timeout() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = temp_dir("inputrc");
+        std::fs::create_dir_all(&home).unwrap();
+        let _restore = EnvRestore::capture(&["HOME", "INPUTRC", "TERM"]);
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("INPUTRC");
+        std::env::remove_var("TERM");
+        std::fs::write(
+            home.join(".inputrc"),
+            "set editing-mode vi\nset keyseq-timeout 120\n\"\\C-g\": redisplay\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_editor_mode_from_inputrc(),
+            (EditorMode::Vi, SettingSource::Inputrc)
+        );
+        assert_eq!(
+            resolve_keyseq_timeout_from_inputrc(),
+            (120, SettingSource::Inputrc)
+        );
+        // $INPUTRC wins over ~/.inputrc, exactly like readline.
+        let other = home.join("custom.inputrc");
+        std::fs::write(&other, "set editing-mode emacs\nset keyseq-timeout 250\n").unwrap();
+        std::env::set_var("INPUTRC", &other);
+        assert_eq!(
+            resolve_editor_mode_from_inputrc(),
+            (EditorMode::Emacs, SettingSource::Inputrc)
+        );
+        assert_eq!(
+            resolve_keyseq_timeout_from_inputrc(),
+            (250, SettingSource::Inputrc)
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn inputrc_absent_keeps_defaults() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = temp_dir("no-inputrc");
+        std::fs::create_dir_all(&home).unwrap();
+        let _restore = EnvRestore::capture(&["HOME", "INPUTRC"]);
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("INPUTRC");
+        assert_eq!(
+            resolve_editor_mode_from_inputrc(),
+            (EditorMode::Emacs, SettingSource::Default)
+        );
+        assert_eq!(
+            resolve_keyseq_timeout_from_inputrc(),
+            (DEFAULT_KEYSEQ_TIMEOUT_MS, SettingSource::Default)
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn setting_rows_render_value_and_source() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = temp_dir("rows");
+        std::fs::create_dir_all(&home).unwrap();
+        let _restore = EnvRestore::capture(&[
+            "HOME",
+            "INPUTRC",
+            COMPLETION_STYLE_ENV,
+            COMPLETION_INTERACTION_ENV,
+            COMMAND_NOT_FOUND_HINT_ENV,
+            RC_POLICY_ENV,
+        ]);
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("INPUTRC");
+        std::env::remove_var(COMPLETION_STYLE_ENV);
+        std::env::remove_var(COMPLETION_INTERACTION_ENV);
+        std::env::remove_var(COMMAND_NOT_FOUND_HINT_ENV);
+        std::env::remove_var(RC_POLICY_ENV);
+        std::fs::write(home.join(".inputrc"), "set editing-mode vi\n").unwrap();
+        std::env::set_var(COMPLETION_STYLE_ENV, "ide");
+
+        let rows = setting_rows();
+        let style = rows
+            .iter()
+            .find(|row| row.key == COMPLETION_STYLE_KEY)
+            .unwrap();
+        assert_eq!(style.render(), "completion.style = ide (env)");
+        let editor = rows.iter().find(|row| row.key == EDITOR_MODE_KEY).unwrap();
+        assert_eq!(editor.render(), "editing-mode = vi (inputrc)");
+        let policy = rows.iter().find(|row| row.key == RC_POLICY_KEY).unwrap();
+        assert_eq!(
+            policy.render(),
+            "startup.rc-policy = primary-only (default)"
+        );
+        assert_eq!(setting_row(COMPLETION_STYLE_ENV).unwrap().value, "ide");
+        assert!(setting_row("no.such.key").is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    fn write_legacy_config(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn migrate_translates_keys_appends_rc_and_renames_once() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = temp_dir("migrate");
+        std::fs::create_dir_all(&home).unwrap();
+        let legacy = home.join("config.toml");
+        let _restore = EnvRestore::capture(&["HOME", "NIU_CONFIG"]);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("NIU_CONFIG", &legacy);
+        write_legacy_config(
+            &legacy,
+            r#"
+schema = "niubash:config@0.1.0"
+command-not-found-hint = "wpm"
+
+[completion]
+style = "ide"
+interaction = "insert"
+
+[startup]
+rc-policy = "bashrc-fallback"
+
+[keymap]
+bind = ['"\C-g": redisplay', '-x "\C-t": my-cmd']
+unbind = ['"\C-a"']
+"#,
+        );
+        let report = migrate_legacy_config()
+            .unwrap()
+            .expect("legacy file exists");
+        assert_eq!(report.legacy_path, legacy);
+        // The shared home resolver normalizes an existing home before
+        // joining (on Windows that expands the temp dir's 8.3 short name,
+        // e.g. RUNNER~1 -> runneradmin), so the expectation must be
+        // normalized the same way before comparing paths.
+        assert_eq!(
+            report.rc_path,
+            crate::path_utils::normalize_existing_host_path(home.join(".niubashrc"))
+        );
+        assert!(report.rc_changed);
+        assert_eq!(
+            report.lines,
+            vec![
+                "export NIU_COMMAND_NOT_FOUND_HINT=wpm".to_string(),
+                "export NIU_COMPLETION_STYLE=ide".to_string(),
+                "export NIU_COMPLETION_INTERACTION=insert".to_string(),
+                "export NIU_RC_POLICY=bashrc-fallback".to_string(),
+                r#"bind '"\C-g": redisplay'"#.to_string(),
+                r#"bind '-x "\C-t": my-cmd'"#.to_string(),
+                r#"bind -r '"\C-a"'"#.to_string(),
+            ]
+        );
+        assert!(!legacy.exists(), "the old file must be renamed");
+        let backup = report.backup_path.unwrap();
+        assert!(backup.exists());
+        let backup_name = backup.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            refused.iter().all(|result| result.is_err()),
-            "every unusable rule is refused: {refused:?}"
+            backup_name.starts_with("config.toml.migrated-"),
+            "{backup_name}"
         );
-        assert!(!temp.exists(), "a refused rule never creates the file");
-    }
+        let rc = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
+        assert!(rc.contains("# >>> niu config migrate >>>"), "{rc}");
+        assert!(rc.contains("export NIU_COMPLETION_STYLE=ide"), "{rc}");
+        assert!(rc.contains(r#"bind '"\C-g": redisplay'"#), "{rc}");
+        assert!(rc.contains("# <<< niu config migrate <<<"), "{rc}");
 
-    #[test]
-    fn rc_policy_parse_and_defaults() {
-        assert_eq!(RcPolicy::parse("primary-only"), Some(RcPolicy::PrimaryOnly));
+        // Re-running after the rename finds nothing and appends nothing.
+        assert!(migrate_legacy_config().unwrap().is_none());
         assert_eq!(
-            RcPolicy::parse("bashrc-fallback"),
-            Some(RcPolicy::BashrcFallback)
+            std::fs::read_to_string(home.join(".niubashrc")).unwrap(),
+            rc
         );
-        // Tolerated spellings, same namespace contract as the other keys.
+
+        // Re-running with the same marker (a restored file) updates in
+        // place instead of duplicating the block.
+        write_legacy_config(&legacy, "[completion]\nstyle = \"gnu\"\n");
+        let report = migrate_legacy_config().unwrap().unwrap();
+        let rc = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
         assert_eq!(
-            RcPolicy::parse("  BASHRC-FALLBACK "),
-            Some(RcPolicy::BashrcFallback)
+            rc.matches("# >>> niu config migrate >>>").count(),
+            1,
+            "{rc}"
         );
-        assert_eq!(RcPolicy::default(), RcPolicy::PrimaryOnly);
-        // Anything else fails closed at parse time too.
-        assert_eq!(RcPolicy::parse("bashrc"), None);
-        assert_eq!(RcPolicy::parse("fallback"), None);
-        assert_eq!(RcPolicy::parse(""), None);
-        assert_eq!(RcPolicy::parse("primary-only; rm -rf"), None);
-        assert_eq!(RcPolicy::PrimaryOnly.as_str(), "primary-only");
-        assert_eq!(RcPolicy::BashrcFallback.as_str(), "bashrc-fallback");
+        assert!(rc.contains("export NIU_COMPLETION_STYLE=gnu"), "{rc}");
+        assert!(report.rc_changed);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// niubash#359 acceptance matrix, persistence rows: unknown/missing
-    /// enum, wrong type, malformed TOML, unreadable config — every read
-    /// problem fails closed to primary-only, never to fallback.
     #[test]
-    fn resolve_rc_policy_fails_closed_matrix() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+    fn migrate_refuses_malformed_file_and_leaves_it_in_place() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-rcpolicy-matrix-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
-        let previous = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = {
-            // No file at all.
-            std::fs::remove_file(&temp).ok();
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly, "no file");
-            // Missing key.
-            std::fs::write(&temp, "schema = \"niubash:config@0.1.0\"\n").unwrap();
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly, "missing key");
-            // Explicit primary-only.
-            std::fs::write(&temp, "[startup]\nrc-policy = \"primary-only\"\n").unwrap();
-            assert_eq!(
-                resolve_rc_policy(),
-                RcPolicy::PrimaryOnly,
-                "explicit primary-only"
-            );
-            // Valid opt-in.
-            std::fs::write(&temp, "[startup]\nrc-policy = \"bashrc-fallback\"\n").unwrap();
-            assert_eq!(
-                resolve_rc_policy(),
-                RcPolicy::BashrcFallback,
-                "valid opt-in"
-            );
-            // Unknown enum value.
-            std::fs::write(&temp, "[startup]\nrc-policy = \"bashrc\"\n").unwrap();
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly, "unknown enum");
-            // Wrong value type.
-            std::fs::write(&temp, "[startup]\nrc-policy = 3\n").unwrap();
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly, "wrong type");
-            // Wrong table type (the whole startup section unusable).
-            std::fs::write(&temp, "startup = \"x\"\n").unwrap();
-            assert_eq!(
-                resolve_rc_policy(),
-                RcPolicy::PrimaryOnly,
-                "wrong table type"
-            );
-            // Duplicate key spellings (dotted + table) are malformed TOML.
-            std::fs::write(
-                &temp,
-                "startup.rc-policy = \"bashrc-fallback\"\n[startup]\nrc-policy = \"bashrc-fallback\"\n",
-            )
-            .unwrap();
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly, "duplicate key");
-            // Malformed TOML.
-            std::fs::write(&temp, "[startup\nrc-policy = ").unwrap();
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly, "malformed toml");
-            // A config DIRECTORY is unreadable as a file.
-            std::fs::remove_file(&temp).unwrap();
-            std::fs::create_dir_all(&temp).unwrap();
-            assert_eq!(
-                resolve_rc_policy(),
-                RcPolicy::PrimaryOnly,
-                "unreadable config"
-            );
-            Ok::<(), anyhow::Error>(())
-        };
-        match previous {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        std::fs::remove_dir_all(&temp).ok();
-        result.unwrap();
+        let home = temp_dir("migrate-bad");
+        std::fs::create_dir_all(&home).unwrap();
+        let legacy = home.join("config.toml");
+        let _restore = EnvRestore::capture(&["HOME", "NIU_CONFIG"]);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("NIU_CONFIG", &legacy);
+        write_legacy_config(&legacy, "[completion\nstyle = ");
+        let err = migrate_legacy_config().expect_err("malformed config must refuse");
+        assert!(format!("{err:#}").contains("could not parse"), "{err:#}");
+        assert!(legacy.exists(), "the old bytes stay untouched");
+        assert!(!home.join(".niubashrc").exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// The niubash#359 writer contract: persisting one setting is surgical —
-    /// comments, unknown keys, sibling sections, and the rc-policy enum all
-    /// survive `niu config` writes untouched, and only explicit setup may
-    /// change the policy.
     #[test]
-    fn config_writes_preserve_comments_unknown_keys_and_rc_policy() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+    fn migrate_reports_unknown_values_as_skipped() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-preserve-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = (|| {
-            let original = "\n\
-                # my own note, kept by hand\n\
-                custom-flag = \"keep me\"\n\
-                schema = \"niubash:config@0.0.9\"\n\
-                [startup]\n\
-                # a comment INSIDE the section, kept too\n\
-                rc-policy = \"bashrc-fallback\"\n\
-                [completion]\n\
-                style = \"ide\"\n\
-                unknown-in-section = 1\n\
-            ";
-            std::fs::write(&temp, original).unwrap();
-
-            // A `niu config` write touches only its one key: the rc-policy
-            // (owned by setup), the unknown keys, and the comments all
-            // survive byte-for-byte.
-            set_command_not_found_hint(CommandNotFoundHint::Wpm)?;
-            let text = std::fs::read_to_string(&temp)?;
-            assert!(text.contains("# my own note, kept by hand"), "{text}");
-            assert!(text.contains("custom-flag = \"keep me\""), "{text}");
-            assert!(text.contains("rc-policy = \"bashrc-fallback\""), "{text}");
-            assert!(text.contains("# a comment INSIDE the section"), "{text}");
-            assert!(text.contains("unknown-in-section = 1"), "{text}");
-            assert_eq!(resolve_rc_policy(), RcPolicy::BashrcFallback);
-
-            // Setting completion back to the default removes exactly that
-            // key; the section's unknown key must stay (no table nuking).
-            set_completion_style(CompletionStyle::Column)?;
-            let text = std::fs::read_to_string(&temp)?;
-            assert!(!text.contains("style = \"ide\""), "{text}");
-            assert!(text.contains("unknown-in-section = 1"), "{text}");
-            assert_eq!(resolve_rc_policy(), RcPolicy::BashrcFallback);
-
-            // An inline-table section is the same namespace: the writer
-            // preserves its shape and siblings instead of rewriting it.
-            std::fs::write(
-                &temp,
-                "completion = { style = \"ide\", unknown-in-section = 1 }\n[startup]\nrc-policy = \"bashrc-fallback\"\n",
-            )
-            .unwrap();
-            set_command_not_found_hint(CommandNotFoundHint::Off)?;
-            let text = std::fs::read_to_string(&temp)?;
-            assert!(
-                text.contains("unknown-in-section = 1"),
-                "inline sibling lost: {text}"
-            );
-            set_completion_style(CompletionStyle::List)?;
-            let text = std::fs::read_to_string(&temp)?;
-            assert!(text.contains("style = \"list\""), "{text}");
-            assert!(
-                text.contains("unknown-in-section = 1"),
-                "inline sibling lost after set: {text}"
-            );
-            assert_eq!(resolve_rc_policy(), RcPolicy::BashrcFallback);
-            Ok::<(), anyhow::Error>(())
-        })();
-        match previous {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        let _ = std::fs::remove_file(&temp);
-        result.unwrap();
+        let home = temp_dir("migrate-skip");
+        std::fs::create_dir_all(&home).unwrap();
+        let legacy = home.join("config.toml");
+        let _restore = EnvRestore::capture(&["HOME", "NIU_CONFIG"]);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("NIU_CONFIG", &legacy);
+        write_legacy_config(
+            &legacy,
+            "command-not-found-hint = \"winget\"\n[completion]\nstyle = \"nope\"\n",
+        );
+        let report = migrate_legacy_config().unwrap().unwrap();
+        assert!(report.lines.is_empty());
+        assert_eq!(report.skipped.len(), 2);
+        assert!(!home.join(".niubashrc").exists(), "nothing to write");
+        assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// `niu setup --rc-policy` is the only writer: round-trip select and
-    /// revoke, no rc file involved (the path only names config.toml), and
-    /// a failed persistence leaves the previous bytes AND policy intact.
     #[test]
-    fn set_rc_policy_round_trips_and_fails_without_replacing() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+    fn persist_rc_policy_writes_marker_and_revokes_it() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-rcpolicy-set-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = (|| {
-            // Fresh write: the fallback opt-in persists…
-            std::fs::remove_file(&temp).ok();
-            let path = set_rc_policy(RcPolicy::BashrcFallback)?;
-            assert_eq!(path, temp, "the writer reports the config path only");
-            assert_eq!(resolve_rc_policy(), RcPolicy::BashrcFallback);
-            // …and revoking via the built-in default removes the key.
-            set_rc_policy(RcPolicy::PrimaryOnly)?;
-            let text = std::fs::read_to_string(&temp)?;
-            assert!(
-                !text.contains("= \"bashrc-fallback\""),
-                "the revoked key must be gone (notes comments may stay): {text}"
-            );
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly);
-
-            // Malformed config: the writer REFUSES and the bytes stay —
-            // no defaults replacement, no repair (the contract's
-            // atomic-publication row).
-            let corrupt = "[startup\nthis is not toml";
-            std::fs::write(&temp, corrupt).unwrap();
-            let err = set_rc_policy(RcPolicy::BashrcFallback)
-                .expect_err("a corrupt config must refuse to save");
-            assert!(err.to_string().contains("not parseable TOML"), "{err:#}");
-            assert_eq!(
-                std::fs::read_to_string(&temp).unwrap(),
-                corrupt,
-                "the corrupt bytes must stay untouched"
-            );
-            assert_eq!(resolve_rc_policy(), RcPolicy::PrimaryOnly, "fail closed");
-
-            // A wrong-typed startup section is a refusal too, never a
-            // silent table replacement of user content.
-            let wrong = "startup = \"mine\"\n";
-            std::fs::write(&temp, wrong).unwrap();
-            let err = set_rc_policy(RcPolicy::BashrcFallback)
-                .expect_err("a wrong-typed startup must refuse to save");
-            assert!(err.to_string().contains("not a table"), "{err:#}");
-            assert_eq!(std::fs::read_to_string(&temp).unwrap(), wrong);
-            Ok::<(), anyhow::Error>(())
-        })();
-        match previous {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        let _ = std::fs::remove_file(&temp);
-        result.unwrap();
-    }
-
-    #[test]
-    fn command_not_found_hint_parse_accepts_known_values() {
+        let home = temp_dir("policy");
+        std::fs::create_dir_all(&home).unwrap();
+        let _restore = EnvRestore::capture(&["HOME"]);
+        std::env::set_var("HOME", &home);
+        // No primary rc: selecting fallback must not create one (that
+        // would suppress the fallback it selects).
         assert_eq!(
-            CommandNotFoundHint::parse("wpm"),
-            Some(CommandNotFoundHint::Wpm)
+            persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
+            RcPolicyWrite::Instruction("export NIU_RC_POLICY=bashrc-fallback".to_string())
         );
+        assert!(!home.join(".niubashrc").exists());
+
+        std::fs::write(home.join(".niubashrc"), "# mine\n").unwrap();
         assert_eq!(
-            CommandNotFoundHint::parse("off"),
-            Some(CommandNotFoundHint::Off)
+            persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
+            RcPolicyWrite::Written(crate::path_utils::normalize_existing_host_path(
+                home.join(".niubashrc")
+            ))
         );
+        let rc = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
+        assert!(rc.starts_with("# mine\n"), "{rc}");
+        assert!(rc.contains("export NIU_RC_POLICY=bashrc-fallback"), "{rc}");
         assert_eq!(
-            CommandNotFoundHint::parse("none"),
-            Some(CommandNotFoundHint::Off)
+            persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
+            RcPolicyWrite::Written(crate::path_utils::normalize_existing_host_path(
+                home.join(".niubashrc")
+            ))
         );
+        let rc_again = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
+        assert_eq!(rc, rc_again, "the same pick is idempotent");
+
         assert_eq!(
-            CommandNotFoundHint::parse(" WPM "),
-            Some(CommandNotFoundHint::Wpm)
+            persist_rc_policy(RcPolicy::PrimaryOnly).unwrap(),
+            RcPolicyWrite::Default
         );
+        let rc = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
+        assert!(!rc.contains("NIU_RC_POLICY"), "{rc}");
+        assert!(rc.contains("# mine"), "{rc}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn command_not_found_hint_parse_rejects_third_party_managers() {
-        // niubash#249: third-party managers are not valid opt-ins — the
-        // only enabled channel is niu's own wpm.
-        assert_eq!(CommandNotFoundHint::parse("winget"), None);
-        assert_eq!(CommandNotFoundHint::parse("scoop"), None);
-        assert_eq!(CommandNotFoundHint::parse("choco"), None);
-        assert_eq!(CommandNotFoundHint::parse(""), None);
-    }
-
-    #[test]
-    fn command_not_found_hint_default_is_off() {
-        assert_eq!(CommandNotFoundHint::default(), CommandNotFoundHint::Off);
-    }
-
-    #[test]
-    fn user_config_file_round_trips_command_not_found_hint() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-roundtrip-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = (|| {
-            // Unset (no file yet): the default stands.
-            std::fs::remove_file(&temp).ok();
-            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
-
-            set_command_not_found_hint(CommandNotFoundHint::Wpm)?;
-            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Wpm);
-            // The written file parses as the documented schema.
-            let text = std::fs::read_to_string(&temp)?;
-            let parsed: UserConfigFile = toml::from_str(&text)?;
-            assert_eq!(parsed.schema.as_deref(), Some(USER_CONFIG_SCHEMA));
-            assert_eq!(parsed.command_not_found_hint.as_deref(), Some("wpm"));
-
-            set_command_not_found_hint(CommandNotFoundHint::Off)?;
-            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
-            Ok::<(), anyhow::Error>(())
-        })();
-        match previous {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        let _ = std::fs::remove_dir_all(
-            temp.parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| std::path::PathBuf::from(".")),
-        );
-        let _ = std::fs::remove_file(&temp);
-        result.unwrap();
-    }
-
-    #[test]
-    fn user_config_unknown_and_invalid_values_degrade_to_off() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-degrade-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
-        let previous = std::env::var_os("NIU_CONFIG");
-        std::env::set_var("NIU_CONFIG", &temp);
-        let result = {
-            // An unknown value degrades to the default, never to a hint.
-            std::fs::write(&temp, "command-not-found-hint = \"winget\"").unwrap();
-            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
-            // Malformed TOML degrades too.
-            std::fs::write(&temp, "[broken").unwrap();
-            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Off);
-            Ok::<(), anyhow::Error>(())
-        };
-        match previous {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        let _ = std::fs::remove_file(&temp);
-        result.unwrap();
-    }
-
-    /// niubash#302: `HOME` alone must sandbox the config subsystem. With
-    /// `NIU_CONFIG` unset, `HOME` pointed at an isolated dir and
-    /// `USERPROFILE` deliberately left at a DIFFERENT dir, reads AND writes
-    /// have to land under the isolated home — an explicit `HOME` override
-    /// never loses to the system profile (it did before, when the resolver
-    /// ranked `USERPROFILE` first on Windows, and a HOME-only sandbox
-    /// silently leaked writes into the real profile).
-    #[test]
-    fn home_env_isolation_redirects_config_reads_and_writes() {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let stamp = format!(
-            "niu-config-isolation-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let isolated_home = std::env::temp_dir().join(format!("{stamp}-home"));
-        let decoy_profile = std::env::temp_dir().join(format!("{stamp}-profile"));
-        std::fs::create_dir_all(isolated_home.join(".niubash")).unwrap();
-        std::fs::create_dir_all(decoy_profile.join(".niubash")).unwrap();
-
-        let previous_niu_config = std::env::var_os("NIU_CONFIG");
-        let previous_home = std::env::var_os("HOME");
-        let previous_profile = std::env::var_os("USERPROFILE");
-        std::env::remove_var("NIU_CONFIG");
-        std::env::set_var("HOME", &isolated_home);
-        std::env::set_var("USERPROFILE", &decoy_profile);
-        let result = {
-            // Write through the real writer: the file must appear under the
-            // isolated home and NOWHERE near the decoy profile.
-            let written =
-                set_command_not_found_hint(CommandNotFoundHint::Wpm).expect("config write");
-            assert_eq!(
-                written,
-                crate::path_utils::normalize_existing_host_path(isolated_home.clone())
-                    .join(".niubash")
-                    .join("config.toml"),
-                "the write must land in the HOME sandbox"
-            );
-            assert!(
-                !decoy_profile.join(".niubash").join("config.toml").exists(),
-                "USERPROFILE profile was written to despite HOME isolation"
-            );
-            // Read back through the real resolver: the persisted value is
-            // visible (so the read path resolves the same isolated home).
-            assert_eq!(resolve_command_not_found_hint(), CommandNotFoundHint::Wpm);
-            Ok::<(), anyhow::Error>(())
-        };
-        match previous_niu_config {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        match previous_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match previous_profile {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        let _ = std::fs::remove_dir_all(&isolated_home);
-        let _ = std::fs::remove_dir_all(&decoy_profile);
-        result.unwrap();
-    }
-
-    /// Run `body` with NIU_CONFIG pointed at a fresh temp file path and
-    /// the completion env overrides cleared, restoring the process env
-    /// afterwards (the `completion_style_persists_and_env_wins_over_file`
-    /// discipline, factored for the #631 interaction tests).
-    fn with_interaction_env(tag: &str, body: impl FnOnce(&std::path::Path)) {
-        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let temp = std::env::temp_dir().join(format!(
-            "niu-config-interaction-{tag}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let previous_config = std::env::var_os("NIU_CONFIG");
-        let previous_interaction = std::env::var_os("NIU_COMPLETION_INTERACTION");
-        let previous_style = std::env::var_os("NIU_COMPLETION_STYLE");
-        std::env::set_var("NIU_CONFIG", &temp);
-        std::env::remove_var("NIU_COMPLETION_INTERACTION");
-        std::env::remove_var("NIU_COMPLETION_STYLE");
-        body(&temp);
-        match previous_config {
-            Some(value) => std::env::set_var("NIU_CONFIG", value),
-            None => std::env::remove_var("NIU_CONFIG"),
-        }
-        match previous_interaction {
-            Some(value) => std::env::set_var("NIU_COMPLETION_INTERACTION", value),
-            None => std::env::remove_var("NIU_COMPLETION_INTERACTION"),
-        }
-        match previous_style {
-            Some(value) => std::env::set_var("NIU_COMPLETION_STYLE", value),
-            None => std::env::remove_var("NIU_COMPLETION_STYLE"),
-        }
-        let _ = std::fs::remove_file(&temp);
-    }
-
-    #[test]
-    fn issue631_interaction_defaults_to_cycle_without_any_setting() {
-        with_interaction_env("default", |path| {
-            // No config file at all: the built-in default is cycle, and
-            // the legacy-disclosure predicate stays off (fresh install).
-            assert!(!path.exists());
-            assert_eq!(
-                resolve_completion_interaction(),
-                (
-                    CompletionInteraction::Cycle,
-                    CompletionInteractionSource::Default
-                )
-            );
-            assert_eq!(
-                MenuConfig::default().completion_interaction,
-                CompletionInteraction::Cycle
-            );
-            assert!(!legacy_config_lacks_interaction_setting());
-        });
-    }
-
-    #[test]
-    fn issue631_interaction_config_file_value_resolves_with_config_source() {
-        with_interaction_env("config", |path| {
-            std::fs::write(
-                path,
-                "schema = \"x\"\n\n[completion]\ninteraction = \"insert\"\n",
-            )
-            .unwrap();
-            assert_eq!(
-                resolve_completion_interaction(),
-                (
-                    CompletionInteraction::Insert,
-                    CompletionInteractionSource::ConfigFile
-                )
-            );
-            // An explicit pick is not a legacy config: no disclosure.
-            assert!(!legacy_config_lacks_interaction_setting());
-        });
-    }
-
-    #[test]
-    fn issue631_interaction_env_wins_over_config_file() {
-        with_interaction_env("env", |path| {
-            std::fs::write(path, "[completion]\ninteraction = \"cycle\"\n").unwrap();
-            std::env::set_var("NIU_COMPLETION_INTERACTION", "insert");
-            assert_eq!(
-                resolve_completion_interaction(),
-                (
-                    CompletionInteraction::Insert,
-                    CompletionInteractionSource::Env
-                )
-            );
-            assert!(!legacy_config_lacks_interaction_setting());
-            // A bad env value falls through to the config-file pick.
-            std::env::set_var("NIU_COMPLETION_INTERACTION", "spiral");
-            assert_eq!(
-                resolve_completion_interaction(),
-                (
-                    CompletionInteraction::Cycle,
-                    CompletionInteractionSource::ConfigFile
-                )
-            );
-        });
-    }
-
-    #[test]
-    fn issue631_interaction_set_round_trips_and_default_removes_the_key() {
-        with_interaction_env("set", |path| {
-            // The non-default pick persists into the [completion] table.
-            set_completion_interaction(CompletionInteraction::Insert).unwrap();
-            let text = std::fs::read_to_string(path).unwrap();
-            assert!(text.contains("interaction = \"insert\""), "{text}");
-            assert_eq!(
-                resolve_completion_interaction(),
-                (
-                    CompletionInteraction::Insert,
-                    CompletionInteractionSource::ConfigFile
-                )
-            );
-
-            // Setting the built-in default again removes the key — and
-            // the sibling style key and the schema survive the write.
-            set_completion_style(CompletionStyle::Ide).unwrap();
-            set_completion_interaction(CompletionInteraction::Cycle).unwrap();
-            let text = std::fs::read_to_string(path).unwrap();
-            assert!(!text.contains("interaction ="), "{text}");
-            assert!(text.contains("style = \"ide\""), "{text}");
-            assert!(text.contains("schema = \"niubash:config@0.1.0\""), "{text}");
-            assert_eq!(
-                resolve_completion_interaction(),
-                (
-                    CompletionInteraction::Cycle,
-                    CompletionInteractionSource::Default
-                )
-            );
-        });
-    }
-
-    #[test]
-    fn issue631_legacy_config_predicate_needs_an_existing_file_and_no_setting() {
-        with_interaction_env("legacy", |path| {
-            // A pre-#631 config: other keys present, no interaction key.
-            std::fs::write(path, "command-not-found-hint = \"wpm\"\n").unwrap();
-            assert!(legacy_config_lacks_interaction_setting());
-            // The gnu style makes the axis inert: nothing changes for
-            // this user, so no disclosure either.
-            std::fs::write(path, "[completion]\nstyle = \"gnu\"\n").unwrap();
-            assert!(!legacy_config_lacks_interaction_setting());
-        });
+    fn utc_timestamp_is_filename_safe_and_ordered() {
+        let stamp = utc_timestamp();
+        assert_eq!(stamp.len(), 16, "{stamp}");
+        assert!(stamp.ends_with('Z'));
+        assert!(!stamp.contains(':'));
+        // 2026-10-30 is a known civil date (day 0 = 1970-01-01).
+        let (y, m, d) = civil_from_days(20_756);
+        assert_eq!((y, m, d), (2026, 10, 30));
     }
 }

@@ -356,8 +356,6 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         &shell_ref.native_widget_bindings,
         &shell_ref.user_widget_bindings,
         &shell_ref.engine_bindings,
-        &shell_ref.user_keymap_rules,
-        &shell_ref.user_keymap_unbinds,
         shell_ref.engine_bind_generation,
         menu_config.completion_interaction,
     );
@@ -369,8 +367,6 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         build_args.3,
         build_args.4,
         build_args.5,
-        build_args.6,
-        build_args.7,
     );
     // niubash#630: the other machine, registered as a standby so a startup
     // `bind` of `vi-editing-mode` / `emacs-editing-mode` (GNU's two
@@ -392,8 +388,6 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         build_args.3,
         build_args.4,
         build_args.5,
-        build_args.6,
-        build_args.7,
     );
     // Publish the unified keymap registry (niubash#630): this build's
     // effective table and dropped records become the one snapshot the
@@ -403,21 +397,6 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     for notice in crate::keymap_registry::publish(keymap_registry) {
         eprintln!("{notice}");
     }
-    // niubash#631: the one-time legacy-config disclosure. An existing
-    // config.toml that never picked a completion interaction gets the
-    // new cycle default with this build — say so once, in the §8
-    // summary-line shape, with the revert command. The once-flag lives
-    // in the keymap state file (the reminder-state family, just
-    // published above), never in the user's config itself.
-    if crate::config::legacy_config_lacks_interaction_setting()
-        && crate::keymap_registry::claim_interaction_change_disclosure()
-    {
-        eprintln!(
-            "{}",
-            crate::keymap_registry::interaction_change_disclosure_line()
-        );
-    }
-
     // readline's `keyseq-timeout` for the chord layer, resolved once per
     // editor build. The standby machine gets the same value so a mode flip
     // keeps the wait the user configured.
@@ -750,23 +729,6 @@ impl LayeredKeymap {
         out
     }
 
-    /// Remove one slot outright (the `[keymap].unbind` operation,
-    /// niubash#630): the key goes back to *unbound*, not to a lower
-    /// layer's binding, so the provenance stack goes with it and the
-    /// registry never lists a binding the editor does not have.
-    fn remove_slot(&mut self, modifiers: KeyModifiers, code: KeyCode) {
-        if let Some(combo) = self
-            .keybindings
-            .bindings
-            .keys()
-            .find(|combo| combo.modifier == modifiers && combo.key_code == code)
-            .cloned()
-        {
-            self.keybindings.bindings.remove(&combo);
-        }
-        self.stacks.remove(&(modifiers, code));
-    }
-
     fn finish(self) -> (Keybindings, crate::keymap_registry::KeymapStacks) {
         (self.keybindings, self.stacks.into_iter().collect())
     }
@@ -778,13 +740,10 @@ impl LayeredKeymap {
 /// (engine `bind`) < user. User bindings used to be applied *before*
 /// the engine pass, so a startup script silently overrode the user's
 /// own `NIU_BINDKEYS` — that inversion was a defect, not a baseline,
-/// and this order is the fix. Within the user layer, `NIU_BINDKEYS`
-/// applies first and the config.toml `[keymap]` rules after it (the
-/// newer surface wins inside the layer), and `[keymap].unbind`
-/// removals run last of all. The adjudication happens here, at build
+/// and this order is the fix. The adjudication happens here, at build
 /// (registration) time: every rebuild reapplies the user layer over
 /// whatever the script layer registered, so a mid-session script
-/// rebind of a user-ruled key can never take effect — it is recorded
+/// rebind of a user-widget key can never take effect — it is recorded
 /// as shadowed instead. Returns the map plus the registry rows and
 /// dropped-bind records the build produced.
 #[allow(clippy::too_many_arguments)]
@@ -796,8 +755,6 @@ fn build_keymap_for_target(
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
     engine_bindings: &[crate::bind_surface::EngineBindEntry],
-    user_keymap_rules: &[crate::bind_surface::EngineBindEntry],
-    user_keymap_unbinds: &[(KeyModifiers, KeyCode)],
     completion_interaction: CompletionInteraction,
 ) -> (
     Keybindings,
@@ -829,7 +786,7 @@ fn build_keymap_for_target(
             });
         }
     }
-    let mut dropped = builder
+    let dropped = builder
         .layer(KeymapSource::Script, |keybindings| {
             add_engine_bind_keybindings_recorded(keybindings, target, engine_bindings, 0)
         })
@@ -840,47 +797,10 @@ fn build_keymap_for_target(
         },
         |keybindings| add_user_widget_keybindings(keybindings, user_widget_bindings),
     );
-    // The config.toml rules ride the same translation as engine
-    // entries — same parser output, same classification of what
-    // cannot be mirrored (DESIGN §5.2: sources are equal before the
-    // shape classes) — but land after NIU_BINDKEYS inside the user
-    // layer, and their `bind -x` triggers resolve behind the engine
-    // snapshot's indices.
-    let user_dropped = builder
-        .layer(
-            KeymapSource::User {
-                via: UserBindingVia::ConfigToml,
-            },
-            |keybindings| {
-                add_engine_bind_keybindings_recorded(
-                    keybindings,
-                    target,
-                    user_keymap_rules,
-                    engine_bindings.len(),
-                )
-            },
-        )
-        .1;
-    for bind in user_dropped {
-        if !dropped.contains(&bind) {
-            dropped.push(bind);
-        }
-    }
-    for (modifiers, code) in user_keymap_unbinds {
-        builder.remove_slot(*modifiers, *code);
-    }
     let (keybindings, stacks) = builder.finish();
-    // The action column resolves `bind -x` triggers against the
-    // combined resolution list (engine snapshot, then user rules) —
-    // the same list the shell resolves indices against at keypress.
-    let resolution: Vec<crate::bind_surface::EngineBindEntry> = engine_bindings
-        .iter()
-        .chain(user_keymap_rules.iter())
-        .cloned()
-        .collect();
     (
         keybindings,
-        entries_from_stacks(mode, stacks, &resolution),
+        entries_from_stacks(mode, stacks, engine_bindings),
         dropped,
     )
 }
@@ -892,8 +812,6 @@ fn build_edit_mode(
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
     engine_bindings: &[crate::bind_surface::EngineBindEntry],
-    user_keymap_rules: &[crate::bind_surface::EngineBindEntry],
-    user_keymap_unbinds: &[(KeyModifiers, KeyCode)],
     engine_bind_generation: u64,
     completion_interaction: CompletionInteraction,
 ) -> (
@@ -913,8 +831,6 @@ fn build_edit_mode(
                 native_widget_bindings,
                 user_widget_bindings,
                 engine_bindings,
-                user_keymap_rules,
-                user_keymap_unbinds,
                 completion_interaction,
             );
             let alt_keys = alt_bound_keys(&keybindings);
@@ -926,16 +842,7 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
-                {
-                    let mut chords =
-                        collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
-                    chords.extend(collect_chord_bindings(
-                        user_keymap_rules,
-                        NativeKeymapTarget::Emacs,
-                        engine_bindings.len(),
-                    ));
-                    chords
-                },
+                collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0),
                 alt_keys,
             )
         }
@@ -948,8 +855,6 @@ fn build_edit_mode(
                 native_widget_bindings,
                 user_widget_bindings,
                 engine_bindings,
-                user_keymap_rules,
-                user_keymap_unbinds,
                 completion_interaction,
             );
             let (normal_keybindings, normal_entries, normal_dropped) = build_keymap_for_target(
@@ -960,8 +865,6 @@ fn build_edit_mode(
                 native_widget_bindings,
                 user_widget_bindings,
                 engine_bindings,
-                user_keymap_rules,
-                user_keymap_unbinds,
                 completion_interaction,
             );
             entries.extend(normal_entries);
@@ -990,11 +893,6 @@ fn build_edit_mode(
                     let mut chords = Vec::new();
                     for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
                         chords.extend(collect_chord_bindings(engine_bindings, target, 0));
-                        chords.extend(collect_chord_bindings(
-                            user_keymap_rules,
-                            target,
-                            engine_bindings.len(),
-                        ));
                     }
                     chords
                 },
@@ -2977,16 +2875,13 @@ fn completion_event() -> ReedlineEvent {
     ])
 }
 
-/// Parse one `[keymap].bind` rule from config.toml (niubash#630, K4):
-/// the argument string of a GNU `bind` command, restricted to the
-/// options that register a binding (`-m`, `-x`). The binding spec
-/// itself goes through the engine's own parsers — the same functions
-/// the `bind` builtin dispatches to — so a rule means exactly what
-/// the same text means at the shell prompt; there is no second
-/// grammar. Failures carry the reason verbatim: the config writer
-/// refuses the rule with it, and the startup loader reports it once
-/// and skips the rule (a bad rule never breaks startup, never applies
-/// silently).
+/// Parse one GNU `bind` argument string, restricted to the options that
+/// register a binding (`-m`, `-x`). The binding spec itself goes through
+/// the engine's own parsers — the same functions the `bind` builtin
+/// dispatches to — so a rule means exactly what the same text means at
+/// the shell prompt; there is no second grammar. Failures carry the
+/// reason verbatim: `niu config migrate` refuses a legacy rule with it
+/// instead of writing an unusable rc line.
 pub(crate) fn parse_keymap_bind_rule(
     spec: &str,
 ) -> Result<crate::bind_surface::EngineBindEntry, String> {
@@ -4105,10 +4000,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // the line editor is built. Engine `bind` registrations (bind -x,
     // macros, function bindings) come from the same rc and snapshot at
     // the same point (niubash#185).
+    // A leftover pre-1.5.0 ~/.niubash/config.toml is never read. Say so
+    // once per interactive session, with the one-time migration command;
+    // the file itself never affects startup.
+    if let Some(notice) = crate::config::legacy_config_notice() {
+        eprintln!("{notice}");
+    }
     shell.borrow_mut().load_user_widget_bindings();
     shell.borrow_mut().load_user_compdefs();
     shell.borrow_mut().load_engine_bindings();
-    shell.borrow_mut().load_user_keymap_rules();
     // niubash#184: the rc's `set -o vi` (the standard bashrc line) must land
     // in the editor built below. GNU bash resolves the editing mode the same
     // way after startup files: `set -o vi` runs set_edit_mode
@@ -4136,11 +4036,6 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // history writes through to the file, so the rebuild is lossless.
         if shell.borrow().engine_bindings_stale() {
             shell.borrow_mut().load_engine_bindings();
-            // The user rules reload with the snapshot: the rebuild
-            // below reapplies them over whatever the script layer just
-            // registered, which is what keeps a mid-session script
-            // rebind from ever covering a user-ruled key (niubash#630).
-            shell.borrow_mut().load_user_keymap_rules();
             line_editor = build_line_editor(&shell)?;
         }
         // niubash#646: refresh the HIST* settings snapshot before the
@@ -5950,8 +5845,6 @@ mod tests {
                 &bundle,
                 &user,
                 &[],
-                &[],
-                &[],
                 CompletionInteraction::Insert,
             );
             assert_eq!(
@@ -5993,8 +5886,6 @@ mod tests {
             &[],
             &user,
             &engine,
-            &[],
-            &[],
             CompletionInteraction::Insert,
         );
         assert!(dropped.is_empty());
@@ -6084,8 +5975,6 @@ mod tests {
             &[],
             &[],
             &engine,
-            &[],
-            &[],
             CompletionInteraction::Insert,
         );
         let shapes: Vec<(&str, DroppedReason)> = dropped
@@ -6191,358 +6080,6 @@ mod tests {
         );
         assert!(parse_keymap_unbind_key(r#""\C-x\C-f""#).is_err());
         assert!(parse_keymap_unbind_key("").is_err());
-    }
-
-    // niubash#630, K4: a config rule is a first-class registry source —
-    // it binds inside the user layer, is attributed
-    // `[user: config.toml]`, and beats a script bind on the same key.
-    #[test]
-    fn issue630_config_rule_binds_and_beats_script() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
-        let engine = vec![BindEntry {
-            keyseq: r"\C-g".to_string(),
-            kind: BindKind::Execute {
-                command: "script-widget".to_string(),
-            },
-            keymap: None,
-        }];
-        let rules = vec![parse_keymap_bind_rule(r#""\C-g": redisplay"#).unwrap()];
-        let (built, entries, dropped) = build_keymap_for_target(
-            default_emacs_keybindings(),
-            NativeKeymapTarget::Emacs,
-            crate::keymap_registry::KeymapMode::Emacs,
-            &NativeWidgetConfig::default(),
-            &[],
-            &[],
-            &engine,
-            &rules,
-            &[],
-            CompletionInteraction::Insert,
-        );
-        assert!(dropped.is_empty());
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(ReedlineEvent::Repaint),
-            "the config rule wins the slot"
-        );
-        let row = entries
-            .iter()
-            .find(|entry| entry.key_display == "\"\\C-g\"")
-            .expect("registry row for the contested key");
-        assert_eq!(
-            row.source,
-            crate::keymap_registry::KeymapSource::User {
-                via: crate::keymap_registry::UserBindingVia::ConfigToml
-            }
-        );
-        assert_eq!(
-            row.shadowed,
-            Some(crate::keymap_registry::KeymapSource::Script)
-        );
-        assert_eq!(row.action, "redraw");
-    }
-
-    // niubash#630, K4 DESIGN §9 rescue pin, end to end at build level:
-    // a startup script's chained bind for a function is dropped
-    // (structural), and a config rule lands the same *kind* of target
-    // on a single key the editor can actually deliver — the dropped
-    // count for unrescuable shapes is unchanged, but the user has the
-    // function on a working key, attributed to their rule.
-    #[test]
-    fn issue630_config_rule_rescues_chained_target() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
-        // fzf's shape (DESIGN §3 #1/#2): the chain and the mode toggle.
-        let engine = vec![
-            BindEntry {
-                keyseq: r"\C-\e(".to_string(),
-                kind: BindKind::Function {
-                    name: "redraw-current-line".to_string(),
-                },
-                keymap: Some("emacs-standard".to_string()),
-            },
-            BindEntry {
-                keyseq: r"\C-z".to_string(),
-                kind: BindKind::Function {
-                    name: "vi-editing-mode".to_string(),
-                },
-                keymap: None,
-            },
-        ];
-        let (built, _entries, dropped) = build_keymap_for_target(
-            default_emacs_keybindings(),
-            NativeKeymapTarget::Emacs,
-            crate::keymap_registry::KeymapMode::Emacs,
-            &NativeWidgetConfig::default(),
-            &[],
-            &[],
-            &engine,
-            &[],
-            &[],
-            CompletionInteraction::Insert,
-        );
-        assert_eq!(
-            dropped.len(),
-            0,
-            "the chord is delivered by the chord layer and the toggle by SwitchMode"
-        );
-        let chords = collect_chord_bindings(&engine, NativeKeymapTarget::Emacs, 0);
-        assert_eq!(chords.len(), 1);
-        assert_eq!(chords[0].event, ReedlineEvent::Repaint);
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(edit_event(EditCommand::Redo)),
-            "without a rule, the rescue key holds only its reedline default"
-        );
-
-        let rules = vec![parse_keymap_bind_rule(r#""\C-g": redisplay"#).unwrap()];
-        let (built, entries, dropped) = build_keymap_for_target(
-            default_emacs_keybindings(),
-            NativeKeymapTarget::Emacs,
-            crate::keymap_registry::KeymapMode::Emacs,
-            &NativeWidgetConfig::default(),
-            &[],
-            &[],
-            &engine,
-            &rules,
-            &[],
-            CompletionInteraction::Insert,
-        );
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(ReedlineEvent::Repaint),
-            "the rescue rule delivers the redraw on a single key"
-        );
-        assert_eq!(
-            dropped.len(),
-            0,
-            "the rescue rule adds a single-key binding; nothing is dropped"
-        );
-        let row = entries
-            .iter()
-            .find(|entry| entry.key_display == "\"\\C-g\"")
-            .expect("registry row for the rescue key");
-        assert_eq!(
-            row.source,
-            crate::keymap_registry::KeymapSource::User {
-                via: crate::keymap_registry::UserBindingVia::ConfigToml
-            }
-        );
-        assert_eq!(
-            row.shadowed,
-            Some(crate::keymap_registry::KeymapSource::Default),
-            "the rule shadows the reedline default it replaced"
-        );
-    }
-
-    // niubash#630, K4: a user rule's `bind -x` trigger resolves behind
-    // the engine snapshot — the baked index is offset by the
-    // snapshot's length, and the listing resolves it to the *user*
-    // command, so a keypress can never run an engine entry's command.
-    #[test]
-    fn issue630_config_execute_rule_resolves_behind_engine_snapshot() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
-        let engine = vec![BindEntry {
-            keyseq: r"\C-t".to_string(),
-            kind: BindKind::Execute {
-                command: "engine-cmd".to_string(),
-            },
-            keymap: None,
-        }];
-        let rules = vec![parse_keymap_bind_rule(r#"-x "\C-g": user-cmd"#).unwrap()];
-        let (built, entries, dropped) = build_keymap_for_target(
-            default_emacs_keybindings(),
-            NativeKeymapTarget::Emacs,
-            crate::keymap_registry::KeymapMode::Emacs,
-            &NativeWidgetConfig::default(),
-            &[],
-            &[],
-            &engine,
-            &rules,
-            &[],
-            CompletionInteraction::Insert,
-        );
-        assert!(dropped.is_empty());
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
-            Some(ReedlineEvent::ExecuteHostCommand(format!(
-                "{BINDX_HOST_COMMAND_PREFIX}0"
-            )))
-        );
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(ReedlineEvent::ExecuteHostCommand(format!(
-                "{BINDX_HOST_COMMAND_PREFIX}1"
-            ))),
-            "the user rule's trigger is offset past the engine snapshot"
-        );
-        let row = entries
-            .iter()
-            .find(|entry| entry.key_display == "\"\\C-g\"")
-            .expect("registry row for the user -x key");
-        assert_eq!(row.action, "host command: user-cmd");
-    }
-
-    // niubash#630, K4: the precedence adjudication happens at build
-    // (registration) time, not at keypress — a script that rebinds a
-    // user-ruled key mid-session gets shadowed at the next build, and
-    // the user's event is what the editor holds throughout.
-    #[test]
-    fn issue630_script_rebind_cannot_override_user_rule() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
-        let execute = |keyseq: &str, command: &str| BindEntry {
-            keyseq: keyseq.to_string(),
-            kind: BindKind::Execute {
-                command: command.to_string(),
-            },
-            keymap: None,
-        };
-        let rules = vec![parse_keymap_bind_rule(r#""\C-g": redisplay"#).unwrap()];
-        let build = |engine: &[BindEntry]| {
-            build_keymap_for_target(
-                default_emacs_keybindings(),
-                NativeKeymapTarget::Emacs,
-                crate::keymap_registry::KeymapMode::Emacs,
-                &NativeWidgetConfig::default(),
-                &[],
-                &[],
-                engine,
-                &rules,
-                &[],
-                CompletionInteraction::Insert,
-            )
-        };
-        let (built, _entries, _dropped) = build(&[execute(r"\C-g", "first-widget")]);
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(ReedlineEvent::Repaint)
-        );
-        // Mid-session: the script rebinds the contested key to another
-        // command and registers a new key besides. The rebuild (the
-        // REPL's generation gate) reapplies the user layer on top.
-        let (built, entries, _dropped) = build(&[
-            execute(r"\C-g", "second-widget"),
-            execute(r"\C-t", "new-widget"),
-        ]);
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(ReedlineEvent::Repaint),
-            "the user rule survives the script's rebind"
-        );
-        assert_eq!(
-            built.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
-            Some(ReedlineEvent::ExecuteHostCommand(format!(
-                "{BINDX_HOST_COMMAND_PREFIX}1"
-            ))),
-            "the script's new key still lands, at its own index"
-        );
-        let row = entries
-            .iter()
-            .find(|entry| entry.key_display == "\"\\C-g\"")
-            .expect("registry row for the contested key");
-        assert_eq!(
-            row.source,
-            crate::keymap_registry::KeymapSource::User {
-                via: crate::keymap_registry::UserBindingVia::ConfigToml
-            }
-        );
-        assert_eq!(
-            row.shadowed,
-            Some(crate::keymap_registry::KeymapSource::Script)
-        );
-    }
-
-    // niubash#630, K4: `[keymap].unbind` removes a slot outright —
-    // script-bound, user-bound and default keys alike — and the
-    // registry stops listing it (DESIGN §5.3: "the user said no" is
-    // clean; the key does not fall back to a lower layer).
-    #[test]
-    fn issue630_unbind_removes_slots_outright() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
-        let engine = vec![BindEntry {
-            keyseq: r"\C-t".to_string(),
-            kind: BindKind::Execute {
-                command: "fzf-file-widget".to_string(),
-            },
-            keymap: None,
-        }];
-        let user = vec![native_widget_binding("^G", None, "accept-line")];
-        let unbinds = vec![
-            parse_keymap_unbind_key(r#""\C-t""#).unwrap(),
-            parse_keymap_unbind_key(r#""\C-g""#).unwrap(),
-            parse_keymap_unbind_key(r#""\C-a""#).unwrap(),
-        ];
-        let (built, entries, dropped) = build_keymap_for_target(
-            default_emacs_keybindings(),
-            NativeKeymapTarget::Emacs,
-            crate::keymap_registry::KeymapMode::Emacs,
-            &NativeWidgetConfig::default(),
-            &[],
-            &user,
-            &engine,
-            &[],
-            &unbinds,
-            CompletionInteraction::Insert,
-        );
-        assert!(dropped.is_empty());
-        for (modifiers, code) in [
-            (KeyModifiers::CONTROL, KeyCode::Char('t')),
-            (KeyModifiers::CONTROL, KeyCode::Char('g')),
-            (KeyModifiers::CONTROL, KeyCode::Char('a')),
-        ] {
-            assert_eq!(
-                built.find_binding(modifiers, code),
-                None,
-                "unbound slot {modifiers:?}+{code:?} stays unbound"
-            );
-        }
-        assert!(
-            entries.iter().all(|entry| !matches!(
-                entry.key_display.as_str(),
-                "\"\\C-t\"" | "\"\\C-g\"" | "\"\\C-a\""
-            )),
-            "the registry lists exactly the effective table"
-        );
-        assert_eq!(entries.len(), built.get_keybindings().len());
-    }
-
-    // niubash#630, K4: user rules are equal before the shape classes
-    // (DESIGN §5.2) — a rule that lands in an R class is recorded as
-    // dropped, with the same classification a script's bind would get.
-    #[test]
-    fn issue630_user_rules_drop_by_shape_like_scripts() {
-        use crate::keymap_registry::DroppedReason;
-        let rules = vec![
-            parse_keymap_bind_rule(r#""\C-\e(": redraw-current-line"#).unwrap(),
-            parse_keymap_bind_rule(r#""\C-g": no-such-readline-function"#).unwrap(),
-            parse_keymap_bind_rule(r#""\ec": " \C-b\C-k""#).unwrap(),
-        ];
-        let (_built, _entries, dropped) = build_keymap_for_target(
-            default_emacs_keybindings(),
-            NativeKeymapTarget::Emacs,
-            crate::keymap_registry::KeymapMode::Emacs,
-            &NativeWidgetConfig::default(),
-            &[],
-            &[],
-            &[],
-            &rules,
-            &[],
-            CompletionInteraction::Insert,
-        );
-        let shapes: Vec<(&str, DroppedReason)> = dropped
-            .iter()
-            .map(|bind| (bind.keyseq.as_str(), bind.reason))
-            .collect();
-        assert_eq!(
-            shapes,
-            vec![
-                (r"\C-g", DroppedReason::UnknownFunction),
-                (r"\ec", DroppedReason::ScriptMacro),
-            ],
-            "a user rule's chord is delivered like a script's"
-        );
-        let chords = collect_chord_bindings(&rules, NativeKeymapTarget::Emacs, 0);
-        assert_eq!(chords.len(), 1, "the user rule's chord is collected");
-        assert_eq!(chords[0].event, ReedlineEvent::Repaint);
     }
 
     #[test]
