@@ -19,6 +19,23 @@ TAB never shows you things you did not ask for:
    `rubash/` and `repro/`), there is nothing to complete, so the grid
    acts as the disambiguation aid right away.
 
+## Where candidates come from
+
+GNU surfaces are authoritative, in this order:
+
+1. shell-function completers (`NIU_COMPDEFS`, compdef protocol) — opt-in;
+2. a GNU compspec registered by `complete` (bash-completion included) — when
+   it exists it owns the command's arguments, and neither the static tables
+   nor the path fallback contribute;
+3. niu's embedded completion tables (winuxcmd applets and common commands,
+   then bundle and user completion dirs) — only for commands without a
+   compspec;
+4. path / variable / command-name completion.
+
+The embedded tables are generated data (`assets/completions/*.toml`), not
+configuration: nothing about them is user-editable, and they never override
+what `complete` registered.
+
 ## Completion styles
 
 Five shapes, one TAB contract. Switch any time; it takes effect on the
