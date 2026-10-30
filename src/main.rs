@@ -1647,6 +1647,8 @@ fn print_usage() {
     println!("  plugin migrate-rc [--diff]");
     println!("                            Read-only migration report for legacy managed");
     println!("                            blocks (never writes the rc)");
+    println!("  plugin migrate            One-time conversion of pre-1.5.0 TOML distro");
+    println!("                            data (registry + collection manifests) to JSON");
     println!("  plugin discover [--verbose]");
     println!("                            Read-only overview of external plugin sources");
     println!("  plugin source <command>   Full source protocol (add/remove/update/");
@@ -1730,6 +1732,11 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         // legacy managed blocks, publishes the candidate loader generation,
         // and NEVER writes the rc.
         "migrate-rc" => run_plugin_migrate_rc_command(&args[3..]),
+        // 1.5.0 product-TOML deletion: the one-time bridge for pre-1.5.0
+        // TOML distro data (distros registry + imported collection
+        // manifests). The runtime reads JSON only; this verb reads the
+        // TOML forms exactly once and renames them aside.
+        "migrate" => run_plugin_migrate_command(&args[3..]),
         "update" => run_plugin_source_update_command(&args[3..]),
         "rollback" => run_plugin_source_rollback_command(&args[3..]),
         "restore" => run_plugin_restore_command(&args[3..]),
@@ -2989,7 +2996,7 @@ fn print_plugin_distro_usage() {
     println!("Usage:  niu plugin distro <command>");
     println!();
     println!("  list                        Built-in + imported collections");
-    println!("  import <repo|path>          Import a collection (niu-collection.toml)");
+    println!("  import <repo|path>          Import a collection (niu-collection.json)");
     println!("  remove <name>               Remove an imported collection");
     println!("  apply <name>                Install every recipe in the collection");
     println!();
@@ -3490,6 +3497,65 @@ fn run_plugin_enable_command(args: &[String], enable: bool) -> anyhow::Result<()
 /// and prints the removal guidance. `--diff` additionally writes the
 /// suggested post-migration rc under `~/.niubash/candidates/`. The user rc
 /// itself is NEVER modified — the removal is always the user's own edit.
+/// `niu plugin migrate` — the one-time bridge from the pre-1.5.0 TOML
+/// distro data. The runtime never reads those files; this verb converts
+/// the distros registry and every imported collection manifest to JSON
+/// and renames the old files aside (never deletes them).
+fn run_plugin_migrate_command(args: &[String]) -> anyhow::Result<()> {
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!("usage: niu plugin migrate");
+                println!();
+                println!("  one-time: converts pre-1.5.0 TOML distro data — the registry");
+                println!("  ~/.niubash/distros/registry.toml and every imported");
+                println!("  niu-collection.toml — to their JSON forms and renames the");
+                println!("  old files to <name>.migrated-<timestamp>. Nothing reads the");
+                println!("  TOML forms afterwards; safe to re-run (a second run is a no-op).");
+                return Ok(());
+            }
+            unknown => anyhow::bail!("unknown plugin migrate option '{unknown}'"),
+        }
+    }
+    use niubash_runtime::plugins::distros::{distros_root, migrate_legacy_distros};
+    let Some(report) = migrate_legacy_distros()? else {
+        println!(
+            "No legacy TOML distro data found under {} — nothing to migrate.",
+            distros_root().display()
+        );
+        return Ok(());
+    };
+    if !report.collections.is_empty() {
+        println!(
+            "Migrated {} imported collection(s) to JSON manifests:",
+            report.collections.len()
+        );
+        for name in &report.collections {
+            println!("  {name}");
+        }
+    }
+    if let Some(backup) = &report.registry_backup {
+        println!(
+            "Distro registry converted to JSON; old file renamed to {}.",
+            backup.display()
+        );
+    }
+    for backup in &report.manifest_backups {
+        println!("Old manifest renamed to {}.", backup.display());
+    }
+    if !report.skipped.is_empty() {
+        println!(
+            "Skipped {} legacy manifest(s) that could not be converted:",
+            report.skipped.len()
+        );
+        for skipped in &report.skipped {
+            println!("  {skipped}");
+        }
+        println!("Fix or remove those files by hand, then re-run `niu plugin migrate`.");
+    }
+    Ok(())
+}
+
 fn run_plugin_migrate_rc_command(args: &[String]) -> anyhow::Result<()> {
     let mut want_candidate = false;
     for arg in args {
@@ -3936,6 +4002,9 @@ fn print_plugin_usage() {
     println!("  migrate-rc [--diff]      Read-only diagnostic: scan the rc for legacy");
     println!("                           `# >>> niu source` managed blocks that keep");
     println!("                           the loader off; never edits the rc");
+    println!("  migrate                  One-time conversion of pre-1.5.0 TOML distro");
+    println!("                           data (registry + imported collection");
+    println!("                           manifests) to JSON; old files renamed aside");
     println!("  ui                       Menu UI (sections by state, same verbs)");
     println!();
     println!("  recipe <command>         Recipe index: list [--category <c>]");

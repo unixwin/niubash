@@ -3792,10 +3792,10 @@ mod tests {
         let source = temp.join("collection-src");
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(
-            source.join("niu-collection.toml"),
-            "schema = \"niubash:plugin-collection@1\"\nname = \"g3test\"\n\n\
-             [[entry]]\nrecipe = \"omb-theme-agnoster\"\n\n\
-             [[entry]]\nrecipe = \"omb-theme-90210\"\n",
+            source.join(crate::plugins::distros::COLLECTION_MANIFEST),
+            "{\"schema\": \"niubash:plugin-collection@1\", \"name\": \"g3test\", \
+             \"entry\": [{\"recipe\": \"omb-theme-agnoster\"}, \
+             {\"recipe\": \"omb-theme-90210\"}]}",
         )
         .unwrap();
         crate::plugins::distros::import(source.to_string_lossy().as_ref()).expect("import g3test");

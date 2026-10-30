@@ -104,7 +104,7 @@ instead of installing.
 ```console
 $ niu plugin distro list            # built-in + imported
 $ niu plugin distro apply recommended
-$ niu plugin distro import <git-repo-or-path>   # any repo with niu-collection.toml
+$ niu plugin distro import <git-repo-or-path>   # any repo with niu-collection.json
 $ niu plugin distro remove <name>
 ```
 
@@ -113,21 +113,25 @@ default theme + completions — also offered by the first-run wizard),
 `full` (both frameworks + bash-preexec; its fzf/starship entries print
 package-manager suggestions, since niu downloads nothing).
 
-A collection is a small TOML manifest of recipe ids:
+A collection is a small JSON manifest of recipe ids:
 
-```toml
-schema = "niubash:plugin-collection@1"
-name = "my-starter"
-description = "what this bundle is"
-
-[[entry]]
-recipe = "oh-my-bash"
-[[entry]]
-recipe = "starship"
+```json
+{
+  "schema": "niubash:plugin-collection@1",
+  "name": "my-starter",
+  "description": "what this bundle is",
+  "entry": [
+    { "recipe": "oh-my-bash" },
+    { "recipe": "starship" }
+  ]
+}
 ```
 
 Imports are first-class: anything the built-ins can do, your own repo can do,
-byte-identically. `apply` installs every entry through its recipe driver —
+byte-identically. Upgrading from a pre-1.5.0 niu whose imported collections
+still use the TOML forms? Run `niu plugin migrate` once — it converts the
+distro registry and every imported manifest to JSON and renames the old
+files aside; nothing reads the TOML forms afterwards. `apply` installs every entry through its recipe driver —
 installation only; activation stays an explicit `enable`. Failures are collected per
 entry (a bad entry never kills the rest) and reported with the retry verb.
 The first-run wizard's plugin-collection question is a LazyVim-style
