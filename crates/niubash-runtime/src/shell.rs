@@ -9679,7 +9679,7 @@ complete -F _envtooldyn_hook envtooldyn
 
 #[cfg(test)]
 mod invocation_name_tests {
-    use super::tests::test_shell;
+    use super::tests::{test_shell, CwdGuard};
     use super::{default_script_name_from, HookConfig};
     use crate::test_support::PROCESS_STATE_LOCK;
 
