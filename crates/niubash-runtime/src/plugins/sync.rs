@@ -884,6 +884,19 @@ fn read_bootstrap_failures() -> Vec<BootstrapFailure> {
         .unwrap_or_default()
 }
 
+/// Parse an existing JSON ledger for the migrate bridge: blank
+/// (zero-byte or whitespace-only) text is an empty ledger, not a ledger
+/// niu "cannot read" — the same tolerance [`read_bootstrap_failures`]
+/// applies (its parse failure falls back to empty). Non-blank garbage
+/// still fails here, so the bridge keeps its whole-file refusal for
+/// content it genuinely cannot read.
+fn parse_bootstrap_failure_ledger_json(text: &str) -> serde_json::Result<BootstrapFailureLedger> {
+    if text.trim().is_empty() {
+        return Ok(BootstrapFailureLedger::default());
+    }
+    serde_json::from_str(text)
+}
+
 fn write_bootstrap_failures(failures: &[BootstrapFailure]) {
     let path = bootstrap_failure_path();
     let Some(parent) = path.parent() else {
@@ -925,7 +938,9 @@ pub struct BootstrapFailureMigrationReport {
 /// lock-grade state (prune decisions read it), so it follows the
 /// registry discipline, not the spec's named skip: a legacy ledger that
 /// does not parse — or an existing JSON ledger niu cannot read —
-/// refuses the conversion whole, before anything on disk changes.
+/// refuses the conversion whole, before anything on disk changes. A
+/// blank existing JSON ledger is not unreadable content: it reads as an
+/// empty ledger (the runtime read's rule).
 pub fn migrate_legacy_bootstrap_failures() -> anyhow::Result<Option<BootstrapFailureMigrationReport>>
 {
     let legacy_path = legacy_bootstrap_failure_path();
@@ -947,7 +962,7 @@ pub fn migrate_legacy_bootstrap_failures() -> anyhow::Result<Option<BootstrapFai
     let mut merged = BootstrapFailureLedger::default();
     if json_path.is_file() {
         let existing_text = std::fs::read_to_string(&json_path)?;
-        merged = serde_json::from_str(&existing_text).with_context(|| {
+        merged = parse_bootstrap_failure_ledger_json(&existing_text).with_context(|| {
             format!(
                 "could not parse {} — fix or remove the file by hand; \
                  niu never rewrites a failure ledger it cannot read",
@@ -2257,6 +2272,65 @@ mod tests {
         assert!(format!("{err:#}").contains("never rewrites"), "{err:#}");
         assert!(legacy.exists(), "refused ledger stays put");
         assert!(!bootstrap_failure_path().exists(), "no JSON written");
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// A blank existing JSON ledger reads as an empty ledger, not as
+    /// content niu "cannot read": the conversion proceeds and the legacy
+    /// entries carry over. (The runtime read has always treated a blank
+    /// ledger as empty; the bridge's whole-file refusal is for garbage.)
+    #[test]
+    fn migrate_proceeds_over_a_blank_json_ledger() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let box_ = sandbox("bootstrap-migrate-blank-json");
+        let json = bootstrap_failure_path();
+        fs::create_dir_all(json.parent().unwrap()).unwrap();
+        fs::write(&json, "").unwrap();
+        let legacy = legacy_bootstrap_failure_path();
+        fs::write(
+            &legacy,
+            concat!(
+                "schema = \"niubash:plugin-bootstrap-failures@1\"\n",
+                "\n[[failure]]\n",
+                "target = \"https://github.com/o/carried.git\"\n",
+            ),
+        )
+        .unwrap();
+        let report = migrate_legacy_bootstrap_failures().unwrap().unwrap();
+        assert_eq!(
+            report.carried,
+            ["https://github.com/o/carried.git".to_string()]
+        );
+        let failures = read_bootstrap_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].target, "https://github.com/o/carried.git");
+        assert!(!legacy.exists(), "legacy renamed aside");
+        let _ = fs::remove_dir_all(&box_.temp);
+    }
+
+    /// A garbage existing JSON ledger still refuses the conversion
+    /// whole: the error names the refusal and nothing on disk changes.
+    #[test]
+    fn migrate_refuses_a_garbage_json_ledger() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let box_ = sandbox("bootstrap-migrate-bad-json");
+        let json = bootstrap_failure_path();
+        fs::create_dir_all(json.parent().unwrap()).unwrap();
+        fs::write(&json, "this is { not a ledger").unwrap();
+        let legacy = legacy_bootstrap_failure_path();
+        fs::write(
+            &legacy,
+            "schema = \"niubash:plugin-bootstrap-failures@1\"\n",
+        )
+        .unwrap();
+        let err = migrate_legacy_bootstrap_failures().unwrap_err();
+        assert!(format!("{err:#}").contains("never rewrites"), "{err:#}");
+        assert!(legacy.exists(), "refused conversion leaves the legacy file");
+        assert_eq!(
+            fs::read_to_string(&json).unwrap(),
+            "this is { not a ledger",
+            "refused conversion leaves the JSON ledger untouched"
+        );
         let _ = fs::remove_dir_all(&box_.temp);
     }
 
