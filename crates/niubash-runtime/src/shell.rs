@@ -9553,6 +9553,35 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(shell.take_session_exit_jump(), None);
     }
 
+    /// niubash#698 setup: make `sleep` resolvable for the pins below.
+    /// The engine's sleep fast path is an emulated external
+    /// (rubash#1545): it stands in for the PATH binary and inherits
+    /// its resolvability, so in an environment with no `sleep`
+    /// command the name is a 127, exactly as GNU's PATH search
+    /// adjudicates it — and nothing blocks for the delivery to
+    /// interrupt. The installed product always resolves it (the
+    /// winuxcmd command links are niubash's PATH floor), so the pins
+    /// install the same condition hermetically: a `sleep.exe`
+    /// placeholder in a temp dir prepended to the session PATH.
+    /// When the fast path answers, the placeholder is never spawned;
+    /// the in-process emulation is the product's answer for a
+    /// resolvable `sleep`. Returns the dir to keep it alive.
+    #[cfg(windows)]
+    fn issue698_make_sleep_resolvable(shell: &mut Shell) -> PathBuf {
+        let dir = unique_temp_dir("niu-issue698-sleep-link");
+        std::fs::create_dir_all(&dir).expect("create sleep link dir");
+        std::fs::write(dir.join("sleep.exe"), b"placeholder").expect("write sleep placeholder");
+        let old_path = shell
+            .executor()
+            .get_env("PATH")
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        shell
+            .executor_mut()
+            .set_env("PATH", &format!("{};{}", dir.display(), old_path));
+        dir
+    }
+
     /// niubash#698: an untrapped Ctrl+C delivered while a foreground
     /// command runs in an interactive session ends the command with
     /// $?=130 and returns to the prompt (GNU jobs.c:3064 wait_for:
@@ -9575,6 +9604,7 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
         shell.enter_interactive();
+        let _sleep_link = issue698_make_sleep_resolvable(&mut shell);
 
         let injector = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(300));
@@ -9609,6 +9639,7 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
         shell.enter_interactive();
+        let _sleep_link = issue698_make_sleep_resolvable(&mut shell);
         assert_eq!(shell.execute_interactive_line("trap '' INT").unwrap(), 0);
 
         let injector = std::thread::spawn(|| {
@@ -9639,6 +9670,7 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
         // No enter_interactive: `__RUBASH_INTERACTIVE` stays unset.
+        let _sleep_link = issue698_make_sleep_resolvable(&mut shell);
 
         let injector = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(300));
