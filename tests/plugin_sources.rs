@@ -329,7 +329,7 @@ fn setup_noninteractive_stays_deterministic_and_records_no_answers() {
     // No question was asked, so no lasting answer (niu-git nag marker) may
     // be recorded.
     assert!(
-        !home.join(".niubash").join("wizard-answers.toml").is_file(),
+        !home.join(".niubash").join("wizard-answers.json").is_file(),
         "wizard answers must not be written without an explicit pick"
     );
     let _ = fs::remove_dir_all(&temp);
