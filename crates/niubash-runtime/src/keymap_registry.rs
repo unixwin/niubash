@@ -941,6 +941,7 @@ pub fn how_to_change_block() -> String {
          session only : bind '\"\\C-x\": <function>'  ·  bind -x '\"\\C-x\": <command>'\n  \
          persistent   : niu config set keymap.bind '<bind spec>'   (writes [keymap] in ~/.niubash/config.toml)\n                 \
          niu config set keymap.unbind '\"\\C-t\"' removes a key outright\n                 \
+         niu config set keymap.keyseq-timeout <ms> sets the chord wait (0 waits forever)\n                 \
          shell-function widgets can also ride NIU_BINDKEYS in ~/.niubashrc\n  \
          completion   : style = {} ({}) — change with: \
          niu config set completion.style <gnu|ide|column|list|inline>\n                 \

@@ -66,9 +66,11 @@ editor, including the two shapes a flat keymap cannot express on its own
   chord layer above the editor. The first unit is held only when a chord
   starts with it; a matching second unit fires the binding, and a
   non-matching one replays the held key followed by the new one, so
-  nothing is swallowed. The window is readline's `keyseq-timeout`
-  (500 ms): past it the prefix is replayed on its own and the key stands
-  alone.
+  nothing is swallowed. The window is readline's `keyseq-timeout`:
+  500 ms by default, and configurable in `[keymap]` as
+  `keyseq-timeout` (milliseconds; `0` waits forever). Past the window the
+  prefix is replayed on its own and the key stands alone. Change it with
+  `niu config set keymap.keyseq-timeout 250`.
 * **Editing-mode toggles** (`vi-editing-mode` / `emacs-editing-mode`):
   these switch the session's machine for real. The other mode is built as
   a standby with the same widgets, `bind -m` entries and user keymap
