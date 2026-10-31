@@ -275,13 +275,21 @@ impl TuiModel {
     }
 
     /// Keep `scroll` such that the cursor line is inside the viewport of
-    /// `viewport_rows` flat lines.
+    /// `viewport_rows` flat lines. When scrolling up lands on a section's
+    /// first row, the section header scrolls in with it: the header is
+    /// that row's context line, and the reset view (`rebuild_flat`,
+    /// scroll 0 with the selection on the first row) shows it — the
+    /// scrolled-up view of the same selection must match.
     pub fn ensure_visible(&mut self, viewport_rows: usize) {
         if viewport_rows == 0 {
             return;
         }
         if self.cursor < self.scroll {
-            self.scroll = self.cursor;
+            self.scroll = if matches!(self.flat.get(self.cursor), Some(FlatRef::Row(_, 0))) {
+                self.cursor.saturating_sub(1)
+            } else {
+                self.cursor
+            };
         } else if self.cursor >= self.scroll + viewport_rows {
             self.scroll = self.cursor + 1 - viewport_rows;
         }
