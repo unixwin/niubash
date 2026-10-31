@@ -360,7 +360,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         shell_ref.engine_bind_generation,
         menu_config.completion_interaction,
     );
-    let (edit_mode, keymap_registry, chord_bindings, alt_keys, quote_sequences) = build_edit_mode(
+    let (edit_mode, keymap_registry, layer_parts) = build_edit_mode(
         shell_ref.editor_mode,
         build_args.0,
         build_args.1,
@@ -378,19 +378,18 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // `bind -m` entries and user rules — so a flip keeps the user's
     // bindings in the target keymap. Its registry snapshot is discarded:
     // the published one describes the active mode.
-    let (standby_edit_mode, _, standby_chord_bindings, standby_alt_keys, standby_quote_sequences) =
-        build_edit_mode(
-            match shell_ref.editor_mode {
-                EditorMode::Emacs => EditorMode::Vi,
-                EditorMode::Vi => EditorMode::Emacs,
-            },
-            build_args.0,
-            build_args.1,
-            build_args.2,
-            build_args.3,
-            build_args.4,
-            build_args.5,
-        );
+    let (standby_edit_mode, _, standby_layer_parts) = build_edit_mode(
+        match shell_ref.editor_mode {
+            EditorMode::Emacs => EditorMode::Vi,
+            EditorMode::Vi => EditorMode::Emacs,
+        },
+        build_args.0,
+        build_args.1,
+        build_args.2,
+        build_args.3,
+        build_args.4,
+        build_args.5,
+    );
     // Publish the unified keymap registry (niubash#630): this build's
     // effective table and dropped records become the one snapshot the
     // viewing faces read, and the reminder pass surfaces the binds
@@ -467,12 +466,12 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
                     PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
                         .with_cycle_session(cycle_session.clone()),
                 ),
-                chord_bindings,
-                alt_keys,
+                layer_parts.chords,
+                layer_parts.alt_keys,
                 Some(Box::new(live_lookahead)),
                 keyseq_timeout,
             )
-            .with_quote_sequences(quote_sequences),
+            .with_quote_sequences(layer_parts.quote_sequences),
         ))
         .with_additional_edit_mode(Box::new(
             ChordEditMode::new(
@@ -480,12 +479,12 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
                     PasteChunkEditMode::new(standby_edit_mode, menu_config.completion_style)
                         .with_cycle_session(cycle_session),
                 ),
-                standby_chord_bindings,
-                standby_alt_keys,
+                standby_layer_parts.chords,
+                standby_layer_parts.alt_keys,
                 Some(Box::new(live_lookahead)),
                 keyseq_timeout,
             )
-            .with_quote_sequences(standby_quote_sequences),
+            .with_quote_sequences(standby_layer_parts.quote_sequences),
         ));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
@@ -817,6 +816,16 @@ fn build_keymap_for_target(
     )
 }
 
+/// Everything the chord layer needs on top of the inner machine,
+/// built from the engine snapshot for one edit mode (niubash#731:
+/// the quote sequences joined the chords here; the parts travel as
+/// one struct so `build_edit_mode`'s return stays a plain triple).
+struct ChordLayerParts {
+    chords: Vec<ChordBinding>,
+    alt_keys: std::collections::HashSet<KeyCode>,
+    quote_sequences: Vec<Vec<(KeyModifiers, KeyCode)>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_edit_mode(
     mode: EditorMode,
@@ -829,9 +838,7 @@ fn build_edit_mode(
 ) -> (
     Box<dyn EditMode>,
     crate::keymap_registry::KeymapRegistry,
-    Vec<ChordBinding>,
-    std::collections::HashSet<KeyCode>,
-    Vec<Vec<(KeyModifiers, KeyCode)>>,
+    ChordLayerParts,
 ) {
     use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
@@ -855,9 +862,14 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
-                collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0),
-                alt_keys,
-                collect_quote_sequences(engine_bindings, NativeKeymapTarget::Emacs),
+                ChordLayerParts {
+                    chords: collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0),
+                    alt_keys,
+                    quote_sequences: collect_quote_sequences(
+                        engine_bindings,
+                        NativeKeymapTarget::Emacs,
+                    ),
+                },
             )
         }
         EditorMode::Vi => {
@@ -903,20 +915,22 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
-                {
-                    let mut chords = Vec::new();
-                    for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
-                        chords.extend(collect_chord_bindings(engine_bindings, target, 0));
-                    }
-                    chords
-                },
-                alt_keys,
-                {
-                    let mut quotes = Vec::new();
-                    for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
-                        quotes.extend(collect_quote_sequences(engine_bindings, target));
-                    }
-                    quotes
+                ChordLayerParts {
+                    chords: {
+                        let mut chords = Vec::new();
+                        for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                            chords.extend(collect_chord_bindings(engine_bindings, target, 0));
+                        }
+                        chords
+                    },
+                    alt_keys,
+                    quote_sequences: {
+                        let mut quotes = Vec::new();
+                        for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                            quotes.extend(collect_quote_sequences(engine_bindings, target));
+                        }
+                        quotes
+                    },
                 },
             )
         }
@@ -2869,9 +2883,11 @@ struct ChordEditMode {
     /// wait forever (no expiry).
     keyseq_timeout: Duration,
     pending: Vec<crossterm29::event::Event>,
-    /// When the first pending unit was parked. readline's
-    /// `keyseq-timeout` applies here too: a prefix that does not complete
-    /// inside the window stops being a chord prefix.
+    /// When the latest pending unit was parked: the keyseq-timeout
+    /// deadline restarts at each key (GNU's per-key wait,
+    /// niubash#731), so this is the last key's arrival, not the
+    /// first's. A prefix that does not complete inside the window
+    /// stops being a chord prefix.
     pending_since: Option<std::time::Instant>,
     /// Keys that carry a real ALT binding: terminals spell Alt-C as
     /// `ESC c`, and emacs-mode readline treats ESC as the meta prefix.
@@ -3108,6 +3124,12 @@ impl ChordEditMode {
         }
         if self.is_prefix(&candidate) || self.quote_is_prefix(&candidate) {
             self.pending.push(raw);
+            // The wait restarts at each key: GNU gives every key of
+            // the sequence its own keyseq-timeout window (the #704
+            // review's chord observation ② — the deadline used to
+            // run from the FIRST parked key, so a slow-but-steady
+            // 3+ key chord expired mid-sequence, niubash#731).
+            self.pending_since = Some(std::time::Instant::now());
             return ReedlineEvent::None;
         }
         // Mismatch: replay the parked keys, then the current one, in order.
@@ -5508,6 +5530,50 @@ mod tests {
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
             edit_event(EditCommand::MoveToLineStart { select: false })
+        );
+    }
+
+    /// niubash#731 (the #704 review's chord observation ②): the
+    /// keyseq-timeout window restarts at each parked key — GNU
+    /// waits per key, so a three-key chord typed steadily, each
+    /// gap inside the window but the total past it, still fires.
+    /// (Under the old first-key accounting the prefix expired
+    /// before the third key and the chord never completed.)
+    #[test]
+    fn issue731_chord_timeout_restarts_at_each_key() {
+        use crossterm29::event::{KeyCode as Code, KeyModifiers as Mods};
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (Mods::CONTROL, Code::Char('x')),
+                (Mods::NONE, Code::Char('a')),
+                (Mods::NONE, Code::Char('b')),
+            ],
+            event: edit_event(EditCommand::InsertString("TRIPLE".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            Duration::from_millis(600),
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(Code::Char('x'), Mods::CONTROL)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            mode.parse_event(chord_test_key(Code::Char('a'), Mods::NONE)),
+            ReedlineEvent::None
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        // ~700 ms since the first key (past the 600 ms window),
+        // ~300 ms since the second: only the per-key deadline lets
+        // the chord complete.
+        assert_eq!(
+            mode.parse_event(chord_test_key(Code::Char('b'), Mods::NONE)),
+            edit_event(EditCommand::InsertString("TRIPLE".to_string()))
         );
     }
 
