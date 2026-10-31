@@ -37,4 +37,5 @@ pub mod sources;
 pub mod spec;
 pub mod sync;
 pub mod theme_preview;
+pub mod tui;
 pub mod ui;

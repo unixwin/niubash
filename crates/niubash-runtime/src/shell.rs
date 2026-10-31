@@ -5463,7 +5463,19 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
 
     // /tmp is intentionally absent: it is backed by the real Windows temp
     // directory (unixwin/niubash#94), never by the install tree.
-    for relative in ["bin", "usr/bin", "usr/local/bin", "etc", "var", "dev"] {
+    // dev/shm is provisioned with the tree (niubash#758): scripts use it
+    // as the POSIX shared-memory scratch directory, and on the payload
+    // root it is simply a real directory — the MSYS2/Cygwin arrangement,
+    // where /dev/shm is likewise a plain directory in the install tree.
+    for relative in [
+        "bin",
+        "usr/bin",
+        "usr/local/bin",
+        "etc",
+        "var",
+        "dev",
+        "dev/shm",
+    ] {
         std::fs::create_dir_all(root.join(relative))?;
     }
     Ok(Some(root))
@@ -8028,6 +8040,9 @@ complete -F _envtooldyn_hook envtooldyn
         std::fs::write(&winuxcmd, b"test").unwrap();
         let shell_root = prepare_shell_root(Some(&winuxcmd)).unwrap();
         assert_eq!(shell_root, Some(configured.clone()));
+        // niubash#758: the payload root carries the /dev/shm scratch
+        // directory from first provisioning.
+        assert!(configured.join("dev").join("shm").is_dir());
 
         let mut env = HashMap::new();
         env.insert(
