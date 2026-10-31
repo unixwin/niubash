@@ -2,7 +2,10 @@
 // Integrates command, path, and variable completion
 
 use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
-use crate::completion::path::PathCompleter;
+use crate::completion::path::{
+    entry_is_executable, uncached_listing, DirCacheHandle, DirListingCache, ListedKind,
+    PathCompleter, SessionKey,
+};
 use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
@@ -110,6 +113,13 @@ pub struct CompletionState {
     pub snapshot_function_names: Vec<String>,
     /// niubash#594: the sorted alias names `aliases` was built from.
     pub snapshot_alias_names: Vec<String>,
+    /// niubash#747: session-scoped directory-listing cache shared by
+    /// every query this state serves. Each query borrows it through a
+    /// `DirCacheHandle` stamped with the query's session key, so the
+    /// path completer and the cwd command-slot overlay enumerate a
+    /// directory at most once per completion session instead of
+    /// re-walking (and re-statting) it per keystroke.
+    pub dir_cache: Arc<Mutex<DirListingCache>>,
 }
 
 impl CompletionState {
@@ -128,6 +138,7 @@ impl CompletionState {
             snapshot_env_fingerprint: 0,
             snapshot_function_names: Vec::new(),
             snapshot_alias_names: Vec::new(),
+            dir_cache: Arc::new(Mutex::new(DirListingCache::default())),
         }
     }
 
@@ -241,26 +252,54 @@ impl NiubashCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, plugins) =
-            if let Ok(state) = self.state.lock() {
-                (
-                    state.current_dir.clone(),
-                    state.env_vars.clone(),
-                    state.aliases.clone(),
-                    state.functions.clone(),
-                    state.open_fds.clone(),
-                    state.tmp_base.clone(),
-                    state.behavior,
-                    state.plugins.clone(),
-                )
-            } else {
-                return Vec::new();
-            };
+        let (
+            current_dir,
+            env_vars,
+            aliases,
+            functions,
+            open_fds,
+            tmp_base,
+            behavior,
+            plugins,
+            dir_cache,
+        ) = if let Ok(state) = self.state.lock() {
+            (
+                state.current_dir.clone(),
+                state.env_vars.clone(),
+                state.aliases.clone(),
+                state.functions.clone(),
+                state.open_fds.clone(),
+                state.tmp_base.clone(),
+                state.behavior,
+                state.plugins.clone(),
+                state.dir_cache.clone(),
+            )
+        } else {
+            return Vec::new();
+        };
 
-        let mut context =
-            CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
+        let mut context = CompletionContext::with_behavior(
+            current_dir.clone(),
+            input.to_string(),
+            cursor_pos,
+            behavior,
+        );
         context.open_fds = open_fds;
         context.tmp_base = tmp_base;
+        // niubash#747: lend the query the session's listing cache.
+        // The session key is this query's current directory plus the
+        // line up to the word being completed — stable while the user
+        // types/filters inside the word, retired when a new word or
+        // command line starts.
+        let word_start = context
+            .current_word_span()
+            .map(|(start, _)| start)
+            .unwrap_or_else(|| floor_char_boundary(input, cursor_pos.min(input.len())));
+        let line_stem = input[..word_start].to_string();
+        context.dir_cache = Some(DirCacheHandle::with_shared(
+            dir_cache,
+            SessionKey::new(current_dir, line_stem),
+        ));
         // niubash#743: the session's LS_COLORS table, resolved per
         // completion call so a fresh `export LS_COLORS=…` takes effect
         // on the next TAB without an editor rebuild.
@@ -397,29 +436,43 @@ impl NiubashCompleter {
             return Vec::new();
         }
 
-        let entries = match std::fs::read_dir(&context.current_dir) {
-            Ok(entries) => entries,
-            Err(_) => return Vec::new(),
+        // niubash#747: enumerate through the session's stat-free
+        // listing cache — this overlay used to walk the cwd (and
+        // stat every non-directory in it) on every query.
+        let listing = match &context.dir_cache {
+            Some(handle) => handle.listing(&context.current_dir),
+            None => uncached_listing(&context.current_dir),
+        };
+        let Some(listing) = listing else {
+            return Vec::new();
         };
 
         let mut candidates: Vec<CwdPathCandidate> = Vec::new();
-        for entry in entries.flatten() {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if !context.behavior.matches(&file_name, &word) {
+        for entry in listing.entries() {
+            let file_name = &entry.name;
+            if !context.behavior.matches(file_name, &word) {
                 continue;
             }
-            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            let is_dir = entry.kind == ListedKind::Directory;
             // niubash#671: a non-directory qualifies for the command
             // slot only when it is executable — offering plain files
             // (`notes.txt`) as `./notes.txt` manufactures commands the
-            // shell would never resolve at this position.
-            if !is_dir && !Self::is_command_file(&entry) {
-                continue;
+            // shell would never resolve at this position. The verdict
+            // is the one per-entry check that needs metadata; the
+            // session cache memoizes it (niubash#747).
+            if !is_dir {
+                let is_exec = match &context.dir_cache {
+                    Some(handle) => handle.exec_verdict(&context.current_dir, file_name),
+                    None => entry_is_executable(&context.current_dir, file_name),
+                };
+                if !is_exec {
+                    continue;
+                }
             }
             if file_name.starts_with('.') && !word.starts_with('.') {
                 continue;
             }
-            let escaped = shell_escape_path_segment(&file_name);
+            let escaped = shell_escape_path_segment(file_name);
             let value = if is_dir {
                 format!("./{escaped}/")
             } else {
@@ -434,7 +487,7 @@ impl NiubashCompleter {
                     } else {
                         crate::completion::CandidateKind::Executable
                     },
-                    &file_name,
+                    file_name,
                 )
             });
             candidates.push(CwdPathCandidate {
@@ -471,40 +524,6 @@ impl NiubashCompleter {
                 match_indices: None,
             })
             .collect()
-    }
-
-    /// niubash#671: whether a non-directory cwd entry could actually
-    /// run from the command slot. Platform rule: on Unix, any execute
-    /// bit; on Windows, an extension listed in PATHEXT (the same list
-    /// command resolution uses; the Windows default applies when the
-    /// variable is unset).
-    fn is_command_file(entry: &std::fs::DirEntry) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            entry
-                .metadata()
-                .map(|md| md.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
-        }
-        #[cfg(windows)]
-        {
-            let path = entry.path();
-            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-                return false;
-            };
-            let pathext =
-                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-            pathext
-                .split(';')
-                .filter(|item| !item.is_empty())
-                .any(|item| item.trim_start_matches('.').eq_ignore_ascii_case(ext))
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = entry;
-            false
-        }
     }
 
     fn alias_suggestions_at_command_position(
@@ -937,6 +956,109 @@ niu_git_comp() {
             .unwrap_or_else(|| panic!("missing suggestion, got {suggestions:?}"));
         assert_eq!(suggestion.span.start, 3);
         assert_eq!(suggestion.span.end, input.len());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    /// niubash#747 (a): candidate generation over a 6000-entry
+    /// directory must not scale with per-entry stats. The old
+    /// enumeration paid ~36–90µs/entry (≈220–550 ms for this
+    /// directory). The hard guarantee here
+    /// is structural — the session cache's metadata counter stays
+    /// within the refinement window — with a loose clock bound as
+    /// an end-to-end smoke shape (parallel test load makes tight
+    /// budgets meaningless; the counter does not care).
+    #[test]
+    fn issue747_large_directory_candidate_generation_budget() {
+        let temp_dir = unique_temp_dir("niubash-issue747-perf");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        for i in 0..6000 {
+            std::fs::write(temp_dir.join(format!("entry{i:04}")), "x").unwrap();
+        }
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let probe = {
+            let state = state.lock().unwrap();
+            DirCacheHandle::with_shared(
+                state.dir_cache.clone(),
+                SessionKey::new(temp_dir.clone(), String::new()),
+            )
+        };
+        let mut completer = NiubashCompleter::new(state);
+        let start = std::time::Instant::now();
+        let suggestions = completer.complete("ls ", 3);
+        let elapsed = start.elapsed();
+        assert_eq!(
+            suggestions.len(),
+            6000,
+            "every entry must be offered, got {}",
+            suggestions.len()
+        );
+        // The load-bearing assertion is structural, not the clock:
+        // one enumeration, and per-entry metadata bounded by the
+        // refinement window — a return of the per-entry stat shape
+        // (2000 stats) fails here on any machine, loaded or not.
+        let (enumerations, metadata_calls) = probe.stats();
+        assert_eq!(enumerations, 1, "one session query enumerates once");
+        assert!(
+            metadata_calls <= crate::completion::path::EXEC_REFINE_LIMIT,
+            "per-entry metadata must stay bounded by the refinement \
+             window, got {metadata_calls} for 6000 entries"
+        );
+        // The clock is a smoke bound only, sized for a loaded CI
+        // machine: the pre-fix shape measured ~180 ms idle for this
+        // directory on the issue's machine class and grows with the
+        // entry count, while the stat-free shape stays flat.
+        assert!(
+            elapsed < std::time::Duration::from_millis(600),
+            "6000-entry candidate generation took {elapsed:?}; \
+             the per-entry stat shape must not come back"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    /// niubash#747 (d): at command position the cwd overlay shares
+    /// the session listing — two queries in one session enumerate
+    /// the directory once, however many keystrokes re-ask.
+    #[test]
+    fn issue747_command_position_overlay_enumerates_once_per_session() {
+        let temp_dir = unique_temp_dir("niubash-issue747-overlay");
+        std::fs::create_dir_all(temp_dir.join("rundir")).unwrap();
+        std::fs::write(temp_dir.join("run.sh"), "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                temp_dir.join("run.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let probe = {
+            let state = state.lock().unwrap();
+            DirCacheHandle::with_shared(
+                state.dir_cache.clone(),
+                SessionKey::new(temp_dir.clone(), String::new()),
+            )
+        };
+        let before = probe.stats().0;
+        let mut completer = NiubashCompleter::new(state);
+        let first = completer.complete("ru", 2);
+        let second = completer.complete("run", 3);
+        assert!(first
+            .iter()
+            .any(|suggestion| suggestion.value == "./rundir/"));
+        assert!(second
+            .iter()
+            .any(|suggestion| suggestion.value == "./rundir/"));
+        assert_eq!(
+            probe.stats().0 - before,
+            1,
+            "the cwd overlay must enumerate once per completion session"
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
