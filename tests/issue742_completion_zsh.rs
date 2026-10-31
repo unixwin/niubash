@@ -171,6 +171,126 @@ fn issue741_pty_long_outlier_keeps_multi_column_grid() {
     s.expect_prompt();
 }
 
+/// niubash#741, the issue's own geometry: ~90 candidates with name
+/// widths spread over 4..=25 in the home-sized start dir, `ls ` + TAB
+/// at 120x30 — the grid stays multi-column. (Regression guard: this
+/// plain shape already laid out correctly; the collapse lives in the
+/// two shapes pinned below.)
+#[test]
+fn issue741_pty_home_sized_set_keeps_multi_column_grid() {
+    if !require_pty_or_skip("issue741_pty_home_sized_set_keeps_multi_column_grid") {
+        return;
+    }
+    let mut s = NiuSession::spawn("home-grid-741");
+    let mut heads = Vec::new();
+    for i in 0..88 {
+        let width = 4 + (i % 22);
+        let mut name = format!("h{i:02}");
+        while name.len() < width {
+            name.push('x');
+        }
+        heads.push(format!("h{i:02}"));
+        if i % 3 == 0 {
+            std::fs::create_dir_all(s.start().join(&name)).unwrap();
+        } else {
+            std::fs::write(s.start().join(&name), "x\n").unwrap();
+        }
+    }
+    std::fs::create_dir_all(s.start().join("HoleFeature_x64_20261030")).unwrap();
+    s.wait_ready();
+    s.send("ls ");
+    s.send(TAB);
+    s.expect("HoleFeature");
+    std::thread::sleep(SETTLE);
+    let transcript = s.transcript();
+    let multi = transcript
+        .lines()
+        .filter(|line| heads.iter().filter(|h| line.contains(h.as_str())).count() >= 2)
+        .count();
+    assert!(
+        multi >= 1,
+        "at least one grid row must carry 2+ candidates (multi-column):\n{transcript}"
+    );
+    s.send(ESC);
+    s.send("\r");
+    s.expect_prompt();
+}
+
+/// niubash#741: one 100-wide file name among 25-wide companions —
+/// uncapped, no second column fits beside the outlier's at 120
+/// (100 + 25 + gutter > 120) and the grid renders one-per-line.
+/// With the truncation rescue the outlier is cut and the grid
+/// stays multi-column.
+#[test]
+fn issue741_pty_wide_outlier_keeps_multi_column_grid() {
+    if !require_pty_or_skip("issue741_pty_wide_outlier_keeps_multi_column_grid") {
+        return;
+    }
+    let mut s = NiuSession::spawn("outlier-grid-741");
+    for i in 0..89 {
+        std::fs::write(s.start().join(format!("pk{i:023}")), "x\n").unwrap();
+    }
+    std::fs::write(s.start().join(format!("z{}", "9".repeat(99))), "x\n").unwrap();
+    s.wait_ready();
+    s.send("cat ");
+    s.send(TAB);
+    s.expect("pk000");
+    std::thread::sleep(SETTLE);
+    let transcript = s.transcript();
+    let multi = transcript
+        .lines()
+        .filter(|line| line.matches("pk").count() >= 2)
+        .count();
+    assert!(
+        multi >= 1,
+        "at least one grid row must carry 2+ candidates (multi-column):\n{transcript}"
+    );
+    s.send(ESC);
+    s.send("\r");
+    s.expect_prompt();
+}
+
+/// niubash#741: the shared-prefix shape — completing inside a typed
+/// deep path puts the whole prefix in every candidate's display
+/// value (here 62 cells of prefix on 3-cell names). Uncapped, every
+/// column's max is ~65 and two columns bust 120: one-per-line.
+/// Truncation keeps the grid at two columns, and each cell's tail
+/// (the file name) stays visible.
+#[test]
+fn issue741_pty_prefix_inflated_set_keeps_multi_column_grid() {
+    if !require_pty_or_skip("issue741_pty_prefix_inflated_set_keeps_multi_column_grid") {
+        return;
+    }
+    let mut s = NiuSession::spawn("prefix-grid-741");
+    let a_dir = "a".repeat(30);
+    let b_dir = "b".repeat(30);
+    let deep = s.start().join(&a_dir).join(&b_dir);
+    std::fs::create_dir_all(&deep).unwrap();
+    for i in 0..30 {
+        std::fs::write(deep.join(format!("f{i:02}")), "x\n").unwrap();
+    }
+    s.wait_ready();
+    s.send(&format!("cat {a_dir}/{b_dir}/"));
+    s.send(TAB);
+    s.expect("f00");
+    std::thread::sleep(SETTLE);
+    let transcript = s.transcript();
+    // Each painted cell ends in its file name ("/fNN" survives the
+    // middle truncation), so a two-cell row shows "/f" twice; the
+    // one-per-line collapse never does.
+    let multi = transcript
+        .lines()
+        .filter(|line| line.matches("/f").count() >= 2)
+        .count();
+    assert!(
+        multi >= 1,
+        "at least one grid row must carry 2+ candidates (multi-column):\n{transcript}"
+    );
+    s.send(ESC);
+    s.send("\r");
+    s.expect_prompt();
+}
+
 /// niubash#743: the grid paints candidates through the session's
 /// LS_COLORS — an explicit tiny table pins the ANSI sequences.
 #[test]
