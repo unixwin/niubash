@@ -8052,7 +8052,7 @@ complete -F _envtooldyn_hook envtooldyn
 
         // An absent root leaves the environment alone.
         publish_process_shell_root(None);
-        assert!(std::env::var_os("NIU_ROOT").map_or(true, |value| value.is_empty()));
+        assert!(std::env::var_os("NIU_ROOT").is_none_or(|value| value.is_empty()));
 
         // A derived root becomes a real process variable, which is what a
         // bundled WinuxCmd applet reads through native_path.cppm::
