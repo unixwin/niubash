@@ -4,6 +4,11 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Native script debugger**: `niu --debug script` opens the interactive debugger on the controlling terminal and `niu --dap script` serves the Debug Adapter Protocol on stdio (`niu --dap` alone is a pure server whose `launch` request names the program; `niu --debug --dap script` is the spelled-out editor form). Both imply `extdebug` internally without changing the observable `shopt extdebug` setting; `--debug` with `-c`, `-s`, or `-i` keeps the legacy extdebug-arming behavior. The frontend now presents the host word `niu` — prompt `(niu-dbg)` and `niu: …` diagnostics — instead of the engine's `rubash`. `niu --help`, `docs/src/advanced-usage.md`, and the bundled zero-JS VS Code extension (`editors/vscode/`, type `niubash`, program `niu`) document and launch the flags.
+- **DAP hover evaluation of bare names**: a `hover`/`clipboard` request for an identifier now renders the variable's value from the stop snapshot (the same rendering as `print` and watch), instead of returning the literal word.
+
 ### Removed
 
 - **`~/.niubash/config.toml` is gone (1.5.0, breaking)**: the runtime no longer reads or writes a user TOML config. GNU-shaped knobs come from rc `bind`/`set`/`shopt` and `$INPUTRC`/`~/.inputrc`; niu-proprietary knobs come from `NIU_COMPLETION_STYLE`, `NIU_COMPLETION_INTERACTION`, `NIU_COMMAND_NOT_FOUND_HINT`, and `NIU_RC_POLICY` (exported from the rc or the environment). The `[keymap].bind`/`[keymap].unbind` TOML channel is removed — bindings use rc `bind` and inputrc only. `niu config set` is removed with an actionable error.
@@ -14,6 +19,10 @@ All notable changes to Niubash are documented in this file.
 - **`niu config` is read-only**: `niu config` / `niu config get <key>` print the effective value and its source (`env`, `inputrc`, or `default`). `editing-mode` and `keyseq-timeout` are now surfaced from readline/inputrc.
 - **inputrc is read after the rc**: `Shell::load_engine_bindings()` initializes readline after startup files, so `$INPUTRC` / `~/.inputrc` variables and bindings override rc `bind` lines in the mirrored keymaps, and `set editing-mode` seeds the editor mode.
 - **Setup minimal preset completion style `gnu` → `column`**: the minimal preset — the one non-interactive / scripted `niu setup` applies — now pins the product-default `column` completion style (owner ruling 2026-10-14) instead of `gnu`. This is a behavior change for scripted installs: they move from the no-menu GNU shape, where Enter always executes the line, into the menu family, where Enter with the completion menu open commits the highlighted candidate. Users who picked a completion style explicitly are unaffected. (#342 follow-up sweep, 2026-10-26.)
+
+### Fixed
+
+- **Bundled WinuxCmd applets lost the shell tree on installed layouts** (#746): the winux purge pair (niubash#715, rubash#2206) stopped the engine from exporting the shell root to children, and only the MSIX layout published `NIU_ROOT`, so an installed layout derived the root for Rubash but never handed it to the applets. `ls.exe /usr/bin` / `stat /usr/bin` failed with ENOENT, while `realpath /etc` and `readlink -f /tmp` leaked drive-relative native paths — even though a foreign child such as `eza` kept working through the engine's argument translation. Startup now publishes the derived root as `NIU_ROOT`; the same variable is what host-side syntax highlighting and completion read, so those resolve the tree again too.
 
 ## [1.4.4] - 2026-10-22
 

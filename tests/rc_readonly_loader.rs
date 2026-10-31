@@ -1082,3 +1082,218 @@ fn rbash_named_session_loads_the_generated_loader_then_restricts() {
         "loader document is never rewritten by startup"
     );
 }
+
+/// ── issue359 pins (1.5.0 containment round) ────────────────────────────────
+///
+/// The 359.4-359.12 cases above pin the case-A slice. The cases below pin
+/// the remaining write entries this round closed: the legacy bootstrap
+/// line's earliest-branch no-op, `niu setup --rc-policy` (the last product
+/// write into an existing rc), the wizard's create-only preset path, and
+/// startup over a managed-block rc.
+
+/// Sorted (name, len) inventory of the WHOLE sandbox home — the
+/// zero-side-effect gate: nothing anywhere under HOME may appear, vanish,
+/// or change size.
+fn home_inventory(home: &Path) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, u64)>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, &format!("{name}/"), out);
+            } else if let Ok(meta) = entry.metadata() {
+                out.push((name, meta.len()));
+            }
+        }
+    }
+    walk(home, "", &mut out);
+    out.sort();
+    out
+}
+
+/// The legacy `plugin sync --bootstrap` line — still sitting in old rc
+/// files — is a silent no-op at the EARLIEST branch: success, no output,
+/// and zero side effects even with a corrupt registry on disk and mutating
+/// flags mixed in (a mixture must never route back into the sync path).
+#[test]
+fn issue359_bootstrap_noop_is_silent_and_side_effect_free() {
+    let sandbox = Sandbox::new("issue359-bootstrap");
+    fs::create_dir_all(sandbox.home.join(".niubash").join("sources")).unwrap();
+    fs::write(
+        sandbox
+            .home
+            .join(".niubash")
+            .join("sources")
+            .join("registry.json"),
+        "{ corrupt registry — the no-op must not even read it",
+    )
+    .unwrap();
+    fs::write(
+        sandbox.rc_path(),
+        format!(
+            "# my rc\nniu plugin sync --bootstrap\n{}export MINE=1\n",
+            legacy_omb_block()
+        ),
+    )
+    .unwrap();
+    let rc_before = sandbox.rc_identity();
+    let home_before = home_inventory(&sandbox.home);
+
+    for args in [
+        vec!["plugin", "sync", "--bootstrap"],
+        vec!["plugin", "sync", "--prune", "--bootstrap"],
+        vec!["plugin", "sync", "--adopt", "--bootstrap"],
+        vec!["plugin", "sync", "--bootstrap", "--timeout", "5"],
+        vec!["plugin", "sync", "--bootstrap", "--bogus-flag"],
+    ] {
+        let out = sandbox.run(&args);
+        assert_success(&out, "legacy bootstrap no-op");
+        assert_eq!(stdout_text(&out), "", "the no-op is silent (stdout)");
+        assert_eq!(stderr_text(&out), "", "the no-op is silent (stderr)");
+    }
+    sandbox.assert_rc_identity_unchanged(&rc_before);
+    assert_eq!(
+        home_inventory(&sandbox.home),
+        home_before,
+        "the bootstrap no-op creates, repairs, and deletes nothing"
+    );
+}
+
+/// On a completely fresh home the bootstrap no-op does not even create
+/// the config directory: the home stays exactly as empty as it was.
+#[test]
+fn issue359_bootstrap_noop_on_fresh_home_creates_nothing() {
+    let sandbox = Sandbox::new("issue359-bootstrap-fresh");
+    assert_eq!(home_inventory(&sandbox.home), Vec::new());
+    let out = sandbox.run(&["plugin", "sync", "--bootstrap"]);
+    assert_success(&out, "legacy bootstrap no-op on a fresh home");
+    assert_eq!(stdout_text(&out), "");
+    assert_eq!(stderr_text(&out), "");
+    assert_eq!(
+        home_inventory(&sandbox.home),
+        Vec::new(),
+        "no rc, no config dir, no registry — nothing"
+    );
+}
+
+/// `niu setup --rc-policy` never writes the rc: the pick is printed as an
+/// export line for the user to apply by hand, and a stale marked block
+/// left by an earlier release is reported, never edited or removed.
+#[test]
+fn issue359_setup_rc_policy_never_writes_the_rc() {
+    let sandbox = Sandbox::new("issue359-rc-policy");
+    fs::write(sandbox.rc_path(), "# mine\nexport MINE=1\n").unwrap();
+    let before = sandbox.rc_identity();
+
+    let out = sandbox.run(&["setup", "--rc-policy", "bashrc-fallback"]);
+    assert_success(&out, "setup --rc-policy bashrc-fallback");
+    assert!(
+        stdout_text(&out).contains("export NIU_RC_POLICY=bashrc-fallback"),
+        "the pick is delivered as the export line: {}",
+        stdout_text(&out)
+    );
+    sandbox.assert_rc_identity_unchanged(&before);
+
+    let out = sandbox.run(&["setup", "--rc-policy", "primary-only"]);
+    assert_success(&out, "setup --rc-policy primary-only");
+    sandbox.assert_rc_identity_unchanged(&before);
+
+    // A stale marked block from an earlier release: both directions
+    // report it and leave every byte in place.
+    fs::write(
+        sandbox.rc_path(),
+        "# mine\n\
+         # >>> niu setup rc-policy >>>\n\
+         # Personal-rc policy selected by `niu setup --rc-policy`.\n\
+         export NIU_RC_POLICY=bashrc-fallback\n\
+         # <<< niu setup rc-policy <<<\n",
+    )
+    .unwrap();
+    let before = sandbox.rc_identity();
+    for value in ["bashrc-fallback", "primary-only"] {
+        let out = sandbox.run(&["setup", "--rc-policy", value]);
+        assert_success(&out, "setup --rc-policy over a stale block");
+        assert!(
+            stdout_text(&out).contains("left untouched"),
+            "the stale block is reported, not edited: {}",
+            stdout_text(&out)
+        );
+        sandbox.assert_rc_identity_unchanged(&before);
+    }
+}
+
+/// Explicit setup is create-only: a preset run over a missing rc creates
+/// it (with no bootstrap line in the generated text); a second run over
+/// the now-existing rc leaves it byte-identical and parks the new
+/// proposal as a sample under ~/.niubash/ instead.
+#[test]
+fn issue359_setup_preset_creates_once_then_parks_proposal() {
+    let sandbox = Sandbox::new("issue359-preset");
+    let out = sandbox.run(&["setup", "--preset", "minimal"]);
+    assert_success(&out, "setup --preset minimal (create)");
+    let created = sandbox.rc();
+    assert!(!created.is_empty(), "the preset created an rc");
+    assert!(
+        !created.contains("--bootstrap"),
+        "new templates omit the bootstrap line:\n{created}"
+    );
+    let before = sandbox.rc_identity();
+
+    let out = sandbox.run(&["setup", "--preset", "minimal"]);
+    assert_success(&out, "setup --preset minimal (over existing rc)");
+    sandbox.assert_rc_identity_unchanged(&before);
+    let sample = sandbox
+        .home
+        .join(".niubash")
+        .join("candidates")
+        .join("setup-proposed.niubashrc");
+    assert!(
+        sample.is_file(),
+        "the second run parks its proposal as a sample, not an overwrite"
+    );
+}
+
+/// Startup over an rc that still carries a legacy managed block (with the
+/// double-execution guard tripped) performs no writes anywhere except the
+/// documented one-time hint marker inside ~/.niubash/generated/.
+#[test]
+fn issue359_startup_over_managed_block_rc_is_write_free() {
+    let sandbox = Sandbox::new("issue359-startup-guard");
+    install_omb(&sandbox);
+    assert_success(&sandbox.run(&["plugin", "enable", "git"]), "enable");
+    // The old bootstrap line rides along as rc TEXT (commented so the pin
+    // stays hermetic — the executed no-op itself is pinned at the CLI
+    // level by issue359_bootstrap_noop_*).
+    fs::write(
+        sandbox.rc_path(),
+        format!(
+            "# my rc\n# niu plugin sync --bootstrap\n{}export MINE=1\n",
+            legacy_omb_block()
+        ),
+    )
+    .unwrap();
+    let rc_before = sandbox.rc_identity();
+    let inventory_before = sandbox.config_inventory();
+
+    let out = sandbox.run_interactive("true");
+    assert_success(&out, "startup over a managed-block rc");
+    sandbox.assert_rc_identity_unchanged(&rc_before);
+    let mut expected = inventory_before.clone();
+    expected.push(("generated/.legacy-block-hint-shown".to_string(), 6));
+    expected.sort();
+    assert_eq!(
+        sandbox.config_inventory(),
+        expected,
+        "the only startup write is the one-time hint marker"
+    );
+
+    // Second startup: not even the marker changes.
+    let out = sandbox.run_interactive("true");
+    assert_success(&out, "second startup over a managed-block rc");
+    sandbox.assert_rc_identity_unchanged(&rc_before);
+    assert_eq!(sandbox.config_inventory(), expected);
+}

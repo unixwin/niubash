@@ -1290,7 +1290,7 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
 
     // --- Q2.7: TAB completion interaction (niubash#631) ---
     // The interaction axis joined the style axis in 1.5.0 with a new
-    // default (cycle), so it gets the same discovery discipline as
+    // default (select since niubash#742), so it gets the same discovery discipline as
     // Q2.6: asked on first install AND on every `niu setup` re-run,
     // the current effective value pre-highlighted, written only when
     // the pick differs. The question names the axis in one line apart
@@ -1942,9 +1942,14 @@ fn ask_completion_interaction(
     use crate::config::CompletionInteraction;
     let entries = [
         (
+            CompletionInteraction::Select,
+            "select",
+            t.tr("default — TAB opens the grid unselected, the next TAB picks and cycles, Esc rolls back"),
+        ),
+        (
             CompletionInteraction::Cycle,
             "cycle",
-            t.tr("default — TAB cycles candidates into the line, Enter accepts and runs, Esc rolls back"),
+            t.tr("TAB cycles candidates into the line, Enter accepts and runs, Esc rolls back"),
         ),
         (
             CompletionInteraction::Insert,
@@ -3739,18 +3744,24 @@ mod tests {
     #[test]
     fn issue631_completion_interaction_step_preselects_the_effective_interaction() {
         use crate::config::CompletionInteraction;
-        // Row 0 is cycle: with current=cycle, row 0 keeps it.
+        // Row 0 is select (the default since niubash#742): with
+        // current=select, row 0 keeps it.
         let mut io = WizardIo::scripted(&[0]);
         let pick =
-            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).unwrap();
-        assert_eq!(pick, "cycle");
-        // With current=insert, row 0 is the user explicitly moving to cycle.
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Select).unwrap();
+        assert_eq!(pick, "select");
+        // With current=insert, row 0 is the user explicitly moving to select.
         let mut io = WizardIo::scripted(&[0]);
         let pick =
             ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Insert).unwrap();
-        assert_eq!(pick, "cycle");
-        // Row 1 is insert.
+        assert_eq!(pick, "select");
+        // Row 1 is cycle.
         let mut io = WizardIo::scripted(&[1]);
+        let pick =
+            ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Select).unwrap();
+        assert_eq!(pick, "cycle");
+        // Row 2 is insert.
+        let mut io = WizardIo::scripted(&[2]);
         let pick =
             ask_completion_interaction(&mut io, &Lang::En, CompletionInteraction::Cycle).unwrap();
         assert_eq!(pick, "insert");

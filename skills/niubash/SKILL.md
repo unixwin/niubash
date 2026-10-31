@@ -82,6 +82,23 @@ Every built-in documents itself: `help <name>` (`help -s '*'` for the one
 line per command). Launcher verbs and the plugin verb table:
 `references/quickref.md`.
 
+## Debugging scripts
+
+- **`niu --debug script.sh [args…]`** starts the native interactive debugger
+  stopped at the entry stop. The prompt is `(niu-dbg)`; the M1 command set
+  includes `break`, `continue`, `next`/`step`, `where`, `frame`, `list`,
+  `print`/`eval`, `set var`, `info …`, and `quit`/`kill`. Commands come from
+  the controlling terminal, never the debuggee's stdin, so piped stdin is
+  not a batch driver — use `source <file>` inside the session.
+- **`niu --dap script.sh`** serves the same session over the Debug Adapter
+  Protocol on stdio. `niu --dap` without a script is a pure server and the
+  client's `launch` request names the program; `niu --debug --dap script.sh`
+  is the spelled-out editor form. The bundled zero-JS VS Code extension is
+  in `editors/vscode/` (type `niubash`, program `niu`).
+- `--debug` with `-c`, `-s`, or `-i` keeps the legacy extdebug-arming
+  behavior (no debugger frontend); `--debugger` remains the GNU bashdb
+  starter path.
+
 ## Common pitfalls
 
 - **Path forms.** Native `C:/Users/me` (or `C:\Users\me`) is always safe
