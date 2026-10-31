@@ -70,6 +70,7 @@ pub mod doctor;
 pub(crate) mod easter_eggs;
 pub mod ffi;
 pub mod fonts;
+pub mod git_prompt_cache;
 #[cfg(windows)]
 pub mod git_prompt;
 pub(crate) mod history;
