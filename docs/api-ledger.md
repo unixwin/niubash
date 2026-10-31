@@ -134,6 +134,12 @@
 > The
 > recorded methods are inherent faces, not trait
 > methods, so no UFCS-token caveat applies to them.
+> The same change's per-flag builder setter
+> `SessionBuilder::interactive` is recorded in §6
+> with them, pairing its twin
+> `SessionBuilder::login_shell` (recorded since v4);
+> the structured face supersedes both setters, which
+> stay public inherent faces of the builder.
 >
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
@@ -653,6 +659,7 @@ method rubash::api::SessionBuilder::compatible_shell_path
 method rubash::api::SessionBuilder::disable_builtin
 method rubash::api::SessionBuilder::external_route_provider
 method rubash::api::SessionBuilder::env
+method rubash::api::SessionBuilder::interactive
 method rubash::api::SessionBuilder::invocation_shape
 method rubash::api::SessionBuilder::login_shell
 method rubash::api::SessionBuilder::shell_root
@@ -746,6 +753,9 @@ Staged record, 2026-10-31: the invocation-shape family
 ahead of host adoption — consumed today by the engine's
 own build path, its migrated carrier reads, and the
 in-tree consumer tests; niubash names none of it yet.
+The same change's per-flag setter
+`SessionBuilder::interactive` is recorded in §6 with
+the family, pairing `SessionBuilder::login_shell` (v4).
 Ledger v1, 2026-10-25. Update rule: any change to the consumed
 surface (a symbol appears, vanishes, or moves tiers) updates this
 file — both copies — in the same change that causes it, with the
