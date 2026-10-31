@@ -1001,7 +1001,7 @@ niu_git_comp() {
         let (enumerations, metadata_calls) = probe.stats();
         assert_eq!(enumerations, 1, "one session query enumerates once");
         assert!(
-            metadata_calls as usize <= crate::completion::path::EXEC_REFINE_LIMIT,
+            metadata_calls <= crate::completion::path::EXEC_REFINE_LIMIT,
             "per-entry metadata must stay bounded by the refinement \
              window, got {metadata_calls} for 6000 entries"
         );

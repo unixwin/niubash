@@ -1677,7 +1677,6 @@ mod issue747_tests {
     #[test]
     fn issue747_exec_style_refined_at_head_unrefined_past_limit() {
         let colors = FileColors::defaults();
-        let ex = colors.style_for(CandidateKind::Executable, "x");
         let di = colors.style_for(CandidateKind::Directory, "x");
 
         let dir = unique_temp_dir("niubash-issue747-style");
@@ -1711,6 +1710,7 @@ mod issue747_tests {
         assert_eq!(style_of("adir/"), di);
         #[cfg(unix)]
         {
+            let ex = colors.style_for(CandidateKind::Executable, "x");
             assert_eq!(style_of("aarun"), ex, "head executable keeps the ex style");
             assert_ne!(
                 style_of("zzexec"),
