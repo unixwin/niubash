@@ -14,6 +14,83 @@ use reedline::{
     ReedlineErrorVariants, Result, SearchDirection, SearchQuery,
 };
 
+// niubash#622: history-file read accounting. The #622 investigation
+// first blamed history loading for an interactive-startup residual
+// that turned out to be interactive init proper, so the load path now
+// counts its own reads permanently: every full store load
+// (`HistoryStore::load_from_file`), every raw line count
+// (`count_file_lines`), and every raw read the session-end reconcile
+// performs is tallied here, and the `issue622_*` pins assert on the
+// tallies. Set `NIU_TRACE_HISTORY=1` (also `true`/`on`, the
+// `NIU_TRACE_STARTUP` idiom) to print each event with its elapsed
+// time to stderr; the counters run either way (one atomic add per
+// event) and stay silent unless the trace is enabled.
+static HISTORY_FULL_LOADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static HISTORY_LINE_COUNTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static HISTORY_RECONCILE_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Full history-file loads performed so far in this process.
+pub(crate) fn history_full_load_count() -> usize {
+    HISTORY_FULL_LOADS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Raw history-file line counts performed so far in this process.
+pub(crate) fn history_line_count_count() -> usize {
+    HISTORY_LINE_COUNTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Raw reads by the session-end reconcile performed so far.
+pub(crate) fn history_reconcile_read_count() -> usize {
+    HISTORY_RECONCILE_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn history_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("NIU_TRACE_HISTORY")
+            .map(|value| {
+                ["1", "true", "on"]
+                    .iter()
+                    .any(|name| value.eq_ignore_ascii_case(name))
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn trace_history_event(event: &str, path: &Path, elapsed: std::time::Duration) {
+    if history_trace_enabled() {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "NIU_TRACE_HISTORY: {} {} (loads={} counts={} reconcile_reads={}) in {:.1} ms",
+            event,
+            path.display(),
+            history_full_load_count(),
+            history_line_count_count(),
+            history_reconcile_read_count(),
+            elapsed.as_micros() as f64 / 1000.0,
+        );
+    }
+}
+
+fn note_history_full_load(path: &Path, elapsed: std::time::Duration) {
+    HISTORY_FULL_LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    trace_history_event("load", path, elapsed);
+}
+
+fn note_history_line_count(path: &Path, elapsed: std::time::Duration) {
+    HISTORY_LINE_COUNTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    trace_history_event("line-count", path, elapsed);
+}
+
+fn note_history_reconcile_read(path: &Path, elapsed: std::time::Duration) {
+    HISTORY_RECONCILE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    trace_history_event("reconcile-read", path, elapsed);
+}
+
 /// On Windows, reset the DACL of the history file to grant the current
 /// process full access. This handles the case where the file was created
 /// by a different security context (e.g., Codex sandbox) and has
@@ -695,7 +772,13 @@ impl HistoryStore {
             ));
         }
         let mut store = Self::new(capacity);
-        store.merge_from_disk(path)?;
+        // niubash#622: every full load is counted (and timed under
+        // NIU_TRACE_HISTORY) — see the accounting block at the top of
+        // this file.
+        let started = std::time::Instant::now();
+        let merged = store.merge_from_disk(path);
+        note_history_full_load(path, started.elapsed());
+        merged?;
         Ok(store)
     }
 
@@ -1976,7 +2059,13 @@ impl LiveFileBackedHistory {
         // belongs to the overwrite-flavored default mode.
         let mut removed_ok = cleared.is_empty() && (histappend || cleared_base.is_empty());
         if !removed_ok {
-            match std::fs::read_to_string(&path) {
+            // niubash#622: the reconcile's removal pass reads the raw
+            // file; tallied as a reconcile read (see the accounting
+            // block at the top of this file).
+            let read_started = std::time::Instant::now();
+            let contents = std::fs::read_to_string(&path);
+            note_history_reconcile_read(&path, read_started.elapsed());
+            match contents {
                 Ok(contents) => {
                     let total = contents.lines().count();
                     let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
@@ -2028,7 +2117,13 @@ impl LiveFileBackedHistory {
         // maybe_save_shell_history ends with sv_histsize(
         // "HISTFILESIZE"), and histfile.c applies it to the file tail.
         if let Some(limit) = histfilesize {
-            match std::fs::read_to_string(&path) {
+            // niubash#622: the truncation pass reads the raw file
+            // (GNU's history_truncate_file reads it too, histfile.c);
+            // tallied as a reconcile read.
+            let read_started = std::time::Instant::now();
+            let contents = std::fs::read_to_string(&path);
+            note_history_reconcile_read(&path, read_started.elapsed());
+            match contents {
                 Ok(contents) => {
                     let lines: Vec<&str> = contents.lines().collect();
                     if lines.len() > limit {
@@ -2470,9 +2565,15 @@ fn append_line_to_file(path: &Path, text: &str) -> io::Result<()> {
 /// (a trailing partial line still counts). Used for ledger bases; an
 /// unreadable file counts as empty.
 fn count_file_lines(path: &Path) -> usize {
-    std::fs::read_to_string(path)
+    // niubash#622: a line count is a full file read; it is tallied
+    // with the other history-file reads (see the accounting block at
+    // the top of this file).
+    let started = std::time::Instant::now();
+    let counted = std::fs::read_to_string(path)
         .map(|contents| contents.lines().count())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    note_history_line_count(path, started.elapsed());
+    counted
 }
 
 /// Remove `cleared` lines from raw (still-encoded) file lines as a
