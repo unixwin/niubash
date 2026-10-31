@@ -105,6 +105,42 @@
 > completeness red this raised on every rubash PR's
 > pairing job is what surfaced the gap.
 >
+> Addendum (invocation shape record, 2026-10-31,
+> rubash#2084 / rubash#2130): the typed invocation-shape
+> family — the `rubash::api` types `InvocationShape`
+> (+ constructors `new` / `interactive` /
+> `login_interactive`) and `RespawnSource` (+ variants
+> `Fresh` / `EngineChild`), the builder face
+> `SessionBuilder::invocation_shape`, the readback
+> `Session::invocation_shape`, and the Executor state
+> accessors `invocation_interactive` / `invocation_login`
+> / `set_invocation_shape` — is recorded (§2.1 row, §4
+> row, §6 entries). The family is new on the engine side
+> in the same change (rubash#2324): the builder applies
+> the declared shape to the executor's typed invocation
+> state at build, and the migrated carrier reads — 38
+> decision-point reads of the two read accessors across
+> 15 executor files, which used to key off the
+> `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL`
+> env-table entries — read through them. niubash
+> consumes none of it yet (its Shell construction names
+> no shape), so the record is staged ahead of the host's
+> adoption, like the kill-hook records before it.
+> (§5's completeness check stays green with no new
+> warnings: the host already names the `rubash::api`
+> module itself, which covers the module's entries
+> under the check's module-prefix rule — the staged
+> status is a fact of this record, not of the check.)
+> The
+> recorded methods are inherent faces, not trait
+> methods, so no UFCS-token caveat applies to them.
+> The same change's per-flag builder setter
+> `SessionBuilder::interactive` is recorded in §6
+> with them, pairing its twin
+> `SessionBuilder::login_shell` (recorded since v4);
+> the structured face supersedes both setters, which
+> stay public inherent faces of the builder.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -262,7 +298,7 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the route family `ExternalRouteProvider` / `ExternalRouteRequest` / `ExternalRouteStdio` / `ExternalRouteHandle` (+ variants `Inherit`, `Handle`) / `ExternalRouteOutcome` (+ variants `Completed`, `Declined`, `Cancelled`) — the niubash#567 route capability (see the header addendum) |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the route family `ExternalRouteProvider` / `ExternalRouteRequest` / `ExternalRouteStdio` / `ExternalRouteHandle` (+ variants `Inherit`, `Handle`) / `ExternalRouteOutcome` (+ variants `Completed`, `Declined`, `Cancelled`) — the niubash#567 route capability (see the header addendum); plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
@@ -427,6 +463,7 @@ to the split core crate without changing its shape.
 | `invocation` (`ShellInvocation`, `materialize_command_file`) | B (row-11 ruling) | driver-layer input type: both binaries' `main()` parse through it identically, and the RFC's own §8 puts driver wrappers at B; it stays in the `invocation` module in-tree and moves with the driver layer at the split |
 | `builtins::kill` console hooks | C → **replaced (row 11)** | `Executor::inject_signal` / `Executor::interrupt` (Tier A, RFC §6.4) for session-scoped delivery; `script_driver::inject_console_ctrl_c` / `script_driver::consume_background_wrapper_handshake` (Tier B) for the two host-launcher shapes that have no executor yet. The kill items themselves were demoted to `pub(crate)` in the migration's companion change (Ledger v4) |
 | session configuration (`set_winuxcmd_path`, `set_shell_root`, `set_compatible_shell_path`, `set_builtin_disabled`, `mark_login_shell`) | A (row-11 ruling) | builder-time session initialization — M-2's own language ("the 55 set_env sites collapse into builder initialization"); these five are the same shape: host facts installed before the first run |
+| invocation shape (`InvocationShape`, `RespawnSource`, `SessionBuilder::invocation_shape`, `Session::invocation_shape`; the Executor accessors `invocation_interactive` / `invocation_login` / `set_invocation_shape`) | A | construction-time session state in `rubash::api`, beside the session-configuration row: the builder applies the declared shape to the executor's typed invocation state at build — the structured declaration is authoritative for the fields it names, over the environment seeds — and `Session::invocation_shape` reads it back; the Executor accessors are the state's engine-side face, behind which the migrated carrier reads of rubash#2130 sit (recorded staged ahead of host adoption; see the header addendum) |
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
@@ -496,7 +533,9 @@ item rubash::api::ExternalRouteProvider
 item rubash::api::ExternalRouteRequest
 item rubash::api::ExternalRouteStdio
 item rubash::api::Flow
+item rubash::api::InvocationShape
 item rubash::api::PreparedLine
+item rubash::api::RespawnSource
 item rubash::api::RunOptions
 item rubash::api::RunOutcome
 item rubash::api::Session
@@ -572,6 +611,8 @@ variant rubash::api::ExternalRouteOutcome::Declined
 variant rubash::api::Flow::ExitRequested
 variant rubash::api::PreparedLine::Discard
 variant rubash::api::PreparedLine::Execute
+variant rubash::api::RespawnSource::EngineChild
+variant rubash::api::RespawnSource::Fresh
 variant rubash::builtins::bind::BindingSpec::Function
 variant rubash::builtins::bind::BindingSpec::Macro
 variant rubash::executor::ExecuteError::CommandNotFound
@@ -587,6 +628,9 @@ variant rubash::shell::bind_registry::BindKind::Macro
 variant rubash::special_paths::SpecialPathClass::Filesystem
 method rubash::Executor::new
 method rubash::api::ExternalRouteHandle::raw_or_zero
+method rubash::api::InvocationShape::interactive
+method rubash::api::InvocationShape::login_interactive
+method rubash::api::InvocationShape::new
 method rubash::api::OptionsView::set
 method rubash::api::Session::aliases
 method rubash::api::Session::builder
@@ -598,6 +642,7 @@ method rubash::api::Session::expand_prompt
 method rubash::api::Session::functions
 method rubash::api::Session::has_compspec
 method rubash::api::Session::inherit_process_stdin
+method rubash::api::Session::invocation_shape
 method rubash::api::Session::last_status
 method rubash::api::Session::options
 method rubash::api::Session::prepare_line
@@ -614,6 +659,8 @@ method rubash::api::SessionBuilder::compatible_shell_path
 method rubash::api::SessionBuilder::disable_builtin
 method rubash::api::SessionBuilder::external_route_provider
 method rubash::api::SessionBuilder::env
+method rubash::api::SessionBuilder::interactive
+method rubash::api::SessionBuilder::invocation_shape
 method rubash::api::SessionBuilder::login_shell
 method rubash::api::SessionBuilder::shell_root
 method rubash::api::SessionBuilder::winuxcmd_path
@@ -639,6 +686,8 @@ method rubash::executor::Executor::has_function
 method rubash::executor::Executor::last_exit_code
 method rubash::executor::Executor::inject_signal
 method rubash::executor::Executor::interrupt
+method rubash::executor::Executor::invocation_interactive
+method rubash::executor::Executor::invocation_login
 method rubash::executor::Executor::last_command_inverted
 method rubash::executor::Executor::mark_login_shell
 method rubash::executor::Executor::resolve_shell_path
@@ -650,6 +699,7 @@ method rubash::executor::Executor::script_fd0_line
 method rubash::executor::Executor::set_env
 method rubash::executor::Executor::set_external_route_provider
 method rubash::executor::Executor::set_history_provider
+method rubash::executor::Executor::set_invocation_shape
 method rubash::executor::Executor::set_shopt_option
 method rubash::executor::Executor::take_exit_jump_pending
 method rubash::executor::Executor::take_signal_discard_pending
@@ -698,6 +748,14 @@ consumed by niubash#694's invocation-input operand reader
 missed by the v4 census (which counted the builder
 construction and the receiver-form seam calls), and
 flagged by §5's completeness check.
+Staged record, 2026-10-31: the invocation-shape family
+(rubash#2084 / rubash#2130) is recorded (§2.1/§4/§6)
+ahead of host adoption — consumed today by the engine's
+own build path, its migrated carrier reads, and the
+in-tree consumer tests; niubash names none of it yet.
+The same change's per-flag setter
+`SessionBuilder::interactive` is recorded in §6 with
+the family, pairing `SessionBuilder::login_shell` (v4).
 Ledger v1, 2026-10-25. Update rule: any change to the consumed
 surface (a symbol appears, vanishes, or moves tiers) updates this
 file — both copies — in the same change that causes it, with the
