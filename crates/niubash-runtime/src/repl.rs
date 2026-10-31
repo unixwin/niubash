@@ -2264,30 +2264,50 @@ fn add_engine_bind_keybindings_recorded(
             // for zsh-style shell-function widgets, which `bind` to a
             // readline function position has no meaning for.
             crate::bind_surface::EngineBindKind::Function { name } => {
-                match native_widget_event(name) {
-                    // native_widget_event's sentinel fallthrough means
-                    // "unknown readline function": skipped, like GNU's
-                    // silent rl_parse_and_bind drop (wt100 probe).
-                    Some(ReedlineEvent::ExecuteHostCommand(payload))
-                        if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
-                    {
-                        note_unusable_bind(
-                            &mut unusable,
-                            &mut dropped,
-                            entry,
-                            unusable_function_reason(name),
-                        );
-                        continue;
+                // `self-insert` means "insert the pressed key's own
+                // character": the event depends on the key, which only
+                // this layer knows, so it is translated here instead of
+                // in the name table (niubash#731). A key with no
+                // character of its own keeps the actionable record.
+                if name == "self-insert" {
+                    match key_literal_text(modifiers, key_code) {
+                        Some(text) => edit_event(EditCommand::InsertString(text)),
+                        None => {
+                            note_unusable_bind(
+                                &mut unusable,
+                                &mut dropped,
+                                entry,
+                                UnusableBindReason::Other,
+                            );
+                            continue;
+                        }
                     }
-                    Some(event) => event,
-                    None => {
-                        note_unusable_bind(
-                            &mut unusable,
-                            &mut dropped,
-                            entry,
-                            unusable_function_reason(name),
-                        );
-                        continue;
+                } else {
+                    match native_widget_event(name) {
+                        // native_widget_event's sentinel fallthrough means
+                        // "unknown readline function": skipped, like GNU's
+                        // silent rl_parse_and_bind drop (wt100 probe).
+                        Some(ReedlineEvent::ExecuteHostCommand(payload))
+                            if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                        {
+                            note_unusable_bind(
+                                &mut unusable,
+                                &mut dropped,
+                                entry,
+                                unusable_function_reason(name),
+                            );
+                            continue;
+                        }
+                        Some(event) => event,
+                        None => {
+                            note_unusable_bind(
+                                &mut unusable,
+                                &mut dropped,
+                                entry,
+                                unusable_function_reason(name),
+                            );
+                            continue;
+                        }
                     }
                 }
             }
@@ -2465,6 +2485,48 @@ fn native_widget_keymap_applies(keymap: Option<&str>, target: NativeKeymapTarget
     )
 }
 
+/// The literal text a key itself carries, for the readline functions
+/// whose meaning is the pressed key's own character: `self-insert`
+/// (the bound key) and `quoted-insert` (the key pressed after the
+/// quoting key, niubash#731). A control combination carries its
+/// control byte; a meta combination carries the character itself
+/// (the ESC is the prefix mechanism, not data). Keys with no
+/// character of their own (arrows, function keys, ...) carry nothing.
+fn key_literal_text(modifiers: KeyModifiers, code: KeyCode) -> Option<String> {
+    match code {
+        KeyCode::Char(c) => {
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                control_char(c).map(|ch| ch.to_string())
+            } else {
+                Some(c.to_string())
+            }
+        }
+        KeyCode::Enter => Some("\n".to_string()),
+        KeyCode::Tab => Some("\t".to_string()),
+        KeyCode::Backspace => Some("\u{7f}".to_string()),
+        KeyCode::Esc => Some("\u{1b}".to_string()),
+        _ => None,
+    }
+}
+
+/// The control byte a Ctrl+key combination names: letters fold to
+/// 0x01–0x1a, and the symbol row keeps its ASCII control names
+/// (C-@ / C-Space is NUL, C-? is DEL, ...).
+fn control_char(c: char) -> Option<char> {
+    match c {
+        'a'..='z' => char::from_u32(c as u32 - 'a' as u32 + 1),
+        'A'..='Z' => char::from_u32(c as u32 - 'A' as u32 + 1),
+        '@' | ' ' => Some('\0'),
+        '[' => Some('\u{1b}'),
+        '\\' => Some('\u{1c}'),
+        ']' => Some('\u{1d}'),
+        '^' => Some('\u{1e}'),
+        '_' => Some('\u{1f}'),
+        '?' => Some('\u{7f}'),
+        _ => None,
+    }
+}
+
 fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
     match widget {
         "autosuggest-accept" => Some(ReedlineEvent::HistoryHintComplete),
@@ -2476,10 +2538,14 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // GNU's own spellings of the substring-search pair
         // (`history-substring-search-backward`/`-forward`, funmap.c)
         // ride the same arms as the zsh spellings (niubash#731).
-        "history-substring-search-up" | "history-substring-search-backward"
-        | "history-search-backward" | "up-line-or-history" => Some(ReedlineEvent::Up),
-        "history-substring-search-down" | "history-substring-search-forward"
-        | "history-search-forward" | "down-line-or-history" => Some(ReedlineEvent::Down),
+        "history-substring-search-up"
+        | "history-substring-search-backward"
+        | "history-search-backward"
+        | "up-line-or-history" => Some(ReedlineEvent::Up),
+        "history-substring-search-down"
+        | "history-substring-search-forward"
+        | "history-search-forward"
+        | "down-line-or-history" => Some(ReedlineEvent::Down),
         "accept-line" => Some(ReedlineEvent::Enter),
         "beginning-of-line" => Some(edit_event(EditCommand::MoveToLineStart { select: false })),
         "end-of-line" => Some(edit_event(EditCommand::MoveToLineEnd { select: false })),
@@ -2682,14 +2748,27 @@ fn collect_chord_bindings(
                 edit_event(EditCommand::InsertString(text.clone()))
             }
             crate::bind_surface::EngineBindKind::Function { name } => {
-                match native_widget_event(name) {
-                    Some(ReedlineEvent::ExecuteHostCommand(payload))
-                        if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                // A chord ending in `self-insert` inserts the chord's
+                // last key — the same key-dependent translation as the
+                // flat path (niubash#731).
+                if name == "self-insert" {
+                    match keys
+                        .last()
+                        .and_then(|(mods, code)| key_literal_text(*mods, *code))
                     {
-                        continue
+                        Some(text) => edit_event(EditCommand::InsertString(text)),
+                        None => continue,
                     }
-                    Some(event) => event,
-                    None => continue,
+                } else {
+                    match native_widget_event(name) {
+                        Some(ReedlineEvent::ExecuteHostCommand(payload))
+                            if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                        {
+                            continue
+                        }
+                        Some(event) => event,
+                        None => continue,
+                    }
                 }
             }
         };
@@ -5130,7 +5209,12 @@ mod tests {
             Some(ReedlineEvent::Down)
         );
         // The residual inexpressible set still falls to the sentinel.
-        for name in ["yank-pop", "operate-and-get-next", "set-mark", "overwrite-mode"] {
+        for name in [
+            "yank-pop",
+            "operate-and-get-next",
+            "set-mark",
+            "overwrite-mode",
+        ] {
             assert!(
                 matches!(
                     native_widget_event(name),
@@ -5139,6 +5223,54 @@ mod tests {
                 "{name} must stay on the sentinel (reported, not mis-delivered)"
             );
         }
+    }
+
+    /// niubash#731: `self-insert` is key-dependent — the bridge
+    /// delivers it as inserting the bound key's own character (a
+    /// control key inserts its control byte), on the flat path and
+    /// at the end of a chord alike; a key with no character of its
+    /// own stays an actionable drop.
+    #[test]
+    fn issue731_self_insert_inserts_the_bound_key() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        let function = |keyseq: &str, name: &str| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: None,
+        };
+        let mut keybindings = default_emacs_keybindings();
+        let entries = vec![
+            function("x", "self-insert"),
+            function(r"\C-a", "self-insert"),
+            function(r"\e[5~", "self-insert"),
+        ];
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Char('x')),
+            Some(edit_event(EditCommand::InsertString("x".to_string())))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('a')),
+            Some(edit_event(EditCommand::InsertString("\u{1}".to_string())))
+        );
+        // PgUp carries no character: recorded, not delivered.
+        assert_eq!(unusable.len(), 1);
+        assert_eq!(unusable[0].keyseq, r"\e[5~");
+
+        // Chord-final self-insert inserts the chord's last key.
+        let chords = collect_chord_bindings(
+            &[function(r"\C-xa", "self-insert")],
+            NativeKeymapTarget::Emacs,
+            0,
+        );
+        assert_eq!(chords.len(), 1);
+        assert_eq!(
+            chords[0].event,
+            edit_event(EditCommand::InsertString("a".to_string()))
+        );
     }
 
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
