@@ -2,13 +2,328 @@
 // Provides Tab completion for files and directories
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use crate::completion::file_colors::{CandidateKind, FileColors};
 use crate::completion::{CompletionBehavior, CompletionContext, CompletionResult};
 use crate::path_utils::{resolve_logical_shell_path, shell_home_dir, shell_path_to_host_path};
 use anyhow::Result;
+
+// ─── Session-scoped directory listings (niubash#747) ─────────────────────
+//
+// Candidate enumeration used to pay a symlink-following stat(2) for
+// EVERY directory entry — the LS_COLORS exec-bit refinement in the old
+// `candidate_kind` — plus a fresh `read_dir` for every keystroke the
+// editor re-queried with. On ordinary directories that is merely
+// wasteful; on virtual trees (/proc, /sys, /dev) and very large
+// directories it made Tab completion unusable.
+//
+// Enumeration now records only what `read_dir` already knows — the
+// entry name and its dirent type — and never stats. A session-scoped
+// cache keeps the enumerated listing for the (directory + line stem)
+// being completed in, so navigation/filter re-queries filter the
+// cached names instead of re-walking the directory. The one
+// refinement that genuinely needs metadata (the Unix exec bit behind
+// the LS_COLORS `ex` kind) is deferred until the candidate list is
+// built and sorted, and runs for at most [`EXEC_REFINE_LIMIT`]
+// regular-file candidates from the head of the list — the window a
+// completion grid can show first. Verdicts are memoized on the cache,
+// so one session pays an entry's stat at most once, and only for
+// entries near the head of the list.
+
+/// How many head-of-list regular-file candidates get their exec bit
+/// refined (one stat each) per directory listing. A completion grid
+/// shows at most a screenful (~100 cells); 128 covers the first
+/// screen with margin.
+pub(crate) const EXEC_REFINE_LIMIT: usize = 128;
+
+/// How many directory listings one session cache retains. Drilling
+/// into a subdirectory and back touches two; four leaves headroom
+/// without letting a long session accumulate walks.
+const MAX_CACHED_LISTINGS: usize = 4;
+
+/// Identifies the completion session a directory listing belongs to:
+/// the shell's current directory plus the input line up to the start
+/// of the word being completed. Re-queries while the user types or
+/// filters inside one word keep the key; starting a new word or a new
+/// command line changes it and retires every cached listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionKey {
+    current_dir: PathBuf,
+    line_stem: String,
+}
+
+impl SessionKey {
+    pub fn new(current_dir: PathBuf, line_stem: String) -> Self {
+        Self {
+            current_dir,
+            line_stem,
+        }
+    }
+}
+
+/// A directory entry's kind as the dirent reports it — the only
+/// classification enumeration is allowed to make (niubash#747).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListedKind {
+    Directory,
+    Symlink,
+    /// Any other typed entry (regular file, fifo, socket, …).
+    Other,
+    /// The dirent carried no usable type (`file_type()` errored).
+    Unknown,
+}
+
+impl ListedKind {
+    fn from_file_type(file_type: &fs::FileType) -> Self {
+        if file_type.is_dir() {
+            ListedKind::Directory
+        } else if file_type.is_symlink() {
+            ListedKind::Symlink
+        } else {
+            ListedKind::Other
+        }
+    }
+
+    /// The LS_COLORS kind this dirent kind alone proves — everything
+    /// except `Executable`, which needs the mode bits (a stat).
+    fn candidate_kind(self) -> CandidateKind {
+        match self {
+            ListedKind::Directory => CandidateKind::Directory,
+            ListedKind::Symlink => CandidateKind::Symlink,
+            ListedKind::Other | ListedKind::Unknown => CandidateKind::File,
+        }
+    }
+}
+
+/// One enumerated directory entry: a name and its dirent kind.
+#[derive(Debug, Clone)]
+pub(crate) struct ListedEntry {
+    pub name: String,
+    pub kind: ListedKind,
+}
+
+/// An enumerated directory: the stat-free name list one session
+/// reuses across re-queries.
+#[derive(Debug)]
+pub struct DirListing {
+    entries: Vec<ListedEntry>,
+    /// Directory mtime captured just after enumeration; a later
+    /// mismatch retires the listing (adding/removing/renaming an
+    /// entry bumps it). `None` when the platform reported no mtime —
+    /// such a listing is trusted for its session. Filesystems with
+    /// coarse mtime granularity can lag one tick behind a same-tick
+    /// change; that is the snapshot semantics one completion session
+    /// is allowed (procfs membership churn inside a session is the
+    /// same accepted case).
+    mtime: Option<SystemTime>,
+}
+
+impl DirListing {
+    pub(crate) fn entries(&self) -> &[ListedEntry] {
+        &self.entries
+    }
+
+    fn mtime_still_current(&self, dir: &Path) -> bool {
+        match self.mtime {
+            Some(recorded) => fs::metadata(dir)
+                .and_then(|md| md.modified())
+                .map(|now| now == recorded)
+                .unwrap_or(false),
+            None => true,
+        }
+    }
+}
+
+/// Enumerate one directory the stat-free way: names + dirent kinds.
+/// `None` when the directory cannot be read at all (the old walk's
+/// `read_dir` error case).
+fn enumerate_dir(dir: &Path) -> Option<DirListing> {
+    let read = fs::read_dir(dir).ok()?;
+    let mut entries = Vec::new();
+    for entry in read.flatten() {
+        let kind = match entry.file_type() {
+            Ok(ft) => ListedKind::from_file_type(&ft),
+            Err(_) => ListedKind::Unknown,
+        };
+        entries.push(ListedEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            kind,
+        });
+    }
+    let mtime = fs::metadata(dir).and_then(|md| md.modified()).ok();
+    Some(DirListing { entries, mtime })
+}
+
+/// Enumerate without a session cache (contexts built outside the
+/// completer's session plumbing, e.g. unit tests).
+pub(crate) fn uncached_listing(dir: &Path) -> Option<Arc<DirListing>> {
+    enumerate_dir(dir).map(Arc::new)
+}
+
+/// The shared directory-listing cache, owned by `CompletionState`
+/// and lent to each query through a [`DirCacheHandle`].
+#[derive(Debug, Default)]
+pub struct DirListingCache {
+    session: Option<SessionKey>,
+    listings: Vec<(PathBuf, Arc<DirListing>)>,
+    exec_verdicts: HashMap<(PathBuf, String), bool>,
+    enumerations: usize,
+    metadata_calls: usize,
+}
+
+/// One query's borrow of the shared listing cache, stamped with the
+/// session the query belongs to. A session change clears the cache
+/// on first touch.
+#[derive(Debug, Clone)]
+pub struct DirCacheHandle {
+    shared: Arc<Mutex<DirListingCache>>,
+    session: SessionKey,
+}
+
+impl DirCacheHandle {
+    /// A standalone handle with its own cache (tests, probes).
+    pub fn new(session: SessionKey) -> Self {
+        Self {
+            shared: Arc::new(Mutex::new(DirListingCache::default())),
+            session,
+        }
+    }
+
+    /// Wrap the completer state's shared cache for one session.
+    pub(crate) fn with_shared(shared: Arc<Mutex<DirListingCache>>, session: SessionKey) -> Self {
+        Self { shared, session }
+    }
+
+    /// The listing for `dir`, enumerating on first use in this
+    /// session and reusing it while the directory's mtime holds.
+    pub fn listing(&self, dir: &Path) -> Option<Arc<DirListing>> {
+        let Ok(mut cache) = self.shared.lock() else {
+            // A poisoned lock must not take path completion down:
+            // answer uncached.
+            return uncached_listing(dir);
+        };
+        if cache.session.as_ref() != Some(&self.session) {
+            cache.session = Some(self.session.clone());
+            cache.listings.clear();
+            cache.exec_verdicts.clear();
+        }
+        if let Some(pos) = cache.listings.iter().position(|(d, _)| d == dir) {
+            let (_, listing) = cache.listings.remove(pos);
+            if listing.mtime_still_current(dir) {
+                cache.listings.push((dir.to_path_buf(), listing.clone()));
+                return Some(listing);
+            }
+            // Stale (the directory changed under the session):
+            // fall through and re-enumerate.
+        }
+        let listing = Arc::new(enumerate_dir(dir)?);
+        cache.enumerations += 1;
+        cache.listings.push((dir.to_path_buf(), listing.clone()));
+        if cache.listings.len() > MAX_CACHED_LISTINGS {
+            cache.listings.remove(0);
+        }
+        Some(listing)
+    }
+
+    /// The exec verdict for one entry, memoized for the session.
+    /// Computing a verdict is the ONLY per-entry metadata call left
+    /// in completion, and it happens at most once per (directory,
+    /// name) per session.
+    pub fn exec_verdict(&self, dir: &Path, name: &str) -> bool {
+        let Ok(mut cache) = self.shared.lock() else {
+            return entry_is_executable(dir, name);
+        };
+        if cache.session.as_ref() != Some(&self.session) {
+            // Asked outside the listing session: answer uncached
+            // rather than polluting another session's memo.
+            return entry_is_executable(dir, name);
+        }
+        let key = (dir.to_path_buf(), name.to_string());
+        if let Some(verdict) = cache.exec_verdicts.get(&key) {
+            return *verdict;
+        }
+        #[cfg(unix)]
+        {
+            cache.metadata_calls += 1;
+        }
+        let verdict = entry_is_executable(dir, name);
+        cache.exec_verdicts.insert(key, verdict);
+        verdict
+    }
+
+    /// (enumerations, per-entry metadata calls) so far — the
+    /// structural evidence the niubash#747 pins assert on.
+    pub fn stats(&self) -> (usize, usize) {
+        match self.shared.lock() {
+            Ok(cache) => (cache.enumerations, cache.metadata_calls),
+            Err(_) => (0, 0),
+        }
+    }
+}
+
+/// Whether the entry at `dir`/`name` is executable, by the same
+/// platform rule command resolution uses (niubash#671/#743): on Unix,
+/// any execute bit (one stat, symlinks followed); on Windows, a
+/// PATHEXT suffix — a pure name check.
+pub(crate) fn entry_is_executable(dir: &Path, name: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(dir.join(name))
+            .map(|md| md.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        let _ = dir;
+        is_pathext_executable(name)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (dir, name);
+        false
+    }
+}
+
+/// niubash#747: the virtual filesystem roots. Entries under them are
+/// served name + dirent type only — no per-entry metadata, no
+/// per-entry style resolution — because their metadata is synthetic
+/// and expensive to materialize (on Windows /proc and /dev never
+/// reach the walk at all: the simulated-namespace tier answers from
+/// the engine registry; on Unix these are the real procfs/sysfs/dev
+/// trees the walk would otherwise stat entry by entry).
+fn is_virtual_tree(word: &str, base_dir: &Path) -> bool {
+    if let Some(dir) = logical_dir_of(word) {
+        if is_virtual_root_spelling(&dir) {
+            return true;
+        }
+    }
+    is_virtual_host_path(base_dir)
+}
+
+fn is_virtual_root_spelling(dir: &str) -> bool {
+    matches!(dir, "/proc" | "/sys" | "/dev")
+        || dir.starts_with("/proc/")
+        || dir.starts_with("/sys/")
+        || dir.starts_with("/dev/")
+}
+
+#[cfg(unix)]
+fn is_virtual_host_path(path: &Path) -> bool {
+    ["/proc", "/sys", "/dev"]
+        .iter()
+        .any(|root| path.starts_with(root))
+}
+
+#[cfg(not(unix))]
+fn is_virtual_host_path(_path: &Path) -> bool {
+    false
+}
 
 /// Path completer
 pub struct PathCompleter;
@@ -44,70 +359,85 @@ impl PathCompleter {
 
         let base_dir = Self::normalize_path(&query.base_dir);
 
-        // Check if base directory exists
-        if !base_dir.exists() || !base_dir.is_dir() {
-            return Ok(None);
+        // Check if base directory exists — one metadata call on the
+        // directory itself replaces the old exists()+is_dir() pair.
+        match fs::metadata(&base_dir) {
+            Ok(md) if md.is_dir() => {}
+            _ => return Ok(None),
         }
 
-        Self::complete_directory(
-            &base_dir,
-            &query,
-            directories_only,
-            context.behavior,
-            context.file_colors.as_ref(),
-        )
+        let virtual_tree = is_virtual_tree(word, &base_dir);
+        Self::complete_directory(&base_dir, &query, directories_only, context, virtual_tree)
     }
 
-    /// Complete entries in a directory
+    /// Complete entries in a directory, from the session's cached
+    /// stat-free listing (niubash#747).
     fn complete_directory(
         base_dir: &Path,
         query: &PathQuery,
         directories_only: bool,
-        behavior: CompletionBehavior,
-        file_colors: Option<&FileColors>,
+        context: &CompletionContext,
+        virtual_tree: bool,
     ) -> Result<Option<CompletionResult>> {
-        let entries = match fs::read_dir(base_dir) {
-            Ok(entries) => entries,
-            Err(_) => return Ok(None),
+        let listing = match &context.dir_cache {
+            Some(handle) => handle.listing(base_dir),
+            None => uncached_listing(base_dir),
         };
+        let Some(listing) = listing else {
+            return Ok(None);
+        };
+        let behavior = context.behavior;
+        let file_colors = context.file_colors.as_ref();
 
         let mut completions: Vec<PathCandidate> = Vec::new();
 
-        for entry in entries.flatten() {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-
-            let matched = name_matches(&query.prefix, &file_name, behavior);
-            if matched {
-                let file_type = match entry.file_type() {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
-                };
-                if directories_only && !file_type.is_dir() {
-                    continue;
-                }
-                if file_name.starts_with('.') && !query.prefix.starts_with('.') {
-                    continue;
-                }
-
-                let style = file_colors.and_then(|colors| {
-                    colors.style_for(candidate_kind(&entry, &file_type, &file_name), &file_name)
-                });
-                completions.push(PathCandidate::new(
-                    file_type.is_dir(),
-                    &query.display_prefix,
-                    &file_name,
-                    query.quote,
-                    style,
-                ));
+        for entry in listing.entries() {
+            // The old walk skipped entries whose dirent type could
+            // not be read; the listing records them as Unknown.
+            if entry.kind == ListedKind::Unknown {
+                continue;
             }
+            if !name_matches(&query.prefix, &entry.name, behavior) {
+                continue;
+            }
+            let is_dir = entry.kind == ListedKind::Directory;
+            if directories_only && !is_dir {
+                continue;
+            }
+            if entry.name.starts_with('.') && !query.prefix.starts_with('.') {
+                continue;
+            }
+
+            // niubash#747: styling from the dirent kind alone —
+            // directory, symlink and suffix/`fi` colors never needed
+            // a stat. Virtual trees skip style resolution entirely.
+            let style = if virtual_tree {
+                None
+            } else {
+                file_colors
+                    .and_then(|colors| colors.style_for(entry.kind.candidate_kind(), &entry.name))
+            };
+            completions.push(PathCandidate::new(
+                entry.kind,
+                &query.display_prefix,
+                &entry.name,
+                query.quote,
+                style,
+            ));
         }
 
         if completions.is_empty() {
-            Ok(None)
-        } else {
-            completions.sort();
-            Ok(Some(candidates_result(completions)))
+            return Ok(None);
         }
+        completions.sort();
+
+        // niubash#747: the exec-bit refinement — the only per-entry
+        // stat left — runs after the sort, over the head of the
+        // list, and only when a color table is in play.
+        if !virtual_tree && file_colors.is_some() {
+            refine_exec_styles(&mut completions, base_dir, context);
+        }
+        Ok(Some(candidates_result(completions)))
     }
 
     /// Normalize path for Windows/Unix compatibility
@@ -187,9 +517,52 @@ impl PathQuery {
     }
 }
 
+/// niubash#747: deferred exec-bit refinement. At most the first
+/// [`EXEC_REFINE_LIMIT`] regular-file candidates (in display order)
+/// get their kind upgraded from the dirent `File` to `Executable`
+/// when the entry actually carries an exec bit — the only verdict
+/// that needs metadata. Beyond the limit the candidate keeps its
+/// suffix/`fi` style: in a directory that large the unrefined tail
+/// is never on the grid's first screen, and the per-entry stat it
+/// would cost is exactly what this issue removes. Verdicts flow
+/// through the session cache (memoized, counted); contexts without
+/// one compute them directly.
+fn refine_exec_styles(
+    completions: &mut [PathCandidate],
+    base_dir: &Path,
+    context: &CompletionContext,
+) {
+    let Some(colors) = context.file_colors.as_ref() else {
+        return;
+    };
+    let mut refined = 0usize;
+    for candidate in completions.iter_mut() {
+        if refined >= EXEC_REFINE_LIMIT {
+            break;
+        }
+        if candidate.kind != ListedKind::Other {
+            continue;
+        }
+        refined += 1;
+        let is_exec = match &context.dir_cache {
+            Some(handle) => handle.exec_verdict(base_dir, &candidate.name),
+            None => entry_is_executable(base_dir, &candidate.name),
+        };
+        if is_exec {
+            candidate.style = colors.style_for(CandidateKind::Executable, &candidate.name);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PathCandidate {
     is_dir: bool,
+    /// The dirent kind the candidate was enumerated with
+    /// (niubash#747); not part of ordering.
+    kind: ListedKind,
+    /// The raw entry name (before prefix/escaping); not part of
+    /// ordering. The exec refinement stats by this name.
+    name: String,
     sort_key: String,
     completion: String,
     /// The LS_COLORS style this candidate paints with (niubash#743);
@@ -199,12 +572,13 @@ struct PathCandidate {
 
 impl PathCandidate {
     fn new(
-        is_dir: bool,
+        kind: ListedKind,
         display_prefix: &str,
         file_name: &str,
         quote: Option<char>,
         style: Option<nu_ansi_term::Style>,
     ) -> Self {
+        let is_dir = kind == ListedKind::Directory;
         let mut path = format!("{}{}", display_prefix, file_name);
         if is_dir {
             path.push('/');
@@ -212,6 +586,8 @@ impl PathCandidate {
         let completion = format_shell_path(&path, quote);
         Self {
             is_dir,
+            kind,
+            name: file_name.to_string(),
             sort_key: file_name.to_lowercase(),
             completion,
             style,
@@ -234,49 +610,9 @@ fn candidates_result(candidates: Vec<PathCandidate>) -> CompletionResult {
     )
 }
 
-/// The LS_COLORS kind a directory entry is (niubash#743): symlink and
-/// directory come from the entry's own file type; executable follows
-/// the same platform rule command resolution does — a PATHEXT suffix
-/// on Windows, any execute bit on Unix.
-fn candidate_kind(
-    entry: &fs::DirEntry,
-    file_type: &fs::FileType,
-    file_name: &str,
-) -> CandidateKind {
-    if file_type.is_symlink() {
-        return CandidateKind::Symlink;
-    }
-    if file_type.is_dir() {
-        return CandidateKind::Directory;
-    }
-    #[cfg(windows)]
-    {
-        let _ = entry;
-        if is_pathext_executable(file_name) {
-            return CandidateKind::Executable;
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if entry
-            .metadata()
-            .map(|md| md.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-        {
-            return CandidateKind::Executable;
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = entry;
-    }
-    CandidateKind::File
-}
-
 /// Windows executable-name check: the extension appears in PATHEXT —
-/// the same list the command completer's command-slot gate uses
-/// (`NiubashCompleter::is_command_file`).
+/// the same list the command completer's command-slot gate uses (both
+/// go through `entry_is_executable` since niubash#747).
 #[cfg(windows)]
 fn is_pathext_executable(file_name: &str) -> bool {
     let Some(ext) = file_name
@@ -481,7 +817,11 @@ fn simulated_namespace_candidates(
                 continue;
             }
             candidates.push(PathCandidate::new(
-                is_dir,
+                if is_dir {
+                    ListedKind::Directory
+                } else {
+                    ListedKind::Other
+                },
                 &query.display_prefix,
                 name,
                 query.quote,
@@ -535,7 +875,11 @@ fn dev_namespace_candidates(
                     continue;
                 }
                 candidates.push(PathCandidate::new(
-                    *is_dir,
+                    if *is_dir {
+                        ListedKind::Directory
+                    } else {
+                        ListedKind::Other
+                    },
                     &query.display_prefix,
                     name,
                     query.quote,
@@ -554,7 +898,7 @@ fn dev_namespace_candidates(
                     let name = fd.to_string();
                     if name_matches(&query.prefix, &name, context.behavior) {
                         candidates.push(PathCandidate::new(
-                            false,
+                            ListedKind::Other,
                             &query.display_prefix,
                             &name,
                             query.quote,
@@ -1185,5 +1529,305 @@ mod simulated_namespace_tests {
         let values = values(candidates);
         assert!(values.contains(&"/proc/meminfo".to_string()), "{values:?}");
         assert!(values.contains(&"/proc/self/".to_string()), "{values:?}");
+    }
+}
+
+#[cfg(test)]
+mod issue747_tests {
+    use super::*;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn set_exec(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+    }
+
+    /// A context completing `input` in `dir`, carrying the given
+    /// session-cache handle and (optionally) the default color table.
+    fn ctx(
+        dir: &Path,
+        input: &str,
+        handle: Option<DirCacheHandle>,
+        colors: bool,
+    ) -> CompletionContext {
+        let mut context = CompletionContext::new(dir.to_path_buf(), input.to_string(), input.len());
+        context.dir_cache = handle;
+        if colors {
+            context.file_colors = Some(FileColors::defaults());
+        }
+        context
+    }
+
+    fn handle_for(dir: &Path, stem: &str) -> DirCacheHandle {
+        DirCacheHandle::new(SessionKey::new(dir.to_path_buf(), stem.to_string()))
+    }
+
+    /// (d) Session reuse: two queries in one session (same directory,
+    /// same line stem, different typed prefixes) enumerate once; a
+    /// different session key re-enumerates; a subdirectory drilled
+    /// into within the session gets its own listing without retiring
+    /// the first.
+    #[test]
+    fn issue747_session_requeries_enumerate_once() {
+        let dir = unique_temp_dir("niubash-issue747-session");
+        std::fs::write(dir.join("alpha.txt"), "x").unwrap();
+        std::fs::write(dir.join("alpine.txt"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("nested.txt"), "x").unwrap();
+
+        let shared = Arc::new(Mutex::new(DirListingCache::default()));
+        let key = SessionKey::new(dir.clone(), "ls ".to_string());
+        let handle = DirCacheHandle::with_shared(shared.clone(), key);
+
+        let first = PathCompleter::complete(&ctx(&dir, "ls a", Some(handle.clone()), false))
+            .unwrap()
+            .expect("candidates");
+        assert!(first.completions.iter().any(|c| c == "alpha.txt"));
+        let second = PathCompleter::complete(&ctx(&dir, "ls al", Some(handle.clone()), false))
+            .unwrap()
+            .expect("candidates");
+        assert!(second.completions.iter().any(|c| c == "alpine.txt"));
+        assert_eq!(
+            handle.stats().0,
+            1,
+            "two queries in one session must enumerate the directory once"
+        );
+
+        // Drilling into a subdirectory enumerates THAT directory but
+        // keeps the first listing for the rest of the session.
+        let drilled = PathCompleter::complete(&ctx(&dir, "ls sub/", Some(handle.clone()), false))
+            .unwrap()
+            .expect("candidates");
+        assert!(drilled.completions.iter().any(|c| c == "sub/nested.txt"));
+        assert_eq!(handle.stats().0, 2);
+        let _ = PathCompleter::complete(&ctx(&dir, "ls a", Some(handle.clone()), false)).unwrap();
+        assert_eq!(
+            handle.stats().0,
+            2,
+            "the first listing survives a drill-down within the session"
+        );
+
+        // A new session key retires the cache.
+        let other =
+            DirCacheHandle::with_shared(shared, SessionKey::new(dir.clone(), "cat ".to_string()));
+        let _ = PathCompleter::complete(&ctx(&dir, "cat a", Some(other.clone()), false)).unwrap();
+        assert_eq!(other.stats().0, 3, "a new session re-enumerates");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// (b) Structural bound: refining exec styles over a 300-file
+    /// directory costs at most EXEC_REFINE_LIMIT per-entry metadata
+    /// calls — never one per entry — and the verdicts are memoized
+    /// for the rest of the session.
+    #[test]
+    fn issue747_metadata_calls_bounded_by_refine_limit() {
+        let dir = unique_temp_dir("niubash-issue747-bounded");
+        for i in 0..300 {
+            let path = dir.join(format!("f{i:03}"));
+            std::fs::write(&path, "x").unwrap();
+            if i % 2 == 0 {
+                set_exec(&path);
+            }
+        }
+        let handle = handle_for(&dir, "ls ");
+        let result = PathCompleter::complete(&ctx(&dir, "ls ", Some(handle.clone()), true))
+            .unwrap()
+            .expect("candidates");
+        assert_eq!(result.completions.len(), 300);
+        let (_, metadata_calls) = handle.stats();
+        assert!(
+            metadata_calls <= EXEC_REFINE_LIMIT,
+            "refinement must be capped at {EXEC_REFINE_LIMIT} stats, got {metadata_calls} for 300 entries"
+        );
+        #[cfg(unix)]
+        assert!(
+            metadata_calls > 0,
+            "unix refinement must actually run inside the window"
+        );
+
+        // Same session, same query: verdicts are memoized, no new stats.
+        let _ = PathCompleter::complete(&ctx(&dir, "ls ", Some(handle.clone()), true)).unwrap();
+        assert_eq!(handle.stats().1, metadata_calls);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// #743 behavior preserved inside the refinement window: an
+    /// executable regular file paints with the `ex` style, a plain
+    /// file with its suffix style, a directory with `di` — and the
+    /// documented niubash#747 delta: past the refinement window an
+    /// executable keeps its `fi`/suffix style instead of `ex`.
+    #[test]
+    fn issue747_exec_style_refined_at_head_unrefined_past_limit() {
+        let colors = FileColors::defaults();
+        let ex = colors.style_for(CandidateKind::Executable, "x");
+        let di = colors.style_for(CandidateKind::Directory, "x");
+
+        let dir = unique_temp_dir("niubash-issue747-style");
+        std::fs::create_dir_all(dir.join("adir")).unwrap();
+        // Sorts first among the regular files: inside the window.
+        let runme = dir.join("aarun");
+        std::fs::write(&runme, "x").unwrap();
+        set_exec(&runme);
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        // 200 plain files push the last-named executable past the
+        // refinement window (candidates sort dirs first, then names).
+        for i in 0..200 {
+            std::fs::write(dir.join(format!("m{i:03}")), "x").unwrap();
+        }
+        let late = dir.join("zzexec");
+        std::fs::write(&late, "x").unwrap();
+        set_exec(&late);
+
+        let handle = handle_for(&dir, "ls ");
+        let result = PathCompleter::complete(&ctx(&dir, "ls ", Some(handle), true))
+            .unwrap()
+            .expect("candidates");
+        let style_of = |name: &str| {
+            let idx = result
+                .completions
+                .iter()
+                .position(|c| c == name)
+                .unwrap_or_else(|| panic!("missing {name} in {:?}", result.completions));
+            result.styles[idx]
+        };
+        assert_eq!(style_of("adir/"), di);
+        #[cfg(unix)]
+        {
+            assert_eq!(style_of("aarun"), ex, "head executable keeps the ex style");
+            assert_ne!(
+                style_of("zzexec"),
+                ex,
+                "past the refinement window the ex upgrade is not paid for"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// (c) Virtual trees: spelling recognition, plus — on Unix, where
+    /// /proc is a real tree the walk serves — candidates come back
+    /// with dirent typing (dirs carry their slash), NO styles, and
+    /// zero per-entry metadata calls.
+    #[test]
+    fn issue747_virtual_tree_spellings() {
+        assert!(is_virtual_root_spelling("/proc"));
+        assert!(is_virtual_root_spelling("/proc/1"));
+        assert!(is_virtual_root_spelling("/sys"));
+        assert!(is_virtual_root_spelling("/sys/kernel"));
+        assert!(is_virtual_root_spelling("/dev"));
+        assert!(is_virtual_root_spelling("/dev/fd"));
+        assert!(!is_virtual_root_spelling("/"));
+        assert!(!is_virtual_root_spelling("/procx"));
+        assert!(!is_virtual_root_spelling("/home/proc"));
+        assert!(is_virtual_tree("/proc/", Path::new("/elsewhere")));
+        assert!(is_virtual_tree("/proc/1/ta", Path::new("/elsewhere")));
+        assert!(!is_virtual_tree("/et", Path::new("/")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue747_virtual_proc_walk_is_stat_free_and_unstyled() {
+        let proc_dir = Path::new("/proc");
+        if !proc_dir.is_dir() {
+            return;
+        }
+        // Word-anchored: completing /proc/ from elsewhere.
+        let handle = handle_for(Path::new("/"), "ls ");
+        let result = PathCompleter::complete(&ctx(
+            Path::new("/"),
+            "ls /proc/",
+            Some(handle.clone()),
+            true,
+        ))
+        .unwrap()
+        .expect("/proc must complete");
+        assert!(
+            result.completions.len() > 10,
+            "expected a real proc listing, got {:?}",
+            result.completions
+        );
+        assert!(
+            result.completions.iter().any(|c| c == "/proc/self/"),
+            "dirent typing survives: /proc/self is a directory candidate"
+        );
+        assert!(
+            result.styles.iter().all(|s| s.is_none()),
+            "virtual trees resolve no per-entry styles"
+        );
+        assert_eq!(
+            handle.stats().1,
+            0,
+            "virtual trees pay zero per-entry metadata calls"
+        );
+
+        // cwd-anchored: the shell is standing in /proc itself.
+        let handle = handle_for(proc_dir, "ls ");
+        let result = PathCompleter::complete(&ctx(proc_dir, "ls ", Some(handle.clone()), true))
+            .unwrap()
+            .expect("/proc must complete from inside");
+        assert!(result.styles.iter().all(|s| s.is_none()));
+        assert_eq!(handle.stats().1, 0);
+    }
+
+    /// Directory-mtime invalidation: a listing whose directory
+    /// changed is re-enumerated even inside one session.
+    #[test]
+    fn issue747_listing_invalidated_when_directory_changes() {
+        let dir = unique_temp_dir("niubash-issue747-invalidate");
+        std::fs::write(dir.join("one.txt"), "x").unwrap();
+        let handle = handle_for(&dir, "ls ");
+        let _ = PathCompleter::complete(&ctx(&dir, "ls ", Some(handle.clone()), false)).unwrap();
+        assert_eq!(handle.stats().0, 1);
+
+        // Force a distinct directory mtime (some filesystems tick
+        // coarsely) so the cached listing's validation token moves.
+        force_new_dir_mtime(&dir);
+        std::fs::write(dir.join("two.txt"), "x").unwrap();
+
+        let result = PathCompleter::complete(&ctx(&dir, "ls ", Some(handle.clone()), false))
+            .unwrap()
+            .expect("candidates");
+        assert_eq!(
+            handle.stats().0,
+            2,
+            "a changed directory must be re-enumerated within the session"
+        );
+        assert!(result.completions.iter().any(|c| c == "two.txt"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Move a directory's mtime using only std: creating and
+    /// removing an entry changes it on most filesystems, but coarse
+    /// ticks may not move it — churn with short sleeps until the
+    /// mtime actually differs (bounded).
+    fn force_new_dir_mtime(dir: &Path) {
+        let before = fs::metadata(dir).and_then(|md| md.modified()).ok();
+        for i in 0..50 {
+            let probe = dir.join(format!(".mtime-probe-{i}"));
+            std::fs::write(&probe, "x").unwrap();
+            let _ = std::fs::remove_file(&probe);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let now = fs::metadata(dir).and_then(|md| md.modified()).ok();
+            if now != before {
+                return;
+            }
+        }
     }
 }

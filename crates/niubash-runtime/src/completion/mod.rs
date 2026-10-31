@@ -82,6 +82,12 @@ pub struct CompletionContext {
     /// (`path`, the cwd command-slot overlay) paint candidates through
     /// it; `None` leaves candidates unstyled.
     pub file_colors: Option<FileColors>,
+    /// The session's directory-listing cache (niubash#747), lent by
+    /// the completer so the path completer and the cwd command-slot
+    /// overlay reuse one stat-free enumeration across a completion
+    /// session's re-queries. Contexts built outside the completer
+    /// keep `None` and enumerate uncached, exactly as before.
+    pub dir_cache: Option<crate::completion::path::DirCacheHandle>,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -118,6 +124,7 @@ impl CompletionContext {
             open_fds: Vec::new(),
             tmp_base: std::env::temp_dir(),
             file_colors: None,
+            dir_cache: None,
         }
     }
 
