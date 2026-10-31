@@ -495,6 +495,7 @@ impl Menu for GnuMenu {
 mod tests {
     use super::*;
     use reedline::{CompletionResult, Span, UndoBehavior};
+    use unicode_width::UnicodeWidthStr;
 
     /// A prefix completer that INCLUDES the exact typed word among its
     /// candidates — the shape niubash's real completer produces (reedline's
@@ -950,6 +951,193 @@ mod tests {
 
         // Empty input renders nothing.
         assert_eq!(render_list(&[], &[], 80, 10), "");
+    }
+
+    /// Strip CSI escape sequences (the only kind the menu styles emit)
+    /// so a rendered grid's visible widths can be measured.
+    fn strip_csi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                if chars.next() == Some('[') {
+                    for inner in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&inner) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    fn visible_width(text: &str) -> usize {
+        UnicodeWidthStr::width(strip_csi(text).as_str())
+    }
+
+    /// Build `count` display values whose widths cycle through
+    /// `lo..=hi` (deterministic, unsorted), each value a distinct
+    /// letter-run so grid cells stay recognizable in assertions.
+    fn spread_values(count: usize, lo: usize, hi: usize, tag: char) -> Vec<String> {
+        (0..count)
+            .map(|i| {
+                let w = lo + (i * 7) % (hi - lo + 1);
+                let mut s = format!("{tag}{i:03}");
+                while s.len() < w {
+                    s.push('x');
+                }
+                s
+            })
+            .collect()
+    }
+
+    #[test]
+    fn issue741_plain_geometry_stays_multi_column() {
+        // The healthy baseline the collapse must not disturb: 90
+        // candidates with display widths spread over 4..=28 (the
+        // issue's home-dir shape) lay out multi-column and render
+        // untruncated.
+        let values = spread_values(90, 4, 28, 'f');
+        let widths: Vec<usize> = values.iter().map(|v| v.width()).collect();
+        let (columns, _rows, _col_widths) = packed_column_layout(&widths, 120);
+        assert_eq!(columns, 4, "plain 90-item geometry at 120 columns");
+        let (columns, _rows, _col_widths) = packed_column_layout(&widths, 200);
+        assert_eq!(columns, 6, "plain 90-item geometry at 200 columns");
+
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let rendered = render_list_packed(&refs, &widths, 120, 30);
+        assert!(
+            !rendered.contains('…'),
+            "no cell is truncated in the plain geometry:\n{rendered}"
+        );
+        for line in rendered.split("\r\n") {
+            assert!(visible_width(line) <= 120, "line fits the terminal: {line:?}");
+        }
+        let first_line = rendered.split("\r\n").next().unwrap();
+        assert!(
+            first_line.matches('f').count() >= 2,
+            "multiple candidates share the first row:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn issue741_single_wide_outlier_keeps_at_least_two_columns() {
+        // One display-width-100 candidate among 20..=28-wide
+        // companions: any second column next to the outlier's busts
+        // the uncapped budget at both 120 and 80, so the pre-fix
+        // packed layout bottoms out at one column.
+        let mut values = spread_values(89, 20, 28, 'o');
+        values.push("z".repeat(100));
+        let widths: Vec<usize> = values.iter().map(|v| v.width()).collect();
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        for terminal in [120usize, 80] {
+            let (columns, _rows, _col_widths) = packed_column_layout(&widths, terminal);
+            assert!(
+                columns >= 2,
+                "outlier set keeps >= 2 columns at {terminal}: got {columns}"
+            );
+            let rendered = render_list_packed(&refs, &widths, terminal, 100);
+            assert!(
+                rendered.contains('…'),
+                "the outlier is visibly truncated at {terminal}:\n{rendered}"
+            );
+            for line in rendered.split("\r\n") {
+                assert!(
+                    visible_width(line) <= terminal,
+                    "rendered line fits {terminal} columns: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue741_prefix_inflated_set_keeps_at_least_two_columns() {
+        // Every display value carries the same 40-cell prefix (the
+        // typed directory part of the completed word): widths
+        // 50..=68 across the whole set. Each column's max is ~68, so
+        // two columns already bust 120 uncapped — the pre-fix layout
+        // returns a single column.
+        let prefix = "d/".repeat(20);
+        let values: Vec<String> = spread_values(90, 10, 28, 'n')
+            .iter()
+            .map(|name| format!("{prefix}{name}"))
+            .collect();
+        let widths: Vec<usize> = values.iter().map(|v| v.width()).collect();
+        assert!(widths.iter().all(|w| (50..=68).contains(w)));
+        let (columns, _rows, _col_widths) = packed_column_layout(&widths, 120);
+        assert!(
+            columns >= 2,
+            "prefix-inflated set keeps >= 2 columns: got {columns}"
+        );
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let rendered = render_list_packed(&refs, &widths, 120, 100);
+        assert!(
+            rendered.contains('…'),
+            "overlong cells are visibly truncated:\n{rendered}"
+        );
+        for line in rendered.split("\r\n") {
+            assert!(
+                visible_width(line) <= 120,
+                "rendered line fits the terminal: {line:?}"
+            );
+        }
+        // Middle truncation keeps the tail of each display value —
+        // the file-name part after the shared prefix — on screen.
+        assert!(
+            rendered.contains("n089"),
+            "a truncated cell still shows its distinguishing tail:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn issue741_styled_outlier_truncates_without_splitting_escapes() {
+        // CycleMenu pre-styles cells (LS_COLORS / selection reverse):
+        // the styled string's escapes must survive truncation whole,
+        // with only the visible text cut.
+        let styled = format!("\u{1b}[1;34m{}\u{1b}[0m", "y".repeat(100));
+        let mut values: Vec<String> = spread_values(11, 20, 28, 's');
+        values.push(styled);
+        let widths: Vec<usize> = values
+            .iter()
+            .map(|v| strip_csi(v).width())
+            .collect();
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let rendered = render_list_packed(&refs, &widths, 80, 100);
+        assert!(
+            rendered.contains("\u{1b}[1;34m"),
+            "the style prefix survives intact:\n{rendered:?}"
+        );
+        assert!(
+            rendered.contains("\u{1b}[0m"),
+            "the style suffix survives intact:\n{rendered:?}"
+        );
+        assert!(rendered.contains('…'), "truncation is marked:\n{rendered:?}");
+        for line in rendered.split("\r\n") {
+            assert!(
+                visible_width(line) <= 80,
+                "rendered line fits the terminal: {line:?}"
+            );
+        }
+        let (columns, _rows, _col_widths) = packed_column_layout(&widths, 80);
+        assert!(columns >= 2, "styled outlier set keeps >= 2 columns");
+    }
+
+    #[test]
+    fn issue741_lone_overwide_candidate_truncates_to_the_terminal() {
+        // A single candidate wider than the terminal: one column is
+        // correct, but the cell must be cut to the terminal width
+        // instead of overflowing the line.
+        let values = ["x".repeat(200)];
+        let widths = [200usize];
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let (columns, _rows, _col_widths) = packed_column_layout(&widths, 80);
+        assert_eq!(columns, 1);
+        let rendered = render_list_packed(&refs, &widths, 80, 10);
+        assert!(rendered.contains('…'), "the lone cell is marked truncated");
+        assert_eq!(visible_width(&rendered), 80);
     }
 
     #[test]

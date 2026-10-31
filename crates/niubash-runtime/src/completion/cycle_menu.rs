@@ -1272,6 +1272,48 @@ mod tests {
         );
     }
 
+    // ─── niubash#741: the rendered grid must not collapse ─────────
+
+    #[test]
+    fn issue741_menu_string_keeps_grid_with_wide_outlier() {
+        // 30 candidates of width 24 plus one of width 100, at the
+        // menu's default 80-column terminal: uncapped, any second
+        // column next to the outlier's busts the budget and the grid
+        // renders one-per-line (the #741 collapse). The layout must
+        // truncate the outlier and keep at least two columns.
+        let mut names: Vec<String> = (0..30)
+            .map(|i| {
+                let mut s = format!("c{i:02}");
+                while s.len() < 24 {
+                    s.push('x');
+                }
+                s
+            })
+            .collect();
+        names.push(format!("c{}", "z".repeat(99)));
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut completer = PrefixCompleter::new(&refs);
+        let (mut menu, _session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        let mut editor = editor_with("c");
+        activate(&mut menu, &mut editor, &mut completer);
+
+        let rendered = menu.menu_string(100, false);
+        assert!(
+            rendered.contains('…'),
+            "the wide outlier is visibly truncated:\n{rendered}"
+        );
+        let heads: Vec<String> = (0..30).map(|i| format!("c{i:02}")).collect();
+        let multi = rendered
+            .split("\r\n")
+            .filter(|line| heads.iter().filter(|h| line.contains(h.as_str())).count() >= 2)
+            .count();
+        assert!(
+            multi >= 1,
+            "at least one grid row carries 2+ candidates (multi-column):\n{rendered}"
+        );
+    }
+
     #[test]
     fn issue743_no_ansi_mode_strips_styles() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
