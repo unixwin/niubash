@@ -19,7 +19,7 @@ use crate::shell::Shell;
 use crate::syntax_highlighting::NiubashSyntaxHighlighter;
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    default_vi_visual_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode,
+    default_vi_visual_keybindings, ColumnarMenu, Direction, EditCommand, EditMode, Emacs, KeyCode,
     KeyCombination, KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode,
     PromptHistorySearch, PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
     Signal, ValidationResult, Validator, Vi,
@@ -2751,6 +2751,65 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "expand-or-complete" | "complete-word" => Some(completion_event()),
         "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
+        // GNU kill-ring and word-transform functions the fork's
+        // `EditCommand` set delivers directly.
+        "yank-pop" => Some(edit_event(EditCommand::YankPop)),
+        "transpose-words" => Some(edit_event(EditCommand::SwapWords)),
+        "capitalize-word" => Some(edit_event(EditCommand::CapitalizeWord)),
+        "revert-line" => Some(edit_event(EditCommand::RevertLine)),
+        "delete-horizontal-space" => Some(edit_event(EditCommand::DeleteHorizontalSpace)),
+        // GNU keeps the emacs and vi spellings for the same
+        // "delete back to the last path separator" gesture.
+        "unix-filename-rubout" | "vi-filename-rubout" => {
+            Some(edit_event(EditCommand::CutFilenameLeft))
+        }
+        "exchange-point-and-mark" => Some(edit_event(EditCommand::SwapCursorAndAnchor)),
+        // GNU `tab-insert` is a literal TAB in the buffer (readline's
+        // `rl_tab_insert`), not completion.
+        "tab-insert" => Some(edit_event(EditCommand::InsertChar('\t'))),
+        // Verbatim next-key insertion (`rl_quoted_insert`).
+        "quoted-insert" => Some(ReedlineEvent::QuotedInsert),
+        // Accept the line and preload the following history entry
+        // (`rl_operate_and_get_next`, C-o).
+        "operate-and-get-next" => Some(ReedlineEvent::OperateAndGetNext),
+        // Insert-key toggle; `None` flips, matching GNU's no-argument
+        // `rl_overwrite_mode`.
+        "overwrite-mode" => Some(ReedlineEvent::OverwriteMode(None)),
+        // GNU keyboard-macro trio (C-x ( / C-x ) / C-x e).
+        "start-kbd-macro" => Some(ReedlineEvent::StartKbdMacro),
+        "end-kbd-macro" => Some(ReedlineEvent::EndKbdMacro),
+        "call-last-kbd-macro" => Some(ReedlineEvent::CallLastKbdMacro),
+        // GNU `character-search` (C-]) / `character-search-backward`
+        // (M-C-]): the next key is the search target.
+        "character-search" => Some(ReedlineEvent::CharSearch {
+            direction: Direction::Forward,
+        }),
+        "character-search-backward" => Some(ReedlineEvent::CharSearch {
+            direction: Direction::Backward,
+        }),
+        // GNU `yank-last-arg` (M-.): `None` is GNU's `'$'` — the last
+        // argument. `yank-nth-arg` defaults to argument 1; explicit
+        // counts reach the editor through `WithArg`.
+        "yank-last-arg" => Some(ReedlineEvent::YankLastArg { count: None }),
+        "yank-nth-arg" => Some(ReedlineEvent::YankNthArg { count: 1 }),
+        // Numeric-argument accumulation (M-0..M-9 / M-- / C-u). `None`
+        // is GNU's `M--` negate.
+        "digit-argument" => Some(ReedlineEvent::DigitArgument(None)),
+        "universal-argument" => Some(ReedlineEvent::UniversalArgument),
+        // GNU `clear-display` (M-C-l) scrolls the screen so the line
+        // sits at the top — scrollback clear, not the `clear-screen`
+        // repaint above.
+        "clear-display" => Some(ReedlineEvent::ClearScrollback),
+        // GNU `edit-and-execute-command` (C-x C-e): open the line in
+        // $VISUAL/$EDITOR.
+        "edit-and-execute-command" => Some(ReedlineEvent::OpenEditor),
+        // GNU `insert-comment` (M-#): prepend `#` and accept the line —
+        // a composite, so a Multiple.
+        "insert-comment" => Some(ReedlineEvent::Multiple(vec![
+            edit_event(EditCommand::MoveToLineStart { select: false }),
+            edit_event(EditCommand::InsertString("#".to_string())),
+            ReedlineEvent::Enter,
+        ])),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -5243,6 +5302,126 @@ mod tests {
             native_widget_event("no_such_readline_fn"),
             Some(ReedlineEvent::ExecuteHostCommand(_))
         ));
+    }
+
+    /// Second niubash#630 batch: readline functions deliverable only since
+    /// the reedline fork gained `Suspend`/`QuotedInsert`/`OverwriteMode`/
+    /// `CharSearch`/the yank-arg pair/`OperateAndGetNext`/the kbd-macro
+    /// trio/the numeric-argument events/`ClearScrollback`/`OpenEditor` and
+    /// the `EditCommand` additions (`YankPop`, `SwapWords`,
+    /// `CapitalizeWord`, `SwapCursorAndAnchor`, `RevertLine`,
+    /// `CutFilenameLeft`, `DeleteHorizontalSpace`). Every arm below must
+    /// produce the real event shape, not the unknown-widget sentinel.
+    #[test]
+    fn native_widget_maps_fork_delivered_gnu_readline_names() {
+        // EditCommand-backed arms.
+        assert_eq!(
+            native_widget_event("yank-pop"),
+            Some(edit_event(EditCommand::YankPop))
+        );
+        assert_eq!(
+            native_widget_event("transpose-words"),
+            Some(edit_event(EditCommand::SwapWords))
+        );
+        assert_eq!(
+            native_widget_event("capitalize-word"),
+            Some(edit_event(EditCommand::CapitalizeWord))
+        );
+        assert_eq!(
+            native_widget_event("exchange-point-and-mark"),
+            Some(edit_event(EditCommand::SwapCursorAndAnchor))
+        );
+        assert_eq!(
+            native_widget_event("revert-line"),
+            Some(edit_event(EditCommand::RevertLine))
+        );
+        assert_eq!(
+            native_widget_event("delete-horizontal-space"),
+            Some(edit_event(EditCommand::DeleteHorizontalSpace))
+        );
+        for widget in ["unix-filename-rubout", "vi-filename-rubout"] {
+            assert_eq!(
+                native_widget_event(widget),
+                Some(edit_event(EditCommand::CutFilenameLeft))
+            );
+        }
+        assert_eq!(
+            native_widget_event("tab-insert"),
+            Some(edit_event(EditCommand::InsertChar('\t')))
+        );
+
+        // ReedlineEvent-backed arms.
+        assert_eq!(
+            native_widget_event("quoted-insert"),
+            Some(ReedlineEvent::QuotedInsert)
+        );
+        assert_eq!(
+            native_widget_event("operate-and-get-next"),
+            Some(ReedlineEvent::OperateAndGetNext)
+        );
+        assert_eq!(
+            native_widget_event("overwrite-mode"),
+            Some(ReedlineEvent::OverwriteMode(None))
+        );
+        assert_eq!(
+            native_widget_event("start-kbd-macro"),
+            Some(ReedlineEvent::StartKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("end-kbd-macro"),
+            Some(ReedlineEvent::EndKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("call-last-kbd-macro"),
+            Some(ReedlineEvent::CallLastKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("character-search"),
+            Some(ReedlineEvent::CharSearch {
+                direction: Direction::Forward
+            })
+        );
+        assert_eq!(
+            native_widget_event("character-search-backward"),
+            Some(ReedlineEvent::CharSearch {
+                direction: Direction::Backward
+            })
+        );
+        assert_eq!(
+            native_widget_event("yank-last-arg"),
+            Some(ReedlineEvent::YankLastArg { count: None })
+        );
+        assert_eq!(
+            native_widget_event("yank-nth-arg"),
+            Some(ReedlineEvent::YankNthArg { count: 1 })
+        );
+        assert_eq!(
+            native_widget_event("digit-argument"),
+            Some(ReedlineEvent::DigitArgument(None))
+        );
+        assert_eq!(
+            native_widget_event("universal-argument"),
+            Some(ReedlineEvent::UniversalArgument)
+        );
+        assert_eq!(
+            native_widget_event("clear-display"),
+            Some(ReedlineEvent::ClearScrollback)
+        );
+        assert_eq!(
+            native_widget_event("edit-and-execute-command"),
+            Some(ReedlineEvent::OpenEditor)
+        );
+
+        // `insert-comment` is the composite: go to line start, insert
+        // `#`, accept the line.
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                edit_event(EditCommand::MoveToLineStart { select: false }),
+                edit_event(EditCommand::InsertString("#".to_string())),
+                ReedlineEvent::Enter,
+            ]))
+        );
     }
 
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {

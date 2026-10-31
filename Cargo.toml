@@ -97,4 +97,4 @@ rubash = { path = "../rubash" }
 # Both are needed for bash's default bind table to land 25/25.
 # Retirement tracked on niubash#706.
 [patch.crates-io]
-reedline = { git = "https://github.com/caomengxuan666/reedline", rev = "b116d5a" }
+reedline = { git = "https://github.com/unixwin/ruline", rev = "83ac10b" }
