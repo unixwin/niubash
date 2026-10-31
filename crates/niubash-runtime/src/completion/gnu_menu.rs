@@ -154,6 +154,44 @@ pub(crate) fn column_layout(
     (columns, rows)
 }
 
+/// niubash#741 — the zsh-family packed layout the interactive grid uses.
+///
+/// Entries still fill column-major like GNU, but each column's field is
+/// the widest entry *in that column* (zsh's `list-packed` geometry), so
+/// one long name cannot flatten the whole grid to a single column the
+/// way the uniform field does — GNU math at `field = longest + gutter`
+/// yields one column as soon as the longest candidate passes half the
+/// terminal width, which is exactly the collapse this issue reports.
+/// The largest column count whose rows still fit the terminal wins.
+///
+/// Returns `(columns, rows, col_widths)` — `col_widths[c]` is the max
+/// display width among column `c`'s entries (gutter NOT included).
+pub(crate) fn packed_column_layout(
+    widths: &[usize],
+    terminal_columns: usize,
+) -> (usize, usize, Vec<usize>) {
+    let count = widths.len().max(1);
+    // More columns than the terminal has cells could never fit; the
+    // gutter alone costs one cell per extra column.
+    let n_max = count.min(terminal_columns.max(1));
+    for n in (1..=n_max).rev() {
+        let rows = count.div_ceil(n);
+        let mut col_widths = vec![0usize; n];
+        for (index, width) in widths.iter().enumerate() {
+            let col = index / rows;
+            col_widths[col] = col_widths[col].max(*width);
+        }
+        let total: usize =
+            col_widths.iter().sum::<usize>() + GNU_COLUMN_GUTTER * n.saturating_sub(1);
+        if total <= terminal_columns {
+            return (n, rows, col_widths);
+        }
+    }
+    // Even one column does not fit (a name wider than the terminal):
+    // the single column it must take anyway.
+    (1, count, vec![widths.iter().copied().max().unwrap_or(0)])
+}
+
 /// Render the candidate grid. `widths` are the per-candidate display widths
 /// (ANSI-stripped) parallel to `values`; entries fill column-major (down
 /// first, like bash); trailing padding is trimmed at line ends and the
@@ -176,12 +214,45 @@ pub(crate) fn render_list(
         widths.iter().copied().max().unwrap_or(0),
         terminal_columns,
     );
-    let rows = rows.min(available_lines.max(1) as usize).max(1);
     let field = widths.iter().copied().max().unwrap_or(0).max(1) + GNU_COLUMN_GUTTER;
+    render_grid(values, widths, &vec![field; columns], rows, available_lines)
+}
+
+/// niubash#741: same column-major render as [`render_list`], on the
+/// packed layout — each column pads to ITS OWN widest entry.
+pub(crate) fn render_list_packed(
+    values: &[&str],
+    widths: &[usize],
+    terminal_columns: usize,
+    available_lines: u16,
+) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let (columns, rows, col_widths) = packed_column_layout(widths, terminal_columns);
+    let fields: Vec<usize> = col_widths
+        .iter()
+        .map(|w| (*w).max(1) + GNU_COLUMN_GUTTER)
+        .collect();
+    debug_assert_eq!(fields.len(), columns);
+    render_grid(values, widths, &fields, rows, available_lines)
+}
+
+/// Shared grid renderer: `fields[col]` is column `col`'s field width
+/// (entry width + gutter). `rows` is the unclipped layout depth; the
+/// emitted grid is clipped to `available_lines` rows.
+fn render_grid(
+    values: &[&str],
+    widths: &[usize],
+    fields: &[usize],
+    rows: usize,
+    available_lines: u16,
+) -> String {
+    let rows = rows.min(available_lines.max(1) as usize).max(1);
     let mut out = String::new();
     for row in 0..rows {
         let mut line = String::new();
-        for col in 0..columns {
+        for (col, field) in fields.iter().enumerate() {
             let index = col * rows + row;
             if index >= values.len() {
                 continue;
@@ -189,7 +260,7 @@ pub(crate) fn render_list(
             let cell_width = widths.get(index).copied().unwrap_or(0);
             let pad = field.saturating_sub(cell_width).max(GNU_COLUMN_GUTTER);
             line.push_str(values[index]);
-            let last_in_row = col + 1 == columns || index + 1 >= values.len();
+            let last_in_row = col + 1 == fields.len() || index + 1 >= values.len();
             if !last_in_row {
                 for _ in 0..pad {
                     line.push(' ');
@@ -816,6 +887,47 @@ mod tests {
             (10, 1),
             "columns never exceed the candidate count"
         );
+    }
+
+    #[test]
+    fn packed_layout_keeps_a_long_outlier_from_flattening_the_grid() {
+        // niubash#741's reproducer shape: one 40-char name among short
+        // ones. GNU uniform math at field=42 fits 120/42 = 2 columns;
+        // the packed layout isolates the outlier in its own column and
+        // keeps far more.
+        let mut widths: Vec<usize> = (0..30).map(|_| 4).collect();
+        widths.push(40);
+        let (columns, rows, col_widths) = packed_column_layout(&widths, 120);
+        assert!(columns >= 3, "packed layout stays multi-column: {columns}");
+        assert_eq!(col_widths.len(), columns);
+        assert_eq!(
+            *col_widths.iter().max().unwrap(),
+            40,
+            "the outlier's column carries its own width"
+        );
+        assert_eq!(rows, 31_usize.div_ceil(columns));
+
+        // Rendered: short names share rows — never a one-per-line list.
+        let values: Vec<String> = (0..30).map(|i| format!("f{i:02}")).collect();
+        let mut values: Vec<&str> = values.iter().map(String::as_str).collect();
+        values.push("veryverylongcandidatenamethatkeepsgoing1234");
+        let mut widths: Vec<usize> = (0..30).map(|_| 3).collect();
+        widths.push(42);
+        let rendered = render_list_packed(&values, &widths, 120, 30);
+        let first_line = rendered.lines().next().unwrap();
+        assert!(
+            first_line.matches("f0").count() + first_line.matches("f1").count() >= 2,
+            "multiple short candidates share a row:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn packed_layout_single_column_when_nothing_else_fits() {
+        // Every candidate wider than half the terminal: even packed
+        // geometry is one column — same floor as GNU.
+        let widths = [60usize, 62, 58];
+        let (columns, _rows, _) = packed_column_layout(&widths, 80);
+        assert_eq!(columns, 1);
     }
 
     #[test]

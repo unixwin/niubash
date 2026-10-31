@@ -1,9 +1,10 @@
 //! niubash#631 regression: the completion *interaction* axis on a real
-//! terminal — `completion.interaction = cycle` (the default since
-//! 1.5.0) cycles candidates into the line with TAB, Enter accepts the
-//! candidate in the line and runs it in the same press, Esc rolls the
-//! line back to its pre-completion snapshot, and a leftover pre-1.5.0
-//! config.toml prints the one-time migration notice (it is never read).
+//! terminal — `completion.interaction = cycle` (opt-in since
+//! niubash#742 made `select` the default) cycles candidates into the
+//! line with TAB, Enter accepts the candidate in the line and runs it
+//! in the same press, Esc rolls the line back to its pre-completion
+//! snapshot, and a leftover pre-1.5.0 config.toml prints the one-time
+//! migration notice (it is never read).
 //!
 //! The candidate vehicle is `cd` into one of two same-prefix
 //! directories, asserted through `pwd`: builtins only (the driver
@@ -36,9 +37,20 @@ fn write_candidates(s: &NiuSession) {
 
 /// One cycle round in a fresh session: type `cd cyc-`, press TAB
 /// `tabs` times, press Enter, and return the session so the caller
-/// can assert where the shell landed.
+/// can assert where the shell landed. The sessions pin the `cycle`
+/// interaction explicitly — since niubash#742 the built-in default is
+/// `select`, and this target pins *cycle's* contract.
 fn cycle_round(prefix: &str, tabs: usize) -> NiuSession {
-    let mut s = NiuSession::spawn(prefix);
+    let mut s = NiuSession::spawn_custom(
+        prefix,
+        &driver::default_rc(),
+        &[(
+            "NIU_COMPLETION_INTERACTION".to_string(),
+            "cycle".to_string(),
+        )],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
     write_candidates(&s);
     s.wait_ready();
     s.send("cd cyc-");
@@ -58,17 +70,18 @@ fn cycle_round(prefix: &str, tabs: usize) -> NiuSession {
     s
 }
 
-/// The cycle default end to end: TAB #1 puts the first candidate in
-/// the line and Enter runs it in the same press (no commit step — the
-/// insert interaction's two-Enter shape is the other contract, pinned
-/// by interactive.rs's #486 test under `insert`); TAB #2 reaches the
-/// second candidate; TAB #3 wraps the full loop back to the first.
+/// The cycle interaction end to end: TAB #1 puts the first candidate
+/// in the line and Enter runs it in the same press (no commit step —
+/// the insert interaction's two-Enter shape is the other contract,
+/// pinned by interactive.rs's #486 test under `insert`); TAB #2
+/// reaches the second candidate; TAB #3 wraps the full loop back to
+/// the first.
 #[test]
 fn issue631_pty_cycle_tab_loops_candidates_and_enter_runs_the_pick() {
     if !require_pty_or_skip("issue631_pty_cycle_tab_loops_candidates_and_enter_runs_the_pick") {
         return;
     }
-    // No NIU_COMPLETION_INTERACTION anywhere: the default IS cycle.
+    // NIU_COMPLETION_INTERACTION=cycle pinned in `cycle_round`.
     let mut s = cycle_round("cycle-loop-631-a", 1);
     s.send_line("pwd");
     s.expect("/cyc-one");
@@ -95,10 +108,18 @@ fn issue631_pty_esc_rolls_back_to_the_pre_completion_line() {
     if !require_pty_or_skip("issue631_pty_esc_rolls_back_to_the_pre_completion_line") {
         return;
     }
-    let mut s = NiuSession::spawn("cycle-esc-631");
+    let mut s = NiuSession::spawn_custom(
+        "cycle-esc-631",
+        &driver::default_rc(),
+        &[(
+            "NIU_COMPLETION_INTERACTION".to_string(),
+            "cycle".to_string(),
+        )],
+        (120, 30),
+        DEFAULT_TIMEOUT,
+    );
     write_candidates(&s);
     s.wait_ready();
-    let start = s.start().to_string_lossy().into_owned();
     s.send("cd cyc-");
     s.send(TAB);
     s.expect("cyc-one");
@@ -110,9 +131,9 @@ fn issue631_pty_esc_rolls_back_to_the_pre_completion_line() {
     s.expect_prompt();
     s.send_line("pwd");
     // The pwd line is the start directory itself — not a candidate.
-    // (No trailing newline in the needle: the raw stream terminates
-    // the line with CRLF.)
-    s.expect(&start);
+    // (POSIX persona form: `C:\foo` renders as `/c/foo`, so needle the
+    // trailing `/start`, not the Windows path.)
+    s.expect("/start");
     s.expect_prompt();
 }
 
@@ -146,7 +167,7 @@ fn issue631_pty_legacy_config_prints_migration_notice() {
     std::thread::sleep(SETTLE);
     let transcript = s.transcript();
     assert!(
-        transcript.contains("niu config migrate"),
+        transcript.contains("is no longer read") && transcript.contains("niu config migr"),
         "the startup notice must name the migration command:\n{transcript}"
     );
     assert!(
