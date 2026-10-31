@@ -158,7 +158,8 @@ impl RubashHistoryProvider {
     /// HAS one); without it, the write is the plain face, unchanged.
     fn write_history_face(&mut self, path: &str, timestamps: Option<&[String]>) -> io::Result<()> {
         ensure_history_file_accessible(std::path::Path::new(path));
-        let entries = rubash::history::HistoryProvider::entries(self)?;
+        use rubash::history::HistoryProvider as _;
+        let entries = self.entries()?;
         // The stamps run parallel to the entry list (the trait
         // contract); a slot the caller did not cover reads as the
         // empty stamp — the entry is written without a stamp line.
