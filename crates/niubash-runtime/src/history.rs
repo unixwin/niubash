@@ -4326,16 +4326,19 @@ mod tests {
             "# not a stamp\necho seed\necho live\n",
             "the live sync writes plain lines only"
         );
+        // -a to a foreign file appends this session's pending lines
+        // (here only the live one), again as plain lines. This runs
+        // BEFORE the -w below: -w commits the pending set, after which
+        // -a has nothing to append (and, per histfile.c's append open
+        // without O_CREAT, would not create the target either).
+        let foreign = temp.path().join("foreign");
+        provider.append_history(foreign.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "echo live\n");
         let out = temp.path().join("written");
         provider.write_history(out.to_str().unwrap()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&out).unwrap(),
             "# not a stamp\necho seed\necho live\n"
         );
-        // -a to a foreign file appends this session's pending lines
-        // (here only the live one), again as plain lines.
-        let foreign = temp.path().join("foreign");
-        provider.append_history(foreign.to_str().unwrap()).unwrap();
-        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "echo live\n");
     }
 }
