@@ -818,101 +818,6 @@ impl Completer for NiubashCompleter {
 }
 
 #[cfg(test)]
-mod probe747_temp {
-    use super::*;
-    use std::time::Instant;
-
-    fn median_ms(mut samples: Vec<f64>) -> f64 {
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        samples[samples.len() / 2]
-    }
-
-    fn time_calls(label: &str, n: usize, mut f: impl FnMut()) {
-        // 2 warmups, then n timed calls; report median + min.
-        for _ in 0..2 {
-            f();
-        }
-        let mut samples = Vec::new();
-        for _ in 0..n {
-            let t = Instant::now();
-            f();
-            samples.push(t.elapsed().as_secs_f64() * 1000.0);
-        }
-        let min = samples.iter().copied().fold(f64::INFINITY, f64::min);
-        eprintln!(
-            "PROBE747 {label}: median {:.2} ms, min {:.2} ms (n={n})",
-            median_ms(samples.clone()),
-            min
-        );
-    }
-
-    fn completer_with(cwd: &str, plugins: bool) -> NiubashCompleter {
-        let mut state = CompletionState::new(PathBuf::from(cwd));
-        if plugins {
-            state.load_completion_dirs(&[]);
-        }
-        NiubashCompleter::new(Arc::new(Mutex::new(state)))
-    }
-
-    #[test]
-    fn probe747_cold_pr() {
-        // Run alone (filter probe747_cold_pr) for a cold process view:
-        // the /pr query is the FIRST completion this completer serves.
-        let mut c = completer_with("/", true);
-        let t = Instant::now();
-        let out = c.complete("ls /pr", 6);
-        eprintln!(
-            "PROBE747 cold ls /pr (plugins): {:.2} ms, {} suggestions",
-            t.elapsed().as_secs_f64() * 1000.0,
-            out.len()
-        );
-    }
-
-    #[test]
-    fn probe747_steady() {
-        // External plugin construction cost (EMBEDDED_DEFS parse rides here).
-        let t = Instant::now();
-        let _p = crate::completion::external::ExternalCompletionPlugin::new();
-        eprintln!(
-            "PROBE747 ExternalCompletionPlugin::new: {:.2} ms",
-            t.elapsed().as_secs_f64() * 1000.0
-        );
-
-        let mut bare = completer_with("/", false);
-        time_calls("bare ls /pr", 15, || {
-            std::hint::black_box(bare.complete("ls /pr", 6));
-        });
-
-        let mut plug = completer_with("/", true);
-        time_calls("plugins ls /pr", 15, || {
-            std::hint::black_box(plug.complete("ls /pr", 6));
-        });
-        time_calls("plugins ls <blank> cwd=/", 15, || {
-            std::hint::black_box(plug.complete("ls ", 3));
-        });
-
-        let mut usrbin = completer_with("/usr/bin", true);
-        time_calls("plugins ls <blank> cwd=/usr/bin", 9, || {
-            std::hint::black_box(usrbin.complete("ls ", 3));
-        });
-
-        // PathCompleter alone for the /pr word.
-        let ctx = CompletionContext::new(PathBuf::from("/"), "ls /pr".to_string(), 6);
-        time_calls("PathCompleter ls /pr", 15, || {
-            std::hint::black_box(PathCompleter::complete(&ctx).ok());
-        });
-
-        // LS_COLORS resolution per query.
-        let env: HashMap<String, String> = HashMap::new();
-        time_calls("FileColors::from_env_vars x200", 15, || {
-            for _ in 0..200 {
-                std::hint::black_box(crate::completion::FileColors::from_env_vars(&env));
-            }
-        });
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1055,37 +960,59 @@ niu_git_comp() {
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
-    /// niubash#747 (a): candidate generation over a 2000-entry
+    /// niubash#747 (a): candidate generation over a 6000-entry
     /// directory must not scale with per-entry stats. The old
-    /// enumeration paid ~90µs/entry on the issue's machine class
-    /// (≈180 ms here); the budget below sits well under that shape
-    /// while leaving the stat-free enumeration (plus the bounded
-    /// head refinement) generous headroom on a loaded machine. The
-    /// hard guarantee is the metadata-counter pin in path.rs; this
-    /// is the end-to-end smoke shape.
+    /// enumeration paid ~36–90µs/entry (≈220–550 ms for this
+    /// directory). The hard guarantee here
+    /// is structural — the session cache's metadata counter stays
+    /// within the refinement window — with a loose clock bound as
+    /// an end-to-end smoke shape (parallel test load makes tight
+    /// budgets meaningless; the counter does not care).
     #[test]
     fn issue747_large_directory_candidate_generation_budget() {
         let temp_dir = unique_temp_dir("niubash-issue747-perf");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        for i in 0..2000 {
+        for i in 0..6000 {
             std::fs::write(temp_dir.join(format!("entry{i:04}")), "x").unwrap();
         }
 
         let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let probe = {
+            let state = state.lock().unwrap();
+            DirCacheHandle::with_shared(
+                state.dir_cache.clone(),
+                SessionKey::new(temp_dir.clone(), String::new()),
+            )
+        };
         let mut completer = NiubashCompleter::new(state);
         let start = std::time::Instant::now();
         let suggestions = completer.complete("ls ", 3);
         let elapsed = start.elapsed();
         assert_eq!(
             suggestions.len(),
-            2000,
+            6000,
             "every entry must be offered, got {}",
             suggestions.len()
         );
+        // The load-bearing assertion is structural, not the clock:
+        // one enumeration, and per-entry metadata bounded by the
+        // refinement window — a return of the per-entry stat shape
+        // (2000 stats) fails here on any machine, loaded or not.
+        let (enumerations, metadata_calls) = probe.stats();
+        assert_eq!(enumerations, 1, "one session query enumerates once");
         assert!(
-            elapsed < std::time::Duration::from_millis(120),
-            "2000-entry candidate generation took {elapsed:?}; \
-             the per-entry stat shape (~180 ms) must not come back"
+            metadata_calls as usize <= crate::completion::path::EXEC_REFINE_LIMIT,
+            "per-entry metadata must stay bounded by the refinement \
+             window, got {metadata_calls} for 6000 entries"
+        );
+        // The clock is a smoke bound only, sized for a loaded CI
+        // machine: the pre-fix shape measured ~180 ms idle for this
+        // directory on the issue's machine class and grows with the
+        // entry count, while the stat-free shape stays flat.
+        assert!(
+            elapsed < std::time::Duration::from_millis(600),
+            "6000-entry candidate generation took {elapsed:?}; \
+             the per-entry stat shape must not come back"
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);

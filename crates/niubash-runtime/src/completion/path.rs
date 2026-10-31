@@ -1764,8 +1764,12 @@ mod issue747_tests {
             result.completions
         );
         assert!(
-            result.completions.iter().any(|c| c == "/proc/self/"),
-            "dirent typing survives: /proc/self is a directory candidate"
+            result.completions.iter().any(|c| c == "/proc/sys/"),
+            "dirent typing survives: /proc/sys is a directory candidate"
+        );
+        assert!(
+            result.completions.iter().any(|c| c == "/proc/self"),
+            "dirent typing survives: /proc/self is a symlink candidate (no slash)"
         );
         assert!(
             result.styles.iter().all(|s| s.is_none()),
