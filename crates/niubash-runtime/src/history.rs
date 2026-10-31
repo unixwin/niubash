@@ -2362,7 +2362,7 @@ impl LiveFileBackedHistory {
                 // caller-supplied one when present, else a fresh
                 // record-time stamp — the value the reload below reads
                 // back as this entry's stamp either way.
-                let armed = Self::write_timestamps_armed(&state);
+                let armed = Self::write_timestamps_armed(state);
                 let stamp = stamp_override.clone().unwrap_or_else(now_stamp);
                 let appended = if armed && !stamp.is_empty() {
                     append_line_to_file(&path, &stamp).is_ok()
