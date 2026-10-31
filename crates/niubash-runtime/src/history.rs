@@ -1674,13 +1674,20 @@ impl LiveFileBackedHistory {
         // niubash#642: the snapshot's decoded lines are what the ledger
         // captures as the cleared base set — post-refresh the reader
         // equals the file, so the snapshot IS the file the clear sees.
-        let snapshot_lines: Vec<String> = snapshot
+        // niubash#733: the snapshot is grouped into entry+stamp units
+        // first — the cleared base set is an ENTRY view (a stamp line
+        // is the following entry's timestamp, histfile.c:140, never an
+        // entry), matching the store's list, which no longer contains
+        // stamp lines since niubash#703.
+        let snapshot_units: Vec<HistoryFileUnit> = snapshot
             .as_deref()
             .map(|bytes| {
-                String::from_utf8_lossy(bytes)
-                    .lines()
-                    .map(decode_history_line)
-                    .collect()
+                group_history_file_units(
+                    String::from_utf8_lossy(bytes)
+                        .lines()
+                        .map(|line| line.to_string())
+                        .collect(),
+                )
             })
             .unwrap_or_default();
         // Reedline's `clear` emptied the list AND removed the backing
@@ -1719,7 +1726,18 @@ impl LiveFileBackedHistory {
         // niubash#614: the same call records the view hide, applied to
         // this instance now and to the editor twin at its next query.
         if let Ok(mut ledger) = ledger.lock() {
-            ledger.note_cleared(view_len_at_clear, &snapshot_lines);
+            // niubash#642 + niubash#733: the base lines this clear
+            // retires are the entries of the snapshot units inside the
+            // startup base window — the ledger keeps that window in
+            // RAW lines, so translate it against the snapshot's units.
+            // Lines another shell appended after startup sit past the
+            // window and are never this session's to remove.
+            let base_window = units_within_raw_prefix(&snapshot_units, ledger.base_lines);
+            let cleared_base: Vec<String> = snapshot_units[..base_window]
+                .iter()
+                .filter_map(|unit| unit.entry.as_deref().map(decode_history_line))
+                .collect();
+            ledger.note_cleared(view_len_at_clear, cleared_base);
         }
         Self::sync_view(state, &ledger);
         outcome
@@ -1979,25 +1997,41 @@ impl LiveFileBackedHistory {
         if !removed_ok {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
-                    let total = contents.lines().count();
                     let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
-                    let mut kept = file_lines;
+                    let total = file_lines.len();
+                    // niubash#733: removal runs on entry+stamp units,
+                    // not raw lines — a `#<epoch>` line is the
+                    // FOLLOWING entry's timestamp (histfile.c:140
+                    // HIST_TIMESTAMP_START), so removing an entry by
+                    // raw text alone would orphan its stamp onto the
+                    // next surviving entry. The ledger's base stays a
+                    // raw line count; translate its boundary into unit
+                    // coordinates on this file (the first pass removes
+                    // nothing before the base, so the boundary is the
+                    // same for the second pass's window).
+                    let units = group_history_file_units(file_lines);
+                    let base_units = units_within_raw_prefix(&units, base_lines);
+                    let mut kept = units;
                     if !cleared.is_empty() {
-                        kept = remove_cleared_lines(kept, &cleared, base_lines);
+                        kept = remove_cleared_units(kept, &cleared, base_units);
                     }
                     if !histappend && !cleared_base.is_empty() {
-                        let window = base_lines.min(kept.len());
-                        let tail: Vec<String> = kept.drain(window..).collect();
-                        let mut prefix = remove_cleared_lines(kept, &cleared_base, 0);
+                        let window = base_units.min(kept.len());
+                        let tail: Vec<HistoryFileUnit> = kept.drain(window..).collect();
+                        let mut prefix = remove_cleared_units(kept, &cleared_base, 0);
                         prefix.extend(tail);
                         kept = prefix;
                     }
-                    let removed = total - kept.len();
+                    let kept_lines: Vec<String> = kept
+                        .into_iter()
+                        .flat_map(HistoryFileUnit::into_lines)
+                        .collect();
+                    let removed = total - kept_lines.len();
                     if removed > 0 {
-                        let rewritten = if kept.is_empty() {
+                        let rewritten = if kept_lines.is_empty() {
                             String::new()
                         } else {
-                            kept.join("\n") + "\n"
+                            kept_lines.join("\n") + "\n"
                         };
                         match std::fs::write(&path, rewritten) {
                             Ok(()) => {
@@ -2031,13 +2065,39 @@ impl LiveFileBackedHistory {
         if let Some(limit) = histfilesize {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
-                    let lines: Vec<&str> = contents.lines().collect();
-                    if lines.len() > limit {
-                        let kept = &lines[lines.len() - limit..];
-                        let rewritten = if kept.is_empty() {
+                    let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
+                    // niubash#733: HISTFILESIZE counts ENTRIES, not raw
+                    // lines — GNU's history_truncate_file decrements
+                    // its counter only at a newline whose next line
+                    // does not start a timestamp (histfile.c:636) and
+                    // starts the kept tail at the first kept entry's
+                    // stamp line (histfile.c:651). Group into
+                    // entry+stamp units and keep the last `limit`
+                    // entry-carrying units, whole.
+                    let units = group_history_file_units(file_lines);
+                    let entries = units.iter().filter(|unit| unit.entry.is_some()).count();
+                    if entries > limit {
+                        let mut to_skip = entries - limit;
+                        let mut cut = units.len();
+                        for (index, unit) in units.iter().enumerate() {
+                            if unit.entry.is_none() {
+                                continue;
+                            }
+                            if to_skip == 0 {
+                                cut = index;
+                                break;
+                            }
+                            to_skip -= 1;
+                        }
+                        let kept_lines: Vec<String> = units
+                            .into_iter()
+                            .skip(cut)
+                            .flat_map(HistoryFileUnit::into_lines)
+                            .collect();
+                        let rewritten = if kept_lines.is_empty() {
                             String::new()
                         } else {
-                            kept.join("\n") + "\n"
+                            kept_lines.join("\n") + "\n"
                         };
                         match std::fs::write(&path, rewritten) {
                             Ok(()) => {
@@ -2482,15 +2542,100 @@ fn count_file_lines(path: &Path) -> usize {
 /// `start` predate the session and are never its own; a cleared line with
 /// no occurrence left is simply gone already. Multiplicity is honored:
 /// clearing the same line twice removes two occurrences.
-fn remove_cleared_lines(file_lines: Vec<String>, cleared: &[String], start: usize) -> Vec<String> {
+/// niubash#733: one entry of the raw history file as the session-end
+/// reconcile sees it: the entry's raw line plus the `#<epoch>` stamp
+/// lines preceding it. The reader consumes a stamp line as the
+/// FOLLOWING entry's timestamp (histfile.c:140 HIST_TIMESTAMP_START;
+/// see `is_stamp_line`), so in the raw file a stamp and its entry are
+/// one unit: the reconcile must never remove or truncate one without
+/// the other — an orphaned stamp re-pairs with the next surviving
+/// entry at the next load. Stamp lines with no following entry (a
+/// dangling tail a foreign writer left) form a unit with no entry:
+/// cleared text never matches it, and HISTFILESIZE never counts it.
+struct HistoryFileUnit {
+    /// The stamp lines preceding the entry, in file order.
+    stamps: Vec<String>,
+    /// The entry's raw (encoded) line, when one follows the stamps.
+    entry: Option<String>,
+}
+
+impl HistoryFileUnit {
+    /// Raw file lines this unit occupies.
+    fn raw_len(&self) -> usize {
+        self.stamps.len() + usize::from(self.entry.is_some())
+    }
+
+    /// The unit's raw lines, in file order.
+    fn into_lines(self) -> impl Iterator<Item = String> {
+        self.stamps.into_iter().chain(self.entry)
+    }
+}
+
+/// niubash#733: group raw history-file lines into entry+stamp units.
+/// The grouping partitions the input exactly — flattening the units
+/// reproduces the original line sequence — so on a file without
+/// stamp lines every unit is a single entry line and the reconcile
+/// behaves exactly as the raw-line model did.
+fn group_history_file_units(lines: Vec<String>) -> Vec<HistoryFileUnit> {
+    let mut units = Vec::new();
+    let mut stamps: Vec<String> = Vec::new();
+    for line in lines {
+        if is_stamp_line(&line) {
+            stamps.push(line);
+        } else {
+            units.push(HistoryFileUnit {
+                stamps: std::mem::take(&mut stamps),
+                entry: Some(line),
+            });
+        }
+    }
+    if !stamps.is_empty() {
+        units.push(HistoryFileUnit {
+            stamps,
+            entry: None,
+        });
+    }
+    units
+}
+
+/// niubash#733: how many units sit completely inside the first
+/// `raw_lines` raw lines — the unit coordinate of a raw-line boundary
+/// (the session ledger keeps its base window in raw lines,
+/// `SessionLedger::base_lines`; the reconcile translates it against
+/// the actual file it is about to rewrite).
+fn units_within_raw_prefix(units: &[HistoryFileUnit], raw_lines: usize) -> usize {
+    let mut covered = 0usize;
+    let mut count = 0usize;
+    for unit in units {
+        if covered + unit.raw_len() > raw_lines {
+            break;
+        }
+        covered += unit.raw_len();
+        count += 1;
+    }
+    count
+}
+
+/// niubash#733: cleared-line removal on entry+stamp units — the
+/// forward-subsequence match runs on entry lines (encoded, exactly
+/// as the raw-line model matched them), and a matched unit leaves
+/// with all its stamp lines.
+fn remove_cleared_units(
+    units: Vec<HistoryFileUnit>,
+    cleared: &[String],
+    start: usize,
+) -> Vec<HistoryFileUnit> {
     let encoded: Vec<String> = cleared.iter().map(|c| encode_history_line(c)).collect();
-    let mut out = Vec::with_capacity(file_lines.len());
+    let mut out = Vec::with_capacity(units.len());
     let mut next = 0usize;
-    for (index, line) in file_lines.into_iter().enumerate() {
-        if index >= start && next < encoded.len() && line == encoded[next] {
+    for (index, unit) in units.into_iter().enumerate() {
+        if index >= start
+            && next < encoded.len()
+            && unit.entry.as_deref() == Some(encoded[next].as_str())
+        {
             next += 1;
         } else {
-            out.push(line);
+            out.push(unit);
         }
     }
     out
@@ -2755,18 +2900,20 @@ impl SessionLedger {
     /// list equal to the file, so that count is a prefix length in each
     /// instance's raw list; lines appended afterwards (by any session)
     /// land past the prefix and stay visible.
-    fn note_cleared(&mut self, view_len: usize, file_lines_now: &[String]) {
+    fn note_cleared(&mut self, view_len: usize, cleared_base: Vec<String>) {
         self.cleared.extend(self.pending.drain(..).map(|p| p.text));
-        // niubash#642: the base lines this clear retires are the file
-        // snapshot's first `base_lines` entries — the window the base
-        // occupied at startup. Lines another shell appended after
-        // startup sit past the window and are never this session's to
-        // remove. Replace, don't extend: the file is unchanged since
-        // any earlier clear in this session, so its snapshot captures
-        // the same base window again (extending would double-count a
-        // text and could eat a foreign same-text line at flush time).
-        let base_window = self.base_lines.min(file_lines_now.len());
-        self.cleared_base = file_lines_now[..base_window].to_vec();
+        // niubash#642: the base lines this clear retires are the
+        // caller-computed base window (see `clear_memory`): the file
+        // snapshot's entries inside the window the base occupied at
+        // startup, in entry units (niubash#733 — stamp lines are not
+        // entries and never enter the set). Lines another shell
+        // appended after startup sit past the window and are never
+        // this session's to remove. Replace, don't extend: the file
+        // is unchanged since any earlier clear in this session, so
+        // its snapshot captures the same base window again (extending
+        // would double-count a text and could eat a foreign same-text
+        // line at flush time).
+        self.cleared_base = cleared_base;
         self.view_hidden_len = view_len;
         self.view_gen += 1;
     }
@@ -4000,6 +4147,121 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "seed4\nseed5\nn1\nn2\n"
         );
+    }
+
+    #[test]
+    fn issue733_session_end_clear_removes_stamps_with_their_entries() {
+        // niubash#733: the backing file carries `#<epoch>` stamp lines
+        // (shared with real bash, or written by the timestamped
+        // faces). The session-end clear must remove each cleared entry
+        // WITH its stamp line: entry+stamp is one unit (histfile.c:140
+        // — the reader pairs a stamp with the FOLLOWING entry), so a
+        // stamp left behind would re-pair with the next surviving
+        // entry at the next load. The foreign stamped entry appended
+        // after the clear keeps its own stamp, and no stamp from the
+        // cleared base survives.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "#1700000001\necho first\n#1700000002\necho second\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        assert_eq!(
+            provider.entries().unwrap(),
+            ["echo first", "echo second"],
+            "stamp lines load as their entries' timestamps, not entries"
+        );
+        provider.append("echo doomed".to_string()).unwrap();
+        provider.clear().unwrap();
+        // Another shell appends a stamped entry after the clear.
+        let mut contents = std::fs::read_to_string(&path).unwrap();
+        contents.push_str("#1700000009\necho foreign\n");
+        std::fs::write(&path, contents).unwrap();
+        provider.append("echo kept".to_string()).unwrap();
+
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#1700000009\necho foreign\necho kept\n",
+            "cleared entries leave with their stamps; the foreign \
+             entry keeps its own; no orphan stamp re-pairs with \
+             `echo kept`"
+        );
+
+        // And the next session loads exactly the survivors.
+        let mut next = RubashHistoryProvider::with_file(100, path.clone());
+        assert_eq!(next.entries().unwrap(), ["echo foreign", "echo kept"]);
+    }
+
+    #[test]
+    fn issue733_histfilesize_counts_entries_not_stamp_lines() {
+        // niubash#733: HISTFILESIZE=2 on a stamped file of four
+        // entries (eight raw lines) keeps the last TWO ENTRIES. The
+        // raw-line count would keep a single entry (its stamp line
+        // plus the entry line) — GNU counts command lines
+        // (histfile.c history_truncate_file: the counter decrements
+        // only at a newline whose next line starts no timestamp).
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(
+            &path,
+            "#1700000001\necho one\n#1700000002\necho two\n\
+             #1700000003\necho three\n#1700000004\necho four\n",
+        )
+        .unwrap();
+        let provider = provider_with_settings(&path, |settings| {
+            settings.histfilesize = Some(2);
+        });
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#1700000003\necho three\n#1700000004\necho four\n"
+        );
+    }
+
+    #[test]
+    fn issue733_histfilesize_keeps_the_first_kept_entrys_stamp() {
+        // niubash#733: HISTFILESIZE=3 on the same stamped file — the
+        // kept tail starts at the first kept entry's STAMP line
+        // (histfile.c:651 walks the cut back to a timestamp start),
+        // never at the bare entry line: a cut between a stamp and its
+        // entry would leave the entry to be re-paired with whatever
+        // stamp precedes it at the next load.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(
+            &path,
+            "#1700000001\necho one\n#1700000002\necho two\n\
+             #1700000003\necho three\n#1700000004\necho four\n",
+        )
+        .unwrap();
+        let provider = provider_with_settings(&path, |settings| {
+            settings.histfilesize = Some(3);
+        });
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#1700000002\necho two\n#1700000003\necho three\n\
+             #1700000004\necho four\n"
+        );
+    }
+
+    #[test]
+    fn issue733_unstamped_file_reconcile_is_byte_identical() {
+        // niubash#733 control: without stamp lines every unit is a
+        // bare entry line and the reconcile is the raw-line model —
+        // a clear followed by a session-end write on a plain file
+        // lands byte-identically to the pre-#733 behavior.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "seed0\nseed1\nseed2\nseed3\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        provider.append("echo doomed".to_string()).unwrap();
+        provider.clear().unwrap();
+        provider.append("echo kept".to_string()).unwrap();
+
+        drop(provider);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo kept\n");
     }
 
     #[test]
