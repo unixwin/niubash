@@ -140,6 +140,180 @@ impl RubashHistoryProvider {
     pub(crate) fn settings(&self) -> Arc<Mutex<HistorySettings>> {
         self.inner.settings()
     }
+
+    /// niubash#703: exact-list rewrite whose entries keep their own
+    /// stamps (`read_history`'s fallback for a timestamped file).
+    fn replace_stamped(&mut self, entries: Vec<String>, stamps: Vec<String>) -> io::Result<()> {
+        self.inner
+            .replace_all_stamped(entries, stamps)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    /// The `history -w` face, plain or timestamped (niubash#703).
+    /// With `timestamps` present — the engine passes it only while
+    /// HISTTIMEFORMAT exists as a variable (variables.c sv_histtimefmt
+    /// arms `history_write_timestamps`) — each entry that carries a
+    /// stamp is preceded by its `#<epoch>` line (histfile.c:738
+    /// history_write_slow: the stamp is written only when the entry
+    /// HAS one); without it, the write is the plain face, unchanged.
+    fn write_history_face(&mut self, path: &str, timestamps: Option<&[String]>) -> io::Result<()> {
+        ensure_history_file_accessible(std::path::Path::new(path));
+        let entries = rubash::history::HistoryProvider::entries(self)?;
+        // The stamps run parallel to the entry list (the trait
+        // contract); a slot the caller did not cover reads as the
+        // empty stamp — the entry is written without a stamp line.
+        let mut pairs: Vec<(String, String)> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let stamp = timestamps
+                    .and_then(|stamps| stamps.get(index))
+                    .cloned()
+                    .unwrap_or_default();
+                (entry, stamp)
+            })
+            .collect();
+        // niubash#646: GNU's write_history truncates the written file
+        // to HISTFILESIZE lines (histfile.c history_write); the
+        // limit counts command lines and a kept entry's stamp line
+        // travels with it (histfile.c:633 `lines +=
+        // history_write_timestamps`), so the tail cut applies to
+        // pairs, and the ledger reset below counts what was written.
+        pairs = match self.inner.settings().lock() {
+            Ok(settings) => match settings.histfilesize {
+                Some(limit) if pairs.len() > limit => pairs[pairs.len() - limit..].to_vec(),
+                _ => pairs,
+            },
+            Err(_) => pairs,
+        };
+        if pairs.is_empty() {
+            std::fs::write(path, "")?;
+        } else {
+            let mut lines: Vec<String> = Vec::new();
+            for (entry, stamp) in &pairs {
+                if !stamp.is_empty() {
+                    // The stamp line is written raw: `#<epoch>` is
+                    // already its file shape.
+                    lines.push(stamp.clone());
+                }
+                // Encode embedded newlines the way reedline stores
+                // them, so a multi-line entry survives the round
+                // trip (the old raw join wrote literal newlines into
+                // the file).
+                lines.push(encode_history_line(entry));
+            }
+            std::fs::write(path, lines.join("\n") + "\n")?;
+        }
+        // niubash#569: -w commits this session's pending lines. To the
+        // backing file it is an authoritative rewrite, so the cleared
+        // set resets too and the base moves to the rewritten file; to a
+        // foreign file only the pending set commits (the backing file
+        // still holds the cleared lines for the session-end removal).
+        let requested = std::path::Path::new(path);
+        let is_backing = self
+            .inner
+            .backing_file()
+            .is_some_and(|backing| backing == requested);
+        let ledger = self.inner.ledger();
+        if let Ok(mut ledger) = ledger.lock() {
+            if is_backing {
+                ledger.reset(pairs.len());
+            } else {
+                ledger.commit();
+            }
+        }
+        Ok(())
+    }
+
+    /// The `history -a` face, plain or timestamped (niubash#703).
+    ///
+    /// niubash#569/#570: -a appends this session's pending lines
+    /// (bashhist.c appends history_lines_this_session), judged by the
+    /// ledger, not by content. The old content check subtracted any
+    /// line already present in the file — which dropped a second
+    /// session's same-text line (#570) — and it re-appended lines the
+    /// live sync had already written, which is what broke the bash-it
+    /// theme interlock (niubash#182): codeword/gitline run
+    /// `history -a && history -c && history -r` from PROMPT_COMMAND
+    /// on every prompt, and re-appending the whole list doubled the
+    /// file each cycle, which `history -r` then loaded back into
+    /// memory — a self-amplifying loop that wedged the session.
+    /// To the backing file, only lines the live sync has not yet
+    /// written are appended (the common case is a no-op); to a foreign
+    /// file, all pending lines are appended (the foreign file never
+    /// saw the live sync). Either way the pending set commits: a
+    /// later -c must not remove lines -a already wrote.
+    ///
+    /// With `stamped` set, each appended entry that carries a stamp
+    /// is preceded by its `#<epoch>` line (histfile.c:815
+    /// history_append — a stamped entry is two file lines). The
+    /// stamps are the pending lines' own, captured at their saves:
+    /// the trait contract leaves the appended tail to the host's
+    /// pending-set accounting, and those are the same stamps the
+    /// engine's `timestamps` argument reports for the tail entries.
+    fn append_history_face(&mut self, path: &str, stamped: bool) -> io::Result<()> {
+        ensure_history_file_accessible(std::path::Path::new(path));
+        let requested = std::path::Path::new(path);
+        let is_backing = self
+            .inner
+            .backing_file()
+            .is_some_and(|backing| backing == requested);
+        let ledger = self.inner.ledger();
+        let to_append: Vec<(String, String)> = {
+            let ledger = ledger
+                .lock()
+                .map_err(|_| io::Error::other("history ledger lock poisoned"))?;
+            if is_backing {
+                ledger
+                    .pending
+                    .iter()
+                    .filter(|p| !p.synced)
+                    .map(|p| (p.text.clone(), p.stamp.clone()))
+                    .collect()
+            } else {
+                ledger
+                    .pending
+                    .iter()
+                    .map(|p| (p.text.clone(), p.stamp.clone()))
+                    .collect()
+            }
+        };
+        if to_append.is_empty() {
+            // Still a commit: -a commits the pending set even when
+            // there is nothing new to write (the common all-synced case).
+            // Returning early without committing would leave the lines
+            // pending, so a later -c would remove lines -a already
+            // covered — the exact bug this ledger exists to prevent.
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.commit();
+            }
+            return Ok(());
+        }
+        for (line, stamp) in &to_append {
+            if stamped && !stamp.is_empty() {
+                // append_line_to_file encodes its argument; a stamp
+                // contains no newline, so the encoding is the identity
+                // and the line lands byte-exact.
+                append_line_to_file(std::path::Path::new(path), stamp)?;
+            }
+            append_line_to_file(std::path::Path::new(path), line)?;
+        }
+        if is_backing {
+            // The backing file grew outside the reader's accounting:
+            // rebuild it so a later reedline sync does not re-append
+            // these lines (the #182 dedupe hazard). An accounting
+            // rebuild, not a re-read: a clear's view hide survives it
+            // (niubash#614).
+            let _ = self.inner.reload_from_file_keeping_view();
+        }
+        // Commit only after the append succeeded: on failure the lines
+        // stay pending, so a later -a or the session-end write can still
+        // place them (committing first would lose them from the file).
+        if let Ok(mut ledger) = ledger.lock() {
+            ledger.commit();
+        }
+        Ok(())
+    }
 }
 
 /// The GNU history variables that govern the REPL record/list/file faces,
@@ -155,14 +329,16 @@ impl RubashHistoryProvider {
 /// raw (the two pattern/control strings) or pre-parsed with the engine's
 /// own mapping (`SessionHistory::size_limit`, variables.c sv_histsize).
 ///
-/// HISTTIMEFORMAT is deliberately absent: it has no consumer on this
-/// side of the host/engine boundary. The engine renders timestamps from
-/// its own session list (`SessionHistory::timestamps`), the
-/// `HistoryProvider` contract carries plain entry strings only, and
-/// reedline's file format (one encoded line per entry, no stamp lines)
-/// cannot persist the `#<epoch>` side lines GNU writes — so a host-side
-/// value would be a write-only reader. The REPL timestamp face waits on
-/// the provider contract growing a stamp channel (niubash#622).
+/// HISTTIMEFORMAT is deliberately absent — not for lack of a
+/// consumer, but because its arming decision lives on the engine
+/// side of the boundary: the engine invokes the provider's
+/// timestamped faces only while the variable exists (variables.c
+/// sv_histtimefmt: `history_write_timestamps = (v != 0)`), passing
+/// the stamps through the `HistoryProvider` stamp channel
+/// (rubash#2157, wired on this side by niubash#703), and the store's
+/// reader consumes `#<epoch>` lines under histfile.c's model with
+/// no host-side arming bit. A snapshot here would be a second,
+/// diverging arming source for the same face.
 #[derive(Clone)]
 pub(crate) struct HistorySettings {
     /// Raw `HISTCONTROL` value (colon-separated tokens).
@@ -253,47 +429,24 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
     }
 
     fn write_history(&mut self, path: &str) -> io::Result<()> {
-        ensure_history_file_accessible(std::path::Path::new(path));
-        let entries = self.entries()?;
-        // niubash#646: GNU's write_history truncates the written file
-        // to HISTFILESIZE lines (histfile.c history_write); with one
-        // line per entry, that is the entry list's tail, and the
-        // ledger reset below counts what was actually written.
-        let entries = match self.inner.settings().lock() {
-            Ok(settings) => match settings.histfilesize {
-                Some(limit) if entries.len() > limit => entries[entries.len() - limit..].to_vec(),
-                _ => entries,
-            },
-            Err(_) => entries,
-        };
-        if entries.is_empty() {
-            std::fs::write(path, "")?;
-        } else {
-            // Encode embedded newlines the way reedline stores them, so
-            // a multi-line entry survives the round trip (the old raw
-            // join wrote literal newlines into the file).
-            let encoded: Vec<String> = entries.iter().map(|e| encode_history_line(e)).collect();
-            std::fs::write(path, encoded.join("\n") + "\n")?;
+        self.write_history_face(path, None)
+    }
+
+    fn entry_timestamps(&mut self) -> Vec<String> {
+        // niubash#703: the host side of the rubash#2157 stamp channel —
+        // the store's stamps for the current list view, parallel to
+        // `entries()`.
+        self.inner.view_stamps()
+    }
+
+    fn write_history_timestamped(&mut self, path: &str, timestamps: &[String]) -> io::Result<()> {
+        // The engine calls this only while HISTTIMEFORMAT exists as
+        // a variable; an empty slice is the "no channel" signal and
+        // keeps the plain face, byte-identical to before.
+        if timestamps.is_empty() {
+            return self.write_history(path);
         }
-        // niubash#569: -w commits this session's pending lines. To the
-        // backing file it is an authoritative rewrite, so the cleared
-        // set resets too and the base moves to the rewritten file; to a
-        // foreign file only the pending set commits (the backing file
-        // still holds the cleared lines for the session-end removal).
-        let requested = std::path::Path::new(path);
-        let is_backing = self
-            .inner
-            .backing_file()
-            .is_some_and(|backing| backing == requested);
-        let ledger = self.inner.ledger();
-        if let Ok(mut ledger) = ledger.lock() {
-            if is_backing {
-                ledger.reset(entries.len());
-            } else {
-                ledger.commit();
-            }
-        }
-        Ok(())
+        self.write_history_face(path, Some(timestamps))
     }
 
     fn read_history(&mut self, path: &str) -> io::Result<()> {
@@ -319,82 +472,49 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
-        let entries: Vec<String> = content
-            .lines()
-            .map(|l| l.to_string())
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-        self.replace(entries)
+        // niubash#703: `#<epoch>` lines are consumed as the following
+        // entry's stamp, never loaded as entries (histfile.c
+        // read_history_range; a pending stamp survives blank lines —
+        // histfile.c:451-453 skips leading blanks after a timestamp).
+        // A file without stamp lines takes the plain replace exactly
+        // as before.
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut pending_stamp: Option<String> = None;
+        let mut saw_stamp_line = false;
+        for line in content.lines() {
+            if is_stamp_line(line) {
+                pending_stamp = Some(line.to_string());
+                saw_stamp_line = true;
+                continue;
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let stamp = pending_stamp.take().unwrap_or_else(now_stamp);
+            pairs.push((line.to_string(), stamp));
+        }
+        if saw_stamp_line {
+            let (entries, stamps): (Vec<String>, Vec<String>) = pairs.into_iter().unzip();
+            self.replace_stamped(entries, stamps)
+        } else {
+            self.replace(pairs.into_iter().map(|(entry, _)| entry).collect())
+        }
     }
 
     fn append_history(&mut self, path: &str) -> io::Result<()> {
-        ensure_history_file_accessible(std::path::Path::new(path));
-        // niubash#569/#570: -a appends this session's pending lines
-        // (bashhist.c appends history_lines_this_session), judged by the
-        // ledger, not by content. The old content check subtracted any
-        // line already present in the file — which dropped a second
-        // session's same-text line (#570) — and it re-appended lines the
-        // live sync had already written, which is what broke the bash-it
-        // theme interlock (niubash#182): codeword/gitline run
-        // `history -a && history -c && history -r` from PROMPT_COMMAND
-        // on every prompt, and re-appending the whole list doubled the
-        // file each cycle, which `history -r` then loaded back into
-        // memory — a self-amplifying loop that wedged the session.
-        // To the backing file, only lines the live sync has not yet
-        // written are appended (the common case is a no-op); to a foreign
-        // file, all pending lines are appended (the foreign file never
-        // saw the live sync). Either way the pending set commits: a
-        // later -c must not remove lines -a already wrote.
-        let requested = std::path::Path::new(path);
-        let is_backing = self
-            .inner
-            .backing_file()
-            .is_some_and(|backing| backing == requested);
-        let ledger = self.inner.ledger();
-        let to_append: Vec<String> = {
-            let ledger = ledger
-                .lock()
-                .map_err(|_| io::Error::other("history ledger lock poisoned"))?;
-            if is_backing {
-                ledger
-                    .pending
-                    .iter()
-                    .filter(|p| !p.synced)
-                    .map(|p| p.text.clone())
-                    .collect()
-            } else {
-                ledger.pending.iter().map(|p| p.text.clone()).collect()
-            }
-        };
-        if to_append.is_empty() {
-            // Still a commit: -a commits the pending set even when
-            // there is nothing new to write (the common all-synced case).
-            // Returning early without committing would leave the lines
-            // pending, so a later -c would remove lines -a already
-            // covered — the exact bug this ledger exists to prevent.
-            if let Ok(mut ledger) = ledger.lock() {
-                ledger.commit();
-            }
-            return Ok(());
+        self.append_history_face(path, false)
+    }
+
+    fn append_history_timestamped(&mut self, path: &str, timestamps: &[String]) -> io::Result<()> {
+        // As with the write face: an empty slice keeps the plain
+        // face. Otherwise the appended tail is this host's pending
+        // set (the trait contract), whose lines carry the stamps
+        // captured at their saves — the same stamps `timestamps`
+        // reports for the tail entries.
+        if timestamps.is_empty() {
+            return self.append_history(path);
         }
-        for line in &to_append {
-            append_line_to_file(std::path::Path::new(path), line)?;
-        }
-        if is_backing {
-            // The backing file grew outside the reader's accounting:
-            // rebuild it so a later reedline sync does not re-append
-            // these lines (the #182 dedupe hazard). An accounting
-            // rebuild, not a re-read: a clear's view hide survives it
-            // (niubash#614).
-            let _ = self.inner.reload_from_file_keeping_view();
-        }
-        // Commit only after the append succeeded: on failure the lines
-        // stay pending, so a later -a or the session-end write can still
-        // place them (committing first would lose them from the file).
-        if let Ok(mut ledger) = ledger.lock() {
-            ledger.commit();
-        }
-        Ok(())
+        self.append_history_face(path, true)
     }
 
     fn read_new_history(&mut self, path: &str) -> io::Result<()> {
@@ -407,11 +527,26 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
         let existing = self.entries()?;
         let existing_set: std::collections::HashSet<&str> =
             existing.iter().map(|s| s.as_str()).collect();
-        let missing: Vec<String> = content
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && !existing_set.contains(l.as_str()))
-            .collect();
+        // niubash#703: as in `read_history`, `#<epoch>` lines are
+        // consumed as the following entry's stamp — they are never
+        // "missing entries", and the entry they precede keeps the
+        // stamp it arrived with (see `save_unfiltered_stamped`).
+        let mut pending_stamp: Option<String> = None;
+        let mut missing: Vec<(String, String)> = Vec::new();
+        for line in content.lines() {
+            if is_stamp_line(line) {
+                pending_stamp = Some(line.to_string());
+                continue;
+            }
+            let text = line.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let stamp = pending_stamp.take().unwrap_or_else(now_stamp);
+            if !existing_set.contains(text.as_str()) {
+                missing.push((text, stamp));
+            }
+        }
         if missing.is_empty() {
             return Ok(());
         }
@@ -438,9 +573,11 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
         // niubash#646: loads bypass the record filters (GNU's read
         // path applies no HISTCONTROL/HISTIGNORE filtering), so these
         // go through the unfiltered save, not the provider append.
-        for line in missing {
+        // niubash#703: the stamped variant carries each line's own
+        // file stamp (or the read time for an unstamped line).
+        for (line, stamp) in missing {
             self.inner
-                .save_unfiltered(HistoryItem::from_command_line(line))
+                .save_unfiltered_stamped(HistoryItem::from_command_line(line), stamp)
                 .map_err(|error| io::Error::other(error.to_string()))?;
         }
         Ok(())
@@ -513,6 +650,18 @@ struct HistoryState {
 struct HistoryStore {
     capacity: usize,
     entries: VecDeque<String>,
+    /// niubash#703: each entry's `#<epoch>` stamp, parallel to
+    /// `entries` (`stamps.len() == entries.len()` is the invariant
+    /// every mutation below maintains). GNU stores a stamp on every
+    /// list entry — readline/history.c `hist_inittime` stamps each
+    /// `add_history`, and histfile.c's read path attaches a file's
+    /// `#<epoch>` line to the entry that follows it — so the store
+    /// does the same: saves stamp with the record time, loads take
+    /// the file's stamp line or the read time. The stamps feed the
+    /// `HistoryProvider` stamp channel (`entry_timestamps` and the
+    /// two timestamped file faces); the plain on-disk stream stays
+    /// stamp-free, so an unarmed session's file bytes are unchanged.
+    stamps: VecDeque<String>,
     /// How many leading entries the backing file already holds.
     len_on_disk: usize,
     /// A capacity pop retired an on-disk head entry: the file's prefix
@@ -528,6 +677,7 @@ impl HistoryStore {
         Self {
             capacity,
             entries: VecDeque::new(),
+            stamps: VecDeque::new(),
             len_on_disk: 0,
             disk_prefix_stale: false,
         }
@@ -575,6 +725,7 @@ impl HistoryStore {
             if (self.entries.back() != Some(&entry)) && !entry.is_empty() && self.capacity > 0 {
                 if self.entries.len() == self.capacity {
                     self.entries.pop_front();
+                    self.stamps.pop_front();
                     if self.len_on_disk > 0 {
                         // The retired head was already on disk: the
                         // file's prefix no longer matches `entries`.
@@ -583,6 +734,9 @@ impl HistoryStore {
                     self.len_on_disk = self.len_on_disk.saturating_sub(1);
                 }
                 self.entries.push_back(entry.clone());
+                // niubash#703: hist_inittime — every recorded entry
+                // carries its record-time stamp.
+                self.stamps.push_back(now_stamp());
                 Some(HistoryItemId::new((self.entries.len() - 1) as i64))
             } else {
                 None
@@ -730,8 +884,49 @@ impl HistoryStore {
     /// the `History::clear` impl).
     fn clear_entries(&mut self) {
         self.entries.clear();
+        self.stamps.clear();
         self.len_on_disk = 0;
         self.disk_prefix_stale = false;
+    }
+
+    /// The (entry, stamp) pairs in list order (niubash#703). The zip
+    /// is defensive: a stamp slot this store somehow lacks reads as
+    /// the empty stamp, the GNU "carries none" shape.
+    fn pairs(&self) -> Vec<(String, String)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                (
+                    entry.clone(),
+                    self.stamps.get(index).cloned().unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    /// niubash#703: after a staging rebuild (replace_all / retarget /
+    /// erasedups), the reloaded entries took read-time stamps from
+    /// the plain staged file. Restore the stamps of the entries that
+    /// survived the rebuild: `old_pairs` is matched as an
+    /// order-preserving subsequence (multiplicity honored), so a
+    /// surviving entry keeps its own stamp, a deleted entry's stamp
+    /// dies with it, and a genuinely new or rewritten entry keeps
+    /// the read-time stamp the reload gave it.
+    fn realign_stamps(&mut self, old_pairs: &[(String, String)]) {
+        let mut next = 0usize;
+        for index in 0..self.entries.len() {
+            let mut probe = next;
+            while probe < old_pairs.len() && old_pairs[probe].0 != self.entries[index] {
+                probe += 1;
+            }
+            if probe < old_pairs.len() {
+                if let Some(stamp) = self.stamps.get_mut(index) {
+                    *stamp = old_pairs[probe].1.clone();
+                }
+                next = probe + 1;
+            }
+        }
     }
 
     /// Write the unwritten tail to the backing file — reedline `sync`'s
@@ -775,6 +970,7 @@ impl HistoryStore {
         // The unwritten entries
         let start = self.len_on_disk.min(self.entries.len());
         let own_entries: Vec<String> = self.entries.range(start..).cloned().collect();
+        let own_stamps: Vec<String> = self.stamps.range(start..).cloned().collect();
 
         if let Some(base_dir) = path.parent() {
             fs::create_dir_all(base_dir)?;
@@ -786,18 +982,35 @@ impl HistoryStore {
             .read(true)
             .truncate(false)
             .open(path)?;
-        let mut foreign_entries: VecDeque<String> = BufReader::new(&file)
-            .lines()
-            .map(|line| line.map(|l| decode_history_line(&l)))
-            .collect::<io::Result<VecDeque<_>>>()?;
+        // niubash#703: the read face of the stamp channel, mirroring
+        // histfile.c read_history_range (lib/readline/histfile.c:424-456):
+        // a `#<digit>` line (HIST_TIMESTAMP_START, histfile.c:140) is
+        // held as the pending stamp for the next entry line, never
+        // loaded as an entry; an entry with no stamp line of its own
+        // takes the read time (hist_inittime via add_history), which
+        // is what GNU displays for it once HISTTIMEFORMAT is set.
+        let mut foreign_entries: VecDeque<String> = VecDeque::new();
+        let mut foreign_stamps: VecDeque<String> = VecDeque::new();
+        {
+            let mut pending_stamp: Option<String> = None;
+            for line in BufReader::new(&file).lines() {
+                let raw = line?;
+                if is_stamp_line(&raw) {
+                    pending_stamp = Some(raw);
+                    continue;
+                }
+                foreign_entries.push_back(decode_history_line(&raw));
+                foreign_stamps.push_back(pending_stamp.take().unwrap_or_else(now_stamp));
+            }
+        }
         drop(file);
 
         let truncate = if foreign_entries.len() + own_entries.len() > self.capacity {
-            foreign_entries = foreign_entries.split_off(
-                foreign_entries
-                    .len()
-                    .saturating_sub(self.capacity.saturating_sub(own_entries.len())),
-            );
+            let drop_count = foreign_entries
+                .len()
+                .saturating_sub(self.capacity.saturating_sub(own_entries.len()));
+            foreign_entries = foreign_entries.split_off(drop_count);
+            foreign_stamps = foreign_stamps.split_off(drop_count);
             true
         } else {
             false
@@ -820,6 +1033,8 @@ impl HistoryStore {
 
         foreign_entries.extend(own_entries);
         self.entries = foreign_entries;
+        foreign_stamps.extend(own_stamps);
+        self.stamps = foreign_stamps;
         self.len_on_disk = self.entries.len();
         self.disk_prefix_stale = false;
         Ok(())
@@ -1327,10 +1542,42 @@ impl LiveFileBackedHistory {
     /// backing file); if even the staging fails there, fall back to the
     /// clear-and-save rewrite rather than failing the caller.
     pub(crate) fn replace_all(&mut self, entries: Vec<String>) -> Result<()> {
+        self.replace_all_inner(entries, None)
+    }
+
+    /// niubash#703: `replace_all` for a list loaded from a timestamped
+    /// file (`read_history`'s fallback): the entries' own stamps
+    /// stage with them and are restored exactly, so the loaded list
+    /// keeps the file's pairings instead of degrading every stamp
+    /// to the read time.
+    pub(crate) fn replace_all_stamped(
+        &mut self,
+        entries: Vec<String>,
+        stamps: Vec<String>,
+    ) -> Result<()> {
+        self.replace_all_inner(entries, Some(stamps))
+    }
+
+    fn replace_all_inner(
+        &mut self,
+        entries: Vec<String>,
+        stamps: Option<Vec<String>>,
+    ) -> Result<()> {
         let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock (see save).
         let ledger = Arc::clone(&self.ledger);
         let state = self.lock_mut()?;
+        // niubash#703: the pairs the rebuild must preserve — the
+        // caller's own pairings for a stamped load, the current
+        // list's pairings otherwise (see `HistoryStore::realign_stamps`).
+        let keep_pairs: Vec<(String, String)> = match &stamps {
+            Some(stamps) => entries
+                .iter()
+                .cloned()
+                .zip(stamps.iter().cloned())
+                .collect(),
+            None => state.history.pairs(),
+        };
         let staged_path = match state.path.clone() {
             Some(path) => path,
             None => std::env::temp_dir()
@@ -1347,11 +1594,15 @@ impl LiveFileBackedHistory {
         // `<\n>`, terminated by `\n` (so `""` writes a bare newline and
         // `"\n"` writes `<\n>\n`, exactly as the old join did).
         let entry_count = entries.len();
-        let staged = write_entries_staged(&staged_path, &entries);
+        let staged = match &stamps {
+            Some(stamps) => write_pairs_staged(&staged_path, &entries, stamps),
+            None => write_entries_staged(&staged_path, &entries),
+        };
         let rebuilt = staged.and_then(|()| HistoryStore::load_from_file(capacity, &staged_path));
         match rebuilt {
             Ok(history) => {
                 state.history = history;
+                state.history.realign_stamps(&keep_pairs);
                 if let Some(path) = state.path.clone() {
                     state.signature = file_signature_lossy(&path, state);
                 }
@@ -1379,6 +1630,7 @@ impl LiveFileBackedHistory {
                 for entry in entries {
                     let _ = state.history.save(HistoryItem::from_command_line(entry));
                 }
+                state.history.realign_stamps(&keep_pairs);
                 Self::sync_state(state);
                 // The rewrite is authoritative here too (niubash#614).
                 if let Ok(mut ledger) = ledger.lock() {
@@ -1477,6 +1729,31 @@ impl LiveFileBackedHistory {
         self.state.lock().ok().and_then(|state| state.path.clone())
     }
 
+    /// niubash#703: the stamps of the current list view — the same
+    /// window `History::search` answers from (post-clear hide,
+    /// post-HISTSIZE stifle), so element `i` is the stamp of the
+    /// `i`-th entry the provider's `entries()` reports. Lossy like
+    /// every history read: a poisoned lock yields the empty vec and
+    /// the engine falls back to its own dispatch-time stamp ledger.
+    pub(crate) fn view_stamps(&self) -> Vec<String> {
+        let capacity = self.capacity;
+        let ledger = Arc::clone(&self.ledger);
+        let Ok(mut state) = self.state.lock() else {
+            return Vec::new();
+        };
+        Self::refresh_if_stale(capacity, &mut state);
+        Self::sync_view(&mut state, &ledger);
+        let (hidden, raw_len) = Self::view_bounds(&state);
+        state
+            .history
+            .stamps
+            .iter()
+            .skip(hidden)
+            .take(raw_len.saturating_sub(hidden))
+            .cloned()
+            .collect()
+    }
+
     /// Move this history's backing file to `new_path` mid-session
     /// (niubash#661: the user assigned `HISTFILE` a new value and the
     /// host's prompt-boundary refresh noticed). GNU reads HISTFILE at
@@ -1519,6 +1796,10 @@ impl LiveFileBackedHistory {
                     .collect()
             })
             .unwrap_or_default();
+        // niubash#703: the view's stamps ride along so the rebuilt
+        // store keeps the pairings (see `HistoryStore::realign_stamps`).
+        let keep_pairs: Vec<(String, String)> =
+            entries.iter().cloned().zip(self.view_stamps()).collect();
         let Ok(state) = self.state.get_mut() else {
             return;
         };
@@ -1529,6 +1810,7 @@ impl LiveFileBackedHistory {
         match staged {
             Ok(history) => {
                 state.history = history;
+                state.history.realign_stamps(&keep_pairs);
                 state.signature = file_signature_lossy(&new_path, state);
                 state.path = Some(new_path);
                 // The staged file IS the list now (niubash#614: the
@@ -1803,11 +2085,25 @@ impl LiveFileBackedHistory {
     /// file loads use this (read_new_history's fallback): GNU's read
     /// path applies no HISTCONTROL/HISTIGNORE filtering to lines it
     /// loads, exactly like its `-r`/`-n` list semantics.
-    pub(crate) fn save_unfiltered(&mut self, item: HistoryItem) -> Result<HistoryItem> {
-        self.save_entry(item, false)
+    /// niubash#703: save without the niubash#646 record filters, for
+    /// a line loaded from a timestamped file (`read_new_history`'s
+    /// fallback): the file's own `#<epoch>` stamp replaces the
+    /// read-time stamp the load assigns, so the entry keeps the
+    /// stamp it arrived with.
+    pub(crate) fn save_unfiltered_stamped(
+        &mut self,
+        item: HistoryItem,
+        stamp: String,
+    ) -> Result<HistoryItem> {
+        self.save_entry(item, false, Some(stamp))
     }
 
-    fn save_entry(&mut self, item: HistoryItem, apply_filters: bool) -> Result<HistoryItem> {
+    fn save_entry(
+        &mut self,
+        item: HistoryItem,
+        apply_filters: bool,
+        stamp_override: Option<String>,
+    ) -> Result<HistoryItem> {
         let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock: the lock
         // borrows `self` mutably, so the handle must already be owned.
@@ -1922,8 +2218,22 @@ impl LiveFileBackedHistory {
                         state.history = history;
                         state.signature = file_signature_lossy(&path, state);
                         // The line is in the file now, by construction.
+                        // niubash#703: the appended line is the rebuilt
+                        // list's last entry; an override stamp replaces
+                        // the read-time stamp the reload just gave it.
+                        if let Some(stamp) = &stamp_override {
+                            if let Some(last) = state.history.stamps.back_mut() {
+                                *last = stamp.clone();
+                            }
+                        }
+                        let stamp = state
+                            .history
+                            .stamps
+                            .back()
+                            .cloned()
+                            .unwrap_or_else(now_stamp);
                         if let Ok(mut ledger) = ledger.lock() {
-                            ledger.note_saved(text, true);
+                            ledger.note_saved(text, stamp, true);
                         }
                         let saved = state
                             .history
@@ -1947,10 +2257,34 @@ impl LiveFileBackedHistory {
             Self::sync_state(state);
             return Ok(item);
         }
+        // niubash#703: capture the stamp of the entry this save
+        // recorded (the store's new tail stamp), so the ledger's
+        // pending line carries it for the append face. A store-level
+        // drop (capacity zero) records nothing; the pending line then
+        // takes a fresh stamp, as it did a fresh identity before.
+        let entries_before = state.history.entries.len();
         let saved = state.history.save(item);
+        let recorded = state.history.entries.len() > entries_before;
+        if recorded {
+            if let Some(stamp) = &stamp_override {
+                if let Some(last) = state.history.stamps.back_mut() {
+                    *last = stamp.clone();
+                }
+            }
+        }
+        let stamp = if recorded {
+            state
+                .history
+                .stamps
+                .back()
+                .cloned()
+                .unwrap_or_else(now_stamp)
+        } else {
+            now_stamp()
+        };
         let synced = Self::sync_state(state);
         if let Ok(mut ledger) = ledger.lock() {
-            ledger.note_saved(text, synced);
+            ledger.note_saved(text, stamp, synced);
         }
         Ok(saved)
     }
@@ -2014,11 +2348,15 @@ impl LiveFileBackedHistory {
             None => std::env::temp_dir()
                 .join(format!("niubash-history-stage-{}.tmp", std::process::id())),
         };
+        // niubash#703: the kept entries keep their stamps across the
+        // staging rebuild (see `HistoryStore::realign_stamps`).
+        let keep_pairs = state.history.pairs();
         let staged = write_entries_staged(&staged_path, &kept);
         let rebuilt = staged.and_then(|()| HistoryStore::load_from_file(capacity, &staged_path));
         match rebuilt {
             Ok(history) => {
                 state.history = history;
+                state.history.realign_stamps(&keep_pairs);
                 if let Some(path) = state.path.clone() {
                     state.signature = file_signature_lossy(&path, state);
                 }
@@ -2044,6 +2382,31 @@ impl LiveFileBackedHistory {
     }
 }
 
+/// niubash#703: does this raw history-file line start a GNU timestamp?
+/// lib/readline/histfile.c:140 `HIST_TIMESTAMP_START`: the history
+/// comment char (`#`) followed by a digit — only the FIRST character
+/// after the `#` is tested, so `#123abc` is a stamp line too, and a
+/// genuine command line of that shape cannot round-trip through a
+/// timestamped file (GNU's own accepted ambiguity, confirmed against
+/// bash 5.3.20: the line is consumed as the next entry's stamp).
+fn is_stamp_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() > 1 && bytes[0] == b'#' && bytes[1].is_ascii_digit()
+}
+
+/// niubash#703: the `#<unix-seconds>` stamp readline's `hist_inittime`
+/// (lib/readline/history.c) puts on every entry as it joins the list —
+/// at record time for typed lines, at read time for file entries that
+/// carry no stamp line of their own. The same shape the engine's
+/// `SessionHistory::now_stamp` produces.
+fn now_stamp() -> String {
+    let epoch = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("#{epoch}")
+}
+
 /// Encode one history line exactly as reedline stores it on disk (an
 /// embedded newline becomes the literal four characters `<\n>`).
 fn encode_history_line(text: &str) -> String {
@@ -2062,10 +2425,24 @@ fn decode_history_line(line: &str) -> String {
 /// segments joined by `<\n>`, terminated by `\n` (so `""` writes a bare
 /// newline and `"\n"` writes `<\n>\n`).
 fn write_entries_staged(path: &Path, entries: &[String]) -> io::Result<()> {
+    write_pairs_staged(path, entries, &[])
+}
+
+/// niubash#703: [`write_entries_staged`] with GNU stamp lines: entry
+/// `i` is preceded by `stamps[i]` when that stamp is non-empty
+/// (histfile.c:738 — the stamp line is written only when the entry
+/// HAS one). Used to stage a list whose stamps must survive the
+/// staging round trip (a timestamped foreign file loaded through
+/// `read_history`'s fallback).
+fn write_pairs_staged(path: &Path, entries: &[String], stamps: &[String]) -> io::Result<()> {
     use std::io::{BufWriter, Write as _};
     let file = std::fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(stamp) = stamps.get(index).filter(|stamp| !stamp.is_empty()) {
+            writer.write_all(stamp.as_bytes())?;
+            writer.write_all(b"\n")?;
+        }
         for (i, segment) in entry.split('\n').enumerate() {
             if i > 0 {
                 writer.write_all(b"<\\n>")?;
@@ -2282,6 +2659,11 @@ fn glob_class_match(pattern: &[char], start: usize, c: char) -> Option<(bool, us
 /// One line this session saved, plus whether it reached the backing file.
 struct PendingLine {
     text: String,
+    /// niubash#703: the entry's `#<epoch>` stamp, captured from the
+    /// store at save time so the append face can write the stamp
+    /// line ahead of the entry (histfile.c history_append: a stamped
+    /// entry is two file lines).
+    stamp: String,
     synced: bool,
 }
 
@@ -2348,8 +2730,12 @@ impl SessionLedger {
         }
     }
 
-    fn note_saved(&mut self, text: String, synced: bool) {
-        self.pending.push(PendingLine { text, synced });
+    fn note_saved(&mut self, text: String, stamp: String, synced: bool) {
+        self.pending.push(PendingLine {
+            text,
+            stamp,
+            synced,
+        });
     }
 
     /// Commit pending lines (-a/-w): they are part of the file now, so a
@@ -2439,7 +2825,7 @@ impl SessionLedger {
 
 impl History for LiveFileBackedHistory {
     fn save(&mut self, item: HistoryItem) -> Result<HistoryItem> {
-        self.save_entry(item, true)
+        self.save_entry(item, true, None)
     }
     fn load(&self, id: HistoryItemId) -> Result<HistoryItem> {
         let capacity = self.capacity;
@@ -3764,5 +4150,192 @@ mod tests {
             std::fs::read_to_string(&a).unwrap(),
             "seedA\nsession-line\n"
         );
+    }
+
+    #[test]
+    fn issue703_gnu_timestamped_file_loads_without_stamp_pollution() {
+        // niubash#703, read face: a history file in GNU's timestamped
+        // shape (what bash 5.3.20 writes with HISTTIMEFORMAT set —
+        // verified against the oracle: every entry preceded by its
+        // `#<epoch>` line) loads as entries + stamps, never as
+        // stamp pseudo-entries. The second stamp is the ambiguity
+        // edge from the oracle probes: a line shaped exactly like a
+        // genuine `#1234567890` command is consumed as the FOLLOWING
+        // entry's stamp (histfile.c:140 HIST_TIMESTAMP_START tests
+        // only `#` + one digit).
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "#1700000001\necho first\n#1234567890\necho second\n").unwrap();
+        let mut provider = RubashHistoryProvider::with_file(100, path);
+        assert_eq!(provider.entries().unwrap(), ["echo first", "echo second"]);
+        assert_eq!(
+            provider.entry_timestamps(),
+            ["#1700000001", "#1234567890"],
+            "stamps stay paired with their entries"
+        );
+
+        // A stamp line mid-file (the shape `history -a` produces when
+        // it appends stamped entries onto a plain file) is consumed
+        // the same way; the unstamped head entry takes a read-time
+        // stamp (hist_inittime), never an empty one.
+        let path2 = temp.path().join("history2");
+        std::fs::write(&path2, "echo plain-first\n#1234567890\necho plain-second\n").unwrap();
+        let mut provider2 = RubashHistoryProvider::with_file(100, path2);
+        assert_eq!(
+            provider2.entries().unwrap(),
+            ["echo plain-first", "echo plain-second"]
+        );
+        let stamps = provider2.entry_timestamps();
+        assert_eq!(stamps.len(), 2);
+        assert!(
+            is_stamp_line(&stamps[0]),
+            "unstamped entry takes a read-time stamp: {stamps:?}"
+        );
+        assert_eq!(stamps[1], "#1234567890");
+    }
+
+    #[test]
+    fn issue703_write_history_timestamped_emits_stamp_pairs() {
+        // niubash#703, write face: with HISTTIMEFORMAT armed, the
+        // provider's `history -w` writes two lines per stamped entry
+        // (`#<epoch>` + command line) — histfile.c:738
+        // history_write_slow, oracle-verified against bash 5.3.20.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let backing = temp.path().join("history");
+        std::fs::write(
+            &backing,
+            "#1700000001\necho first\n#1700000002\necho second\n",
+        )
+        .unwrap();
+        let mut provider = RubashHistoryProvider::with_file(100, backing);
+        let stamps = provider.entry_timestamps();
+        let out = temp.path().join("written");
+        provider
+            .write_history_timestamped(out.to_str().unwrap(), &stamps)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "#1700000001\necho first\n#1700000002\necho second\n"
+        );
+        // The trait's "no channel" signal (empty stamps) keeps the
+        // plain face byte-identical.
+        let out_plain = temp.path().join("written-plain");
+        provider
+            .write_history_timestamped(out_plain.to_str().unwrap(), &[])
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out_plain).unwrap(),
+            "echo first\necho second\n"
+        );
+    }
+
+    #[test]
+    fn issue703_append_history_timestamped_emits_stamp_pairs() {
+        // niubash#703, append face: the session's pending lines land
+        // in a foreign file as stamp/entry pairs (histfile.c:815
+        // history_append), each entry preceded by the stamp captured
+        // at its save; a second -a appends nothing (the pending set
+        // committed). The entry/stamp alignment contract the engine
+        // checks (`entry_timestamps` parallel to `entries`, at least
+        // one stamp) holds for the live-recorded lines too.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let backing = temp.path().join("history");
+        let mut provider = RubashHistoryProvider::with_file(100, backing);
+        provider.append("echo one".to_string()).unwrap();
+        provider.append("echo two".to_string()).unwrap();
+        let stamps = provider.entry_timestamps();
+        assert_eq!(stamps.len(), 2);
+        assert!(
+            stamps.iter().all(|stamp| is_stamp_line(stamp)),
+            "every recorded entry carries a stamp: {stamps:?}"
+        );
+
+        let foreign = temp.path().join("foreign");
+        provider
+            .append_history_timestamped(foreign.to_str().unwrap(), &stamps)
+            .unwrap();
+        let expected = format!("{}\necho one\n{}\necho two\n", stamps[0], stamps[1]);
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), expected);
+        provider
+            .append_history_timestamped(foreign.to_str().unwrap(), &stamps)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&foreign).unwrap(),
+            expected,
+            "the pending set committed; nothing is appended twice"
+        );
+    }
+
+    #[test]
+    fn issue703_round_trip_save_load_keeps_pairs() {
+        // niubash#703: save through the timestamped write face, load
+        // through a fresh provider — entries and stamps stay paired
+        // and stamp lines never come back as entries. The foreign
+        // `history -r` face (the provider read fallback) pairs them
+        // the same way.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::write(
+            &source,
+            "#1700000001\necho first\n#1700000002\necho second\n",
+        )
+        .unwrap();
+        let mut provider = RubashHistoryProvider::with_file(100, source);
+        let stamps = provider.entry_timestamps();
+        let saved = temp.path().join("saved");
+        provider
+            .write_history_timestamped(saved.to_str().unwrap(), &stamps)
+            .unwrap();
+
+        let mut reloaded = RubashHistoryProvider::with_file(100, saved.clone());
+        assert_eq!(reloaded.entries().unwrap(), ["echo first", "echo second"]);
+        assert_eq!(reloaded.entry_timestamps(), ["#1700000001", "#1700000002"]);
+
+        // `history -r` of the saved file into a memory-only provider
+        // (the read fallback's replace path) keeps the same pairings.
+        let blocker = temp.path().join("blocker");
+        std::fs::write(&blocker, "file, not a dir").unwrap();
+        let mut memory = RubashHistoryProvider::with_file(100, blocker.join("history"));
+        memory.read_history(saved.to_str().unwrap()).unwrap();
+        assert_eq!(memory.entries().unwrap(), ["echo first", "echo second"]);
+        assert_eq!(memory.entry_timestamps(), ["#1700000001", "#1700000002"]);
+    }
+
+    #[test]
+    fn issue703_unarmed_faces_keep_plain_file_bytes() {
+        // niubash#703 scope guard: with HISTTIMEFORMAT unset the
+        // engine never calls the timestamped faces, and nothing about
+        // the plain faces' file bytes changes — saves, -w and -a all
+        // write one encoded line per entry, exactly as before the
+        // stamp channel was wired. A `#` line that is NOT a stamp
+        // line (`#` + non-digit, histfile.c:140) still loads as the
+        // entry it is.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let backing = temp.path().join("history");
+        std::fs::write(&backing, "# not a stamp\necho seed\n").unwrap();
+        let mut provider = RubashHistoryProvider::with_file(100, backing.clone());
+        assert_eq!(provider.entries().unwrap(), ["# not a stamp", "echo seed"]);
+        provider.append("echo live".to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&backing).unwrap(),
+            "# not a stamp\necho seed\necho live\n",
+            "the live sync writes plain lines only"
+        );
+        let out = temp.path().join("written");
+        provider.write_history(out.to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "# not a stamp\necho seed\necho live\n"
+        );
+        // -a to a foreign file appends this session's pending lines
+        // (here only the live one), again as plain lines.
+        let foreign = temp.path().join("foreign");
+        provider.append_history(foreign.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "echo live\n");
     }
 }

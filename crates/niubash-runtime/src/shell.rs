@@ -3549,8 +3549,9 @@ impl Shell {
     /// unset/empty/negative/non-numeric means no limit); histappend is
     /// read from the engine's `__RUBASH_SHOPT_STATE` carrier, the same
     /// read `resync_parse_extglob_gate` performs for extglob.
-    /// HISTTIMEFORMAT is not snapshotted: it has no consumer on this
-    /// side of the provider contract (see `HistorySettings`).
+    /// HISTTIMEFORMAT is not snapshotted: its arming is decided by
+    /// the engine, which invokes the provider's timestamped faces
+    /// only while the variable exists (see `HistorySettings`).
     ///
     /// Two live-state faces ride along (niubash#660/#661): the
     /// `history` shell option is snapshotted into the same cell (the
