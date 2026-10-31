@@ -241,7 +241,7 @@ fn candidates_result(candidates: Vec<PathCandidate>) -> CompletionResult {
 fn candidate_kind(
     entry: &fs::DirEntry,
     file_type: &fs::FileType,
-    file_name: &str,
+    _file_name: &str,
 ) -> CandidateKind {
     if file_type.is_symlink() {
         return CandidateKind::Symlink;
@@ -252,7 +252,7 @@ fn candidate_kind(
     #[cfg(windows)]
     {
         let _ = entry;
-        if is_pathext_executable(file_name) {
+        if is_pathext_executable(_file_name) {
             return CandidateKind::Executable;
         }
     }
