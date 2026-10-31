@@ -2744,6 +2744,7 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
         "yank" => Some(edit_event(EditCommand::PasteCutBufferBefore)),
         "undo" => Some(edit_event(EditCommand::Undo)),
+        "suspend" => Some(ReedlineEvent::Suspend),
         "redo" => Some(edit_event(EditCommand::Redo)),
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
         "redisplay" | "redraw-current-line" => Some(ReedlineEvent::Repaint),
