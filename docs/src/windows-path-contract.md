@@ -39,8 +39,11 @@ These are ordinary Windows directories. `usr/bin` is canonical for
 Explicit WPM targets under `bin`, `usr/bin`, or `usr/local/bin` remain in that
 exact directory. `.wpm` is private package state and is never a command path.
 
-Niubash passes this exact root to Rubash as `NIU_ROOT`. Rubash maps paths
-lexically below it:
+Niubash passes this exact root to Rubash as `NIU_ROOT`. It is both the
+session's root (Rubash records it as `__RUBASH_SHELL_ROOT`) and a real
+process-environment variable, because the bundled WinuxCmd applets resolve the
+shell-tree spellings through their own `shell_ns::root` and therefore read the
+child environment (unixwin/niubash#746). Rubash maps paths lexically below it:
 
 ```text
 /             -> <root>
@@ -64,8 +67,9 @@ every child verbatim. One child class is exempt from the drive-form rewrite,
 described under Shell Namespace Ownership.
 
 Command lookup and native child `PATH` use these real directories directly.
-Rubash does not merge a second provider directory, and WinuxCmd coreutils do
-not inspect Niubash variables. Existing flat installations remain usable when
+Rubash does not merge a second provider directory, and WinuxCmd applets read no
+Niubash configuration — only the root published as `NIU_ROOT` (see Shell
+Namespace Ownership). Existing flat installations remain usable when
 their directory is explicitly present on `PATH`; new installs use the tree
 above.
 

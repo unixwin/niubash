@@ -495,6 +495,7 @@ impl Shell {
         };
         crate::startup_trace::tick("winuxcmd selected");
         let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
+        publish_process_shell_root(shell_root.as_deref());
         crate::startup_trace::tick("shell root prepared");
 
         // 3. Build rubash Executor after host path selection.
@@ -5468,6 +5469,33 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
     Ok(Some(root))
 }
 
+/// Publish the session's shell root to the process environment as
+/// `NIU_ROOT`.
+///
+/// Bundled WinuxCmd applets own the shell-tree spellings (`/usr/bin`,
+/// `/etc`, the bare `/`) and resolve them from their own process
+/// environment (`WinuxCmd src/utils/native_path.cppm`, `shell_ns::root`,
+/// which reads `__RUBASH_SHELL_ROOT`, then `NIU_ROOT`). The engine writes
+/// the configured root only into the session's `__RUBASH_SHELL_ROOT`
+/// variable (rubash 4a4e0ff9 demolished the exported `WINUXSH_ROOT`
+/// bridge), so it never reaches a child; and the MSIX layout was the only
+/// one that published `NIU_ROOT` (niubash#495). An installed layout
+/// therefore derived the root for its own path handling, while children
+/// fell back to WinuxCmd's native dialect — `ls.exe /usr/bin` resolved to
+/// the drive root and failed — even though a foreign child such as `eza`
+/// kept working because the engine translates its arguments. Host-side
+/// readers (syntax highlighting, completion) read the same process
+/// variable, so the export belongs here and not only in the session env.
+fn publish_process_shell_root(root: Option<&Path>) {
+    let Some(root) = root else {
+        return;
+    };
+    if std::env::var_os("NIU_ROOT").is_some_and(|value| !value.is_empty()) {
+        return;
+    }
+    std::env::set_var("NIU_ROOT", root);
+}
+
 fn is_slash_drive_path(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 2
@@ -8027,6 +8055,37 @@ complete -F _envtooldyn_hook envtooldyn
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_shell_root_is_published_to_the_child_environment() {
+        // Mutates the process env (NIU_ROOT): serialize with every other
+        // env-touching test (Windows env races — wt61).
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _root_guard = EnvVarGuard::set_value("NIU_ROOT", "");
+        let root = unique_temp_dir("niubash-published-root");
+
+        // An absent root leaves the environment alone.
+        publish_process_shell_root(None);
+        assert!(std::env::var_os("NIU_ROOT").is_none_or(|value| value.is_empty()));
+
+        // A derived root becomes a real process variable, which is what a
+        // bundled WinuxCmd applet reads through native_path.cppm::
+        // shell_ns::root before it resolves `/usr/bin` in the shell tree.
+        publish_process_shell_root(Some(&root));
+        assert_eq!(
+            std::env::var_os("NIU_ROOT").map(PathBuf::from),
+            Some(root.clone())
+        );
+
+        // A root the process already carries (MSIX, or a parent session)
+        // is never overwritten.
+        let other = unique_temp_dir("niubash-other-root");
+        publish_process_shell_root(Some(&other));
+        assert_eq!(std::env::var_os("NIU_ROOT").map(PathBuf::from), Some(root));
+
+        let _ = std::fs::remove_dir_all(other);
     }
 
     #[test]
