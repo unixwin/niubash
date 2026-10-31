@@ -72,6 +72,7 @@ pub mod ffi;
 pub mod fonts;
 #[cfg(windows)]
 pub mod git_prompt;
+pub mod git_prompt_cache;
 pub(crate) mod history;
 pub mod interactive_menu;
 pub mod keymap_registry;
