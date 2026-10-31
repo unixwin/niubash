@@ -541,6 +541,9 @@ pub fn action_summary(
         ReedlineEvent::HistoryHintWordComplete => "accept history hint word".to_string(),
         ReedlineEvent::OpenEditor => "open editor".to_string(),
         ReedlineEvent::None => "no-op".to_string(),
+        ReedlineEvent::KeySequence(keys) => {
+            format!("key-script macro ({} keys)", keys.len())
+        }
         other => {
             let debug = format!("{other:?}");
             debug

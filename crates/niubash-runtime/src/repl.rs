@@ -19,10 +19,10 @@ use crate::shell::Shell;
 use crate::syntax_highlighting::NiubashSyntaxHighlighter;
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    default_vi_visual_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode,
-    KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
-    PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
-    ValidationResult, Validator, Vi,
+    default_vi_visual_keybindings, ColumnarMenu, Direction, EditCommand, EditMode, Emacs, KeyCode,
+    KeyCombination, KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode,
+    PromptHistorySearch, PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
+    Signal, ValidationResult, Validator, Vi,
 };
 
 const COMPLETION_MENU: &str = "completion_menu";
@@ -2282,12 +2282,28 @@ fn add_engine_bind_keybindings_recorded(
             }
             crate::bind_surface::EngineBindKind::Macro { text } => {
                 if crate::keymap_registry::is_script_macro_text(text) {
-                    dropped.push(crate::keymap_registry::dropped_bind_for(
-                        entry,
-                        crate::keymap_registry::DroppedReason::ScriptMacro,
-                    ));
+                    // K3: the key-script executor — the macro decodes to
+                    // the keystrokes it carries and binds
+                    // `ReedlineEvent::KeySequence`, reedline's replay
+                    // queue; each key then dispatches through the live
+                    // keymap exactly like readline replay. A macro that
+                    // decodes to no keys (or pure self-insert text, where
+                    // the literal path is identical) keeps the literal
+                    // insert; one that decodes to nothing at all keeps
+                    // its dropped record too.
+                    match script_macro_key_sequence(text) {
+                        Some(event) => event,
+                        None => {
+                            dropped.push(crate::keymap_registry::dropped_bind_for(
+                                entry,
+                                crate::keymap_registry::DroppedReason::ScriptMacro,
+                            ));
+                            edit_event(EditCommand::InsertString(text.clone()))
+                        }
+                    }
+                } else {
+                    edit_event(EditCommand::InsertString(text.clone()))
                 }
-                edit_event(EditCommand::InsertString(text.clone()))
             }
             // A readline function name the editor cannot deliver is
             // skipped; the sentinel fallthrough of native_widget_event is
@@ -2383,6 +2399,196 @@ pub(crate) fn char_offset_to_byte(buffer: &str, chars: usize) -> usize {
         .nth(chars)
         .map(|(offset, _)| offset)
         .unwrap_or(buffer.len())
+}
+
+/// Decode an engine macro's stored byte text into reedline key
+/// combinations for [`ReedlineEvent::KeySequence`] replay (K3).
+///
+/// The engine hands the host the post-translation form: `\C-`/`\e`
+/// escapes are already raw bytes, so a control byte is a keystroke
+/// token and a printable char is a literal insertion key. ESC starts a
+/// meta unit — `\e`+char is Alt, `\e`+control is Ctrl-Alt, and a CSI
+/// (`\e[..`) or SS3 (`\eO.`) terminal sequence resolves through the
+/// same spellings [`parse_key_sequence`] owns. An unresolvable
+/// terminal sequence contributes nothing, like an unbound key inside
+/// a readline macro.
+///
+/// Returns `None` only when the text carried no keys at all (the
+/// caller then keeps the literal insert and the dropped record);
+/// a pure self-insert decode collapses back to the literal insert
+/// event, which is identical for every byte it could carry.
+fn script_macro_key_sequence(text: &str) -> Option<ReedlineEvent> {
+    let kc = |modifier: KeyModifiers, key_code: KeyCode| KeyCombination { modifier, key_code };
+    let mut keys: Vec<KeyCombination> = Vec::new();
+    let normalized = normalize_macro_escapes(text);
+    let mut chars = normalized.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                None => keys.push(kc(KeyModifiers::NONE, KeyCode::Esc)),
+                Some(open @ ('[' | 'O')) => {
+                    // Reassemble the terminal sequence into the textual
+                    // spelling parse_key_sequence owns ("\e[3~", "\eOA").
+                    let mut seq = String::from("\\e");
+                    seq.push(open);
+                    if open == '[' {
+                        // CSI: parameter/intermediate bytes until a final
+                        // byte in 0x40..=0x7e.
+                        while let Some(&next) = chars.peek() {
+                            chars.next();
+                            seq.push(next);
+                            if ('\u{40}'..='\u{7e}').contains(&next) {
+                                break;
+                            }
+                        }
+                    } else if let Some(&next) = chars.peek() {
+                        chars.next();
+                        seq.push(next);
+                    }
+                    if let Some((modifier, key_code)) = parse_key_sequence(&seq) {
+                        keys.push(kc(modifier, key_code));
+                    }
+                }
+                Some(next) if next.is_control() => {
+                    if let Some(key_code) = control_byte_key_code(next) {
+                        keys.push(kc(KeyModifiers::CONTROL | KeyModifiers::ALT, key_code));
+                    }
+                }
+                Some(next) => keys.push(kc(KeyModifiers::ALT, KeyCode::Char(next))),
+            },
+            '\u{7f}' => keys.push(kc(KeyModifiers::NONE, KeyCode::Backspace)),
+            '\t' => keys.push(kc(KeyModifiers::NONE, KeyCode::Tab)),
+            '\n' | '\r' => keys.push(kc(KeyModifiers::NONE, KeyCode::Enter)),
+            c if c.is_control() => {
+                if let Some(key_code) = control_byte_key_code(c) {
+                    keys.push(kc(KeyModifiers::CONTROL, key_code));
+                }
+            }
+            c => keys.push(kc(KeyModifiers::NONE, KeyCode::Char(c))),
+        }
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    if keys
+        .iter()
+        .all(|key| key.modifier == KeyModifiers::NONE && matches!(key.key_code, KeyCode::Char(_)))
+    {
+        return Some(edit_event(EditCommand::InsertString(text.to_string())));
+    }
+    Some(ReedlineEvent::KeySequence(keys))
+}
+
+/// Fold the written `\C-x`/`\M-x`/`\e`/`\\` escape spellings in a macro
+/// text down to the raw-byte form the engine normally stores. The
+/// stored form passes through untouched (it carries no backslashes the
+/// caller did not write); the written form arrives via `[keymap].bind`
+/// rules and tests. Unknown escapes keep their backslash, like GNU's
+/// permissive keyseq reader.
+fn normalize_macro_escapes(text: &str) -> String {
+    if !text.contains('\\') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            None => out.push('\\'),
+            Some(tag @ ('C' | 'M')) if chars.peek() == Some(&'-') => {
+                chars.next(); // consume '-'
+                match chars.next() {
+                    Some(key) => {
+                        if tag == 'M' {
+                            out.push('\u{1b}');
+                            out.push(key);
+                        } else {
+                            out.push(control_byte_for_letter(key));
+                        }
+                    }
+                    None => {
+                        out.push('\\');
+                        out.push(tag);
+                        out.push('-');
+                    }
+                }
+            }
+            Some('e') => out.push('\u{1b}'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('a') => out.push('\u{7}'),
+            Some('b') => out.push('\u{8}'),
+            Some('d') => out.push('\u{7f}'),
+            Some('f') => out.push('\u{c}'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('v') => out.push('\u{b}'),
+            Some('x') => {
+                // \xHH: two hex digits; fewer keeps the escape literal.
+                let hi = chars.next();
+                let lo = chars.next();
+                match (hi, lo) {
+                    (Some(h), Some(l)) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
+                        let byte = u8::from_str_radix(&format!("{h}{l}"), 16).unwrap_or(0);
+                        out.push(byte as char);
+                    }
+                    _ => {
+                        out.push('\\');
+                        out.push('x');
+                        if let Some(h) = hi {
+                            out.push(h);
+                        }
+                        if let Some(l) = lo {
+                            out.push(l);
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+/// The control byte a `\C-` letter names (readline translate_keyseq):
+/// letters fold into the low five bits, `@ [ \ ] ^ _` land on their
+/// partners, `?` is DEL. Characters outside the table pass through so
+/// a stray `\C-(` stays visible instead of silently vanishing.
+fn control_byte_for_letter(key: char) -> char {
+    match key {
+        '@' => '\u{0}',
+        'a'..='z' | 'A'..='Z' => char::from_u32((key as u32) & 0x1f).unwrap_or(key),
+        '[' => '\u{1b}',
+        '\\' => '\u{1c}',
+        ']' => '\u{1d}',
+        '^' => '\u{1e}',
+        '_' => '\u{1f}',
+        '?' => '\u{7f}',
+        other => other,
+    }
+}
+
+/// The `KeyCode` a raw control byte names, minus the exceptions the
+/// caller maps first (ESC, DEL, Tab, Enter): C-@ is space, C-\ through
+/// C-_ are their punctuation partners, and the rest are the letter
+/// block. Returns `None` for bytes with no crossterm spelling.
+fn control_byte_key_code(byte: char) -> Option<KeyCode> {
+    match byte as u32 {
+        0 => Some(KeyCode::Char(' ')),
+        0x01..=0x1a => char::from_u32(byte as u32 + 0x60).map(KeyCode::Char),
+        0x1c => Some(KeyCode::Char('\\')),
+        0x1d => Some(KeyCode::Char(']')),
+        0x1e => Some(KeyCode::Char('^')),
+        0x1f => Some(KeyCode::Char('_')),
+        _ => None,
+    }
 }
 
 fn add_menu_keybindings(
@@ -2655,6 +2861,7 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
         "yank" => Some(edit_event(EditCommand::PasteCutBufferBefore)),
         "undo" => Some(edit_event(EditCommand::Undo)),
+        "suspend" => Some(ReedlineEvent::Suspend),
         "redo" => Some(edit_event(EditCommand::Redo)),
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
         // GNU `clear-display` clears the screen AND the scrollback,
@@ -2667,6 +2874,49 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "expand-or-complete" | "complete-word" => Some(completion_event()),
         "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
+        // GNU kill-ring and word-transform functions the fork's
+        // `EditCommand` set delivers directly.
+        "yank-pop" => Some(edit_event(EditCommand::YankPop)),
+        "revert-line" => Some(edit_event(EditCommand::RevertLine)),
+        "delete-horizontal-space" => Some(edit_event(EditCommand::DeleteHorizontalSpace)),
+        // GNU keeps the emacs and vi spellings for the same
+        // "delete back to the last path separator" gesture.
+        "unix-filename-rubout" | "vi-filename-rubout" => {
+            Some(edit_event(EditCommand::CutFilenameLeft))
+        }
+        "exchange-point-and-mark" => Some(edit_event(EditCommand::SwapCursorAndAnchor)),
+        // Verbatim next-key insertion (`rl_quoted_insert`).
+        "quoted-insert" => Some(ReedlineEvent::QuotedInsert),
+        // Accept the line and preload the following history entry
+        // (`rl_operate_and_get_next`, C-o).
+        "operate-and-get-next" => Some(ReedlineEvent::OperateAndGetNext),
+        // Insert-key toggle; `None` flips, matching GNU's no-argument
+        // `rl_overwrite_mode`.
+        "overwrite-mode" => Some(ReedlineEvent::OverwriteMode(None)),
+        // GNU keyboard-macro trio (C-x ( / C-x ) / C-x e).
+        "start-kbd-macro" => Some(ReedlineEvent::StartKbdMacro),
+        "end-kbd-macro" => Some(ReedlineEvent::EndKbdMacro),
+        "call-last-kbd-macro" => Some(ReedlineEvent::CallLastKbdMacro),
+        // GNU `character-search` (C-]) / `character-search-backward`
+        // (M-C-]): the next key is the search target.
+        "character-search" => Some(ReedlineEvent::CharSearch {
+            direction: Direction::Forward,
+        }),
+        "character-search-backward" => Some(ReedlineEvent::CharSearch {
+            direction: Direction::Backward,
+        }),
+        // GNU `yank-last-arg` (M-.): `None` is GNU's `'$'` — the last
+        // argument. `yank-nth-arg` defaults to argument 1; explicit
+        // counts reach the editor through `WithArg`.
+        "yank-last-arg" => Some(ReedlineEvent::YankLastArg { count: None }),
+        "yank-nth-arg" => Some(ReedlineEvent::YankNthArg { count: 1 }),
+        // Numeric-argument accumulation (M-0..M-9 / M-- / C-u). `None`
+        // is GNU's `M--` negate.
+        "digit-argument" => Some(ReedlineEvent::DigitArgument(None)),
+        "universal-argument" => Some(ReedlineEvent::UniversalArgument),
+        // GNU `edit-and-execute-command` (C-x C-e): open the line in
+        // $VISUAL/$EDITOR.
+        "edit-and-execute-command" => Some(ReedlineEvent::OpenEditor),
         // GNU `insert-comment` (text.c `rl_insert_comment`, no
         // explicit argument — the only shape reachable without
         // readline's prefix-argument machinery): move to the line
@@ -5310,6 +5560,128 @@ mod tests {
         ));
     }
 
+    /// Second niubash#630 batch: readline functions deliverable only since
+    /// the reedline fork gained `Suspend`/`QuotedInsert`/`OverwriteMode`/
+    /// `CharSearch`/the yank-arg pair/`OperateAndGetNext`/the kbd-macro
+    /// trio/the numeric-argument events/`ClearScrollback`/`OpenEditor` and
+    /// the `EditCommand` additions (`YankPop`, `SwapWords`,
+    /// `CapitalizeWord`, `SwapCursorAndAnchor`, `RevertLine`,
+    /// `CutFilenameLeft`, `DeleteHorizontalSpace`). Every arm below must
+    /// produce the real event shape, not the unknown-widget sentinel.
+    #[test]
+    fn native_widget_maps_fork_delivered_gnu_readline_names() {
+        // EditCommand-backed arms.
+        assert_eq!(
+            native_widget_event("yank-pop"),
+            Some(edit_event(EditCommand::YankPop))
+        );
+        assert_eq!(
+            native_widget_event("transpose-words"),
+            Some(edit_event(EditCommand::SwapWords))
+        );
+        assert_eq!(
+            native_widget_event("capitalize-word"),
+            Some(edit_event(EditCommand::CapitalizeWord))
+        );
+        assert_eq!(
+            native_widget_event("exchange-point-and-mark"),
+            Some(edit_event(EditCommand::SwapCursorAndAnchor))
+        );
+        assert_eq!(
+            native_widget_event("revert-line"),
+            Some(edit_event(EditCommand::RevertLine))
+        );
+        assert_eq!(
+            native_widget_event("delete-horizontal-space"),
+            Some(edit_event(EditCommand::DeleteHorizontalSpace))
+        );
+        for widget in ["unix-filename-rubout", "vi-filename-rubout"] {
+            assert_eq!(
+                native_widget_event(widget),
+                Some(edit_event(EditCommand::CutFilenameLeft))
+            );
+        }
+        assert_eq!(
+            native_widget_event("tab-insert"),
+            Some(edit_event(EditCommand::InsertChar('\t')))
+        );
+
+        // ReedlineEvent-backed arms.
+        assert_eq!(
+            native_widget_event("quoted-insert"),
+            Some(ReedlineEvent::QuotedInsert)
+        );
+        assert_eq!(
+            native_widget_event("operate-and-get-next"),
+            Some(ReedlineEvent::OperateAndGetNext)
+        );
+        assert_eq!(
+            native_widget_event("overwrite-mode"),
+            Some(ReedlineEvent::OverwriteMode(None))
+        );
+        assert_eq!(
+            native_widget_event("start-kbd-macro"),
+            Some(ReedlineEvent::StartKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("end-kbd-macro"),
+            Some(ReedlineEvent::EndKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("call-last-kbd-macro"),
+            Some(ReedlineEvent::CallLastKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("character-search"),
+            Some(ReedlineEvent::CharSearch {
+                direction: Direction::Forward
+            })
+        );
+        assert_eq!(
+            native_widget_event("character-search-backward"),
+            Some(ReedlineEvent::CharSearch {
+                direction: Direction::Backward
+            })
+        );
+        assert_eq!(
+            native_widget_event("yank-last-arg"),
+            Some(ReedlineEvent::YankLastArg { count: None })
+        );
+        assert_eq!(
+            native_widget_event("yank-nth-arg"),
+            Some(ReedlineEvent::YankNthArg { count: 1 })
+        );
+        assert_eq!(
+            native_widget_event("digit-argument"),
+            Some(ReedlineEvent::DigitArgument(None))
+        );
+        assert_eq!(
+            native_widget_event("universal-argument"),
+            Some(ReedlineEvent::UniversalArgument)
+        );
+        assert_eq!(
+            native_widget_event("clear-display"),
+            Some(ReedlineEvent::ClearScrollback)
+        );
+        assert_eq!(
+            native_widget_event("edit-and-execute-command"),
+            Some(ReedlineEvent::OpenEditor)
+        );
+
+        // `insert-comment` is the composite: go to line start, insert
+        // `#`, accept the line.
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![
+                    EditCommand::MoveToLineStart { select: false },
+                    EditCommand::InsertString("#".to_string()),
+                ]),
+                ReedlineEvent::Enter,
+            ]))
+        );
+    }
+
     /// niubash#731 (K3 widening): GNU readline names the editor could
     /// already express but the bridge still dropped — the remaining
     /// word transforms, the cycling completion, the scrollback clear,
@@ -5367,20 +5739,18 @@ mod tests {
             Some(ReedlineEvent::Down)
         );
         // The residual inexpressible set still falls to the sentinel.
-        for name in [
-            "yank-pop",
-            "operate-and-get-next",
-            "set-mark",
-            "overwrite-mode",
-        ] {
-            assert!(
-                matches!(
-                    native_widget_event(name),
-                    Some(ReedlineEvent::ExecuteHostCommand(_))
-                ),
-                "{name} must stay on the sentinel (reported, not mis-delivered)"
-            );
-        }
+        // `yank-pop`, `operate-and-get-next` and `overwrite-mode` left
+        // this set when the reedline fork parity batch delivered them
+        // (the K3 key-script executor line): they map to real events
+        // in the table above and are pinned by
+        // `native_widget_maps_fork_delivered_gnu_readline_names`.
+        assert!(
+            matches!(
+                native_widget_event("set-mark"),
+                Some(ReedlineEvent::ExecuteHostCommand(_))
+            ),
+            "set-mark must stay on the sentinel (reported, not mis-delivered)"
+        );
     }
 
     /// niubash#731: `self-insert` is key-dependent — the bridge
@@ -6551,19 +6921,80 @@ mod tests {
             vec![
                 (r"\e[0n", DroppedReason::ResponseSequence),
                 (r"\C-g", DroppedReason::UnknownFunction),
-                (r"\ec", DroppedReason::ScriptMacro),
-                (r"\C-x", DroppedReason::ScriptMacro),
             ],
-            "the chord and the mode toggle are delivered now, not dropped"
+            "the chord, the mode toggle and both macros are delivered now"
         );
         assert_eq!(dropped[0].kind, DroppedKind::Execute);
-        // K1 records the macro; the translation is unchanged until K3.
-        assert_eq!(
-            built.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
-            Some(edit_event(EditCommand::InsertString(
-                r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string()
-            )))
+        // K3: a script macro is replay, not literal text. The written
+        // `\ec` form decodes to the same bytes the stored form carries:
+        // space, C-b, C-k, C-u, `__fzf_cd__`, Alt-Ctrl-e — a
+        // `KeySequence`, not an InsertString.
+        let alt_c = built
+            .find_binding(KeyModifiers::ALT, KeyCode::Char('c'))
+            .expect("the fzf macro stays bound");
+        let ReedlineEvent::KeySequence(keys) = alt_c else {
+            panic!("the script macro replays, it does not insert text: {alt_c:?}")
+        };
+        assert!(keys.iter().any(|key| {
+            key.modifier == KeyModifiers::CONTROL && key.key_code == KeyCode::Char('b')
+        }));
+        // The stored form (raw control bytes) decodes identically.
+        let ctrl_x = built
+            .find_binding(KeyModifiers::CONTROL, KeyCode::Char('x'))
+            .expect("the stored-form macro stays bound");
+        assert!(
+            matches!(ctrl_x, ReedlineEvent::KeySequence(_)),
+            "raw-byte macros replay too: {ctrl_x:?}"
         );
+    }
+
+    #[test]
+    fn k3_script_macro_decodes_keystrokes() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        // fzf Alt-C, stored form: " \x02\x0b \x15`__fzf_cd__`\x1b\x05\x1br\r"
+        // = space C-b C-k space C-u `__fzf_cd__` M-C-e M-r Enter.
+        let entry = BindEntry {
+            keyseq: r"\ec".to_string(),
+            kind: BindKind::Macro {
+                text: " \u{2}\u{b} \u{15}`__fzf_cd__`\u{1b}\u{5}\u{1b}r\r".to_string(),
+            },
+            keymap: None,
+        };
+        let (built, _, dropped) = build_keymap_for_target(
+            default_emacs_keybindings(),
+            NativeKeymapTarget::Emacs,
+            crate::keymap_registry::KeymapMode::Emacs,
+            &NativeWidgetConfig::default(),
+            &[],
+            &[],
+            std::slice::from_ref(&entry),
+            CompletionInteraction::Insert,
+        );
+        assert!(dropped.is_empty(), "a replayable macro is not dropped");
+        let ReedlineEvent::KeySequence(keys) = built
+            .find_binding(KeyModifiers::ALT, KeyCode::Char('c'))
+            .expect("bound")
+        else {
+            panic!("expected KeySequence")
+        };
+        let at = |i: usize| (keys[i].modifier, keys[i].key_code);
+        assert_eq!(at(0), (KeyModifiers::NONE, KeyCode::Char(' ')));
+        assert_eq!(at(1), (KeyModifiers::CONTROL, KeyCode::Char('b')));
+        assert_eq!(at(2), (KeyModifiers::CONTROL, KeyCode::Char('k')));
+        assert_eq!(at(4), (KeyModifiers::CONTROL, KeyCode::Char('u')));
+        // `__fzf_cd__` is literal text keys, then Alt+Ctrl-e, Alt-r, Enter.
+        assert_eq!(
+            *keys.last().unwrap(),
+            KeyCombination {
+                modifier: KeyModifiers::NONE,
+                key_code: KeyCode::Enter
+            }
+        );
+        assert!(keys.iter().any(|key| key
+            == &KeyCombination {
+                modifier: KeyModifiers::CONTROL | KeyModifiers::ALT,
+                key_code: KeyCode::Char('e')
+            }));
     }
 
     // niubash#630, K4: the `[keymap].bind` rule parser takes the bind
