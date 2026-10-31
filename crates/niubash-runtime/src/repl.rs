@@ -5744,15 +5744,13 @@ mod tests {
         // (the K3 key-script executor line): they map to real events
         // in the table above and are pinned by
         // `native_widget_maps_fork_delivered_gnu_readline_names`.
-        for name in ["set-mark"] {
-            assert!(
-                matches!(
-                    native_widget_event(name),
-                    Some(ReedlineEvent::ExecuteHostCommand(_))
-                ),
-                "{name} must stay on the sentinel (reported, not mis-delivered)"
-            );
-        }
+        assert!(
+            matches!(
+                native_widget_event("set-mark"),
+                Some(ReedlineEvent::ExecuteHostCommand(_))
+            ),
+            "set-mark must stay on the sentinel (reported, not mis-delivered)"
+        );
     }
 
     /// niubash#731: `self-insert` is key-dependent — the bridge
