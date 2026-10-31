@@ -755,6 +755,7 @@ mod byte_battery {
     use std::io::{Read, Write};
     use std::mem::ManuallyDrop;
     use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::process::{Command, Stdio};
     use std::sync::atomic::AtomicU32;
@@ -1138,11 +1139,17 @@ mod byte_battery {
         std::fs::write(&stdin_path, &case.stdin).unwrap();
         let stdout_path = dir.join("stdout.bin");
         let stderr_path = dir.join("stderr.bin");
-        let program = match case.name {
-            "envprobe" => coreutil("printenv"),
-            name => coreutil(name),
+        let display_name = match case.name {
+            "envprobe" => "printenv",
+            name => name,
         };
+        let program = coreutil(display_name);
         let status = Command::new(program)
+            // A shell invokes the bare name: argv[0] is `head`,
+            // not the resolved path — GNU diagnostics embed
+            // argv[0], so the reference arm must present the
+            // same argv[0] the product arms present.
+            .arg0(display_name)
             .args(&case.args)
             .env_clear()
             .envs(env_pairs(case))
