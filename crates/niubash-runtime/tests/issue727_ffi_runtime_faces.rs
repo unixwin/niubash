@@ -109,9 +109,8 @@ fn issue727_runtime_faces_probe_claim_cancel_fallback() {
         }
         other => panic!("expected Fallback after the cancel, got {other:?}"),
     }
-    assert_eq!(
+    assert!(
         ffi::status().last_fallback.is_some(),
-        true,
         "the fallback is recorded on the status face"
     );
 

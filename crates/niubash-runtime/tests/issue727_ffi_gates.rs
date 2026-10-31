@@ -459,7 +459,7 @@ fn issue727_ten_thousand_calls_no_drift() {
         let outcome = provider.execute(&grep_like_request(), true);
         assert_eq!(
             outcome,
-            FfiOutcome::Completed((i % 3) as i32),
+            FfiOutcome::Completed(i % 3),
             "call {i} drifted"
         );
     }
