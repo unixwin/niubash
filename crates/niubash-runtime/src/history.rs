@@ -25,10 +25,8 @@ use reedline::{
 // `NIU_TRACE_STARTUP` idiom) to print each event with its elapsed
 // time to stderr; the counters run either way (one atomic add per
 // event) and stay silent unless the trace is enabled.
-static HISTORY_FULL_LOADS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-static HISTORY_LINE_COUNTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static HISTORY_FULL_LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HISTORY_LINE_COUNTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static HISTORY_RECONCILE_READS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
