@@ -307,8 +307,9 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // and Enter (accept the candidate and run). Only built when the
     // interaction applies: `cycle` on a non-GNU style (the GNU style's
     // literal readline interaction is inert to the axis by design).
-    let cycle_session: Option<SharedCycleSession> = if menu_config.completion_interaction
+    let cycle_session: Option<SharedCycleSession> = if (menu_config.completion_interaction
         == CompletionInteraction::Cycle
+        || menu_config.completion_interaction == CompletionInteraction::Select)
         && menu_config.completion_style != CompletionStyle::Gnu
     {
         Some(Arc::new(std::sync::Mutex::new(
@@ -537,7 +538,11 @@ fn configured_completion_menu(
             return Box::new(
                 crate::completion::cycle_menu::CycleMenu::new(session)
                     .with_name(name)
-                    .with_menu_open_flag(menu_open),
+                    .with_menu_open_flag(menu_open)
+                    .with_select_mode(matches!(
+                        config.completion_interaction,
+                        CompletionInteraction::Select
+                    )),
             );
         }
     }
@@ -2328,10 +2333,12 @@ fn add_menu_keybindings(
             ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
             ReedlineEvent::Edit(vec![EditCommand::Complete]),
         ]),
-        CompletionInteraction::Cycle => ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::MenuNext,
-            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
-        ]),
+        CompletionInteraction::Cycle | CompletionInteraction::Select => {
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuNext,
+                ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+            ])
+        }
     };
     keybindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, tab_event);
     keybindings.add_binding(

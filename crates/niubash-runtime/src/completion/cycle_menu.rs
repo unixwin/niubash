@@ -276,6 +276,12 @@ pub struct CycleMenu {
     menu_open: Option<Arc<AtomicBool>>,
     /// Terminal width seen at the last paint; 80 before the first.
     terminal_columns: usize,
+    /// niubash#742: zsh menu-select form — TAB #1 opens the grid with
+    /// no candidate spliced; the first navigate selects index 0.
+    select_mode: bool,
+    /// Whether a candidate is currently spliced into the line (always
+    /// true once a classic cycle session begins; gated by select_mode).
+    has_selection: bool,
 }
 
 impl CycleMenu {
@@ -296,7 +302,16 @@ impl CycleMenu {
             session,
             menu_open: None,
             terminal_columns: 80,
+            select_mode: false,
+            has_selection: false,
         }
+    }
+
+    /// Enable the zsh menu-select form (niubash#742).
+    #[must_use]
+    pub fn with_select_mode(mut self, on: bool) -> Self {
+        self.select_mode = on;
+        self
     }
 
     /// Name the menu (the engine routes `ReedlineEvent::Menu(name)` by it).
@@ -381,8 +396,15 @@ impl CycleMenu {
         if let Ok(mut session) = self.session.lock() {
             session.begin(snapshot, candidates, (span.start, span.end));
         }
-        self.splice(editor);
-        if self.values.len() == 1 {
+        if self.select_mode {
+            // menu-select: the grid opens unselected; the splice waits
+            // for the first navigate.
+            self.has_selection = false;
+        } else {
+            self.splice(editor);
+            self.has_selection = true;
+        }
+        if self.values.len() == 1 && !self.select_mode {
             self.end_session();
         }
     }
@@ -430,6 +452,7 @@ impl CycleMenu {
         self.display_widths = Vec::new();
         self.index = 0;
         self.provisional = false;
+        self.has_selection = false;
         if let Ok(mut session) = self.session.lock() {
             session.end();
         }
@@ -482,7 +505,14 @@ impl CycleMenu {
             return;
         }
         let len = self.values.len() as isize;
-        self.index = (self.index as isize + delta).rem_euclid(len) as usize;
+        if self.select_mode && !self.has_selection {
+            // First navigate after an unselected open picks an edge:
+            // forward -> first candidate, backward -> last (zsh).
+            self.index = if delta >= 0 { 0 } else { len as usize - 1 };
+            self.has_selection = true;
+        } else {
+            self.index = (self.index as isize + delta).rem_euclid(len) as usize;
+        }
         self.splice(editor);
         // The wrapper normally drives navigation itself (see
         // `CycleSession::nav_seq`); this menu-local path is the
@@ -673,7 +703,7 @@ impl Menu for CycleMenu {
             .enumerate()
             .map(|(position, suggestion)| {
                 let text = suggestion.display_value();
-                if use_ansi_coloring && position == self.index {
+                if use_ansi_coloring && self.has_selection && position == self.index {
                     format!(
                         "{}{}{}",
                         selected_style.prefix(),

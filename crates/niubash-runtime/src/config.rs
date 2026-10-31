@@ -183,6 +183,10 @@ pub enum CompletionInteraction {
     /// TAB completes the common prefix / opens the presentation menu,
     /// Enter confirms the pick, and Esc keeps what was inserted.
     Insert,
+    /// zsh menu-select form (niubash#742): TAB #1 only opens the grid
+    /// with nothing selected, TAB #2 selects the first candidate and
+    /// later TABs cycle down the set; Esc rolls the line back.
+    Select,
 }
 
 impl CompletionInteraction {
@@ -190,6 +194,7 @@ impl CompletionInteraction {
         match value.trim().to_ascii_lowercase().as_str() {
             "cycle" => Some(Self::Cycle),
             "insert" => Some(Self::Insert),
+            "select" => Some(Self::Select),
             _ => None,
         }
     }
@@ -198,6 +203,7 @@ impl CompletionInteraction {
         match self {
             Self::Cycle => "cycle",
             Self::Insert => "insert",
+            Self::Select => "select",
         }
     }
 }
@@ -562,7 +568,9 @@ pub fn resolve_completion_interaction() -> (CompletionInteraction, SettingSource
         match CompletionInteraction::parse(&value) {
             Some(interaction) => return (interaction, SettingSource::Env),
             None => {
-                eprintln!("niubash: {COMPLETION_INTERACTION_ENV} must be one of: insert, cycle")
+                eprintln!(
+                    "niubash: {COMPLETION_INTERACTION_ENV} must be one of: insert, cycle, select"
+                )
             }
         }
     }
