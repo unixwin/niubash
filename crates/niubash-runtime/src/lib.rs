@@ -70,9 +70,9 @@ pub mod doctor;
 pub(crate) mod easter_eggs;
 pub mod ffi;
 pub mod fonts;
-pub mod git_prompt_cache;
 #[cfg(windows)]
 pub mod git_prompt;
+pub mod git_prompt_cache;
 pub(crate) mod history;
 pub mod interactive_menu;
 pub mod keymap_registry;
