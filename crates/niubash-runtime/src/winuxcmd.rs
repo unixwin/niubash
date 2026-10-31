@@ -1222,7 +1222,10 @@ pub fn list_commands() -> Vec<String> {
     Vec::new()
 }
 
-#[cfg(test)]
+// The winuxcmd installation/shim matrix is a Windows-only surface: the
+// tests stage .exe payloads, drive-letter paths and hardlink semantics
+// that do not exist off Windows.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};

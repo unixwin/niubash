@@ -20,9 +20,9 @@ use crate::syntax_highlighting::NiubashSyntaxHighlighter;
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
     default_vi_visual_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode,
-    KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
-    PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
-    ValidationResult, Validator, Vi,
+    KeyCombination, KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode,
+    PromptHistorySearch, PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
+    Signal, ValidationResult, Validator, Vi,
 };
 
 const COMPLETION_MENU: &str = "completion_menu";
@@ -2252,12 +2252,28 @@ fn add_engine_bind_keybindings_recorded(
             }
             crate::bind_surface::EngineBindKind::Macro { text } => {
                 if crate::keymap_registry::is_script_macro_text(text) {
-                    dropped.push(crate::keymap_registry::dropped_bind_for(
-                        entry,
-                        crate::keymap_registry::DroppedReason::ScriptMacro,
-                    ));
+                    // K3: the key-script executor — the macro decodes to
+                    // the keystrokes it carries and binds
+                    // `ReedlineEvent::KeySequence`, reedline's replay
+                    // queue; each key then dispatches through the live
+                    // keymap exactly like readline replay. A macro that
+                    // decodes to no keys (or pure self-insert text, where
+                    // the literal path is identical) keeps the literal
+                    // insert; one that decodes to nothing at all keeps
+                    // its dropped record too.
+                    match script_macro_key_sequence(text) {
+                        Some(event) => event,
+                        None => {
+                            dropped.push(crate::keymap_registry::dropped_bind_for(
+                                entry,
+                                crate::keymap_registry::DroppedReason::ScriptMacro,
+                            ));
+                            edit_event(EditCommand::InsertString(text.clone()))
+                        }
+                    }
+                } else {
+                    edit_event(EditCommand::InsertString(text.clone()))
                 }
-                edit_event(EditCommand::InsertString(text.clone()))
             }
             // A readline function name the editor cannot deliver is
             // skipped; the sentinel fallthrough of native_widget_event is
@@ -2324,6 +2340,196 @@ pub(crate) fn char_offset_to_byte(buffer: &str, chars: usize) -> usize {
         .nth(chars)
         .map(|(offset, _)| offset)
         .unwrap_or(buffer.len())
+}
+
+/// Decode an engine macro's stored byte text into reedline key
+/// combinations for [`ReedlineEvent::KeySequence`] replay (K3).
+///
+/// The engine hands the host the post-translation form: `\C-`/`\e`
+/// escapes are already raw bytes, so a control byte is a keystroke
+/// token and a printable char is a literal insertion key. ESC starts a
+/// meta unit — `\e`+char is Alt, `\e`+control is Ctrl-Alt, and a CSI
+/// (`\e[..`) or SS3 (`\eO.`) terminal sequence resolves through the
+/// same spellings [`parse_key_sequence`] owns. An unresolvable
+/// terminal sequence contributes nothing, like an unbound key inside
+/// a readline macro.
+///
+/// Returns `None` only when the text carried no keys at all (the
+/// caller then keeps the literal insert and the dropped record);
+/// a pure self-insert decode collapses back to the literal insert
+/// event, which is identical for every byte it could carry.
+fn script_macro_key_sequence(text: &str) -> Option<ReedlineEvent> {
+    let kc = |modifier: KeyModifiers, key_code: KeyCode| KeyCombination { modifier, key_code };
+    let mut keys: Vec<KeyCombination> = Vec::new();
+    let normalized = normalize_macro_escapes(text);
+    let mut chars = normalized.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                None => keys.push(kc(KeyModifiers::NONE, KeyCode::Esc)),
+                Some(open @ ('[' | 'O')) => {
+                    // Reassemble the terminal sequence into the textual
+                    // spelling parse_key_sequence owns ("\e[3~", "\eOA").
+                    let mut seq = String::from("\\e");
+                    seq.push(open);
+                    if open == '[' {
+                        // CSI: parameter/intermediate bytes until a final
+                        // byte in 0x40..=0x7e.
+                        while let Some(&next) = chars.peek() {
+                            chars.next();
+                            seq.push(next);
+                            if ('\u{40}'..='\u{7e}').contains(&next) {
+                                break;
+                            }
+                        }
+                    } else if let Some(&next) = chars.peek() {
+                        chars.next();
+                        seq.push(next);
+                    }
+                    if let Some((modifier, key_code)) = parse_key_sequence(&seq) {
+                        keys.push(kc(modifier, key_code));
+                    }
+                }
+                Some(next) if next.is_control() => {
+                    if let Some(key_code) = control_byte_key_code(next) {
+                        keys.push(kc(KeyModifiers::CONTROL | KeyModifiers::ALT, key_code));
+                    }
+                }
+                Some(next) => keys.push(kc(KeyModifiers::ALT, KeyCode::Char(next))),
+            },
+            '\u{7f}' => keys.push(kc(KeyModifiers::NONE, KeyCode::Backspace)),
+            '\t' => keys.push(kc(KeyModifiers::NONE, KeyCode::Tab)),
+            '\n' | '\r' => keys.push(kc(KeyModifiers::NONE, KeyCode::Enter)),
+            c if c.is_control() => {
+                if let Some(key_code) = control_byte_key_code(c) {
+                    keys.push(kc(KeyModifiers::CONTROL, key_code));
+                }
+            }
+            c => keys.push(kc(KeyModifiers::NONE, KeyCode::Char(c))),
+        }
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    if keys
+        .iter()
+        .all(|key| key.modifier == KeyModifiers::NONE && matches!(key.key_code, KeyCode::Char(_)))
+    {
+        return Some(edit_event(EditCommand::InsertString(text.to_string())));
+    }
+    Some(ReedlineEvent::KeySequence(keys))
+}
+
+/// Fold the written `\C-x`/`\M-x`/`\e`/`\\` escape spellings in a macro
+/// text down to the raw-byte form the engine normally stores. The
+/// stored form passes through untouched (it carries no backslashes the
+/// caller did not write); the written form arrives via `[keymap].bind`
+/// rules and tests. Unknown escapes keep their backslash, like GNU's
+/// permissive keyseq reader.
+fn normalize_macro_escapes(text: &str) -> String {
+    if !text.contains('\\') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            None => out.push('\\'),
+            Some(tag @ ('C' | 'M')) if chars.peek() == Some(&'-') => {
+                chars.next(); // consume '-'
+                match chars.next() {
+                    Some(key) => {
+                        if tag == 'M' {
+                            out.push('\u{1b}');
+                            out.push(key);
+                        } else {
+                            out.push(control_byte_for_letter(key));
+                        }
+                    }
+                    None => {
+                        out.push('\\');
+                        out.push(tag);
+                        out.push('-');
+                    }
+                }
+            }
+            Some('e') => out.push('\u{1b}'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('a') => out.push('\u{7}'),
+            Some('b') => out.push('\u{8}'),
+            Some('d') => out.push('\u{7f}'),
+            Some('f') => out.push('\u{c}'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('v') => out.push('\u{b}'),
+            Some('x') => {
+                // \xHH: two hex digits; fewer keeps the escape literal.
+                let hi = chars.next();
+                let lo = chars.next();
+                match (hi, lo) {
+                    (Some(h), Some(l)) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
+                        let byte = u8::from_str_radix(&format!("{h}{l}"), 16).unwrap_or(0);
+                        out.push(byte as char);
+                    }
+                    _ => {
+                        out.push('\\');
+                        out.push('x');
+                        if let Some(h) = hi {
+                            out.push(h);
+                        }
+                        if let Some(l) = lo {
+                            out.push(l);
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+/// The control byte a `\C-` letter names (readline translate_keyseq):
+/// letters fold into the low five bits, `@ [ \ ] ^ _` land on their
+/// partners, `?` is DEL. Characters outside the table pass through so
+/// a stray `\C-(` stays visible instead of silently vanishing.
+fn control_byte_for_letter(key: char) -> char {
+    match key {
+        '@' => '\u{0}',
+        'a'..='z' | 'A'..='Z' => char::from_u32((key as u32) & 0x1f).unwrap_or(key),
+        '[' => '\u{1b}',
+        '\\' => '\u{1c}',
+        ']' => '\u{1d}',
+        '^' => '\u{1e}',
+        '_' => '\u{1f}',
+        '?' => '\u{7f}',
+        other => other,
+    }
+}
+
+/// The `KeyCode` a raw control byte names, minus the exceptions the
+/// caller maps first (ESC, DEL, Tab, Enter): C-@ is space, C-\ through
+/// C-_ are their punctuation partners, and the rest are the letter
+/// block. Returns `None` for bytes with no crossterm spelling.
+fn control_byte_key_code(byte: char) -> Option<KeyCode> {
+    match byte as u32 {
+        0 => Some(KeyCode::Char(' ')),
+        0x01..=0x1a => char::from_u32(byte as u32 + 0x60).map(KeyCode::Char),
+        0x1c => Some(KeyCode::Char('\\')),
+        0x1d => Some(KeyCode::Char(']')),
+        0x1e => Some(KeyCode::Char('^')),
+        0x1f => Some(KeyCode::Char('_')),
+        _ => None,
+    }
 }
 
 fn add_menu_keybindings(
@@ -6012,19 +6218,80 @@ mod tests {
             vec![
                 (r"\e[0n", DroppedReason::ResponseSequence),
                 (r"\C-g", DroppedReason::UnknownFunction),
-                (r"\ec", DroppedReason::ScriptMacro),
-                (r"\C-x", DroppedReason::ScriptMacro),
             ],
-            "the chord and the mode toggle are delivered now, not dropped"
+            "the chord, the mode toggle and both macros are delivered now"
         );
         assert_eq!(dropped[0].kind, DroppedKind::Execute);
-        // K1 records the macro; the translation is unchanged until K3.
-        assert_eq!(
-            built.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
-            Some(edit_event(EditCommand::InsertString(
-                r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string()
-            )))
+        // K3: a script macro is replay, not literal text. The written
+        // `\ec` form decodes to the same bytes the stored form carries:
+        // space, C-b, C-k, C-u, `__fzf_cd__`, Alt-Ctrl-e — a
+        // `KeySequence`, not an InsertString.
+        let alt_c = built
+            .find_binding(KeyModifiers::ALT, KeyCode::Char('c'))
+            .expect("the fzf macro stays bound");
+        let ReedlineEvent::KeySequence(keys) = alt_c else {
+            panic!("the script macro replays, it does not insert text: {alt_c:?}")
+        };
+        assert!(keys.iter().any(|key| {
+            key.modifier == KeyModifiers::CONTROL && key.key_code == KeyCode::Char('b')
+        }));
+        // The stored form (raw control bytes) decodes identically.
+        let ctrl_x = built
+            .find_binding(KeyModifiers::CONTROL, KeyCode::Char('x'))
+            .expect("the stored-form macro stays bound");
+        assert!(
+            matches!(ctrl_x, ReedlineEvent::KeySequence(_)),
+            "raw-byte macros replay too: {ctrl_x:?}"
         );
+    }
+
+    #[test]
+    fn k3_script_macro_decodes_keystrokes() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        // fzf Alt-C, stored form: " \x02\x0b \x15`__fzf_cd__`\x1b\x05\x1br\r"
+        // = space C-b C-k space C-u `__fzf_cd__` M-C-e M-r Enter.
+        let entry = BindEntry {
+            keyseq: r"\ec".to_string(),
+            kind: BindKind::Macro {
+                text: " \u{2}\u{b} \u{15}`__fzf_cd__`\u{1b}\u{5}\u{1b}r\r".to_string(),
+            },
+            keymap: None,
+        };
+        let (built, _, dropped) = build_keymap_for_target(
+            default_emacs_keybindings(),
+            NativeKeymapTarget::Emacs,
+            crate::keymap_registry::KeymapMode::Emacs,
+            &NativeWidgetConfig::default(),
+            &[],
+            &[],
+            std::slice::from_ref(&entry),
+            CompletionInteraction::Insert,
+        );
+        assert!(dropped.is_empty(), "a replayable macro is not dropped");
+        let ReedlineEvent::KeySequence(keys) = built
+            .find_binding(KeyModifiers::ALT, KeyCode::Char('c'))
+            .expect("bound")
+        else {
+            panic!("expected KeySequence")
+        };
+        let at = |i: usize| (keys[i].modifier, keys[i].key_code);
+        assert_eq!(at(0), (KeyModifiers::NONE, KeyCode::Char(' ')));
+        assert_eq!(at(1), (KeyModifiers::CONTROL, KeyCode::Char('b')));
+        assert_eq!(at(2), (KeyModifiers::CONTROL, KeyCode::Char('k')));
+        assert_eq!(at(4), (KeyModifiers::CONTROL, KeyCode::Char('u')));
+        // `__fzf_cd__` is literal text keys, then Alt+Ctrl-e, Alt-r, Enter.
+        assert_eq!(
+            *keys.last().unwrap(),
+            KeyCombination {
+                modifier: KeyModifiers::NONE,
+                key_code: KeyCode::Enter
+            }
+        );
+        assert!(keys.iter().any(|key| key
+            == &KeyCombination {
+                modifier: KeyModifiers::CONTROL | KeyModifiers::ALT,
+                key_code: KeyCode::Char('e')
+            }));
     }
 
     // niubash#630, K4: the `[keymap].bind` rule parser takes the bind
