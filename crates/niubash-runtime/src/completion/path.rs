@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::completion::file_colors::{CandidateKind, FileColors};
 use crate::completion::{CompletionBehavior, CompletionContext, CompletionResult};
 use crate::path_utils::{resolve_logical_shell_path, shell_home_dir, shell_path_to_host_path};
 use anyhow::Result;
@@ -38,12 +39,7 @@ impl PathCompleter {
                 return Ok(None);
             }
             candidates.sort();
-            return Ok(Some(CompletionResult::new(
-                candidates
-                    .into_iter()
-                    .map(|candidate| candidate.completion)
-                    .collect(),
-            )));
+            return Ok(Some(candidates_result(candidates)));
         }
 
         let base_dir = Self::normalize_path(&query.base_dir);
@@ -53,7 +49,13 @@ impl PathCompleter {
             return Ok(None);
         }
 
-        Self::complete_directory(&base_dir, &query, directories_only, context.behavior)
+        Self::complete_directory(
+            &base_dir,
+            &query,
+            directories_only,
+            context.behavior,
+            context.file_colors.as_ref(),
+        )
     }
 
     /// Complete entries in a directory
@@ -62,6 +64,7 @@ impl PathCompleter {
         query: &PathQuery,
         directories_only: bool,
         behavior: CompletionBehavior,
+        file_colors: Option<&FileColors>,
     ) -> Result<Option<CompletionResult>> {
         let entries = match fs::read_dir(base_dir) {
             Ok(entries) => entries,
@@ -86,11 +89,15 @@ impl PathCompleter {
                     continue;
                 }
 
+                let style = file_colors.and_then(|colors| {
+                    colors.style_for(candidate_kind(&entry, &file_type, &file_name), &file_name)
+                });
                 completions.push(PathCandidate::new(
                     file_type.is_dir(),
                     &query.display_prefix,
                     &file_name,
                     query.quote,
+                    style,
                 ));
             }
         }
@@ -99,12 +106,7 @@ impl PathCompleter {
             Ok(None)
         } else {
             completions.sort();
-            Ok(Some(CompletionResult::new(
-                completions
-                    .into_iter()
-                    .map(|candidate| candidate.completion)
-                    .collect(),
-            )))
+            Ok(Some(candidates_result(completions)))
         }
     }
 
@@ -185,15 +187,24 @@ impl PathQuery {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 struct PathCandidate {
     is_dir: bool,
     sort_key: String,
     completion: String,
+    /// The LS_COLORS style this candidate paints with (niubash#743);
+    /// None when no table is in play or it has no rule for the kind.
+    style: Option<nu_ansi_term::Style>,
 }
 
 impl PathCandidate {
-    fn new(is_dir: bool, display_prefix: &str, file_name: &str, quote: Option<char>) -> Self {
+    fn new(
+        is_dir: bool,
+        display_prefix: &str,
+        file_name: &str,
+        quote: Option<char>,
+        style: Option<nu_ansi_term::Style>,
+    ) -> Self {
         let mut path = format!("{}{}", display_prefix, file_name);
         if is_dir {
             path.push('/');
@@ -203,9 +214,92 @@ impl PathCandidate {
             is_dir,
             sort_key: file_name.to_lowercase(),
             completion,
+            style,
         }
     }
 }
+
+/// Fold a sorted candidate list into the completion result, carrying
+/// each candidate's display style (niubash#743).
+fn candidates_result(candidates: Vec<PathCandidate>) -> CompletionResult {
+    CompletionResult::with_styles(
+        candidates
+            .iter()
+            .map(|candidate| candidate.completion.clone())
+            .collect(),
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.style)
+            .collect(),
+    )
+}
+
+/// The LS_COLORS kind a directory entry is (niubash#743): symlink and
+/// directory come from the entry's own file type; executable follows
+/// the same platform rule command resolution does — a PATHEXT suffix
+/// on Windows, any execute bit on Unix.
+fn candidate_kind(
+    entry: &fs::DirEntry,
+    file_type: &fs::FileType,
+    file_name: &str,
+) -> CandidateKind {
+    if file_type.is_symlink() {
+        return CandidateKind::Symlink;
+    }
+    if file_type.is_dir() {
+        return CandidateKind::Directory;
+    }
+    #[cfg(windows)]
+    {
+        let _ = entry;
+        if is_pathext_executable(file_name) {
+            return CandidateKind::Executable;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if entry
+            .metadata()
+            .map(|md| md.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+        {
+            return CandidateKind::Executable;
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = entry;
+    }
+    CandidateKind::File
+}
+
+/// Windows executable-name check: the extension appears in PATHEXT —
+/// the same list the command completer's command-slot gate uses
+/// (`NiubashCompleter::is_command_file`).
+#[cfg(windows)]
+fn is_pathext_executable(file_name: &str) -> bool {
+    let Some(ext) = file_name
+        .rsplit('.')
+        .next()
+        .filter(|_| file_name.contains('.'))
+    else {
+        return false;
+    };
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    pathext
+        .split(';')
+        .filter(|item| !item.is_empty())
+        .any(|item| item.trim_start_matches('.').eq_ignore_ascii_case(ext))
+}
+
+impl PartialEq for PathCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for PathCandidate {}
 
 impl Ord for PathCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -391,11 +485,31 @@ fn simulated_namespace_candidates(
                 &query.display_prefix,
                 name,
                 query.quote,
+                kind_style(context.file_colors.as_ref(), is_dir, name),
             ));
         }
         return Some(candidates);
     }
     None
+}
+
+/// The style for a candidate whose kind is known only as "directory
+/// or not" — the simulated-namespace tiers never stat a real entry.
+fn kind_style(
+    file_colors: Option<&FileColors>,
+    is_dir: bool,
+    name: &str,
+) -> Option<nu_ansi_term::Style> {
+    file_colors.and_then(|colors| {
+        colors.style_for(
+            if is_dir {
+                CandidateKind::Directory
+            } else {
+                CandidateKind::File
+            },
+            name,
+        )
+    })
 }
 
 /// The /dev family's candidates, by directory spelling. Compiled for
@@ -425,6 +539,7 @@ fn dev_namespace_candidates(
                     &query.display_prefix,
                     name,
                     query.quote,
+                    kind_style(context.file_colors.as_ref(), *is_dir, name),
                 ));
             }
             Some(candidates)
@@ -443,6 +558,7 @@ fn dev_namespace_candidates(
                             &query.display_prefix,
                             &name,
                             query.quote,
+                            kind_style(context.file_colors.as_ref(), false, &name),
                         ));
                     }
                 }

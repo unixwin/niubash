@@ -102,7 +102,7 @@ The source is `env`, `inputrc`, or `default`. Example:
 
 ```text
 completion.style = ide (env)
-completion.interaction = cycle (default)
+completion.interaction = select (default)
 startup.rc-policy = primary-only (default)
 editing-mode = vi (inputrc)
 keyseq-timeout = 120 (inputrc)

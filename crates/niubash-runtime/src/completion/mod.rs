@@ -7,12 +7,14 @@ pub mod command;
 pub mod completer;
 pub mod cycle_menu;
 pub mod external;
+pub mod file_colors;
 pub mod gnu_menu;
 pub mod path;
 pub mod variables;
 pub mod winuxcmd_assets;
 
 pub use completer::{CommandProbe, CompletionState, NiubashCompleter};
+pub use file_colors::{CandidateKind, FileColors};
 
 use std::path::PathBuf;
 
@@ -74,6 +76,12 @@ pub struct CompletionContext {
     /// Contexts built without session state keep the process temp
     /// dir — the fallback for the stateless case only.
     pub tmp_base: PathBuf,
+    /// The session's parsed `LS_COLORS` table (niubash#743), resolved
+    /// by the completer from `CompletionState::env_vars` (process-env
+    /// fallback, GNU defaults when unset). Filesystem producers
+    /// (`path`, the cwd command-slot overlay) paint candidates through
+    /// it; `None` leaves candidates unstyled.
+    pub file_colors: Option<FileColors>,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -109,6 +117,7 @@ impl CompletionContext {
             behavior,
             open_fds: Vec::new(),
             tmp_base: std::env::temp_dir(),
+            file_colors: None,
         }
     }
 
@@ -237,6 +246,10 @@ pub struct CompletionResult {
     pub completions: Vec<String>,
     /// Per-completion description (parallel to `completions`; None = no description)
     pub descriptions: Vec<Option<String>>,
+    /// Per-completion display style (parallel to `completions`;
+    /// None = unstyled). Filesystem producers fill this from the
+    /// session's `LS_COLORS` table (niubash#743).
+    pub styles: Vec<Option<nu_ansi_term::Style>>,
     /// Common prefix (for partial completion)
     pub common_prefix: Option<String>,
 }
@@ -248,15 +261,31 @@ impl CompletionResult {
         Self {
             completions,
             descriptions: vec![None; len],
+            styles: vec![None; len],
             common_prefix,
         }
     }
 
     pub fn with_descriptions(completions: Vec<String>, descriptions: Vec<Option<String>>) -> Self {
         let common_prefix = Self::find_common_prefix(&completions);
+        let len = completions.len();
         Self {
             completions,
             descriptions,
+            styles: vec![None; len],
+            common_prefix,
+        }
+    }
+
+    /// Completions carrying per-candidate paint styles (the path
+    /// completer's filesystem classification, niubash#743).
+    pub fn with_styles(completions: Vec<String>, styles: Vec<Option<nu_ansi_term::Style>>) -> Self {
+        let common_prefix = Self::find_common_prefix(&completions);
+        let len = completions.len();
+        Self {
+            completions,
+            descriptions: vec![None; len],
+            styles,
             common_prefix,
         }
     }

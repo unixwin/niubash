@@ -1347,7 +1347,19 @@ impl PasteChunkEditMode {
         }
         let snapshot = state.snapshot.clone()?;
         let len = state.candidates.len() as isize;
-        state.index = (state.index as isize + delta).rem_euclid(len) as usize;
+        state.index = if !state.spliced {
+            // niubash#742 select form: the grid opened with nothing
+            // spliced — the first navigate picks an edge (forward ->
+            // first candidate, backward -> last), exactly like the
+            // menu-side select path in CycleMenu::apply_navigate.
+            if delta >= 0 {
+                0
+            } else {
+                len as usize - 1
+            }
+        } else {
+            (state.index as isize + delta).rem_euclid(len) as usize
+        };
         let text = state.candidates[state.index].splice_text();
         let (start, span_end) = state.span;
         let mut new_buffer = String::with_capacity(snapshot.buffer.len() + text.len());
@@ -2755,7 +2767,14 @@ impl EditMode for ChordEditMode {
 impl ChordEditMode {
     fn dispatch(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
         let Some(key) = chord_key(&raw) else {
-            return self.forward(ReedlineRawEvent::try_from(raw).expect("non-key event"));
+            // Non-key traffic (key releases, focus flicker, resize): the
+            // lookahead can pull one in as an Esc partner and hand it
+            // straight here — an unconvertible event must be inert, not
+            // a panic (niubash#742's select-Esc drive exposed this).
+            return match ReedlineRawEvent::try_from(raw) {
+                Ok(raw) => self.forward(raw),
+                Err(_) => ReedlineEvent::None,
+            };
         };
         // ESC as readline's meta prefix (emacs mode only: vi uses ESC to
         // leave insert mode). Only when the peeked partner actually has an

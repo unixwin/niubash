@@ -171,14 +171,14 @@ impl CompletionStyle {
 /// display (niubash#631): the *interaction* axis, orthogonal to
 /// [`CompletionStyle`], which is the *presentation* axis.
 ///
-/// The default is [`CompletionInteraction::Cycle`] (owner ruling
-/// 2026-10-28): TAB puts the first candidate into the line and further
-/// TABs cycle through the candidate set; Enter accepts the candidate in
-/// the line and runs the command; Esc rolls the line back.
+/// The default is [`CompletionInteraction::Select`] (owner ruling
+/// niubash#742, superseding the 2026-10-28 cycle pick): TAB #1 opens
+/// the candidate grid with nothing selected, TAB #2 selects the first
+/// candidate and later TABs cycle; Enter accepts the candidate in the
+/// line and runs the command; Esc rolls the line back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionInteraction {
     /// zsh menu-completion form: TAB cycles candidates into the line.
-    #[default]
     Cycle,
     /// TAB completes the common prefix / opens the presentation menu,
     /// Enter confirms the pick, and Esc keeps what was inserted.
@@ -186,6 +186,7 @@ pub enum CompletionInteraction {
     /// zsh menu-select form (niubash#742): TAB #1 only opens the grid
     /// with nothing selected, TAB #2 selects the first candidate and
     /// later TABs cycle down the set; Esc rolls the line back.
+    #[default]
     Select,
 }
 
@@ -562,7 +563,7 @@ pub fn resolve_completion_style() -> (CompletionStyle, SettingSource) {
 }
 
 /// Resolve the effective TAB completion interaction:
-/// `NIU_COMPLETION_INTERACTION` env > built-in default (cycle).
+/// `NIU_COMPLETION_INTERACTION` env > built-in default (select).
 pub fn resolve_completion_interaction() -> (CompletionInteraction, SettingSource) {
     if let Some(value) = env_value(COMPLETION_INTERACTION_ENV) {
         match CompletionInteraction::parse(&value) {
@@ -1266,7 +1267,7 @@ mod tests {
     fn menu_config_default_completion_style() {
         let config = MenuConfig::default();
         assert_eq!(config.completion_style, CompletionStyle::Column);
-        assert_eq!(config.completion_interaction, CompletionInteraction::Cycle);
+        assert_eq!(config.completion_interaction, CompletionInteraction::Select);
     }
 
     #[test]
@@ -1302,7 +1303,7 @@ mod tests {
         std::env::remove_var(COMPLETION_INTERACTION_ENV);
         assert_eq!(
             resolve_completion_interaction(),
-            (CompletionInteraction::Cycle, SettingSource::Default)
+            (CompletionInteraction::Select, SettingSource::Default)
         );
         std::env::set_var(COMPLETION_INTERACTION_ENV, "insert");
         assert_eq!(
@@ -1312,7 +1313,7 @@ mod tests {
         std::env::set_var(COMPLETION_INTERACTION_ENV, "spiral");
         assert_eq!(
             resolve_completion_interaction(),
-            (CompletionInteraction::Cycle, SettingSource::Default)
+            (CompletionInteraction::Select, SettingSource::Default)
         );
     }
 

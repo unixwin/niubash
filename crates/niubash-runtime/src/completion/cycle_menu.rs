@@ -1,6 +1,7 @@
 //! Cycle interaction for TAB completion (niubash#631): the
-//! `completion.interaction = cycle` behavior — the default since
-//! 1.5.0 (owner ruling 2026-10-28).
+//! `completion.interaction = cycle`/`select` behaviors — `select`
+//! (zsh menu-select) is the default since niubash#742's ruling,
+//! superseding the 2026-10-28 `cycle` pick.
 //!
 //! Behavior contract (DESIGN §7, as ruled):
 //!
@@ -54,7 +55,7 @@ use reedline::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::gnu_menu::{column_layout, render_list};
+use super::gnu_menu::{packed_column_layout, render_list_packed};
 
 /// The line as it stood when a cycle session began: what Esc restores.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +194,21 @@ impl CycleSession {
 /// The shared cell, created per editor build and handed to both the
 /// menu and the edit-mode wrapper.
 pub type SharedCycleSession = Arc<Mutex<CycleSession>>;
+
+/// niubash#742: what a bare TAB (nothing completable — an empty or
+/// whitespace-only line before the cursor) inserts. zsh's shape is a
+/// literal TAB/indent; four spaces is the indentation the editor can
+/// render deterministically.
+const BARE_TAB_INDENT: &str = "    ";
+
+/// Whether the buffer before the cursor is empty or whitespace only —
+/// the bare-TAB shape where completion has nothing to offer and the
+/// key means "indent" (niubash#742).
+fn buffer_before_cursor_is_blank(editor: &Editor) -> bool {
+    let buffer = editor.get_buffer();
+    let cursor = editor.line_buffer().insertion_point().min(buffer.len());
+    buffer[..cursor].trim().is_empty()
+}
 
 /// The edit batch that puts `buffer` on the line with the cursor at
 /// `cursor`: clear, insert, reposition. This is the whole-buffer
@@ -396,16 +412,20 @@ impl CycleMenu {
         if let Ok(mut session) = self.session.lock() {
             session.begin(snapshot, candidates, (span.start, span.end));
         }
-        if self.select_mode {
+        if self.values.len() == 1 {
+            // A lone candidate completes outright and ends the session
+            // at once (GNU/zsh shape — nothing left to cycle, under
+            // select as well: menu-select has no menu for one match).
+            self.splice(editor);
+            self.has_selection = true;
+            self.end_session();
+        } else if self.select_mode {
             // menu-select: the grid opens unselected; the splice waits
             // for the first navigate.
             self.has_selection = false;
         } else {
             self.splice(editor);
             self.has_selection = true;
-        }
-        if self.values.len() == 1 && !self.select_mode {
-            self.end_session();
         }
     }
 
@@ -453,6 +473,13 @@ impl CycleMenu {
         self.index = 0;
         self.provisional = false;
         self.has_selection = false;
+        // The grid is gone — stand the autosuggest hinter back up.
+        // Sessions that end without a Deactivate event (empty answers,
+        // the bare-TAB indent) would otherwise leave the ghost
+        // suppressed for the rest of the line.
+        if let Some(menu_open) = &self.menu_open {
+            menu_open.store(false, Ordering::Relaxed);
+        }
         if let Ok(mut session) = self.session.lock() {
             session.end();
         }
@@ -467,8 +494,21 @@ impl CycleMenu {
     /// TAB #1: query (unless the engine's `update_values` just did),
     /// then begin the session over whatever the query produced. No
     /// candidates: the TAB was inert, the menu closes at once.
+    ///
+    /// niubash#742: a TAB whose buffer is empty or whitespace-only
+    /// before the cursor is an *indent* key, not a completion request
+    /// — zsh's shape splices a four-space indent where niubash used to
+    /// open the command-position grid on an empty line.
     fn apply_activate(&mut self, editor: &mut Editor, completer: &mut dyn Completer) {
         if self.session_begun {
+            return;
+        }
+        if buffer_before_cursor_is_blank(editor) {
+            editor.edit_buffer(
+                |buffer| buffer.insert_str(BARE_TAB_INDENT),
+                UndoBehavior::CreateUndoPoint,
+            );
+            self.end_session();
             return;
         }
         self.activation_pending = true;
@@ -677,11 +717,7 @@ impl Menu for CycleMenu {
         if !self.session_begun {
             return 0;
         }
-        let (_, rows) = column_layout(
-            self.display_widths.len(),
-            self.display_widths.iter().copied().max().unwrap_or(0),
-            terminal_columns as usize,
-        );
+        let (_, rows, _) = packed_column_layout(&self.display_widths, terminal_columns as usize);
         rows.min(u16::MAX as usize) as u16
     }
 
@@ -692,7 +728,10 @@ impl Menu for CycleMenu {
         // The selected cell wears the stock selected style
         // (MenuTextStyle's default: green, bold, reversed) — the
         // settings' own color is not readable outside reedline, and
-        // the default is what every stock menu paints.
+        // the default is what every stock menu paints. niubash#743: an
+        // unselected cell keeps the candidate's own LS_COLORS style;
+        // the selected cell composes it with the selection marker
+        // (reverse over the file color, like zsh's menu-select).
         let selected_style = nu_ansi_term::Style::new()
             .fg(nu_ansi_term::Color::Green)
             .bold()
@@ -703,20 +742,24 @@ impl Menu for CycleMenu {
             .enumerate()
             .map(|(position, suggestion)| {
                 let text = suggestion.display_value();
-                if use_ansi_coloring && self.has_selection && position == self.index {
-                    format!(
-                        "{}{}{}",
-                        selected_style.prefix(),
-                        text,
-                        selected_style.suffix()
-                    )
+                if !use_ansi_coloring {
+                    return text.to_string();
+                }
+                if self.has_selection && position == self.index {
+                    let style = suggestion
+                        .style
+                        .map(|style| style.bold().reverse())
+                        .unwrap_or(selected_style);
+                    format!("{}{}{}", style.prefix(), text, style.suffix())
+                } else if let Some(style) = suggestion.style {
+                    format!("{}{}{}", style.prefix(), text, style.suffix())
                 } else {
                     text.to_string()
                 }
             })
             .collect();
         let values: Vec<&str> = cells.iter().map(String::as_str).collect();
-        render_list(
+        render_list_packed(
             &values,
             &self.display_widths,
             self.terminal_columns,
@@ -1058,5 +1101,185 @@ mod tests {
         let session = session.lock().unwrap();
         assert!(!session.open);
         assert!(session.snapshot.is_none());
+    }
+
+    // ─── niubash#742: select (zsh menu-select) form ───────────────────
+
+    #[test]
+    fn issue742_select_first_tab_opens_grid_without_splicing() {
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
+        let (mut menu, session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        let mut editor = editor_with("git ch");
+
+        activate(&mut menu, &mut editor, &mut completer);
+
+        // Grid is live, nothing selected, line untouched.
+        assert!(menu.is_active());
+        assert_eq!(editor.get_buffer(), "git ch");
+        let session = session.lock().unwrap();
+        assert!(session.open);
+        assert!(!session.spliced);
+        assert_eq!(
+            session.snapshot,
+            Some(CycleSnapshot {
+                buffer: "git ch".to_string(),
+                cursor: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn issue742_select_first_navigate_picks_an_edge_then_cycles() {
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
+        let (mut menu, session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+
+        // Forward navigate picks the FIRST candidate (zsh menu-select).
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::NextElement,
+        );
+        assert_eq!(editor.get_buffer(), "git checkout");
+        assert!(session.lock().unwrap().spliced);
+
+        // Next steps to candidate 2, then wraps to the last.
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::NextElement,
+        );
+        assert_eq!(editor.get_buffer(), "git cherry");
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::NextElement,
+        );
+        assert_eq!(editor.get_buffer(), "git cherry-pick");
+    }
+
+    #[test]
+    fn issue742_select_first_backward_navigate_picks_the_last() {
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
+        let (mut menu, _session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::PreviousElement,
+        );
+        assert_eq!(editor.get_buffer(), "git cherry-pick");
+    }
+
+    #[test]
+    fn issue742_select_lone_candidate_completes_outright() {
+        let mut completer = PrefixCompleter::new(&["checkout", "status"]);
+        let (mut menu, session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        let mut editor = editor_with("git che");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "git checkout");
+        assert!(!menu.is_active());
+        assert!(!session.lock().unwrap().open);
+    }
+
+    #[test]
+    fn issue742_bare_tab_inserts_indent_and_never_opens_the_grid() {
+        // An empty line: TAB is an indent key (zsh's shape), the
+        // command-position grid never opens and no session begins.
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
+        let (mut menu, session) = menu_with_session();
+        let mut editor = editor_with("");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "    ");
+        assert!(!menu.is_active());
+        assert!(!session.lock().unwrap().open);
+
+        // A whitespace-only prefix indents further (re-indent case).
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
+        let (mut menu, session) = menu_with_session();
+        let mut editor = editor_with("  ");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "      ");
+        assert!(!menu.is_active());
+        assert!(!session.lock().unwrap().open);
+    }
+
+    #[test]
+    fn issue742_tab_on_a_line_with_content_still_completes() {
+        // The indent rule is scoped to the blank-prefix case: `git ch`
+        // still opens the candidate session.
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
+        let (mut menu, _session) = menu_with_session();
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "git checkout");
+        assert!(menu.is_active());
+    }
+
+    // ─── niubash#743: LS_COLORS-style candidate coloring ──────────────
+
+    #[test]
+    fn issue743_unselected_cells_paint_the_candidate_style() {
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
+        let (mut menu, _session) = menu_with_session();
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+
+        // Paint candidate 1 as a directory (bold blue).
+        let dir_style = nu_ansi_term::Style::new()
+            .fg(nu_ansi_term::Color::Blue)
+            .bold();
+        menu.values[1].style = Some(dir_style);
+
+        let menu_string = menu.menu_string(20, true);
+        let styled = format!("{}cherry{}", dir_style.prefix(), dir_style.suffix());
+        assert!(
+            menu_string.contains(&styled),
+            "unselected cell keeps its file color:\n{menu_string:?}"
+        );
+        // The selected cell (index 0) wears the composed selection
+        // style, not the plain text.
+        assert!(menu_string.contains("checkout"));
+    }
+
+    #[test]
+    fn issue743_selected_cell_composes_file_color_with_selection() {
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
+        let (mut menu, _session) = menu_with_session();
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+
+        let dir_style = nu_ansi_term::Style::new().fg(nu_ansi_term::Color::Blue);
+        menu.values[0].style = Some(dir_style);
+        let menu_string = menu.menu_string(20, true);
+
+        // The selected styled cell: file color kept, bold + reverse added.
+        let selected = dir_style.bold().reverse();
+        let styled = format!("{}checkout{}", selected.prefix(), selected.suffix());
+        assert!(
+            menu_string.contains(&styled),
+            "selected cell = file color + selection marker:\n{menu_string:?}"
+        );
+    }
+
+    #[test]
+    fn issue743_no_ansi_mode_strips_styles() {
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
+        let (mut menu, _session) = menu_with_session();
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+        menu.values[1].style = Some(nu_ansi_term::Style::new().fg(nu_ansi_term::Color::Blue));
+        let menu_string = menu.menu_string(20, false);
+        assert!(!menu_string.contains('\u{1b}'));
     }
 }

@@ -261,6 +261,10 @@ impl NiubashCompleter {
             CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
         context.open_fds = open_fds;
         context.tmp_base = tmp_base;
+        // niubash#743: the session's LS_COLORS table, resolved per
+        // completion call so a fresh `export LS_COLORS=…` takes effect
+        // on the next TAB without an editor rebuild.
+        context.file_colors = Some(crate::completion::FileColors::from_env_vars(&env_vars));
         let mut all_suggestions = Vec::new();
 
         // GNU programmable completion owns a command's arguments whenever a
@@ -421,7 +425,23 @@ impl NiubashCompleter {
             } else {
                 format!("./{escaped}")
             };
-            candidates.push(CwdPathCandidate { is_dir, value });
+            // niubash#743: these are real filesystem entries — paint
+            // them through the session's LS_COLORS table too.
+            let style = context.file_colors.as_ref().and_then(|colors| {
+                colors.style_for(
+                    if is_dir {
+                        crate::completion::CandidateKind::Directory
+                    } else {
+                        crate::completion::CandidateKind::Executable
+                    },
+                    &file_name,
+                )
+            });
+            candidates.push(CwdPathCandidate {
+                is_dir,
+                value,
+                style,
+            });
         }
 
         if candidates.is_empty() {
@@ -442,7 +462,7 @@ impl NiubashCompleter {
                 value: candidate.value,
                 display_override: None,
                 description: None,
-                style: None,
+                style: candidate.style,
                 extra: None,
                 span: Span {
                     start: span_start,
@@ -586,12 +606,13 @@ impl NiubashCompleter {
 
         for (i, completion) in result.completions.iter().enumerate() {
             let description = result.descriptions.get(i).and_then(|d| d.as_deref());
+            let style = result.styles.get(i).copied().flatten();
 
             suggestions.push(Suggestion {
                 value: completion.clone(),
                 display_override: None,
                 description: description.map(|s| s.to_string()),
-                style: None,
+                style,
                 extra: None,
                 span: Span {
                     start: span_start,
@@ -747,6 +768,8 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
 struct CwdPathCandidate {
     is_dir: bool,
     value: String,
+    /// The LS_COLORS style (niubash#743); not part of ordering.
+    style: Option<nu_ansi_term::Style>,
 }
 
 impl Ord for CwdPathCandidate {
