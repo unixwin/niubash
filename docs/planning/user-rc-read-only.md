@@ -9,10 +9,28 @@ is implemented — `generated/plugins.niu` exists (`plugins::loader`), the host
 sources it read-only before the user rc with a double-execution guard and the
 `NIU_PLUGIN_LOADER=off` rollback switch, plugin verbs write the sidecar
 manifest only, and `niu plugin migrate-rc` is the read-only migration
-diagnostic. Still unimplemented here: `niu setup` create-only (the wizard's
-whole-file rc write converges in 1.4.3), the `startup.rc-policy` enum, and the
-config-writer rework it depends on. Gate evidence: `tests/rc_readonly_loader.rs`
+diagnostic. Gate evidence: `tests/rc_readonly_loader.rs`
 (359.4-359.9, 359.12) plus the stage-1 suites.
+
+Implementation update (niubash#359, 1.5.0): the remaining containment items
+landed. The wizard's rc write is create-only — over an existing rc it parks
+the generated text as a proposal sample under `~/.niubash/` and the rc stays
+byte-identical. Legacy `plugin sync --bootstrap` is an earliest-branch
+silent no-op (scanned for before any other argument is validated). The last
+product write entry into an existing rc is gone: `niu setup --rc-policy`
+no longer upserts or removes a marked policy block in `~/.niubashrc`; it
+prints the `export NIU_RC_POLICY=...` line for the user to apply by hand
+and reports (never edits) a stale block left by an earlier release.
+Deviations from the text below, forced by the 1.5.0 TOML removal: the
+rc-policy is NOT persisted as a `startup.rc-policy` enum in
+`~/.niubash/config.toml` — product TOML no longer exists, the policy is
+read from the `NIU_RC_POLICY` environment variable only, and the
+`config.rs` typed-subset writer concern is moot (the file and its writer
+are gone). The one-time `config::migrate_legacy_config` bridge still
+writes its marked block into the rc by explicit user invocation; that
+one-shot migration was kept as delivered by a separate ruling and is not
+a standing write path. Gate evidence: the `issue359_*` cases in
+`tests/rc_readonly_loader.rs` plus the runtime unit suites.
 
 ## Ownership Boundary
 
