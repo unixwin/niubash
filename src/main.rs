@@ -1583,6 +1583,16 @@ fn print_usage() {
     println!("    -s reads commands from standard input; --init-file and --rcfile each");
     println!("    take <file>, replacing the default startup file (profile chain / rc).");
     println!();
+    println!("Script debugging:");
+    println!("  niu --debug <script> [args]  Debug a script in the interactive CLI");
+    println!("                               (commands come from the controlling terminal)");
+    println!("  niu --dap <script> [args]    Serve the Debug Adapter Protocol on stdio");
+    println!("  niu --debug --dap <script>   The spelled-out editor launch form");
+    println!("  niu --debugger <script>      Source the GNU bashdb starter (GNU parity)");
+    println!("  --dap with no script runs a pure DAP server; the client's `launch`");
+    println!("  request names the program. `--debug` with -c, -s, or -i keeps the");
+    println!("  legacy extdebug-arming behavior (no debugger frontend).");
+    println!();
     println!("Type `niu -c \"help set\"` for more information about shell options.");
     println!("Type `niu -c help` for more information about shell builtin commands.");
     println!("Report bugs at <https://github.com/unixwin/niubash/issues>.");
