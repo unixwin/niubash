@@ -3808,8 +3808,8 @@ fn run_plugin_restore_command(args: &[String]) -> anyhow::Result<()> {
 
 /// `niu plugin sync` — reconcile the declarative spec with the machine
 /// (§14.6.3; lazy.nvim `:Lazy sync`): install declared-but-missing sources,
-/// materialize the managed rc
-/// blocks from the spec idempotently, and suggest cleanup for installed
+/// materialize the generated loader from the spec idempotently (the user
+/// rc is never written, niubash#359), and suggest cleanup for installed
 /// sources the spec no longer declares (`--prune` is the explicit confirm).
 /// `--timeout <seconds>` (`niu plugin sync` / `niu plugin add`, niubash#293):
 /// the per-source fetch budget override for this run. Parsed from either
@@ -3825,17 +3825,25 @@ fn parse_timeout_seconds(raw: &str) -> anyhow::Result<std::time::Duration> {
     Ok(std::time::Duration::from_secs(secs))
 }
 
-/// `--bootstrap` is a silent compatibility no-op for existing rc files.
+/// `--bootstrap` is a silent compatibility no-op for existing rc files
+/// (niubash#359): the legacy rc startup line must succeed silently with
+/// zero side effects — no network, install, directory creation, registry
+/// read or repair, adoption, or loader generation. It is therefore the
+/// EARLIEST branch of this verb: the flag is scanned for before any
+/// other argument is validated, so no mixture of management flags (or
+/// even a malformed one) can route the legacy invocation back into the
+/// mutating sync path or turn it into an error at every shell launch.
 fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|arg| arg == "--bootstrap") {
+        return Ok(());
+    }
     let mut prune = false;
-    let mut bootstrap = false;
     let mut adopt = false;
     let mut timeout: Option<std::time::Duration> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--prune" => prune = true,
-            "--bootstrap" => bootstrap = true,
             "--adopt" => adopt = true,
             "--timeout" => {
                 let value = iter
@@ -3851,9 +3859,6 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
                 }
             }
         }
-    }
-    if bootstrap {
-        return Ok(());
     }
     let report =
         niubash_runtime::plugins::sync::sync_spec(niubash_runtime::plugins::sync::SyncOptions {
@@ -4153,13 +4158,15 @@ fn setup_rc_policy_arg(args: &[String]) -> anyhow::Result<Option<String>> {
 }
 
 /// `niu setup --rc-policy <primary-only|bashrc-fallback>` (niubash#359):
-/// the policy is read from `NIU_RC_POLICY` at startup. An existing
-/// `~/.niubashrc` receives a marked `export NIU_RC_POLICY=...` block; when
-/// no primary exists, selecting the fallback must NOT create one (that
-/// would suppress the very fallback being selected), so the command prints
-/// the export line for the user's environment instead.
+/// the policy is read from `NIU_RC_POLICY` at startup. The command never
+/// edits `~/.niubashrc` — the rc is user-owned shell code, so the pick is
+/// printed as an export line for the user to apply by hand (in the rc or
+/// in the terminal environment). Creating a primary rc to hold the line
+/// would also suppress the very fallback being selected, so no file is
+/// created either. A marked policy block left in the rc by an earlier
+/// release is reported and left byte-identical, never removed.
 fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
-    use niubash_runtime::config::{persist_rc_policy, RcPolicy, RcPolicyWrite};
+    use niubash_runtime::config::{advise_rc_policy, RcPolicy, RcPolicyAdvice};
     let Some(policy) = RcPolicy::parse(value) else {
         anyhow::bail!("unknown rc policy '{value}' — valid values: primary-only, bashrc-fallback");
     };
@@ -4168,23 +4175,36 @@ fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
     if setup_preset_arg(args).is_some() {
         anyhow::bail!("--rc-policy and --preset are separate runs: pick one");
     }
-    match persist_rc_policy(policy)? {
-        RcPolicyWrite::Written(path) => {
+    match advise_rc_policy(policy) {
+        RcPolicyAdvice::Instruction(line) => {
             println!("NIU_RC_POLICY = {}", policy.as_str());
-            println!("  persisted in {}", path.display());
-            println!("  the variable is read at startup; a new session picks it up.");
-        }
-        RcPolicyWrite::Instruction(line) => {
-            println!("NIU_RC_POLICY = {}", policy.as_str());
-            println!("  No ~/.niubashrc exists, and creating one would suppress the");
-            println!("  fallback it selects. Export this line in your terminal");
+            println!("  niu never edits ~/.niubashrc (niubash#359) — apply the pick yourself:");
+            println!("  add this line to ~/.niubashrc, or export it in your terminal");
             println!("  environment (or Windows user environment / shell profile):");
             println!("    {line}");
+            println!("  the variable is read at startup; a new session picks it up.");
         }
-        RcPolicyWrite::Default => {
+        RcPolicyAdvice::StaleBlock { path, replace_with } => {
+            println!("NIU_RC_POLICY = {}", policy.as_str());
+            println!(
+                "  An earlier niu release persisted a pick as a marked block in {};",
+                path.display()
+            );
+            println!("  it was left untouched — niu no longer edits your rc (niubash#359).");
+            match replace_with {
+                Some(line) => {
+                    println!("  To make this pick yours, replace those marked lines with:");
+                    println!("    {line}");
+                }
+                None => {
+                    println!("  To revoke the pick, delete those marked lines by hand.");
+                }
+            }
+        }
+        RcPolicyAdvice::Default => {
             println!("NIU_RC_POLICY = primary-only (the built-in default)");
             println!("  ~/.niubashrc is the only personal rc; ~/.bashrc is never considered.");
-            println!("  Any setup-persisted policy block was removed.");
+            println!("  Nothing to persist: the default needs no export line.");
         }
     }
     match policy {
@@ -4226,7 +4246,7 @@ fn show_setup_usage() {
     println!("  niu setup                       Re-run the interactive setup wizard");
     println!("  niu setup --preset <name>       Apply a preset non-interactively");
     println!("                                  (e.g. recommended, minimal)");
-    println!("  niu setup --rc-policy <policy>  Persist NIU_RC_POLICY in ~/.niubashrc");
+    println!("  niu setup --rc-policy <policy>  Print the NIU_RC_POLICY export line for a policy");
     println!("                                  without running the wizard: primary-only");
     println!("                                  (default) | bashrc-fallback — ~/.bashrc");
     println!("                                  fills the slot only while ~/.niubashrc");
