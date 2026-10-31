@@ -1063,6 +1063,84 @@ fn winuxcmd_ls_preserves_unicode_filenames() {
 }
 
 #[test]
+fn installed_layout_publishes_the_derived_shell_root_to_children() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let Some(winuxcmd) = real_winuxcmd_for_test() else {
+        return;
+    };
+    let Some(winuxcmd_dir) = winuxcmd.parent() else {
+        return;
+    };
+    // Mirror the product's installation-root rule: `<root>/usr/bin/x.exe` and
+    // `<root>/usr/local/bin/x.exe` climb to `<root>`, `<root>/bin/x.exe` steps
+    // up one, a flat layout is its own root.
+    let mut installation_root = winuxcmd_dir;
+    if installation_root
+        .file_name()
+        .is_some_and(|name| name == "bin")
+    {
+        let Some(parent) = installation_root.parent() else {
+            return;
+        };
+        installation_root = parent;
+        if installation_root
+            .file_name()
+            .is_some_and(|name| name == "usr")
+        {
+            let Some(root) = installation_root.parent() else {
+                return;
+            };
+            installation_root = root;
+        } else if installation_root
+            .file_name()
+            .is_some_and(|name| name == "local")
+        {
+            let Some(root) = installation_root.parent().and_then(Path::parent) else {
+                return;
+            };
+            installation_root = root;
+        }
+    }
+    if !winuxcmd_dir.join("ls.exe").is_file() {
+        return;
+    }
+
+    let temp = unique_temp_dir("niubash-published-niu-root");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    // An installed layout derives the root from WINUXCMD_PATH; only the
+    // MSIX layout writes NIU_ROOT itself, so until the host publishes the
+    // derived root a bundled applet falls back to the drive-root dialect
+    // and `ls.exe /usr/bin` is ENOENT (winux purge S2/S3 regression).
+    let output = run_niu(
+        "printf '%s\\n' \"$NIU_ROOT\"; ls.exe -d /usr/bin",
+        &start,
+        &home,
+        &[
+            ("WINUXCMD_PATH", native_path(&winuxcmd)),
+            ("NIU_ROOT", String::new()),
+        ],
+    );
+    assert_success(&output, "derived shell root publication");
+    let stdout = normalize_text(&output.stdout);
+    let mut lines = stdout.lines();
+    assert_eq!(
+        lines.next(),
+        Some(native_path(installation_root).as_str()),
+        "the derived root must reach children as NIU_ROOT: {stdout:?}"
+    );
+    assert_eq!(lines.next(), Some("/usr/bin"), "{stdout:?}");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn installed_winuxcmd_links_back_logical_bin_namespaces_without_root_copies() {
     if !cfg!(windows) {
         return;
