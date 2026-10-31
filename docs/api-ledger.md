@@ -448,7 +448,7 @@ to the split core crate without changing its shape.
 | `complete_line`, `has_compspec` | A | `Session::complete` + compspec view |
 | `set_history_provider` + `HistoryProvider` | A | builder-injected capability (trait unchanged) |
 | external route capability (`ExternalRouteProvider` + the request / stdio / handle / outcome family) | A | builder-injected capability in the §5.5 family, beside `ExternalCommandHandler`: the dispatcher consults it after resolution and redirection with the spawn prepared; the provider runs the call in-process over live handles or declines to the spawn (niubash#567) |
-| `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` + functions view |
+| `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` / `Session::call_function_with_env` + functions view (the env channel landed on the contract surface with rubash#2001; until then this row's env half was carried by the tier-C seam below) |
 | `inherit_process_stdin` | A | builder stream binding |
 | `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome` |
 | `script_driver` run family | A (driver wrappers B) | `Session::run`; thin wrappers stay in the driver crate |
@@ -634,6 +634,7 @@ method rubash::api::InvocationShape::new
 method rubash::api::OptionsView::set
 method rubash::api::Session::aliases
 method rubash::api::Session::builder
+method rubash::api::Session::call_function_with_env
 method rubash::api::Session::close
 method rubash::api::Session::complete
 method rubash::api::Session::executor
