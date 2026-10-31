@@ -1,0 +1,107 @@
+{
+  "categories": [
+    "Debuggers"
+  ],
+  "contributes": {
+    "breakpoints": [
+      {
+        "language": "shellscript"
+      }
+    ],
+    "debuggers": [
+      {
+        "args": [
+          "--debug",
+          "--dap"
+        ],
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "program": {
+                "description": "Attach is honored only in its launch-equivalent form: background jobs are separate OS processes and cannot be attached.",
+                "type": "string"
+              }
+            }
+          },
+          "launch": {
+            "properties": {
+              "args": {
+                "default": [],
+                "description": "Arguments passed to the program as positional parameters.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "cwd": {
+                "default": "${workspaceFolder}",
+                "description": "Working directory for the debuggee.",
+                "type": "string"
+              },
+              "env": {
+                "default": {},
+                "description": "Environment variables for the debuggee.",
+                "type": "object"
+              },
+              "noDebug": {
+                "default": false,
+                "description": "Run the program without debugging.",
+                "type": "boolean"
+              },
+              "program": {
+                "default": "${file}",
+                "description": "The shell script to debug.",
+                "type": "string"
+              },
+              "stopOnEntry": {
+                "default": true,
+                "description": "Stop at the entry stop before the first command runs.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "program"
+            ]
+          }
+        },
+        "configurationSnippets": [
+          {
+            "body": {
+              "name": "Debug script (Niubash)",
+              "program": "${file}",
+              "request": "launch",
+              "stopOnEntry": true,
+              "type": "niubash"
+            },
+            "description": "Launch the current script under the Niubash native debugger.",
+            "label": "Niubash: debug the current script"
+          }
+        ],
+        "initialConfigurations": [
+          {
+            "name": "Debug script (Niubash)",
+            "program": "${file}",
+            "request": "launch",
+            "stopOnEntry": true,
+            "type": "niubash"
+          }
+        ],
+        "label": "Niubash (native debugger)",
+        "languages": [
+          "shellscript"
+        ],
+        "program": "niu",
+        "type": "niubash"
+      }
+    ]
+  },
+  "description": "Zero-JS declarative debugger extension for Niubash: launches the native debugger's DAP frontend (niu --debug --dap). Contains no JavaScript and no activation code.",
+  "displayName": "Niubash Debugger",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "license": "MIT",
+  "name": "niubash-debug",
+  "publisher": "unixwin",
+  "version": "0.1.0"
+}

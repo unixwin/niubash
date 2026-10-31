@@ -4,6 +4,11 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Native script debugger**: `niu --debug script` opens the interactive debugger on the controlling terminal and `niu --dap script` serves the Debug Adapter Protocol on stdio (`niu --dap` alone is a pure server whose `launch` request names the program; `niu --debug --dap script` is the spelled-out editor form). Both imply `extdebug` internally without changing the observable `shopt extdebug` setting; `--debug` with `-c`, `-s`, or `-i` keeps the legacy extdebug-arming behavior. The frontend now presents the host word `niu` — prompt `(niu-dbg)` and `niu: …` diagnostics — instead of the engine's `rubash`. `niu --help`, `docs/src/advanced-usage.md`, and the bundled zero-JS VS Code extension (`editors/vscode/`, type `niubash`, program `niu`) document and launch the flags.
+- **DAP hover evaluation of bare names**: a `hover`/`clipboard` request for an identifier now renders the variable's value from the stop snapshot (the same rendering as `print` and watch), instead of returning the literal word.
+
 ### Removed
 
 - **`~/.niubash/config.toml` is gone (1.5.0, breaking)**: the runtime no longer reads or writes a user TOML config. GNU-shaped knobs come from rc `bind`/`set`/`shopt` and `$INPUTRC`/`~/.inputrc`; niu-proprietary knobs come from `NIU_COMPLETION_STYLE`, `NIU_COMPLETION_INTERACTION`, `NIU_COMMAND_NOT_FOUND_HINT`, and `NIU_RC_POLICY` (exported from the rc or the environment). The `[keymap].bind`/`[keymap].unbind` TOML channel is removed — bindings use rc `bind` and inputrc only. `niu config set` is removed with an actionable error.

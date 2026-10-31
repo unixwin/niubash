@@ -133,17 +133,47 @@ itself and is not a user configuration entry point.
 
 ## Script Debugging Flags
 
-Two startup flags wire debugger support. Neither affects `-c` automation
-unless you pass them explicitly.
+Niubash embeds the native script debugger: one debug session, two
+frontends. `--debug` drives it from an interactive terminal and `--dap`
+speaks the Debug Adapter Protocol for editors. Both imply `extdebug`
+internally and never change your observable `shopt extdebug` setting.
 
-### `--debug` — arm the DEBUG-trap substrate (niu extension)
+### `--debug <script>` — interactive debugger
 
-`niu --debug script.sh` turns `extdebug` on from the first command: DEBUG
-traps fire at every GNU stop site with `BASH_ARGC`/`BASH_ARGV` populated,
-so a trap-based debugger or profiler can install itself without editing
-the script. GNU bash accepts the same flag as a no-op (its internal
-`debugging` variable is write-only — nothing in bash reads it), so scripts
-that pass `--debug` keep running unchanged under GNU bash too.
+`niu --debug script.sh [args…]` starts the session stopped at the entry
+stop, before the first command runs. Commands are read from the controlling
+terminal, never from the debuggee's stdin; the debuggee keeps its own stdio,
+and the debugger prompt is `(niu-dbg)`. The M1 command set includes
+`break`/`tbreak`/`enable`/`disable`/`delete`, `step`/`step+`/`step-`/`next`/
+`finish`, `where`/`frame`/`up`/`down`, `list`, `print`/`eval`, `set var`,
+`info locals|variables|args|functions|files|breakpoints`, `exceptions`, and
+`continue`/`quit`/`kill`.
+
+Batch driving is the `source <file>` command inside the session, not a piped
+debugger: when no terminal device opens and stdin is not itself a terminal,
+the frontend refuses with a clear diagnostic and exit status 2.
+
+`--debug` with `-c`, `-s`, or interactive `-i` keeps the legacy behavior:
+it arms `extdebug` (DEBUG traps fire at every GNU stop site with
+`BASH_ARGC`/`BASH_ARGV` populated) without opening the debugger frontend.
+GNU bash accepts the same flag as a no-op, so scripts that pass `--debug`
+keep running unchanged under GNU bash too.
+
+### `--dap <script>` — editor frontend
+
+`niu --dap script.sh [args…]` serves DAP on stdio (Content-Length framed
+JSON). `niu --dap` without a script is a pure server; the client's `launch`
+request then names the program. `niu --debug --dap script.sh` is the
+spelled-out editor launch form used by the bundled zero-JS VS Code
+extension (`editors/vscode/`).
+
+The adapter covers `initialize`, `launch`/`attach` (launch-equivalent),
+`setBreakpoints` (line, function, conditional), `setExceptionBreakpoints`
+(`err-trap`, `set -e`, `parse-error`), `configurationDone`, `threads`,
+`stackTrace`, `scopes`, `variables`, `setVariable`, `evaluate`
+(hover/watch/repl), `next`/`stepIn`/`stepOut`, `continue`, `pause`,
+`terminate`, and `disconnect`, with `initialized`, `stopped`, `terminated`,
+`exited`, `output`, `thread`, and `breakpoint` events.
 
 ### `--debugger` — run bashdb (GNU parity)
 
