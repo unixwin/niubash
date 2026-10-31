@@ -1668,6 +1668,7 @@ fn print_usage() {
     println!("  plugin distro <command>   Collections (list/import/remove/apply)");
     println!("  plugin mirror <command>   Git fetch mirroring (list/show/set)");
     println!("  plugin ui                 Menu UI (sections by state, same verbs)");
+    println!("  plugin tui                Full-screen plugin manager (preview pane, single-key)");
     println!();
     println!("  skill install|status      Install/check the AI agent skill bundle");
     println!("                            ([--target codex|claude|zcode|cursor|all|<dir>])");
@@ -1733,6 +1734,9 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         // Menu-level UI (lazy view IA): sections by state, verbs from the
         // command table, actions through the same runtime calls.
         "ui" => niubash_runtime::plugins::ui::run_ui(),
+        // Full-screen TUI (niubash#186): alternate buffer, single-key
+        // drive, live preview pane; same inventory and verbs as `ui`.
+        "tui" => niubash_runtime::plugins::tui::run_tui(),
         // The external ecosystem is first-class (owner ruling 2026-10-02):
         // vim-plug/lazy.nvim-style verbs over the real manager assets.
         "add" => run_plugin_add_command(&args[3..]),
