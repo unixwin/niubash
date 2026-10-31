@@ -1249,6 +1249,7 @@ fn issue359_setup_preset_creates_once_then_parks_proposal() {
     let sample = sandbox
         .home
         .join(".niubash")
+        .join("candidates")
         .join("setup-proposed.niubashrc");
     assert!(
         sample.is_file(),
