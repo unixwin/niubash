@@ -1122,15 +1122,13 @@ fn home_inventory(home: &Path) -> Vec<(String, u64)> {
 #[test]
 fn issue359_bootstrap_noop_is_silent_and_side_effect_free() {
     let sandbox = Sandbox::new("issue359-bootstrap");
-    fs::create_dir_all(
+    fs::create_dir_all(sandbox.home.join(".niubash").join("sources")).unwrap();
+    fs::write(
         sandbox
             .home
             .join(".niubash")
-            .join("sources"),
-    )
-    .unwrap();
-    fs::write(
-        sandbox.home.join(".niubash").join("sources").join("registry.json"),
+            .join("sources")
+            .join("registry.json"),
         "{ corrupt registry — the no-op must not even read it",
     )
     .unwrap();
