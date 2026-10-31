@@ -39,8 +39,11 @@ These are ordinary Windows directories. `usr/bin` is canonical for
 Explicit WPM targets under `bin`, `usr/bin`, or `usr/local/bin` remain in that
 exact directory. `.wpm` is private package state and is never a command path.
 
-Niubash passes this exact root to Rubash as `NIU_ROOT`. Rubash maps paths
-lexically below it:
+Niubash passes this exact root to Rubash as `NIU_ROOT`. It is both the
+session's root (Rubash records it as `__RUBASH_SHELL_ROOT`) and a real
+process-environment variable, because the bundled WinuxCmd applets resolve the
+shell-tree spellings through their own `shell_ns::root` and therefore read the
+child environment (unixwin/niubash#746). Rubash maps paths lexically below it:
 
 ```text
 /             -> <root>
@@ -64,8 +67,9 @@ every child verbatim. One child class is exempt from the drive-form rewrite,
 described under Shell Namespace Ownership.
 
 Command lookup and native child `PATH` use these real directories directly.
-Rubash does not merge a second provider directory, and WinuxCmd coreutils do
-not inspect Niubash variables. Existing flat installations remain usable when
+Rubash does not merge a second provider directory, and WinuxCmd applets read no
+Niubash configuration — only the root published as `NIU_ROOT` (see Shell
+Namespace Ownership). Existing flat installations remain usable when
 their directory is explicitly present on `PATH`; new installs use the tree
 above.
 
@@ -88,6 +92,20 @@ paths — never both, and never a guess about the child's capabilities:
   such as MSYS2 or Cygwin — receives native Windows paths.** There is
   no per-child capability probe and no `MSYS_NO_PATHCONV`-style switch; a
   foreign runtime is treated exactly like a native program.
+- **The bare `/` is the one operand that second class does not receive
+  translated** (unixwin/niubash#153, niubash#748). `/usr/bin`, `/etc`,
+  `/tmp`, and `/mnt/X` are unambiguously path-shaped, so Rubash translates
+  them for native children; a lone `/` is also a data operand — `expr 10 / 3`,
+  `tr / X`, `grep / file` — and only the child's grammar can tell the two
+  apart. Rubash therefore hands the bare `/` over verbatim, and a native
+  child resolves it by its own semantics (on Win32, the current drive's
+  root). Bundled applets still receive it verbatim and map it through
+  WinuxCmd's shell tree, and the grammar mask keeps the data positions of
+  `expr`, `tr`, `grep`, `sed`, `awk`, `find`, `basename`, and `dirname`
+  verbatim. Consequence: `ls.exe /` (applet) is the shell root, while
+  `eza /` (a native program) is the current drive root. That is the
+  boundary, not a bug; niubash#748 records the decision to keep it rather
+  than add a `NO_CONV`-style switch.
 - **One exception, and it is not a capability probe: `cmd.exe`.** A
   single-letter drive form such as `/d/repo` or `/c/Users` reaches `cmd.exe`
   verbatim, because `/d` and `/c` are indistinguishable from `cmd`'s own
@@ -115,6 +133,38 @@ The boundary is structural rather than a rename of the "MSYS NO CONV"
 problem: the shell never asks a child what it can understand. The shipped
 toolchain's own resolution decides, and the engine compensates only for the
 child classes that cannot resolve the tree.
+
+### User-space trade-off
+
+A user who prefers a native tool (for example `eza`) over a bundled applet
+accepts native path semantics for it, including the lone-`/` rule above.
+The shell does not rewrite argv to make that tool look POSIX, and no
+environment variable turns such a rewrite on. If you want only the common
+single-operand `ls /` spelling to show the shell root, opt in in
+`~/.niubashrc` with a user-owned wrapper (remove any existing `alias ls=…`
+first: an alias wins over a function of the same name):
+
+```bash
+# ~/.niubashrc — user-space opt-in, NOT part of the shell contract.
+# eza is a native Win32 program: a lone "/" is the current drive root.
+# This makes only `ls /` (one operand) resolve to the shell root.
+ls() {
+  if [ "$#" -eq 1 ] && [ "$1" = "/" ]; then
+    command eza -- "$NIU_ROOT"
+  else
+    command eza -- "$@"
+  fi
+}
+```
+
+The wrapper is deliberately narrow: `eza /` called directly, multi-operand
+forms such as `ls / /usr`, and every other native program keep the native
+meaning. For POSIX spelling everywhere, use the bundled applets (`ls`,
+`find`, `realpath`, …) rather than a native replacement. If your rc already
+contains an `alias ls=eza` line (for example from the setup wizard's
+optional eza recommendation, which only appears when you have eza on
+`PATH`), remove that alias before defining the function; niu never rewrites
+your rc.
 
 ## Dispatcher Selection
 
