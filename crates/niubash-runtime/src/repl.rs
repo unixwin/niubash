@@ -5739,12 +5739,12 @@ mod tests {
             Some(ReedlineEvent::Down)
         );
         // The residual inexpressible set still falls to the sentinel.
-        for name in [
-            "yank-pop",
-            "operate-and-get-next",
-            "set-mark",
-            "overwrite-mode",
-        ] {
+        // `yank-pop`, `operate-and-get-next` and `overwrite-mode` left
+        // this set when the reedline fork parity batch delivered them
+        // (the K3 key-script executor line): they map to real events
+        // in the table above and are pinned by
+        // `native_widget_maps_fork_delivered_gnu_readline_names`.
+        for name in ["set-mark"] {
             assert!(
                 matches!(
                     native_widget_event(name),
