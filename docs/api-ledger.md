@@ -655,6 +655,7 @@ method rubash::executor::Executor::take_exit_jump_pending
 method rubash::executor::Executor::take_signal_discard_pending
 method rubash::executor::Executor::take_parse_error
 method rubash::executor::Executor::unset_env
+method rubash::history::HistoryProvider::entries
 method rubash::history::SessionHistory::size_limit
 method rubash::invocation::ShellInvocation::parse
 method rubash::parser::WordMetadata::literal
