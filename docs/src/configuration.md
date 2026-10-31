@@ -60,10 +60,13 @@ rc may be sourced), so a line inside the rc only reaches sessions
 started from a shell that already exports it. To use
 `bashrc-fallback` before the rc exists, set the variable in the
 terminal environment (or the Windows user environment / shell profile).
-`niu setup --rc-policy bashrc-fallback` writes a marked export block
-into an existing `~/.niubashrc`; when no primary rc exists it prints
-the line instead of creating one, because creating a primary would
-suppress the fallback it selects.
+`niu setup --rc-policy bashrc-fallback` prints the export line for
+you to add yourself: niu never edits `~/.niubashrc` (it is your shell
+code, not a product database), and creating a primary rc to hold the
+line would suppress the fallback it selects. A marked policy block
+left in an rc by an older niu release is reported by the command and
+left byte-identical — removing or replacing those lines is a hand
+edit.
 
 ## GNU-shaped settings
 
@@ -102,7 +105,7 @@ The source is `env`, `inputrc`, or `default`. Example:
 
 ```text
 completion.style = ide (env)
-completion.interaction = cycle (default)
+completion.interaction = select (default)
 startup.rc-policy = primary-only (default)
 editing-mode = vi (inputrc)
 keyseq-timeout = 120 (inputrc)
@@ -142,5 +145,8 @@ successful migration the startup notice disappears because the old
 name no longer exists.
 
 `niu setup` no longer writes a config file either. Its completion
-choices are written to `~/.niubashrc` as `export NIU_*` lines, and
-`niu setup --rc-policy` uses the marked block described above.
+choices become `export NIU_*` lines in the rc it creates — and only
+when no rc exists yet: over an existing rc the wizard parks the same
+text as a proposal sample under `~/.niubash/` for you to apply by
+hand, and `niu setup --rc-policy` only prints the export line
+described above.
