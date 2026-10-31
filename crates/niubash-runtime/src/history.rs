@@ -405,16 +405,21 @@ impl RubashHistoryProvider {
 /// raw (the two pattern/control strings) or pre-parsed with the engine's
 /// own mapping (`SessionHistory::size_limit`, variables.c sv_histsize).
 ///
-/// HISTTIMEFORMAT is deliberately absent — not for lack of a
-/// consumer, but because its arming decision lives on the engine
-/// side of the boundary: the engine invokes the provider's
-/// timestamped faces only while the variable exists (variables.c
-/// sv_histtimefmt: `history_write_timestamps = (v != 0)`), passing
-/// the stamps through the `HistoryProvider` stamp channel
-/// (rubash#2157, wired on this side by niubash#703), and the store's
-/// reader consumes `#<epoch>` lines under histfile.c's model with
-/// no host-side arming bit. A snapshot here would be a second,
-/// diverging arming source for the same face.
+/// HISTTIMEFORMAT's arming is not snapshotted for the faces the
+/// engine drives — that decision lives on the engine side of the
+/// boundary: the engine invokes the provider's timestamped faces
+/// only while the variable exists (variables.c sv_histtimefmt:
+/// `history_write_timestamps = (v != 0)`), passing the stamps
+/// through the `HistoryProvider` stamp channel (rubash#2157, wired
+/// on this side by niubash#703), and the store's reader consumes
+/// `#<epoch>` lines under histfile.c's model. A snapshot feeding
+/// THOSE faces would be a second, diverging arming source for the
+/// same face. The one snapshot below (`histtimeformat_armed`,
+/// niubash#734) feeds only the two write faces the engine never
+/// invokes — the live sync and the session-end flush's write path —
+/// whose GNU counterparts (histfile.c's append/write faces, driven
+/// in-session and by bashhist.c's exit path) stamp while armed and
+/// which have no other arming source on this side of the boundary.
 #[derive(Clone)]
 pub(crate) struct HistorySettings {
     /// Raw `HISTCONTROL` value (colon-separated tokens).
@@ -441,6 +446,16 @@ pub(crate) struct HistorySettings {
     /// pushes `-s` operands through add_history unconditionally
     /// (builtins/history.def), verified against bash 5.3.20.
     pub(crate) history_enabled: bool,
+    /// niubash#734: the `HISTTIMEFORMAT` arming bit — armed iff the
+    /// variable exists (variables.c sv_histtimefmt; set-but-empty
+    /// arms too). Consulted ONLY by the host-driven write faces (the
+    /// live sync's appends and the session-end flush's write path):
+    /// while armed, each entry they write is preceded by its
+    /// `#<epoch>` stamp from the store's stamps vector (histfile.c:
+    /// a stamped entry is two file lines, on the append face as on
+    /// the write face). The engine-driven faces never read this bit;
+    /// their arming arrives through the stamp channel (niubash#703).
+    pub(crate) histtimeformat_armed: bool,
 }
 
 impl Default for HistorySettings {
@@ -455,6 +470,10 @@ impl Default for HistorySettings {
             // that was never refreshed must fail open to recording, not
             // silently swallow a session's lines.
             history_enabled: true,
+            // Unarmed is the byte-preserving default: a snapshot that
+            // was never refreshed writes the plain stream, exactly as
+            // before niubash#734.
+            histtimeformat_armed: false,
         }
     }
 }
@@ -735,8 +754,11 @@ struct HistoryStore {
     /// does the same: saves stamp with the record time, loads take
     /// the file's stamp line or the read time. The stamps feed the
     /// `HistoryProvider` stamp channel (`entry_timestamps` and the
-    /// two timestamped file faces); the plain on-disk stream stays
-    /// stamp-free, so an unarmed session's file bytes are unchanged.
+    /// two timestamped file faces) and, while HISTTIMEFORMAT is
+    /// armed, the host-driven write faces (niubash#734: the live
+    /// sync and the session-end flush write through `flush`); an
+    /// unarmed session's on-disk stream stays stamp-free, so its
+    /// file bytes are unchanged.
     stamps: VecDeque<String>,
     /// How many leading entries the backing file already holds.
     len_on_disk: usize,
@@ -773,9 +795,10 @@ impl HistoryStore {
         let mut store = Self::new(capacity);
         // niubash#622: every full load is counted (and timed under
         // NIU_TRACE_HISTORY) — see the accounting block at the top of
-        // this file.
+        // this file. Not a write face (niubash#734): the fold-in keeps
+        // the plain stream; only `flush`'s legs stamp, while armed.
         let started = std::time::Instant::now();
-        let merged = store.merge_from_disk(path);
+        let merged = store.merge_from_disk(path, false);
         note_history_full_load(path, started.elapsed());
         merged?;
         Ok(store)
@@ -1016,9 +1039,18 @@ impl HistoryStore {
     /// file gains exactly `entries[len_on_disk..]`, appended; when the
     /// on-disk prefix may no longer match (capacity pop), this takes
     /// the merge path, which is reedline's sync in full.
-    fn flush(&mut self, path: &Path) -> io::Result<()> {
+    ///
+    /// niubash#734: this is the one write face behind both the live
+    /// sync and the session-end flush's append step, and GNU stamps
+    /// on both (histfile.c's append face in-session, bashhist.c's
+    /// `maybe_save_shell_history` at exit). With `write_timestamps`
+    /// set (HISTTIMEFORMAT armed), each written entry is preceded by
+    /// its stamp line — the stamp is written only when the entry HAS
+    /// one (histfile.c:738) — fed by the parallel `stamps` vector.
+    /// Unset, the byte stream is exactly the plain one.
+    fn flush(&mut self, path: &Path, write_timestamps: bool) -> io::Result<()> {
         if self.disk_prefix_stale {
-            return self.merge_from_disk(path);
+            return self.merge_from_disk(path, write_timestamps);
         }
         if let Some(base_dir) = path.parent() {
             fs::create_dir_all(base_dir)?;
@@ -1027,7 +1059,14 @@ impl HistoryStore {
             .create(true)
             .append(true)
             .open(path)?;
-        for line in self.entries.range(self.len_on_disk..) {
+        for (line, stamp) in self
+            .entries
+            .range(self.len_on_disk..)
+            .zip(self.stamps.range(self.len_on_disk..))
+        {
+            if write_timestamps && !stamp.is_empty() {
+                writeln!(file, "{stamp}")?;
+            }
             writeln!(file, "{}", encode_history_line(line))?;
         }
         file.flush()?;
@@ -1046,7 +1085,12 @@ impl HistoryStore {
     /// fallback) — the per-operation refresh goes through the
     /// signature gate and rebuilds from the file instead (see
     /// `refresh_if_stale`).
-    fn merge_from_disk(&mut self, path: &Path) -> io::Result<()> {
+    /// niubash#734: `write_timestamps` is `flush`'s arming, threaded
+    /// through — the merge's own write legs (the capacity rewrite and
+    /// the tail append) stamp exactly the way `flush`'s append leg
+    /// does. Construction/reload fold-ins (`load_from_file`) pass
+    /// false: they are not write faces, and their bytes stay plain.
+    fn merge_from_disk(&mut self, path: &Path, write_timestamps: bool) -> io::Result<()> {
         use std::io::{BufRead, BufReader};
 
         // The unwritten entries
@@ -1101,13 +1145,22 @@ impl HistoryStore {
         if truncate {
             let mut kept: Vec<String> = foreign_entries.iter().cloned().collect();
             kept.extend(own_entries.iter().cloned());
-            write_entries_staged(path, &kept)?;
+            if write_timestamps {
+                let mut kept_stamps: Vec<String> = foreign_stamps.iter().cloned().collect();
+                kept_stamps.extend(own_stamps.iter().cloned());
+                write_pairs_staged(path, &kept, &kept_stamps)?;
+            } else {
+                write_entries_staged(path, &kept)?;
+            }
         } else if !own_entries.is_empty() {
             let mut file = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)?;
-            for line in &own_entries {
+            for (line, stamp) in own_entries.iter().zip(own_stamps.iter()) {
+                if write_timestamps && !stamp.is_empty() {
+                    writeln!(file, "{stamp}")?;
+                }
                 writeln!(file, "{}", encode_history_line(line))?;
             }
             file.flush()?;
@@ -1350,7 +1403,10 @@ impl LiveFileBackedHistory {
         // read the whole file for the flush as well, and its merge
         // result was then discarded for this same reload (audit item
         // H-03).
-        if let Err(error) = state.history.flush(&path) {
+        if let Err(error) = state
+            .history
+            .flush(&path, Self::write_timestamps_armed(state))
+        {
             warn_io_failure(state, "history flush before reload failed", error);
         }
         match HistoryStore::load_from_file(capacity, &path) {
@@ -1528,9 +1584,24 @@ impl LiveFileBackedHistory {
     /// writes report nothing (bashhist.c), and only the explicit
     /// `history -w`/`-a` builtins surface I/O errors. Keep the entries in
     /// memory, warn once, and let later reads still see them.
+    /// niubash#734: the snapshotted HISTTIMEFORMAT arming bit for the
+    /// host-driven write faces (see `HistorySettings`). A poisoned
+    /// settings cell fails closed to the plain stream — the
+    /// byte-preserving default.
+    fn write_timestamps_armed(state: &HistoryState) -> bool {
+        state
+            .settings
+            .lock()
+            .map(|settings| settings.histtimeformat_armed)
+            .unwrap_or(false)
+    }
+
     fn sync_state(state: &mut HistoryState) -> bool {
         let synced = match state.path.clone() {
-            Some(path) => match state.history.flush(&path) {
+            Some(path) => match state
+                .history
+                .flush(&path, Self::write_timestamps_armed(state))
+            {
                 Ok(()) => true,
                 Err(error) => {
                     warn_io_failure(state, "history file sync failed", error);
@@ -1998,11 +2069,19 @@ impl LiveFileBackedHistory {
         // histappend/HISTFILESIZE values — the host refreshed the
         // settings cell once more after the EXIT trap ran, so values
         // the trap itself set are the ones that govern the write.
-        let (histappend, histfilesize) = state
+        // niubash#734: the HISTTIMEFORMAT arming bit rides the same
+        // final snapshot and governs step (a)'s write shape.
+        let (histappend, histfilesize, histtimeformat_armed) = state
             .settings
             .lock()
-            .map(|settings| (settings.histappend, settings.histfilesize))
-            .unwrap_or((false, None));
+            .map(|settings| {
+                (
+                    settings.histappend,
+                    settings.histfilesize,
+                    settings.histtimeformat_armed,
+                )
+            })
+            .unwrap_or((false, None, false));
         if entries.is_empty() && cleared.is_empty() && cleared_base.is_empty() {
             // Only an existing file needs truncating; a session without
             // history must not create an empty one. (Pinned by
@@ -2041,7 +2120,7 @@ impl LiveFileBackedHistory {
         let mut appended_ok = unsynced.is_empty();
         let mut file_changed = false;
         if !unsynced.is_empty() {
-            match state.history.flush(&path) {
+            match state.history.flush(&path, histtimeformat_armed) {
                 Ok(()) => {
                     appended_ok = true;
                     file_changed = true;
@@ -2367,7 +2446,23 @@ impl LiveFileBackedHistory {
             .is_some_and(|last| last.command_line == text);
         if last_is_same {
             if let Some(path) = state.path.clone() {
-                if append_line_to_file(&path, &text).is_ok() {
+                // niubash#734: while HISTTIMEFORMAT is armed this live
+                // append writes the entry's stamp line ahead of the
+                // entry (histfile.c's append face: a stamped entry is
+                // two file lines), the same shape `append_history_face`
+                // writes for the engine-driven face. The stamp is the
+                // caller-supplied one when present, else a fresh
+                // record-time stamp — the value the reload below reads
+                // back as this entry's stamp either way.
+                let armed = Self::write_timestamps_armed(state);
+                let stamp = stamp_override.clone().unwrap_or_else(now_stamp);
+                let appended = if armed && !stamp.is_empty() {
+                    append_line_to_file(&path, &stamp).is_ok()
+                        && append_line_to_file(&path, &text).is_ok()
+                } else {
+                    append_line_to_file(&path, &text).is_ok()
+                };
+                if appended {
                     if let Ok(history) = HistoryStore::load_from_file(capacity, &path) {
                         state.history = history;
                         state.signature = file_signature_lossy(&path, state);
@@ -4701,6 +4796,142 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&out).unwrap(),
             "# not a stamp\necho seed\necho live\n"
+        );
+    }
+
+    #[test]
+    fn issue734_armed_live_append_writes_stamp_pairs() {
+        // niubash#734: while HISTTIMEFORMAT is armed, the LIVE sync
+        // stamps — GNU's in-session appends carry the stamp line
+        // while armed (histfile.c history_append: a stamped entry is
+        // two file lines). The pre-existing plain seed line stays
+        // plain: the sync appends only the new tail. A fresh provider
+        // over the result pairs the live entry with the exact stamp
+        // the sync wrote.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "echo seed\n").unwrap();
+        let mut provider = provider_with_settings(&path, |settings| {
+            settings.histtimeformat_armed = true;
+        });
+        provider.append("echo live".to_string()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3, "seed + stamp/entry pair: {content:?}");
+        assert_eq!(lines[0], "echo seed");
+        assert!(is_stamp_line(lines[1]), "stamp line: {:?}", lines[1]);
+        assert_eq!(lines[2], "echo live");
+        let written_stamp = lines[1].to_string();
+
+        drop(provider);
+        let mut reloaded = RubashHistoryProvider::with_file(100, path);
+        assert_eq!(reloaded.entries().unwrap(), ["echo seed", "echo live"]);
+        assert_eq!(reloaded.entry_timestamps()[1], written_stamp);
+    }
+
+    #[test]
+    fn issue734_armed_duplicate_live_append_writes_stamp_pairs() {
+        // niubash#734: a duplicate of the last line takes save_entry's
+        // direct-append fast path (niubash#570: the store's record
+        // filter drops consecutive duplicates, the file must still
+        // gain the line); while armed it writes the stamp line ahead
+        // of the entry, the histfile.c append shape, exactly like the
+        // flush-driven append in the pin above.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut provider = provider_with_settings(&path, |settings| {
+            settings.histtimeformat_armed = true;
+        });
+        provider.append("echo one".to_string()).unwrap();
+        provider.append("echo one".to_string()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4, "two stamp/entry pairs: {content:?}");
+        assert!(is_stamp_line(lines[0]), "stamp line: {:?}", lines[0]);
+        assert_eq!(lines[1], "echo one");
+        assert!(is_stamp_line(lines[2]), "stamp line: {:?}", lines[2]);
+        assert_eq!(lines[3], "echo one");
+    }
+
+    #[test]
+    fn issue734_armed_exit_flush_writes_stamp_pairs() {
+        // niubash#734: a line whose live sync failed mid-session is
+        // written at session end (bashhist.c maybe_save_shell_history:
+        // the exit append); while armed it lands as a stamp/entry
+        // pair, like the line that synced live. The sync failure is
+        // simulated by swapping the backing file for a directory —
+        // an open failure no uid bypasses (a read-only file would be
+        // masked for uid 0). The synced pair's bytes are restored
+        // verbatim before the drop, so the final file must be exactly
+        // pair + pair.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut provider = provider_with_settings(&path, |settings| {
+            settings.histtimeformat_armed = true;
+        });
+        provider.append("echo synced".to_string()).unwrap();
+        let synced_pair = std::fs::read_to_string(&path).unwrap();
+        {
+            let lines: Vec<&str> = synced_pair.lines().collect();
+            assert_eq!(lines.len(), 2, "live pair: {synced_pair:?}");
+            assert!(is_stamp_line(lines[0]), "stamp line: {:?}", lines[0]);
+            assert_eq!(lines[1], "echo synced");
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        provider.append("echo lost".to_string()).unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            ["echo synced", "echo lost"],
+            "the unsynced line survives in memory"
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, &synced_pair).unwrap();
+
+        drop(provider);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.starts_with(&synced_pair),
+            "the synced pair is untouched: {content:?}"
+        );
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4, "two stamp/entry pairs: {content:?}");
+        assert!(is_stamp_line(lines[2]), "stamp line: {:?}", lines[2]);
+        assert_eq!(lines[3], "echo lost");
+    }
+
+    #[test]
+    fn issue734_unarmed_live_and_exit_writes_stay_plain() {
+        // niubash#734 scope guard: with HISTTIMEFORMAT unset the
+        // host-driven faces keep the exact pre-#734 bytes — the live
+        // sync writes plain lines and the session-end flush's append
+        // of an unsynced line is plain too (the #703 unarmed pin
+        // guards the engine-driven faces the same way). Same
+        // directory-swap sync failure as the armed exit pin above.
+        use rubash::history::HistoryProvider as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        provider.append("echo synced".to_string()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo synced\n");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        provider.append("echo lost".to_string()).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "echo synced\n").unwrap();
+
+        drop(provider);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "echo synced\necho lost\n",
+            "unarmed, the exit flush appends the plain line"
         );
     }
 }

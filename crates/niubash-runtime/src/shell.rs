@@ -3549,9 +3549,13 @@ impl Shell {
     /// unset/empty/negative/non-numeric means no limit); histappend is
     /// read from the engine's `__RUBASH_SHOPT_STATE` carrier, the same
     /// read `resync_parse_extglob_gate` performs for extglob.
-    /// HISTTIMEFORMAT is not snapshotted: its arming is decided by
-    /// the engine, which invokes the provider's timestamped faces
-    /// only while the variable exists (see `HistorySettings`).
+    /// HISTTIMEFORMAT's arming for the engine-driven faces is not
+    /// snapshotted: it is decided by the engine, which invokes the
+    /// provider's timestamped faces only while the variable exists.
+    /// The arming bit IS snapshotted (niubash#734) for the two
+    /// host-driven write faces the engine never invokes — the live
+    /// sync and the session-end flush's write path (see
+    /// `HistorySettings`).
     ///
     /// Two live-state faces ride along (niubash#660/#661): the
     /// `history` shell option is snapshotted into the same cell (the
@@ -3562,6 +3566,17 @@ impl Shell {
         let Some(settings) = self.history_settings() else {
             return;
         };
+        // niubash#734: the HISTTIMEFORMAT arming bit. Presence is the
+        // whole predicate — variables.c sv_histtimefmt arms
+        // history_write_timestamps when the variable exists,
+        // set-but-empty included — the same `is_some()` the engine
+        // checks for the faces it drives (rubash job_builtins'
+        // write_ts).
+        let histtimeformat_armed = self
+            .session_mut()
+            .variables()
+            .resolved_value("HISTTIMEFORMAT")
+            .is_some();
         let histcontrol = self
             .session_mut()
             .variables()
@@ -3610,6 +3625,7 @@ impl Shell {
             settings.histfilesize = histfilesize;
             settings.histappend = histappend;
             settings.history_enabled = history_enabled;
+            settings.histtimeformat_armed = histtimeformat_armed;
         }
         self.apply_history_redirect();
     }
