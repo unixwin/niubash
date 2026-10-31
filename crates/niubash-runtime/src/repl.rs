@@ -2473,12 +2473,13 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             ReedlineEvent::Enter,
         ])),
         "autosuggest-partial-accept" => Some(ReedlineEvent::HistoryHintWordComplete),
-        "history-substring-search-up" | "history-search-backward" | "up-line-or-history" => {
-            Some(ReedlineEvent::Up)
-        }
-        "history-substring-search-down" | "history-search-forward" | "down-line-or-history" => {
-            Some(ReedlineEvent::Down)
-        }
+        // GNU's own spellings of the substring-search pair
+        // (`history-substring-search-backward`/`-forward`, funmap.c)
+        // ride the same arms as the zsh spellings (niubash#731).
+        "history-substring-search-up" | "history-substring-search-backward"
+        | "history-search-backward" | "up-line-or-history" => Some(ReedlineEvent::Up),
+        "history-substring-search-down" | "history-substring-search-forward"
+        | "history-search-forward" | "down-line-or-history" => Some(ReedlineEvent::Down),
         "accept-line" => Some(ReedlineEvent::Enter),
         "beginning-of-line" => Some(edit_event(EditCommand::MoveToLineStart { select: false })),
         "end-of-line" => Some(edit_event(EditCommand::MoveToLineEnd { select: false })),
@@ -2502,7 +2503,13 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // "not in the host's deliverable set" (niubash#630 gap list).
         "upcase-word" => Some(edit_event(EditCommand::UppercaseWord)),
         "downcase-word" => Some(edit_event(EditCommand::LowercaseWord)),
+        // The third word-case transform and the word transpose: the
+        // editor carries both edits (`CapitalizeWord`, `SwapWords`),
+        // so a bind of the GNU names mirrors like its siblings
+        // (niubash#731).
+        "capitalize-word" => Some(edit_event(EditCommand::CapitalizeWord)),
         "transpose-chars" => Some(edit_event(EditCommand::SwapGraphemes)),
+        "transpose-words" => Some(edit_event(EditCommand::SwapWords)),
         // GNU `unix-word-rubout` (Ctrl+W) is the same "kill the word
         // before the cursor into the cut buffer" gesture as
         // `backward-kill-word`; readline keeps both names.
@@ -2530,6 +2537,11 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // completion event is exactly that (menu first, then the
         // editor's own completion).
         "complete" => Some(completion_event()),
+        // `menu-complete` is GNU's cycling completion: the same event
+        // (the menu cycles under the host's interaction rules,
+        // niubash#731). The backward/old variants stay undelivered —
+        // the editor has no open-the-menu-backward event.
+        "menu-complete" => Some(completion_event()),
         "kill-word" => Some(edit_event(EditCommand::CutWordRight)),
         "kill-line" => Some(edit_event(EditCommand::CutToLineEnd)),
         "backward-kill-line" | "unix-line-discard" => {
@@ -2540,10 +2552,33 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "undo" => Some(edit_event(EditCommand::Undo)),
         "redo" => Some(edit_event(EditCommand::Redo)),
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
+        // GNU `clear-display` clears the screen AND the scrollback,
+        // then redraws (text.c `rl_clear_display` calls
+        // `_rl_clear_screen (1)`): the editor's `ClearScrollback` is
+        // that shape, where `clear-screen` above is the milder one
+        // (niubash#731).
+        "clear-display" => Some(ReedlineEvent::ClearScrollback),
         "redisplay" | "redraw-current-line" => Some(ReedlineEvent::Repaint),
         "expand-or-complete" | "complete-word" => Some(completion_event()),
         "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
+        // GNU `insert-comment` (text.c `rl_insert_comment`, no
+        // explicit argument — the only shape reachable without
+        // readline's prefix-argument machinery): move to the line
+        // start, insert the comment-begin string (GNU's default is
+        // `#`, rlconf.h `RL_COMMENT_BEGIN_DEFAULT`), and accept the
+        // line. A customized comment-begin is not consulted, the same
+        // static-arm limit as the rest of this table (niubash#731).
+        "insert-comment" => Some(ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Edit(vec![
+                EditCommand::MoveToLineStart { select: false },
+                EditCommand::InsertString("#".to_string()),
+            ]),
+            ReedlineEvent::Enter,
+        ])),
+        // GNU `tab-insert` inserts a literal tab where TAB itself is
+        // the completion key (niubash#731).
+        "tab-insert" => Some(edit_event(EditCommand::InsertChar('\t'))),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -5036,6 +5071,74 @@ mod tests {
             native_widget_event("no_such_readline_fn"),
             Some(ReedlineEvent::ExecuteHostCommand(_))
         ));
+    }
+
+    /// niubash#731 (K3 widening): GNU readline names the editor could
+    /// already express but the bridge still dropped — the remaining
+    /// word transforms, the cycling completion, the scrollback clear,
+    /// the comment-and-accept composition, the literal tab, and GNU's
+    /// own substring-search spellings. `redraw-current-line` (the
+    /// #630 K3 note) is pinned here too: it already maps to `Repaint`.
+    /// Names with no editor expression (kill-ring rotation, the mark
+    /// register, prefix arguments...) keep the sentinel, so the
+    /// bridge keeps reporting them instead of mis-delivering.
+    #[test]
+    fn issue731_native_widget_maps_widened_gnu_names() {
+        assert_eq!(
+            native_widget_event("capitalize-word"),
+            Some(edit_event(EditCommand::CapitalizeWord))
+        );
+        assert_eq!(
+            native_widget_event("transpose-words"),
+            Some(edit_event(EditCommand::SwapWords))
+        );
+        assert_eq!(
+            native_widget_event("clear-display"),
+            Some(ReedlineEvent::ClearScrollback)
+        );
+        assert_eq!(
+            native_widget_event("redraw-current-line"),
+            Some(ReedlineEvent::Repaint)
+        );
+        assert_eq!(
+            native_widget_event("tab-insert"),
+            Some(edit_event(EditCommand::InsertChar('\t')))
+        );
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![
+                    EditCommand::MoveToLineStart { select: false },
+                    EditCommand::InsertString("#".to_string()),
+                ]),
+                ReedlineEvent::Enter,
+            ]))
+        );
+        // `menu-complete` shares the completion event, like `complete`.
+        match native_widget_event("menu-complete") {
+            Some(ReedlineEvent::UntilFound(events)) => {
+                assert!(matches!(events.first(), Some(ReedlineEvent::Menu(_))));
+            }
+            other => panic!("menu-complete must map to the completion event, got {other:?}"),
+        }
+        assert_eq!(
+            native_widget_event("history-substring-search-backward"),
+            Some(ReedlineEvent::Up)
+        );
+        assert_eq!(
+            native_widget_event("history-substring-search-forward"),
+            Some(ReedlineEvent::Down)
+        );
+        // The residual inexpressible set still falls to the sentinel.
+        for name in ["yank-pop", "operate-and-get-next", "set-mark", "overwrite-mode"] {
+            assert!(
+                matches!(
+                    native_widget_event(name),
+                    Some(ReedlineEvent::ExecuteHostCommand(_))
+                ),
+                "{name} must stay on the sentinel (reported, not mis-delivered)"
+            );
+        }
     }
 
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
