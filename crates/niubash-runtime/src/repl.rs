@@ -4268,6 +4268,15 @@ pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)>
         "\\e[3~" | "^[[3~" => Some((KeyModifiers::NONE, KeyCode::Delete)),
         "\\e[5~" | "^[[5~" | "\\e[I" | "^[[I" => Some((KeyModifiers::NONE, KeyCode::PageUp)),
         "\\e[6~" | "^[[6~" | "\\e[G" | "^[[G" => Some((KeyModifiers::NONE, KeyCode::PageDown)),
+        // CSI modifier spellings in GNU's terminal table (xterm/rxvt
+        // send these for modified arrows and Delete). The terminal
+        // layer delivers the same chord as KeyCode+modifier, so map
+        // both spellings to one key.
+        "\\e[1;3C" => Some((KeyModifiers::ALT, KeyCode::Right)),
+        "\\e[1;3D" => Some((KeyModifiers::ALT, KeyCode::Left)),
+        "\\e[1;5C" | "\\e[5C" => Some((KeyModifiers::CONTROL, KeyCode::Right)),
+        "\\e[1;5D" | "\\e[5D" => Some((KeyModifiers::CONTROL, KeyCode::Left)),
+        "\\e[3;5~" => Some((KeyModifiers::CONTROL, KeyCode::Delete)),
         // A bare ESC is one of GNU's default binds (`"\e": emacs-editing-mode`).
         // It arrives here only when it is the whole keyseq; `\e[...` forms
         // were matched above.
@@ -6186,18 +6195,18 @@ mod tests {
     ///   not readline's C-style history expansion event.
     /// - `do-lowercase-version` (`\eA`–`\eN`, `\eP`–`\eZ`): GNU's
     ///   uppercase-fallback rule, not a name the editor dispatches.
-    /// - terminal spellings `\e[1;3C`/`\e[1;5C`/`\e[5C` family and
-    ///   `\e[3;5~`: CSI modified keys parse as raw escape text today;
-    ///   the terminal layer delivers the same chords as
-    ///   KeyCode+modifier events, so this is a parser gap.
     /// - `\e[200~` (bracketed-paste-begin): reedline consumes the
     ///   bracketed-paste envelope itself and never routes the marker
     ///   through the keymap.
+    ///
+    /// The CSI modified-arrow/Delete spellings (`\e[1;3C`, `\e[1;5C`,
+    /// `\e[5C`, `\e[3;5~`, ...) are delivered: `parse_key_sequence`
+    /// maps them to the same KeyCode+modifier chords the terminal
+    /// layer sends.
     const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &[
         "\\C-g", "\\C-s", "\\e!", "\\e$", "\\e/", "\\e@", "\\eA", "\\eB", "\\eC", "\\eD", "\\eE",
         "\\eF", "\\eG", "\\eH", "\\eI", "\\eJ", "\\eK", "\\eL", "\\eM", "\\eN", "\\eP", "\\eQ",
-        "\\eR", "\\eS", "\\eT", "\\eU", "\\eV", "\\eW", "\\eX", "\\eY", "\\eZ", "\\e[1;3C",
-        "\\e[1;3D", "\\e[1;5C", "\\e[1;5D", "\\e[200~", "\\e[3;5~", "\\e[5C", "\\e[5D", "\\e^",
+        "\\eR", "\\eS", "\\eT", "\\eU", "\\eV", "\\eW", "\\eX", "\\eY", "\\eZ", "\\e[200~", "\\e^",
         "\\eg", "\\e{", "\\e~",
     ];
 
