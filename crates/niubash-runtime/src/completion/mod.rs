@@ -2,6 +2,7 @@
 // Provides Tab completion for commands, paths, and variables
 
 pub mod bash_import;
+pub mod brace;
 pub mod column_menu;
 pub mod command;
 pub mod completer;
@@ -10,6 +11,7 @@ pub mod external;
 pub mod file_colors;
 pub mod gnu_menu;
 pub mod path;
+pub mod sources;
 pub mod variables;
 pub mod winuxcmd_assets;
 

@@ -2868,19 +2868,40 @@ impl Shell {
         self.executor().has_function(name)
     }
 
-    /// Re-read the startup rc's bind state — the host face of GNU
+    /// Re-read the keybinding files — the host face of GNU
     /// `re-read-init-file` (lib/readline/bind.c:1025
-    /// `rl_re_read_init_file` re-reads the keybinding file;
-    /// niubash's keybinding state lives in `~/.niubashrc`, so its
-    /// top-level `bind` lines are what re-reading means here,
-    /// niubash#765). The lines run against the live engine, so
-    /// edited bindings land in the bind registry; the REPL's
-    /// between-prompts staleness rebuild re-mirrors them into the
-    /// editor before the next prompt. The rest of the rc (aliases,
-    /// exports, arbitrary commands) is startup state, not
-    /// keybinding state, and does not re-run. Returns how many
-    /// bind lines ran.
+    /// `rl_re_read_init_file` re-reads `$INPUTRC` / `~/.inputrc`).
+    /// GNU's inputrc leg runs first through the engine's `bind -f`;
+    /// niu then re-runs the startup rc's top-level `bind` lines because
+    /// its bindings also live in `~/.niubashrc` (niubash#765). The
+    /// lines run against the live engine, so edited bindings land in
+    /// the bind registry; the REPL's between-prompts staleness rebuild
+    /// re-mirrors them into the editor before the next prompt. The rest
+    /// of the rc (aliases, exports, arbitrary commands) is startup
+    /// state, not keybinding state, and does not re-run. Returns how
+    /// many rc bind lines ran (the inputrc leg is reported by `bind`).
     pub fn reread_init_file_bindings(&mut self) -> usize {
+        // GNU rl_re_read_init_file re-reads the inputrc first
+        // (bind.c:1025 -> rl_read_init_file(NULL)); that is $INPUTRC,
+        // else ~/.inputrc. Niu also re-runs the startup rc's top-level
+        // `bind` lines because its bindings live there. The inputrc
+        // leg goes through the engine's own `bind -f`, so its parser
+        // and diagnostics stay the single source of truth.
+        let inputrc = self
+            .executor()
+            .get_env("INPUTRC")
+            .map(str::to_string)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.home_dir.join(".inputrc"));
+        if inputrc.is_file() {
+            let quoted = format!(
+                "'{}'",
+                inputrc.display().to_string().replace('\'', "'\\''")
+            );
+            let _ = self.execute_line(&format!("bind -f {quoted}"));
+        }
+
         let Some(path) = self.startup_rc_path() else {
             return 0;
         };
@@ -6458,12 +6479,18 @@ mod tests {
             "export NIUBASH_REREAD_MARK=first\nbind '\"\\C-o\": operate-and-get-next'\n",
         )
         .unwrap();
+        std::fs::write(home.join(".inputrc"), "\"\\C-t\": transpose-chars\n").unwrap();
         let mut shell = test_shell(HookConfig::default());
         shell.home_dir = home.clone();
         // The bind line lands in the registry…
         assert_eq!(shell.reread_init_file_bindings(), 1);
         let (entries, _) = crate::bind_surface::load_engine_bindings(shell.executor());
         assert!(entries.iter().any(|e| e.keyseq == "\\C-o"));
+        // GNU's inputrc leg is re-read too ($INPUTRC/~/.inputrc).
+        assert!(
+            entries.iter().any(|e| e.keyseq == "\\C-t"),
+            "inputrc binding must be re-read: {entries:?}"
+        );
         // …while the export line is startup state, not bind state,
         // and does not re-run.
         assert_eq!(
