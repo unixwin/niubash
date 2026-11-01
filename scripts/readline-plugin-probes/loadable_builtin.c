@@ -32,6 +32,13 @@
  * `RL_PROBE_KEY_MARK=1` makes the rl_add_defun callback print a marker when
  * the host dispatches its key, proving a plugin binding fires live.
  *
+ * Argument modes (niubash#775 live routing): `rl_probe keyseq` (host
+ * bind / bind -x visible through rl_function_of_keyseq[_len]),
+ * `rl_probe macro` / `macrocheck` (rl_macro_bind routed both ways),
+ * `rl_probe pending` / `done` (rl_pending_input / rl_done consumed by the
+ * editor), `rl_probe hooks` (startup + pre-input hook markers), and
+ * `rl_probe mark` / `markread` (mark survives a host-command resume).
+ *
  * The builtin struct is the stable GNU bash loadable-builtin contract
  * (builtins.h): name, function, flags, long_doc, short_doc, handle.  It is
  * declared here rather than including bash headers so the fixture builds on
@@ -63,9 +70,15 @@ typedef int rl_command_func_t(int, int);
 #endif
 
 /* GNU bash builtins.h (the ABI is stable; keep the field order). */
+/* command.h: WORD_LIST -> WORD_DESC -> char *word. */
+typedef struct word_desc {
+    char *word;
+    int flags;
+} WORD_DESC;
+
 typedef struct word_list {
     struct word_list *next;
-    char *word;
+    WORD_DESC *word;
 } WORD_LIST;
 
 typedef int sh_builtin_func_t(WORD_LIST *);
@@ -101,10 +114,207 @@ static int rl_probe_defun(int count, int key)
 
 typedef int (*rl_add_defun_fn)(const char *, rl_command_func_t *, int);
 typedef int (*rl_bind_key_fn)(int, rl_command_func_t *);
+typedef int (*rl_macro_bind_fn)(const char *, const char *, void *);
+typedef rl_command_func_t *(*rl_function_of_keyseq_fn)(const char *, void *, int *);
+typedef rl_command_func_t *(*rl_function_of_keyseq_len_fn)(const char *, size_t,
+                                                           void *, int *);
+typedef rl_command_func_t *(*rl_named_function_fn)(const char *);
+typedef int (*rl_probe_hook_fn)(void);
 
 static void *probe_sym(const char *name)
 {
     return dlsym(RTLD_DEFAULT, name);
+}
+
+/* --- niubash#775 live-routing acceptance modes -------------------------
+ *
+ * `rl_probe keyseq`   host bind / bind -x visibility through the exported
+ *                     keymaps (`rl_function_of_keyseq[_len]`).
+ * `rl_probe macro`    rl_macro_bind -> host macro/chord registry.
+ * `rl_probe pending`  rl_pending_input -> injected key on resume.
+ * `rl_probe done`     rl_done -> accept the current line.
+ * `rl_probe hooks`    install rl_startup_hook / rl_pre_input_hook markers.
+ * `rl_probe mark`     set an active mark at offset 1.
+ * `rl_probe markread` print the mark left by an earlier probe.
+ * `rl_probe macrocheck` read back the C-t macro binding installed by
+ *                     `rl_probe macro` (macro visible to ABI consumers).
+ */
+
+static int rl_probe_startup(void)
+{
+    printf("RL_PROBE_STARTUP\n");
+    fflush(stdout);
+    return 0;
+}
+
+static int rl_probe_pre_input(void)
+{
+    printf("RL_PROBE_PREINPUT\n");
+    fflush(stdout);
+    return 0;
+}
+
+static const char *probe_first_word(WORD_LIST *list)
+{
+    return (list != NULL && list->word != NULL && list->word->word != NULL)
+               ? list->word->word
+               : "";
+}
+
+/* The `keyseq` mode: a host `bind '"\C-o": dump-variables'` must be the
+ * function rl_function_of_keyseq returns for the raw C-o byte, and a host
+ * `bind -x '"\C-g": ...'` must differ from the ABI default (abort). */
+static void probe_keyseq_mode(void)
+{
+    const char *function = NULL;
+    const char *length = NULL;
+    const char *bindx = NULL;
+    const char *kind_field = NULL;
+    rl_function_of_keyseq_fn of_keyseq =
+        (rl_function_of_keyseq_fn)probe_sym("rl_function_of_keyseq");
+    rl_function_of_keyseq_len_fn of_keyseq_len =
+        (rl_function_of_keyseq_len_fn)probe_sym("rl_function_of_keyseq_len");
+    rl_named_function_fn named =
+        (rl_named_function_fn)probe_sym("rl_named_function");
+
+    if (of_keyseq == NULL || of_keyseq_len == NULL || named == NULL) {
+        printf("RL_PROBE_KEYSEQ function=missing length=missing bindx=missing "
+               "kind=missing\n");
+        fflush(stdout);
+        return;
+    }
+
+    {
+        char key_c_o[2] = {(char)0x0f, 0};
+        char key_c_g[2] = {(char)0x07, 0};
+        int kind = -1;
+        rl_command_func_t *dump_variables = named("dump-variables");
+        rl_command_func_t *abort_fn = named("abort");
+        rl_command_func_t *seen = of_keyseq(key_c_o, NULL, &kind);
+
+        function = (dump_variables != NULL && seen == dump_variables) ? "ok" : "error";
+        kind_field = (kind == 0) ? "ok" : "error";
+
+        seen = of_keyseq_len(key_c_o, 1, NULL, &kind);
+        length = (dump_variables != NULL && seen == dump_variables && kind == 0)
+                     ? "ok"
+                     : "error";
+
+        kind = -1;
+        seen = of_keyseq(key_c_g, NULL, &kind);
+        bindx = (seen != NULL && seen != abort_fn && kind == 0) ? "ok" : "error";
+    }
+
+    printf("RL_PROBE_KEYSEQ function=%s length=%s bindx=%s kind=%s\n",
+           function, length, bindx, kind_field);
+    fflush(stdout);
+}
+
+static void probe_macro_mode(void)
+{
+    rl_macro_bind_fn macro_bind = (rl_macro_bind_fn)probe_sym("rl_macro_bind");
+    const char *field = "missing";
+    if (macro_bind != NULL) {
+        /* Raw C-t; the text inserts literally in the editor. */
+        field = macro_bind("\\C-t", "MAGIC", NULL) == 0 ? "ok" : "error";
+    }
+    printf("RL_PROBE_MACRO macro=%s\n", field);
+    fflush(stdout);
+}
+
+static void probe_macrocheck_mode(void)
+{
+    rl_function_of_keyseq_fn of_keyseq =
+        (rl_function_of_keyseq_fn)probe_sym("rl_function_of_keyseq");
+    const char *field = "missing";
+    if (of_keyseq != NULL) {
+        char key_c_t[2] = {(char)0x14, 0};
+        int kind = -1;
+        rl_command_func_t *seen = of_keyseq(key_c_t, NULL, &kind);
+        /* A macro slot reports kind == ISMACR (2); GNU returns the
+         * macro-string pointer through the function pointer union. */
+        field = (seen != NULL && kind == 2) ? "ok" : "error";
+        printf("RL_PROBE_MACROCHECK macro=%s kind=%d seen=%d\n", field, kind,
+               seen != NULL);
+        fflush(stdout);
+        return;
+    }
+    printf("RL_PROBE_MACROCHECK macro=%s\n", field);
+    fflush(stdout);
+}
+
+static void probe_pending_mode(void)
+{
+    int *pending = (int *)probe_sym("rl_pending_input");
+    const char *field = "missing";
+    if (pending != NULL) {
+        *pending = 'Z';
+        field = (*pending == 'Z') ? "ok" : "error";
+    }
+    printf("RL_PROBE_CONTROL pending=%s\n", field);
+    fflush(stdout);
+}
+
+static void probe_done_mode(void)
+{
+    int *done = (int *)probe_sym("rl_done");
+    const char *field = "missing";
+    if (done != NULL) {
+        *done = 1;
+        field = (*done == 1) ? "ok" : "error";
+    }
+    printf("RL_PROBE_CONTROL done=%s\n", field);
+    fflush(stdout);
+}
+
+static void probe_hooks_mode(void)
+{
+    rl_probe_hook_fn *startup =
+        (rl_probe_hook_fn *)probe_sym("rl_startup_hook");
+    rl_probe_hook_fn *pre_input =
+        (rl_probe_hook_fn *)probe_sym("rl_pre_input_hook");
+    const char *startup_field = "missing";
+    const char *pre_input_field = "missing";
+    if (startup != NULL) {
+        *startup = rl_probe_startup;
+        startup_field = (*startup == rl_probe_startup) ? "ok" : "error";
+    }
+    if (pre_input != NULL) {
+        *pre_input = rl_probe_pre_input;
+        pre_input_field = (*pre_input == rl_probe_pre_input) ? "ok" : "error";
+    }
+    printf("RL_PROBE_HOOKS startup=%s pre_input=%s\n", startup_field,
+           pre_input_field);
+    fflush(stdout);
+}
+
+static void probe_mark_mode(void)
+{
+    int *mark = (int *)probe_sym("rl_mark");
+    int (*activate)(void) = (int (*)(void))probe_sym("rl_activate_mark");
+    const char *field = "missing";
+    if (mark != NULL) {
+        *mark = 1;
+        field = (*mark == 1) ? "ok" : "error";
+    }
+    if (activate != NULL) {
+        activate();
+    }
+    printf("RL_PROBE_MARK set=%s mark=%d\n", field, mark != NULL ? *mark : -1);
+    fflush(stdout);
+}
+
+static void probe_markread_mode(void)
+{
+    int *mark = (int *)probe_sym("rl_mark");
+    int (*active)(void) = (int (*)(void))probe_sym("rl_mark_active_p");
+    if (mark == NULL) {
+        printf("RL_PROBE_MARK read=missing mark=-1 active=-1\n");
+    } else {
+        printf("RL_PROBE_MARK read=ok mark=%d active=%d\n", *mark,
+               active != NULL ? active() : -1);
+    }
+    fflush(stdout);
 }
 
 static int rl_probe_builtin(WORD_LIST *list)
@@ -122,7 +332,42 @@ static int rl_probe_builtin(WORD_LIST *list)
     char version_buffer[32];
     char library_buffer[128];
 
-    (void)list;
+    /* niubash#775 live-routing modes; each prints one RL_PROBE_* line. */
+    {
+        const char *mode = probe_first_word(list);
+        if (strcmp(mode, "keyseq") == 0) {
+            probe_keyseq_mode();
+            return 0;
+        }
+        if (strcmp(mode, "macro") == 0) {
+            probe_macro_mode();
+            return 0;
+        }
+        if (strcmp(mode, "macrocheck") == 0) {
+            probe_macrocheck_mode();
+            return 0;
+        }
+        if (strcmp(mode, "pending") == 0) {
+            probe_pending_mode();
+            return 0;
+        }
+        if (strcmp(mode, "done") == 0) {
+            probe_done_mode();
+            return 0;
+        }
+        if (strcmp(mode, "hooks") == 0) {
+            probe_hooks_mode();
+            return 0;
+        }
+        if (strcmp(mode, "mark") == 0) {
+            probe_mark_mode();
+            return 0;
+        }
+        if (strcmp(mode, "markread") == 0) {
+            probe_markread_mode();
+            return 0;
+        }
+    }
 
     /* Acceptance probe mode: the default restores every mutation so the
      * host's line survives a plugin call unchanged.  With RL_PROBE_MUTATE=1

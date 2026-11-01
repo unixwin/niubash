@@ -449,7 +449,17 @@ def scenario_niu_builtin(args):
             # Register the plugin key slot (0xfe) before the editor is built.
             "rl_probe\n"
             # Run the same builtin from a bind -x key while editing.
-            "bind -x '\"\\C-g\": rl_probe'\n" % builtin
+            "bind -x '\"\\C-g\": rl_probe'\n"
+            # niubash#775 live-routing coverage, all installed at startup:
+            # hooks before the first prompt, a plugin macro, a host function
+            # bind and bind -x entries for pending input / rl_done / mark.
+            "rl_probe hooks\n"
+            "rl_probe macro\n"
+            "bind '\"\\C-o\": dump-variables'\n"
+            "bind -x '\"\\C-p\": rl_probe pending'\n"
+            "bind -x '\"\\C-y\": rl_probe done'\n"
+            "bind -x '\"\\C-k\": rl_probe mark'\n"
+            "bind -x '\"\\C-l\": rl_probe markread'\n" % builtin
         )
 
     env = base_env(home)
@@ -543,10 +553,157 @@ def scenario_niu_builtin(args):
                 session,
             )
 
+        if session.read_until(b"P1> ", 10) is None:
+            return fail("prompt did not return after the mutation phase", session)
+
+        # 4. Host keymap -> ABI: a rc `bind '\C-o': dump-variables` must be
+        #    what rl_function_of_keyseq returns, and the rc `bind -x` on C-g
+        #    must differ from readline's default abort binding.
+        session.send(b"rl_probe keyseq; rl_probe macrocheck\r")
+        chunk = session.read_until(b"RL_PROBE_KEYSEQ ", 10)
+        if chunk is None:
+            return fail("rl_probe keyseq produced no output", session)
+        line = session.read_until(b"\n", 5) or b""
+        keyseq_text = strip_ansi(chunk + line).replace("\r", "").replace("\n", " ")
+        keyseq_text = keyseq_text[keyseq_text.index("RL_PROBE_KEYSEQ "):]
+        for field in ("function=ok", "length=ok", "bindx=ok", "kind=ok"):
+            if field not in keyseq_text:
+                return fail(
+                    "host bind/bind -x invisible to rl_function_of_keyseq "
+                    "(missing %s): %s" % (field, keyseq_text),
+                    session,
+                )
+
+        # 5. Macro -> host: rl_probe macro bound C-t at startup; the host
+        #    mirror keeps the ABI slot a macro, and the editor inserts its
+        #    text when the key is pressed.
+        chunk = session.read_until(b"RL_PROBE_MACROCHECK ", 5)
+        if chunk is None:
+            return fail("rl_probe macrocheck produced no output", session)
+        line = session.read_until(b"\n", 5) or b""
+        macrocheck_text = strip_ansi(chunk + line).replace("\r", "").replace("\n", " ")
+        macrocheck_text = macrocheck_text[macrocheck_text.index("RL_PROBE_MACROCHECK "):]
+        if "macro=ok" not in macrocheck_text:
+            return fail(
+                "rl_macro_bind did not stay a macro slot in the ABI keymap: "
+                + macrocheck_text,
+                session,
+            )
+        if session.read_until(b"P1> ", 5) is None:
+            return fail("prompt did not return after the keyseq/macro checks", session)
+
+        session.send(b"printf 'MACRO-%s\\n' ")
+        settle(session)
+        session.send(b"\x14")  # Ctrl-T -> plugin macro "MAGIC"
+        time.sleep(0.2)
+        session.send(b"\r")
+        if session.read_until(b"MACRO-MAGIC", 10) is None:
+            return fail(
+                "rl_macro_bind text was not routed into the live editor "
+                "(C-t did not insert MAGIC)",
+                session,
+            )
+        if session.read_until(b"P1> ", 5) is None:
+            return fail("prompt did not return after the macro run", session)
+
+        # 6. rl_pending_input: the bind -x command queues 'Z'; after it
+        #    returns the editor injects that key at point.
+        session.send(b"printf 'PEND-%s\\n' a")
+        settle(session)
+        session.send(b"\x10")  # Ctrl-P -> rl_probe pending
+        chunk = session.read_until(b"RL_PROBE_CONTROL ", 10)
+        if chunk is None:
+            return fail("rl_probe pending produced no output", session)
+        line = session.read_until(b"\n", 5) or b""
+        pending_text = strip_ansi(chunk + line).replace("\r", "").replace("\n", " ")
+        if "pending=ok" not in pending_text:
+            return fail("rl_pending_input was not writable: " + pending_text, session)
+        session.send(b"\r")
+        if session.read_until(b"PEND-aZ", 10) is None:
+            return fail(
+                "rl_pending_input was reset instead of injected as the next key "
+                "(expected the line to gain a trailing Z)",
+                session,
+            )
+        if session.read_until(b"P1> ", 5) is None:
+            return fail("prompt did not return after the pending-input run", session)
+
+        # 7. rl_done: setting it from a bind -x command submits the line
+        #    without an Enter keypress.
+        session.send(b"echo DONE-OK")
+        settle(session)
+        session.send(b"\x19")  # Ctrl-Y -> rl_probe done
+        chunk = session.read_until(b"RL_PROBE_CONTROL ", 10)
+        if chunk is None:
+            return fail("rl_probe done produced no output", session)
+        line = session.read_until(b"\n", 5) or b""
+        done_text = strip_ansi(chunk + line).replace("\r", "").replace("\n", " ")
+        if "done=ok" not in done_text:
+            return fail("rl_done was not writable: " + done_text, session)
+        if session.read_until(b"DONE-OK", 10) is None:
+            return fail(
+                "rl_done did not submit the current line (no Enter was sent)",
+                session,
+            )
+        if session.read_until(b"P1> ", 5) is None:
+            return fail("prompt did not return after the rl_done submit", session)
+
+        # 8. Mark across a host-command resume: one bind -x sets it, the
+        #    next (a separate resume of the same read) still sees it.
+        session.send(b"abc")
+        settle(session)
+        session.send(b"\x0b")  # Ctrl-K -> rl_probe mark
+        chunk = session.read_until(b"RL_PROBE_MARK ", 10)
+        if chunk is None:
+            return fail("rl_probe mark produced no output", session)
+        line = session.read_until(b"\n", 5) or b""
+        mark_set_text = strip_ansi(chunk + line).replace("\r", "").replace("\n", " ")
+        session.send(b"\x0c")  # Ctrl-L -> rl_probe markread
+        chunk = session.read_until(b"RL_PROBE_MARK ", 10)
+        if chunk is None:
+            return fail("rl_probe markread produced no output", session)
+        line = session.read_until(b"\n", 5) or b""
+        mark_read_text = strip_ansi(chunk + line).replace("\r", "").replace("\n", " ")
+        if "set=ok" not in mark_set_text or "read=ok mark=1 active=1" not in mark_read_text:
+            return fail(
+                "rl_mark did not survive the host-command resume: set=%s read=%s"
+                % (" ".join(mark_set_text.split()), " ".join(mark_read_text.split())),
+                session,
+            )
+        session.send(b"\x03")  # Ctrl-C clears the line
+        time.sleep(0.2)
+
+        # 9. Hooks: startup exactly once before the first prompt, pre-input
+        #    once per line.
+        transcript = bytes(session.transcript)
+        startup_count = transcript.count(b"RL_PROBE_STARTUP")
+        pre_input_count = transcript.count(b"RL_PROBE_PREINPUT")
+        if startup_count != 1:
+            return fail(
+                "rl_startup_hook ran %d times (expected exactly one startup call)"
+                % startup_count,
+                session,
+            )
+        if pre_input_count < 3:
+            return fail(
+                "rl_pre_input_hook ran %d times (expected one call per line)"
+                % pre_input_count,
+                session,
+            )
+
         return ok(
             "niu live ABI: %s; editor adopted Xcho oneZ from the plugin's "
-            "rl_line_buffer/rl_point writes; rl_bind_key slot fired (%s)"
-            % (" ".join(probe_text.split()), " ".join(marker_text.split()))
+            "rl_line_buffer/rl_point writes; rl_bind_key slot fired (%s); "
+            "%s; %s; pending_input injected (PEND-aZ); rl_done submitted "
+            "(DONE-OK); mark survived resume; hooks startup=%d pre_input=%d"
+            % (
+                " ".join(probe_text.split()),
+                " ".join(marker_text.split()),
+                " ".join(keyseq_text.split()),
+                " ".join(macrocheck_text.split()),
+                startup_count,
+                pre_input_count,
+            )
         )
     finally:
         session.close()
