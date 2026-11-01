@@ -1,14 +1,14 @@
 {
   "harness": 1,
   "description": "niubash completion option matrix (styles x interactions, precedence, compdefs)",
-  "base": "2e8485a",
+  "base": "78c815a",
   "niu": {
     "bin": "/data/data/com.termux/files/home/wt/niu-completion-matrix/target/debug/niu",
     "version": "Niubash 1.4.4 \u2014 bash-compatible shell for Windows\n  rubash   git c9604443ae09\nHome: <https://unixwin.dev>\nDocs & downloads: <https://unixwin.dev>"
   },
   "counts": {
-    "PASS": 47,
-    "FAIL": 9,
+    "PASS": 55,
+    "FAIL": 1,
     "N/A": 2,
     "SKIP": 0
   },
@@ -26,9 +26,9 @@
     {
       "id": "defaults/select_tab1_first_candidate",
       "group": "defaults",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "TAB #1 splices first candidate and highlights it",
-      "actual": "expected: line 'cd cmp-aa/' and first cell cmp-aa highlighted; actual: line 'cd cmp-', highlighted []",
+      "actual": "expected: line 'cd cmp-aa/' and first cell cmp-aa highlighted; actual: line 'cd cmp-aa/', highlighted ['cmp-aa']",
       "source": "config.rs CompletionInteraction::Select (owner ruling #742/#778); zsh complist.c:2813 `mselect = (*(minfo.cur))->gnum` (first match starts selected)",
       "note": "",
       "issue": "#778"
@@ -36,9 +36,9 @@
     {
       "id": "defaults/select_tab2_cycles",
       "group": "defaults",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "second TAB moves to the second candidate",
-      "actual": "expected: line 'cd cmp-bb/' and cell cmp-bb highlighted; actual: line 'cd cmp-aa/', highlighted []",
+      "actual": "expected: line 'cd cmp-bb/' and cell cmp-bb highlighted; actual: line 'cd cmp-bb/', highlighted ['cmp-bb']",
       "source": "docs/src/completion.md#completion-styles; zsh /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps",
       "note": "",
       "issue": "#778"
@@ -46,9 +46,9 @@
     {
       "id": "select/shift_tab_previous",
       "group": "select",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "line 'cd cmp-ff/'",
-      "actual": "expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-ff/', highlighted []",
+      "actual": "expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-ff/', highlighted ['cmp-ff']",
       "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: TAB = complete-word; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps at edges",
       "note": "",
       "issue": "#778"
@@ -56,9 +56,9 @@
     {
       "id": "select/down_one_row",
       "group": "select",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "line 'cd cmp-bb/'",
-      "actual": "expected: line 'cd cmp-bb/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "actual": "expected: line 'cd cmp-bb/' with that candidate highlighted; actual: line 'cd cmp-bb/', highlighted ['cmp-bb']",
       "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Down = down-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps",
       "note": "",
       "issue": "#778"
@@ -68,7 +68,7 @@
       "group": "select",
       "status": "FAIL",
       "expected": "line 'cd cmp-ff/'",
-      "actual": "expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "actual": "expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-bb/', highlighted ['cmp-bb']",
       "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Up = up-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap",
       "note": "",
       "issue": "#778"
@@ -76,9 +76,9 @@
     {
       "id": "select/right_one_column",
       "group": "select",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "line 'cd cmp-cc/'",
-      "actual": "expected: line 'cd cmp-cc/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "actual": "expected: line 'cd cmp-cc/' with that candidate highlighted; actual: line 'cd cmp-cc/', highlighted ['cmp-cc']",
       "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Right = forward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap; column-major grid row stride = 2 for 6 candidates at 40 columns",
       "note": "",
       "issue": "#778"
@@ -86,9 +86,9 @@
     {
       "id": "select/left_one_column_wraps",
       "group": "select",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "line 'cd cmp-ee/'",
-      "actual": "expected: line 'cd cmp-ee/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "actual": "expected: line 'cd cmp-ee/' with that candidate highlighted; actual: line 'cd cmp-ee/', highlighted ['cmp-ee']",
       "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Left = backward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap",
       "note": "",
       "issue": "#778"
@@ -96,9 +96,9 @@
     {
       "id": "select/enter_accept_runs",
       "group": "select",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "Enter accepts and runs",
-      "actual": "expected: Enter after TAB runs cd into cmp-aa; actual: ['irectory', '__NIU_CMP__> basename \"$PWD\"', 'work', '__NIU_CMP__>']",
+      "actual": "expected: Enter after TAB runs cd into cmp-aa; actual: ['__NIU_CMP__> cd cmp-aa/', '__NIU_CMP__> basename \"$PWD\"', 'cmp-aa', '__NIU_CMP__>']",
       "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Enter = accept-line",
       "note": "",
       "issue": "#778"
@@ -108,7 +108,7 @@
       "group": "select",
       "status": "PASS",
       "expected": "Esc rolls the line back",
-      "actual": "expected: Esc restores pre-completion 'cd cmp-'; actual: before 'cd cmp-aa/', after 'cd cmp-'",
+      "actual": "expected: Esc restores pre-completion 'cd cmp-'; actual: before 'cd cmp-bb/', after 'cd cmp-'",
       "source": "docs/src/completion.md two-step rule; niu CycleSession rollback contract",
       "note": "",
       "issue": "#778"
@@ -308,7 +308,7 @@
       "group": "styles",
       "status": "PASS",
       "expected": "list descriptions",
-      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'], highlighted=[]",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'], highlighted=['start']",
       "source": "docs/src/completion.md#completion-styles; style=list",
       "note": "",
       "issue": ""
@@ -366,9 +366,9 @@
     {
       "id": "styles/select_inline_cycles",
       "group": "styles",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "inline style cycles candidates in place",
-      "actual": "expected: inline presentation cycles in place; TAB1 cmp-aa/, TAB2 cmp-bb/; actual: TAB1 'cd cmp-' grid=2 rows, TAB2 'cd cmp-aa/'",
+      "actual": "expected: inline presentation cycles in place; TAB1 cmp-aa/, TAB2 cmp-bb/; actual: TAB1 'cd cmp-aa/' grid=2 rows, TAB2 'cd cmp-bb/'",
       "source": "docs/src/completion.md#completion-styles inline = first match inserted, TAB cycles",
       "note": "",
       "issue": "#778"
@@ -588,7 +588,7 @@
       "group": "select",
       "status": "PASS",
       "expected": "PageDown does not select or splice a candidate",
-      "actual": "expected: PageDown is not claimed by the docs; line stays put; actual: before 'cd cmp-', after 'cd cmp-'",
+      "actual": "expected: PageDown leaves the line and the highlighted candidate unchanged; actual: before line 'cd cmp-aa/' hi=['cmp-aa'], after line 'cd cmp-aa/' hi=['cmp-aa']",
       "source": "/data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings has no PageUp/PageDown; niu docs do not claim them",
       "note": "",
       "issue": ""

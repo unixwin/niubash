@@ -980,11 +980,20 @@ def cases() -> list[Case]:
             s.type_text("cd cmp-")
             s.key(TAB)
             before = s.input_line()
+            before_highlight = s.highlighted(CANDIDATES)
             s.key(PGDN)
             after = s.input_line()
-            ok = after == "cd cmp-"
-            return verdict(ok, "PageDown is not claimed by the docs; line stays put",
-                           f"before {before!r}, after {after!r}")
+            after_highlight = s.highlighted(CANDIDATES)
+            # PageDown is unclaimed: neither the line nor the selected
+            # candidate may move. (Capturing `before` after TAB is
+            # deliberate — the select default already spliced candidate 0.)
+            ok = after == before and after_highlight == before_highlight
+            return verdict(
+                ok,
+                "PageDown leaves the line and the highlighted candidate unchanged",
+                f"before line {before!r} hi={before_highlight!r}, "
+                f"after line {after!r} hi={after_highlight!r}",
+            )
     add(Case("select/page_keys_unclaimed", "select",
              f"{ZSH_COMPLIST} menuselect_bindings has no PageUp/PageDown; niu docs do not claim them",
              "PageDown does not select or splice a candidate", page_keys_probe))

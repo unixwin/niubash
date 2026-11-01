@@ -1,9 +1,9 @@
 # Completion options matrix baseline
 
-- base: `3018703`
+- base: `78c815a`
 - niu: `/data/data/com.termux/files/home/wt/niu-completion-matrix/target/debug/niu`
 - version: `Niubash 1.4.4 — bash-compatible shell for Windows`
-- **PASS 47 / FAIL 9 / N/A 2 / SKIP 0** (58 cases)
+- **PASS 55 / FAIL 1 / N/A 2 / SKIP 0** (58 cases)
 
 Expected values are the documented contract. Selection/highlight assertions are
 frame-level (reverse-video cell), not buffer text.
@@ -45,8 +45,8 @@ frame-level (reverse-video cell), not buffer text.
 | Case | Status | Expected | Actual | Source |
 | --- | --- | --- | --- | --- |
 | `defaults/config_rows` | PASS | built-in default is column + select | expected: completion.style = column (default); completion.interaction = select (default); actual: Effective settings (source: env, inputrc, or default):   command-not-found-hint = off (default)   completion.style = column (default)   completion.interaction = select (default)   startup.rc-policy = primary-only (default)   editing-mode = emacs (default)   keyseq-timeout = 500 (default)  Key bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; they are not a niu setting. | docs/src/configuration.md#the-three-sources |
-| `defaults/select_tab1_first_candidate` | FAIL | TAB #1 splices first candidate and highlights it | expected: line 'cd cmp-aa/' and first cell cmp-aa highlighted; actual: line 'cd cmp-', highlighted [] | config.rs CompletionInteraction::Select (owner ruling #742/#778); zsh complist.c:2813 `mselect = (*(minfo.cur))->gnum` (first match starts selected) |
-| `defaults/select_tab2_cycles` | FAIL | second TAB moves to the second candidate | expected: line 'cd cmp-bb/' and cell cmp-bb highlighted; actual: line 'cd cmp-aa/', highlighted [] | docs/src/completion.md#completion-styles; zsh /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps |
+| `defaults/select_tab1_first_candidate` | PASS | TAB #1 splices first candidate and highlights it | expected: line 'cd cmp-aa/' and first cell cmp-aa highlighted; actual: line 'cd cmp-aa/', highlighted ['cmp-aa'] | config.rs CompletionInteraction::Select (owner ruling #742/#778); zsh complist.c:2813 `mselect = (*(minfo.cur))->gnum` (first match starts selected) |
+| `defaults/select_tab2_cycles` | PASS | second TAB moves to the second candidate | expected: line 'cd cmp-bb/' and cell cmp-bb highlighted; actual: line 'cd cmp-bb/', highlighted ['cmp-bb'] | docs/src/completion.md#completion-styles; zsh /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps |
 
 ## inline
 
@@ -89,18 +89,18 @@ frame-level (reverse-video cell), not buffer text.
 
 | Case | Status | Expected | Actual | Source |
 | --- | --- | --- | --- | --- |
-| `select/shift_tab_previous` | FAIL | line 'cd cmp-ff/' | expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-ff/', highlighted [] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: TAB = complete-word; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps at edges |
-| `select/down_one_row` | FAIL | line 'cd cmp-bb/' | expected: line 'cd cmp-bb/' with that candidate highlighted; actual: line 'cd cmp-', highlighted [] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Down = down-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps |
-| `select/up_one_row_wraps` | FAIL | line 'cd cmp-ff/' | expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-', highlighted [] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Up = up-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap |
-| `select/right_one_column` | FAIL | line 'cd cmp-cc/' | expected: line 'cd cmp-cc/' with that candidate highlighted; actual: line 'cd cmp-', highlighted [] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Right = forward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap; column-major grid row stride = 2 for 6 candidates at 40 columns |
-| `select/left_one_column_wraps` | FAIL | line 'cd cmp-ee/' | expected: line 'cd cmp-ee/' with that candidate highlighted; actual: line 'cd cmp-', highlighted [] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Left = backward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap |
-| `select/enter_accept_runs` | FAIL | Enter accepts and runs | expected: Enter after TAB runs cd into cmp-aa; actual: ['irectory', '__NIU_CMP__> basename "$PWD"', 'work', '__NIU_CMP__>'] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Enter = accept-line |
-| `select/esc_rollback` | PASS | Esc rolls the line back | expected: Esc restores pre-completion 'cd cmp-'; actual: before 'cd cmp-aa/', after 'cd cmp-' | docs/src/completion.md two-step rule; niu CycleSession rollback contract |
+| `select/shift_tab_previous` | PASS | line 'cd cmp-ff/' | expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-ff/', highlighted ['cmp-ff'] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: TAB = complete-word; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps at edges |
+| `select/down_one_row` | PASS | line 'cd cmp-bb/' | expected: line 'cd cmp-bb/' with that candidate highlighted; actual: line 'cd cmp-bb/', highlighted ['cmp-bb'] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Down = down-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps |
+| `select/up_one_row_wraps` | FAIL | line 'cd cmp-ff/' | expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-bb/', highlighted ['cmp-bb'] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Up = up-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap |
+| `select/right_one_column` | PASS | line 'cd cmp-cc/' | expected: line 'cd cmp-cc/' with that candidate highlighted; actual: line 'cd cmp-cc/', highlighted ['cmp-cc'] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Right = forward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap; column-major grid row stride = 2 for 6 candidates at 40 columns |
+| `select/left_one_column_wraps` | PASS | line 'cd cmp-ee/' | expected: line 'cd cmp-ee/' with that candidate highlighted; actual: line 'cd cmp-ee/', highlighted ['cmp-ee'] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Left = backward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap |
+| `select/enter_accept_runs` | PASS | Enter accepts and runs | expected: Enter after TAB runs cd into cmp-aa; actual: ['__NIU_CMP__> cd cmp-aa/', '__NIU_CMP__> basename "$PWD"', 'cmp-aa', '__NIU_CMP__>'] | zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Enter = accept-line |
+| `select/esc_rollback` | PASS | Esc rolls the line back | expected: Esc restores pre-completion 'cd cmp-'; actual: before 'cd cmp-bb/', after 'cd cmp-' | docs/src/completion.md two-step rule; niu CycleSession rollback contract |
 | `select/lone_candidate` | PASS | lone candidate completes outright | expected: lone candidate completes outright 'cd only-dir/'; actual: 'cd only-dir/' | docs/src/completion.md#completion-styles two-step rule |
 | `select/bare_tab_indent` | PASS | blank-line TAB inserts four spaces | expected: four-space indent, no candidate grid; actual: line '', indent-paint=yes, menu [] | config.rs BARE_TAB_INDENT (#742) |
 | `select/grid_column_major` | PASS | 6 candidates at 40 cols form 3x2 column-major grid | expected: column-major grid rows ['cmp-aa', 'cmp-cc', 'cmp-ee'] / ['cmp-bb', 'cmp-dd', 'cmp-ff']; actual: [['cmp-aa', 'cmp-cc', 'cmp-ee'], ['cmp-bb', 'cmp-dd', 'cmp-ff']] | gnu_menu.rs packed_column_layout (zsh list-packed geometry) |
 | `select/lscolors` | PASS | directories paint through LS_COLORS | expected: unselected directory cells paint LS_COLORS di=01;35; actual: di=01;35 SGR present | completion/file_colors.rs (#743) |
-| `select/page_keys_unclaimed` | PASS | PageDown does not select or splice a candidate | expected: PageDown is not claimed by the docs; line stays put; actual: before 'cd cmp-', after 'cd cmp-' | /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings has no PageUp/PageDown; niu docs do not claim them |
+| `select/page_keys_unclaimed` | PASS | PageDown does not select or splice a candidate | expected: PageDown leaves the line and the highlighted candidate unchanged; actual: before line 'cd cmp-aa/' hi=['cmp-aa'], after line 'cd cmp-aa/' hi=['cmp-aa'] | /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings has no PageUp/PageDown; niu docs do not claim them |
 
 ## styles
 
@@ -108,11 +108,11 @@ frame-level (reverse-video cell), not buffer text.
 | --- | --- | --- | --- | --- |
 | `styles/select_column_descriptions` | PASS | column description vertical | expected: any description forces the column style to a single vertical column with descriptions; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'] | docs/src/completion.md#completion-styles; style=column |
 | `styles/select_ide_descriptions` | PASS | ide descriptions | expected: popup shows each candidate's description; actual: lines=['start  desc-start  stop  desc-stop  status  desc-status'] | docs/src/completion.md#completion-styles; style=ide |
-| `styles/select_list_descriptions` | PASS | list descriptions | expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'], highlighted=[] | docs/src/completion.md#completion-styles; style=list |
+| `styles/select_list_descriptions` | PASS | list descriptions | expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'], highlighted=['start'] | docs/src/completion.md#completion-styles; style=list |
 | `styles/select_gnu_printed` | PASS | gnu printed no selection | expected: TAB1 'ls alp', TAB2 list with no selection; actual: TAB1 'ls alp' hi=[], TAB2 'ls alp' hi=[] | docs/src/completion.md#completion-styles; style=gnu |
 | `styles/cycle_column_descriptions` | PASS | the style's documented shape survives the cycle interaction | expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'] | docs/src/completion.md#completion-styles; style=column, interaction=cycle |
 | `styles/cycle_ide_descriptions` | PASS | the style's documented shape survives the cycle interaction | expected: popup with all candidate descriptions visible; actual: lines=['start  desc-start  stop  desc-stop  status  desc-status'] | docs/src/completion.md#completion-styles; style=ide, interaction=cycle |
 | `styles/cycle_list_descriptions` | PASS | the style's documented shape survives the cycle interaction | expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'] | docs/src/completion.md#completion-styles; style=list, interaction=cycle |
 | `styles/cycle_gnu_printed` | PASS | gnu style stays a printed list under cycle | expected: gnu is exempt: TAB1 'ls alp', TAB2 printed list, no selection; actual: TAB1 'ls alp' hi=[], TAB2 'ls alp' hi=[] | docs/src/completion.md#completion-styles; gnu interaction axis is inert |
-| `styles/select_inline_cycles` | FAIL | inline style cycles candidates in place | expected: inline presentation cycles in place; TAB1 cmp-aa/, TAB2 cmp-bb/; actual: TAB1 'cd cmp-' grid=2 rows, TAB2 'cd cmp-aa/' | docs/src/completion.md#completion-styles inline = first match inserted, TAB cycles |
+| `styles/select_inline_cycles` | PASS | inline style cycles candidates in place | expected: inline presentation cycles in place; TAB1 cmp-aa/, TAB2 cmp-bb/; actual: TAB1 'cd cmp-aa/' grid=2 rows, TAB2 'cd cmp-bb/' | docs/src/completion.md#completion-styles inline = first match inserted, TAB cycles |
 
