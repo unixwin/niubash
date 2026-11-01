@@ -1,0 +1,597 @@
+{
+  "harness": 1,
+  "description": "niubash completion option matrix (styles x interactions, precedence, compdefs)",
+  "base": "3018703",
+  "niu": {
+    "bin": "/data/data/com.termux/files/home/wt/niu-completion-matrix/target/debug/niu",
+    "version": "Niubash 1.4.4 \u2014 bash-compatible shell for Windows\n  rubash   git c9604443ae09\nHome: <https://unixwin.dev>\nDocs & downloads: <https://unixwin.dev>"
+  },
+  "counts": {
+    "PASS": 38,
+    "FAIL": 18,
+    "MISSING": 2,
+    "SKIP": 0
+  },
+  "cases": [
+    {
+      "id": "defaults/config_rows",
+      "group": "defaults",
+      "status": "PASS",
+      "expected": "built-in default is column + select",
+      "actual": "expected: completion.style = column (default); completion.interaction = select (default); actual: Effective settings (source: env, inputrc, or default):\n  command-not-found-hint = off (default)\n  completion.style = column (default)\n  completion.interaction = select (default)\n  startup.rc-policy = primary-only (default)\n  editing-mode = emacs (default)\n  keyseq-timeout = 500 (default)\n\nKey bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; they are not a niu setting.",
+      "source": "docs/src/configuration.md#the-three-sources",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "defaults/select_tab1_first_candidate",
+      "group": "defaults",
+      "status": "FAIL",
+      "expected": "TAB #1 splices first candidate and highlights it",
+      "actual": "expected: line 'cd cmp-aa/' and first cell cmp-aa highlighted; actual: line 'cd cmp-', highlighted []",
+      "source": "config.rs CompletionInteraction::Select (owner ruling #742/#778); zsh complist.c:2813 `mselect = (*(minfo.cur))->gnum` (first match starts selected)",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "defaults/select_tab2_cycles",
+      "group": "defaults",
+      "status": "FAIL",
+      "expected": "second TAB moves to the second candidate",
+      "actual": "expected: line 'cd cmp-bb/' and cell cmp-bb highlighted; actual: line 'cd cmp-aa/', highlighted []",
+      "source": "docs/src/completion.md#completion-styles; zsh /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/shift_tab_previous",
+      "group": "select",
+      "status": "FAIL",
+      "expected": "line 'cd cmp-ff/'",
+      "actual": "expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-ff/', highlighted []",
+      "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: TAB = complete-word; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps at edges",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/down_one_row",
+      "group": "select",
+      "status": "FAIL",
+      "expected": "line 'cd cmp-bb/'",
+      "actual": "expected: line 'cd cmp-bb/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Down = down-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo movement wraps",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/up_one_row_wraps",
+      "group": "select",
+      "status": "FAIL",
+      "expected": "line 'cd cmp-ff/'",
+      "actual": "expected: line 'cd cmp-ff/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Up = up-line-or-history; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/right_one_column",
+      "group": "select",
+      "status": "FAIL",
+      "expected": "line 'cd cmp-cc/'",
+      "actual": "expected: line 'cd cmp-cc/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Right = forward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap; column-major grid row stride = 2 for 6 candidates at 40 columns",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/left_one_column_wraps",
+      "group": "select",
+      "status": "FAIL",
+      "expected": "line 'cd cmp-ee/'",
+      "actual": "expected: line 'cd cmp-ee/' with that candidate highlighted; actual: line 'cd cmp-', highlighted []",
+      "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c: Left = backward-char; /data/data/com.termux/files/home/refs/zsh/Doc/Zsh/mod_complist.yo wrap",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/enter_accept_runs",
+      "group": "select",
+      "status": "FAIL",
+      "expected": "Enter accepts and runs",
+      "actual": "expected: Enter after TAB runs cd into cmp-aa; actual: ['irectory', '__NIU_CMP__> basename \"$PWD\"', 'work', '__NIU_CMP__>']",
+      "source": "zsh /data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings: Enter = accept-line",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/esc_rollback",
+      "group": "select",
+      "status": "PASS",
+      "expected": "Esc rolls the line back",
+      "actual": "expected: Esc restores pre-completion 'cd cmp-'; actual: before 'cd cmp-aa/', after 'cd cmp-'",
+      "source": "docs/src/completion.md two-step rule; niu CycleSession rollback contract",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "select/lone_candidate",
+      "group": "select",
+      "status": "PASS",
+      "expected": "lone candidate completes outright",
+      "actual": "expected: lone candidate completes outright 'cd only-dir/'; actual: 'cd only-dir/'",
+      "source": "docs/src/completion.md#completion-styles two-step rule",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "select/bare_tab_indent",
+      "group": "select",
+      "status": "PASS",
+      "expected": "blank-line TAB inserts four spaces",
+      "actual": "expected: four-space indent, no candidate grid; actual: line '', indent-paint=yes, menu []",
+      "source": "config.rs BARE_TAB_INDENT (#742)",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "select/grid_column_major",
+      "group": "select",
+      "status": "PASS",
+      "expected": "6 candidates at 40 cols form 3x2 column-major grid",
+      "actual": "expected: column-major grid rows ['cmp-aa', 'cmp-cc', 'cmp-ee'] / ['cmp-bb', 'cmp-dd', 'cmp-ff']; actual: [['cmp-aa', 'cmp-cc', 'cmp-ee'], ['cmp-bb', 'cmp-dd', 'cmp-ff']]",
+      "source": "gnu_menu.rs packed_column_layout (zsh list-packed geometry)",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "select/lscolors",
+      "group": "select",
+      "status": "PASS",
+      "expected": "directories paint through LS_COLORS",
+      "actual": "expected: unselected directory cells paint LS_COLORS di=01;35; actual: di=01;35 SGR present",
+      "source": "completion/file_colors.rs (#743)",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "cycle/tab1_first_candidate",
+      "group": "cycle",
+      "status": "PASS",
+      "expected": "line 'cd cmp-aa/'",
+      "actual": "expected: line 'cd cmp-aa/'; actual: line 'cd cmp-aa/', highlighted ['cmp-aa']",
+      "source": "config.rs CompletionInteraction::Cycle; docs/src/completion.md#completion-styles",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "cycle/tab2_second",
+      "group": "cycle",
+      "status": "PASS",
+      "expected": "line 'cd cmp-bb/'",
+      "actual": "expected: line 'cd cmp-bb/'; actual: line 'cd cmp-bb/', highlighted ['cmp-bb']",
+      "source": "config.rs CompletionInteraction::Cycle; docs/src/completion.md#completion-styles",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "cycle/shift_tab_wraps_last",
+      "group": "cycle",
+      "status": "PASS",
+      "expected": "line 'cd cmp-ff/'",
+      "actual": "expected: line 'cd cmp-ff/'; actual: line 'cd cmp-ff/', highlighted ['cmp-ff']",
+      "source": "config.rs CompletionInteraction::Cycle; docs/src/completion.md#completion-styles",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "cycle/enter_accept_runs",
+      "group": "cycle",
+      "status": "PASS",
+      "expected": "Enter accepts and runs",
+      "actual": "expected: Enter runs cd into cmp-aa; actual: ['__NIU_CMP__> cd cmp-aa/', '__NIU_CMP__> basename \"$PWD\"', 'cmp-aa', '__NIU_CMP__>']",
+      "source": "niubash#631 cycle contract",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "cycle/esc_rollback",
+      "group": "cycle",
+      "status": "PASS",
+      "expected": "Esc rolls back",
+      "actual": "expected: Esc restores pre-completion 'cd cmp-'; actual: before 'cd cmp-bb/', after 'cd cmp-'",
+      "source": "niubash#631 cycle contract",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "inline/cycle_first_match_then_next",
+      "group": "inline",
+      "status": "PASS",
+      "expected": "inline style cycles candidates in place",
+      "actual": "expected: inline cycle: TAB1 'cd cmp-aa/', TAB2 'cd cmp-bb/'; actual: TAB1 'cd cmp-aa/' (grid=True), TAB2 'cd cmp-bb/'",
+      "source": "docs/src/completion.md#completion-styles inline = first match inserted, TAB cycles (bash menu-complete)",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "insert/column_prefix_two_step",
+      "group": "insert",
+      "status": "PASS",
+      "expected": "TAB1 completes common prefix 'ls alp', TAB2 lists",
+      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls alp' menu=[], TAB2 'ls alp' menu=[(2, 'alpha.txt           alpine.txt')]",
+      "source": "docs/src/completion.md#completion-styles two-step rule; style=column",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "insert/gnu_prefix_two_step",
+      "group": "insert",
+      "status": "PASS",
+      "expected": "TAB1 completes common prefix 'ls alp', TAB2 lists",
+      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls alp' menu=[], TAB2 'ls alp' menu=[(2, 'alpha.txt   alpine.txt')]",
+      "source": "docs/src/completion.md#completion-styles two-step rule; style=gnu",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "insert/ide_prefix_two_step",
+      "group": "insert",
+      "status": "FAIL",
+      "expected": "TAB1 completes common prefix 'ls alp', TAB2 lists",
+      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls alp' menu=[(2, 'alpha.txt'), (3, 'alpine.txt')], TAB2 'ls alp' menu=[(2, 'alpha.txt'), (3, 'alpine.txt')]",
+      "source": "docs/src/completion.md#completion-styles two-step rule; style=ide",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "insert/list_prefix_two_step",
+      "group": "insert",
+      "status": "FAIL",
+      "expected": "TAB1 completes common prefix 'ls alp', TAB2 lists",
+      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls al' menu=[(2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')], TAB2 'ls al' menu=[(2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')]",
+      "source": "docs/src/completion.md#completion-styles two-step rule; style=list",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "insert/inline_first_match",
+      "group": "insert",
+      "status": "FAIL",
+      "expected": "TAB1 completes common prefix 'ls alpha.txt', TAB2 lists",
+      "actual": "expected: TAB1 'ls alpha.txt' with no menu, TAB2 lists; actual: TAB1 'ls al' menu=[(2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')], TAB2 'ls al' menu=[(2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')]",
+      "source": "docs/src/completion.md#completion-styles two-step rule; style=inline",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "insert/enter_confirms_then_runs",
+      "group": "insert",
+      "status": "PASS",
+      "expected": "Enter commits the highlighted candidate, a second Enter runs",
+      "actual": "expected: first Enter commits 'cd cmp-aa/' without running; second runs it; actual: after first Enter 'cd cmp-aa/', screen tail=['__NIU_CMP__> cd cmp-aa/', '__NIU_CMP__> basename \"$PWD\"', 'cmp-aa', '__NIU_CMP__>']",
+      "source": "docs/src/completion.md#completion-styles Enter with the menu open; config.rs Insert contract",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "insert/esc_keeps_prefix",
+      "group": "insert",
+      "status": "PASS",
+      "expected": "Esc keeps what was inserted",
+      "actual": "expected: Esc keeps the inserted common prefix; actual: before 'ls alp', after 'ls alp'",
+      "source": "config.rs Insert contract",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/select_column_descriptions",
+      "group": "styles",
+      "status": "FAIL",
+      "expected": "column description vertical",
+      "actual": "expected: any description forces the column style to a single vertical column with descriptions; actual: lines=['start  stop  status']",
+      "source": "docs/src/completion.md#completion-styles; style=column",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/select_ide_descriptions",
+      "group": "styles",
+      "status": "FAIL",
+      "expected": "ide descriptions",
+      "actual": "expected: popup shows each candidate's description; actual: lines=['start  stop  status']",
+      "source": "docs/src/completion.md#completion-styles; style=ide",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/select_list_descriptions",
+      "group": "styles",
+      "status": "FAIL",
+      "expected": "list descriptions",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status'], highlighted=[]",
+      "source": "docs/src/completion.md#completion-styles; style=list",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/select_gnu_printed",
+      "group": "styles",
+      "status": "PASS",
+      "expected": "gnu printed no selection",
+      "actual": "expected: TAB1 'ls alp', TAB2 list with no selection; actual: TAB1 'ls alp' hi=[], TAB2 'ls alp' hi=[]",
+      "source": "docs/src/completion.md#completion-styles; style=gnu",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/cycle_column_descriptions",
+      "group": "styles",
+      "status": "FAIL",
+      "expected": "the style's documented shape survives the cycle interaction",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status']",
+      "source": "docs/src/completion.md#completion-styles; style=column, interaction=cycle",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/cycle_ide_descriptions",
+      "group": "styles",
+      "status": "FAIL",
+      "expected": "the style's documented shape survives the cycle interaction",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status']",
+      "source": "docs/src/completion.md#completion-styles; style=ide, interaction=cycle",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/cycle_list_descriptions",
+      "group": "styles",
+      "status": "FAIL",
+      "expected": "the style's documented shape survives the cycle interaction",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status']",
+      "source": "docs/src/completion.md#completion-styles; style=list, interaction=cycle",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/cycle_gnu_printed",
+      "group": "styles",
+      "status": "PASS",
+      "expected": "gnu style stays a printed list under cycle",
+      "actual": "expected: gnu is exempt: TAB1 'ls alp', TAB2 printed list, no selection; actual: TAB1 'ls alp' hi=[], TAB2 'ls alp' hi=[]",
+      "source": "docs/src/completion.md#completion-styles; gnu interaction axis is inert",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "styles/select_inline_cycles",
+      "group": "styles",
+      "status": "FAIL",
+      "expected": "inline style cycles candidates in place",
+      "actual": "expected: inline presentation cycles in place; TAB1 cmp-aa/, TAB2 cmp-bb/; actual: TAB1 'cd cmp-' grid=2 rows, TAB2 'cd cmp-aa/'",
+      "source": "docs/src/completion.md#completion-styles inline = first match inserted, TAB cycles",
+      "note": "",
+      "issue": "#778"
+    },
+    {
+      "id": "aliases/readline_gnu",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "readline -> gnu",
+      "actual": "expected: alias 'readline' behaves exactly like 'gnu': ('ls alp', (), 'ls alp', ((2, 'alpha.txt   alpine.txt'),)); actual: alias screen ('ls alp', (), 'ls alp', ((2, 'alpha.txt   alpine.txt'),))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "aliases/col_column",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "col -> column",
+      "actual": "expected: alias 'col' behaves exactly like 'column': ('ls alp', (), 'ls alp', ((2, 'alpha.txt           alpine.txt'),)); actual: alias screen ('ls alp', (), 'ls alp', ((2, 'alpha.txt           alpine.txt'),))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "aliases/grid_column",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "grid -> column",
+      "actual": "expected: alias 'grid' behaves exactly like 'column': ('ls alp', (), 'ls alp', ((2, 'alpha.txt           alpine.txt'),)); actual: alias screen ('ls alp', (), 'ls alp', ((2, 'alpha.txt           alpine.txt'),))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "aliases/vertical_list",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "vertical -> list",
+      "actual": "expected: alias 'vertical' behaves exactly like 'list': ('ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2'))); actual: alias screen ('ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "aliases/cycle_inline",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "cycle -> inline",
+      "actual": "expected: alias 'cycle' behaves exactly like 'inline': ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2'))); actual: alias screen ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "aliases/menu_inline",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "menu -> inline",
+      "actual": "expected: alias 'menu' behaves exactly like 'inline': ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2'))); actual: alias screen ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "aliases/smart_ide_code",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "smart -> ide",
+      "actual": "expected: alias 'smart' behaves exactly like 'ide': ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt'))); actual: alias screen ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "aliases/popup_ide_code",
+      "group": "aliases",
+      "status": "PASS",
+      "expected": "popup -> ide",
+      "actual": "expected: alias 'popup' behaves exactly like 'ide': ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt'))); actual: alias screen ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')))",
+      "source": "config.rs CompletionStyle::parse aliases",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "precedence/env_style_gnu",
+      "group": "precedence",
+      "status": "PASS",
+      "expected": "env > default for style",
+      "actual": "expected: env NIU_COMPLETION_STYLE=gnu gives gnu prefix/list; actual: TAB1 'ls alp', TAB2 'ls alp', menu=[(2, 'alpha.txt   alpine.txt')]",
+      "source": "docs/src/configuration.md#the-three-sources",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "precedence/env_interaction_insert",
+      "group": "precedence",
+      "status": "PASS",
+      "expected": "env > default for interaction",
+      "actual": "expected: env NIU_COMPLETION_INTERACTION=insert prefixes and stops; actual: TAB1 'ls alp', menu=[]",
+      "source": "docs/src/configuration.md#the-three-sources",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "precedence/invalid_style_falls_back",
+      "group": "precedence",
+      "status": "PASS",
+      "expected": "invalid style warns once and falls back to column",
+      "actual": "expected: one diagnostic and fallback to column (default); actual: diagnostic=yes; rows='Effective settings (source: env, inputrc, or default):\\n  command-not-found-hint = off (default)\\n  completion.style = column (default)\\n  completion.interaction = select (default)\\n  startup.rc-policy = primary-only (default)\\n  editing-mode = emacs (default)\\n  keyseq-timeout = 500 (default)\\n\\nKey bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; they are not a niu setting.\\nniubash: NIU_COMPLETION_STYLE must be one of: gnu, ide, column, list, inline\\n'",
+      "source": "docs/src/configuration.md#the-three-sources",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "precedence/invalid_interaction_falls_back",
+      "group": "precedence",
+      "status": "PASS",
+      "expected": "invalid interaction warns once and falls back to select",
+      "actual": "expected: one diagnostic and fallback to select (default); actual: diagnostic=yes; rows='Effective settings (source: env, inputrc, or default):\\n  command-not-found-hint = off (default)\\n  completion.style = column (default)\\n  completion.interaction = select (default)\\n  startup.rc-policy = primary-only (default)\\n  editing-mode = emacs (default)\\n  keyseq-timeout = 500 (default)\\n\\nKey bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; they are not a niu setting.\\nniubash: NIU_COMPLETION_INTERACTION must be one of: insert, cycle, select\\n'",
+      "source": "docs/src/configuration.md#the-three-sources",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "precedence/config_file_ignored",
+      "group": "precedence",
+      "status": "PASS",
+      "expected": "completion.style/completion.interaction in a config file are not honored",
+      "actual": "expected: config.toml is not read; rows stay column/select defaults; actual: Effective settings (source: env, inputrc, or default):\n  command-not-found-hint = off (default)\n  completion.style = column (default)\n  completion.interaction = select (default)\n  startup.rc-policy = primary-only (default)\n  editing-mode = emacs (default)\n  keyseq-timeout = 500 (default)\n\nKey bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; they are not a niu setting.",
+      "source": "CHANGELOG.md 1.5.0 (config.toml gone); docs/src/configuration.md",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "precedence/env_over_config",
+      "group": "precedence",
+      "status": "PASS",
+      "expected": "env overrides a leftover config file",
+      "actual": "expected: env inline/insert wins; config gnu/cycle is not a source; actual: Effective settings (source: env, inputrc, or default):\n  command-not-found-hint = off (default)\n  completion.style = inline (env)\n  completion.interaction = insert (env)\n  startup.rc-policy = primary-only (default)\n  editing-mode = emacs (default)\n  keyseq-timeout = 500 (default)\n\nKey bindings are read from rc `bind` lines and $INPUTRC/~/.inputrc; they are not a niu setting.",
+      "source": "docs/src/configuration.md precedence: NIU_* env > built-in default; config.toml gone",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "precedence/config_migration_notice",
+      "group": "precedence",
+      "status": "PASS",
+      "expected": "leftover config.toml prints one migration notice and is never read",
+      "actual": "expected: startup notice names 'is no longer read' and 'niu config migrate'; actual: ['Niubash 1.4.4', 'niubash: /data/data/com.termux/files/home/wt/niu-completion-matrix/scripts/completion-options-matrix/.work/precedence__config_migration_notice/home/.niubash/config.toml is no longer read \u2014 run `niu config migrate` to move its settings into ~/.niubashrc (the old file is then renamed)', '\\x1b[?2004h\\x1b[?25l\\x1b[6n\\x1b[0m\\x1b[?25l\\x1b[?2026h\\x1b[6;1H\\x1b[J\\x1b[92m__NIU_CMP__> \\x1b[39m\\x1b[35m\\x1b[0m\\x1b[0m\\x1b7\\x1b8\\x1b[?25h\\x1b[?2026l']",
+      "source": "tests/issue631_completion_interaction.rs legacy-config notice",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "knobs/page_size_not_exposed",
+      "group": "knobs",
+      "status": "MISSING",
+      "expected": "page size is exposed as a documented knob",
+      "actual": "expected: a completion.page_size/env knob exists and limits the page; actual: env ignored; no config row; 12/12 candidates shown",
+      "source": "config.rs MenuConfig::completion_page_size (fixed 10); no env/config key documented",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "knobs/completion_behavior_not_exposed",
+      "group": "knobs",
+      "status": "MISSING",
+      "expected": "prefix/substring behavior is a documented, working knob",
+      "actual": "expected: completion.behavior=substring matches inside the word; actual: line='ls pha', menu=[]",
+      "source": "config.rs only resolves style/interaction; no completion.behavior key",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "compdefs/compdef_wins_static",
+      "group": "compdefs",
+      "status": "PASS",
+      "expected": "NIU_COMPDEFS wins over static tables",
+      "actual": "expected: compdef candidates only; static table (checkout/commit) does not contribute; actual: ['defonly-1  defonly-2']",
+      "source": "docs/src/external-completion-providers.md",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "compdefs/compspec_wins_static",
+      "group": "compdefs",
+      "status": "PASS",
+      "expected": "a GNU compspec owns the command over static tables",
+      "actual": "expected: compspec candidates only; static table does not contribute; actual: ['spec-one  spec-two']",
+      "source": "docs/src/external-completion-providers.md",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "compdefs/compdef_and_compspec_merge",
+      "group": "compdefs",
+      "status": "PASS",
+      "expected": "provider never shadows a compspec; both contribute, static table does not",
+      "actual": "expected: compdef and compspec candidates merge; static table does not contribute; actual: ['defonly-1  defonly-2  spec-one  spec-two']",
+      "source": "docs/src/external-completion-providers.md",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "compdefs/external_directory",
+      "group": "compdefs",
+      "status": "PASS",
+      "expected": "NIU_COMPDEFS directory loads TOML and bash completion files",
+      "actual": "expected: TOML file serves --fixture-flag; bash-import file serves --verbose; actual: toml=yes, bash=yes; tail=['', '', '']",
+      "source": "docs/src/external-completion-providers.md section 3 (completion definition files)",
+      "note": "",
+      "issue": ""
+    },
+    {
+      "id": "select/page_keys_unclaimed",
+      "group": "select",
+      "status": "PASS",
+      "expected": "PageDown does not select or splice a candidate",
+      "actual": "expected: PageDown is not claimed by the docs; line stays put; actual: before 'cd cmp-', after 'cd cmp-'",
+      "source": "/data/data/com.termux/files/home/refs/zsh/Src/Zle/complist.c menuselect_bindings has no PageUp/PageDown; niu docs do not claim them",
+      "note": "",
+      "issue": ""
+    }
+  ]
+}
