@@ -3541,7 +3541,10 @@ mod tests {
             provider.entries().unwrap(),
             ["T1248=${T1248}alpha", "T1248=${T1248}alpha", "echo next"]
         );
-        // And the backing file holds exactly the same three lines.
+        // And after the session-end write the backing file holds
+        // exactly the same three lines (the replace staged the pair;
+        // the later append lands at session end, niubash#773).
+        drop(provider);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "T1248=${T1248}alpha\nT1248=${T1248}alpha\necho next\n"
@@ -3597,11 +3600,16 @@ mod tests {
     }
 
     #[test]
-    fn saved_entries_are_visible_to_another_history_instance() {
+    fn saved_entries_are_visible_to_a_new_session_only() {
+        // niubash#773 (was saved_entries_are_visible_to_another_history_
+        // instance, the niubash#572 live-refresh pin): a concurrently
+        // running instance does NOT see this session's saves — GNU
+        // sessions are isolated — but a fresh instance started after
+        // this session's end sees them all.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut first = LiveFileBackedHistory::with_file(100, path.clone());
-        let second = LiveFileBackedHistory::with_file(100, path);
+        let second = LiveFileBackedHistory::with_file(100, path.clone());
 
         first
             .save(HistoryItem::from_command_line("cd first"))
@@ -3611,6 +3619,16 @@ mod tests {
             .unwrap();
 
         let matches = second
+            .search(SearchQuery::all_that_contain_rev("cd".to_string()))
+            .unwrap();
+        assert!(
+            matches.is_empty(),
+            "a live session never sees another session's saves"
+        );
+
+        first.flush_at_session_end();
+        let third = LiveFileBackedHistory::with_file(100, path);
+        let matches = third
             .search(SearchQuery::all_that_contain_rev("cd".to_string()))
             .unwrap();
         let commands: Vec<_> = matches
@@ -3623,9 +3641,11 @@ mod tests {
     #[test]
     fn consecutive_duplicate_saves_are_kept_positionally() {
         // niubash#570: GNU history is positional — typing the same line
-        // twice in a row keeps both copies. Reedline's save drops an entry
-        // identical to the previous one, so the wrapper appends it to the
-        // file directly and rebuilds the reader instead.
+        // twice in a row keeps both copies. Reedline's save drops an
+        // entry identical to the previous one, so the wrapper records
+        // the second copy with a positional push. niubash#773: the
+        // push is memory-only; both copies reach the file at the
+        // session-end write, like every recorded line.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut history = LiveFileBackedHistory::with_file(100, path.clone());
@@ -3637,11 +3657,6 @@ mod tests {
             .save(HistoryItem::from_command_line("echo same"))
             .unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "echo same\necho same\n",
-            "both consecutive copies must reach the file"
-        );
         let commands = history
             .search(SearchQuery::all_that_contain_rev(String::new()))
             .unwrap()
@@ -3649,6 +3664,17 @@ mod tests {
             .map(|item| item.command_line)
             .collect::<Vec<_>>();
         assert_eq!(commands, vec!["echo same", "echo same"]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            "",
+            "recording writes nothing mid-session (niubash#773)"
+        );
+        history.flush_at_session_end();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "echo same\necho same\n",
+            "both consecutive copies must reach the file"
+        );
     }
 
     #[test]
@@ -3656,7 +3682,10 @@ mod tests {
         // niubash#570 (dual-same probe): two sessions typing the identical
         // line must leave two copies in the shared file. Before the fix the
         // second session's save saw the first session's line as its last
-        // entry and reedline dropped the second copy.
+        // entry and reedline dropped the second copy. niubash#773: each
+        // session's list holds only its own copy (no cross-session
+        // visibility), and the copies land in the file one per
+        // session-end write, in end order.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "SEEDONE\nSEEDTWO\n").unwrap();
@@ -3670,11 +3699,6 @@ mod tests {
             .save(HistoryItem::from_command_line("echo SAMECMD"))
             .unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "SEEDONE\nSEEDTWO\necho SAMECMD\necho SAMECMD\n",
-            "the shared file must hold both sessions' copies"
-        );
         let commands = second
             .search(SearchQuery::all_that_contain_rev(String::new()))
             .unwrap()
@@ -3683,12 +3707,32 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             commands,
-            vec!["echo SAMECMD", "echo SAMECMD", "SEEDTWO", "SEEDONE"]
+            vec!["echo SAMECMD", "SEEDTWO", "SEEDONE"],
+            "the second session sees only its own copy"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "SEEDONE\nSEEDTWO\n",
+            "nothing is written mid-session"
+        );
+        first.flush_at_session_end();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "SEEDONE\nSEEDTWO\necho SAMECMD\n"
+        );
+        second.flush_at_session_end();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "SEEDONE\nSEEDTWO\necho SAMECMD\necho SAMECMD\n",
+            "the shared file must hold both sessions' copies"
         );
     }
 
     #[test]
-    fn saving_history_updates_the_file_before_drop() {
+    fn saving_history_writes_the_file_at_session_end_not_before() {
+        // niubash#773 (was saving_history_updates_the_file_before_drop,
+        // the write-through pin): recording is memory-only; the file
+        // gains the line at the session-end write.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut history = LiveFileBackedHistory::with_file(100, path.clone());
@@ -3696,19 +3740,21 @@ mod tests {
         history
             .save(HistoryItem::from_command_line("echo live"))
             .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), "");
 
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "echo live\n");
+        history.flush_at_session_end();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo live\n");
     }
 
     #[test]
-    fn live_history_refreshes_from_later_external_writes() {
-        // niubash#572: there is exactly one sharing semantics now. The
-        // retired private mode used to ignore later external writes (its
-        // refresh short-circuited for every non-shared mode), and the
-        // retired session mode documented — but did not implement — that
-        // "builtins can observe later file updates". Both promises are
-        // replaced by the uniform rule: a query refreshes from the file,
-        // so another session's lines are visible here.
+    fn live_history_does_not_refresh_from_later_external_writes() {
+        // niubash#773 (was live_history_refreshes_from_later_external_
+        // writes, the niubash#572 pin): the retired rule — a query
+        // refreshes from the file, so another session's lines become
+        // visible here — is exactly the defect #773 removes. GNU's
+        // rule: a session's list is its startup read plus its own
+        // activity and explicit `history -n`/`-r` reads; an external
+        // append stays invisible to it and is seen by new sessions.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "old-one\nold-two\n").unwrap();
@@ -3735,17 +3781,101 @@ mod tests {
             .into_iter()
             .map(|item| item.command_line)
             .collect::<Vec<_>>();
+        assert_eq!(commands, vec!["old-one", "old-two", "this-session"]);
+
+        // A new session over the file sees the external line; this
+        // session's own line joins the file only at its session end,
+        // appended after whatever landed meanwhile.
+        let fresh = LiveFileBackedHistory::with_file(100, path.clone());
+        let commands = fresh
+            .search(SearchQuery::everything(
+                reedline::SearchDirection::Forward,
+                None,
+            ))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.command_line)
+            .collect::<Vec<_>>();
+        assert_eq!(commands, vec!["old-one", "old-two", "from-another-session"]);
+        first.flush_at_session_end();
         assert_eq!(
-            commands,
-            vec!["old-one", "old-two", "this-session", "from-another-session"]
+            std::fs::read_to_string(&path).unwrap(),
+            "old-one\nold-two\nfrom-another-session\nthis-session\n"
+        );
+    }
+
+    #[test]
+    fn issue773_dual_session_isolation_and_explicit_sync() {
+        // niubash#773, the deliverable grid in provider terms (the
+        // GNU two-session PTY probe is the oracle): sessions are
+        // isolated mid-session; B's lines reach the file only at B's
+        // `-a` or exit; A sees them only after its own `-n`, exactly
+        // once, duplicates included; a new session sees everything
+        // both sessions wrote.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "seed\n").unwrap();
+
+        let mut a = RubashHistoryProvider::with_file(100, path.clone());
+        let mut b = RubashHistoryProvider::with_file(100, path.clone());
+
+        b.append("B-line".to_string()).unwrap();
+        assert_eq!(
+            a.entries().unwrap(),
+            vec!["seed"],
+            "B's line is invisible to A"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "seed\n",
+            "recording writes nothing"
+        );
+
+        b.append_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "seed\nB-line\n");
+        assert_eq!(
+            a.entries().unwrap(),
+            vec!["seed"],
+            "even with B's line in the file, A does not refresh"
+        );
+
+        a.read_new_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(a.entries().unwrap(), vec!["seed", "B-line"]);
+        a.read_new_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            a.entries().unwrap(),
+            vec!["seed", "B-line"],
+            "a second -n delivers nothing twice"
+        );
+
+        // A duplicate of a text A already holds is delivered too:
+        // positions count entries, not texts (niubash#645).
+        b.append("seed".to_string()).unwrap();
+        b.append_history(path.to_str().unwrap()).unwrap();
+        a.read_new_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(a.entries().unwrap(), vec!["seed", "B-line", "seed"]);
+
+        a.append("A-line".to_string()).unwrap();
+        drop(a);
+        drop(b);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "seed\nB-line\nseed\nA-line\n"
+        );
+        let mut c = RubashHistoryProvider::with_file(100, path);
+        assert_eq!(
+            c.entries().unwrap(),
+            vec!["seed", "B-line", "seed", "A-line"],
+            "a new session sees everything both sessions wrote"
         );
     }
 
     #[test]
     fn append_history_does_not_duplicate_already_persisted_entries() {
         // niubash#182: GNU `history -a` appends only what the file lacks
-        // (bashhist.c appends history_lines_this_session). The live history
-        // syncs every save to the file, so `-a` must be a no-op here —
+        // (bashhist.c appends history_lines_this_session). Recording
+        // never writes (niubash#773), so the first `-a` appends the
+        // session's lines and every later one must be a no-op —
         // bash-it themes (codeword/gitline) run `history -a` on every
         // prompt, and re-appending the whole list doubled the file each
         // cycle.
@@ -3837,9 +3967,11 @@ mod tests {
         // read_history_range appends the file lines past the reader's
         // position): a second session appending a line whose text this
         // session already holds delivers a SECOND copy, and -n itself
-        // adds nothing beyond what the file holds. In the REPL
-        // composition the live refresh has usually delivered the line
-        // before -n runs; the pin asserts exactly that end state.
+        // adds nothing beyond what the file holds. Delivery is
+        // explicit (niubash#773): the second session's lines reach the
+        // file through its own `history -a` — the only mid-session
+        // write — and this session picks them up with `history -n`;
+        // the pin asserts exactly that end state.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "seedcmd\n").unwrap();
@@ -3851,6 +3983,7 @@ mod tests {
         // from the other session is picked up once, and the file gains
         // no duplicate from the pickup itself.
         second.append("ls".to_string()).unwrap();
+        second.append_history(path.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "seedcmd\nls\n");
         first.read_new_history(path.to_str().unwrap()).unwrap();
         assert_eq!(first.entries().unwrap(), vec!["seedcmd", "ls"]);
@@ -3865,7 +3998,9 @@ mod tests {
         // for that text goes 1 -> 2 in the list — a text-set dedupe
         // would have kept it at 1 — and a further -n changes nothing.
         second.append("ls".to_string()).unwrap();
+        second.append_history(path.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "seedcmd\nls\nls\n");
+        first.read_new_history(path.to_str().unwrap()).unwrap();
         assert_eq!(
             first.entries().unwrap(),
             vec!["seedcmd", "ls", "ls"],
@@ -3889,6 +4024,9 @@ mod tests {
 
         let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo gone".to_string()).unwrap();
+        // The line reaches the file through the session's own `-a` —
+        // GNU's only mid-session write (niubash#773).
+        provider.append_history(path.to_str().unwrap()).unwrap();
         provider.clear().unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -4091,16 +4229,19 @@ mod tests {
 
     #[test]
     fn session_end_write_appends_missing_entries_without_duplicates() {
-        // A non-empty final list takes the -a dedupe append. The real
-        // divergence it repairs: a transient mid-session sync failure (the
-        // file locked by another process, a read-only DACL) left session
-        // entries in memory only. Simulated here with a read-only file
-        // while the second entry is saved.
+        // A non-empty final list takes the -a dedupe append. The
+        // divergence it guards: an entry the file lacks must be
+        // appended exactly once at session end — niubash#773's general
+        // case (recording never writes), sharpened here with a
+        // read-only window while the second entry is saved (the
+        // transient-failure shape: the file locked by another process,
+        // a read-only DACL).
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
 
         let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo synced".to_string()).unwrap();
+        provider.append_history(path.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo synced\n");
 
         let original = std::fs::metadata(&path).unwrap().permissions();
@@ -4111,7 +4252,8 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "echo synced\n",
-            "the read-only file kept the session entry memory-only"
+            "the second entry is memory-only (the read-only window is \
+             also #773's plain recording rule)"
         );
         std::fs::set_permissions(&path, original).unwrap();
 
@@ -4126,21 +4268,26 @@ mod tests {
     #[test]
     fn issue614_cleared_list_does_not_resurrect_on_later_queries() {
         // niubash#614: after `history -c`, the in-session list must stay
-        // cleared even though the file keeps the cleared lines until the
-        // session-end write (niubash#569) and every later save/query
-        // refreshes the reader from that file. Before the fix, the
+        // cleared even though the file keeps the cleared lines until
+        // the session-end write (niubash#569). Before the fix, the
         // first query after any later append rebuilt the reader from
         // the file and the whole pre-clear list came back — GNU lists
         // only the post-clear lines (oracle: bash 5.3.20 pty probe,
         // seeds + `echo MARKER` + `history -c` + `history` lists just
-        // `history`).
+        // `history`). niubash#773: nothing rebuilds the reader from
+        // the file at all; the pin now runs on the production wiring
+        // (the editor twin over the provider's shared state) and
+        // asserts the same end state.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "SEEDONE\nSEEDTWO\n").unwrap();
 
         let mut provider = RubashHistoryProvider::with_file(100, path.clone());
-        let mut editor =
-            LiveFileBackedHistory::with_shared_ledger(100, path.clone(), provider.ledger());
+        let mut editor = LiveFileBackedHistory::with_shared_state(
+            100,
+            provider.shared_state(),
+            provider.ledger(),
+        );
         // The editor records the typed lines; the provider runs -c.
         editor
             .save(HistoryItem::from_command_line("echo MARKER"))
@@ -4154,9 +4301,8 @@ mod tests {
             "-c empties the list"
         );
 
-        // The next typed line is live-synced to the file, which makes
-        // every later query refresh the reader from the file — the
-        // exact moment the cleared lines used to resurrect.
+        // The next typed line joins the one shared list; no query can
+        // resurrect the cleared lines, because nothing reloads them.
         editor
             .save(HistoryItem::from_command_line("history"))
             .unwrap();
@@ -4182,11 +4328,12 @@ mod tests {
             .unwrap();
         assert_eq!(provider.entries().unwrap(), vec!["history", "echo AFTER"]);
 
-        // Mid-session the file still holds the cleared lines: -c's
-        // file effect stays deferred to the session-end write (#569).
+        // Mid-session the file still holds exactly the seeds: -c's
+        // file effect stays deferred to the session-end write (#569),
+        // and recording never writes at all (#773).
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "SEEDONE\nSEEDTWO\necho MARKER\nhistory -c\nhistory\necho AFTER\n"
+            "SEEDONE\nSEEDTWO\n"
         );
         drop(editor);
         drop(provider);
@@ -4201,10 +4348,14 @@ mod tests {
     #[test]
     fn issue614_clear_hides_only_what_predates_the_clear() {
         // niubash#614, dual-session interleave (the #583 report §5.1
-        // probe shape): lines another session appended BEFORE this
-        // session's -c are part of what the clear emptied and stay
-        // hidden; lines appended AFTER the clear are new history and
-        // show. The other session's own view is unaffected.
+        // probe shape), restated under niubash#773's GNU session
+        // semantics: a session's list holds its own lines only. What
+        // predates A's -c in A's OWN list (A-OWN) is cleared and
+        // stays gone; what A records after the clear shows. B's lines
+        // are never in A's list at all — they reach A only through an
+        // explicit `history -n`, which delivers them positionally,
+        // including the one B appended before A's -c (it was never
+        // A's to clear; GNU's -c empties only the caller's list).
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
 
@@ -4216,11 +4367,14 @@ mod tests {
         b.append("B-AFTER".to_string()).unwrap();
         a.append("A-AFTER".to_string()).unwrap();
 
-        assert_eq!(a.entries().unwrap(), vec!["B-AFTER", "A-AFTER"]);
-        assert_eq!(
-            b.entries().unwrap(),
-            vec!["B-BEFORE", "A-OWN", "B-AFTER", "A-AFTER"]
-        );
+        assert_eq!(a.entries().unwrap(), vec!["A-AFTER"]);
+        assert_eq!(b.entries().unwrap(), vec!["B-BEFORE", "B-AFTER"]);
+
+        // B's lines reach the file at B's explicit append; A's -n
+        // then delivers both, appended after A's own post-clear line.
+        b.append_history(path.to_str().unwrap()).unwrap();
+        a.read_new_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(a.entries().unwrap(), vec!["A-AFTER", "B-BEFORE", "B-AFTER"]);
     }
 
     #[test]
@@ -4247,9 +4401,11 @@ mod tests {
             provider.entries().unwrap(),
             vec!["loaded-one", "loaded-two", "echo new"]
         );
+        drop(provider);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "loaded-one\nloaded-two\necho new\n"
+            "loaded-one\nloaded-two\necho new\n",
+            "the session-end write appends the post-reread line"
         );
     }
 
@@ -4294,7 +4450,10 @@ mod tests {
         // (no resurrection of cleared lines) and A's own cleared line,
         // while every line B appended — before AND after A's clear —
         // survives (no loss), nothing is written twice (no
-        // duplication), and no lines merge.
+        // duplication), and no lines merge. niubash#773: B's lines
+        // reach the file through B's own `history -a` at the same
+        // interleave points (the only mid-session write); the checked
+        // end state is unchanged.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "seedA\nseedB\n").unwrap();
@@ -4303,8 +4462,10 @@ mod tests {
         let mut b = RubashHistoryProvider::with_file(100, path.clone());
         a.append("A1".to_string()).unwrap();
         b.append("B1".to_string()).unwrap();
+        b.append_history(path.to_str().unwrap()).unwrap();
         a.clear().unwrap();
         b.append("B2".to_string()).unwrap();
+        b.append_history(path.to_str().unwrap()).unwrap();
         a.append("A2".to_string()).unwrap();
 
         drop(a);
@@ -4352,9 +4513,11 @@ mod tests {
         provider.append(" secretcmd".to_string()).unwrap();
         provider.append("echo two".to_string()).unwrap();
         assert_eq!(provider.entries().unwrap(), vec!["echo one", "echo two"]);
+        drop(provider);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "echo one\necho two\n"
+            "echo one\necho two\n",
+            "the filtered lines are in neither the list nor, at session end, the file"
         );
     }
 
@@ -4379,6 +4542,7 @@ mod tests {
             provider.entries().unwrap(),
             vec!["echo start", "echo other"]
         );
+        drop(provider);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "echo start\necho other\n"
@@ -4388,9 +4552,9 @@ mod tests {
     #[test]
     fn issue646_histcontrol_erasedups_removes_earlier_copies() {
         // niubash#646: HISTCONTROL=erasedups — recording `a` again
-        // removes the earlier copy from the list AND the file (the
-        // live sync had already written it there), and the new copy
-        // lands at the end, where GNU puts it.
+        // removes the earlier copy from the list and, via the staging
+        // rewrite, from the file, and the new copy lands at the end,
+        // where GNU puts it.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut provider = provider_with_settings(&path, |settings| {
@@ -4400,6 +4564,11 @@ mod tests {
         provider.append("b".to_string()).unwrap();
         provider.append("a".to_string()).unwrap();
         assert_eq!(provider.entries().unwrap(), vec!["b", "a"]);
+        // The erase rewrite staged the kept list through the file, so
+        // the file already holds `b`; the new copy of `a` is
+        // memory-only until the session-end write (niubash#773).
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\n");
+        drop(provider);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\na\n");
     }
 
@@ -4417,10 +4586,12 @@ mod tests {
             provider.append(entry.to_string()).unwrap();
         }
         assert_eq!(provider.entries().unwrap(), vec!["e3", "e4", "e5"]);
+        drop(provider);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "e1\ne2\ne3\ne4\ne5\n",
-            "the stifle is a view, not a file truncation"
+            "the stifle is a view, not a file truncation — the \
+             session-end write lands all five"
         );
     }
 
@@ -4588,13 +4759,12 @@ mod tests {
     #[test]
     fn issue646_histfilesize_truncates_write_history() {
         // niubash#646: `history -w` writes at most HISTFILESIZE lines
-        // (histfile.c history_write). niu's reader is a live mirror of
-        // the file (niubash#572), so the list face follows the
-        // truncated file at the next query — where GNU's independent
-        // in-memory list would still show w1 until the session ends.
-        // That divergence is the mirror architecture's, not the
-        // truncation's; the session-end face (the main HISTFILESIZE
-        // consumer) is unaffected because the session is over.
+        // (histfile.c history_write). niubash#773: the in-memory list
+        // is the session's own (GNU's model), so it does NOT follow
+        // the truncated file — w1 stays in the list until the session
+        // ends, exactly as GNU's independent list behaves. (The
+        // pre-#773 live-mirror reader followed the file; that
+        // divergence is gone.)
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut provider = provider_with_settings(&path, |settings| {
@@ -4605,7 +4775,7 @@ mod tests {
         provider.append("w3".to_string()).unwrap();
         provider.write_history(path.to_str().unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "w2\nw3\n");
-        assert_eq!(provider.entries().unwrap(), vec!["w2", "w3"]);
+        assert_eq!(provider.entries().unwrap(), vec!["w1", "w2", "w3"]);
     }
 
     #[test]
@@ -4622,12 +4792,11 @@ mod tests {
         let path = temp.path().join("history");
         let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         // The production sharing: the editor twin is built over the
-        // provider's ledger and settings cells (build_line_editor).
-        let mut editor = LiveFileBackedHistory::with_shared_ledger_and_settings(
+        // provider's session state (build_line_editor, niubash#773).
+        let mut editor = LiveFileBackedHistory::with_shared_state(
             100,
-            path.clone(),
+            provider.shared_state(),
             provider.ledger(),
-            provider.settings(),
         );
         editor.set_history_option_gate();
         provider.settings().lock().unwrap().history_enabled = false;
@@ -4646,15 +4815,24 @@ mod tests {
         provider.append("s-added-while-off".to_string()).unwrap();
         assert_eq!(provider.entries().unwrap(), vec!["s-added-while-off"]);
         assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "s-added-while-off\n"
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            "",
+            "even the ungated -s line is memory-only until a write face (niubash#773)"
         );
 
-        // The option back on: the editor records again.
+        // The option back on: the editor records again — into the
+        // same shared list — and the session-end write lands both
+        // lines in order.
         provider.settings().lock().unwrap().history_enabled = true;
         editor
             .save(HistoryItem::from_command_line("visible-after-on"))
             .unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            vec!["s-added-while-off", "visible-after-on"]
+        );
+        drop(editor);
+        drop(provider);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "s-added-while-off\nvisible-after-on\n"
@@ -4676,11 +4854,17 @@ mod tests {
         provider.append("session-line".to_string()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&a).unwrap(),
-            "seedA\nsession-line\n"
+            "seedA\n",
+            "recording is memory-only (niubash#773): the line lands in              the old file at the retarget settle below"
         );
 
         provider.retarget(b.clone());
         assert_eq!(provider.backing_file(), Some(b.clone()));
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "seedA\nsession-line\n",
+            "the settle flushed the unwritten line to the old file"
+        );
         assert_eq!(
             std::fs::read_to_string(&b).unwrap(),
             "seedA\nsession-line\n",
@@ -4690,7 +4874,8 @@ mod tests {
         provider.append("after-redirect".to_string()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&b).unwrap(),
-            "seedA\nsession-line\nafter-redirect\n"
+            "seedA\nsession-line\n",
+            "the post-redirect line is memory-only until the session-end write"
         );
         assert_eq!(
             std::fs::read_to_string(&a).unwrap(),
@@ -4881,8 +5066,9 @@ mod tests {
         provider.append("echo live".to_string()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&backing).unwrap(),
-            "# not a stamp\necho seed\necho live\n",
-            "the live sync writes plain lines only"
+            "# not a stamp\necho seed\n",
+            "recording writes nothing mid-session (niubash#773); the \
+             plain line lands at the write faces below"
         );
         // -a to a foreign file appends this session's pending lines
         // (here only the live one), again as plain lines. This runs
@@ -4901,14 +5087,14 @@ mod tests {
     }
 
     #[test]
-    fn issue734_armed_live_append_writes_stamp_pairs() {
-        // niubash#734: while HISTTIMEFORMAT is armed, the LIVE sync
-        // stamps — GNU's in-session appends carry the stamp line
-        // while armed (histfile.c history_append: a stamped entry is
-        // two file lines). The pre-existing plain seed line stays
-        // plain: the sync appends only the new tail. A fresh provider
-        // over the result pairs the live entry with the exact stamp
-        // the sync wrote.
+    fn issue734_armed_session_end_append_writes_stamp_pairs() {
+        // niubash#734 x niubash#773: while HISTTIMEFORMAT is armed,
+        // the session-end flush's append carries the stamp line
+        // (histfile.c: a stamped entry is two file lines) — the same
+        // bytes the pre-#773 live sync wrote at record time. The
+        // pre-existing plain seed line stays plain: the flush appends
+        // only the new tail. A fresh provider over the result pairs
+        // the entry with the exact stamp the flush wrote.
         use rubash::history::HistoryProvider as _;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
@@ -4917,7 +5103,13 @@ mod tests {
             settings.histtimeformat_armed = true;
         });
         provider.append("echo live".to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "echo seed\n",
+            "recording writes nothing, armed or not (niubash#773)"
+        );
 
+        drop(provider);
         let content = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 3, "seed + stamp/entry pair: {content:?}");
@@ -4926,20 +5118,19 @@ mod tests {
         assert_eq!(lines[2], "echo live");
         let written_stamp = lines[1].to_string();
 
-        drop(provider);
         let mut reloaded = RubashHistoryProvider::with_file(100, path);
         assert_eq!(reloaded.entries().unwrap(), ["echo seed", "echo live"]);
         assert_eq!(reloaded.entry_timestamps()[1], written_stamp);
     }
 
     #[test]
-    fn issue734_armed_duplicate_live_append_writes_stamp_pairs() {
-        // niubash#734: a duplicate of the last line takes save_entry's
-        // direct-append fast path (niubash#570: the store's record
-        // filter drops consecutive duplicates, the file must still
-        // gain the line); while armed it writes the stamp line ahead
-        // of the entry, the histfile.c append shape, exactly like the
-        // flush-driven append in the pin above.
+    fn issue734_armed_duplicate_writes_stamp_pairs_at_session_end() {
+        // niubash#734 x niubash#570/#773: a duplicate of the last line
+        // is recorded positionally (the store's record filter drops
+        // consecutive duplicates; the positional push keeps it), and
+        // while HISTTIMEFORMAT is armed the session-end flush writes
+        // each copy as its own stamp/entry pair, the histfile.c
+        // append shape.
         use rubash::history::HistoryProvider as _;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
@@ -4948,7 +5139,13 @@ mod tests {
         });
         provider.append("echo one".to_string()).unwrap();
         provider.append("echo one".to_string()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            "",
+            "recording writes nothing, armed or not (niubash#773)"
+        );
 
+        drop(provider);
         let content = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 4, "two stamp/entry pairs: {content:?}");
@@ -4960,15 +5157,15 @@ mod tests {
 
     #[test]
     fn issue734_armed_exit_flush_writes_stamp_pairs() {
-        // niubash#734: a line whose live sync failed mid-session is
-        // written at session end (bashhist.c maybe_save_shell_history:
-        // the exit append); while armed it lands as a stamp/entry
-        // pair, like the line that synced live. The sync failure is
-        // simulated by swapping the backing file for a directory —
-        // an open failure no uid bypasses (a read-only file would be
-        // masked for uid 0). The synced pair's bytes are restored
-        // verbatim before the drop, so the final file must be exactly
-        // pair + pair.
+        // niubash#734: a line recorded while the backing was
+        // unavailable is written at session end (bashhist.c
+        // maybe_save_shell_history: the exit append); while armed it
+        // lands as a stamp/entry pair, like the line an earlier
+        // session-end flush already wrote. niubash#773: recording is
+        // memory-only in the first place — the directory swap stands
+        // in for the unavailable backing. The written pair's bytes
+        // are restored verbatim before the drop, so the final file
+        // must be exactly pair + pair.
         use rubash::history::HistoryProvider as _;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
@@ -4976,10 +5173,11 @@ mod tests {
             settings.histtimeformat_armed = true;
         });
         provider.append("echo synced".to_string()).unwrap();
+        provider.flush_at_session_end();
         let synced_pair = std::fs::read_to_string(&path).unwrap();
         {
             let lines: Vec<&str> = synced_pair.lines().collect();
-            assert_eq!(lines.len(), 2, "live pair: {synced_pair:?}");
+            assert_eq!(lines.len(), 2, "flushed pair: {synced_pair:?}");
             assert!(is_stamp_line(lines[0]), "stamp line: {:?}", lines[0]);
             assert_eq!(lines[1], "echo synced");
         }
@@ -5010,16 +5208,17 @@ mod tests {
     #[test]
     fn issue734_unarmed_live_and_exit_writes_stay_plain() {
         // niubash#734 scope guard: with HISTTIMEFORMAT unset the
-        // host-driven faces keep the exact pre-#734 bytes — the live
-        // sync writes plain lines and the session-end flush's append
-        // of an unsynced line is plain too (the #703 unarmed pin
-        // guards the engine-driven faces the same way). Same
-        // directory-swap sync failure as the armed exit pin above.
+        // host-driven faces keep the exact pre-#734 bytes — a plain
+        // line at the first session-end write, and the session-end
+        // flush's append of the still-unwritten line is plain too
+        // (the #703 unarmed pin guards the engine-driven faces the
+        // same way). Same directory swap as the armed exit pin above.
         use rubash::history::HistoryProvider as _;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut provider = RubashHistoryProvider::with_file(100, path.clone());
         provider.append("echo synced".to_string()).unwrap();
+        provider.flush_at_session_end();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo synced\n");
 
         std::fs::remove_file(&path).unwrap();

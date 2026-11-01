@@ -5879,6 +5879,9 @@ mod tests {
             .save(reedline::HistoryItem::from_command_line("after-on"))
             .unwrap();
 
+        // niubash#773: recording is memory-only; the file is written
+        // at the session-end flush.
+        shell.flush_session_history();
         let persisted = std::fs::read_to_string(&path).unwrap();
         assert!(persisted.contains("before-off"), "{persisted:?}");
         assert!(
@@ -5927,10 +5930,11 @@ mod tests {
 
         record_accepted_line(&shell, "after-redirect-marker");
         assert!(
-            std::fs::read_to_string(&b)
+            !std::fs::read_to_string(&b)
                 .unwrap()
                 .contains("after-redirect-marker"),
-            "later saves must land in the new file"
+            "recording is memory-only (niubash#773): the save must not \
+             land in the new file before a write face"
         );
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "seedA\n");
 
