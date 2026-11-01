@@ -339,6 +339,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     } else {
         None
     };
+    // niubash#787: a clone of the session cell for the idle-repaint
+    // registry (the original is consumed by the menus and edit-mode
+    // wrappers below); the registry reads it to keep an idle repaint
+    // from racing an open cycle-menu session.
+    let repaint_cycle_session = cycle_session.clone();
 
     // The GNU completion style redraws the prompt unchanged while its list
     // is up; reedline replaces the prompt indicator with the active menu's
@@ -540,6 +545,21 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // REPL compares it between prompts so a plugin that registered or
     // unbound a key at runtime gets a lossless rebuild before the next line.
     crate::readline_live::mark_installed();
+
+    // niubash#787: hand the idle-repaint channel this editor's
+    // repaint signal and the cycle-menu session, and make sure the
+    // segment cache's landing observer is installed. Every build
+    // re-registers, so an edit-mode rebuild replaces the previous
+    // editor's hooks wholesale. The signal travels as a
+    // request closure: its type is not exported from the editor
+    // crate's root at this pin, and the closure keeps the signal
+    // clone — whose lifetime arms the editor's input poll — alive.
+    let repaint_signal = editor.repaint_signal();
+    crate::idle_repaint::register_editor(
+        std::sync::Arc::new(move || repaint_signal.request_repaint()),
+        repaint_cycle_session,
+    );
+    crate::idle_repaint::ensure_cache_observer();
 
     Ok(editor)
 }
@@ -5826,10 +5846,23 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // sees the editor's buffer and the prompt, and the hooks run.
             crate::readline_live::begin_read(&mut line_editor, &prompt_text);
             typeahead.disarm_and_reinject();
-            match consume_abi_control(&mut line_editor) {
+            // niubash#787: while this read is on screen, a segment
+            // refresh landing for the displayed worktree may re-stamp
+            // the prompt's live Vcs cell and request one idle
+            // repaint; the registration spans exactly the read, so a
+            // landing while a command executes finds no live pass.
+            crate::idle_repaint::begin_pass(
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|cwd| crate::git_prompt_cache::find_worktree(&cwd)),
+                prompt.live_vcs_cell(),
+            );
+            let read = match consume_abi_control(&mut line_editor) {
                 Some(line) => Ok(Signal::Success(line)),
                 None => line_editor.read_line(&prompt),
-            }
+            };
+            crate::idle_repaint::end_pass();
+            read
         } else {
             let prompt = shell.borrow().prompt.clone();
             let prompt = ContinuationPrompt::new(&prompt, prompt.vi_indicators());

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
+use crate::idle_repaint::LiveVcsCell;
 use crate::path_utils::shell_home_dir;
 use crate::prompt::{format_local_time, PromptIndicators};
 
@@ -438,6 +439,15 @@ pub struct SegmentPrompt {
     /// physically cannot outlive the pass that stamped it: the clone
     /// carrying it is dropped when the pass's read_line returns.
     vcs_stamp: Option<VcsPassStamp>,
+    /// The stamp's live cell (niubash#787): created alongside the
+    /// stamp when the pass's cwd is inside a worktree, and shared
+    /// with the idle-repaint registry for exactly this pass. When a
+    /// segment refresh lands mid-pass, the landing re-stamps the
+    /// cell and the editor repaint that follows renders the landed
+    /// value — renders still never touch the cache; the cell is a
+    /// host-written stamp, not a render read. `None` whenever the
+    /// prompt is unstamped or the pass has no worktree.
+    vcs_live: Option<Arc<LiveVcsCell>>,
     /// The Dir segment's memo (audit item A2), the Vcs stamp's sibling
     /// for the one other file-system-touching segment: shared across
     /// clones and keyed by (cwd, HOME, USERPROFILE), so repaints in a
@@ -451,6 +461,7 @@ impl SegmentPrompt {
         Self {
             config,
             vcs_stamp: None,
+            vcs_live: None,
             dir_memo: Arc::new(Mutex::new(None)),
         }
     }
@@ -471,10 +482,37 @@ impl SegmentPrompt {
     /// Stamp this prompt (a per-pass clone) with the Vcs value its pass
     /// read from the segment cache (niubash#592, S2; niubash#685).
     /// Called exactly once per pass by `Shell::prompt_for_display`,
-    /// after the precmd hooks have run.
+    /// after the precmd hooks have run. `worktree` is the repository
+    /// the value belongs to: when the pass runs inside one, the stamp
+    /// also gets its live cell (niubash#787), so a refresh landing
+    /// mid-pass can re-stamp this clone in place.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) fn stamp_vcs(&mut self, seq: u64, value: Option<String>) {
+    pub(crate) fn stamp_vcs(&mut self, seq: u64, value: Option<String>, worktree: Option<PathBuf>) {
+        self.vcs_live =
+            worktree.map(|worktree| Arc::new(LiveVcsCell::new(worktree, value.clone())));
         self.vcs_stamp = Some(VcsPassStamp { seq, value });
+    }
+
+    /// The live Vcs cell this pass renders through, if it carries
+    /// one (niubash#787): the REPL registers it with the
+    /// idle-repaint registry for the pass's `read_line`.
+    pub(crate) fn live_vcs_cell(&self) -> Option<Arc<LiveVcsCell>> {
+        self.vcs_live.clone()
+    }
+
+    /// The stamp this prompt's renders read: the live cell's current
+    /// value when the pass carries one (a mid-pass landing may have
+    /// re-stamped it, niubash#787), else the value stamped at pass
+    /// start. `None` stays `None` — an unstamped prompt keeps its
+    /// render-time cache fallback.
+    fn vcs_render_stamp(&self) -> Option<VcsPassStamp> {
+        match (&self.vcs_live, &self.vcs_stamp) {
+            (Some(cell), stamp) => Some(VcsPassStamp {
+                seq: stamp.as_ref().map_or(0, |stamp| stamp.seq),
+                value: cell.get(),
+            }),
+            (None, stamp) => stamp.clone(),
+        }
     }
 
     /// The per-pass Vcs stamp, if this prompt was stamped (niubash#592).
@@ -516,16 +554,14 @@ impl SegmentPrompt {
             return String::new();
         }
         let mut segments: Vec<RenderedSegment> = Vec::new();
+        let stamp = self.vcs_render_stamp();
         for element in &self.config.right_elements {
             if *element == SegmentId::Newline {
                 break;
             }
-            if let Some(content) = render_content(
-                element,
-                &self.config,
-                self.vcs_stamp.as_ref(),
-                Some(&self.dir_memo),
-            ) {
+            if let Some(content) =
+                render_content(element, &self.config, stamp.as_ref(), Some(&self.dir_memo))
+            {
                 let (fg, bg) = self.colour_for(element, &content);
                 segments.push(RenderedSegment { content, fg, bg });
             }
@@ -559,6 +595,7 @@ impl SegmentPrompt {
     fn render_lines(&self) -> Vec<PromptLine> {
         let mut lines: Vec<PromptLine> = Vec::new();
         let mut current: Vec<RenderedSegment> = Vec::new();
+        let stamp = self.vcs_render_stamp();
 
         for element in &self.config.left_elements {
             if *element == SegmentId::Newline {
@@ -566,12 +603,9 @@ impl SegmentPrompt {
                 current = Vec::new();
                 continue;
             }
-            if let Some(content) = render_content(
-                element,
-                &self.config,
-                self.vcs_stamp.as_ref(),
-                Some(&self.dir_memo),
-            ) {
+            if let Some(content) =
+                render_content(element, &self.config, stamp.as_ref(), Some(&self.dir_memo))
+            {
                 let (fg, bg) = self.colour_for(element, &content);
                 current.push(RenderedSegment { content, fg, bg });
             }
@@ -1005,7 +1039,7 @@ mod tests {
     fn issue592_stamped_prompt_renders_its_pass_value() {
         let mut prompt = vcs_only_prompt();
         assert!(prompt.vcs_stamp().is_none(), "fresh prompt is unstamped");
-        prompt.stamp_vcs(7, Some("hooked*".to_string()));
+        prompt.stamp_vcs(7, Some("hooked*".to_string()), None);
         let stamp = prompt.vcs_stamp().expect("stamped");
         assert_eq!(stamp.seq, 7);
         assert_eq!(stamp.value.as_deref(), Some("hooked*"));
@@ -1019,9 +1053,32 @@ mod tests {
         // pass"), not a missing value: the render must re-read it and
         // stay empty rather than falling back to a fresh computation.
         let mut prompt = vcs_only_prompt();
-        prompt.stamp_vcs(1, None);
+        prompt.stamp_vcs(1, None, None);
         assert_eq!(prompt.render_left(), "");
         assert_eq!(prompt.render_right(), "");
+    }
+
+    #[test]
+    fn issue787_landing_restamps_the_pass_clone_in_place() {
+        // niubash#787: a pass stamped cold (no segment yet) renders
+        // the landed value after the landing re-stamps its live
+        // cell — the same write the idle-repaint registry performs —
+        // without a new stamp and without touching the cache.
+        let mut prompt = vcs_only_prompt();
+        let worktree = PathBuf::from("/tmp/issue787-segments-repo");
+        prompt.stamp_vcs(3, None, Some(worktree));
+        assert_eq!(prompt.render_left(), "");
+        let cell = prompt
+            .live_vcs_cell()
+            .expect("a stamped pass inside a worktree carries a live cell");
+        assert!(cell.set_if_changed(&Some("main".to_string())));
+        let left = prompt.render_left();
+        assert!(left.contains("main"), "{left:?}");
+        // The pass snapshot keeps its stamp-time identity: the live
+        // cell is a re-stamp channel, not a second stamp.
+        let stamp = prompt.vcs_stamp().expect("stamped");
+        assert_eq!(stamp.seq, 3);
+        assert_eq!(stamp.value, None);
     }
 
     /// Off-Windows the unstamped fallback is the empty segment (the Vcs

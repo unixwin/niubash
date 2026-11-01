@@ -2445,7 +2445,11 @@ impl Shell {
     /// this pass's Vcs value (niubash#592, S2): the value is read from
     /// the cross-pass segment cache in this call — which the REPL
     /// makes after `run_precmd_hooks` — and the pass's repaints
-    /// re-read the stamp instead of touching the cache again.
+    /// re-read the stamp instead of touching the cache again. Since
+    /// niubash#787 both faces carry the stamp as a live cell: a
+    /// refresh landing mid-pass re-stamps the cell, and the host
+    /// requests one editor repaint so the segment reaches an idle
+    /// line without a keypress.
     /// Since niubash#685 the read never computes and never waits: on a
     /// cold or stale entry this call launches a background refresh and
     /// stamps the cached value as-is, so a hook that changes the
@@ -2456,10 +2460,28 @@ impl Shell {
     pub(crate) fn prompt_for_display(&mut self) -> PromptBackend {
         #[cfg(windows)]
         if self.gitbash_prompt_active && !self.prompt_slot_claimed() {
-            let left = crate::git_prompt::render(
-                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            );
-            self.prompt = PromptBackend::Bash(BashPrompt::new(left, String::new()));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let value = crate::git_prompt::branch_segment(&cwd);
+            let left = crate::git_prompt::render_with_segment(&cwd, value.as_deref());
+            let mut prompt = BashPrompt::new(left, String::new());
+            // niubash#787: attach the pass's live Vcs cell, so a
+            // segment refresh landing mid-pass re-stamps the prompt
+            // and one editor repaint carries the segment to the
+            // idle line instead of waiting for the first keypress.
+            if let Some(worktree) = crate::git_prompt_cache::find_worktree(&cwd) {
+                let rebuild_cwd = cwd.clone();
+                prompt = prompt.with_live_vcs(
+                    std::sync::Arc::new(crate::idle_repaint::LiveVcsCell::new(
+                        worktree,
+                        value.clone(),
+                    )),
+                    value,
+                    std::sync::Arc::new(move |segment: &Option<String>| {
+                        crate::git_prompt::render_with_segment(&rebuild_cwd, segment.as_deref())
+                    }),
+                );
+            }
+            self.prompt = PromptBackend::Bash(prompt);
         }
         let prompt = self.prompt.clone();
         #[cfg(windows)]
@@ -2471,7 +2493,8 @@ impl Shell {
                 let seq = self.vcs_pass_seq;
                 let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 let value = crate::git_prompt::branch_segment(&cwd);
-                adapter.inner.stamp_vcs(seq, value);
+                let worktree = crate::git_prompt_cache::find_worktree(&cwd);
+                adapter.inner.stamp_vcs(seq, value, worktree);
             }
         }
         prompt
@@ -5302,12 +5325,9 @@ where
     // nothing (download retraction 2026-10-04), so the hint names the
     // platform's primary package-manager command directly — wpm first on
     // Windows (owner correction 2026-10-03), the native manager elsewhere.
-    // `niu plugin add <recipe>` prints the same, fuller recommendation.
     if let Some(recipe) = plugin_recipe_for_command(command) {
         if let Some(install) = crate::plugins::recipes::first_recommendation(recipe) {
-            lines.push(format!(
-                "niubash: try '{install}' to add {command} (or: niu plugin add {recipe})"
-            ));
+            lines.push(format!("niubash: try '{install}' to add {command}"));
         }
     }
 
@@ -7559,11 +7579,7 @@ complete -F _envtooldyn_hook envtooldyn
 
         #[cfg(windows)]
         assert!(
-            lines.contains(
-                &"niubash: try 'wpm install ripgrep' to add rg \
-                             (or: niu plugin add ripgrep)"
-                    .to_string()
-            ),
+            lines.contains(&"niubash: try 'wpm install ripgrep' to add rg".to_string()),
             "{lines:?}"
         );
         #[cfg(not(windows))]
@@ -7749,12 +7765,6 @@ complete -F _envtooldyn_hook envtooldyn
                 "hint recipe '{recipe}' for '{command}' has no executable-tool row in the seed index"
             );
             let lines = native_command_not_found_hint_lines(command, |_| false);
-            assert!(
-                lines
-                    .iter()
-                    .any(|line| line.contains(&format!("niu plugin add {recipe}"))),
-                "{command}: {lines:?}"
-            );
             // The platform's primary install command is named directly
             // (wpm on Windows, a native manager elsewhere).
             let first = crate::plugins::recipes::first_recommendation(recipe)
