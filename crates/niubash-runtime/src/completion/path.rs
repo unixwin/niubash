@@ -1581,7 +1581,10 @@ mod simulated_namespace_tests {
         let candidates = simulated_namespace_candidates(&q, "/proc/self/", &context, false)
             .expect("/proc/self is simulated on Windows");
         let values = values(candidates);
-        assert!(values.contains(&"/proc/self/root".to_string()), "{values:?}");
+        assert!(
+            values.contains(&"/proc/self/root".to_string()),
+            "{values:?}"
+        );
         assert!(values.contains(&"/proc/self/cwd".to_string()), "{values:?}");
         assert!(values.contains(&"/proc/self/exe".to_string()), "{values:?}");
     }
