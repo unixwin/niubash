@@ -1,6 +1,7 @@
 // Custom completer for WinSH
 // Integrates command, path, and variable completion
 
+use crate::completion::command::CommandCompleter;
 use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
 use crate::completion::path::{
     entry_is_executable, uncached_listing, DirCacheHandle, DirListingCache, ListedKind,
@@ -221,6 +222,36 @@ impl CompletionState {
     }
 }
 
+/// One of GNU bash's context-specific completion entry points
+/// (bashline.c `bash_complete_command` / `bash_complete_variable` /
+/// `bash_complete_filename`, installed by `rl_add_defun` at
+/// bashline.c:504-514). Each uses the same completion engine as TAB
+/// but pins the candidate source instead of letting the cursor's
+/// position choose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecificCompletion {
+    /// `complete-command` — command names (builtins, PATH, aliases,
+    /// functions), `command_word_completion_function` (bashline.c:2005).
+    Command,
+    /// `complete-variable` — variable names, `variable_completion_function`
+    /// (bashline.c:2568).
+    Variable,
+    /// `complete-filename` — filenames, `rl_filename_completion_function`
+    /// (complete.c), with the filename word-break set bash installs for
+    /// this entry point (bashline.c:3914).
+    Filename,
+    /// `complete-username` — user names, `rl_username_completion_function`
+    /// (complete.c:2377, `getpwent`; see [`crate::completion::sources`]).
+    Username,
+    /// `complete-hostname` — host names, `hostname_completion_function`
+    /// (bashline.c:2626, `/etc/hosts`).
+    Hostname,
+    /// `complete-into-braces` — filename matches compressed into one
+    /// csh-style brace expression (bashline.c:3795 `bash_brace_completion`,
+    /// bracecomp.c).
+    Brace,
+}
+
 /// Custom completer for WinSH
 pub struct NiubashCompleter {
     state: Arc<Mutex<CompletionState>>,
@@ -248,6 +279,101 @@ impl NiubashCompleter {
     /// Return plain suggestions for internal probes and tests.
     pub fn complete(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
         self.complete_input(input, cursor_pos)
+    }
+
+    /// Complete INPUT at CURSOR_POS with one pinned GNU completion
+    /// source (see [`SpecificCompletion`]). This bypasses
+    /// `complete_input`'s position-driven source choice only; every
+    /// candidate comes from the same real completer/plugin table the
+    /// TAB path uses, and the returned suggestions carry the same
+    /// word span and whitespace policy.
+    pub fn complete_specific(
+        &mut self,
+        mode: SpecificCompletion,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Vec<Suggestion> {
+        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, dir_cache) =
+            if let Ok(state) = self.state.lock() {
+                (
+                    state.current_dir.clone(),
+                    state.env_vars.clone(),
+                    state.aliases.clone(),
+                    state.functions.clone(),
+                    state.open_fds.clone(),
+                    state.tmp_base.clone(),
+                    state.behavior,
+                    state.dir_cache.clone(),
+                )
+            } else {
+                return Vec::new();
+            };
+
+        let cursor_pos = cursor_pos.min(input.len());
+        let mut context = CompletionContext::with_behavior(
+            current_dir.clone(),
+            input.to_string(),
+            cursor_pos,
+            behavior,
+        );
+        context.open_fds = open_fds;
+        context.tmp_base = tmp_base;
+        context.file_colors = Some(crate::completion::FileColors::from_env_vars(&env_vars));
+        context.dir_cache = Some(DirCacheHandle::with_shared(
+            dir_cache,
+            SessionKey::new(current_dir, String::new()),
+        ));
+
+        let result =
+            match mode {
+                SpecificCompletion::Command => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    let mut matches = CommandCompleter::get_all_commands();
+                    matches.extend(aliases);
+                    matches.extend(functions);
+                    matches.sort();
+                    matches.dedup();
+                    matches.retain(|command| context.behavior.matches(command, &word));
+                    (!matches.is_empty()).then(|| CompletionResult::new(matches))
+                }
+                SpecificCompletion::Variable => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    VariableCompleter::complete_names(&word, &env_vars)
+                }
+                SpecificCompletion::Filename => PathCompleter::complete(&context).ok().flatten(),
+                SpecificCompletion::Username => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    crate::completion::sources::complete_username(&word)
+                }
+                SpecificCompletion::Hostname => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    crate::completion::sources::complete_hostname(&word)
+                }
+                // bracecomp.c `bash_brace_completion`: complete filenames
+                // first, then collapse the raw match list into one brace
+                // expression. GNU turns off filename quoting here and quotes
+                // each inserted substring itself, so undo the path
+                // completer's shell quoting before compressing.
+                SpecificCompletion::Brace => PathCompleter::complete(&context)
+                    .ok()
+                    .flatten()
+                    .and_then(|result| {
+                        let mut names: Vec<String> = result
+                            .completions
+                            .iter()
+                            .map(|value| crate::completion::path::unescape_shell_path(value))
+                            .collect();
+                        names.sort();
+                        names.dedup();
+                        crate::completion::brace::compress_braces(&names)
+                            .map(|compressed| CompletionResult::new(vec![compressed]))
+                    }),
+            };
+
+        match result {
+            Some(result) => self.format_completions(result, input, cursor_pos),
+            None => Vec::new(),
+        }
     }
 
     /// Complete input
@@ -1058,6 +1184,95 @@ niu_git_comp() {
             probe.stats().0 - before,
             1,
             "the cwd overlay must enumerate once per completion session"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn burndown_complete_specific_pins_the_gnu_source() {
+        let temp_dir = unique_temp_dir("niubash-specific-completion");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("spec-file-alpha.txt"), "x").unwrap();
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        {
+            let mut state = state.lock().unwrap();
+            state.aliases.insert("niu_specific_command".to_string());
+            state
+                .env_vars
+                .insert("NIU_SPECIFIC_VAR".to_string(), "1".to_string());
+        }
+        let mut completer = NiubashCompleter::new(state);
+
+        // complete-command ignores the cursor's argument position:
+        // GNU's command_word_completion_function always completes a
+        // command name (bashline.c:2005).
+        let commands =
+            completer.complete_specific(SpecificCompletion::Command, "echo niu_specific_co", 20);
+        assert!(
+            commands
+                .iter()
+                .any(|suggestion| suggestion.value == "niu_specific_command"),
+            "command mode must complete the alias at argument position: {commands:?}"
+        );
+
+        // complete-variable completes a variable name, keeping the
+        // user's `$` prefix (bashline.c:2568).
+        let variables =
+            completer.complete_specific(SpecificCompletion::Variable, "$NIU_SPECIFIC", 13);
+        assert!(
+            variables
+                .iter()
+                .any(|suggestion| suggestion.value == "$NIU_SPECIFIC_VAR"),
+            "variable mode must complete the name: {variables:?}"
+        );
+
+        // complete-filename completes against the filesystem even at
+        // an argument position (bashline.c:3896).
+        let files = completer.complete_specific(SpecificCompletion::Filename, "echo spec-", 10);
+        assert!(
+            files
+                .iter()
+                .any(|suggestion| suggestion.value == "spec-file-alpha.txt"),
+            "filename mode must complete the file: {files:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn burndown_brace_completion_compresses_filename_matches() {
+        let temp_dir = unique_temp_dir("niubash-brace-completion");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("alpha-one.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("alpha-two.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("alpha three.txt"), "x").unwrap();
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::new(state);
+
+        // `complete-into-braces` completes filenames first, then returns
+        // exactly one compressed expression (bashline.c
+        // bash_brace_completion -> bracecomp.c hack_braces_completion).
+        let suggestions = completer.complete_specific(SpecificCompletion::Brace, "echo alpha-", 11);
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha-{one.txt,two.txt}"],
+            "brace completion must compress the filename matches: {suggestions:?}"
+        );
+
+        // The path completer's shell quoting is undone first: the raw
+        // name is quoted once by bracecomp's sh_backslash_quote, not twice.
+        let spaced = completer.complete_specific(SpecificCompletion::Brace, "echo alpha\\ t", 13);
+        assert_eq!(
+            spaced
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha\\ three.txt"],
+            "a raw filename space is backslash-quoted exactly once: {spaced:?}"
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);

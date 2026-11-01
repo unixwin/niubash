@@ -123,10 +123,18 @@ fn issue742_pty_bare_tab_inserts_indent() {
     s.expect_prompt();
     let transcript = s.transcript();
     // The painted input line carries the indent straight after the
-    // prompt's reset code (`<ESC>[m` + four spaces + `echo` — the
-    // driver's transcript escapes ESC to `<ESC>`).
+    // prompt's reset code (reset + four spaces + `echo` — the driver's
+    // transcript escapes ESC to `<ESC>`). SGR reset has two byte
+    // spellings, `ESC[m` and `ESC[0m`, with identical meaning; the
+    // stream a test sees depends on the hosting layer — ConPTY
+    // normalizes the sequences it forwards (the spelling this pin was
+    // authored against), while a Unix pty carries the painter's own
+    // `ESC[0m` bytes. Canonicalize the spelling before matching so
+    // the pin asserts the behavior (indent directly after the reset),
+    // not one platform's byte form (niubash#753).
+    let canonical = transcript.replace("<ESC>[0m", "<ESC>[m");
     assert!(
-        transcript.contains("<ESC>[m    "),
+        canonical.contains("<ESC>[m    "),
         "the TAB must have left a four-space indent in the line:\n{transcript}"
     );
 }

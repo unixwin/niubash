@@ -86,6 +86,21 @@ pub fn current_generation(_executor: &rubash::Executor) -> u64 {
     0
 }
 
+/// The engine registry's readline variable table, in GNU dump
+/// order (the registry seeds it from `READLINE_VARIABLE_DEFAULTS`
+/// and `set` lines update it in place) — the data the host's
+/// `dump-variables` prints (niubash#765). Outside the `internals`
+/// feature the mirror is empty, like the bindings mirror.
+#[cfg(feature = "internals")]
+pub fn load_readline_variables(executor: &rubash::Executor) -> Vec<(String, String)> {
+    executor.bind_registry().borrow().variables.clone()
+}
+
+#[cfg(not(feature = "internals"))]
+pub fn load_readline_variables(_executor: &rubash::Executor) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// Whether `name` is one of the engine registry's known keymap
 /// names (the `-m` targets a bind entry may name). The `[keymap]`
 /// rule parser consults this through the gate so a rule naming an

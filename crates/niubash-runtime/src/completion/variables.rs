@@ -68,6 +68,38 @@ impl VariableCompleter {
         }
     }
 
+    /// `variable_completion_function` (bashline.c:2568) for the
+    /// `complete-variable` entry point: unlike [`Self::complete`], the
+    /// word need not start with `$` — GNU completes bare names too
+    /// (`HO` → `HOME`), and preserves whichever prefix the user typed
+    /// (`$`, `${`). Matching is the C function's case-sensitive
+    /// prefix test (`all_variables_matching_prefix`, variables.c).
+    pub fn complete_names(
+        word: &str,
+        env_vars: &HashMap<String, String>,
+    ) -> Option<CompletionResult> {
+        let (prefix, suffix, var_name) = if let Some(rest) = word.strip_prefix("${") {
+            ("${", "}", rest)
+        } else if let Some(rest) = word.strip_prefix('$') {
+            ("$", "", rest)
+        } else {
+            ("", "", word)
+        };
+
+        let mut all_vars = Self::get_environment_variables();
+        all_vars.extend(env_vars.keys().cloned());
+        all_vars.sort();
+        all_vars.dedup();
+
+        let matches: Vec<String> = all_vars
+            .into_iter()
+            .filter(|var| var.starts_with(var_name))
+            .map(|var| format!("{prefix}{var}{suffix}"))
+            .collect();
+
+        (!matches.is_empty()).then(|| CompletionResult::new(matches))
+    }
+
     /// Get system environment variables
     pub fn get_environment_variables() -> Vec<String> {
         std::env::vars().map(|(key, _)| key).collect()
@@ -179,5 +211,49 @@ mod tests {
         // Just testing the function exists and runs
         let result = VariableCompleter::expand_variables("echo $TEST", &env_vars);
         assert!(result.contains("echo"));
+    }
+
+    #[test]
+    fn burndown_complete_variable_names_follow_variable_completion_function() {
+        // bashline.c:2568 variable_completion_function: a bare name
+        // completes bare names; `$`/`${` prefixes are preserved.
+        let mut env_vars = HashMap::new();
+        env_vars.insert("NIU_COMPLETE_VAR_ALPHA".to_string(), "1".to_string());
+        env_vars.insert("NIU_COMPLETE_VAR_ALPINE".to_string(), "2".to_string());
+        env_vars.insert("UNRELATED_NAME".to_string(), "3".to_string());
+
+        let bare = VariableCompleter::complete_names("NIU_COMPLETE_VAR_AL", &env_vars)
+            .expect("a bare prefix completes");
+        assert_eq!(
+            bare.completions,
+            vec![
+                "NIU_COMPLETE_VAR_ALPHA".to_string(),
+                "NIU_COMPLETE_VAR_ALPINE".to_string()
+            ]
+        );
+        assert_eq!(bare.common_prefix.as_deref(), Some("NIU_COMPLETE_VAR_ALP"));
+
+        let dollar = VariableCompleter::complete_names("$NIU_COMPLETE_VAR_ALP", &env_vars)
+            .expect("a $-prefixed prefix completes");
+        assert_eq!(
+            dollar.completions,
+            vec![
+                "$NIU_COMPLETE_VAR_ALPHA".to_string(),
+                "$NIU_COMPLETE_VAR_ALPINE".to_string()
+            ]
+        );
+
+        let braced = VariableCompleter::complete_names("${NIU_COMPLETE_VAR_ALP", &env_vars)
+            .expect("a ${-prefixed prefix completes");
+        assert_eq!(
+            braced.completions,
+            vec![
+                "${NIU_COMPLETE_VAR_ALPHA}".to_string(),
+                "${NIU_COMPLETE_VAR_ALPINE}".to_string()
+            ]
+        );
+
+        // The prefix is case-sensitive, like all_variables_matching_prefix.
+        assert!(VariableCompleter::complete_names("niu_complete_var", &env_vars).is_none());
     }
 }

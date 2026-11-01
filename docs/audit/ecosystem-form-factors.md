@@ -292,13 +292,16 @@ emulation.
 - Compiled caches: `zrecompile` `.zwc` files and the `zcompdump` completion
   cache (`oh-my-zsh.sh:79, 215-256`).
 
-**niu status: NOT APPLICABLE by design.** `enable -f` (dynamic builtin
-loading) is refused — `engine: src/builtins/enable.rs:101` TODO comment,
-`:153-181` "dynamic loading not supported" diagnostics. No `.so`/`zwc`
-loading will ever exist in niu; the driver should *recognize and skip* these
-artifacts (a `*.zwc` next to a `*.zsh` is cache, not the plugin). The
-perf idea — caching expansion/completion state — is niu's own problem to
-solve natively, not a compatibility form.
+**niu status: NOT APPLICABLE by design.** `enable -f` (bash loadable
+builtin) loading is still refused by the engine — `engine:
+src/builtins/enable.rs:101` TODO comment, `:153-181` "dynamic loading not
+supported" diagnostics — and niu is preparing the *host* side separately
+(the in-process readline C ABI export, niubash#775 / ruline#8). That work
+exposes `rl_*` to bash builtins; it is not a zsh module ABI, so `.mdd`/`.so`
+zsh modules and `.zwc` caches stay unsupported. The driver should
+*recognize and skip* these artifacts (a `*.zwc` next to a `*.zsh` is cache,
+not the plugin). The perf idea — caching expansion/completion state — is
+niu's own problem to solve natively, not a compatibility form.
 
 ### F10 — lazy-load stubs (deferred loading)
 

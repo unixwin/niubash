@@ -204,6 +204,15 @@ fn run_main() -> ExitCode {
         niubash_runtime::console_guard::release_orphan_console();
     }
 
+    // niubash#755: an interactive launch seeds the completion state
+    // during Shell construction and would pay the one-time
+    // embedded-definition parse inline; start that parse now so it
+    // overlaps the remaining startup work instead of serializing
+    // into it.
+    if interactive_launch_wanted(&args) {
+        niubash_runtime::completion::external::warm_embedded_definitions();
+    }
+
     // niubash#245: guard a piped stdout for non-interactive executions
     // BEFORE anything can write (Rust caches the stdio handle on first
     // use, so the interposition must land first). A reader that closes

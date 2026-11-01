@@ -705,6 +705,43 @@ fn format_shell_path(value: &str, quote: Option<char>) -> String {
     }
 }
 
+/// Undo [`format_shell_path`], recovering the raw filename from a
+/// suggestion. `complete-into-braces` needs the raw names: GNU's
+/// `bracecomp.c` disables readline's filename quoting and applies its own
+/// `sh_backslash_quote` to the unquoted match list.
+pub(crate) fn unescape_shell_path(value: &str) -> String {
+    if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        return inner.replace("'\\''", "'");
+    }
+    if let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return unescape_backslashes(inner);
+    }
+    unescape_backslashes(value)
+}
+
+fn unescape_backslashes(value: &str) -> String {
+    let mut unescaped = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                unescaped.push(next);
+            } else {
+                unescaped.push(ch);
+            }
+        } else {
+            unescaped.push(ch);
+        }
+    }
+    unescaped
+}
+
 fn escape_double_quoted_path(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
