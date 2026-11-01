@@ -10,6 +10,7 @@ pub mod cycle_menu;
 pub mod external;
 pub mod file_colors;
 pub mod gnu_menu;
+pub mod insert_menu;
 pub mod path;
 pub mod sources;
 pub mod variables;

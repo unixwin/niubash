@@ -15,8 +15,8 @@
 #
 # Exit status: 0 when every probe is PASS or SKIP, 1 when any probe FAILs.
 # SKIP is only for a genuinely absent external prerequisite (no niu binary,
-# no fixture, no fzf). A missing feature of ours (for example rubash's
-# `enable -f` loader) is a FAIL, never a SKIP: see unixwin/rubash#2440.
+# no fixture, no fzf). A missing feature of ours (for example an absent live
+# ABI binding) is a FAIL, never a SKIP.
 
 set -u
 
@@ -311,7 +311,7 @@ if should_run loadable-builtin-gnu-bash; then
 fi
 
 # ---------------------------------------------------------------------------
-# enable -f against niu (known rubash loader blocker) and the builtin run
+# enable -f against niu and the live PTY builtin run
 # ---------------------------------------------------------------------------
 if should_run enable-f; then
     if [ -z "$NIU" ]; then
@@ -341,26 +341,21 @@ if should_run loadable-builtin-niu; then
         skip loadable-builtin-niu "no niu binary"
     elif [ -z "$SO" ]; then
         skip loadable-builtin-niu "fixture not built"
+    elif ! command -v python3 >/dev/null 2>&1; then
+        skip loadable-builtin-niu "python3 not available for the live PTY probe"
     else
         log=$logs/loadable-builtin-niu.log
-        out=$("$NIU" -c "enable -f '$SO' rl_probe; rl_probe" 2>&1)
-        printf '%s\n' "$out" >"$log"
-        if printf '%s\n' "$out" | grep -q 'dynamic loading.*not supported'; then
-            fail loadable-builtin-niu "rubash#2440: depends on enable -f: $(printf '%s\n' "$out" | grep 'dynamic loading' | head -n 1)"
-        elif printf '%s\n' "$out" | grep -q '^RL_PROBE '; then
-            line=$(printf '%s\n' "$out" | grep '^RL_PROBE ' | head -n 1)
-            if printf '%s\n' "$line" | grep -q 'result=ok'; then
-                if printf '%s\n' "$line" | grep -q 'line_buffer=ok'; then
-                    pass loadable-builtin-niu "$line"
-                else
-                    fail loadable-builtin-niu "live editor buffer absent in -c (ABI core works): $line"
-                fi
-            else
-                fail loadable-builtin-niu "builtin loaded but the live readline ABI is incomplete: $line"
-            fi
-        else
-            fail loadable-builtin-niu "unexpected result: $(first_line "$out") (see $log)"
-        fi
+        python3 "$probes_dir/pty_probes.py" niu-builtin \
+            --niu "$NIU" --builtin "$SO" \
+            --work "$work/pty" --transcript "$work/niu-builtin.transcript" \
+            --timeout "$timeout" >"$log" 2>&1
+        rc=$?
+        reason=$(sed -n 's/^REASON=//p' "$log" | tail -n 1)
+        case "$rc" in
+            0) pass loadable-builtin-niu "$reason" ;;
+            77) skip loadable-builtin-niu "$reason" ;;
+            *) fail loadable-builtin-niu "$reason (transcript: $work/niu-builtin.transcript)" ;;
+        esac
     fi
 fi
 

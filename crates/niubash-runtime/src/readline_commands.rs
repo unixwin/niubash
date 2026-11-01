@@ -42,6 +42,10 @@ pub const HOST_COMMAND_NAMES: &[&str] = &[
     "complete-hostname",
     "complete-into-braces",
     "complete-username",
+    // bashline.c:4068 `bash_glob_complete_word`: pathname expansion over
+    // the word (through the engine's `shell_glob_filename`) feeds the
+    // ordinary completion machinery.
+    "glob-complete-word",
     "dump-functions",
     "dump-macros",
     "dump-variables",
@@ -73,9 +77,15 @@ pub const HOST_COMMAND_NAMES: &[&str] = &[
 /// the same key — is dynamic-complete-history). The context-specific
 /// completion modes with host-owned sources (`complete-command`,
 /// `complete-variable`, `complete-filename`, `complete-hostname`,
-/// `complete-username`, `complete-into-braces`) are listed; only
-/// `glob-complete-word` stays out of the table because its source is the
-/// engine's `shell_glob_filename`.
+/// `complete-username`, `complete-into-braces`) are listed, as is
+/// `glob-complete-word` (M-g), whose source is the engine's
+/// `shell_glob_filename` through `Session::glob_filename`. The engine
+/// table also names M-* (insert-completions) and M-? / M-=
+/// (possible-completions); those editor events have no entry in the
+/// pinned editor's own default keymap, so their GNU defaults are listed
+/// here too. possible-completions is list-only: the GNU menu
+/// distinguishes it from TAB at dispatch time and never splices the
+/// common prefix (see `completion::gnu_menu`).
 pub const GNU_DEFAULT_COMMAND_BINDINGS: &[(&str, &str)] = &[
     ("\\C-g", "abort"),
     ("\\M-&", "tilde-expand"),
@@ -89,6 +99,10 @@ pub const GNU_DEFAULT_COMMAND_BINDINGS: &[(&str, &str)] = &[
     ("\\M-@", "complete-hostname"),
     ("\\M-~", "complete-username"),
     ("\\M-{", "complete-into-braces"),
+    ("\\M-g", "glob-complete-word"),
+    ("\\M-*", "insert-completions"),
+    ("\\M-?", "possible-completions"),
+    ("\\M-=", "possible-completions"),
     ("\\M-\\C-i", "dynamic-complete-history"),
     ("\\C-x\\C-r", "re-read-init-file"),
 ];

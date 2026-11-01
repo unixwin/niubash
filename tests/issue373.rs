@@ -194,7 +194,18 @@ impl SilentSession {
 
         let system_root = std::env::var_os("SystemRoot")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+            .unwrap_or_else(|| {
+                if cfg!(windows) {
+                    PathBuf::from(r"C:\Windows")
+                } else {
+                    // Non-Windows hosts have no System32. The `C:\Windows`
+                    // fallback contains the Unix PATH separator ('C:' before
+                    // the ':' split would make join_paths fail), so use a
+                    // colon-free placeholder: these tests drive builtins and
+                    // niu itself, never PATH tools.
+                    PathBuf::from("/tmp")
+                }
+            });
         let system32 = system_root.join("System32");
         let mut command = CommandBuilder::new(niu_binary());
         command.cwd(&start);

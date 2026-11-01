@@ -121,6 +121,11 @@ fn reread_after_clear_restores_the_list() {
     let (mut session, home) = spawn_seeded("reread");
 
     run(&mut session, "echo MARKER614");
+    // GNU session semantics (niubash#773) defer recording to the file until
+    // an explicit -a/-w (or session end). `history -r` can only bring back
+    // lines the file actually holds, so append the session line first —
+    // exactly the `history -a` leg of the bash-it `-a && -c && -r` cycle.
+    run(&mut session, "history -a");
     run(&mut session, "history -c");
     run(
         &mut session,

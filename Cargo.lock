@@ -627,6 +627,7 @@ version = "1.4.4"
 dependencies = [
  "anyhow",
  "env_logger",
+ "libc",
  "log",
  "niubash-runtime",
  "portable-pty",
@@ -656,6 +657,7 @@ dependencies = [
  "log",
  "nu-ansi-term",
  "png",
+ "readline-abi",
  "reedline",
  "rubash",
  "serde",
@@ -928,7 +930,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "readline-abi"
 version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=edc490df7273b32fc4d4cfc5bb163c74bc72172a#edc490df7273b32fc4d4cfc5bb163c74bc72172a"
+source = "git+https://github.com/unixwin/ruline?rev=e5535ce297e22e296e33de6c9caa97ece0223fac#e5535ce297e22e296e33de6c9caa97ece0223fac"
 dependencies = [
  "libc",
  "reedline",
@@ -957,7 +959,7 @@ dependencies = [
 [[package]]
 name = "reedline"
 version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=edc490df7273b32fc4d4cfc5bb163c74bc72172a#edc490df7273b32fc4d4cfc5bb163c74bc72172a"
+source = "git+https://github.com/unixwin/ruline?rev=e5535ce297e22e296e33de6c9caa97ece0223fac#e5535ce297e22e296e33de6c9caa97ece0223fac"
 dependencies = [
  "arboard",
  "crossterm 0.29.0",

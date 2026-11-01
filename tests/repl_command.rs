@@ -292,11 +292,38 @@ fn command_mode_sets_shell_to_current_exe_when_missing() {
         .unwrap_or_else(|err| panic!("failed to run niubash shell env test: {err}"));
 
     assert_success(&output, "command mode default SHELL");
-    assert_eq!(
-        stdout_text(&output).trim(),
-        format!("<{}>", display_path(&bin))
-    );
+    // Windows: niu installs its own executable as the shell when SHELL is
+    // missing. Unix: GNU/rubash derive the login shell from passwd
+    // (getpwuid(getuid())->pw_shell, rubash#1143) and never from the shell
+    // binary; fall back to the executable only when no passwd entry exists,
+    // exactly like login_shell_value().
+    #[cfg(windows)]
+    let expected = display_path(&bin);
+    #[cfg(unix)]
+    let expected = login_shell_from_passwd().unwrap_or_else(|| display_path(&bin));
+    assert_eq!(stdout_text(&output).trim(), format!("<{expected}>"));
     let _ = std::fs::remove_dir_all(temp);
+}
+
+#[cfg(unix)]
+fn login_shell_from_passwd() -> Option<String> {
+    // SAFETY: getpwuid returns either null or a valid passwd entry owned by
+    // libc; pw_shell is a NUL-terminated string valid until the next passwd
+    // call in this thread. We copy it immediately.
+    unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        if entry.is_null() {
+            return None;
+        }
+        let shell = (*entry).pw_shell;
+        if shell.is_null() {
+            return None;
+        }
+        let value = std::ffi::CStr::from_ptr(shell)
+            .to_string_lossy()
+            .into_owned();
+        (!value.is_empty()).then_some(value)
+    }
 }
 
 fn run_niu(args: &[&str], start: &Path, home: &Path) -> Output {

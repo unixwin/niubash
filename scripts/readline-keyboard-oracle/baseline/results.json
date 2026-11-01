@@ -1,0 +1,1490 @@
+{
+  "harness": 1,
+  "description": "PTY differential keyboard oracle: GNU bash/readline vs niu",
+  "bash": {
+    "bin": "/data/data/com.termux/files/usr/bin/bash",
+    "version": "GNU bash, version 5.3.20(1)-release (aarch64-unknown-linux-android) / Copyright (C) 2025 Free Software Foundation, Inc. / License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>"
+  },
+  "niu": {
+    "bin": "/data/data/com.termux/files/home/wt/niu-completion-gnu/target/debug/niu",
+    "version": "Niubash 1.4.4 \u2014 bash-compatible shell for Windows / rubash   git c9604443ae09 / Home: <https://unixwin.dev>",
+    "parity_env": {
+      "NIU_COMPLETION_STYLE": "gnu"
+    }
+  },
+  "counts": {
+    "PASS": 50,
+    "FAIL": 0,
+    "KNOWN": 0,
+    "SKIP": 0
+  },
+  "cases": [
+    {
+      "id": "text/chars",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "",
+      "keys_hex": "",
+      "text": "hello",
+      "text_hex": "68656c6c6f",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "hello",
+        "line_repr": "b'hello'",
+        "line_hex": "68656c6c6f",
+        "point": "5"
+      },
+      "niu": {
+        "line": "hello",
+        "line_repr": "b'hello'",
+        "line_hex": "68656c6c6f",
+        "point": "5"
+      }
+    },
+    {
+      "id": "text/chars_mid_insert",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a X",
+      "keys_hex": "0158",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "Xabc",
+        "line_repr": "b'Xabc'",
+        "line_hex": "58616263",
+        "point": "1"
+      },
+      "niu": {
+        "line": "Xabc",
+        "line_repr": "b'Xabc'",
+        "line_hex": "58616263",
+        "point": "1"
+      }
+    },
+    {
+      "id": "text/left_right",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "Left Left Right",
+      "keys_hex": "1b5b441b5b441b5b43",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "2"
+      },
+      "niu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "2"
+      }
+    },
+    {
+      "id": "text/home",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "Home",
+      "keys_hex": "1b5b48",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "0"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "0"
+      }
+    },
+    {
+      "id": "text/end",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "End",
+      "keys_hex": "1b5b46",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "7"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "7"
+      }
+    },
+    {
+      "id": "text/c_a",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a",
+      "keys_hex": "01",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "0"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "0"
+      }
+    },
+    {
+      "id": "text/c_e",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-e",
+      "keys_hex": "05",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "7"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "7"
+      }
+    },
+    {
+      "id": "text/c_b",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-b C-b",
+      "keys_hex": "0202",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "1"
+      },
+      "niu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "1"
+      }
+    },
+    {
+      "id": "text/c_f_mid",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a C-f C-f",
+      "keys_hex": "010606",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "2"
+      },
+      "niu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "2"
+      }
+    },
+    {
+      "id": "text/m_b",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "M-b",
+      "keys_hex": "1b62",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "4"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "4"
+      }
+    },
+    {
+      "id": "text/m_f",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a M-f",
+      "keys_hex": "011b66",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "3"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "3"
+      }
+    },
+    {
+      "id": "text/c_w",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-w",
+      "keys_hex": "17",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc ",
+        "line_repr": "b'abc '",
+        "line_hex": "61626320",
+        "point": "4"
+      },
+      "niu": {
+        "line": "abc ",
+        "line_repr": "b'abc '",
+        "line_hex": "61626320",
+        "point": "4"
+      }
+    },
+    {
+      "id": "text/c_u",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-u",
+      "keys_hex": "15",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      },
+      "niu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      }
+    },
+    {
+      "id": "text/c_k_mid",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a C-f C-f C-k",
+      "keys_hex": "0106060b",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "ab",
+        "line_repr": "b'ab'",
+        "line_hex": "6162",
+        "point": "2"
+      },
+      "niu": {
+        "line": "ab",
+        "line_repr": "b'ab'",
+        "line_hex": "6162",
+        "point": "2"
+      }
+    },
+    {
+      "id": "text/c_y",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-w C-y",
+      "keys_hex": "1719",
+      "text": "foo bar",
+      "text_hex": "666f6f20626172",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "foo bar",
+        "line_repr": "b'foo bar'",
+        "line_hex": "666f6f20626172",
+        "point": "7"
+      },
+      "niu": {
+        "line": "foo bar",
+        "line_repr": "b'foo bar'",
+        "line_hex": "666f6f20626172",
+        "point": "7"
+      }
+    },
+    {
+      "id": "text/m_y",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-w C-a C-k C-y M-y",
+      "keys_hex": "17010b191b79",
+      "text": "alpha beta",
+      "text_hex": "616c7068612062657461",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "The non-kill C-a separates the two kills: GNU text.c coalesces consecutive kills into one ring entry, so C-w C-w C-y would yank the whole original line instead of exercising M-y.",
+      "reason": "",
+      "gnu": {
+        "line": "beta",
+        "line_repr": "b'beta'",
+        "line_hex": "62657461",
+        "point": "4"
+      },
+      "niu": {
+        "line": "beta",
+        "line_repr": "b'beta'",
+        "line_hex": "62657461",
+        "point": "4"
+      }
+    },
+    {
+      "id": "text/c_t",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a C-f C-f C-t",
+      "keys_hex": "01060614",
+      "text": "abcd",
+      "text_hex": "61626364",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "acbd",
+        "line_repr": "b'acbd'",
+        "line_hex": "61636264",
+        "point": "3"
+      },
+      "niu": {
+        "line": "acbd",
+        "line_repr": "b'acbd'",
+        "line_hex": "61636264",
+        "point": "3"
+      }
+    },
+    {
+      "id": "text/m_t",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-e M-t",
+      "keys_hex": "051b74",
+      "text": "one two three",
+      "text_hex": "6f6e652074776f207468726565",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "GNU transposes the two words before point at end-of-line: 'one three two'.  niu leaves the buffer unchanged.",
+      "reason": "",
+      "gnu": {
+        "line": "one three two",
+        "line_repr": "b'one three two'",
+        "line_hex": "6f6e652074687265652074776f",
+        "point": "13"
+      },
+      "niu": {
+        "line": "one three two",
+        "line_repr": "b'one three two'",
+        "line_hex": "6f6e652074687265652074776f",
+        "point": "13"
+      }
+    },
+    {
+      "id": "text/m_u",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a M-u",
+      "keys_hex": "011b75",
+      "text": "hello world",
+      "text_hex": "68656c6c6f20776f726c64",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "HELLO world",
+        "line_repr": "b'HELLO world'",
+        "line_hex": "48454c4c4f20776f726c64",
+        "point": "5"
+      },
+      "niu": {
+        "line": "HELLO world",
+        "line_repr": "b'HELLO world'",
+        "line_hex": "48454c4c4f20776f726c64",
+        "point": "5"
+      }
+    },
+    {
+      "id": "text/m_l",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a M-l",
+      "keys_hex": "011b6c",
+      "text": "HELLO world",
+      "text_hex": "48454c4c4f20776f726c64",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "hello world",
+        "line_repr": "b'hello world'",
+        "line_hex": "68656c6c6f20776f726c64",
+        "point": "5"
+      },
+      "niu": {
+        "line": "hello world",
+        "line_repr": "b'hello world'",
+        "line_hex": "68656c6c6f20776f726c64",
+        "point": "5"
+      }
+    },
+    {
+      "id": "text/m_c",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a M-c",
+      "keys_hex": "011b63",
+      "text": "hello world",
+      "text_hex": "68656c6c6f20776f726c64",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "GNU moves point to the end of the capitalized word (5); a point of 1 would put the cursor on the first letter.",
+      "reason": "",
+      "gnu": {
+        "line": "Hello world",
+        "line_repr": "b'Hello world'",
+        "line_hex": "48656c6c6f20776f726c64",
+        "point": "5"
+      },
+      "niu": {
+        "line": "Hello world",
+        "line_repr": "b'Hello world'",
+        "line_hex": "48656c6c6f20776f726c64",
+        "point": "5"
+      }
+    },
+    {
+      "id": "text/set_mark_m_f",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a C-@ M-f",
+      "keys_hex": "01001b66",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "3"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "3"
+      }
+    },
+    {
+      "id": "text/exchange_point_mark",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a C-@ M-f C-x C-x",
+      "keys_hex": "01001b661818",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "0"
+      },
+      "niu": {
+        "line": "abc def",
+        "line_repr": "b'abc def'",
+        "line_hex": "61626320646566",
+        "point": "0"
+      }
+    },
+    {
+      "id": "text/exchange_then_insert",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-a C-@ M-f C-x C-x X",
+      "keys_hex": "01001b66181858",
+      "text": "abc def",
+      "text_hex": "61626320646566",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "Xabc def",
+        "line_repr": "b'Xabc def'",
+        "line_hex": "5861626320646566",
+        "point": "1"
+      },
+      "niu": {
+        "line": "Xabc def",
+        "line_repr": "b'Xabc def'",
+        "line_hex": "5861626320646566",
+        "point": "1"
+      }
+    },
+    {
+      "id": "text/undo",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-_",
+      "keys_hex": "1f",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "C-_ is the canonical GNU undo binding; niu leaves the buffer unchanged.  The next case shows niu's C-x C-u undo does work.",
+      "reason": "",
+      "gnu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      },
+      "niu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      }
+    },
+    {
+      "id": "text/undo_c_x_c_u",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-x C-u",
+      "keys_hex": "1815",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "C-x C-u is GNU's second default undo binding and is implemented in niu even though C-_ is not.",
+      "reason": "",
+      "gnu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      },
+      "niu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      }
+    },
+    {
+      "id": "text/c_g",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-g",
+      "keys_hex": "07",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "3"
+      },
+      "niu": {
+        "line": "abc",
+        "line_repr": "b'abc'",
+        "line_hex": "616263",
+        "point": "3"
+      }
+    },
+    {
+      "id": "text/c_g_then_key",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "C-g X",
+      "keys_hex": "0758",
+      "text": "abc",
+      "text_hex": "616263",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "GNU keeps keys queued behind C-g; niu discards a key that arrives in the same input burst. A key sent after a pause is inserted normally in niu, so this is an abort/flush difference, not a permanently stuck editor.",
+      "reason": "",
+      "gnu": {
+        "line": "abcX",
+        "line_repr": "b'abcX'",
+        "line_hex": "61626358",
+        "point": "4"
+      },
+      "niu": {
+        "line": "abcX",
+        "line_repr": "b'abcX'",
+        "line_hex": "61626358",
+        "point": "4"
+      }
+    },
+    {
+      "id": "text/bracketed_paste",
+      "group": "text",
+      "status": "PASS",
+      "keys_label": "ESC[200~echo hi ESC[201~",
+      "keys_hex": "1b5b3230307e6563686f2068691b5b3230317e",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "echo hi",
+        "line_repr": "b'echo hi'",
+        "line_hex": "6563686f206869",
+        "point": "7"
+      },
+      "niu": {
+        "line": "echo hi",
+        "line_repr": "b'echo hi'",
+        "line_hex": "6563686f206869",
+        "point": "7"
+      }
+    },
+    {
+      "id": "history/up",
+      "group": "history",
+      "status": "PASS",
+      "keys_label": "Up",
+      "keys_hex": "1b5b41",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "gamma three",
+        "line_repr": "b'gamma three'",
+        "line_hex": "67616d6d61207468726565",
+        "point": "11"
+      },
+      "niu": {
+        "line": "gamma three",
+        "line_repr": "b'gamma three'",
+        "line_hex": "67616d6d61207468726565",
+        "point": "11"
+      }
+    },
+    {
+      "id": "history/down",
+      "group": "history",
+      "status": "PASS",
+      "keys_label": "Up Down",
+      "keys_hex": "1b5b411b5b42",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      },
+      "niu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      }
+    },
+    {
+      "id": "history/m_p",
+      "group": "history",
+      "status": "PASS",
+      "keys_label": "M-p beta Enter",
+      "keys_hex": "1b70626574610d",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "beta two",
+        "line_repr": "b'beta two'",
+        "line_hex": "626574612074776f",
+        "point": "0"
+      },
+      "niu": {
+        "line": "beta two",
+        "line_repr": "b'beta two'",
+        "line_hex": "626574612074776f",
+        "point": "0"
+      }
+    },
+    {
+      "id": "history/m_n",
+      "group": "history",
+      "status": "PASS",
+      "keys_label": "Up Up Up M-n beta Enter",
+      "keys_hex": "1b5b411b5b411b5b411b6e626574610d",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "Forward non-incremental search from the oldest entry finds beta two.  Both shells start from the same controlled history.",
+      "reason": "",
+      "gnu": {
+        "line": "beta two",
+        "line_repr": "b'beta two'",
+        "line_hex": "626574612074776f",
+        "point": "0"
+      },
+      "niu": {
+        "line": "beta two",
+        "line_repr": "b'beta two'",
+        "line_hex": "626574612074776f",
+        "point": "0"
+      }
+    },
+    {
+      "id": "history/c_r",
+      "group": "history",
+      "status": "PASS",
+      "keys_label": "C-r beta C-j",
+      "keys_hex": "12626574610a",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "GNU search.c leaves point at the start of the match (0); niu leaves it at the end of the recalled line (7).",
+      "reason": "",
+      "gnu": {
+        "line": "beta two",
+        "line_repr": "b'beta two'",
+        "line_hex": "626574612074776f",
+        "point": "0"
+      },
+      "niu": {
+        "line": "beta two",
+        "line_repr": "b'beta two'",
+        "line_hex": "626574612074776f",
+        "point": "0"
+      }
+    },
+    {
+      "id": "history/c_r_abort",
+      "group": "history",
+      "status": "PASS",
+      "keys_label": "C-r beta C-g",
+      "keys_hex": "126265746107",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      },
+      "niu": {
+        "line": "",
+        "line_repr": "b''",
+        "line_hex": "",
+        "point": "0"
+      }
+    },
+    {
+      "id": "history/c_o",
+      "group": "history",
+      "status": "PASS",
+      "keys_label": "Up Up C-o",
+      "keys_hex": "1b5b411b5b410f",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "gamma three",
+        "line_repr": "b'gamma three'",
+        "line_hex": "67616d6d61207468726565",
+        "point": "11"
+      },
+      "niu": {
+        "line": "gamma three",
+        "line_repr": "b'gamma three'",
+        "line_hex": "67616d6d61207468726565",
+        "point": "11"
+      }
+    },
+    {
+      "id": "complete/tab_common_prefix",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "TAB",
+      "keys_hex": "09",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "alpha.txt/alpine.txt share 'alp'; GNU inserts the common prefix on the first TAB.",
+      "reason": "",
+      "gnu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      },
+      "niu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      }
+    },
+    {
+      "id": "complete/tab_single",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "TAB",
+      "keys_hex": "09",
+      "text": "cat alph",
+      "text_hex": "63617420616c7068",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "cat alpha.txt ",
+        "line_repr": "b'cat alpha.txt '",
+        "line_hex": "63617420616c7068612e74787420",
+        "point": "14"
+      },
+      "niu": {
+        "line": "cat alpha.txt ",
+        "line_repr": "b'cat alpha.txt '",
+        "line_hex": "63617420616c7068612e74787420",
+        "point": "14"
+      }
+    },
+    {
+      "id": "complete/tab_double",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "TAB TAB",
+      "keys_hex": "0909",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "Second TAB lists candidates; the buffer stays at 'cat alp'.",
+      "reason": "",
+      "gnu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      },
+      "niu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      }
+    },
+    {
+      "id": "complete/m_question",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-?",
+      "keys_hex": "1b3f",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {},
+      "expect_listed": [
+        "alpha.txt",
+        "alpine.txt"
+      ],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "GNU lists the candidates and leaves 'cat al' at point 6; niu must not splice the common prefix from a list-only event.",
+      "reason": "",
+      "gnu": {
+        "line": "cat al",
+        "line_repr": "b'cat al'",
+        "line_hex": "63617420616c",
+        "point": "6"
+      },
+      "niu": {
+        "line": "cat al",
+        "line_repr": "b'cat al'",
+        "line_hex": "63617420616c",
+        "point": "6"
+      }
+    },
+    {
+      "id": "complete/m_equal",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-=",
+      "keys_hex": "1b3d",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {},
+      "expect_listed": [
+        "alpha.txt",
+        "alpine.txt"
+      ],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "M-= is GNU's second possible-completions binding.",
+      "reason": "",
+      "gnu": {
+        "line": "cat al",
+        "line_repr": "b'cat al'",
+        "line_hex": "63617420616c",
+        "point": "6"
+      },
+      "niu": {
+        "line": "cat al",
+        "line_repr": "b'cat al'",
+        "line_hex": "63617420616c",
+        "point": "6"
+      }
+    },
+    {
+      "id": "complete/m_star",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-*",
+      "keys_hex": "1b2a",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "complete.c rl_insert_completions: GNU inserts every matching candidate; niu installs the same M-* default and splices the list.",
+      "reason": "",
+      "gnu": {
+        "line": "cat alpha.txt alpine.txt ",
+        "line_repr": "b'cat alpha.txt alpine.txt '",
+        "line_hex": "63617420616c7068612e74787420616c70696e652e74787420",
+        "point": "25"
+      },
+      "niu": {
+        "line": "cat alpha.txt alpine.txt ",
+        "line_repr": "b'cat alpha.txt alpine.txt '",
+        "line_hex": "63617420616c7068612e74787420616c70696e652e74787420",
+        "point": "25"
+      }
+    },
+    {
+      "id": "complete/m_slash",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-/",
+      "keys_hex": "1b2f",
+      "text": "cat alph",
+      "text_hex": "63617420616c7068",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "cat alpha.txt ",
+        "line_repr": "b'cat alpha.txt '",
+        "line_hex": "63617420616c7068612e74787420",
+        "point": "14"
+      },
+      "niu": {
+        "line": "cat alpha.txt ",
+        "line_repr": "b'cat alpha.txt '",
+        "line_hex": "63617420616c7068612e74787420",
+        "point": "14"
+      }
+    },
+    {
+      "id": "complete/m_tilde",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-~",
+      "keys_hex": "1b7e",
+      "text": "~ro",
+      "text_hex": "7e726f",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "No username database on this host; parity is the unchanged word.",
+      "reason": "",
+      "gnu": {
+        "line": "~ro",
+        "line_repr": "b'~ro'",
+        "line_hex": "7e726f",
+        "point": "3"
+      },
+      "niu": {
+        "line": "~ro",
+        "line_repr": "b'~ro'",
+        "line_hex": "7e726f",
+        "point": "3"
+      }
+    },
+    {
+      "id": "complete/m_at",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-@",
+      "keys_hex": "1b40",
+      "text": "@loc",
+      "text_hex": "406c6f63",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "@localhost ",
+        "line_repr": "b'@localhost '",
+        "line_hex": "406c6f63616c686f737420",
+        "point": "11"
+      },
+      "niu": {
+        "line": "@localhost ",
+        "line_repr": "b'@localhost '",
+        "line_hex": "406c6f63616c686f737420",
+        "point": "11"
+      }
+    },
+    {
+      "id": "complete/m_lbrace",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-{",
+      "keys_hex": "1b7b",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": null,
+      "reason": "",
+      "gnu": {
+        "line": "cat alp{ha.txt,ine.txt} ",
+        "line_repr": "b'cat alp{ha.txt,ine.txt} '",
+        "line_hex": "63617420616c707b68612e7478742c696e652e7478747d20",
+        "point": "24"
+      },
+      "niu": {
+        "line": "cat alp{ha.txt,ine.txt} ",
+        "line_repr": "b'cat alp{ha.txt,ine.txt} '",
+        "line_hex": "63617420616c707b68612e7478742c696e652e7478747d20",
+        "point": "24"
+      }
+    },
+    {
+      "id": "complete/m_g",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "M-g",
+      "keys_hex": "1b67",
+      "text": "cat al*",
+      "text_hex": "63617420616c2a",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "GNU rl_glob_complete_word expands al* to the common prefix 'alp' and consumes the star; niu routes glob-complete-word through Session::glob_filename and matches.",
+      "reason": "",
+      "gnu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      },
+      "niu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      }
+    },
+    {
+      "id": "complete/default_style_tab",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "TAB",
+      "keys_hex": "09",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {
+        "NIU_COMPLETION_STYLE": "column"
+      },
+      "expect_listed": [
+        "alpha.txt",
+        "alpine.txt"
+      ],
+      "niu_expect": [
+        "cat alpha.txt ",
+        "14"
+      ],
+      "product_rule": "zsh menu-select TAB: the first TAB puts candidate 0 into the line and highlights it in the grid; GNU's common-prefix splice is the recorded reference, not the product contract.",
+      "known_reason": null,
+      "known_url": null,
+      "note": "Owner ruling: column/zsh TAB is intentional, not a GNU parity bug. GNU reference is 'cat alp' at point 7.",
+      "reason": "",
+      "gnu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      },
+      "niu": {
+        "line": "cat alpha.txt ",
+        "line_repr": "b'cat alpha.txt '",
+        "line_hex": "63617420616c7068612e74787420",
+        "point": "14"
+      }
+    },
+    {
+      "id": "complete/m_question_after_prefix",
+      "group": "complete",
+      "status": "PASS",
+      "keys_label": "TAB M-?",
+      "keys_hex": "091b3f",
+      "text": "cat al",
+      "text_hex": "63617420616c",
+      "niu_env": {},
+      "expect_listed": [
+        "alpha.txt",
+        "alpine.txt"
+      ],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "TAB #1 splices 'alp'; M-? then lists without touching it.",
+      "reason": "",
+      "gnu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      },
+      "niu": {
+        "line": "cat alp",
+        "line_repr": "b'cat alp'",
+        "line_hex": "63617420616c70",
+        "point": "7"
+      }
+    },
+    {
+      "id": "macro/record_replay",
+      "group": "macro",
+      "status": "PASS",
+      "keys_label": "C-x ( ab C-x ) C-x e",
+      "keys_hex": "1828616218291865",
+      "text": "",
+      "text_hex": "",
+      "niu_env": {},
+      "expect_listed": [],
+      "niu_expect": null,
+      "product_rule": null,
+      "known_reason": null,
+      "known_url": null,
+      "note": "Record 'ab', then C-x e replays it: GNU buffer 'aba'.",
+      "reason": "",
+      "gnu": {
+        "line": "aba",
+        "line_repr": "b'aba'",
+        "line_hex": "616261",
+        "point": "3"
+      },
+      "niu": {
+        "line": "aba",
+        "line_repr": "b'aba'",
+        "line_hex": "616261",
+        "point": "3"
+      }
+    }
+  ]
+}

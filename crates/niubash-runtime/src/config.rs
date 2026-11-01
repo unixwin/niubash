@@ -176,9 +176,10 @@ impl CompletionStyle {
 /// [`CompletionStyle`], which is the *presentation* axis.
 ///
 /// The default is [`CompletionInteraction::Select`] (owner ruling
-/// niubash#742, superseding the 2026-10-28 cycle pick): TAB #1 opens
-/// the candidate grid with nothing selected, TAB #2 selects the first
-/// candidate and later TABs cycle; Enter accepts the candidate in the
+/// niubash#742, superseding the 2026-10-28 cycle pick): TAB #1 puts
+/// the first candidate into the line and opens the candidate grid
+/// with it highlighted (niubash#778); later TABs / Shift-TABs and
+/// Down / Up cycle the highlight; Enter accepts the candidate in the
 /// line and runs the command; Esc rolls the line back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionInteraction {
@@ -187,9 +188,9 @@ pub enum CompletionInteraction {
     /// TAB completes the common prefix / opens the presentation menu,
     /// Enter confirms the pick, and Esc keeps what was inserted.
     Insert,
-    /// zsh menu-select form (niubash#742): TAB #1 only opens the grid
-    /// with nothing selected, TAB #2 selects the first candidate and
-    /// later TABs cycle down the set; Esc rolls the line back.
+    /// zsh menu-select form (niubash#742): TAB #1 splices the first
+    /// candidate and highlights it in the grid, later TABs / Shift-TABs
+    /// and Down / Up cycle down the set; Esc rolls the line back.
     #[default]
     Select,
 }

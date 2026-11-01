@@ -109,14 +109,18 @@ fn main() -> ExitCode {
     // any `enable -f` loadable builtin can be `dlopen`ed. `rl_initialize`
     // builds the default keymaps/funmaps and allocates `rl_line_buffer`, so a
     // plugin that reads the exported globals sees an initialized editor
-    // state rather than null pointers. Interactive routing between this ABI
-    // and the live Reedline editor is the remaining follow-up (the ABI state
-    // is standalone today).
+    // state rather than null pointers. The runtime then mirrors the live
+    // Reedline buffer/point into those globals at every host boundary and
+    // dispatches plugin key bindings from the same keymap arrays.
     //
     // SAFETY: the exported ABI is initialized once from the main thread
     // before the shell's worker thread starts; the call only touches the
     // crate's own process-wide state.
     unsafe { rl_initialize() };
+    // Snapshot the default keymaps before any rc file or plugin can register
+    // a defun: the live-routing layer diffs against this baseline to tell a
+    // plugin binding apart from a host default (niubash#775).
+    niubash_runtime::readline_live::capture_baseline();
     let code = std::thread::Builder::new()
         .name("niu-main".to_string())
         .stack_size(NIU_MAIN_STACK_SIZE)
