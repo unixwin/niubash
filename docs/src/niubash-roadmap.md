@@ -10,7 +10,7 @@ Niubash is a Windows-native, non-isolated Bash-compatible shell for humans and
 agents.
 
 ```text
-niubash = rubash + winuxcmd + reedline + the external bash ecosystem
+niubash = rubash + winuxcmd + ruline + the external bash ecosystem
 ```
 
 ## Done
@@ -18,7 +18,7 @@ niubash = rubash + winuxcmd + reedline + the external bash ecosystem
 - `rubash` is embedded as the shell language engine, pinned to verified
   upstream commits (v1.4.3 vendors the Bash-5.3 patch-20 surface).
 - WinuxCmd command links provide bundled Unix-style commands through PATH.
-- The REPL uses reedline for editing, history, menus, autosuggestions, syntax
+- The REPL uses ruline for editing, history, menus, autosuggestions, syntax
   highlighting, vi/emacs modes, and prompt rendering.
 - `~/.niubashrc` is the primary — and only — interactive startup file; the
   pre-rename legacy names and `~/.bashrc` are never read.

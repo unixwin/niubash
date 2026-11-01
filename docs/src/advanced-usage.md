@@ -323,7 +323,7 @@ Defaults are a floor, not an identity. The built-in prompt renders only
 while nothing claims `PS1`. It has two faces: on Windows, a Git
 Bash-compatible two-row prompt (green `user@host`, yellow cwd, cyan
 `(branch)` git segment — see [Getting Started](getting-started.md));
-elsewhere, a reedline template (`user@host cwd symbol`).
+elsewhere, a ruline template (`user@host cwd symbol`).
 Whoever sets `PS1` last owns the prompt completely — your own rc line, an
 enabled oh-my-bash theme, or starship:
 
