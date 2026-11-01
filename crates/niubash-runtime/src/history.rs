@@ -369,6 +369,7 @@ impl RubashHistoryProvider {
             // pending, so a later -c would remove lines -a already
             // covered — the exact bug this ledger exists to prevent.
             if let Ok(mut ledger) = ledger.lock() {
+                ledger.note_appended(to_append.len());
                 ledger.commit();
             }
             return Ok(());
@@ -395,6 +396,7 @@ impl RubashHistoryProvider {
         // stay pending, so a later -a or the session-end write can still
         // place them (committing first would lose them from the file).
         if let Ok(mut ledger) = ledger.lock() {
+            ledger.note_appended(to_append.len());
             ledger.commit();
         }
         Ok(())
@@ -628,6 +630,70 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e),
         };
+        let requested = std::path::Path::new(path);
+        let is_backing = self
+            .inner
+            .backing_file()
+            .is_some_and(|backing| backing == requested);
+        if is_backing {
+            // niubash#645/#773: POSITION semantics, like GNU's
+            // read_history_range(filename, history_lines_in_file, -1)
+            // (histfile.c:267): deliver the backing file's entries
+            // past this session's read position — exactly once each,
+            // duplicates included, since positions count entries,
+            // never texts. The pre-#773 face diffed by content set,
+            // which swallowed a duplicate line another session
+            // appended (#645's probe) and could not express "already
+            // consumed" for a text the list happens to hold. The
+            // whole-reader reload it used as its fast path is gone
+            // too: -n appends to the list, it never rebuilds it.
+            // Delivered entries join flagged on disk with no pending
+            // line (see `LiveFileBackedHistory::load_from_read`), so
+            // a later -a cannot re-append them (the #182 loop), and
+            // the read position settles to the file's entry total
+            // even when nothing was delivered (a shrunk file simply
+            // re-bases the position).
+            let units = group_history_file_units(
+                content.lines().map(|line| line.to_string()).collect(),
+            );
+            let total = units.iter().filter(|unit| unit.entry.is_some()).count();
+            let ledger = self.inner.ledger();
+            let position = {
+                let mut ledger = ledger
+                    .lock()
+                    .map_err(|_| io::Error::other("history ledger lock poisoned"))?;
+                match ledger.read_position {
+                    Some(position) => position,
+                    None => {
+                        let position = self.inner.loaded_entry_count();
+                        ledger.read_position = Some(position);
+                        position
+                    }
+                }
+            };
+            let mut entry_index = 0usize;
+            for unit in &units {
+                let Some(raw) = &unit.entry else {
+                    continue;
+                };
+                entry_index += 1;
+                if entry_index <= position {
+                    continue;
+                }
+                let entry = decode_history_line(raw);
+                if entry.is_empty() {
+                    continue;
+                }
+                let stamp = unit.stamps.last().cloned();
+                self.inner
+                    .load_from_read(entry, stamp)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.read_position = Some(total);
+            }
+            return Ok(());
+        }
         let existing = self.entries()?;
         let existing_set: std::collections::HashSet<&str> =
             existing.iter().map(|s| s.as_str()).collect();
@@ -654,26 +720,11 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
         if missing.is_empty() {
             return Ok(());
         }
-        // Fast path (niubash#182, corrected niubash#571): the missing lines
-        // are, by construction, lines already in the backing file that this
-        // session's reader has not seen yet — so the only correct fast path
-        // is rebuilding the reader from disk, exactly like `read_history`'s
-        // fast path. Appending them to the file first (the pre-#571 shape)
-        // duplicated every one of them: a second session's line landed twice
-        // after a single `history -n`. Routing them through per-entry saves
-        // is still wrong for the original #182 reason (reedline re-appends
-        // its whole unwritten buffer on every save), so the reload is the
-        // whole fix, not an optimization on top of an append.
-        let requested = std::path::Path::new(path);
-        if self
-            .inner
-            .backing_file()
-            .is_some_and(|backing| backing == requested)
-            && self.inner.reload_from_file().is_ok()
-        {
-            return Ok(());
-        }
-        // Fallback (memory-only degraded session, or a foreign path).
+        // Fallback (memory-only degraded session, or a foreign path):
+        // the pre-#773 content-diff shape, kept for foreign files —
+        // the positional counter governs the backing file, and a
+        // foreign file's lines were never this session's to position
+        // against.
         // niubash#646: loads bypass the record filters (GNU's read
         // path applies no HISTCONTROL/HISTIGNORE filtering), so these
         // go through the unfiltered save, not the provider append.
@@ -866,6 +917,26 @@ impl HistoryStore {
         self.entries.push_back(entry);
         self.stamps.push_back(now_stamp());
         self.on_disk.push_back(false);
+    }
+
+    /// niubash#773: append an entry an explicit read face loaded
+    /// from the file (`history -n`'s positional delivery), flagged
+    /// on disk, carrying the file's own stamp when it has one
+    /// (niubash#703) and the read-time stamp otherwise — the pairing
+    /// `load_from_file` produces. No record filters: GNU's read path
+    /// has none. Capacity discipline matches `save`.
+    pub(crate) fn push_loaded(&mut self, entry: String, stamp: Option<String>) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.entries.len() == self.capacity {
+            self.entries.pop_front();
+            self.stamps.pop_front();
+            self.on_disk.pop_front();
+        }
+        self.entries.push_back(entry);
+        self.stamps.push_back(stamp.unwrap_or_else(now_stamp));
+        self.on_disk.push_back(true);
     }
 
     /// niubash#773: mark the oldest `count` unwritten entries as on
@@ -1367,13 +1438,25 @@ impl LiveFileBackedHistory {
                 state
             }
         };
-        Self {
+        let this = Self {
             capacity,
             state: Arc::new(Mutex::new(state)),
             ledger,
             settings,
             gate_on_history_option: false,
+        };
+        // niubash#773: a fresh session's `-n` read position starts at
+        // the entry count its startup load consumed (GNU:
+        // history_lines_in_file = history_lines_read_from_file,
+        // bashhist.c:345). A ledger adopted from a live twin already
+        // carries its position and keeps it.
+        let loaded = this.loaded_entry_count();
+        if let Ok(mut ledger) = this.ledger.lock() {
+            if ledger.read_position.is_none() {
+                ledger.read_position = Some(loaded);
+            }
         }
+        this
     }
 
     /// Build the editor twin over the provider instance's state
@@ -1633,6 +1716,26 @@ impl LiveFileBackedHistory {
     /// Fails (without touching state) when this session degraded to
     /// memory-only history, so the caller can fall back to the in-memory
     /// replace path.
+    /// The number of entries the in-memory list currently holds.
+    pub(crate) fn loaded_entry_count(&self) -> usize {
+        self.state
+            .lock()
+            .map(|state| state.history.entries.len())
+            .unwrap_or(0)
+    }
+
+    /// niubash#773: load one entry an explicit `history -n` read
+    /// delivered from the backing file: flagged on disk (it came
+    /// from the file) and given NO ledger pending line — GNU's read
+    /// path never makes a line this session's to append
+    /// (`history -a` appends `history_lines_this_session` only,
+    /// bashhist.c:450-477).
+    pub(crate) fn load_from_read(&mut self, entry: String, stamp: Option<String>) -> Result<()> {
+        let mut state = self.lock()?;
+        state.history.push_loaded(entry, stamp);
+        Ok(())
+    }
+
     /// niubash#773: the provider's `history -a` face appended this
     /// session's unwritten entries to the backing file — flip the
     /// store's on-disk bits for exactly that many entries. The list
@@ -1682,6 +1785,10 @@ impl LiveFileBackedHistory {
                 // ledger generation (niubash#614).
                 if let Ok(mut ledger) = ledger.lock() {
                     ledger.note_view_reloaded();
+                    // niubash#773: the rebuilt list IS the file's
+                    // entries, so the `-n` read position settles to
+                    // its entry total.
+                    ledger.read_position = Some(state.history.entries.len());
                 }
                 Self::sync_view(state, &ledger);
                 Ok(())
@@ -3014,6 +3121,16 @@ pub(crate) struct SessionLedger {
     /// the session-end write removes them.
     view_gen: u64,
     view_hidden_len: usize,
+    /// niubash#773: how many entries of the backing file this session
+    /// has consumed by reading — GNU's `history_lines_in_file`
+    /// (bashhist.c:345), in ENTRY units (a stamp line belongs to its
+    /// entry's unit, niubash#733, never a line of its own).
+    /// `history -n` delivers the file's entries past this position
+    /// and settles it to the file's entry total
+    /// (read_history_range, histfile.c:267); `-a` advances it by the
+    /// appended count (bashhist.c:476-477); `reset` re-bases it.
+    /// `None` until a backing store has been loaded over this ledger.
+    read_position: Option<usize>,
 }
 
 impl SessionLedger {
@@ -3025,6 +3142,7 @@ impl SessionLedger {
             base_lines,
             view_gen: 0,
             view_hidden_len: 0,
+            read_position: None,
         }
     }
 
@@ -3049,6 +3167,16 @@ impl SessionLedger {
     fn mark_all_synced(&mut self) {
         for line in &mut self.pending {
             line.synced = true;
+        }
+    }
+
+    /// niubash#773: an append face landed `count` lines in a file —
+    /// GNU advances `history_lines_in_file` by the appended count on
+    /// both the backing and the foreign face (bashhist.c:476-477;
+    /// the counter pair does not distinguish files).
+    fn note_appended(&mut self, count: usize) {
+        if let Some(position) = &mut self.read_position {
+            *position += count;
         }
     }
 
@@ -3109,6 +3237,9 @@ impl SessionLedger {
         self.cleared.clear();
         self.cleared_base.clear();
         self.base_lines = base_lines;
+        // The rewritten file's entries are exactly the list's, and
+        // the list is what this session has read (niubash#773).
+        self.read_position = Some(base_lines);
         // The rewritten file IS the list now; a stale clear hide would
         // mask its first entries (niubash#614).
         self.view_hidden_len = 0;
