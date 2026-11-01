@@ -6446,6 +6446,10 @@ mod tests {
     #[test]
     fn issue767_shell_expand_line_expands_history_alias_and_words() {
         let mut shell = test_shell(HookConfig::default());
+        // test_shell builds a bare session; the interactive entry
+        // asserts histexpand on (enter_interactive, mirroring
+        // bashhist.c's HISTEXPAND_DEFAULT) — do the same here.
+        shell.session_mut().options().set("histexpand", true);
         shell
             .execute_line("alias greet='echo hello'")
             .expect("alias registers");
@@ -6470,6 +6474,13 @@ mod tests {
         // A failed history expansion leaves the line unexpanded:
         // the caller keeps the buffer as it stood.
         assert_eq!(shell.shell_expand_line("!nosuch", &history), None);
+        // With histexpand off (a user's `set +H`), the history
+        // step is gated and `!!` stays literal.
+        shell.session_mut().options().set("histexpand", false);
+        assert_eq!(
+            shell.shell_expand_line("!!", &history).as_deref(),
+            Some("!!")
+        );
     }
 
     #[test]

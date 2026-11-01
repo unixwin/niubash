@@ -182,52 +182,183 @@ pub fn completion_word_span(buffer: &str, point: usize) -> (usize, usize) {
 }
 
 /// Split one history entry into completion tokens the way
-/// `history_tokenize` (lib/readline/histexpand.c) feeds
-/// `build_history_completion_array` (bashline.c:3740-3779):
-/// whitespace separates tokens outside quotes; quoted sections
-/// stay glued to their token and the quote characters themselves
-/// are dropped (the tokenizer's tokens are the words a command
-/// line is made of).
+/// The tokenizer behind GNU's history completion:
+/// `history_tokenize` (lib/readline/histexpand.c:1692, via
+/// `history_tokenize_internal` :1638 and `history_tokenize_word`
+/// :1483) feeds `build_history_completion_array`
+/// (bashline.c:3735). Tokens are exact substrings of the entry —
+/// quote characters are RETAINED (`"hello world"` is one token,
+/// quotes and all) — split the way the shell would split them:
+/// whitespace separates, the delimiter characters
+/// (`history_word_delimiters`, histexpand.c:52) form their own
+/// tokens, quoted spans stay glued, and a `#` at a token start
+/// ends the entry (bash sets `history_comment_char` to '#',
+/// variables.c:6175).
 pub fn history_tokens(entry: &str) -> Vec<String> {
+    let bytes = entry.as_bytes();
     let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in entry.chars() {
-        if escaped {
-            current.push(c);
-            escaped = false;
-            continue;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // fielddelim (histexpand.c:58): whitespace or newline.
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n') {
+            i += 1;
         }
-        match quote {
-            Some(q) => {
-                if c == q {
-                    quote = None;
-                } else if c == '\\' && q == '"' {
-                    escaped = true;
-                } else {
-                    current.push(c);
-                }
-            }
-            None => {
-                if c == '\'' || c == '"' {
-                    quote = Some(c);
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c.is_whitespace() {
-                    if !current.is_empty() {
-                        tokens.push(std::mem::take(&mut current));
-                    }
-                } else {
-                    current.push(c);
-                }
+        if i >= bytes.len() || bytes[i] == b'#' {
+            break;
+        }
+        let start = i;
+        i = history_tokenize_word(bytes, i);
+        if i == start {
+            // A delimiter the word scanner would not consume:
+            // adjacent delimiters make a separate field
+            // (histexpand.c:1672-1677).
+            i += 1;
+            while i < bytes.len() && HISTORY_WORD_DELIMITERS.contains(&bytes[i]) {
+                i += 1;
             }
         }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
+        tokens.push(entry[start..i].to_string());
     }
     tokens
+}
+
+/// `history_word_delimiters` (histexpand.c:52).
+const HISTORY_WORD_DELIMITERS: &[u8] = b" \t\n;&()|<>";
+
+/// `HISTORY_QUOTE_CHARACTERS` (histexpand.c:53).
+const HISTORY_QUOTE_CHARACTERS: &[u8] = b"\"'`";
+
+/// `slashify_in_quotes` (histexpand.c:56).
+const SLASHIFY_IN_QUOTES: &[u8] = b"\\`\"$";
+
+/// One word of `history_tokenize_word` (histexpand.c:1483):
+/// returns the index one past the word starting at IND.
+fn history_tokenize_word(bytes: &[u8], ind: usize) -> usize {
+    let at = |p: usize| -> u8 { bytes.get(p).copied().unwrap_or(0) };
+    let mut i = ind;
+    let mut delimiter = 0u8;
+    let mut delimopen = 0u8;
+    let mut nestdelim = 0u32;
+
+    if matches!(at(i), b'(' | b')' | b'\n') {
+        return i + 1;
+    }
+
+    // The C tests the operator set again after the digit scan (a
+    // digit run before `<`/`>` is a file descriptor and the
+    // operator joins its token), so the two checks are sequential,
+    // not alternatives.
+    let mut check_operator = true;
+    if at(i).is_ascii_digit() {
+        let mut j = i;
+        while at(j).is_ascii_digit() {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            return j;
+        }
+        i = j;
+        check_operator = matches!(at(i), b'<' | b'>');
+    }
+    if check_operator && matches!(at(i), b'<' | b'>' | b';' | b'&' | b'|') {
+        let c = at(i);
+        let peek = at(i + 1);
+        if peek == c {
+            if peek == b'<' && matches!(at(i + 2), b'-' | b'<') {
+                i += 1;
+            }
+            return i + 2;
+        } else if peek == b'&' && matches!(c, b'>' | b'<') {
+            let mut j = i + 2;
+            while at(j).is_ascii_digit() {
+                j += 1;
+            }
+            if at(j) == b'-' {
+                j += 1;
+            }
+            return j;
+        } else if (peek == b'>' && c == b'&') || (peek == b'|' && c == b'>') {
+            return i + 2;
+        } else if peek == b'(' && matches!(c, b'>' | b'<') {
+            // Process substitution: a nested word follows.
+            i += 2;
+            delimopen = b'(';
+            delimiter = b')';
+            nestdelim = 1;
+        } else {
+            return i + 1;
+        }
+    }
+
+    // get_word (histexpand.c:1555): scan the word body.
+    if delimiter == 0 && HISTORY_QUOTE_CHARACTERS.contains(&at(i)) {
+        delimiter = at(i);
+        i += 1;
+    }
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' && at(i + 1) == b'\n' {
+            i += 2;
+            continue;
+        }
+        // As written in the C, the slashify test examines the
+        // backslash itself — a member of slashify_in_quotes — so a
+        // backslash outside single quotes always skips the next
+        // character (histexpand.c:1568-1575).
+        if c == b'\\'
+            && delimiter != b'\''
+            && (delimiter != b'"' || SLASHIFY_IN_QUOTES.contains(&c))
+        {
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            i += 1;
+            continue;
+        }
+        if nestdelim > 0 && c == delimopen {
+            nestdelim += 1;
+            i += 1;
+            continue;
+        }
+        if nestdelim > 0 && c == delimiter {
+            nestdelim -= 1;
+            if nestdelim == 0 {
+                delimiter = 0;
+            }
+            i += 1;
+            continue;
+        }
+        if delimiter != 0 && c == delimiter {
+            delimiter = 0;
+            i += 1;
+            continue;
+        }
+        // Command/process substitution and extended globs nest.
+        if nestdelim == 0
+            && delimiter == 0
+            && matches!(c, b'<' | b'>' | b'$' | b'!' | b'@' | b'?' | b'+' | b'*')
+            && at(i + 1) == b'('
+        {
+            i += 1;
+            if i + 1 >= bytes.len() {
+                break;
+            }
+            delimopen = b'(';
+            delimiter = b')';
+            nestdelim = 1;
+            i += 1;
+            continue;
+        }
+        if delimiter == 0 && HISTORY_WORD_DELIMITERS.contains(&c) {
+            break;
+        }
+        if delimiter == 0 && HISTORY_QUOTE_CHARACTERS.contains(&c) {
+            delimiter = c;
+        }
+        i += 1;
+    }
+    i
 }
 
 /// All history-completion candidates for WORD, per
@@ -249,36 +380,6 @@ pub fn history_completion_matches(entries: &[String], word: &str) -> Vec<String>
         .collect()
 }
 
-/// Expand the first word of an alias VALUE while it names another
-/// alias (the chain `alias_expand` follows until the first word is
-/// not an alias or repeats a name already expanded in this chain).
-/// Returns the expanded text and whether the last alias value used
-/// ended in a blank — the flag that makes the word AFTER the whole
-/// expansion an alias candidate as well.
-fn expand_alias_chain(
-    value: &str,
-    lookup: &impl Fn(&str) -> Option<String>,
-    seen: &mut Vec<String>,
-) -> (String, bool) {
-    let mut current = value.to_string();
-    let mut ends_blank = value.ends_with(' ') || value.ends_with('\t');
-    loop {
-        let lead = current.len() - current.trim_start_matches([' ', '\t']).len();
-        let rest = &current[lead..];
-        let wend = rest.find([' ', '\t']).unwrap_or(rest.len());
-        let first = &rest[..wend];
-        if first.is_empty() || seen.iter().any(|s| s == first) {
-            break;
-        }
-        let Some(next) = lookup(first) else { break };
-        seen.push(first.to_string());
-        ends_blank = next.ends_with(' ') || next.ends_with('\t');
-        current = format!("{}{}{}", &current[..lead], next, &rest[wend..]);
-    }
-    (current, ends_blank)
-}
-
-/// The longest common prefix of a non-empty match list (the text
 /// `rl_complete_internal` inserts when several matches agree).
 pub fn common_prefix(matches: &[String]) -> String {
     let Some(first) = matches.first() else {
@@ -357,102 +458,202 @@ pub fn history_expand_line(
     }
 }
 
-/// Alias expansion of the command-position words of LINE, the
-/// observable contract of bash's `alias_expand` (alias.c) as
-/// `shell_expand_line` applies it (bashline.c:3003-3011): the
-/// first word of the line and the first word after each unquoted
-/// command separator (`;`, `|`, `&`, `(`, newline) are replaced
-/// while they name an alias; an alias value ending in a blank
-/// makes the following word eligible too; a word already expanded
-/// in the current chain is not re-expanded (the loop guard).
-/// Quoted words are never alias candidates. This is the host's
-/// line-level pass — the engine keeps its own parse-time pass for
-/// executed lines; the two agree on these shapes by construction
-/// of the alias table they share.
+/// Alias expansion of LINE, a direct port of GNU's
+/// `alias_expand` (alias.c:465) with its `skipws` (:353),
+/// `rd_token` (:438), and `skipquotes` (:308) — the function
+/// `shell_expand_line` applies (bashline.c:3003-3011). The scan is
+/// purely textual (byte-wise, like the C), which fixes the
+/// observable details:
+///
+/// - whitespace and quoted/backslash-quoted stretches are copied
+///   verbatim by the skip pass and are never alias candidates;
+/// - the first token, a token after a command separator
+///   (`\r\n;|&(` — including separators the skip pass crossed),
+///   and the token after a value that ends in a blank are the
+///   only candidates; a token containing a backslash never
+///   expands;
+/// - the value replaces the token VERBATIM: a trailing-blank
+///   value plus the original separating blank yields two blanks
+///   (`g st` with `g='git '` gives `git  status`), and the
+///   substituted text is NOT rescanned, so a value whose first
+///   word names another alias stays as written (`a='ll -h'`
+///   gives `ll -h`, not the chain) — both confirmed against the
+///   oracle binary's M-C-e. Chain expansion is the parser's
+///   business when the line executes, not this function's.
 pub fn expand_alias_positions(line: &str, aliases: &[(String, String)]) -> String {
-    if aliases.is_empty() || line.is_empty() {
-        return line.to_string();
-    }
-    let lookup = |word: &str| {
+    let lookup = |word: &str| -> Option<&str> {
         aliases
             .iter()
             .find(|(name, _)| name == word)
-            .map(|(_, value)| value.clone())
+            .map(|(_, value)| value.as_str())
     };
     let bytes = line.as_bytes();
-    let mut out = String::with_capacity(line.len());
+    let at = |p: usize| -> u8 { bytes.get(p).copied().unwrap_or(0) };
+    let command_separator = |c: u8| matches!(c, b'\r' | b'\n' | b';' | b'|' | b'&' | b'(');
+
+    let mut out: Vec<u8> = Vec::with_capacity(line.len());
     let mut i = 0usize;
-    // Whether the next word position is in command position.
-    let mut command_position = true;
-    // Whether the previous alias value ended in a blank, which
-    // puts the next word in command position too.
+    let mut command_word = true;
     let mut expand_next = false;
-    let mut seen: Vec<String> = Vec::new();
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if c == '\'' || c == '"' || c == '\\' {
-            // Quoted/escaped stretch: copy verbatim, never a
-            // candidate span.
-            let start = i;
-            if c == '\\' {
-                i = (i + 2).min(bytes.len());
-            } else {
-                i += 1;
-                while i < bytes.len() && bytes[i] as char != c {
-                    if c == '"' && bytes[i] == b'\\' {
-                        i = (i + 2).min(bytes.len());
-                    } else {
-                        i += 1;
-                    }
-                }
-                i = (i + 1).min(bytes.len());
-            }
-            out.push_str(&line[start..i]);
-            command_position = false;
-            expand_next = false;
-            continue;
-        }
-        if c == ' ' || c == '\t' {
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if matches!(c, ';' | '|' | '&' | '(' | '\n') {
-            out.push(c);
-            i += 1;
-            command_position = true;
-            expand_next = false;
-            seen.clear();
-            continue;
-        }
-        // A word: [i, end) over non-separator, non-blank bytes.
+    loop {
         let start = i;
-        while i < bytes.len() {
-            let b = bytes[i] as char;
-            if matches!(
-                b,
-                ' ' | '\t' | ';' | '|' | '&' | '(' | ')' | '\n' | '\'' | '"' | '\\'
-            ) {
+        i = alias_skipws(bytes, i, &mut command_word);
+        if start == i && i >= bytes.len() {
+            break;
+        }
+        out.extend_from_slice(&bytes[start..i]);
+
+        let real_start = i;
+        if command_separator(at(i)) {
+            command_word = true;
+        }
+        let mut expand_this_token = command_word || expand_next;
+        expand_next = false;
+
+        let tok_start = i;
+        i = alias_rd_token(bytes, i);
+        let mut tl = i - tok_start;
+        if tl == 0 && i < bytes.len() {
+            // A single-character token, probably a delimiter.
+            tl = 1;
+            i += 1;
+        }
+        // Token boundaries fall on ASCII delimiters, so the token
+        // is always whole UTF-8; the fallback is defensive only.
+        let token = std::str::from_utf8(&bytes[tok_start..tok_start + tl]).unwrap_or("");
+        if token.contains('\\') {
+            expand_this_token = false;
+        }
+        let mut expanded = false;
+        if !token.is_empty() && expand_this_token {
+            if let Some(value) = lookup(token) {
+                out.extend_from_slice(value.as_bytes());
+                if matches!(value.bytes().last(), Some(b' ') | Some(b'\t')) {
+                    expand_next = true;
+                }
+                expanded = true;
+            }
+        }
+        if !expanded {
+            out.extend_from_slice(&bytes[real_start..real_start + tl]);
+        }
+        command_word = false;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| line.to_string())
+}
+
+/// `skipquotes` (alias.c:308): the index of the quote closing
+/// the quoted string that opens at START (or the end of input).
+fn alias_skipquotes(bytes: &[u8], start: usize) -> usize {
+    let delimiter = bytes[start];
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 1;
+            if i >= bytes.len() {
                 break;
             }
             i += 1;
+            continue;
         }
-        let word = &line[start..i];
-        if (command_position || expand_next) && !seen.iter().any(|s| s == word) {
-            if let Some(value) = lookup(word) {
-                seen.push(word.to_string());
-                let (expanded, ends_blank) = expand_alias_chain(&value, &lookup, &mut seen);
-                expand_next = ends_blank;
-                out.push_str(&expanded);
-                command_position = false;
-                continue;
-            }
+        if bytes[i] == delimiter {
+            return i;
         }
-        out.push_str(word);
-        command_position = false;
-        expand_next = false;
+        i += 1;
     }
-    out
+    i
+}
+
+/// `skipws` (alias.c:353): skip whitespace, quoted strings,
+/// backslash-quoted words, and command separators (crossing a
+/// separator marks the next token a command word). The caller
+/// copies the skipped span verbatim.
+fn alias_skipws(bytes: &[u8], start: usize, command_word: &mut bool) -> usize {
+    let at = |p: usize| -> u8 { bytes.get(p).copied().unwrap_or(0) };
+    let mut i = start;
+    let mut pass_next = false;
+    let mut backslash_quoted_word = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if pass_next {
+            pass_next = false;
+            i += 1;
+            continue;
+        }
+        if c == b' ' || c == b'\t' {
+            backslash_quoted_word = false;
+            i += 1;
+            continue;
+        }
+        if c == b'\\' {
+            if i + 1 >= bytes.len() {
+                break;
+            }
+            if at(i + 1).is_ascii_alphabetic() {
+                backslash_quoted_word = true;
+            } else {
+                pass_next = true;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            i = alias_skipquotes(bytes, i);
+            if i >= bytes.len() {
+                break;
+            }
+            if at(i + 1).is_ascii_alphabetic() {
+                backslash_quoted_word = true;
+            }
+            i += 1;
+            continue;
+        }
+        if backslash_quoted_word {
+            i += 1;
+            continue;
+        }
+        if matches!(c, b'\r' | b'\n' | b';' | b'|' | b'&' | b'(') {
+            *command_word = true;
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+/// `rd_token` (alias.c:438): the index one past the token that
+/// starts at START — a run of token characters (anything but
+/// whitespace and the self-delimiting set ` \t\n\r;|&()`), with
+/// backslash escapes and quoted stretches consumed whole.
+fn alias_rd_token(bytes: &[u8], start: usize) -> usize {
+    let self_delimiting = |c: u8| {
+        matches!(
+            c,
+            b' ' | b'\t' | b'\n' | b'\r' | b';' | b'|' | b'&' | b'(' | b')'
+        )
+    };
+    let mut i = start;
+    while i < bytes.len() && !self_delimiting(bytes[i]) {
+        if bytes[i] == b'\\' {
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\'' || bytes[i] == b'"' {
+            i = alias_skipquotes(bytes, i);
+            if i >= bytes.len() {
+                break;
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -519,19 +720,25 @@ mod tests {
             "git commit -m \"hello world\"".to_string(),
             "ls ~/docs".to_string(),
         ];
-        // Tokens of all entries, sorted, prefix-filtered.
+        // Tokens are history_tokenize's exact substrings, sorted
+        // and prefix-filtered: the quoted span is ONE token with
+        // its quotes retained, so it answers to `"h`, not to `h`.
+        assert_eq!(
+            history_tokens("git commit -m \"hello world\""),
+            vec!["git", "commit", "-m", "\"hello world\""]
+        );
+        assert_eq!(history_tokens("a;b"), vec!["a", ";", "b"]);
+        assert_eq!(history_tokens("echo hi # there"), vec!["echo", "hi"]);
         assert_eq!(
             history_completion_matches(&entries, "git"),
             vec!["git".to_string()]
         );
+        assert!(history_completion_matches(&entries, "h").is_empty());
         assert_eq!(
-            history_completion_matches(&entries, "h"),
-            vec!["hello".to_string()]
+            history_completion_matches(&entries, "\"h"),
+            vec!["\"hello world\"".to_string()]
         );
-        assert_eq!(
-            history_completion_matches(&entries, "wo"),
-            vec!["world".to_string()]
-        );
+        assert!(history_completion_matches(&entries, "wo").is_empty());
         assert_eq!(
             history_completion_matches(&entries, "~"),
             vec!["~/docs".to_string()]
@@ -553,19 +760,26 @@ mod tests {
         assert_eq!(expand_alias_positions("echo ll", &aliases), "echo ll");
         // After a separator: command position again.
         assert_eq!(expand_alias_positions("cd /; ll", &aliases), "cd /; ls -l");
-        // Trailing-blank alias makes the next word eligible.
-        assert_eq!(expand_alias_positions("g st", &aliases), "git status");
-        // Alias chains follow the replacement's first word, and a
-        // self-referential alias stops at the loop guard.
+        // Trailing-blank alias makes the next word eligible. The
+        // splice is verbatim (alias.c:465), so the value's trailing
+        // blank AND the original separating blank both survive:
+        // "git  status" with two blanks is GNU's own M-C-e output,
+        // confirmed against the oracle binary.
+        assert_eq!(expand_alias_positions("g st", &aliases), "git  status");
+        // The substituted text is NOT rescanned: a value whose
+        // first word names another alias stays as written (the
+        // oracle's M-C-e turns `a /tmp` into `ll -h /tmp`), and a
+        // self-referential value therefore terminates trivially.
         let chain = vec![
             ("a".to_string(), "ll -h".to_string()),
             ("ll".to_string(), "ls -l".to_string()),
             ("loop".to_string(), "loop -x".to_string()),
         ];
-        assert_eq!(expand_alias_positions("a /tmp", &chain), "ls -l -h /tmp");
+        assert_eq!(expand_alias_positions("a /tmp", &chain), "ll -h /tmp");
         assert_eq!(expand_alias_positions("loop", &chain), "loop -x");
-        // Quoted word is never a candidate.
+        // Quoted and backslash-quoted words are never candidates.
         assert_eq!(expand_alias_positions("'ll' x", &aliases), "'ll' x");
+        assert_eq!(expand_alias_positions("\\ll x", &aliases), "\\ll x");
         // Unknown words pass through.
         assert_eq!(expand_alias_positions("nope", &aliases), "nope");
     }

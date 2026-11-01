@@ -806,6 +806,35 @@ fn editor_history_entries(line_editor: &Reedline) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `rl_forward_word` (lib/readline/text.c:482) from POSITION:
+/// if the character there is not a word character, advance to
+/// the next word character first; then advance to the end of
+/// the word. Word characters are alphanumerics and `_`
+/// (readline's `_rl_walphabetic`).
+fn forward_word_end(text: &str, mut position: usize) -> usize {
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+    let mut rest = text[position..].chars().peekable();
+    if matches!(rest.peek(), Some(&c) if !is_word_char(c)) {
+        while let Some(&c) = rest.peek() {
+            if is_word_char(c) {
+                break;
+            }
+            position += c.len_utf8();
+            rest.next();
+        }
+    }
+    while let Some(&c) = rest.peek() {
+        if !is_word_char(c) {
+            break;
+        }
+        position += c.len_utf8();
+        rest.next();
+    }
+    position
+}
+
 /// Perform one host readline command (see
 /// [`READLINE_HOST_COMMAND_PREFIX`]) against the suspended editor
 /// and the live session.
@@ -905,9 +934,11 @@ fn run_readline_command(
         // bashline.c:2982 shell_expand_line (niubash#767): history
         // expansion, alias expansion, then word expansion of the
         // whole line, as one edit. GNU leaves the line untouched on
-        // an expansion error; a point at the end of the old line
-        // goes to the end of the new one, any other point keeps its
-        // offset.
+        // an expansion error. Point placement follows the C tail:
+        // a point at the end of the old line goes to the end of
+        // the new one; any other point keeps its offset, and when
+        // the character there is not whitespace, rl_forward_word
+        // (text.c:482) advances it to the end of that word.
         "shell-expand-line" => {
             let buffer = line_editor.current_buffer_contents().to_string();
             let cursor = line_editor.current_insertion_point();
@@ -920,6 +951,11 @@ fn run_readline_command(
                         let mut position = cursor.min(expanded.len());
                         while !expanded.is_char_boundary(position) {
                             position -= 1;
+                        }
+                        if position < expanded.len()
+                            && !matches!(expanded.as_bytes()[position], b' ' | b'\t')
+                        {
+                            position = forward_word_end(&expanded, position);
                         }
                         position
                     };
