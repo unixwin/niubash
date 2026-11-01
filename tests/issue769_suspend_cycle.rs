@@ -14,7 +14,11 @@
 //! places the job in its own process group and hands it the terminal
 //! (the engine's job-control spawn treatment), the inner shell's
 //! editor raises SIGTSTP on C-z, the kernel stops it, and the
-//! parent's `fg` continues it.
+//! parent's `fg` continues it. This is the same shape the reporter
+//! confirmed on closure of #769 (`bash -i` as job-control parent,
+//! niu in its own pgrp, strace showing the stop); the pin keeps the
+//! cycle locked as a regression shape for the editor suspend wiring
+//! and the engine's foreground-job treatment.
 //!
 //! Assertions are process-state based (Linux `/proc`), not screen
 //! scraping: the stop is a kernel fact, not a paint shape.
@@ -30,9 +34,14 @@ mod driver;
 
 use std::time::{Duration, Instant};
 
-use driver::{require_pty_or_skip, NiuSession, DEFAULT_TIMEOUT};
+use driver::{require_pty_or_skip, NiuSession};
 
 const CTRL_Z: &str = "\u{1a}";
+
+/// State polls get a heavy budget: the nested boot is a full second
+/// shell startup, and on a loaded CI host the default 10 s is tight
+/// (the driver's HEAVY_TIMEOUT exists for the same reason).
+const STATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Pids of live processes whose argv[0] is exactly `exe` AND whose
 /// environment carries this session's sandbox `HOME` (other test
@@ -129,7 +138,7 @@ fn issue769_pty_ctrl_z_stops_and_fg_resumes_nested_shell() {
     s.expect_prompt();
     let inner_pid = {
         let mut found = None;
-        let ok = wait_for("the nested shell to appear", DEFAULT_TIMEOUT, || {
+        let ok = wait_for("the nested shell to appear", STATE_TIMEOUT, || {
             found = niu_processes(&exe, s.home())
                 .into_iter()
                 .find(|(_, ppid)| *ppid == outer_pid)
@@ -142,7 +151,7 @@ fn issue769_pty_ctrl_z_stops_and_fg_resumes_nested_shell() {
 
     // C-z in the nested shell's editor: the kernel must stop it.
     s.send(CTRL_Z);
-    let stopped = wait_for("the nested shell to reach state T", DEFAULT_TIMEOUT, || {
+    let stopped = wait_for("the nested shell to reach state T", STATE_TIMEOUT, || {
         process_state(inner_pid) == Some('T')
     });
     assert!(
@@ -158,7 +167,7 @@ fn issue769_pty_ctrl_z_stops_and_fg_resumes_nested_shell() {
     // fg in the parent: SIGCONT + terminal hand-back; the nested
     // editor repaints and takes input again.
     s.send_line("fg");
-    let resumed = wait_for("the nested shell to leave state T", DEFAULT_TIMEOUT, || {
+    let resumed = wait_for("the nested shell to leave state T", STATE_TIMEOUT, || {
         matches!(process_state(inner_pid), Some('S') | Some('R'))
     });
     assert!(
