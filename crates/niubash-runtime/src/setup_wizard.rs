@@ -1944,7 +1944,7 @@ fn ask_completion_interaction(
         (
             CompletionInteraction::Select,
             "select",
-            t.tr("default — TAB opens the grid unselected, the next TAB picks and cycles, Esc rolls back"),
+            t.tr("default — TAB puts the first candidate in the line with the grid highlighted, TABs and arrows move the pick, Esc rolls back"),
         ),
         (
             CompletionInteraction::Cycle,

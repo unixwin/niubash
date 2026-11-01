@@ -176,10 +176,14 @@ impl CompletionStyle {
 /// [`CompletionStyle`], which is the *presentation* axis.
 ///
 /// The default is [`CompletionInteraction::Select`] (owner ruling
-/// niubash#742, superseding the 2026-10-28 cycle pick): TAB #1 opens
-/// the candidate grid with nothing selected, TAB #2 selects the first
-/// candidate and later TABs cycle; Enter accepts the candidate in the
-/// line and runs the command; Esc rolls the line back.
+/// niubash#742, superseding the 2026-10-28 cycle pick): TAB #1 puts
+/// the first candidate into the line and shows the grid with it
+/// highlighted; later TABs cycle, and the arrow keys move the
+/// highlight through the grid; Enter accepts the candidate in the
+/// line and runs the command; Esc rolls the line back. (The #742
+/// form originally opened the grid with nothing selected; the owner
+/// ruled that a regression — niubash#778 restored the spliced,
+/// highlighted open.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionInteraction {
     /// zsh menu-completion form: TAB cycles candidates into the line.
@@ -187,9 +191,11 @@ pub enum CompletionInteraction {
     /// TAB completes the common prefix / opens the presentation menu,
     /// Enter confirms the pick, and Esc keeps what was inserted.
     Insert,
-    /// zsh menu-select form (niubash#742): TAB #1 only opens the grid
-    /// with nothing selected, TAB #2 selects the first candidate and
-    /// later TABs cycle down the set; Esc rolls the line back.
+    /// zsh menu-select form (niubash#742): TAB #1 puts the first
+    /// candidate into the line and shows the grid with it
+    /// highlighted; TAB / Shift-TAB cycle down/up the set and the
+    /// arrow keys move the highlight through the grid (niubash#778);
+    /// Esc rolls the line back.
     #[default]
     Select,
 }
