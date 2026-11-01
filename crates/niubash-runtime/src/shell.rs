@@ -2898,10 +2898,7 @@ impl Shell {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| self.home_dir.join(".inputrc"));
         if inputrc.is_file() {
-            let quoted = format!(
-                "'{}'",
-                inputrc.display().to_string().replace('\'', "'\\''")
-            );
+            let quoted = format!("'{}'", inputrc.display().to_string().replace('\'', "'\\''"));
             let _ = self.execute_line(&format!("bind -f {quoted}"));
         }
 
