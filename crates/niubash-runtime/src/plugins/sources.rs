@@ -1044,10 +1044,33 @@ fn run_git_bounded(
         match child.try_wait()? {
             Some(status) => {
                 if !status.success() {
-                    anyhow::bail!(
-                        "git {subcommand} of '{origin}' exited with status {}",
-                        status.code().unwrap_or(1)
-                    );
+                    // niubash#809 F1: a git child that died ABNORMALLY (a
+                    // fatal NTSTATUS — the real-network mid-clone disconnect
+                    // observed in the T8 D5 evidence) must fail through this
+                    // same unified path with a diagnostic that says what
+                    // happened. On Windows every termination surfaces as
+                    // `code(): Some(_)`; the fatal range (>= 0x8000_0000,
+                    // i.e. negative as i32) is an abnormal termination, not
+                    // a small exit status — report it as such instead of
+                    // printing a misleading "status -1". Normal non-zero
+                    // exits (git's 128 family) keep the pinned wording the
+                    // D1-D4 evidence and tests rely on.
+                    match status.code() {
+                        Some(code) if (code as u32) >= 0x8000_0000 => {
+                            anyhow::bail!(
+                                "git {subcommand} of '{origin}' was terminated abnormally \
+                                 (exit status {code:#010x}); the fetch was interrupted — \
+                                 retry the command, or raise the budget with --timeout"
+                            );
+                        }
+                        Some(code) => anyhow::bail!(
+                            "git {subcommand} of '{origin}' exited with status {code}"
+                        ),
+                        None => anyhow::bail!(
+                            "git {subcommand} of '{origin}' was terminated without an exit \
+                             status (killed); the fetch was interrupted — retry the command"
+                        ),
+                    }
                 }
                 return Ok(());
             }
@@ -1269,10 +1292,46 @@ fn fetch_source_to_staging(request: &SourceInstallRequest) -> anyhow::Result<Fet
             commit_sha,
         })
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging_for_cleanup);
+    if let Err(fetch_error) = result {
+        // niubash#809 F1: a failed fetch must not strand its staging tree.
+        // On Windows a freshly killed git process tree can still hold
+        // handles on the staging files for a few milliseconds after
+        // `wait()` returns (job termination is asynchronous), so the
+        // removal gets a short bounded retry; if the tree STILL cannot be
+        // removed, the error names the leftover and its remedy instead of
+        // silently leaving a `.staging-*` directory behind.
+        if let Err(clean_error) = remove_staging_with_retry(&staging_for_cleanup) {
+            return Err(fetch_error.context(format!(
+                "staging {} could not be removed after the failed fetch ({clean_error}); \
+                 `niu plugin clean` removes it",
+                staging_for_cleanup.display()
+            )));
+        }
+        return Err(fetch_error);
     }
     result
+}
+
+/// Remove a staging tree, tolerating an already-missing directory and the
+/// Windows handle-release lag of a freshly killed git process tree (the
+/// kill-on-close job initiates termination, but a `git-remote-https` that
+/// still has a pack file open makes the first removal fail with a sharing
+/// violation). Bounded: a few hundred milliseconds of retry, then the
+/// error is the caller's to report.
+fn remove_staging_with_retry(staging: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 10;
+    let mut delay = Duration::from_millis(25);
+    for attempt in 0..ATTEMPTS {
+        match fs::remove_dir_all(staging) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if attempt + 1 == ATTEMPTS => return Err(err),
+            Err(_) => {}
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_millis(200));
+    }
+    unreachable!("the loop returns on its final attempt")
 }
 
 fn unique_staging_path() -> PathBuf {
@@ -2010,6 +2069,215 @@ mod tests {
         .expect_err("exit 3 must fail");
         assert!(err.to_string().contains("status 3"), "{err}");
         assert!(err.to_string().contains("exit-code.example"), "{err}");
+    }
+
+    /// niubash#809 F1 matrix, leg 1 — a child TERMINATED with a fatal
+    /// NTSTATUS (the deterministic stand-in for the real-network mid-clone
+    /// disconnect that killed git hard mid-transfer) must fail through the
+    /// same unified path as a normal non-zero exit: an Err naming the
+    /// origin that says the child was terminated abnormally, with the raw
+    /// status in hex — never a silent pass, never a misleading
+    /// "status -1".
+    #[test]
+    #[cfg(windows)]
+    fn run_git_bounded_names_an_abnormally_terminated_child() {
+        for code in [0xFFFF_FFFFu32, 0xC000_0005] {
+            let holder = unique_temp_dir("f1-abnormal");
+            let marker = holder.join("child-pid");
+            // The child publishes its own PID, then sleeps well past the
+            // test: the killer (this test) polls the marker and
+            // TerminateProcess'es the child with the matrix code while
+            // run_git_bounded is still polling it.
+            let script = format!(
+                "$PID | Set-Content -Path '{}' -NoNewline; Start-Sleep -Seconds 30",
+                marker.display()
+            );
+            let mut command = Command::new("powershell");
+            command
+                .args(["-NoProfile", "-Command", &script])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let runner = std::thread::spawn(move || {
+                run_git_bounded(
+                    command,
+                    FetchLimits::default(),
+                    "clone",
+                    "https://midstream-cut.example/repo.git",
+                )
+            });
+            let pid = loop {
+                if let Ok(text) = fs::read_to_string(&marker) {
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                assert!(
+                    !runner.is_finished(),
+                    "child exited before the killer ran; marker={:?}",
+                    fs::read_to_string(&marker)
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            terminate_process(pid, code);
+            let err = runner
+                .join()
+                .unwrap()
+                .expect_err("a terminated child must fail");
+            let message = err.to_string();
+            assert!(
+                message.contains("terminated abnormally"),
+                "must name the abnormal termination: {message}"
+            );
+            assert!(
+                message.contains(&format!("{code:#010x}")),
+                "must carry the raw status {code:#010x}: {message}"
+            );
+            assert!(
+                message.contains("midstream-cut.example"),
+                "must name the origin: {message}"
+            );
+            let _ = fs::remove_dir_all(&holder);
+        }
+    }
+
+    /// niubash#809 F1 matrix, leg 2 — a TerminateProcess kill with a
+    /// NORMAL small code is indistinguishable from an ordinary non-zero
+    /// exit and keeps the pinned "exited with status N" wording (the D1-D4
+    /// evidence text).
+    #[test]
+    #[cfg(windows)]
+    fn run_git_bounded_reports_a_small_code_kill_as_a_status() {
+        let holder = unique_temp_dir("f1-smallcode");
+        let marker = holder.join("child-pid");
+        let script = format!(
+            "$PID | Set-Content -Path '{}' -NoNewline; Start-Sleep -Seconds 30",
+            marker.display()
+        );
+        let mut command = Command::new("powershell");
+        command
+            .args(["-NoProfile", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let runner = std::thread::spawn(move || {
+            run_git_bounded(
+                command,
+                FetchLimits::default(),
+                "clone",
+                "https://smallcode-cut.example/repo.git",
+            )
+        });
+        let pid = loop {
+            if let Ok(text) = fs::read_to_string(&marker) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(!runner.is_finished(), "child exited before the killer ran");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        terminate_process(pid, 128);
+        let err = runner
+            .join()
+            .unwrap()
+            .expect_err("a killed child must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("exited with status 128"),
+            "a small-code kill keeps the pinned wording: {message}"
+        );
+        assert!(!message.contains("abnormally"), "{message}");
+        let _ = fs::remove_dir_all(&holder);
+    }
+
+    /// TerminateProcess a pid with a chosen exit code (the F1 matrix's
+    /// killer). Test-only.
+    #[cfg(windows)]
+    fn terminate_process(pid: u32, code: u32) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE};
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            assert!(!handle.is_null(), "OpenProcess({pid}) failed");
+            let _ = windows_sys::Win32::System::Threading::TerminateProcess(handle, code);
+            let _ = CloseHandle(handle);
+        }
+    }
+
+    /// niubash#809 F1 matrix, leg 3 — the shared fetch pipeline itself: a
+    /// failed clone (connection refused — the D1 shape) must return an
+    /// Err through the unified path AND leave no `.staging-*` directory
+    /// behind, exactly like the D1-D4 evidence.
+    #[test]
+    fn failed_fetch_cleans_its_staging_tree() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("f1-refused");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let err = match fetch_source_to_staging(&SourceInstallRequest {
+            origin: "https://127.0.0.1:1/nope.git".to_string(),
+            ..SourceInstallRequest::default()
+        }) {
+            Err(err) => err,
+            Ok(fetched) => panic!(
+                "a refused origin must fail the fetch, got {:?}",
+                fetched.staging
+            ),
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("127.0.0.1:1") || message.contains("nope.git"),
+            "the failure must name the origin: {message}"
+        );
+        let strays: Vec<String> = fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with(".staging-"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(strays.is_empty(), "staging trees left behind: {strays:?}");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#809 F1 matrix, leg 4 — the cleanup retry: a freshly killed
+    /// git tree can hold staging handles for a few milliseconds; the
+    /// removal must wait them out instead of silently giving up (the
+    /// historical `.staging-*` residue).
+    #[test]
+    #[cfg(windows)]
+    fn staging_cleanup_retries_past_a_lagging_handle() {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        let holder = unique_temp_dir("f1-lag");
+        let staging = holder.join(".staging-test");
+        fs::create_dir_all(&staging).unwrap();
+        let mut file = fs::File::create(staging.join("pack.txt")).unwrap();
+        file.write_all(b"data").unwrap();
+        drop(file);
+        // Hold the file with NO sharing: remove_dir_all fails until the
+        // handle closes (~300ms), which the retry loop must outlast.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(staging.join("pack.txt"))
+            .unwrap();
+        let release_at = holder.join("release");
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+            let _ = release_at;
+        });
+        remove_staging_with_retry(&staging).expect("the retry must outlast the handle lag");
+        assert!(!staging.exists(), "the staging tree must be gone");
+        closer.join().unwrap();
+        // An already-missing tree is success (idempotent re-clean).
+        remove_staging_with_retry(&staging).expect("a missing tree is Ok");
+        let _ = fs::remove_dir_all(&holder);
     }
 
     /// The guards are plain env overrides on the spawned command —
