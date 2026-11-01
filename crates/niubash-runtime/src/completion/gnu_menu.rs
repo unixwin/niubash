@@ -45,7 +45,7 @@ use unicode_width::UnicodeWidthChar;
 
 /// Two-space gutter between completion columns — GNU readline separates
 /// fields visually the same way (bash lists read `alpha  beta`).
-const GNU_COLUMN_GUTTER: usize = 2;
+pub(crate) const GNU_COLUMN_GUTTER: usize = 2;
 
 /// Where the double-TAB state machine stands. `Attempted` is the GNU "prefix
 /// completed, line unmodified" state that makes the next TAB print the list.

@@ -468,11 +468,12 @@ CASES: list[Case] = [
         "'alp' and consumes the star; niu routes glob-complete-word through "
         "Session::glob_filename and matches.",
     ),
-    # Owner ruling (niubash#342): TAB completion is intentionally zsh-style —
-    # the first TAB opens the candidate grid and does not splice the common
-    # prefix.  This case asserts the product rule against niu's own
-    # documented behavior; GNU's common-prefix result stays in the report as
-    # the oracle reference, not as the pass/fail target.
+    # Owner ruling (niubash#342, restated by #778): TAB completion is
+    # intentionally zsh menu-select — the first TAB splices the FIRST
+    # candidate and highlights it in the grid.  This case asserts the
+    # product rule against niu's own documented behavior; GNU's
+    # common-prefix result stays in the report as the oracle reference,
+    # not as the pass/fail target.
     Case(
         "complete/default_style_tab",
         "complete",
@@ -480,10 +481,10 @@ CASES: list[Case] = [
         TAB,
         "TAB",
         niu_env={"NIU_COMPLETION_STYLE": "column"},
-        niu_expect=(b"cat al", b"6"),
-        product_rule="zsh-style TAB: the first TAB opens the candidate grid "
-        "and leaves the line/point untouched; GNU's common-prefix splice is "
-        "the recorded reference, not the product contract.",
+        niu_expect=(b"cat alpha.txt ", b"14"),
+        product_rule="zsh menu-select TAB: the first TAB puts candidate 0 "
+        "into the line and highlights it in the grid; GNU's common-prefix "
+        "splice is the recorded reference, not the product contract.",
         expect_listed=(b"alpha.txt", b"alpine.txt"),
         note="Owner ruling: column/zsh TAB is intentional, not a GNU parity "
         "bug. GNU reference is 'cat alp' at point 7.",

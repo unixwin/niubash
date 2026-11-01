@@ -18,6 +18,7 @@ each shell, the key sequence is typed as bytes, and a `bind -x` hook dumps
 | `fixtures.sh` | Deterministic per-case `HOME`, `INPUTRC`, history, cwd, and completion files |
 | `baseline/results.json` | Machine-readable baseline for the current niu pin |
 | `baseline/summary.md` | Human-readable baseline (all mismatches and passes) |
+| `select_first_tab_frame.py` | Focused frame-level regression for niubash#778: TAB #1 and grid arrow navigation (`NIU_BIN=… python3 …`) |
 | `transcripts/latest/` | Raw PTY bytes for the latest run (gitignored) |
 
 ## How a case runs
@@ -63,11 +64,12 @@ case starts from a fresh process.
 
 All GNU-parity completion cases run niu with `NIU_COMPLETION_STYLE=gnu`.
 TAB completion itself is intentionally zsh-style (owner ruling,
-niubash#342): the default `column` style opens the candidate grid on the
-first TAB and does not splice the common prefix. That is a product rule,
-not a compatibility bug, so `complete/default_style_tab` runs with
-`NIU_COMPLETION_STYLE=column` and asserts niu's documented result
-(`cat al` at point 6, grid shown). GNU's common-prefix result is still
+niubash#342/#778): the default `column` style opens the candidate grid on
+the first TAB and splices the FIRST candidate (zsh menu-select). That is a
+product rule, not a compatibility bug, so `complete/default_style_tab`
+runs with `NIU_COMPLETION_STYLE=column` and asserts niu's documented result
+(`cat alpha.txt ` at point 14, first candidate highlighted). GNU's
+common-prefix result is still
 captured and reported as the oracle reference, but it is not the
 pass/fail target for that case. This keeps a product rule from either
 hiding real GNU mismatches or being mislabeled as one.
@@ -111,9 +113,10 @@ PASS 50 / FAIL 0 / KNOWN 0 / SKIP 0   (50 cases)
 ```
 
 `complete/default_style_tab` is an explicit product-divergence case, not a
-KNOWN: under the owner ruling it asserts niu's documented zsh-style result
-(TAB opens the grid, `cat al` at point 6) and records GNU's common-prefix
-splice (`cat alp`, point 7) as the reference. The rest of the matrix runs
+KNOWN: under the owner ruling it asserts niu's documented zsh menu-select
+result (TAB #1 splices `cat alpha.txt ` at point 14 with the first
+candidate highlighted) and records GNU's common-prefix splice (`cat alp`,
+point 7) as the reference. The rest of the matrix runs
 with `NIU_COMPLETION_STYLE=gnu`. `M-?`/`M-=` are list-only and match GNU
 buffer/point; their candidate lists are asserted in the transcripts.
 

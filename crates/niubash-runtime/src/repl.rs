@@ -2128,7 +2128,10 @@ impl PasteChunkEditMode {
     }
 
     /// niubash#631: the navigation splice for a TAB (`delta` +1) or
-    /// Shift-TAB (-1) inside a live cycle session, as the edit batch
+    /// Shift-TAB (-1), and (niubash#778, menu-select) the arrow keys,
+    /// inside a live cycle session, as the edit batch. `horizontal`
+    /// selects the grid column stride (`rows` candidates, for
+    /// Left/Right); the row stride is one candidate (TAB / Up / Down).
     /// that replaces the current candidate with the next one
     /// (wrap-around). Issued HERE, at key-translation time, because
     /// the menu cannot: a menu-side splice runs at paint time in
@@ -2143,28 +2146,47 @@ impl PasteChunkEditMode {
     /// consumes one nav_seq per Edit echo the engine reports back).
     /// `None` when no live session can navigate (the key then takes
     /// its normal translation: TAB #1 opens the menu through the
-    /// bindings, and the menu begins the session itself).
-    fn cycle_navigation_edits(&self, delta: isize) -> Option<Vec<EditCommand>> {
+    /// bindings, and the menu begins the session itself — with
+    /// candidate 0 already spliced and highlighted, niubash#778). An
+    /// arrow key is a menu-select navigation only: under `cycle` it
+    /// keeps its line/history meaning.
+    fn cycle_navigation_edits(
+        &self,
+        movement: crate::completion::cycle_menu::CycleMove,
+        via_arrow: bool,
+    ) -> Option<Vec<EditCommand>> {
+        use crate::completion::cycle_menu::{grid_move, CycleMove};
         let session = self.cycle_session.as_ref()?;
         let mut state = session.lock().ok()?;
         if !state.is_open() || state.candidates.len() < 2 {
             return None;
         }
+        if via_arrow && !state.select_mode {
+            return None;
+        }
         let snapshot = state.snapshot.clone()?;
-        let len = state.candidates.len() as isize;
-        state.index = if !state.spliced {
-            // niubash#742 select form: the grid opened with nothing
-            // spliced — the first navigate picks an edge (forward ->
-            // first candidate, backward -> last), exactly like the
-            // menu-side select path in CycleMenu::apply_navigate.
-            if delta >= 0 {
-                0
-            } else {
-                len as usize - 1
+        let len = state.candidates.len();
+        // TAB #1 selected index 0 (niubash#778); TAB / Shift-TAB step
+        // linearly, the arrows walk the painted cell grid with zsh's
+        // mcol/wishcol edge wrap (short last column included).
+        let (index, mcol, wish_col) = match movement {
+            CycleMove::Linear(delta) => {
+                let index = (state.index as isize + delta).rem_euclid(len as isize) as usize;
+                let start = state.grid.position(index).1;
+                (index, start, start)
             }
-        } else {
-            (state.index as isize + delta).rem_euclid(len) as usize
+            CycleMove::Grid(direction) => grid_move(
+                &state.grid,
+                len,
+                state.index,
+                state.mcol,
+                state.wish_col,
+                direction,
+            ),
         };
+        state.index = index;
+        state.mcol = mcol;
+        state.wish_col = wish_col;
         let text = state.candidates[state.index].splice_text();
         let (start, span_end) = state.span;
         let mut new_buffer = String::with_capacity(snapshot.buffer.len() + text.len());
@@ -2671,19 +2693,48 @@ impl PasteChunkEditMode {
         // paint time, one frame behind the grid's highlight. With no
         // live session the key falls through to its normal
         // translation (TAB #1 opens the menu through the bindings).
+        // niubash#778: under menu-select, the arrow keys are the same
+        // grid navigation (Down/Up one row, Right/Left one column with
+        // wrap), so the highlight and the line move in one frame too.
+        // Outside a live select session none of this matches, so the
+        // keys fall through to `UntilFound([MenuUp, Up])` & co. and
+        // keep their history / cursor meaning.
         if let crossterm29::event::Event::Key(key) = &raw {
             if key.kind == crossterm29::event::KeyEventKind::Press {
-                let delta = match (key.code, key.modifiers) {
+                use crate::completion::cycle_menu::{CycleMove, GridMove};
+                let navigation = match (key.code, key.modifiers) {
                     (crossterm29::event::KeyCode::Tab, modifiers)
                         if modifiers == crossterm29::event::KeyModifiers::NONE =>
                     {
-                        Some(1)
+                        Some((CycleMove::Linear(1), false))
                     }
-                    (crossterm29::event::KeyCode::BackTab, _) => Some(-1),
+                    (crossterm29::event::KeyCode::BackTab, _) => {
+                        Some((CycleMove::Linear(-1), false))
+                    }
+                    (crossterm29::event::KeyCode::Down, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Down), true))
+                    }
+                    (crossterm29::event::KeyCode::Up, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Up), true))
+                    }
+                    (crossterm29::event::KeyCode::Right, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Right), true))
+                    }
+                    (crossterm29::event::KeyCode::Left, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Left), true))
+                    }
                     _ => None,
                 };
-                if let Some(delta) = delta {
-                    if let Some(edits) = self.cycle_navigation_edits(delta) {
+                if let Some((movement, via_arrow)) = navigation {
+                    if let Some(edits) = self.cycle_navigation_edits(movement, via_arrow) {
                         self.menu_possible = true;
                         return ReedlineEvent::Edit(edits);
                     }
@@ -3413,6 +3464,15 @@ fn add_menu_keybindings(
         KeyCode::BackTab,
         ReedlineEvent::MenuPrevious,
     );
+    // niubash#778: the unmodified arrows already carry the same
+    // menu-first shape in the editor defaults — Up/Down/Left are
+    // `UntilFound([MenuUp|MenuDown|MenuLeft, Up|Down|Left])` and Right
+    // is `UntilFound([HistoryHintComplete, MenuRight, Right])` — so a
+    // select menu takes them and every other context keeps history /
+    // cursor motion. They are not rebound here: a baseline override
+    // would also flatten the vi-visual map's arrow rebinding. The
+    // wrapper intercepts them only while a live select session exists;
+    // see `cycle_navigation_edits`.
 }
 
 /// Ctrl+V -> system clipboard paste. Only wired when reedline carries the
@@ -10324,6 +10384,258 @@ mod tests {
         let state = session.lock().unwrap();
         assert_eq!(state.index, 1);
         assert_eq!(state.nav_seq, 3);
+    }
+
+    /// The menu-select session the CycleMenu publishes after TAB #1
+    /// (niubash#778): three candidates, candidate 0 spliced and
+    /// highlighted.
+    fn arm_select_session_with_three_candidates(session: &SharedCycleSession) {
+        use crate::completion::cycle_menu::CycleCandidate;
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.select_mode = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "git ch".to_string(),
+            cursor: 6,
+        });
+        state.spliced = true;
+        state.candidates = vec![
+            CycleCandidate {
+                value: "checkout".to_string(),
+                append_whitespace: false,
+            },
+            CycleCandidate {
+                value: "cherry".to_string(),
+                append_whitespace: false,
+            },
+            CycleCandidate {
+                value: "cherry-pick".to_string(),
+                append_whitespace: false,
+            },
+        ];
+        state.span = (4, 6);
+        state.index = 0;
+        state.region = (4, 12);
+        state.nav_seq = 0;
+    }
+
+    #[test]
+    fn issue778_select_down_moves_to_candidate_1_and_up_wraps_to_the_last() {
+        let (mut detector, session) = cycle_detector();
+        arm_select_session_with_three_candidates(&session);
+
+        // Down from the TAB-#1 highlight (index 0) is candidate 1 —
+        // spliced by the wrapper in THIS key batch, so the line and the
+        // grid highlight move together.
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Down,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        {
+            let state = session.lock().unwrap();
+            assert!(state.is_open(), "the arrow navigates, it does not close");
+            assert_eq!(state.index, 1);
+            assert_eq!(state.region, (4, 10));
+            assert_eq!(state.nav_seq, 1);
+        }
+
+        // Up steps back to candidate 0, then up again wraps to the last.
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Up,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git checkout",
+                12,
+            ))
+        );
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Up,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry-pick",
+                15,
+            ))
+        );
+        let state = session.lock().unwrap();
+        assert_eq!(state.index, 2);
+        assert_eq!(state.region, (4, 15));
+        assert_eq!(state.nav_seq, 3);
+    }
+
+    /// A 3-column, 2-row select session over `c0`..`c4` (niubash#778):
+    /// the last column is one cell short, exactly the painted geometry
+    /// (`c0 c2 c4 / c1 c3`) and the zsh `domenuselect` cell table.
+    fn arm_select_grid_session(session: &SharedCycleSession) {
+        use crate::completion::cycle_menu::{CycleCandidate, CycleGrid};
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.select_mode = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "c".to_string(),
+            cursor: 1,
+        });
+        state.spliced = true;
+        state.candidates = (0..5)
+            .map(|index| CycleCandidate {
+                value: format!("c{index}"),
+                append_whitespace: false,
+            })
+            .collect();
+        state.span = (0, 1);
+        state.index = 0;
+        state.region = (0, 2);
+        state.grid = CycleGrid {
+            rows: 2,
+            mcols: 12,
+            starts: vec![0, 4, 8],
+            fields: vec![4, 4, 4],
+        };
+        state.mcol = 0;
+        state.wish_col = 0;
+        state.nav_seq = 0;
+    }
+
+    #[test]
+    fn issue778_select_arrow_grid_splices_every_step_like_zsh() {
+        // The same 3x2-short-last-column walk as the menu unit test,
+        // driven through the wrapper: every arrow's target is spliced in
+        // THAT key batch, so the line never lags the grid highlight. The
+        // expected sequence is zsh 5.9.2 under a PTY for this list
+        // (Src/Zle/complist.c domenuselect, mcol/wishcol + adjust_mcol).
+        let (mut detector, session) = cycle_detector();
+        arm_select_grid_session(&session);
+        let arrow = |code| paste_key(code, crossterm29::event::KeyModifiers::NONE);
+        use crossterm29::event::KeyCode;
+        let walk = [
+            (KeyCode::Down, "c1"),
+            (KeyCode::Down, "c2"),
+            (KeyCode::Down, "c3"),
+            (KeyCode::Right, "c1"),
+            (KeyCode::Right, "c3"),
+            (KeyCode::Right, "c1"),
+            (KeyCode::Left, "c4"),
+            (KeyCode::Up, "c3"),
+            (KeyCode::Up, "c2"),
+            (KeyCode::Up, "c1"),
+            (KeyCode::Left, "c4"),
+            (KeyCode::Right, "c1"),
+            (KeyCode::Up, "c0"),
+            (KeyCode::Down, "c1"),
+        ];
+        for (step, (code, expected)) in walk.into_iter().enumerate() {
+            let event = detector.parse_event(arrow(code));
+            assert_eq!(
+                event,
+                ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(expected, 2)),
+                "step {step} ({code:?})"
+            );
+            let state = session.lock().unwrap();
+            assert_eq!(state.index, expected[1..].parse::<usize>().unwrap());
+            assert_eq!(state.nav_seq as usize, step + 1);
+            assert!(state.is_open(), "arrow navigation keeps the menu open");
+        }
+    }
+
+    #[test]
+    fn issue778_arrows_keep_their_normal_translation_without_a_menu() {
+        // The wrapper only intercepts arrows inside a live select
+        // session; the default bindings keep MenuUp/Down/Left/Right
+        // first with the line/history fallback, so nothing is stolen.
+        let mut map = default_emacs_keybindings();
+        add_menu_keybindings(&mut map, CompletionInteraction::Select);
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Up),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuUp,
+                ReedlineEvent::Up,
+            ]))
+        );
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Down),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuDown,
+                ReedlineEvent::Down,
+            ]))
+        );
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Left),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuLeft,
+                ReedlineEvent::Left,
+            ]))
+        );
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Right),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::HistoryHintComplete,
+                ReedlineEvent::MenuRight,
+                ReedlineEvent::Right,
+            ]))
+        );
+
+        // With a closed session the same keys reach the bindings.
+        let (mut detector, session) = cycle_detector();
+        assert!(!session.lock().unwrap().is_open());
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Down,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuDown, ReedlineEvent::Down])
+        );
+    }
+
+    #[test]
+    fn issue778_select_up_from_the_first_highlight_wraps_to_the_last() {
+        let (mut detector, session) = cycle_detector();
+        arm_select_session_with_three_candidates(&session);
+
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Up,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry-pick",
+                15,
+            ))
+        );
+        let state = session.lock().unwrap();
+        assert_eq!(state.index, 2);
+        assert_eq!(state.nav_seq, 1);
+    }
+
+    #[test]
+    fn issue778_cycle_interaction_keeps_the_arrows_on_the_line() {
+        // The arrow capture is a menu-select feature: under `cycle`
+        // the same key still ends the session and keeps its normal
+        // line/history translation.
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_candidates(&session);
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Down,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            !matches!(event, ReedlineEvent::Edit(_)),
+            "cycle mode does not splice on Down: {event:?}"
+        );
+        assert!(!session.lock().unwrap().is_open());
     }
 
     #[test]

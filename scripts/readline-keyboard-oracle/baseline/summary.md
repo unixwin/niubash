@@ -61,7 +61,7 @@ Expected values are captured from GNU bash 5.3.20 in the same run; the oracle co
 | `complete/m_at` | `M-@` | `b'@localhost '/b'11'` | `b'@localhost '/b'11'` |
 | `complete/m_lbrace` | `M-{` | `b'cat alp{ha.txt,ine.txt} '/b'24'` | `b'cat alp{ha.txt,ine.txt} '/b'24'` |
 | `complete/m_g` | `M-g` | `b'cat alp'/b'7'` | `b'cat alp'/b'7'` |
-| `complete/default_style_tab` | `TAB` | `b'cat alp'/b'7'` | `b'cat al'/b'6'` |
+| `complete/default_style_tab` | `TAB` | `b'cat alp'/b'7'` | `b'cat alpha.txt '/b'14'` |
 | `complete/m_question_after_prefix` | `TAB M-?` | `b'cat alp'/b'7'` | `b'cat alp'/b'7'` |
 | `macro/record_replay` | `C-x ( ab C-x ) C-x e` | `b'aba'/b'3'` | `b'aba'/b'3'` |
 

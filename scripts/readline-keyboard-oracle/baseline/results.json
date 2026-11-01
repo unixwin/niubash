@@ -1404,10 +1404,10 @@
         "alpine.txt"
       ],
       "niu_expect": [
-        "cat al",
-        "6"
+        "cat alpha.txt ",
+        "14"
       ],
-      "product_rule": "zsh-style TAB: the first TAB opens the candidate grid and leaves the line/point untouched; GNU's common-prefix splice is the recorded reference, not the product contract.",
+      "product_rule": "zsh menu-select TAB: the first TAB puts candidate 0 into the line and highlights it in the grid; GNU's common-prefix splice is the recorded reference, not the product contract.",
       "known_reason": null,
       "known_url": null,
       "note": "Owner ruling: column/zsh TAB is intentional, not a GNU parity bug. GNU reference is 'cat alp' at point 7.",
@@ -1419,10 +1419,10 @@
         "point": "7"
       },
       "niu": {
-        "line": "cat al",
-        "line_repr": "b'cat al'",
-        "line_hex": "63617420616c",
-        "point": "6"
+        "line": "cat alpha.txt ",
+        "line_repr": "b'cat alpha.txt '",
+        "line_hex": "63617420616c7068612e74787420",
+        "point": "14"
       }
     },
     {

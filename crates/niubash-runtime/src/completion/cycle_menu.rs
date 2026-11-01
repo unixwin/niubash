@@ -8,14 +8,25 @@
 //! * **TAB #1** queries the candidates once, puts the *first candidate*
 //!   into the line (not the common prefix — cycling replaces the
 //!   prefix-commit of the `insert` interaction) and shows the candidate
-//!   grid with that candidate highlighted. The candidate set is frozen
+//!   grid with that candidate highlighted — the first TAB is already a
+//!   selection (niubash#778): no unselected frame, no "first navigate
+//!   picks an edge" step. The candidate set is frozen
 //!   for the whole session: it was computed against the line as typed,
 //!   and re-querying after a splice would narrow it to the spliced
 //!   candidate's own matches.
-//! * **Further TABs / Shift-TABs** move the highlight through the set
-//!   with wrap-around (a full loop lands back on the first candidate),
-//!   splicing each highlighted candidate into the line in place of the
-//!   previous one. The splice itself is issued by the edit-mode
+//! * **Further TABs / Shift-TABs** move the highlight linearly
+//!   through the set with wrap-around (a full loop lands back on the
+//!   first candidate), splicing each highlighted candidate into the
+//!   line in place of the previous one. **Under menu-select the arrow
+//!   keys navigate the painted grid** (niubash#778): Down / Up move one
+//!   painted line, Right / Left one painted cell column. This follows
+//!   zsh `domenuselect` (`Src/Zle/complist.c`): the walk carries
+//!   `mcol`/`wishcol`, skips padding/empty cells via `adjust_mcol`,
+//!   wraps every movement at the edges (zshmodules: "All movement
+//!   functions wrap around at the edges"), and therefore handles a
+//!   short last column by falling back to the nearest occupied cell.
+//!   From the TAB-#1 highlight (index 0) Down steps down a row. The
+//!   splice itself is issued by the edit-mode
 //!   wrapper at key-translation time (see [`CycleSession::nav_seq`]):
 //!   a menu-side splice could only run at paint time, in
 //!   `update_working_details`, and the painter composes the frame's
@@ -55,7 +66,7 @@ use reedline::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::gnu_menu::{packed_column_layout, render_list_packed};
+use super::gnu_menu::{packed_column_layout, render_list_packed, GNU_COLUMN_GUTTER};
 
 /// The line as it stood when a cycle session began: what Esc restores.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +101,351 @@ impl CycleCandidate {
     }
 }
 
+/// The painted grid as zsh's `menuselect` sees it: terminal cells, not
+/// candidate indices. Each candidate column starts at `starts[col]` and
+/// occupies `fields[col]` cells (content + the GNU gutter); `mcols` is
+/// the terminal width. `Src/Zle/complist.c` (`domenuselect`,
+/// `adjust_mcol`, and the movement labels around L2940-3210) navigates
+/// this cell table, which is what makes a short last column behave the
+/// way zsh does. Mirrored here only as geometry — no zsh code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CycleGrid {
+    /// Data rows of the packed layout.
+    pub rows: usize,
+    /// Terminal cell columns per row (`zterm_columns` in zsh).
+    pub mcols: usize,
+    /// Start cell column of every candidate column.
+    pub starts: Vec<usize>,
+    /// Cell width of every candidate column.
+    pub fields: Vec<usize>,
+}
+
+impl CycleGrid {
+    /// The candidate column count.
+    pub fn columns(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// The candidate at `(row, x)`, or `None` for a padding/empty cell.
+    fn cell(&self, len: usize, row: usize, x: usize) -> Option<usize> {
+        if row >= self.rows || x >= self.mcols {
+            return None;
+        }
+        for (col, (&start, &field)) in self.starts.iter().zip(&self.fields).enumerate() {
+            let end = start.saturating_add(field).min(self.mcols);
+            if x >= start && x < end {
+                let index = col * self.rows + row;
+                return (index < len).then_some(index);
+            }
+        }
+        None
+    }
+
+    /// The top-left cell of an index.
+    pub fn position(&self, index: usize) -> (usize, usize) {
+        let rows = self.rows.max(1);
+        let col = (index / rows).min(self.starts.len().saturating_sub(1));
+        (index % rows, self.starts.get(col).copied().unwrap_or(0))
+    }
+}
+
+/// A direction in the painted grid (niubash#778). TAB / Shift-TAB are
+/// deliberately not here: they stay linear next/previous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridMove {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// A navigation key for the cycle menu: TAB / Shift-TAB stay linear,
+/// the arrow keys walk the painted grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleMove {
+    Linear(isize),
+    Grid(GridMove),
+}
+
+/// Move the menu selection one painted grid step, mirroring zsh
+/// `domenuselect` (`Src/Zle/complist.c`): Up/Down move one line and
+/// Left/Right one terminal column; all four wrap at the edges, and the
+/// `wishcol` cell is carried through vertical movement. The cell walk
+/// skips padding and empty cells, so a short last column falls back to
+/// the nearest candidate instead of stepping into the void. Returns
+/// `(candidate index, mcol, wish_col)`.
+pub fn grid_move(
+    grid: &CycleGrid,
+    len: usize,
+    index: usize,
+    mcol: usize,
+    wish_col: usize,
+    movement: GridMove,
+) -> (usize, usize, usize) {
+    if len == 0 {
+        return (0, 0, 0);
+    }
+    if grid.rows == 0 || grid.starts.is_empty() || grid.mcols == 0 {
+        // No painted layout yet: preserve the historical linear fallback.
+        let next = match movement {
+            GridMove::Up | GridMove::Left => (index + len - 1) % len,
+            GridMove::Down | GridMove::Right => (index + 1) % len,
+        };
+        return (next, mcol, wish_col);
+    }
+    let (row, start) = grid.position(index);
+    // A full wrap may cross an empty row/column twice; the budget keeps a
+    // degenerate one-column grid terminating instead of spinning.
+    let mut budget = 8 * (grid.mcols + grid.rows + len + 1);
+    let (next_row, next_col, next_wish) = match movement {
+        GridMove::Down => step_down(grid, len, row, mcol, wish_col, &mut budget),
+        GridMove::Up => step_up(grid, len, row, mcol, wish_col, &mut budget),
+        GridMove::Right => step_right(grid, len, row, mcol, wish_col, &mut budget),
+        GridMove::Left => step_left(grid, len, row, mcol, wish_col, &mut budget),
+    };
+    let next_index = grid
+        .cell(len, next_row, next_col)
+        .unwrap_or_else(|| grid.cell(len, row, start).unwrap_or(index));
+    (next_index, next_col, next_wish)
+}
+
+/// zsh `adjust_mcol`: the nearest occupied cell to `wish` on `row`; the
+/// left/right tie is broken by the distance from the current `mcol`.
+fn adjust_mcol(
+    grid: &CycleGrid,
+    len: usize,
+    row: usize,
+    wish: usize,
+    mcol: usize,
+) -> Option<usize> {
+    let wish = wish.min(grid.mcols.saturating_sub(1));
+    let left = (0..=wish).rev().find(|x| grid.cell(len, row, *x).is_some());
+    let right = (wish..grid.mcols).find(|x| grid.cell(len, row, *x).is_some());
+    match (left, right) {
+        (None, None) => None,
+        (Some(p), None) => Some(p),
+        (None, Some(n)) => Some(n),
+        (Some(p), Some(n)) => {
+            if (mcol as isize - p as isize) < (n as isize - mcol as isize) {
+                Some(p)
+            } else {
+                Some(n)
+            }
+        }
+    }
+}
+
+fn step_down(
+    grid: &CycleGrid,
+    len: usize,
+    row: usize,
+    mcol: usize,
+    wish: usize,
+    budget: &mut usize,
+    // wrap flags are threaded through the diagonal `goto` edges
+) -> (usize, usize, usize) {
+    let mut wrap = 0u8;
+    step_down_with(grid, len, row, mcol, wish, &mut wrap, budget)
+}
+
+fn step_down_with(
+    grid: &CycleGrid,
+    len: usize,
+    start_row: usize,
+    start_col: usize,
+    wish: usize,
+    wrap: &mut u8,
+    budget: &mut usize,
+) -> (usize, usize, usize) {
+    let mut row = start_row;
+    let mut col = start_col;
+    loop {
+        if *budget == 0 {
+            return (start_row, start_col, wish);
+        }
+        *budget -= 1;
+        if row == grid.rows.saturating_sub(1) {
+            if *wrap & 2 != 0 {
+                row = start_row;
+                col = start_col;
+                break;
+            }
+            row = 0;
+            *wrap |= 1;
+        } else {
+            row += 1;
+        }
+        if let Some(next) = adjust_mcol(grid, len, row, wish, col) {
+            col = next;
+            break;
+        }
+    }
+    if *wrap == 1 {
+        return step_right_with(grid, len, row, col, wish, wrap, budget);
+    }
+    (row, col, wish)
+}
+
+fn step_up(
+    grid: &CycleGrid,
+    len: usize,
+    row: usize,
+    mcol: usize,
+    wish: usize,
+    budget: &mut usize,
+) -> (usize, usize, usize) {
+    let mut wrap = 0u8;
+    step_up_with(grid, len, row, mcol, wish, &mut wrap, budget)
+}
+
+fn step_right(
+    grid: &CycleGrid,
+    len: usize,
+    row: usize,
+    mcol: usize,
+    wish: usize,
+    budget: &mut usize,
+) -> (usize, usize, usize) {
+    let mut wrap = 0u8;
+    step_right_with(grid, len, row, mcol, wish, &mut wrap, budget)
+}
+
+fn step_right_with(
+    grid: &CycleGrid,
+    len: usize,
+    start_row: usize,
+    start_col: usize,
+    _wish: usize,
+    wrap: &mut u8,
+    budget: &mut usize,
+) -> (usize, usize, usize) {
+    let row = start_row;
+    let mut col = start_col;
+    let current = grid.cell(len, row, col);
+    loop {
+        if *budget == 0 {
+            return (start_row, start_col, start_col);
+        }
+        *budget -= 1;
+        if col == grid.mcols.saturating_sub(1) {
+            if *wrap & 1 != 0 {
+                col = start_col;
+                break;
+            }
+            col = 0;
+            *wrap |= 2;
+        } else {
+            col += 1;
+        }
+        match grid.cell(len, row, col) {
+            Some(index) if Some(index) != current => break,
+            _ => {}
+        }
+    }
+    let wish = col;
+    if *wrap == 2 {
+        return step_down_with(grid, len, row, col, wish, wrap, budget);
+    }
+    (row, col, wish)
+}
+
+fn step_left(
+    grid: &CycleGrid,
+    len: usize,
+    row: usize,
+    mcol: usize,
+    wish: usize,
+    budget: &mut usize,
+) -> (usize, usize, usize) {
+    let mut wrap = 0u8;
+    step_left_with(grid, len, row, mcol, wish, &mut wrap, budget)
+}
+
+fn step_left_with(
+    grid: &CycleGrid,
+    len: usize,
+    start_row: usize,
+    start_col: usize,
+    wish: usize,
+    wrap: &mut u8,
+    budget: &mut usize,
+) -> (usize, usize, usize) {
+    let row = start_row;
+    let mut col = start_col;
+    let mut wish = wish;
+    let current = grid.cell(len, row, col);
+    loop {
+        if *budget == 0 {
+            return (start_row, start_col, wish);
+        }
+        *budget -= 1;
+        if col == 0 {
+            if *wrap & 1 != 0 {
+                col = start_col;
+                break;
+            }
+            col = grid.mcols.saturating_sub(1);
+            *wrap |= 2;
+        } else {
+            col -= 1;
+        }
+        match grid.cell(len, row, col) {
+            Some(index) if Some(index) != current => break,
+            _ => {}
+        }
+    }
+    wish = col;
+    if *wrap == 2 {
+        let last = grid.mcols.saturating_sub(1);
+        col = adjust_mcol(grid, len, row, last, last).unwrap_or(col);
+        wish = last;
+        return step_up_with(grid, len, row, col, wish, wrap, budget);
+    }
+    (row, col, wish)
+}
+
+fn step_up_with(
+    grid: &CycleGrid,
+    len: usize,
+    start_row: usize,
+    start_col: usize,
+    wish: usize,
+    wrap: &mut u8,
+    budget: &mut usize,
+) -> (usize, usize, usize) {
+    let mut row = start_row;
+    let mut col = start_col;
+    let mut wish = wish;
+    loop {
+        if *budget == 0 {
+            return (start_row, start_col, wish);
+        }
+        *budget -= 1;
+        if row == 0 {
+            if *wrap & 2 != 0 {
+                row = start_row;
+                col = start_col;
+                break;
+            }
+            row = grid.rows.saturating_sub(1);
+            *wrap |= 1;
+        } else {
+            row -= 1;
+        }
+        if let Some(next) = adjust_mcol(grid, len, row, wish, col) {
+            col = next;
+            break;
+        }
+    }
+    if *wrap == 1 {
+        if col == wish {
+            return step_left_with(grid, len, row, col, wish, wrap, budget);
+        }
+        wish = col;
+    }
+    (row, col, wish)
+}
+
 /// The session state shared between [`CycleMenu`] (publisher) and the
 /// edit-mode wrapper (consumer). The menu owns the session's truth;
 /// the wrapper reads/consumes it for the keys the menu cannot finish
@@ -106,10 +462,15 @@ pub struct CycleSession {
     /// The pre-completion snapshot, published when the session begins.
     pub snapshot: Option<CycleSnapshot>,
     /// A candidate has been spliced into the line — there is something
-    /// an Esc would need to roll back. (A session whose first TAB is
-    /// still being painted has a snapshot but nothing spliced yet;
-    /// Esc there is the plain menu close.)
+    /// an Esc would need to roll back. TAB #1 splices candidate 0, so
+    /// this is true for every live session with a menu (the lone
+    /// candidate session ends at once instead).
     pub spliced: bool,
+    /// The interaction that opened the session: under `select`
+    /// (niubash#778) the arrow keys navigate the menu as well as
+    /// TAB / Shift-TAB; under `cycle` they keep their line/history
+    /// meaning.
+    pub select_mode: bool,
     /// The frozen candidate set, in cycle order.
     pub candidates: Vec<CycleCandidate>,
     /// The replaced span in the *snapshot* buffer: mid-session the
@@ -123,6 +484,15 @@ pub struct CycleSession {
     /// The byte range in the *current* buffer the current candidate's
     /// splice text occupies.
     pub region: (usize, usize),
+    /// The painted grid geometry (niubash#778), column-major
+    /// (`index = column * rows + row`). Published by the menu at
+    /// session start and on every repaint; empty before the first
+    /// layout.
+    pub grid: CycleGrid,
+    /// The selection's terminal cell column (zsh `mcol`) and the cell
+    /// carried through vertical moves (`wishcol`).
+    pub mcol: usize,
+    pub wish_col: usize,
     /// How many navigation splices the wrapper has issued this
     /// session. Each one reaches the menu as an `Edit` event (the
     /// engine reports the wrapper's edit to the active menu); the
@@ -137,14 +507,19 @@ impl CycleSession {
         snapshot: CycleSnapshot,
         candidates: Vec<CycleCandidate>,
         span: (usize, usize),
+        select_mode: bool,
     ) {
         self.open = true;
         self.snapshot = Some(snapshot);
         self.spliced = false;
+        self.select_mode = select_mode;
         self.candidates = candidates;
         self.span = span;
         self.index = 0;
         self.region = span;
+        self.grid = CycleGrid::default();
+        self.mcol = 0;
+        self.wish_col = 0;
         self.nav_seq = 0;
     }
 
@@ -157,8 +532,12 @@ impl CycleSession {
         self.open = false;
         self.snapshot = None;
         self.spliced = false;
+        self.select_mode = false;
         self.candidates = Vec::new();
         self.index = 0;
+        self.grid = CycleGrid::default();
+        self.mcol = 0;
+        self.wish_col = 0;
         self.nav_seq = 0;
     }
 
@@ -260,6 +639,10 @@ pub struct CycleMenu {
     display_widths: Vec<usize>,
     /// The highlighted candidate's index into `values`.
     index: usize,
+    /// zsh `mcol` / `wishcol`: the selection's painted cell column,
+    /// carried through vertical moves (niubash#778).
+    mcol: usize,
+    wish_col: usize,
     /// Whether the live session has begun (snapshot taken, first
     /// candidate spliced). Before that, an activation may still be
     /// waiting for its first answer (`Pending`).
@@ -292,11 +675,13 @@ pub struct CycleMenu {
     menu_open: Option<Arc<AtomicBool>>,
     /// Terminal width seen at the last paint; 80 before the first.
     terminal_columns: usize,
-    /// niubash#742: zsh menu-select form — TAB #1 opens the grid with
-    /// no candidate spliced; the first navigate selects index 0.
+    /// niubash#742: the zsh menu-select interaction. Since niubash#778
+    /// TAB #1 splices candidate 0 under both interactions; the flag is
+    /// published to [`CycleSession`] so the wrapper lets the arrow keys
+    /// navigate a `select` menu too.
     select_mode: bool,
-    /// Whether a candidate is currently spliced into the line (always
-    /// true once a classic cycle session begins; gated by select_mode).
+    /// Whether a candidate is currently spliced into the line. TAB #1
+    /// sets it (niubash#778); it only goes false when a session ends.
     has_selection: bool,
 }
 
@@ -309,6 +694,8 @@ impl CycleMenu {
             values: Vec::new(),
             display_widths: Vec::new(),
             index: 0,
+            mcol: 0,
+            wish_col: 0,
             session_begun: false,
             activation_pending: false,
             queried: false,
@@ -386,10 +773,67 @@ impl CycleMenu {
         self.values = suggestions.to_vec();
     }
 
+    /// Publish the grid geometry the arrow keys navigate (niubash#778):
+    /// the same [`packed_column_layout`] the painter renders — columns
+    /// fill column-major, so Left/Right step one column (`rows`
+    /// candidates) and Up/Down one row (one candidate). The wrapper
+    /// reads this at key-translation time to splice the target in the
+    /// same batch; zsh wraps every movement at the grid edges
+    /// (zshmodules: "All movement functions wrap around at the edges"),
+    /// which the modulo arithmetic preserves.
+    fn publish_grid(&self) {
+        let mcols = self.terminal_columns.max(1);
+        let (_, rows, col_widths) = packed_column_layout(&self.display_widths, mcols);
+        let fields: Vec<usize> = col_widths
+            .iter()
+            .map(|width| (*width).max(1) + GNU_COLUMN_GUTTER)
+            .collect();
+        let mut starts = Vec::with_capacity(fields.len());
+        let mut x: usize = 0;
+        for field in &fields {
+            starts.push(x);
+            x = x.saturating_add(*field);
+        }
+        let grid = CycleGrid {
+            rows,
+            mcols,
+            starts,
+            fields,
+        };
+        if let Ok(mut session) = self.session.lock() {
+            if session.open && session.grid != grid {
+                // A resize (or the first paint) changed the columns:
+                // re-anchor the highlight to the same candidate's cell.
+                // Unchanged geometry preserves zsh's `wishcol` across
+                // paints.
+                let (_, start) = grid.position(session.index);
+                session.grid = grid;
+                session.mcol = start;
+                session.wish_col = start;
+            }
+        }
+    }
+
+    /// The painted layout's cell position for an index (top-left cell).
+    fn grid_position(&self, index: usize) -> (usize, usize) {
+        let mcols = self.terminal_columns.max(1);
+        let (_, rows, col_widths) = packed_column_layout(&self.display_widths, mcols);
+        let rows = rows.max(1);
+        let fields: Vec<usize> = col_widths
+            .iter()
+            .map(|width| (*width).max(1) + GNU_COLUMN_GUTTER)
+            .collect();
+        let col = (index / rows).min(fields.len().saturating_sub(1));
+        let start = fields.iter().take(col).sum::<usize>();
+        (index % rows, start)
+    }
+
     /// Begin the session over the current values: snapshot the line,
-    /// publish the session to the shared cell, splice the first
-    /// candidate. A lone candidate completes outright and ends the
-    /// session at once (GNU/zsh shape — nothing left to cycle).
+    /// publish the session to the shared cell, splice candidate 0 and
+    /// highlight it in the grid (niubash#778: the first TAB is already
+    /// a selection — there is no unselected first frame). A lone
+    /// candidate completes outright and ends the session at once
+    /// (GNU/zsh shape — nothing left to cycle).
     fn begin_session(&mut self, editor: &mut Editor) {
         let snapshot = CycleSnapshot {
             buffer: editor.get_buffer().to_string(),
@@ -398,6 +842,8 @@ impl CycleMenu {
         let span = self.values[0].span;
         self.region = (span.start, span.end);
         self.index = 0;
+        self.mcol = 0;
+        self.wish_col = 0;
         self.echoes_seen = 0;
         self.session_begun = true;
         self.activation_pending = false;
@@ -410,8 +856,9 @@ impl CycleMenu {
             })
             .collect();
         if let Ok(mut session) = self.session.lock() {
-            session.begin(snapshot, candidates, (span.start, span.end));
+            session.begin(snapshot, candidates, (span.start, span.end), self.select_mode);
         }
+        self.publish_grid();
         if self.values.len() == 1 {
             // A lone candidate completes outright and ends the session
             // at once (GNU/zsh shape — nothing left to cycle, under
@@ -419,11 +866,15 @@ impl CycleMenu {
             self.splice(editor);
             self.has_selection = true;
             self.end_session();
-        } else if self.select_mode {
-            // menu-select: the grid opens unselected; the splice waits
-            // for the first navigate.
-            self.has_selection = false;
         } else {
+            // niubash#778 / the #742 owner contract: TAB #1 puts the
+            // FIRST candidate into the line and paints the grid with it
+            // highlighted. `select` and `cycle` share this shape — the
+            // old "menu-select opens unselected, the splice waits for
+            // the first navigate" frame left the first TAB with an
+            // empty grid selection and the typed prefix still in the
+            // line (P0 #778: the owner's menu-select expects the same
+            // splice-on-first-TAB as zsh).
             self.splice(editor);
             self.has_selection = true;
         }
@@ -471,6 +922,8 @@ impl CycleMenu {
         self.values = Vec::new();
         self.display_widths = Vec::new();
         self.index = 0;
+        self.mcol = 0;
+        self.wish_col = 0;
         self.provisional = false;
         self.has_selection = false;
         // The grid is gone — stand the autosuggest hinter back up.
@@ -528,10 +981,11 @@ impl CycleMenu {
         self.begin_session(editor);
     }
 
-    /// Move the highlight by `delta` (wrapping) and splice the newly
-    /// highlighted candidate. A full loop lands back on the first
-    /// candidate — the wrap is the semantics, pinned by test.
-    fn apply_navigate(&mut self, editor: &mut Editor, delta: isize) {
+    /// Move the highlight by one step and splice the newly highlighted
+    /// candidate. TAB / Shift-TAB step linearly (niubash#778 keeps that
+    /// product rule); the arrow keys navigate the painted cell grid with
+    /// zsh's wrap semantics (see [`grid_move`]).
+    fn apply_navigate(&mut self, editor: &mut Editor, movement: CycleMove) {
         if !self.session_begun {
             // Belt and braces for a late first answer: if values are
             // somehow on hand for a pending activation, this TAB
@@ -544,25 +998,49 @@ impl CycleMenu {
         if self.values.is_empty() {
             return;
         }
-        let len = self.values.len() as isize;
-        if self.select_mode && !self.has_selection {
-            // First navigate after an unselected open picks an edge:
-            // forward -> first candidate, backward -> last (zsh).
-            self.index = if delta >= 0 { 0 } else { len as usize - 1 };
-            self.has_selection = true;
-        } else {
-            self.index = (self.index as isize + delta).rem_euclid(len) as usize;
-        }
+        let (index, mcol, wish_col) = match movement {
+            CycleMove::Linear(delta) => {
+                let len = self.values.len() as isize;
+                let index = (self.index as isize + delta).rem_euclid(len) as usize;
+                let (_, start) = self.grid_position(index);
+                (index, start, start)
+            }
+            CycleMove::Grid(direction) => {
+                let len = self.values.len();
+                let (index, mcol, wish_col) = match self.session.lock() {
+                    Ok(session) if session.open => grid_move(
+                        &session.grid,
+                        len,
+                        self.index,
+                        session.mcol,
+                        session.wish_col,
+                        direction,
+                    ),
+                    _ => (self.index, 0, 0),
+                };
+                (index, mcol, wish_col)
+            }
+        };
+        // TAB #1 already highlighted candidate 0 (niubash#778), so
+        // every navigate steps from the current highlight; there is no
+        // unselected-open edge case left to special-case.
+        self.index = index;
+        self.mcol = mcol;
+        self.wish_col = wish_col;
+        self.has_selection = true;
         self.splice(editor);
         // The wrapper normally drives navigation itself (see
         // `CycleSession::nav_seq`); this menu-local path is the
-        // fallback for a MenuNext/MenuPrevious delivered straight to
-        // the menu (a user binding, say). Mirror the outcome into
+        // fallback for a MenuNext/MenuPrevious/MenuUp/MenuDown/
+        // MenuLeft/MenuRight delivered straight to the menu (a user
+        // binding, say). Mirror the outcome into
         // the cell so the wrapper's view stays truthful — without a
         // nav_seq bump: no Edit echo follows a menu-side splice.
         if let Ok(mut session) = self.session.lock() {
             session.index = self.index;
             session.region = self.region;
+            session.mcol = self.mcol;
+            session.wish_col = self.wish_col;
         }
     }
 
@@ -579,6 +1057,8 @@ impl CycleMenu {
                 self.echoes_seen += 1;
                 self.index = session.index;
                 self.region = session.region;
+                self.mcol = session.mcol;
+                self.wish_col = session.wish_col;
                 return;
             }
         }
@@ -590,8 +1070,19 @@ impl CycleMenu {
         while let Some(event) = self.events.pop_front() {
             match event {
                 MenuEvent::Activate(_) => self.apply_activate(editor, completer),
-                MenuEvent::NextElement => self.apply_navigate(editor, 1),
-                MenuEvent::PreviousElement => self.apply_navigate(editor, -1),
+                // TAB / Shift-TAB stay linear, as ruled (niubash#778).
+                MenuEvent::NextElement => self.apply_navigate(editor, CycleMove::Linear(1)),
+                MenuEvent::PreviousElement => self.apply_navigate(editor, CycleMove::Linear(-1)),
+                // Arrow keys: one painted row / cell column, with zsh's
+                // mcol/wishcol edge wrap (niubash#778).
+                MenuEvent::MoveUp => self.apply_navigate(editor, CycleMove::Grid(GridMove::Up)),
+                MenuEvent::MoveDown => self.apply_navigate(editor, CycleMove::Grid(GridMove::Down)),
+                MenuEvent::MoveLeft => {
+                    self.apply_navigate(editor, CycleMove::Grid(GridMove::Left))
+                }
+                MenuEvent::MoveRight => {
+                    self.apply_navigate(editor, CycleMove::Grid(GridMove::Right))
+                }
                 MenuEvent::Edit(_) => self.apply_edit(),
                 // Deactivate was applied by `handle_menu_event`
                 // (set_active + clear_input); nothing is left to do.
@@ -704,6 +1195,9 @@ impl Menu for CycleMenu {
         painter: &Painter,
     ) {
         self.terminal_columns = painter.screen_width() as usize;
+        if self.session_begun {
+            self.publish_grid();
+        }
         self.drain_events(editor, completer);
     }
 
@@ -1106,7 +1600,7 @@ mod tests {
     // ─── niubash#742: select (zsh menu-select) form ───────────────────
 
     #[test]
-    fn issue742_select_first_tab_opens_grid_without_splicing() {
+    fn issue778_select_first_tab_splices_and_paints_first_candidate_selected() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
         let (mut menu, session) = menu_with_session();
         menu = menu.with_select_mode(true);
@@ -1114,40 +1608,51 @@ mod tests {
 
         activate(&mut menu, &mut editor, &mut completer);
 
-        // Grid is live, nothing selected, line untouched.
+        // The owner contract (#742, restated by #778): TAB #1 puts the
+        // FIRST candidate into the line and paints the grid with it
+        // highlighted. No unselected frame, no "wait for a navigate".
         assert!(menu.is_active());
-        assert_eq!(editor.get_buffer(), "git ch");
-        let session = session.lock().unwrap();
-        assert!(session.open);
-        assert!(!session.spliced);
-        assert_eq!(
-            session.snapshot,
-            Some(CycleSnapshot {
-                buffer: "git ch".to_string(),
-                cursor: 6,
-            })
+        assert_eq!(editor.get_buffer(), "git checkout");
+        {
+            let session = session.lock().unwrap();
+            assert!(session.open);
+            assert!(session.spliced);
+            assert!(session.select_mode);
+            assert_eq!(session.index, 0);
+            assert_eq!(
+                session.snapshot,
+                Some(CycleSnapshot {
+                    buffer: "git ch".to_string(),
+                    cursor: 6,
+                })
+            );
+        }
+
+        // The grid's first cell wears the selection style in the very
+        // first paint after TAB.
+        let selected = nu_ansi_term::Style::new()
+            .fg(nu_ansi_term::Color::Green)
+            .bold()
+            .reverse();
+        let menu_string = menu.menu_string(20, true);
+        let styled = format!("{}checkout{}", selected.prefix(), selected.suffix());
+        assert!(
+            menu_string.contains(&styled),
+            "first grid cell is selected on TAB #1:\n{menu_string:?}"
         );
     }
 
     #[test]
-    fn issue742_select_first_navigate_picks_an_edge_then_cycles() {
+    fn issue778_select_navigation_steps_from_the_first_tab_highlight() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
-        let (mut menu, session) = menu_with_session();
+        let (mut menu, _session) = menu_with_session();
         menu = menu.with_select_mode(true);
         let mut editor = editor_with("git ch");
         activate(&mut menu, &mut editor, &mut completer);
-
-        // Forward navigate picks the FIRST candidate (zsh menu-select).
-        navigate(
-            &mut menu,
-            &mut editor,
-            &mut completer,
-            MenuEvent::NextElement,
-        );
         assert_eq!(editor.get_buffer(), "git checkout");
-        assert!(session.lock().unwrap().spliced);
 
-        // Next steps to candidate 2, then wraps to the last.
+        // From index 0 a forward navigate steps to candidate 1 (it does
+        // not "pick the first candidate" a second time).
         navigate(
             &mut menu,
             &mut editor,
@@ -1162,15 +1667,26 @@ mod tests {
             MenuEvent::NextElement,
         );
         assert_eq!(editor.get_buffer(), "git cherry-pick");
+        // Next wraps to the first candidate.
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::NextElement,
+        );
+        assert_eq!(editor.get_buffer(), "git checkout");
     }
 
     #[test]
-    fn issue742_select_first_backward_navigate_picks_the_last() {
+    fn issue778_select_backward_navigate_wraps_to_the_last_candidate() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
         let (mut menu, _session) = menu_with_session();
         menu = menu.with_select_mode(true);
         let mut editor = editor_with("git ch");
         activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "git checkout");
+
+        // Shift-TAB / Up from candidate 0 wraps backwards to the last.
         navigate(
             &mut menu,
             &mut editor,
@@ -1178,6 +1694,98 @@ mod tests {
             MenuEvent::PreviousElement,
         );
         assert_eq!(editor.get_buffer(), "git cherry-pick");
+        // And forward from the last wraps back to the first.
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::NextElement,
+        );
+        assert_eq!(editor.get_buffer(), "git checkout");
+    }
+
+    /// The #778 arrow walk against a 3x2 grid whose last column is one
+    /// short (`c0..c4` at 10 terminal columns: `c0 c2 c4 / c1 c3`).
+    ///
+    /// The expected index sequence is what zsh 5.9.2 produces under a
+    /// PTY for the same list and keys; the implementation follows
+    /// `Src/Zle/complist.c` `domenuselect` (mline/mcol/wishcol,
+    /// `adjust_mcol`, `src/Zle/complist.c:2940-3210`) and
+    /// `Doc/Zsh/mod_complist.yo:337-343,397` ("All movement functions
+    /// wrap around at the edges"). No zsh code is copied.
+    #[test]
+    fn issue778_arrow_grid_walk_matches_zsh_menuselect() {
+        let mut completer = PrefixCompleter::new(&["c0", "c1", "c2", "c3", "c4"]);
+        let (mut menu, session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        menu.terminal_columns = 10;
+        let mut editor = editor_with("c");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "c0");
+        {
+            let state = session.lock().unwrap();
+            assert_eq!((state.grid.columns(), state.grid.rows), (3, 2));
+            assert_eq!(state.grid.starts, vec![0, 4, 8]);
+            assert_eq!(state.grid.mcols, 10);
+            assert_eq!(state.grid.cell(5, 1, 8), None, "short last column cell");
+        }
+
+        let walk = [
+            (MenuEvent::MoveDown, "c1"),
+            (MenuEvent::MoveDown, "c2"),
+            (MenuEvent::MoveDown, "c3"),
+            (MenuEvent::MoveRight, "c1"),
+            (MenuEvent::MoveRight, "c3"),
+            (MenuEvent::MoveRight, "c1"),
+            (MenuEvent::MoveLeft, "c4"),
+            (MenuEvent::MoveUp, "c3"),
+            (MenuEvent::MoveUp, "c2"),
+            (MenuEvent::MoveUp, "c1"),
+            (MenuEvent::MoveLeft, "c4"),
+            (MenuEvent::MoveRight, "c1"),
+            (MenuEvent::MoveUp, "c0"),
+            (MenuEvent::MoveDown, "c1"),
+        ];
+        for (event, expected) in walk {
+            navigate(&mut menu, &mut editor, &mut completer, event);
+            assert_eq!(
+                editor.get_buffer(),
+                expected,
+                "zsh menuselect grid walk"
+            );
+        }
+    }
+
+    #[test]
+    fn issue778_select_left_right_are_a_no_op_in_a_single_column() {
+        // A terminal too narrow for two cells after the #741 cap fits
+        // one column (two rows): there is no neighbor column to move
+        // to, so Left/Right are a no-op.
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
+        let (mut menu, session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        menu.terminal_columns = 1;
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "git checkout");
+        {
+            let state = session.lock().unwrap();
+            assert_eq!((state.grid.columns(), state.grid.rows), (1, 2));
+        }
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::MoveRight,
+        );
+        assert_eq!(editor.get_buffer(), "git checkout");
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::MoveLeft,
+        );
+        assert_eq!(editor.get_buffer(), "git checkout");
     }
 
     #[test]
