@@ -788,6 +788,11 @@ thread_local! {
     /// (niubash#767).
     static LAST_HISTORY_COMPLETION: std::cell::RefCell<Option<(String, usize)>> =
         const { std::cell::RefCell::new(None) };
+    /// The (command, buffer, point) the last context-specific
+    /// completion press left behind (GNU's repeated-TAB rule: the
+    /// second press at the same spot lists instead of editing).
+    static LAST_SPECIFIC_COMPLETION: std::cell::RefCell<Option<(String, usize, String)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The interactive history as the editor holds it, oldest first —
@@ -833,6 +838,43 @@ fn forward_word_end(text: &str, mut position: usize) -> usize {
         rest.next();
     }
     position
+}
+
+/// Replace the suspended editor's line with EXPANDED, placing the
+/// point the way bash's `set_up_new_line` does (bashline.c:2845):
+/// a point at the end stays at the new end; any other point keeps
+/// its offset, and when the character there is not whitespace
+/// `rl_forward_word` (text.c:482) advances it to the end of that
+/// word. No change when EXPANDED equals the line.
+fn replace_line_set_up_new_line(
+    line_editor: &mut Reedline,
+    buffer: &str,
+    cursor: usize,
+    expanded: String,
+) {
+    if expanded == buffer {
+        return;
+    }
+    let position = if cursor >= buffer.len() {
+        expanded.len()
+    } else {
+        let mut position = cursor.min(expanded.len());
+        while !expanded.is_char_boundary(position) {
+            position -= 1;
+        }
+        if position < expanded.len() && !matches!(expanded.as_bytes()[position], b' ' | b'\t') {
+            position = forward_word_end(&expanded, position);
+        }
+        position
+    };
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(expanded),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
 }
 
 /// Perform one host readline command (see
@@ -944,31 +986,39 @@ fn run_readline_command(
             let cursor = line_editor.current_insertion_point();
             let entries = editor_history_entries(line_editor);
             if let Some(expanded) = shell.borrow_mut().shell_expand_line(&buffer, &entries) {
-                if expanded != buffer {
-                    let position = if cursor >= buffer.len() {
-                        expanded.len()
-                    } else {
-                        let mut position = cursor.min(expanded.len());
-                        while !expanded.is_char_boundary(position) {
-                            position -= 1;
-                        }
-                        if position < expanded.len()
-                            && !matches!(expanded.as_bytes()[position], b' ' | b'\t')
-                        {
-                            position = forward_word_end(&expanded, position);
-                        }
-                        position
-                    };
-                    line_editor.run_edit_commands(&[
-                        EditCommand::Clear,
-                        EditCommand::InsertString(expanded),
-                        EditCommand::MoveToPosition {
-                            position,
-                            select: false,
-                        },
-                    ]);
-                }
+                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
             }
+        }
+        // bashline.c:2902 history_expand_line: only the history
+        // expansion stage of shell_expand_line (pre_process_line,
+        // bashhist.c:562). An expansion error leaves the line as it
+        // was, like GNU's cleanup path.
+        "history-expand-line" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let entries = editor_history_entries(line_editor);
+            if let Some(expanded) = shell.borrow_mut().history_expand_line(&buffer, &entries) {
+                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            }
+        }
+        // util.c:99 _rl_abort_internal / util.c:122 rl_abort: clear
+        // the pending command and ding. The line buffer is NOT
+        // touched — C-g must not abandon what the user typed. The
+        // suspended editor has already resolved and dropped any
+        // chord/prefix state before this event; the remaining GNU
+        // state (numeric argument, mark, keyboard macro) has no host
+        // seam, so the observable delivery here is the bell.
+        "abort" => {
+            readline_ding();
+        }
+        // bashline.c:3896/3954/3966 bash_complete_filename /
+        // bash_complete_variable / bash_complete_command: the
+        // ordinary completion machinery pinned to one candidate
+        // source. The shared press rule is rl_complete_internal's:
+        // a lone match is inserted, several insert the longest common
+        // prefix, and a second press at the same spot lists.
+        "complete-filename" | "complete-variable" | "complete-command" => {
+            run_specific_completion(shell, line_editor, name);
         }
         // bashline.c:3810 dynamic_complete_history (niubash#767):
         // completion whose candidates are the tokenized history
@@ -1034,6 +1084,72 @@ fn run_readline_command(
         _ => {}
     }
     SentinelOutcome::Resumed
+}
+
+/// One context-specific completion press (`complete-command` /
+/// `complete-variable` / `complete-filename`). Candidates come from
+/// [`crate::completion::NiubashCompleter::complete_specific`], which
+/// pins the GNU source while reusing the ordinary completion tables.
+fn run_specific_completion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline, name: &str) {
+    use crate::completion::SpecificCompletion;
+    let mode = match name {
+        "complete-command" => SpecificCompletion::Command,
+        "complete-variable" => SpecificCompletion::Variable,
+        _ => SpecificCompletion::Filename,
+    };
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    let matches: Vec<String> = {
+        let mut completer = NiubashCompleter::new(shell.borrow().completion_state.clone());
+        completer
+            .complete_specific(mode, &buffer, cursor)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect()
+    };
+    if matches.is_empty() {
+        readline_ding();
+        return;
+    }
+    let repeated = LAST_SPECIFIC_COMPLETION.with(|last| {
+        matches!(
+            last.borrow().as_ref(),
+            Some((b, c, n)) if b == &buffer && *c == cursor && n == name
+        )
+    });
+    LAST_SPECIFIC_COMPLETION.with(|last| {
+        *last.borrow_mut() = Some((buffer.clone(), cursor, name.to_string()));
+    });
+    if repeated && matches.len() > 1 {
+        // Second press at the same spot: list, like the TAB/TAB
+        // display in rl_complete_internal.
+        let mut sorted = matches;
+        sorted.sort();
+        let mut out = String::from("\n");
+        out.push_str(&sorted.join("  "));
+        out.push('\n');
+        print_suspended_output(&out);
+        return;
+    }
+    let (start, end) = crate::completion::completion_span(&buffer, cursor);
+    let word = &buffer[start..end];
+    let Some(replacement) = crate::readline_commands::completion_replacement(&matches, word) else {
+        readline_ding();
+        return;
+    };
+    let mut next = String::with_capacity(buffer.len() - (end - start) + replacement.len());
+    next.push_str(&buffer[..start]);
+    next.push_str(&replacement);
+    next.push_str(&buffer[end..]);
+    let position = start + replacement.len();
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(next),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
 }
 
 /// GNU's rl_ding: ring the terminal bell.
@@ -2875,6 +2991,21 @@ fn add_engine_bind_keybindings_recorded(
             // for zsh-style shell-function widgets, which `bind` to a
             // readline function position has no meaning for.
             crate::bind_surface::EngineBindKind::Function { name } => {
+                // GNU `do-lowercase-version` (text.c:1179) is not a
+                // command: `_rl_dispatch_subseq` (readline.c:916-922)
+                // special-cases it and re-dispatches the pressed key
+                // lowercased in the same map. The editor's emacs
+                // machine already lowercases every modified character
+                // before lookup (emacs.rs `single_key_event`), and the
+                // chord layer folds an ESC-prefixed uppercase partner
+                // to its lowercase Meta form, so installing a flat
+                // binding here would be wrong twice over: parse_key_sequence
+                // has already lowercased `\eA` to Alt+a, and a binding
+                // there would shadow Meta+a's own command. Skip it;
+                // the fallback is the dispatch layer's job.
+                if name == "do-lowercase-version" {
+                    continue;
+                }
                 // `quoted-insert` is delivered by the chord layer's
                 // quote state (see `collect_quote_sequences`), not by
                 // a flat binding: the key itself must never reach the
@@ -3556,6 +3687,25 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
                 READLINE_HOST_COMMAND_PREFIX, widget
             )))
         }
+        // GNU `abort` (util.c _rl_abort_internal): clear the pending
+        // command and ding without abandoning the line — host work
+        // against the suspended editor. `history-expand-line`
+        // (bashline.c history_expand_line) expands only the history
+        // stage of the line. The three context-specific completion
+        // entry points (bashline.c bash_complete_command /
+        // bash_complete_variable / bash_complete_filename) pin the
+        // candidate source while reusing the host completion engine.
+        // All ride the readline host-command channel; the remaining
+        // context modes need sources the host does not own (hostnames,
+        // usernames, brace expansion, shell globs) and stay undelivered.
+        "abort"
+        | "history-expand-line"
+        | "complete-command"
+        | "complete-variable"
+        | "complete-filename" => Some(ReedlineEvent::ExecuteHostCommand(format!(
+            "{}{}",
+            READLINE_HOST_COMMAND_PREFIX, widget
+        ))),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -3908,6 +4058,27 @@ fn chord_key(event: &crossterm29::event::Event) -> Option<(KeyModifiers, KeyCode
     }
 }
 
+/// GNU's `rl_do_lowercase_version` dispatch rule (readline.c:916-922):
+/// when the pressed Meta key is an uppercase letter whose entry is
+/// `do-lowercase-version`, readline re-dispatches the *lowercase* key
+/// in the same map. The pinned editor lowercases modified characters
+/// before looking them up, but a terminal spells Meta as `ESC` + the
+/// character, so an uppercase partner (`ESC B`, i.e. Meta-B) reaches
+/// this layer as `(NONE, 'B')` and would otherwise be delivered as a
+/// literal `B`. Folding it to the ALT-bound lowercase key here keeps
+/// Meta-A…Meta-Z meaningful. A letter with no ALT-bound lowercase form
+/// stays an ordinary ESC + letter (GNU dings for the unbound map).
+fn meta_fallback_key(
+    code: KeyCode,
+    alt_keys: &std::collections::HashSet<KeyCode>,
+) -> Option<KeyCode> {
+    let candidate = match code {
+        KeyCode::Char(c) if c.is_ascii_uppercase() => KeyCode::Char(c.to_ascii_lowercase()),
+        other => other,
+    };
+    alt_keys.contains(&candidate).then_some(candidate)
+}
+
 fn push_event(events: &mut Vec<ReedlineEvent>, event: ReedlineEvent) {
     match event {
         ReedlineEvent::None => {}
@@ -3970,8 +4141,8 @@ impl ChordEditMode {
                 .as_mut()
                 .and_then(|peek| peek(ESC_META_BUDGET))
             {
-                if let Some((_mods, code)) =
-                    chord_key(&partner).filter(|(_, code)| self.alt_keys.contains(code))
+                if let Some(code) = chord_key(&partner)
+                    .and_then(|(_, code)| meta_fallback_key(code, &self.alt_keys))
                 {
                     let synthetic = crossterm29::event::Event::Key(
                         crossterm29::event::KeyEvent::new(code, KeyModifiers::ALT),
@@ -6178,37 +6349,37 @@ mod tests {
     /// regression unless a new GNU table row arrived with it.
     ///
     /// Groups:
-    /// - abort/forward search: `abort`, `forward-search-history` —
-    ///   reedline has no event for abort (it clears readline's pending
-    ///   command, not the line), and no forward incremental search.
-    ///   `set-mark` is delivered (`EditCommand::SetMark`), and the
-    ///   non-incremental M-n/M-p pair rides
-    ///   `ReedlineEvent::NonIncrementalSearch`.
-    /// - completion modes: `complete-command`, `complete-variable`,
-    ///   `complete-filename`, `complete-hostname`,
-    ///   `glob-complete-word`, `complete-username`,
-    ///   `complete-into-braces` — the engine's completer owns the
-    ///   candidate sources; the editor's single `Complete` event
-    ///   cannot select among them. The listing and bulk-insert forms
-    ///   (`possible-completions`, `insert-completions`) are delivered.
-    /// - `history-expand-line` (`\e^`): the host has shell-expand-line,
-    ///   not readline's C-style history expansion event.
-    /// - `do-lowercase-version` (`\eA`–`\eN`, `\eP`–`\eZ`): GNU's
-    ///   uppercase-fallback rule, not a name the editor dispatches.
-    /// - `\e[200~` (bracketed-paste-begin): reedline consumes the
-    ///   bracketed-paste envelope itself and never routes the marker
-    ///   through the keymap.
+    /// - `forward-search-history` (`\C-s`): the editor has
+    ///   `ReedlineEvent::SearchHistory` for reverse incremental search
+    ///   only; direction-aware incremental search still needs a ruline
+    ///   event (see the issue).
+    /// - completion modes needing sources the host does not own:
+    ///   `complete-hostname` (`\e@`), `glob-complete-word` (`\eg`),
+    ///   `complete-into-braces` (`\e{`), `complete-username` (`\e~`).
+    ///   The three that map onto existing completion sources
+    ///   (`complete-command`, `complete-variable`, `complete-filename`)
+    ///   are delivered as host readline commands in this batch.
+    ///
+    /// Delivered in this batch and removed from the list:
+    /// `abort` (`\C-g`) as a host command that dings without touching
+    /// the line; `history-expand-line` (`\e^`) on the same channel;
+    /// and `do-lowercase-version` (`\eA`–`\eN`, `\eP`–`\eZ`) at
+    /// dispatch time (the editor lowercases modified keys, and the
+    /// chord layer folds an ESC-prefixed uppercase partner).
     ///
     /// The CSI modified-arrow/Delete spellings (`\e[1;3C`, `\e[1;5C`,
     /// `\e[5C`, `\e[3;5~`, ...) are delivered: `parse_key_sequence`
     /// maps them to the same KeyCode+modifier chords the terminal
     /// layer sends.
-    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &[
-        "\\C-g", "\\C-s", "\\e!", "\\e$", "\\e/", "\\e@", "\\eA", "\\eB", "\\eC", "\\eD", "\\eE",
-        "\\eF", "\\eG", "\\eH", "\\eI", "\\eJ", "\\eK", "\\eL", "\\eM", "\\eN", "\\eP", "\\eQ",
-        "\\eR", "\\eS", "\\eT", "\\eU", "\\eV", "\\eW", "\\eX", "\\eY", "\\eZ", "\\e[200~", "\\e^",
-        "\\eg", "\\e{", "\\e~",
-    ];
+    /// GNU default spellings the editor consumes before key dispatch:
+    /// reedline's bracketed-paste envelope turns `\e[200~`…`\e[201~`
+    /// into paste data (`Reedline::use_bracketed_paste`; the raw CSI
+    /// sequence never reaches a keymap), so it is not a binding and
+    /// must not be faked as one. The gate below still requires the
+    /// bridge to *report* it, then excludes exactly this list.
+    const EDITOR_CONSUMED_GNU_DEFAULTS: &[&str] = &["\\e[200~"];
+
+    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s", "\\e@", "\\eg", "\\e{", "\\e~"];
 
     /// niubash#630 gap list: the **whole GNU default bind table** must
     /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
@@ -6238,7 +6409,25 @@ mod tests {
         let mut keybindings = default_emacs_keybindings();
         let unusable =
             add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
-        let mut unmapped: Vec<String> = unusable.into_iter().map(|bind| bind.keyseq).collect();
+        let all_unmapped: Vec<String> = unusable.into_iter().map(|bind| bind.keyseq).collect();
+        // The bracketed-paste marker is genuinely unconsumed by the
+        // keymap — the editor's paste envelope owns it. Pin that
+        // exclusion too, so it cannot silently grow or vanish.
+        let mut editor_consumed: Vec<String> = all_unmapped
+            .iter()
+            .filter(|keyseq| EDITOR_CONSUMED_GNU_DEFAULTS.contains(&keyseq.as_str()))
+            .cloned()
+            .collect();
+        editor_consumed.sort();
+        assert_eq!(
+            editor_consumed,
+            vec!["\\e[200~".to_string()],
+            "only the editor-consumed bracketed-paste marker may leave the keymap"
+        );
+        let mut unmapped: Vec<String> = all_unmapped
+            .into_iter()
+            .filter(|keyseq| !EDITOR_CONSUMED_GNU_DEFAULTS.contains(&keyseq.as_str()))
+            .collect();
         unmapped.sort();
         let expected: Vec<String> = KNOWN_UNMAPPED_GNU_DEFAULTS
             .iter()
@@ -6270,6 +6459,87 @@ mod tests {
         assert_eq!(
             keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
             Some(edit_event(EditCommand::SwapGraphemes))
+        );
+        let host = |name: &str| {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, name
+            )))
+        };
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            host("abort")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('^')),
+            host("history-expand-line")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('!')),
+            host("complete-command")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('$')),
+            host("complete-variable")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('/')),
+            host("complete-filename")
+        );
+        // do-lowercase-version installs no flat binding: Meta-A stays
+        // unbound while Meta-B keeps its own command (the default
+        // table lists \eB before \eF, so a flat insert would have
+        // overwritten this).
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('a')),
+            None
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('b')),
+            Some(edit_event(EditCommand::MoveWordLeft { select: false }))
+        );
+    }
+
+    /// GNU `do-lowercase-version` (text.c:1179, dispatched at
+    /// readline.c:916-922) is a dispatch rule, not a bindable command:
+    /// the bridge must leave the lowercase Meta slots alone, and the
+    /// ESC-meta layer must fold an uppercase partner to the lowercase
+    /// Meta key. This is what the 25 `\eA`–`\eN`/`\eP`–`\eZ` default
+    /// rows deliver.
+    #[test]
+    fn gnu_uppercase_meta_keys_fall_back_to_lowercase_commands() {
+        use crossterm29::event::{Event, KeyEvent};
+        let inner = Emacs::new(default_emacs_keybindings());
+        // The real ALT binding set for the letters this test presses.
+        let alt: HashSet<KeyCode> = [KeyCode::Char('b'), KeyCode::Char('f')]
+            .into_iter()
+            .collect();
+        let partner = Event::Key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE));
+        let lookahead: Lookahead = Box::new(move |_| Some(partner.clone()));
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            Vec::new(),
+            alt,
+            Some(lookahead),
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Esc, KeyModifiers::NONE)),
+            edit_event(EditCommand::MoveWordLeft { select: false }),
+            "ESC B must dispatch Meta-b (backward-word), not insert B"
+        );
+
+        // A lowercase form with no ALT binding is not synthesized: GNU
+        // keeps the unbound Meta key (and dings).
+        assert_eq!(meta_fallback_key(KeyCode::Char('A'), &HashSet::new()), None);
+        assert_eq!(
+            meta_fallback_key(KeyCode::Char('B'), &HashSet::from([KeyCode::Char('b')])),
+            Some(KeyCode::Char('b'))
+        );
+        // Non-letters pass through unchanged when ALT-bound.
+        assert_eq!(
+            meta_fallback_key(KeyCode::Right, &HashSet::from([KeyCode::Right])),
+            Some(KeyCode::Right)
         );
     }
 
@@ -6347,6 +6617,39 @@ mod tests {
                 "{name} must ride the readline host channel"
             );
         }
+    }
+
+    /// This batch's GNU default functions ride the readline host
+    /// channel — never the shell-function widget sentinel. `abort`
+    /// (util.c rl_abort) and `history-expand-line` (bashline.c)
+    /// and the three context-specific completion entry points all
+    /// need the live session/editor, so the host performs them.
+    #[test]
+    fn readline_burndown_host_commands_use_readline_sentinel() {
+        for name in [
+            "abort",
+            "history-expand-line",
+            "complete-command",
+            "complete-variable",
+            "complete-filename",
+        ] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+        assert!(
+            crate::readline_commands::HOST_COMMAND_NAMES.contains(&"abort"),
+            "abort is a readline host command"
+        );
+        assert!(
+            crate::readline_commands::funmap_names().contains(&"history-expand-line"),
+            "the dump must list history-expand-line"
+        );
     }
 
     /// niubash#765: the GNU default C-x C-r chord for
@@ -6482,6 +6785,31 @@ mod tests {
                 "{}execute-named-command",
                 READLINE_HOST_COMMAND_PREFIX
             )))
+        );
+        // This batch's host commands are real default bindings, not
+        // gate-only translations.
+        let host = |name: &str| {
+            ReedlineEvent::ExecuteHostCommand(format!("{}{}", READLINE_HOST_COMMAND_PREFIX, name))
+        };
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(host("abort"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('^')),
+            Some(host("history-expand-line"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('!')),
+            Some(host("complete-command"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('$')),
+            Some(host("complete-variable"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('/')),
+            Some(host("complete-filename"))
         );
 
         // The vi target carries none of the emacs defaults.
@@ -6750,15 +7078,16 @@ mod tests {
                 pattern: false,
             })
         );
-        // The residual inexpressible set still falls to the sentinel:
-        // `abort` has no editor event (GNU's rl_abort clears the
-        // pending command, not the line).
-        assert!(
-            matches!(
-                native_widget_event("abort"),
-                Some(ReedlineEvent::ExecuteHostCommand(_))
-            ),
-            "abort must stay on the sentinel (reported, not mis-delivered)"
+        // `abort` is a host readline command (GNU's rl_abort clears
+        // the pending command and dings, never the line), so it rides
+        // the readline sentinel rather than the shell-function widget
+        // sentinel.
+        assert_eq!(
+            native_widget_event("abort"),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}abort",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
         );
     }
 
