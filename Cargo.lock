@@ -627,6 +627,7 @@ version = "1.4.4"
 dependencies = [
  "anyhow",
  "env_logger",
+ "libc",
  "log",
  "niubash-runtime",
  "portable-pty",

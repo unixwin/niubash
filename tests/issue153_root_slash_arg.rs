@@ -107,6 +107,11 @@ fn bare_slash_argument_reaches_children_verbatim() {
 /// The fix must not un-map the logical install tree: root-relative redirect
 /// targets and `[[ -f ]]` operands still resolve under NIU_ROOT (that is the
 /// shell_path_to_windows layer, distinct from the external-argument gate).
+///
+/// Windows-only: the `/` -> install-root mapping is the Win32 path layer.
+/// On Unix `/` is the real filesystem root (and read-only for an app sandbox
+/// such as Termux), so there is no logical install tree to redirect into.
+#[cfg(windows)]
 #[test]
 fn root_relative_paths_still_map_to_the_install_root() {
     let root = unique_temp_dir("niu-153-redirect");

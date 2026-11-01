@@ -134,24 +134,40 @@ fn epochrealtime_is_live_and_monotonic() {
 /// The issue's core claim: `$EPOCHREALTIME` is orders of magnitude cheaper
 /// than an external `$(date +%s%N)` command substitution. Asserting the
 /// exact microsecond figures would be flaky on loaded CI, so we require
-/// only a 50x gap over 40 iterations each (issue measured ~500x; debug
+/// only a 50x gap over the expansion cost (issue measured ~500x; debug
 /// builds land well above 50x).
+///
+/// The shell loop itself costs a few hundred microseconds per iteration on
+/// a constrained host (a Termux phone), which dominates the EPOCHREALTIME
+/// leg and depresses the raw ratio below 50x even though the expansion is
+/// ~100x cheaper than spawning `date`. Measure a same-count `x=1` baseline
+/// and subtract it from both legs: that isolates the variable-expansion /
+/// command-substitution cost the claim is about. 200 iterations keep the
+/// residual above scheduler noise while staying inside the test budget.
 #[test]
 fn epochrealtime_beats_external_date_for_timing() {
     let out = run_niu(
         r#"t0=${EPOCHREALTIME/.}
-           for i in {1..40}; do x=$(date +%s%N); done
+           for i in {1..200}; do x=1; done
+           t1=${EPOCHREALTIME/.}
+           baseline_us=$(( t1 - t0 ))
+           t0=${EPOCHREALTIME/.}
+           for i in {1..200}; do x=$(date +%s%N); done
            t1=${EPOCHREALTIME/.}
            date_us=$(( t1 - t0 ))
            t0=${EPOCHREALTIME/.}
-           for i in {1..40}; do x=$EPOCHREALTIME; done
+           for i in {1..200}; do x=$EPOCHREALTIME; done
            t1=${EPOCHREALTIME/.}
            epoch_us=$(( t1 - t0 ))
-           echo "date_us=$date_us epoch_us=$epoch_us""#,
+           echo "baseline_us=$baseline_us date_us=$date_us epoch_us=$epoch_us""#,
     );
+    let mut baseline_us: Option<u64> = None;
     let mut date_us: Option<u64> = None;
     let mut epoch_us: Option<u64> = None;
     for token in out.split_whitespace() {
+        if let Some(v) = token.strip_prefix("baseline_us=") {
+            baseline_us = v.parse().ok();
+        }
         if let Some(v) = token.strip_prefix("date_us=") {
             date_us = v.parse().ok();
         }
@@ -159,16 +175,21 @@ fn epochrealtime_beats_external_date_for_timing() {
             epoch_us = v.parse().ok();
         }
     }
-    let (Some(date_us), Some(epoch_us)) = (date_us, epoch_us) else {
+    let (Some(baseline_us), Some(date_us), Some(epoch_us)) = (baseline_us, date_us, epoch_us)
+    else {
         panic!("unparseable timing output: {out}");
     };
+    let date_cost = date_us.saturating_sub(baseline_us);
+    let epoch_cost = epoch_us.saturating_sub(baseline_us);
     assert!(
-        epoch_us > 0,
-        "epoch loop recorded zero time (clock not ticking?)"
+        epoch_cost > 0,
+        "epoch loop recorded no time beyond the loop baseline \
+         (base={baseline_us}µs epoch={epoch_us}µs; clock not ticking?)"
     );
-    let ratio = date_us as f64 / epoch_us as f64;
+    let ratio = date_cost as f64 / epoch_cost as f64;
     assert!(
         ratio >= 50.0,
-        "EPOCHREALTIME not fast enough: date={date_us}µs epoch={epoch_us}µs (x{ratio:.1})"
+        "EPOCHREALTIME not fast enough: base={baseline_us}µs date={date_us}µs \
+         epoch={epoch_us}µs net date={date_cost}µs net epoch={epoch_cost}µs (x{ratio:.1})"
     );
 }
