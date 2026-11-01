@@ -35,7 +35,7 @@ rubash = { version = "1.4.3", git = "https://github.com/unixwin/rubash.git", bra
 # `history_*` against this executable; build.rs anchors every exported symbol
 # in scripts/readline-abi-exports.txt. The lib name is `readline`
 # (readline_abi is the package name).
-readline-abi = { git = "https://github.com/unixwin/ruline", rev = "edc490df7273b32fc4d4cfc5bb163c74bc72172a" }
+readline-abi = { git = "https://github.com/unixwin/ruline", rev = "72d637438121c832558039db79181552bf1e60a6" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
@@ -103,4 +103,4 @@ rubash = { path = "../rubash" }
 # Same rev as the `readline-abi` dependency above: the ABI adapter's path
 # dependency on its workspace-root `reedline` must resolve to the copy niu
 # already links, or the graph carries two editors.
-reedline = { git = "https://github.com/unixwin/ruline", rev = "edc490df7273b32fc4d4cfc5bb163c74bc72172a" }
+reedline = { git = "https://github.com/unixwin/ruline", rev = "72d637438121c832558039db79181552bf1e60a6" }
