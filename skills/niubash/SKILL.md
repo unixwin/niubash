@@ -82,7 +82,12 @@ Every built-in documents itself: `help <name>` (`help -s '*'` for the one
 line per command). Launcher verbs and the plugin verb table:
 `references/quickref.md`.
 
-## Debugging scripts
+## Debugging scripts (new in niubash 1.5.0)
+
+The debugger front ends below ship with niubash **1.5.0**; they are not
+in 1.4.4 (this bundle's version). On 1.4.4, `--debug` keeps the legacy
+extdebug-arming behavior described in the last bullet, and `--debugger`
+is the GNU bashdb starter path.
 
 - **`niu --debug script.sh [args…]`** starts the native interactive debugger
   stopped at the entry stop. The prompt is `(niu-dbg)`; the M1 command set
