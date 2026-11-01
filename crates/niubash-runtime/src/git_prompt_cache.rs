@@ -368,22 +368,23 @@ fn launch_refresh(worktree: PathBuf, fingerprint: RepoFingerprint, cycles: u64) 
     }
 }
 
+/// The one landing-observer shape: a cheap, non-blocking callback
+/// handed the worktree a refresh landed for and the value it stored.
+pub(crate) type LandingObserver = std::sync::Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>;
+
 /// Observers notified every time a refresh lands a value in the
 /// cache (niubash#787): the interactive host's idle-repaint channel
 /// subscribes here so a landing can re-stamp the displayed prompt
 /// pass and request one editor repaint. Observers run on the
 /// refresh thread, after the value is stored and the cache lock
 /// released; they must be cheap and must never wait on the cache.
-static LANDING_OBSERVERS: std::sync::Mutex<
-    Vec<std::sync::Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>>,
-> = std::sync::Mutex::new(Vec::new());
+static LANDING_OBSERVERS: std::sync::Mutex<Vec<LandingObserver>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Register a landing observer. Registering the same observer
 /// instance twice is a no-op (the host re-registers on every editor
 /// build with one shared closure).
-pub(crate) fn add_landing_observer(
-    observer: std::sync::Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>,
-) {
+pub(crate) fn add_landing_observer(observer: LandingObserver) {
     let mut observers = LANDING_OBSERVERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -649,6 +650,9 @@ pub(crate) fn parse_status(bytes: &[u8]) -> Option<(String, bool)> {
 mod tests {
     use super::*;
 
+    /// (worktree, landed value) pairs a test landing observer records.
+    type LandedLog = std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, Option<String>)>>>;
+
     /// Fixtures are real repositories: the segment reads the user's git,
     /// so the tests drive the same path production does. A `false` means
     /// git is not on PATH; the fixture then aborts quietly instead of
@@ -760,15 +764,14 @@ mod tests {
         if !repo_with_commit(tmp.path()) {
             return;
         }
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, Option<String>)>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: LandedLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = {
             let seen = seen.clone();
             std::sync::Arc::new(move |worktree: &Path, value: &Option<String>| {
                 seen.lock()
                     .unwrap()
                     .push((worktree.to_path_buf(), value.clone()));
-            }) as std::sync::Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>
+            }) as LandingObserver
         };
         add_landing_observer(recorder);
         assert_eq!(
@@ -1092,10 +1095,15 @@ mod tests {
         }
         let sub = parent.path().join("sub");
         assert!(sub.join(".git").is_file(), "the submodule marker is a file");
-        // A fresh submodule sits on a detached HEAD: the segment is
-        // the short SHA.
+        // Whether a fresh submodule starts attached to its branch or
+        // detached at the recorded commit varies by git version; pin
+        // the fixture to the recorded commit so the detached-HEAD
+        // spelling the segment must report is the same on every git.
         let full = git_stdout(&sub, &["rev-parse", "HEAD"]);
         if full.len() < 7 {
+            return;
+        }
+        if !git(&sub, &["checkout", "--quiet", "--detach", full.as_str()]) {
             return;
         }
         assert_eq!(
