@@ -6438,6 +6438,111 @@ mod tests {
 
     const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s", "\\eg"];
 
+    /// niubash#768: identity pin for the engine table the gate below
+    /// mirrors. The table is owned by rubash
+    /// (`DEFAULT_FUNCTION_BINDINGS`) and niu CI builds against rubash
+    /// master at run time (`.github/workflows/ci.yml` clones the
+    /// sibling checkout when the job starts), so a rubash table
+    /// expansion reaches niu CI the moment it merges — ahead of the
+    /// bridge arms that deliver the new names. In that window the
+    /// mirror assert failed wholesale on every niu PR (docs-only
+    /// #762 twice in a row, #757, #760, #764), which read as a flaky
+    /// test; it was a true positive with the wrong attribution.
+    /// There is no shared state to race on this path: the bridge is
+    /// pure functions over this const table and a per-call keymap,
+    /// and the failing subsets matched, name for name, the bridge
+    /// arms each branch's base predated. This pin fails FIRST in a
+    /// drift window and names the drift; when it holds, a failure of
+    /// the mirror assert is a bridge regression in this repo. Update
+    /// the pin in the same change that delivers (or retires) bridge
+    /// arms for a changed table — never to silence a red.
+    const ENGINE_BIND_TABLE_ROWS: usize = 403;
+    const ENGINE_BIND_TABLE_FUNCTION_NAMES: &[&str] = &[
+        "abort",
+        "accept-line",
+        "backward-char",
+        "backward-delete-char",
+        "backward-kill-line",
+        "backward-kill-word",
+        "backward-word",
+        "beginning-of-history",
+        "beginning-of-line",
+        "bracketed-paste-begin",
+        "call-last-kbd-macro",
+        "capitalize-word",
+        "character-search",
+        "character-search-backward",
+        "clear-display",
+        "clear-screen",
+        "complete",
+        "complete-command",
+        "complete-filename",
+        "complete-hostname",
+        "complete-into-braces",
+        "complete-username",
+        "complete-variable",
+        "delete-char",
+        "delete-horizontal-space",
+        "digit-argument",
+        "display-shell-version",
+        "do-lowercase-version",
+        "downcase-word",
+        "dynamic-complete-history",
+        "edit-and-execute-command",
+        "end-kbd-macro",
+        "end-of-history",
+        "end-of-line",
+        "exchange-point-and-mark",
+        "execute-named-command",
+        "forward-char",
+        "forward-search-history",
+        "forward-word",
+        "glob-complete-word",
+        "glob-expand-word",
+        "glob-list-expansions",
+        "history-expand-line",
+        "insert-comment",
+        "insert-completions",
+        "insert-last-argument",
+        "kill-line",
+        "kill-word",
+        "next-history",
+        "non-incremental-forward-search-history",
+        "non-incremental-reverse-search-history",
+        "operate-and-get-next",
+        "possible-command-completions",
+        "possible-completions",
+        "possible-filename-completions",
+        "possible-hostname-completions",
+        "possible-username-completions",
+        "possible-variable-completions",
+        "previous-history",
+        "quoted-insert",
+        "re-read-init-file",
+        "reverse-search-history",
+        "revert-line",
+        "self-insert",
+        "set-mark",
+        "shell-backward-word",
+        "shell-expand-line",
+        "shell-forward-word",
+        "shell-kill-word",
+        "shell-transpose-words",
+        "spell-correct-word",
+        "start-kbd-macro",
+        "tilde-expand",
+        "transpose-chars",
+        "transpose-words",
+        "undo",
+        "unix-line-discard",
+        "unix-word-rubout",
+        "upcase-word",
+        "yank",
+        "yank-last-arg",
+        "yank-nth-arg",
+        "yank-pop",
+    ];
+
     /// niubash#630 gap list: the **whole GNU default bind table** must
     /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
     /// is the table `bind -p` prints for a fresh bash 5.3, so feeding it
@@ -6462,6 +6567,37 @@ mod tests {
                     keymap: Some("emacs-standard".to_string()),
                 })
                 .collect();
+
+        // niubash#768: table-identity gate (see the pin above). Runs
+        // before the mirror so an engine-table drift window reports
+        // as drift, not as a wholesale bridge collapse.
+        assert_eq!(
+            entries.len(),
+            ENGINE_BIND_TABLE_ROWS,
+            "engine bind table row count drifted from the pin: rubash's \
+             DEFAULT_FUNCTION_BINDINGS changed — deliver the new rows in \
+             the bridge (or retire dead arms) and update \
+             ENGINE_BIND_TABLE_ROWS / ENGINE_BIND_TABLE_FUNCTION_NAMES \
+             in the same change"
+        );
+        let mut table_names: Vec<&str> = entries
+            .iter()
+            .map(|entry| match &entry.kind {
+                crate::bind_surface::EngineBindKind::Function { name } => name.as_str(),
+                _ => unreachable!("this gate feeds function entries only"),
+            })
+            .collect();
+        table_names.sort_unstable();
+        table_names.dedup();
+        assert_eq!(
+            table_names.as_slice(),
+            ENGINE_BIND_TABLE_FUNCTION_NAMES,
+            "engine bind table function set drifted from the pin: rubash's \
+             DEFAULT_FUNCTION_BINDINGS changed — deliver the new names in \
+             the bridge (or retire dead arms) and update \
+             ENGINE_BIND_TABLE_ROWS / ENGINE_BIND_TABLE_FUNCTION_NAMES \
+             in the same change"
+        );
 
         let mut keybindings = default_emacs_keybindings();
         let unusable =
