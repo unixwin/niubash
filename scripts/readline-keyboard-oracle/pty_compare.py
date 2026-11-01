@@ -395,8 +395,8 @@ CASES: list[Case] = [
         b"cat al",
         M_STAR,
         "M-*",
-        note="complete.c rl_insert_completions inserts every candidate; niu "
-        "leaves the buffer at 'cat al'.",
+        note="complete.c rl_insert_completions: GNU inserts every matching "
+        "candidate; niu installs the same M-* default and splices the list.",
     ),
     # complete.c filename completion (M-/).
     Case(
@@ -442,7 +442,8 @@ CASES: list[Case] = [
         M_G,
         "M-g",
         note="GNU rl_glob_complete_word expands al* to the common prefix "
-        "'alp' and consumes the star; niu leaves 'cat al*' unchanged.",
+        "'alp' and consumes the star; niu routes glob-complete-word through "
+        "Session::glob_filename and matches.",
     ),
     # Documented product-specific default: niu's column menu deliberately
     # does not splice the common prefix on the first TAB.  This is the only

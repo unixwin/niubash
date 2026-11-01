@@ -1036,12 +1036,15 @@ fn run_readline_command(
         // source. The shared press rule is rl_complete_internal's:
         // a lone match is inserted, several insert the longest common
         // prefix, and a second press at the same spot lists.
+        // bashline.c:4068 `bash_glob_complete_word` joins them with
+        // `shell_glob_filename` as its candidate source.
         "complete-filename"
         | "complete-variable"
         | "complete-command"
         | "complete-hostname"
         | "complete-username"
-        | "complete-into-braces" => {
+        | "complete-into-braces"
+        | "glob-complete-word" => {
             run_specific_completion(shell, line_editor, name);
         }
         // bashline.c:3810 dynamic_complete_history (niubash#767):
@@ -1123,6 +1126,7 @@ fn run_specific_completion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedlin
         "complete-hostname" => SpecificCompletion::Hostname,
         "complete-username" => SpecificCompletion::Username,
         "complete-into-braces" => SpecificCompletion::Brace,
+        "glob-complete-word" => SpecificCompletion::Glob,
         _ => SpecificCompletion::Filename,
     };
     let buffer = line_editor.current_buffer_contents().to_string();
@@ -3724,9 +3728,10 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // bash_complete_variable / bash_complete_filename /
         // bash_complete_hostname / bash_complete_username /
         // bash_brace_completion) pin the candidate source while reusing
-        // the host completion engine. All ride the readline host-command
-        // channel; `glob-complete-word` still needs the engine's
-        // `shell_glob_filename` and stays undelivered.
+        // the host completion engine, and glob-complete-word
+        // (bashline.c:4068) uses the engine's pathname expansion through
+        // Session::glob_filename. All ride the readline host-command
+        // channel.
         "abort"
         | "history-expand-line"
         | "complete-command"
@@ -3734,7 +3739,8 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         | "complete-filename"
         | "complete-hostname"
         | "complete-username"
-        | "complete-into-braces" => Some(ReedlineEvent::ExecuteHostCommand(format!(
+        | "complete-into-braces"
+        | "glob-complete-word" => Some(ReedlineEvent::ExecuteHostCommand(format!(
             "{}{}",
             READLINE_HOST_COMMAND_PREFIX, widget
         ))),
@@ -4242,7 +4248,14 @@ impl ChordEditMode {
             {
                 self.pending.push(raw);
                 self.pending_since = Some(std::time::Instant::now());
-                return ReedlineEvent::None;
+                // `Pending` is the editor's "half a multi-key sequence"
+                // signal: the parse loop erases that key from a macro
+                // recording (GNU subtracts rl_key_sequence_length at
+                // macro.c:276), and the engine drops it without a repaint.
+                // Returning `None` here made the `C-x` of `C-x )` part of
+                // the recorded macro, so a later replay left a lone C-x
+                // parked and swallowed the next chord.
+                return ReedlineEvent::Pending;
             }
             return self.forward(ReedlineRawEvent::try_from(raw).expect("key event"));
         }
@@ -4284,13 +4297,20 @@ impl ChordEditMode {
             self.quote_armed = true;
             return ReedlineEvent::None;
         }
-        if self.is_prefix(&candidate) || self.quote_is_prefix(&candidate) {
+        if self.is_prefix(&candidate) {
             self.pending.push(raw);
             // The wait restarts at each key: GNU gives every key of
             // the sequence its own keyseq-timeout window (the #704
             // review's chord observation ② — the deadline used to
             // run from the FIRST parked key, so a slow-but-steady
             // 3+ key chord expired mid-sequence, niubash#731).
+            self.pending_since = Some(std::time::Instant::now());
+            // Same `Pending` contract as the first parked key above: a
+            // chord's prefix half is not a macro-recording key.
+            return ReedlineEvent::Pending;
+        }
+        if self.quote_is_prefix(&candidate) {
+            self.pending.push(raw);
             self.pending_since = Some(std::time::Instant::now());
             return ReedlineEvent::None;
         }
@@ -6394,6 +6414,32 @@ mod tests {
         }
     }
 
+    /// The GNU meta-keymap completion commands that the pinned editor's
+    /// own defaults do not carry are installed by the host baseline, not
+    /// only by a `bind` at startup: M-* (insert-completions) has no
+    /// engine-registry entry on a fresh shell, so without this table the
+    /// key fell through and M-* was a no-op. M-g rides the readline host
+    /// channel (glob-complete-word → Session::glob_filename). M-? is not
+    /// installed: possible-completions is list-only, but the GNU menu's
+    /// queued Activate would splice the common prefix; the unbound key
+    /// leaves the line alone, which is the observable readline result.
+    #[test]
+    fn gnu_default_command_bindings_install_meta_completion_keys() {
+        let mut keybindings = default_emacs_keybindings();
+        add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('*')),
+            Some(ReedlineEvent::InsertCompletions)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('g')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}glob-complete-word",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
+        );
+    }
+
     /// The residue of GNU's default bind table that the host still
     /// cannot deliver, per group. This is a **shrink-only** pin:
     /// mapping one of these names (or teaching `parse_key_sequence`
@@ -6406,13 +6452,10 @@ mod tests {
     ///   `ReedlineEvent::SearchHistory` for reverse incremental search
     ///   only; direction-aware incremental search still needs a ruline
     ///   event (see the issue).
-    /// - `glob-complete-word` (`\eg`): needs the engine's
-    ///   `shell_glob_filename` (`Session` has no public glob entry yet);
-    ///   `complete-command`, `complete-variable`, `complete-filename`,
-    ///   `complete-hostname`, `complete-username` and
-    ///   `complete-into-braces` are delivered as host readline commands.
     ///
     /// Delivered in this batch and removed from the list:
+    /// `glob-complete-word` (`\eg`) through the engine's
+    /// `Session::glob_filename` and the host readline channel;
     /// `complete-hostname` (`\e@`) from `/etc/hosts` plus the local
     /// hostname; `complete-username` (`\e~`) from `/etc/passwd`; and
     /// `complete-into-braces` (`\e{`) via the bracecomp.c port.
@@ -6436,7 +6479,7 @@ mod tests {
     /// bridge to *report* it, then excludes exactly this list.
     const EDITOR_CONSUMED_GNU_DEFAULTS: &[&str] = &["\\e[200~"];
 
-    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s", "\\eg"];
+    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s"];
 
     /// niubash#630 gap list: the **whole GNU default bind table** must
     /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
@@ -6704,6 +6747,7 @@ mod tests {
             "complete-hostname",
             "complete-username",
             "complete-into-braces",
+            "glob-complete-word",
         ] {
             assert_eq!(
                 native_widget_event(name),
@@ -7351,12 +7395,12 @@ mod tests {
         );
         assert_eq!(
             mode.parse_event(chord_test_key(Code::Char('x'), Mods::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(Duration::from_millis(400));
         assert_eq!(
             mode.parse_event(chord_test_key(Code::Char('a'), Mods::NONE)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(Duration::from_millis(300));
         // ~700 ms since the first key (past the 600 ms window),
@@ -7636,7 +7680,7 @@ mod tests {
         // The key is parked even though it has its own binding.
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)),
@@ -7646,7 +7690,7 @@ mod tests {
         // Past the timeout the single binding fires, then the key stands alone.
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         match mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)) {
@@ -7682,7 +7726,7 @@ mod tests {
         // Inside the window: parked, then completed.
         assert_eq!(
             mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         assert_eq!(
             mode.parse_event(key(Code::Char('z'), Mods::NONE)),
@@ -7691,7 +7735,7 @@ mod tests {
         // Past the window: the prefix is replayed on its own, the key is fresh.
         assert_eq!(
             mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         let event = mode.parse_event(key(Code::Char('z'), Mods::NONE));
@@ -7770,7 +7814,7 @@ mod tests {
         );
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         assert_eq!(
@@ -7799,7 +7843,7 @@ mod tests {
         );
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(Duration::from_millis(80));
         let event = mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE));
