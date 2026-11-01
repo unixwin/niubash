@@ -20,8 +20,10 @@ niubash = rubash + winuxcmd + ruline + the external bash ecosystem
 - WinuxCmd command links provide bundled Unix-style commands through PATH.
 - The REPL uses ruline for editing, history, menus, autosuggestions, syntax
   highlighting, vi/emacs modes, and prompt rendering.
-- `~/.niubashrc` is the primary — and only — interactive startup file; the
-  pre-rename legacy names and `~/.bashrc` are never read.
+- `~/.niubashrc` is the primary interactive startup file — the only one
+  on Windows; POSIX login shells additionally read the GNU profile
+  chain first. The pre-rename legacy names and `~/.bashrc` are never
+  read directly.
 - The plugin system is the external bash ecosystem: real sources
   (oh-my-bash, bash-it, bash-completion, wild git repos) installed over
   `git clone`, driven by the declarative
@@ -84,7 +86,8 @@ niubash = rubash + winuxcmd + ruline + the external bash ecosystem
 - `rubash` follows latest `unixwin/rubash` master.
 - WinuxCmd stays integrated through PATH injection and command links.
 - `~/.niubashrc` is the normal user-authored interactive config — and the
-  only rc file the shell reads.
+  only rc file the shell reads (the GNU profile chain on POSIX login
+  shells is a separate, honored surface, not an rc file).
 - Machine-managed state is not a human-authored configuration surface.
 - The official plugin story is the upstream ecosystem itself — oh-my-bash,
   bash-it, bash-completion — installed on demand, never

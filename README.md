@@ -54,7 +54,7 @@ Android (aarch64, armv7): release `.zip` assets ship since v1.4.3 and run on rea
 From source (Rust 1.95+):
 `git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
 
-Configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — it is the **only** startup file niu reads (`~/.bashrc` is never sourced; run `niu plugin migrate-rc --diff` to see exactly what is worth carrying over) — start with [Getting started](docs/src/getting-started.md).
+On Windows, configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — the only startup file niu reads there. Login shells on Linux/macOS additionally read the GNU profile chain (`/etc/profile`, then the first of `~/.bash_profile` → `~/.bash_login` → `~/.profile`), exactly as GNU bash does; `~/.bashrc` is never sourced directly (run `niu plugin migrate-rc --diff` to see exactly what is worth carrying over) — start with [Getting started](docs/src/getting-started.md).
 
 ## Why not Git Bash / MSYS2 / Cygwin
 
