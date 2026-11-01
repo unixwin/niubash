@@ -1,0 +1,8 @@
+# Deterministic fake fzf for scripts/readline-plugin-probes.
+#
+# The real fzf needs a controlling terminal and a human; the acceptance probe
+# only needs the bash integration contract (stdin: current READLINE_LINE,
+# stdout: the selection).  Reads one line and echoes it back prefixed with
+# "picked:".
+IFS= read -r line || line=
+printf 'picked:%s\n' "$line"
