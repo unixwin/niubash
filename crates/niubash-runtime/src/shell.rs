@@ -6444,6 +6444,35 @@ mod tests {
     }
 
     #[test]
+    fn issue767_shell_expand_line_expands_history_alias_and_words() {
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_line("alias greet='echo hello'")
+            .expect("alias registers");
+        shell
+            .execute_line("ISSUE767_NAME=world")
+            .expect("variable registers");
+        let history = vec!["echo first".to_string(), "greet again".to_string()];
+        // History expansion runs first: !! is the newest entry,
+        // whose alias then expands, in the same pass (bashline.c
+        // shell_expand_line's order).
+        assert_eq!(
+            shell.shell_expand_line("!!", &history).as_deref(),
+            Some("echo hello again")
+        );
+        // Alias + word expansion on a plain line.
+        assert_eq!(
+            shell
+                .shell_expand_line("greet $ISSUE767_NAME", &history)
+                .as_deref(),
+            Some("echo hello world")
+        );
+        // A failed history expansion leaves the line unexpanded:
+        // the caller keeps the buffer as it stood.
+        assert_eq!(shell.shell_expand_line("!nosuch", &history), None);
+    }
+
+    #[test]
     fn missing_primary_rc_ignores_other_rc_files_without_modifying_them() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();

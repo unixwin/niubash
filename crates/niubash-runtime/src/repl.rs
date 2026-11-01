@@ -781,6 +781,31 @@ fn dump_function_lines(entries: &[crate::bind_surface::EngineBindEntry]) -> Vec<
         .collect()
 }
 
+thread_local! {
+    /// The (buffer, point) a dynamic-complete-history invocation
+    /// left behind, so the next invocation at the identical spot
+    /// reads as the second consecutive press and lists the matches
+    /// (niubash#767).
+    static LAST_HISTORY_COMPLETION: std::cell::RefCell<Option<(String, usize)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The interactive history as the editor holds it, oldest first —
+/// the list shell-expand-line's history expansion and
+/// dynamic-complete-history's tokenization read (niubash#767). The
+/// engine-side history list is empty on the REPL path, so the
+/// editor is the only honest source.
+fn editor_history_entries(line_editor: &Reedline) -> Vec<String> {
+    line_editor
+        .history()
+        .search(reedline::SearchQuery::everything(
+            reedline::SearchDirection::Forward,
+            None,
+        ))
+        .map(|items| items.into_iter().map(|item| item.command_line).collect())
+        .unwrap_or_default()
+}
+
 /// Perform one host readline command (see
 /// [`READLINE_HOST_COMMAND_PREFIX`]) against the suspended editor
 /// and the live session.
@@ -850,8 +875,7 @@ fn run_readline_command(
                 let word = &buffer[start..end];
                 let env: std::collections::HashMap<String, String> =
                     shell.borrow().session().environment().into_iter().collect();
-                if let Some(expanded) =
-                    rubash::expand::tilde::tilde::expand_word_prefix(word, &env)
+                if let Some(expanded) = rubash::expand::tilde::tilde::expand_word_prefix(word, &env)
                 {
                     if expanded != word {
                         let mut next =
@@ -877,6 +901,99 @@ fn run_readline_command(
         // dispatch it.
         "execute-named-command" => {
             return execute_named_command(shell, line_editor);
+        }
+        // bashline.c:2982 shell_expand_line (niubash#767): history
+        // expansion, alias expansion, then word expansion of the
+        // whole line, as one edit. GNU leaves the line untouched on
+        // an expansion error; a point at the end of the old line
+        // goes to the end of the new one, any other point keeps its
+        // offset.
+        "shell-expand-line" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let entries = editor_history_entries(line_editor);
+            if let Some(expanded) = shell.borrow_mut().shell_expand_line(&buffer, &entries) {
+                if expanded != buffer {
+                    let position = if cursor >= buffer.len() {
+                        expanded.len()
+                    } else {
+                        let mut position = cursor.min(expanded.len());
+                        while !expanded.is_char_boundary(position) {
+                            position -= 1;
+                        }
+                        position
+                    };
+                    line_editor.run_edit_commands(&[
+                        EditCommand::Clear,
+                        EditCommand::InsertString(expanded),
+                        EditCommand::MoveToPosition {
+                            position,
+                            select: false,
+                        },
+                    ]);
+                }
+            }
+        }
+        // bashline.c:3810 dynamic_complete_history (niubash#767):
+        // completion whose candidates are the tokenized history
+        // (history_completion_generator, bashline.c:3782), sorted.
+        // The first press completes to the longest common prefix (a
+        // unique match completes fully); a second consecutive press
+        // at the same buffer and point lists the matches, like
+        // readline's TAB/TAB completion display.
+        "dynamic-complete-history" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
+            let word = &buffer[start..end];
+            let entries = editor_history_entries(line_editor);
+            let matches = crate::readline_commands::history_completion_matches(&entries, word);
+            if matches.is_empty() {
+                readline_ding();
+                return SentinelOutcome::Resumed;
+            }
+            let repeated = LAST_HISTORY_COMPLETION.with(|last| {
+                matches!(last.borrow().as_ref(), Some((b, c)) if b == &buffer && *c == cursor)
+            });
+            if repeated {
+                let mut out = String::from("\n");
+                out.push_str(&matches.join("  "));
+                out.push('\n');
+                print_suspended_output(&out);
+                return SentinelOutcome::Resumed;
+            }
+            let replacement = if matches.len() == 1 {
+                let mut only = matches[0].clone();
+                if buffer[end..].chars().next() != Some(' ') {
+                    only.push(' ');
+                }
+                only
+            } else {
+                crate::readline_commands::common_prefix(&matches)
+            };
+            if replacement != word {
+                let mut next =
+                    String::with_capacity(buffer.len() - (end - start) + replacement.len());
+                next.push_str(&buffer[..start]);
+                next.push_str(&replacement);
+                next.push_str(&buffer[end..]);
+                let position = start + replacement.len();
+                line_editor.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(next.clone()),
+                    EditCommand::MoveToPosition {
+                        position,
+                        select: false,
+                    },
+                ]);
+                LAST_HISTORY_COMPLETION.with(|last| {
+                    *last.borrow_mut() = Some((next, position));
+                });
+            } else {
+                LAST_HISTORY_COMPLETION.with(|last| {
+                    *last.borrow_mut() = Some((buffer.clone(), cursor));
+                });
+            }
         }
         _ => {}
     }
@@ -3371,6 +3488,18 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "tilde-expand" | "execute-named-command" => Some(ReedlineEvent::ExecuteHostCommand(
             format!("{}{}", READLINE_HOST_COMMAND_PREFIX, widget),
         )),
+        // niubash#767: shell-expand-line (bashline.c
+        // shell_expand_line) expands the line through the engine
+        // and dynamic-complete-history (bashline.c
+        // dynamic_complete_history) completes from history tokens —
+        // both need the session and the editor's history, so they
+        // ride the same readline host-command channel.
+        "shell-expand-line" | "dynamic-complete-history" => {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, widget
+            )))
+        }
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -6233,6 +6362,53 @@ mod tests {
         let mut vi = Keybindings::default();
         add_gnu_command_default_keybindings(&mut vi, NativeKeymapTarget::ViInsert);
         assert_eq!(vi.find_binding(KeyModifiers::ALT, KeyCode::Char('~')), None);
+    }
+
+    /// niubash#767: shell-expand-line and dynamic-complete-history
+    /// map to the readline host channel, and their GNU default keys
+    /// (M-C-e, M-TAB in both its spellings) bind in the emacs
+    /// baseline now that the names are delivered.
+    #[test]
+    fn issue767_shell_expand_and_history_complete_are_host_delivered() {
+        for name in ["shell-expand-line", "dynamic-complete-history"] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+
+        let mut keybindings = Keybindings::default();
+        add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
+        assert_eq!(
+            keybindings.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('e')
+            ),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}shell-expand-line",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
+        );
+        let history_event = ReedlineEvent::ExecuteHostCommand(format!(
+            "{}dynamic-complete-history",
+            READLINE_HOST_COMMAND_PREFIX
+        ));
+        assert_eq!(
+            keybindings.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('i')
+            ),
+            Some(history_event.clone())
+        );
+        // The byte shape terminals actually send for Meta-TAB.
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Tab),
+            Some(history_event)
+        );
     }
 
     /// Second niubash#630 batch: readline functions deliverable only since
