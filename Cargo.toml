@@ -88,14 +88,10 @@ strip = "symbols"
 [patch."https://github.com/unixwin/rubash.git"]
 rubash = { path = "../rubash" }
 
-# The line editor is unixwin/ruline — the owner's lightweight fork of
-# nushell/reedline (derived from the caomengxuan666/reedline fork main,
-# incl. the #1248 history change that drops chrono from the public API,
-# the EventStatus re-export, FirstHistoryEntry/LastHistoryEntry, and
-# the GNU parity batch the K3 key-script executor consumes: KeySequence
-# replay, Suspend, QuotedInsert/OverwriteMode, kbd-macro and
-# digit-argument events), minus the sqlite history backend and the
-# ide/description menus. The upstream route is closed (niubash#706);
-# the rev is pinned and bumped on demand only.
+# The line editor is unixwin/ruline — an independent GNU-readline-compatible
+# editor based on reedline 0.52.1 (MIT). It starts its own version line at
+# 0.1.0; the package keeps the `reedline` name during the ABI transition so
+# the source and this patch entry stay stable (rename tracked in ruline#9).
+# The rev is pinned and bumped on demand only.
 [patch.crates-io]
-reedline = { git = "https://github.com/unixwin/ruline", rev = "a0838b562a5e0c5298fa7b8c42070cad46819000" }
+reedline = { git = "https://github.com/unixwin/ruline", rev = "0ec96fea48b5fa50420242f223dca64554be32ab" }
