@@ -25,11 +25,24 @@
 /// sentinel (a shell function by one of these names is NOT what GNU
 /// runs for the key — the readline function is).
 pub const HOST_COMMAND_NAMES: &[&str] = &[
+    // util.c:99 `_rl_abort_internal` / util.c:122 `rl_abort`:
+    // clear the pending command (numeric argument, mark, pending
+    // input, keyboard macro) and ding — the line itself stays.
+    "abort",
+    // bashline.c:3966/3954/3896 `bash_complete_command` /
+    // `bash_complete_variable` / `bash_complete_filename`: the same
+    // completion machinery as TAB, pinned to one candidate source.
+    "complete-command",
+    "complete-filename",
+    "complete-variable",
     "dump-functions",
     "dump-macros",
     "dump-variables",
     "dynamic-complete-history",
     "execute-named-command",
+    // bashline.c:2902 `history_expand_line`: history expansion of the
+    // whole line, without shell-expand-line's alias/word stages.
+    "history-expand-line",
     "re-read-init-file",
     "shell-expand-line",
     "tilde-expand",
@@ -42,19 +55,29 @@ pub const HOST_COMMAND_NAMES: &[&str] = &[
 ///
 /// Sources: `lib/readline/emacs_keymap.c` (M-~ and M-& are both
 /// `rl_tilde_expand`, lines 359/459; M-# is `rl_insert_comment`;
-/// M-x is `rl_execute_named_command`, line 451; C-x C-r is
-/// `rl_re_read_init_file`), `bashline.c:527` (M-C-e is
-/// shell-expand-line), `bashline.c:591` (M-TAB — spelled `\M-\C-i`,
-/// TAB and C-i being the same key — is dynamic-complete-history).
-/// `insert-comment` itself was delivered in the niubash#731 line;
-/// its GNU default chord joins the table here so the dump and the
-/// keymap agree.
+/// M-x is `rl_execute_named_command`, line 451; C-g and M-C-g are
+/// `rl_abort`, lines 42/325), `text.c:1179` (`do-lowercase-version`
+/// is a dispatch rule, so it has no entry here), `bashline.c:527`
+/// (M-C-e is shell-expand-line), `bashline.c:530` (M-^ is
+/// history-expand-line), `bashline.c:555-581` (M-{ / M-! / M-$ /
+/// M-/ / M-@ / M-~ / M-g are the completion entry points), and
+/// `bashline.c:591` (M-TAB — spelled `\M-\C-i`, TAB and C-i being
+/// the same key — is dynamic-complete-history). The three completion
+/// modes backed by host sources (`complete-command`,
+/// `complete-variable`, `complete-filename`) are listed; the four
+/// whose sources the host does not own stay out of the table so they
+/// keep their documented gap.
 pub const GNU_DEFAULT_COMMAND_BINDINGS: &[(&str, &str)] = &[
+    ("\\C-g", "abort"),
     ("\\M-&", "tilde-expand"),
     ("\\M-~", "tilde-expand"),
     ("\\M-#", "insert-comment"),
     ("\\M-x", "execute-named-command"),
     ("\\M-\\C-e", "shell-expand-line"),
+    ("\\M-^", "history-expand-line"),
+    ("\\M-!", "complete-command"),
+    ("\\M-$", "complete-variable"),
+    ("\\M-/", "complete-filename"),
     ("\\M-\\C-i", "dynamic-complete-history"),
     ("\\C-x\\C-r", "re-read-init-file"),
 ];
@@ -400,6 +423,33 @@ pub fn common_prefix(matches: &[String]) -> String {
         }
     }
     first[..end].to_string()
+}
+
+/// The text one completion press inserts for MATCHES, given the word
+/// being completed — `rl_complete_internal`'s default (non-listing)
+/// outcome: a lone match is inserted whole, with the word-breaking
+/// space GNU appends after a complete filename; several matches
+/// insert their longest common prefix. `None` means the press made
+/// no progress (it dings in GNU).
+pub fn completion_replacement(matches: &[String], word: &str) -> Option<String> {
+    match matches {
+        [] => None,
+        [only] => {
+            let mut replacement = only.clone();
+            let bare = replacement
+                .trim_end_matches('"')
+                .trim_end_matches('\'')
+                .trim_end();
+            if !(bare.ends_with('/') || bare.ends_with('\\')) {
+                replacement.push(' ');
+            }
+            Some(replacement)
+        }
+        many => {
+            let prefix = common_prefix(many);
+            (prefix != word).then_some(prefix)
+        }
+    }
 }
 
 /// One line of GNU history expansion (`histexpand.c`
@@ -810,5 +860,30 @@ mod tests {
         assert_eq!(completion_word_span("ls ~/do", 7), (3, 7));
         // Mid-word point: the span covers the whole word.
         assert_eq!(completion_word_span("checkout", 5), (0, 8));
+    }
+
+    #[test]
+    fn burndown_completion_replacement_follows_rl_complete_internal() {
+        // A lone filename gains the word-breaking space ...
+        assert_eq!(
+            completion_replacement(&["README".into()], "RE").as_deref(),
+            Some("README ")
+        );
+        // ... except a directory, which keeps its slash as the hint.
+        assert_eq!(
+            completion_replacement(&["src/".into()], "s").as_deref(),
+            Some("src/")
+        );
+        // Several matches insert the longest common prefix.
+        assert_eq!(
+            completion_replacement(&["alpha".into(), "alpine".into()], "a").as_deref(),
+            Some("alp")
+        );
+        // No progress (or no matches) is a ding, not an edit.
+        assert_eq!(completion_replacement(&[], "a"), None);
+        assert_eq!(
+            completion_replacement(&["alpha".into(), "alpine".into()], "alp"),
+            None
+        );
     }
 }
