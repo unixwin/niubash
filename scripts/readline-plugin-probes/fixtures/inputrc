@@ -1,0 +1,8 @@
+# Inputrc startup fixture: `set` variables, a function binding, a macro and
+# an $include.  @EXTRA@ is replaced with an absolute path by run.sh so the
+# probe does not depend on the process cwd.
+set completion-ignore-case on
+set keyseq-timeout 77
+"\C-t": transpose-chars
+"\C-g": "echo macro-ran\n"
+$include @EXTRA@
