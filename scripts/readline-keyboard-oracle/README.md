@@ -101,69 +101,31 @@ GNU source anchors used in the case comments and driver:
 * `macro.c` — keyboard macro record/end/call.
 * `readline.c` — bracketed paste.
 
-## Baseline: GNU bash 5.3.20 vs niu 1.4.4 (master a883cde, ruline 0bfc785)
+## Baseline: GNU bash 5.3.20 vs niu 1.4.4 (master 288b6b5, rubash c9604443, ruline edc490d)
 
-Run on this host with the prebuilt
-`/data/data/com.termux/files/home/projects/niubash/target/debug/niu`:
+Run on this host with the branch's debug build:
 
 ```text
-PASS 20 / FAIL 27 / KNOWN 1 / SKIP 0   (48 cases)
+PASS 47 / FAIL 0 / KNOWN 1 / SKIP 0   (48 cases)
 ```
 
-The 27 FAILs are:
+The only KNOWN case is `complete/default_style_tab` (TAB, default column
+style): GNU inserts the common prefix `alp`; niu opens the candidate grid
+and leaves `cat al`. That is documented product behavior, linked above;
+the completion-style knob is tracked in
+<https://github.com/unixwin/niubash/issues/342>. The rest of the matrix
+runs with `NIU_COMPLETION_STYLE=gnu`.
 
-**19 × end-of-line point off-by-one** — same buffer, niu point is `len-1`.
-This is the `bind -x` read-back defect:
+The previous baseline on the merge pin reported the end-of-line point
+off-by-one, `M-c`/`C-r` point placement, `M-t`/`C-_`/`C-g X`, `M-*`,
+`M-g`, and the `C-x e` macro replay as failures. Those are closed: the
+`bind -x` read-back reports `len`, `M-*`/`M-g` install their GNU default
+bindings (glob-completion through `Session::glob_filename`), and a
+chord's `C-x` prefix no longer leaks into a keyboard-macro recording.
 
-`text/chars`, `text/end`, `text/c_e`, `text/c_w`, `text/c_k_mid`,
-`text/c_y`, `text/m_y`, `text/c_g`, `text/bracketed_paste`,
-`history/up`, `history/c_o`, `complete/tab_common_prefix`,
-`complete/tab_single`, `complete/tab_double`, `complete/m_question`,
-`complete/m_slash`, `complete/m_tilde`, `complete/m_at`,
-`complete/m_lbrace`.
-
-Expected `point == len(line)`; niu reports `len(line)-1` because
-`Shell::run_bind_x_command` computes `safe_cursor` from
-`char_indices().filter(|off| *off <= cursor_byte).max()`. There is no
-`char_indices()` entry at `buffer.len()`, so a cursor at the end maps to
-the last character start. GNU `bashline.c:4540` reports the character
-offset, which is `len`.
-
-**2 × other point mismatches**
-
-| Case | Keys | GNU | niu | Meaning |
-| --- | --- | --- | --- | --- |
-| `text/m_c` | `C-a M-c` | `Hello world` / 5 | `Hello world` / 1 | Capitalized word is right; point jumps to the first letter instead of the end of the word. |
-| `history/c_r` | `C-r beta C-j` | `beta two` / 0 | `beta two` / 7 | GNU isearch leaves point at the match start; niu leaves it at the end of the recalled line. |
-
-**6 × buffer mismatches**
-
-| Case | Keys | GNU | niu | Meaning |
-| --- | --- | --- | --- | --- |
-| `text/m_t` | `C-e M-t` | `one three two` | `one two three` | `M-t` at end-of-line is a no-op in niu. |
-| `text/undo` | `C-_` | `` (empty) | `abc` | `C-_` undo is a no-op in niu. `C-x C-u` works and is a PASS. |
-| `text/c_g_then_key` | `C-g X` | `abcX` | `abc` | niu flushes a key queued in the same burst behind `C-g`; GNU keeps it. A key sent after a pause is inserted normally. |
-| `complete/m_star` | `M-*` | `cat alpha.txt alpine.txt ` | `cat al` | `insert-completions` is a no-op in niu. |
-| `complete/m_g` | `M-g` | `cat alp` | `cat al*` | GNU glob-completes `al*` and consumes the star; niu does nothing. |
-| `macro/record_replay` | `C-x ( ab C-x ) C-x e` | `aba` | `ab` | Macro recording works, but `C-x e` does not replay the macro. |
-
-**1 × KNOWN**
-
-`complete/default_style_tab` (TAB, default column style): GNU inserts the
-common prefix `alp`; niu opens the candidate grid and leaves `cat al`.
-Documented product behavior, linked above; the completion-style knob is
-tracked in <https://github.com/unixwin/niubash/issues/342>.
-
-The other 20 cases PASS, including `C-a`/`C-b`/`C-f`/`M-b`/`M-f`,
-`C-u`, `C-t`, `M-u`/`M-l`, `C-@` + `M-f`, both `C-x C-x` cases,
-`C-x C-u`, Down, `M-p`/`M-n`, and `C-r` abort. The GNU-mode TAB and
-`M-/` buffers match GNU; those cases are listed under the EOL point
-failures only.
-
-`complete/m_tilde` is a parity PASS on the buffer but still FAILs on the
-EOL point: this host has no password database, so both sides leave `~ro`
-unchanged. `history/m_n` deliberately searches forward from the oldest
-entry; both sides find `beta two`.
+`complete/m_tilde` has no password database on this host, so both sides
+leave `~ro` unchanged; `history/m_n` deliberately searches forward from
+the oldest entry, and both sides find `beta two`.
 
 ## Run it
 
