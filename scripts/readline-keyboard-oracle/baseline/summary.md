@@ -2,20 +2,13 @@
 
 - GNU bash: `/data/data/com.termux/files/usr/bin/bash`
 - GNU version: `GNU bash, version 5.3.20(1)-release (aarch64-unknown-linux-android) / Copyright (C) 2025 Free Software Foundation, Inc. / License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>`
-- niu: `/data/data/com.termux/files/home/wt/niu-keyboard-fix/target/debug/niu`
+- niu: `/data/data/com.termux/files/home/wt/niu-completion-gnu/target/debug/niu`
 - niu version: `Niubash 1.4.4 — bash-compatible shell for Windows / rubash   git c9604443ae09 / Home: <https://unixwin.dev>`
 - niu parity env: `NIU_COMPLETION_STYLE=gnu`
 
-**PASS 47 / FAIL 0 / KNOWN 1 / SKIP 0** (48 cases)
+**PASS 50 / FAIL 0 / KNOWN 0 / SKIP 0** (50 cases)
 
 Expected values are captured from GNU bash 5.3.20 in the same run; the oracle compares raw buffer and point bytes.
-
-## Known product-specific
-
-| Case | Keys | GNU (line, point) | niu (line, point) | Reason |
-| --- | --- | --- | --- | --- |
-| `complete/default_style_tab` | `TAB` | `b'cat alp'/b'7'` | `b'cat al'/b'6'` | buffer differs; niu's default column completion style documents that the first TAB opens the candidate grid instead of inserting the common prefix; NIU_COMPLETION_STYLE=gnu is the GNU parity mode and is used for the rest of the completion matrix. |
-| | | | | https://github.com/unixwin/niubash/blob/master/docs/src/completion.md#completion-styles |
 
 ## Passes
 
@@ -61,12 +54,15 @@ Expected values are captured from GNU bash 5.3.20 in the same run; the oracle co
 | `complete/tab_single` | `TAB` | `b'cat alpha.txt '/b'14'` | `b'cat alpha.txt '/b'14'` |
 | `complete/tab_double` | `TAB TAB` | `b'cat alp'/b'7'` | `b'cat alp'/b'7'` |
 | `complete/m_question` | `M-?` | `b'cat al'/b'6'` | `b'cat al'/b'6'` |
+| `complete/m_equal` | `M-=` | `b'cat al'/b'6'` | `b'cat al'/b'6'` |
 | `complete/m_star` | `M-*` | `b'cat alpha.txt alpine.txt '/b'25'` | `b'cat alpha.txt alpine.txt '/b'25'` |
 | `complete/m_slash` | `M-/` | `b'cat alpha.txt '/b'14'` | `b'cat alpha.txt '/b'14'` |
 | `complete/m_tilde` | `M-~` | `b'~ro'/b'3'` | `b'~ro'/b'3'` |
 | `complete/m_at` | `M-@` | `b'@localhost '/b'11'` | `b'@localhost '/b'11'` |
 | `complete/m_lbrace` | `M-{` | `b'cat alp{ha.txt,ine.txt} '/b'24'` | `b'cat alp{ha.txt,ine.txt} '/b'24'` |
 | `complete/m_g` | `M-g` | `b'cat alp'/b'7'` | `b'cat alp'/b'7'` |
+| `complete/default_style_tab` | `TAB` | `b'cat alp'/b'7'` | `b'cat al'/b'6'` |
+| `complete/m_question_after_prefix` | `TAB M-?` | `b'cat alp'/b'7'` | `b'cat alp'/b'7'` |
 | `macro/record_replay` | `C-x ( ab C-x ) C-x e` | `b'aba'/b'3'` | `b'aba'/b'3'` |
 
 Raw PTY transcripts: `scripts/readline-keyboard-oracle/transcripts/latest`

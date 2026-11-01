@@ -61,19 +61,20 @@ case starts from a fresh process.
 
 ### niu completion mode
 
-All completion cases run niu with `NIU_COMPLETION_STYLE=gnu`, the
-documented GNU readline parity mode. niu's default `column` style is a
-deliberate product behavior; the single `complete/default_style_tab` case
-exercises it and is marked `KNOWN` with the docs link:
-
-<https://github.com/unixwin/niubash/blob/master/docs/src/completion.md#completion-styles>
-
-This keeps a product-specific menu style from hiding real GNU completion
-mismatches.
+All GNU-parity completion cases run niu with `NIU_COMPLETION_STYLE=gnu`.
+TAB completion itself is intentionally zsh-style (owner ruling,
+niubash#342): the default `column` style opens the candidate grid on the
+first TAB and does not splice the common prefix. That is a product rule,
+not a compatibility bug, so `complete/default_style_tab` runs with
+`NIU_COMPLETION_STYLE=column` and asserts niu's documented result
+(`cat al` at point 6, grid shown). GNU's common-prefix result is still
+captured and reported as the oracle reference, but it is not the
+pass/fail target for that case. This keeps a product rule from either
+hiding real GNU mismatches or being mislabeled as one.
 
 ## Matrix coverage
 
-48 cases:
+50 cases:
 
 * **text** — insertion, Left/Right, Home/End, `C-a`/`C-e`, `C-b`/`C-f`,
   `M-b`/`M-f`, `C-w`, `C-u`, `C-k`, `C-y`, `M-y`, `C-t`, `M-t`,
@@ -81,9 +82,9 @@ mismatches.
   undo, `C-g`, `C-g` followed by a key, bracketed paste.
 * **history** — Up/Down, `C-r` incremental search, `M-p`/`M-n`
   non-incremental search, `C-o` operate-and-get-next.
-* **completion** — TAB (common prefix, single match, double TAB), `M-?`,
-  `M-*`, `M-/`, `M-~`, `M-@`, `M-{`, `M-g`, plus the default-style
-  `KNOWN` case.
+* **completion** — TAB (common prefix, single match, double TAB), the
+  zsh-default product case, `M-?`/`M-=` (list-only, with a
+  candidate-list assertion), `M-*`, `M-/`, `M-~`, `M-@`, `M-{`, `M-g`.
 * **macro** — `C-x (`, `C-x )`, `C-x e`.
 
 GNU source anchors used in the case comments and driver:
@@ -106,15 +107,15 @@ GNU source anchors used in the case comments and driver:
 Run on this host with the branch's debug build:
 
 ```text
-PASS 47 / FAIL 0 / KNOWN 1 / SKIP 0   (48 cases)
+PASS 50 / FAIL 0 / KNOWN 0 / SKIP 0   (50 cases)
 ```
 
-The only KNOWN case is `complete/default_style_tab` (TAB, default column
-style): GNU inserts the common prefix `alp`; niu opens the candidate grid
-and leaves `cat al`. That is documented product behavior, linked above;
-the completion-style knob is tracked in
-<https://github.com/unixwin/niubash/issues/342>. The rest of the matrix
-runs with `NIU_COMPLETION_STYLE=gnu`.
+`complete/default_style_tab` is an explicit product-divergence case, not a
+KNOWN: under the owner ruling it asserts niu's documented zsh-style result
+(TAB opens the grid, `cat al` at point 6) and records GNU's common-prefix
+splice (`cat alp`, point 7) as the reference. The rest of the matrix runs
+with `NIU_COMPLETION_STYLE=gnu`. `M-?`/`M-=` are list-only and match GNU
+buffer/point; their candidate lists are asserted in the transcripts.
 
 The previous baseline on the merge pin reported the end-of-line point
 off-by-one, `M-c`/`C-r` point placement, `M-t`/`C-_`/`C-g X`, `M-*`,

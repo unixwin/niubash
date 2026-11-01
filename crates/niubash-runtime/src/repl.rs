@@ -6524,10 +6524,10 @@ mod tests {
     /// only by a `bind` at startup: M-* (insert-completions) has no
     /// engine-registry entry on a fresh shell, so without this table the
     /// key fell through and M-* was a no-op. M-g rides the readline host
-    /// channel (glob-complete-word → Session::glob_filename). M-? is not
-    /// installed: possible-completions is list-only, but the GNU menu's
-    /// queued Activate would splice the common prefix; the unbound key
-    /// leaves the line alone, which is the observable readline result.
+    /// channel (glob-complete-word → Session::glob_filename). M-? and M-=
+    /// (possible-completions) are list-only — the GNU menu distinguishes
+    /// the engine's PossibleCompletions activation from a TAB and leaves
+    /// the line untouched.
     #[test]
     fn gnu_default_command_bindings_install_meta_completion_keys() {
         let mut keybindings = default_emacs_keybindings();
@@ -6535,6 +6535,14 @@ mod tests {
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('*')),
             Some(ReedlineEvent::InsertCompletions)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('?')),
+            Some(ReedlineEvent::PossibleCompletions)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('=')),
+            Some(ReedlineEvent::PossibleCompletions)
         );
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('g')),

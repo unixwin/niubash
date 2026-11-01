@@ -110,6 +110,7 @@ M_Y = ESC + b"y"
 M_P = ESC + b"p"
 M_N = ESC + b"n"
 M_QUESTION = ESC + b"?"
+M_EQUAL = ESC + b"="
 M_STAR = ESC + b"*"
 M_SLASH = ESC + b"/"
 M_TILDE = ESC + b"~"
@@ -133,6 +134,15 @@ class Case:
     known_reason: Optional[str] = None
     known_url: Optional[str] = None
     note: Optional[str] = None
+    # Candidate names the printed list must contain on BOTH sides.  This
+    # catches a list-only command that silently leaves the screen blank
+    # while the buffer/point comparison alone would still pass.
+    expect_listed: tuple[bytes, ...] = ()
+    # Explicit expected-product-divergence: niu's documented behavior for
+    # this case, asserted instead of GNU's.  The GNU observation is still
+    # recorded as the oracle reference; it is not the pass/fail target.
+    niu_expect: Optional[tuple[bytes, bytes]] = None
+    product_rule: Optional[str] = None
 
 
 # The matrix.  Every case starts from a fresh PTY and a fresh fixture tree:
@@ -380,13 +390,26 @@ CASES: list[Case] = [
         "TAB TAB",
         note="Second TAB lists candidates; the buffer stays at 'cat alp'.",
     ),
-    # complete.c rl_possible_completions (M-?, also M-=).
+    # complete.c rl_possible_completions (M-?, also M-=).  List-only:
+    # the candidates are printed and rl_line_buffer/rl_point stay put.
     Case(
         "complete/m_question",
         "complete",
         b"cat al",
         M_QUESTION,
         "M-?",
+        note="GNU lists the candidates and leaves 'cat al' at point 6; niu "
+        "must not splice the common prefix from a list-only event.",
+        expect_listed=(b"alpha.txt", b"alpine.txt"),
+    ),
+    Case(
+        "complete/m_equal",
+        "complete",
+        b"cat al",
+        M_EQUAL,
+        "M-=",
+        note="M-= is GNU's second possible-completions binding.",
+        expect_listed=(b"alpha.txt", b"alpine.txt"),
     ),
     # complete.c rl_insert_completions (M-*).
     Case(
@@ -445,9 +468,11 @@ CASES: list[Case] = [
         "'alp' and consumes the star; niu routes glob-complete-word through "
         "Session::glob_filename and matches.",
     ),
-    # Documented product-specific default: niu's column menu deliberately
-    # does not splice the common prefix on the first TAB.  This is the only
-    # KNOWN case; the parity matrix above runs with the documented GNU style.
+    # Owner ruling (niubash#342): TAB completion is intentionally zsh-style —
+    # the first TAB opens the candidate grid and does not splice the common
+    # prefix.  This case asserts the product rule against niu's own
+    # documented behavior; GNU's common-prefix result stays in the report as
+    # the oracle reference, not as the pass/fail target.
     Case(
         "complete/default_style_tab",
         "complete",
@@ -455,11 +480,24 @@ CASES: list[Case] = [
         TAB,
         "TAB",
         niu_env={"NIU_COMPLETION_STYLE": "column"},
-        known_reason="niu's default column completion style documents that "
-        "the first TAB opens the candidate grid instead of inserting the "
-        "common prefix; NIU_COMPLETION_STYLE=gnu is the GNU parity mode and "
-        "is used for the rest of the completion matrix.",
-        known_url="https://github.com/unixwin/niubash/blob/master/docs/src/completion.md#completion-styles",
+        niu_expect=(b"cat al", b"6"),
+        product_rule="zsh-style TAB: the first TAB opens the candidate grid "
+        "and leaves the line/point untouched; GNU's common-prefix splice is "
+        "the recorded reference, not the product contract.",
+        expect_listed=(b"alpha.txt", b"alpine.txt"),
+        note="Owner ruling: column/zsh TAB is intentional, not a GNU parity "
+        "bug. GNU reference is 'cat alp' at point 7.",
+    ),
+    # M-? after a prefix attempt: still list-only, anchored on the buffer
+    # the first TAB produced.
+    Case(
+        "complete/m_question_after_prefix",
+        "complete",
+        b"cat al",
+        TAB + M_QUESTION,
+        "TAB M-?",
+        note="TAB #1 splices 'alp'; M-? then lists without touching it.",
+        expect_listed=(b"alpha.txt", b"alpine.txt"),
     ),
     # ------------------------------------------------------------------
     # macro.c: keyboard macros.
@@ -699,8 +737,8 @@ def build_env(root: Path, kind: str, case: Case) -> dict[str, str]:
     (root / "tmp").mkdir(parents=True, exist_ok=True)
     if kind == "niu":
         # GNU readline's completion surface for parity.  niu's default
-        # column/inline menu is product-specific and is covered by the
-        # explicit KNOWN case.
+        # zsh-style column grid is an intentional product rule; the
+        # `complete/default_style_tab` case probes that explicitly.
         env["NIU_COMPLETION_STYLE"] = "gnu"
         env.update(case.niu_env)
     return env
@@ -875,7 +913,7 @@ def run_matrix(opts: argparse.Namespace) -> int:
     print("== readline keyboard oracle ==")
     print(f"bash: {bash_bin or '<missing>'} :: {bash_version}")
     print(f"niu : {niu_bin or '<missing>'} :: {niu_version}")
-    print("niu parity env: NIU_COMPLETION_STYLE=gnu (column covered as KNOWN)")
+    print("niu parity env: NIU_COMPLETION_STYLE=gnu (zsh default probed separately)")
     print(f"cases: {len(cases)}")
     print()
 
@@ -935,9 +973,62 @@ def run_matrix(opts: argparse.Namespace) -> int:
             if gnu is None or niu is None:
                 reason = "; ".join(x for x in (gnu_error, niu_error) if x)
                 status = "FAIL"
+            elif case.niu_expect is not None:
+                # Explicit product divergence: assert niu's documented
+                # behavior.  GNU's observation is the recorded reference.
+                want_line, want_point = case.niu_expect
+                if niu.line != want_line or niu.point != want_point:
+                    status = "FAIL"
+                    reason = (
+                        "niu product behavior drifted: expected "
+                        f"{want_line!r}/{want_point!r}, got "
+                        f"{niu.line!r}/{niu.point!r}"
+                    )
+                    if case.product_rule:
+                        reason += f"; {case.product_rule}"
+                else:
+                    missing = [
+                        token
+                        for token in case.expect_listed
+                        if token not in niu.transcript
+                    ]
+                    if missing:
+                        status = "FAIL"
+                        reason = (
+                            "expected candidate list missing from niu "
+                            "transcript: "
+                            + ", ".join(
+                                repr(token.decode("utf-8", "replace"))
+                                for token in missing
+                            )
+                        )
+                    else:
+                        status = "PASS"
+                        reason = ""
             elif gnu.line == niu.line and gnu.point == niu.point:
-                status = "PASS"
-                reason = ""
+                missing = [
+                    token
+                    for token in case.expect_listed
+                    if token not in gnu.transcript or token not in niu.transcript
+                ]
+                if missing:
+                    status = "FAIL"
+                    sides = []
+                    if any(token not in gnu.transcript for token in missing):
+                        sides.append("GNU")
+                    if any(token not in niu.transcript for token in missing):
+                        sides.append("niu")
+                    reason = (
+                        "expected candidate list missing from "
+                        + "/".join(sides)
+                        + " transcript: "
+                        + ", ".join(
+                            repr(token.decode("utf-8", "replace")) for token in missing
+                        )
+                    )
+                else:
+                    status = "PASS"
+                    reason = ""
             else:
                 reason = mismatch_reason(gnu, niu)
                 if case.known_reason:
@@ -1006,6 +1097,13 @@ def result_json(result: CaseResult) -> dict:
         "text": case.text.decode("utf-8", "backslashreplace"),
         "text_hex": case.text.hex(),
         "niu_env": case.niu_env,
+        "expect_listed": [token.decode("utf-8", "replace") for token in case.expect_listed],
+        "niu_expect": (
+            [item.decode("utf-8", "replace") for item in case.niu_expect]
+            if case.niu_expect is not None
+            else None
+        ),
+        "product_rule": case.product_rule,
         "known_reason": case.known_reason,
         "known_url": case.known_url,
         "note": case.note,

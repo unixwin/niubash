@@ -6,6 +6,7 @@ All notable changes to Niubash are documented in this file.
 
 ### Added
 
+- **GNU `possible-completions` defaults (`M-?`, `M-=`)**: both keys now print the candidate list without editing `rl_line_buffer` or moving point, matching readline's `rl_possible_completions`. The GNU menu distinguishes the engine's list-only activation from a TAB, so a queued list event can no longer splice the common prefix. TAB completion itself is unchanged: the default stays zsh-style (first TAB opens the candidate grid), per the owner ruling on niubash#342.
 - **Native script debugger**: `niu --debug script` opens the interactive debugger on the controlling terminal and `niu --dap script` serves the Debug Adapter Protocol on stdio (`niu --dap` alone is a pure server whose `launch` request names the program; `niu --debug --dap script` is the spelled-out editor form). Both imply `extdebug` internally without changing the observable `shopt extdebug` setting; `--debug` with `-c`, `-s`, or `-i` keeps the legacy extdebug-arming behavior. The frontend now presents the host word `niu` — prompt `(niu-dbg)` and `niu: …` diagnostics — instead of the engine's `rubash`. `niu --help`, `docs/src/advanced-usage.md`, and the bundled zero-JS VS Code extension (`editors/vscode/`, type `niubash`, program `niu`) document and launch the flags.
 - **DAP hover evaluation of bare names**: a `hover`/`clipboard` request for an identifier now renders the variable's value from the stop snapshot (the same rendering as `print` and watch), instead of returning the literal word.
 
