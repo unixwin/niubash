@@ -3938,6 +3938,30 @@ fn add_gnu_command_default_keybindings(keybindings: &mut Keybindings, target: Na
         if !gnu_name_is_delivered(name) {
             continue;
         }
+        // niubash#811: GNU's `abort` is search-aware. In readline the
+        // ACTIVE search's own keymap owns C-g (isearch's abort restores
+        // the pre-search line; search.c:270 `_rl_nsearch_abort` the
+        // non-incremental one) — the emacs map's `abort` only ever sees
+        // non-search states. When the pinned editor already delivers its
+        // abort natively for C-g (ruline#15 binds the key to the
+        // editor's abort event, whose search dispatchers restore the
+        // line and whose regular arm clears menus/selection), the native
+        // binding IS the GNU shape — overriding it with the host-command
+        // channel here would replace it with a plain bell and strand an
+        // active search (the T2 F3 face: everything typed after the C-g
+        // vanished into the invisible query). Under older pins (C-g
+        // natively `Redo`) the override below stays: it is the only
+        // source of the GNU abort surface those pins can deliver. The
+        // probe reads the editor's actual default table — a behavior
+        // fact, not a version string — so the layer flips on its own
+        // the moment the pin carries ruline#15.
+        if *name == "abort"
+            && reedline::default_emacs_keybindings()
+                .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
+                .is_some_and(|event| event == ReedlineEvent::Esc)
+        {
+            continue;
+        }
         // Single keys only; `parse_key_sequence` returns None for
         // multi-key spellings (those ride the chord layer).
         let Some((modifiers, code)) = parse_key_sequence(keyseq) else {
@@ -7418,6 +7442,44 @@ mod tests {
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Tab),
             Some(history_event)
         );
+    }
+
+    /// niubash#811: the GNU `abort` default binding is search-aware. When
+    /// the pinned editor delivers its abort natively for C-g (the
+    /// ruline#15 shape: the default emacs table binds the key to the
+    /// editor's abort event, so the engine's search dispatchers restore
+    /// the pre-search line — the T2 F3 face), the host layer must NOT
+    /// override it with the host-command channel: a host override
+    /// replaces the search abort with a plain bell and strands the
+    /// active search. Under older pins (C-g natively `Edit(Redo)`) the
+    /// host override is the only GNU abort surface those pins can
+    /// deliver, so it stays. The test reads the pinned editor's actual
+    /// default table and asserts the layer followed it — under the
+    /// current pin (8351932) that is the override arm.
+    #[test]
+    fn issue811_c_g_abort_binding_follows_the_editor_default() {
+        let native_abort = reedline::default_emacs_keybindings()
+            .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
+            .is_some_and(|event| event == ReedlineEvent::Esc);
+        let mut keybindings = Keybindings::default();
+        add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
+        let bound = keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'));
+        if native_abort {
+            assert_eq!(
+                bound,
+                Some(ReedlineEvent::Esc),
+                "a native abort default must survive the host layer"
+            );
+        } else {
+            assert_eq!(
+                bound,
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}abort",
+                    READLINE_HOST_COMMAND_PREFIX
+                ))),
+                "without a native abort default the host override is the GNU surface"
+            );
+        }
     }
 
     /// Second niubash#630 batch: readline functions deliverable only since
