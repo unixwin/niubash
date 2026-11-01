@@ -16,24 +16,27 @@ proven to be GNU Bash's own coproc reap-timing race** (ledger in rubash's
 [README, "Compatibility at a
 Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it is not matters as much:
 
-- **No POSIX emulation layer.** No `cygwin1.dll`/`msys-2.0.dll`, no fork,
-  no POSIX signal delivery, **no PTY emulation** — job control and terminal
-  handling ride on Win32/ConPTY. Interactive fullscreen TUI programs built
+- **No POSIX emulation layer on Windows.** The Windows stack carries no
+  `cygwin1.dll`/`msys-2.0.dll`, no fork, no POSIX signal delivery, **no PTY
+  emulation** — job control and terminal handling ride on Win32/ConPTY. Interactive fullscreen TUI programs built
   for a POSIX pty (and pty-only tools like `script`/`ssh -t`) are the known
   rough edge, not path or quoting behavior.
 - **No MSYS path rules.** The Windows-native path is the first-class
   internal representation; `/c/...`, `/mnt/c/...`, `/usr/bin`, `/tmp` are
-  input dialects that resolve to real Windows locations. There is no
-  conversion heuristic to misfire, so `MSYS_NO_PATHCONV`-style variables do
-  not exist here and are never needed. Full contract:
-  `references/paths.md`.
+  input dialects that resolve to real Windows locations. Translation at
+  the boundary is one deterministic contract, not a heuristic: classified
+  POSIX spellings are translated for native children, while data-shaped
+  tokens, the bare `/`, and drive-root forms go verbatim — so
+  `MSYS_NO_PATHCONV`-style variables do not exist here and are never
+  needed. Full contract: `references/paths.md`.
 - **Verbatim argv at the boundary** ("Option B"): the bundled `bash.exe` /
   `sh.exe` are hardlinks to `niu.exe` — the same binary taking the GNU
   face from `argv[0]` (a forwarding shim stands in only where the
-  filesystem cannot hardlink). No re-quoting, no path rewriting at the
-  boundary. What a child process receives is always a native Windows path
-  when the argument is a shell path; literal data arguments
-  (`printf '%s\n' /tmp/x`) are never rewritten (GNU bash behavior).
+  filesystem cannot hardlink). No re-quoting at the boundary. What a
+  native child process receives for a classified shell-path spelling is
+  the native Windows path; literal data arguments
+  (`printf '%s\n' /tmp/x`), the bare `/`, and drive-root forms (`/d`,
+  `/d/`) are never rewritten.
 - **No bundler downloads.** Plugin sources arrive by git clone only; fonts
   and CLI tools are package-manager recommendations. `wpm`/WinuxCmd is the
   separate command-layer package manager.
@@ -167,7 +170,7 @@ is the GNU bashdb starter path.
 | Task | Use |
 | --- | --- |
 | Anything with bash syntax (loops, pipes, substitution, globs, scripts) | **niu** — directly in-session |
-| Running Windows-native programs (`git.exe`, `node.exe`, `cargo.exe`) | **niu** — your PATH is your PATH, no conversion step |
+| Running Windows-native programs (`git.exe`, `node.exe`, `cargo.exe`) | **niu** — your PATH is your PATH, no heuristic conversion step |
 | `cmd`-specific quirks (batch files needing `cmd` semantics, `reg` legacy forms) | `cmd /c ...` from niu, but prefer native equivalents |
 | .NET/COM, Windows management, registry scripting, remoting | **powershell** — call it from niu when needed |
 | Linux-only tooling, systemd, Linux binaries | **WSL** — niubash does not emulate Linux |
