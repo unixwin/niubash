@@ -2454,13 +2454,10 @@ impl Shell {
             // segment refresh landing mid-pass re-stamps the prompt
             // and one editor repaint carries the segment to the
             // idle line instead of waiting for the first keypress.
-            if let Some(worktree) = crate::git_prompt_cache::find_worktree(&cwd) {
+            if crate::git_prompt_cache::find_worktree(&cwd).is_some() {
                 let rebuild_cwd = cwd.clone();
                 prompt = prompt.with_live_vcs(
-                    std::sync::Arc::new(crate::idle_repaint::LiveVcsCell::new(
-                        worktree,
-                        value.clone(),
-                    )),
+                    std::sync::Arc::new(crate::idle_repaint::LiveVcsCell::new(value.clone())),
                     value,
                     std::sync::Arc::new(move |segment: &Option<String>| {
                         crate::git_prompt::render_with_segment(&rebuild_cwd, segment.as_deref())

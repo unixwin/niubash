@@ -488,8 +488,7 @@ impl SegmentPrompt {
     /// mid-pass can re-stamp this clone in place.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn stamp_vcs(&mut self, seq: u64, value: Option<String>, worktree: Option<PathBuf>) {
-        self.vcs_live =
-            worktree.map(|worktree| Arc::new(LiveVcsCell::new(worktree, value.clone())));
+        self.vcs_live = worktree.map(|_| Arc::new(LiveVcsCell::new(value.clone())));
         self.vcs_stamp = Some(VcsPassStamp { seq, value });
     }
 
