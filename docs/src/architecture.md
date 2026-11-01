@@ -56,8 +56,11 @@ not re-implement lexer/parser/ast/builtins.
 
 ### 2. WinuxCmd is selected by Niubash and integrated via PATH
 
-Not via FFI/DLL — the rubash Executor still finds external commands through
-`PATH`. Version selection is a Niubash session/config responsibility. At
+PATH is the default route and the fallback — the rubash Executor finds
+external commands through `PATH`. A default-off, opt-in FFI acceleration
+route (niubash#567) can serve commands in-process when enabled; it never
+replaces the PATH route's semantics, which remain the equivalence
+reference. Version selection is a Niubash session/config responsibility. At
 startup:
 
 1. Read the explicit `WINUXCMD_PATH`, then fall back to Niubash's own
