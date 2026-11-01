@@ -1721,7 +1721,7 @@ impl LiveFileBackedHistory {
     }
 
     fn sync_state(state: &mut HistoryState) -> bool {
-        let synced = match state.path.clone() {
+        match state.path.clone() {
             Some(path) => match state
                 .history
                 .flush(&path, Self::write_timestamps_armed(state))
@@ -1733,8 +1733,7 @@ impl LiveFileBackedHistory {
                 }
             },
             None => false,
-        };
-        synced
+        }
     }
 
     /// The number of entries the in-memory list currently holds.
