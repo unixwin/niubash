@@ -888,7 +888,12 @@ impl CycleMenu {
             })
             .collect();
         if let Ok(mut session) = self.session.lock() {
-            session.begin(snapshot, candidates, (span.start, span.end), self.select_mode);
+            session.begin(
+                snapshot,
+                candidates,
+                (span.start, span.end),
+                self.select_mode,
+            );
         }
         self.publish_grid();
         if self.values.len() == 1 {
@@ -1109,9 +1114,7 @@ impl CycleMenu {
                 // mcol/wishcol edge wrap (niubash#778).
                 MenuEvent::MoveUp => self.apply_navigate(editor, CycleMove::Grid(GridMove::Up)),
                 MenuEvent::MoveDown => self.apply_navigate(editor, CycleMove::Grid(GridMove::Down)),
-                MenuEvent::MoveLeft => {
-                    self.apply_navigate(editor, CycleMove::Grid(GridMove::Left))
-                }
+                MenuEvent::MoveLeft => self.apply_navigate(editor, CycleMove::Grid(GridMove::Left)),
                 MenuEvent::MoveRight => {
                     self.apply_navigate(editor, CycleMove::Grid(GridMove::Right))
                 }
@@ -1853,11 +1856,7 @@ mod tests {
         ];
         for (event, expected) in walk {
             navigate(&mut menu, &mut editor, &mut completer, event);
-            assert_eq!(
-                editor.get_buffer(),
-                expected,
-                "zsh menuselect grid walk"
-            );
+            assert_eq!(editor.get_buffer(), expected, "zsh menuselect grid walk");
         }
     }
 
@@ -1884,12 +1883,7 @@ mod tests {
             assert_eq!(state.index, 0);
         }
 
-        navigate(
-            &mut menu,
-            &mut editor,
-            &mut completer,
-            MenuEvent::MoveUp,
-        );
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveUp);
         assert_eq!(editor.get_buffer(), "cd cmp-ff/");
         let state = session.lock().unwrap();
         assert_eq!(state.index, 5);
@@ -1911,19 +1905,9 @@ mod tests {
             let state = session.lock().unwrap();
             assert_eq!((state.grid.columns(), state.grid.rows), (1, 2));
         }
-        navigate(
-            &mut menu,
-            &mut editor,
-            &mut completer,
-            MenuEvent::MoveRight,
-        );
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveRight);
         assert_eq!(editor.get_buffer(), "git checkout");
-        navigate(
-            &mut menu,
-            &mut editor,
-            &mut completer,
-            MenuEvent::MoveLeft,
-        );
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveLeft);
         assert_eq!(editor.get_buffer(), "git checkout");
     }
 
