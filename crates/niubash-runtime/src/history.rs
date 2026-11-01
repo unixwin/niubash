@@ -1967,7 +1967,8 @@ impl LiveFileBackedHistory {
         // lines from the file instead of truncating it. Committed lines
         // (-a/-w already ran) are not in pending, so they survive.
         // niubash#614: the same call records the view hide, applied to
-        // this instance now and to the editor twin at its next query.
+        // a twin instance with its own store at its next query (this
+        // instance's store was just emptied — see the reset below).
         if let Ok(mut ledger) = ledger.lock() {
             // niubash#642 + niubash#733: the base lines this clear
             // retires are the entries of the snapshot units inside the
@@ -1983,6 +1984,20 @@ impl LiveFileBackedHistory {
             ledger.note_cleared(view_len_at_clear, cleared_base);
         }
         Self::sync_view(state, &ledger);
+        // niubash#773: this store was just emptied, so no cleared
+        // prefix remains in it for the hide to mask — zero it back
+        // out (the trait `clear` does the same for its store). The
+        // ledger's hide value now serves only a twin with its own
+        // store (the fallback wiring), whose list still begins with
+        // the cleared lines. Without the reset, the stale prefix
+        // length would mask every line recorded after the clear
+        // (view_bounds clamps it to the new list's length), and the
+        // session-end flush would mistake the session for an
+        // empty-list one and truncate the file. The
+        // refresh-resurrection the hide was built against
+        // (niubash#614) cannot occur anymore: nothing reloads the
+        // file into this store.
+        state.hidden_prefix = 0;
         Ok(())
     }
 
