@@ -35,6 +35,13 @@ pub const HOST_COMMAND_NAMES: &[&str] = &[
     "complete-command",
     "complete-filename",
     "complete-variable",
+    // bashline.c:3980/3890/3795 `bash_complete_hostname` /
+    // `bash_complete_username` / `bash_brace_completion`: hostnames from
+    // /etc/hosts plus gethostname, users from /etc/passwd, and filename
+    // matches compressed into one csh-style brace expression.
+    "complete-hostname",
+    "complete-into-braces",
+    "complete-username",
     "dump-functions",
     "dump-macros",
     "dump-variables",
@@ -53,24 +60,25 @@ pub const HOST_COMMAND_NAMES: &[&str] = &[
 /// the one-key entries into keymap bindings and the multi-key entry
 /// into a chord, and `dump-functions` reports these spellings.
 ///
-/// Sources: `lib/readline/emacs_keymap.c` (M-~ and M-& are both
-/// `rl_tilde_expand`, lines 359/459; M-# is `rl_insert_comment`;
-/// M-x is `rl_execute_named_command`, line 451; C-g and M-C-g are
-/// `rl_abort`, lines 42/325), `text.c:1179` (`do-lowercase-version`
-/// is a dispatch rule, so it has no entry here), `bashline.c:527`
-/// (M-C-e is shell-expand-line), `bashline.c:530` (M-^ is
-/// history-expand-line), `bashline.c:555-581` (M-{ / M-! / M-$ /
-/// M-/ / M-@ / M-~ / M-g are the completion entry points), and
+/// Sources: `lib/readline/emacs_keymap.c` (M-& is `rl_tilde_expand`,
+/// line 359; M-# is `rl_insert_comment`; M-x is
+/// `rl_execute_named_command`, line 451; C-g and M-C-g are `rl_abort`,
+/// lines 42/325), `text.c:1179` (`do-lowercase-version` is a dispatch
+/// rule, so it has no entry here), `bashline.c:527` (M-C-e is
+/// shell-expand-line), `bashline.c:530` (M-^ is history-expand-line),
+/// `bashline.c:555-581` (M-{ / M-! / M-$ / M-/ / M-@ / M-~ are the
+/// completion entry points; M-~ replaces emacs_keymap.c's
+/// `rl_tilde_expand` when its default is still in place), and
 /// `bashline.c:591` (M-TAB — spelled `\M-\C-i`, TAB and C-i being
-/// the same key — is dynamic-complete-history). The three completion
-/// modes backed by host sources (`complete-command`,
-/// `complete-variable`, `complete-filename`) are listed; the four
-/// whose sources the host does not own stay out of the table so they
-/// keep their documented gap.
+/// the same key — is dynamic-complete-history). The context-specific
+/// completion modes with host-owned sources (`complete-command`,
+/// `complete-variable`, `complete-filename`, `complete-hostname`,
+/// `complete-username`, `complete-into-braces`) are listed; only
+/// `glob-complete-word` stays out of the table because its source is the
+/// engine's `shell_glob_filename`.
 pub const GNU_DEFAULT_COMMAND_BINDINGS: &[(&str, &str)] = &[
     ("\\C-g", "abort"),
     ("\\M-&", "tilde-expand"),
-    ("\\M-~", "tilde-expand"),
     ("\\M-#", "insert-comment"),
     ("\\M-x", "execute-named-command"),
     ("\\M-\\C-e", "shell-expand-line"),
@@ -78,6 +86,9 @@ pub const GNU_DEFAULT_COMMAND_BINDINGS: &[(&str, &str)] = &[
     ("\\M-!", "complete-command"),
     ("\\M-$", "complete-variable"),
     ("\\M-/", "complete-filename"),
+    ("\\M-@", "complete-hostname"),
+    ("\\M-~", "complete-username"),
+    ("\\M-{", "complete-into-braces"),
     ("\\M-\\C-i", "dynamic-complete-history"),
     ("\\C-x\\C-r", "re-read-init-file"),
 ];

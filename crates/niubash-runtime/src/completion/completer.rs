@@ -240,6 +240,16 @@ pub enum SpecificCompletion {
     /// (complete.c), with the filename word-break set bash installs for
     /// this entry point (bashline.c:3914).
     Filename,
+    /// `complete-username` — user names, `rl_username_completion_function`
+    /// (complete.c:2377, `getpwent`; see [`crate::completion::sources`]).
+    Username,
+    /// `complete-hostname` — host names, `hostname_completion_function`
+    /// (bashline.c:2626, `/etc/hosts`).
+    Hostname,
+    /// `complete-into-braces` — filename matches compressed into one
+    /// csh-style brace expression (bashline.c:3795 `bash_brace_completion`,
+    /// bracecomp.c).
+    Brace,
 }
 
 /// Custom completer for WinSH
@@ -314,23 +324,51 @@ impl NiubashCompleter {
             SessionKey::new(current_dir, String::new()),
         ));
 
-        let result = match mode {
-            SpecificCompletion::Command => {
-                let word = context.get_current_word().unwrap_or_default();
-                let mut matches = CommandCompleter::get_all_commands();
-                matches.extend(aliases);
-                matches.extend(functions);
-                matches.sort();
-                matches.dedup();
-                matches.retain(|command| context.behavior.matches(command, &word));
-                (!matches.is_empty()).then(|| CompletionResult::new(matches))
-            }
-            SpecificCompletion::Variable => {
-                let word = context.get_current_word().unwrap_or_default();
-                VariableCompleter::complete_names(&word, &env_vars)
-            }
-            SpecificCompletion::Filename => PathCompleter::complete(&context).ok().flatten(),
-        };
+        let result =
+            match mode {
+                SpecificCompletion::Command => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    let mut matches = CommandCompleter::get_all_commands();
+                    matches.extend(aliases);
+                    matches.extend(functions);
+                    matches.sort();
+                    matches.dedup();
+                    matches.retain(|command| context.behavior.matches(command, &word));
+                    (!matches.is_empty()).then(|| CompletionResult::new(matches))
+                }
+                SpecificCompletion::Variable => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    VariableCompleter::complete_names(&word, &env_vars)
+                }
+                SpecificCompletion::Filename => PathCompleter::complete(&context).ok().flatten(),
+                SpecificCompletion::Username => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    crate::completion::sources::complete_username(&word)
+                }
+                SpecificCompletion::Hostname => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    crate::completion::sources::complete_hostname(&word)
+                }
+                // bracecomp.c `bash_brace_completion`: complete filenames
+                // first, then collapse the raw match list into one brace
+                // expression. GNU turns off filename quoting here and quotes
+                // each inserted substring itself, so undo the path
+                // completer's shell quoting before compressing.
+                SpecificCompletion::Brace => PathCompleter::complete(&context)
+                    .ok()
+                    .flatten()
+                    .and_then(|result| {
+                        let mut names: Vec<String> = result
+                            .completions
+                            .iter()
+                            .map(|value| crate::completion::path::unescape_shell_path(value))
+                            .collect();
+                        names.sort();
+                        names.dedup();
+                        crate::completion::brace::compress_braces(&names)
+                            .map(|compressed| CompletionResult::new(vec![compressed]))
+                    }),
+            };
 
         match result {
             Some(result) => self.format_completions(result, input, cursor_pos),
@@ -1197,6 +1235,44 @@ niu_git_comp() {
                 .iter()
                 .any(|suggestion| suggestion.value == "spec-file-alpha.txt"),
             "filename mode must complete the file: {files:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn burndown_brace_completion_compresses_filename_matches() {
+        let temp_dir = unique_temp_dir("niubash-brace-completion");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("alpha-one.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("alpha-two.txt"), "x").unwrap();
+        std::fs::write(temp_dir.join("alpha three.txt"), "x").unwrap();
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::new(state);
+
+        // `complete-into-braces` completes filenames first, then returns
+        // exactly one compressed expression (bashline.c
+        // bash_brace_completion -> bracecomp.c hack_braces_completion).
+        let suggestions = completer.complete_specific(SpecificCompletion::Brace, "echo alpha-", 11);
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha-{one.txt,two.txt}"],
+            "brace completion must compress the filename matches: {suggestions:?}"
+        );
+
+        // The path completer's shell quoting is undone first: the raw
+        // name is quoted once by bracecomp's sh_backslash_quote, not twice.
+        let spaced = completer.complete_specific(SpecificCompletion::Brace, "echo alpha\\ t", 13);
+        assert_eq!(
+            spaced
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha\\ three.txt"],
+            "a raw filename space is backslash-quoted exactly once: {spaced:?}"
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
