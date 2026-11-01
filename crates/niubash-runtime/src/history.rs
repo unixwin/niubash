@@ -321,10 +321,11 @@ impl RubashHistoryProvider {
     /// on every prompt, and re-appending the whole list doubled the
     /// file each cycle, which `history -r` then loaded back into
     /// memory — a self-amplifying loop that wedged the session.
-    /// To the backing file, only lines the live sync has not yet
-    /// written are appended (the common case is a no-op); to a foreign
-    /// file, all pending lines are appended (the foreign file never
-    /// saw the live sync). Either way the pending set commits: a
+    /// To the backing file, only lines not yet on disk are appended
+    /// (niubash#773: recording never writes, so this face performs
+    /// the session's first write for them); to a foreign file, all
+    /// pending lines are appended (the foreign file never receives
+    /// this session's writes). Either way the pending set commits: a
     /// later -c must not remove lines -a already wrote.
     ///
     /// With `stamped` set, each appended entry that carries a stamp
@@ -382,12 +383,13 @@ impl RubashHistoryProvider {
             append_line_to_file(std::path::Path::new(path), line)?;
         }
         if is_backing {
-            // The backing file grew outside the reader's accounting:
-            // rebuild it so a later reedline sync does not re-append
-            // these lines (the #182 dedupe hazard). An accounting
-            // rebuild, not a re-read: a clear's view hide survives it
-            // (niubash#614).
-            let _ = self.inner.reload_from_file_keeping_view();
+            // niubash#773: the append landed exactly the store's
+            // unwritten entries, in list order — flip their on-disk
+            // bits. The list itself does not change, so nothing is
+            // reloaded (the pre-#773 face rebuilt the reader here
+            // purely to resync its prefix accounting; a clear's view
+            // hide is untouched either way, niubash#614).
+            self.inner.note_backing_appended(to_append.len());
         }
         // Commit only after the append succeeded: on failure the lines
         // stay pending, so a later -a or the session-end write can still
@@ -845,6 +847,42 @@ impl HistoryStore {
                 None
             };
         Self::construct_entry(entry_id, entry)
+    }
+
+    /// niubash#570/#773: record a line positionally, bypassing the
+    /// consecutive-duplicate filter in `save` while keeping its
+    /// capacity rule and its record-time stamp (niubash#703). The
+    /// entry starts unwritten: like every recorded line, it reaches
+    /// the file only at an explicit write face.
+    pub(crate) fn push_recorded(&mut self, entry: String) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.entries.len() == self.capacity {
+            self.entries.pop_front();
+            self.stamps.pop_front();
+            self.on_disk.pop_front();
+        }
+        self.entries.push_back(entry);
+        self.stamps.push_back(now_stamp());
+        self.on_disk.push_back(false);
+    }
+
+    /// niubash#773: mark the oldest `count` unwritten entries as on
+    /// disk, in list order — the store-side half of an explicit
+    /// append face (`history -a`) that wrote exactly those entries
+    /// to the backing file.
+    pub(crate) fn mark_oldest_unwritten_on_disk(&mut self, count: usize) {
+        let mut remaining = count;
+        for bit in &mut self.on_disk {
+            if remaining == 0 {
+                break;
+            }
+            if !*bit {
+                *bit = true;
+                remaining -= 1;
+            }
+        }
     }
 
     fn load(&self, id: HistoryItemId) -> Result<HistoryItem> {
@@ -1595,20 +1633,38 @@ impl LiveFileBackedHistory {
     /// Fails (without touching state) when this session degraded to
     /// memory-only history, so the caller can fall back to the in-memory
     /// replace path.
+    /// niubash#773: the provider's `history -a` face appended this
+    /// session's unwritten entries to the backing file — flip the
+    /// store's on-disk bits for exactly that many entries. The list
+    /// itself does not change, so nothing is reloaded.
+    pub(crate) fn note_backing_appended(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.history.mark_oldest_unwritten_on_disk(count);
+        }
+    }
+
     pub(crate) fn reload_from_file(&mut self) -> Result<()> {
-        self.reload_from_file_inner(true)
+        // niubash#773: an explicit re-read rebuilds the list from the
+        // file, so this session's unwritten entries are flushed
+        // first — GNU's `-r` reads the file INTO the existing list,
+        // and lines the deferred write has not landed yet must not
+        // be dropped by the rebuild. Their pending lines flip to
+        // synced with the flush, keeping the ledger's `-a`
+        // accounting exact.
+        if let Ok(mut state) = self.lock() {
+            if Self::sync_state(&mut state) {
+                if let Ok(mut ledger) = self.ledger.lock() {
+                    ledger.mark_all_synced();
+                }
+            }
+        }
+        self.reload_from_file_inner()
     }
 
-    /// Reader rebuild that is NOT an explicit re-read — the `history
-    /// -a` accounting rebuild in `append_history`, which only repairs
-    /// the reader's on-disk accounting after appending pending lines
-    /// itself. The list view is untouched, so a clear's hide survives
-    /// it (niubash#614): `-a` never loads lines into the list in GNU.
-    pub(crate) fn reload_from_file_keeping_view(&mut self) -> Result<()> {
-        self.reload_from_file_inner(false)
-    }
-
-    fn reload_from_file_inner(&mut self, consume_clear: bool) -> Result<()> {
+    fn reload_from_file_inner(&mut self) -> Result<()> {
         let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock (see save).
         let ledger = Arc::clone(&self.ledger);
@@ -1620,16 +1676,14 @@ impl LiveFileBackedHistory {
         match HistoryStore::load_from_file(capacity, &path) {
             Ok(history) => {
                 state.history = history;
-                if consume_clear {
-                    // An explicit re-read (`history -r`/`-n`) loads the
-                    // file back into the list on purpose, so the clear's
-                    // view hide ends here — for both instances, via the
-                    // ledger generation (niubash#614).
-                    if let Ok(mut ledger) = ledger.lock() {
-                        ledger.note_view_reloaded();
-                    }
-                    Self::sync_view(state, &ledger);
+                // An explicit re-read (`history -r`/`-n`) loads the
+                // file back into the list on purpose, so the clear's
+                // view hide ends here — for both instances, via the
+                // ledger generation (niubash#614).
+                if let Ok(mut ledger) = ledger.lock() {
+                    ledger.note_view_reloaded();
                 }
+                Self::sync_view(state, &ledger);
                 Ok(())
             }
             Err(error) => Err(ReedlineError::from(io::Error::other(error.to_string()))),
@@ -2359,11 +2413,15 @@ impl LiveFileBackedHistory {
         // same line typed in two sessions, are all kept (dual-same probe:
         // two sessions typing `echo SAMECMD` must leave two copies in the
         // file). When the new line equals the last one, bypass the
-        // filter: append the
-        // encoded line to the file and rebuild the reader from disk. The
-        // load path applies no duplicate filter, so the rebuilt list holds
-        // both copies, and the returned item carries the new entry's id
-        // (reedline's engine records it as `history_last_run_id`).
+        // filter with a positional push, and the returned item carries
+        // the new entry's id (reedline's engine records it as
+        // `history_last_run_id`). niubash#773: the push is memory-only —
+        // the pre-#773 face appended the line to the file immediately
+        // and rebuilt the reader from the reload, an early write GNU
+        // never makes (recorded lines reach the file at `history -a`,
+        // `-w`, or exit — bashhist.c:450-477, 488-530) and exactly the
+        // write that would let another session's `history -n` surface
+        // this line while this session is still live.
         let last_is_same = state
             .history
             .search(SearchQuery::last_with_search(
@@ -2373,65 +2431,33 @@ impl LiveFileBackedHistory {
             .and_then(|mut items| items.pop())
             .is_some_and(|last| last.command_line == text);
         if last_is_same {
-            if let Some(path) = state.path.clone() {
-                // niubash#734: while HISTTIMEFORMAT is armed this live
-                // append writes the entry's stamp line ahead of the
-                // entry (histfile.c's append face: a stamped entry is
-                // two file lines), the same shape `append_history_face`
-                // writes for the engine-driven face. The stamp is the
-                // caller-supplied one when present, else a fresh
-                // record-time stamp — the value the reload below reads
-                // back as this entry's stamp either way.
-                let armed = Self::write_timestamps_armed(state);
-                let stamp = stamp_override.clone().unwrap_or_else(now_stamp);
-                let appended = if armed && !stamp.is_empty() {
-                    append_line_to_file(&path, &stamp).is_ok()
-                        && append_line_to_file(&path, &text).is_ok()
-                } else {
-                    append_line_to_file(&path, &text).is_ok()
-                };
-                if appended {
-                    if let Ok(history) = HistoryStore::load_from_file(capacity, &path) {
-                        state.history = history;
-                        // The line is in the file now, by construction.
-                        // niubash#703: the appended line is the rebuilt
-                        // list's last entry; an override stamp replaces
-                        // the read-time stamp the reload just gave it.
-                        if let Some(stamp) = &stamp_override {
-                            if let Some(last) = state.history.stamps.back_mut() {
-                                *last = stamp.clone();
-                            }
-                        }
-                        let stamp = state
-                            .history
-                            .stamps
-                            .back()
-                            .cloned()
-                            .unwrap_or_else(now_stamp);
-                        if let Ok(mut ledger) = ledger.lock() {
-                            ledger.note_saved(text, stamp, true);
-                        }
-                        let saved = state
-                            .history
-                            .search(SearchQuery::last_with_search(
-                                reedline::SearchFilter::anything(None),
-                            ))
-                            .ok()
-                            .and_then(|mut items| items.pop())
-                            .unwrap_or(item);
-                        return Ok(saved);
-                    }
+            state.history.push_recorded(text.clone());
+            // niubash#703: an override stamp replaces the record-time
+            // stamp the push assigned, mirroring the plain save path
+            // below.
+            if let Some(stamp) = &stamp_override {
+                if let Some(last) = state.history.stamps.back_mut() {
+                    *last = stamp.clone();
                 }
             }
-            // Degraded fallback (no backing file, or the file could not be
-            // appended/rebuilt): the store's drop stands, exactly the
-            // pre-existing behavior for a session with no file to write.
-            // Nothing is recorded: the line is in neither memory nor file.
-            // (The save takes the item by value and its result is dropped,
-            // so the original is cloned for it and returned as-is.)
-            let _ = state.history.save(item.clone());
-            Self::sync_state(state);
-            return Ok(item);
+            let stamp = state
+                .history
+                .stamps
+                .back()
+                .cloned()
+                .unwrap_or_else(now_stamp);
+            if let Ok(mut ledger) = ledger.lock() {
+                ledger.note_saved(text, stamp, false);
+            }
+            let saved = state
+                .history
+                .search(SearchQuery::last_with_search(
+                    reedline::SearchFilter::anything(None),
+                ))
+                .ok()
+                .and_then(|mut items| items.pop())
+                .unwrap_or(item);
+            return Ok(saved);
         }
         // niubash#703: capture the stamp of the entry this save
         // recorded (the store's new tail stamp), so the ledger's
@@ -2458,9 +2484,11 @@ impl LiveFileBackedHistory {
         } else {
             now_stamp()
         };
-        let synced = Self::sync_state(state);
+        // niubash#773: recording never writes the file — the pending
+        // line is unsynced until an explicit face (-a/-w, the -r
+        // pre-flush, or the session-end write) lands it.
         if let Ok(mut ledger) = ledger.lock() {
-            ledger.note_saved(text, stamp, synced);
+            ledger.note_saved(text, stamp, false);
         }
         Ok(saved)
     }
@@ -2469,9 +2497,11 @@ impl LiveFileBackedHistory {
     /// equal to `text` from the raw list AND the backing file, before
     /// the new copy is saved at the end.
     ///
-    /// GNU erases from the in-memory list only, but niu's live sync
-    /// has already written those copies to the file — leaving them
-    /// there would resurrect them at the next session's load. The
+    /// GNU erases from the in-memory list only. niu's staging rewrite
+    /// also rewrites the file: copies an earlier write face already
+    /// landed would otherwise stay on disk and resurrect at the next
+    /// session's load, and the rebuild keeps the store's on-disk
+    /// accounting exact (afterwards the staged file IS the list). The
     /// rewrite goes through the same staging rebuild `replace_all`
     /// uses, but WITHOUT its ledger reset: pending lines of other
     /// texts stay pending (the staged file holds them verbatim, so the
@@ -2535,6 +2565,10 @@ impl LiveFileBackedHistory {
                 state.history.realign_stamps(&keep_pairs);
                 if let Ok(mut ledger) = ledger.lock() {
                     ledger.pending.retain(|pending| pending.text != text);
+                    // niubash#773: the staged file now holds every
+                    // kept entry, so the retained pending lines are
+                    // on disk.
+                    ledger.mark_all_synced();
                     ledger.base_lines = kept_in_base;
                     if erased_in_prefix > 0 {
                         ledger.note_view_prefix_shrank(erased_in_prefix);
@@ -3008,6 +3042,16 @@ impl SessionLedger {
         self.pending.clear();
     }
 
+    /// niubash#773: every pending line is now in the backing file —
+    /// an explicit face flushed the store wholesale (the `-r`
+    /// pre-flush in `reload_from_file`, the erasedups staging
+    /// rewrite). A later `-a` must not append them again.
+    fn mark_all_synced(&mut self) {
+        for line in &mut self.pending {
+            line.synced = true;
+        }
+    }
+
     /// -c: pending lines leave the session's set and await removal from
     /// the file at session end. Committed lines are untouched.
     ///
@@ -3173,8 +3217,18 @@ impl History for LiveFileBackedHistory {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let mut state = self.state.lock().map_err(|_| history_lock_error())?;
-        Self::sync_state(&mut state);
+        // niubash#773: deliberate no-op. Reedline's contract for
+        // `sync()` is "make the recorded lines durable", but GNU's
+        // timing writes at the explicit faces (`-a`/`-w`) and at
+        // session end only — syncing here would put this session's
+        // lines in the file early, where another session's
+        // `history -n` could pick them up while this session is
+        // still live. The host never calls `sync()` per recorded
+        // line (the pinned reedline's engine exposes `sync_history`
+        // as a host API niu does not call), so nothing is lost:
+        // `LiveFileBackedHistory::drop` also writes nothing, and an
+        // editor rebuild mid-session no longer flushes the session's
+        // lines early.
         Ok(())
     }
 
