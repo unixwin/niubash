@@ -1328,46 +1328,13 @@ impl Shell {
         let mut printed_command_not_found_hints = false;
         let code = if let Some(exit) = self.easter_egg_exit(&ast.commands) {
             exit
-        } else if let Some(execution) = self.execute_host_synced_simple_ast(&ast) {
-            match execution {
-                Ok(code) => code,
-                Err(rubash::executor::ExecuteError::ExitCode(code)) => {
-                    // Keep `$?` in sync (#542) and record the jump so the
-                    // REPL ends the session (#544 R1) — unless the unwind
-                    // is a signal discard (#610).
-                    self.session_mut().set_last_status(code);
-                    self.note_exit_code_unwind(code);
-                    code
-                }
-                Err(rubash::executor::ExecuteError::Return(code)) => code,
-                Err(rubash::executor::ExecuteError::ExpansionFailure(code)) => code,
-                Err(rubash::executor::ExecuteError::FatalFunctionError(code)) => {
-                    self.note_session_exit_jump(code);
-                    code
-                }
-                Err(rubash::executor::ExecuteError::SigintUnwind) => {
-                    // rubash#1639 DISCARD verdict (the engine's grouped
-                    // driver maps it identically): the foreground job
-                    // died of SIGINT, the line is discarded, the reader
-                    // prompts again with $? = 130 — no diagnostic, no
-                    // session jump (niubash#610).
-                    self.session_mut().set_last_status(130);
-                    130
-                }
-                Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
-                    eprintln!("niubash: {}: command not found", cmd);
-                    self.print_command_not_found_hints(&cmd);
-                    printed_command_not_found_hints = true;
-                    127
-                }
-                Err(e) => {
-                    if !is_broken_pipe_execute_error(&e) {
-                        eprintln!("niubash: {}", e);
-                    }
-                    1
-                }
-            }
         } else {
+            // niubash#796: the host-synced per-command bypass that used to
+            // sit here (see the script-path note in execute_script_inner)
+            // leaked rubash's word-expansion comsub `$?` overlay past its
+            // one-command scope, so `X=$(exit 5); cd /tmp; false; echo $?`
+            // printed 5. Every line now runs through the engine's own list
+            // walker; the tail syncs below keep the host cwd/PATH current.
             match self.executor_mut().execute_ast(&ast) {
                 Ok(()) => self.session().last_status(),
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => {
@@ -2454,13 +2421,10 @@ impl Shell {
             // segment refresh landing mid-pass re-stamps the prompt
             // and one editor repaint carries the segment to the
             // idle line instead of waiting for the first keypress.
-            if let Some(worktree) = crate::git_prompt_cache::find_worktree(&cwd) {
+            if crate::git_prompt_cache::find_worktree(&cwd).is_some() {
                 let rebuild_cwd = cwd.clone();
                 prompt = prompt.with_live_vcs(
-                    std::sync::Arc::new(crate::idle_repaint::LiveVcsCell::new(
-                        worktree,
-                        value.clone(),
-                    )),
+                    std::sync::Arc::new(crate::idle_repaint::LiveVcsCell::new(value.clone())),
                     value,
                     std::sync::Arc::new(move |segment: &Option<String>| {
                         crate::git_prompt::render_with_segment(&rebuild_cwd, segment.as_deref())
@@ -4147,11 +4111,30 @@ impl Shell {
         let execution = if let Some(exit) = self.easter_egg_exit(&ast.commands) {
             Ok(exit)
         } else {
-            self.execute_host_synced_simple_ast(&ast)
-                .unwrap_or_else(|| match self.executor_mut().execute_ast(&ast) {
-                    Ok(()) => Ok(self.session().last_status()),
-                    Err(err) => Err(err),
-                })
+            // niubash#796: cd-bearing simple sequences used to bypass the
+            // engine's list walker here (a per-command execute_command loop
+            // that re-synced the host cwd/PATH after each command). That
+            // bypass skipped the walker's per-command bookkeeping — most
+            // visibly the $? overlay reset (rubash ast_exec.rs:541 clears
+            // word_expansion_comsub_exit, the word-expansion-local comsub
+            // status of rubash#485), so after a comsub-bearing command the
+            // overlay leaked past its one-command scope and every later
+            // `$?` read in the sequence returned the substitution's status
+            // (`X=$(exit 5); cd /tmp; false; echo $?` printed 5). GNU has
+            // no overlay: subst.c command_substitute writes the child's
+            // wait status into last_command_exit_value and the NEXT
+            // command's own completion overwrites it (execute_cmd.c:624
+            // per-command commit). The host cwd/PATH syncs the loop made
+            // per command are redundant with the tail syncs below (and
+            // with execute_line_with_options'), which every arm already
+            // runs — the engine stamps spawned children from its own cwd
+            // field (rubash G-02), so nothing host-side observes the
+            // process cwd mid-sequence. Route every sequence through the
+            // engine's walker; no host-level command fast path remains.
+            match self.executor_mut().execute_ast(&ast) {
+                Ok(()) => Ok(self.session().last_status()),
+                Err(err) => Err(err),
+            }
         };
 
         let code = match execution {
@@ -4252,35 +4235,6 @@ impl Shell {
         stage.heredoc = Some(input);
         stage.heredoc_delimiter = Some("NIU_PROCESS_STDIN".to_string());
         Ok(())
-    }
-    fn execute_host_synced_simple_ast(
-        &mut self,
-        ast: &Ast,
-    ) -> Option<Result<i32, rubash::executor::ExecuteError>> {
-        if !is_host_synced_simple_sequence(ast) {
-            return None;
-        }
-
-        for command in &ast.commands {
-            match self.executor_mut().execute_command(command) {
-                Ok(()) => {
-                    self.sync_process_cwd_from_executor_pwd();
-                    self.sync_process_path_from_executor_path();
-                }
-                // Propagate the unwind instead of flattening it to a status:
-                // the callers' `ExitCode` arms record the jump (niubash#402
-                // for the script path, niubash R1 for the interactive line),
-                // which `cd /tmp; exit 3`-shaped host-synced sequences need
-                // exactly like every other list.
-                Err(rubash::executor::ExecuteError::ExitCode(code)) => {
-                    return Some(Err(rubash::executor::ExecuteError::ExitCode(code)))
-                }
-                Err(rubash::executor::ExecuteError::Return(code)) => return Some(Ok(code)),
-                Err(err) => return Some(Err(err)),
-            }
-        }
-
-        Some(Ok(self.session().last_status()))
     }
 }
 
@@ -4455,22 +4409,6 @@ fn cd_tilde_path_to_slash_drive(value: &str) -> Option<String> {
     }
 }
 
-fn is_host_synced_simple_sequence(ast: &Ast) -> bool {
-    if !cfg!(windows) || !ast.commands.iter().any(is_cd_command) {
-        return false;
-    }
-
-    ast.commands.iter().all(is_host_synced_simple_command)
-}
-
-fn is_host_synced_simple_command(command: &rubash::parser::CommandNode) -> bool {
-    is_plain_simple_command(command)
-        && !command
-            .words
-            .first()
-            .is_some_and(|word| word == "set" || word == "trap")
-}
-
 fn is_plain_simple_command(command: &rubash::parser::CommandNode) -> bool {
     command.pipe.is_none()
         && !command.background
@@ -4545,13 +4483,6 @@ fn process_stdin_pipeline_bridge_stage(ast: &mut Ast) -> Option<&mut rubash::par
 fn niubash_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str, &[String])> {
     let _ = command;
     None
-}
-
-fn is_cd_command(command: &rubash::parser::CommandNode) -> bool {
-    command
-        .words
-        .first()
-        .is_some_and(|word| word.eq_ignore_ascii_case("cd"))
 }
 
 fn rewrite_winuxcmd_command_shims(tokens: &mut Vec<Token>, interactive_terminal_colors: bool) {

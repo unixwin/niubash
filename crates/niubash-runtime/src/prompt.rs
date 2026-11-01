@@ -461,6 +461,14 @@ pub struct BashPrompt {
     live: Option<LiveBashVcs>,
 }
 
+/// The gitbash factory face's rebuild closure (niubash#787):
+/// re-renders the full (pre-split) prompt from a segment value.
+type SegmentRebuild = Arc<dyn Fn(&Option<String>) -> String + Send + Sync>;
+
+/// The prompt pieces one rebuild produces — (left, right,
+/// right-on-last-line).
+type RebuiltPieces = (String, Option<String>, bool);
+
 /// The live Vcs state of a factory `BashPrompt` (niubash#787):
 /// the shared segment cell, the segment value the baked strings
 /// were built from, and the rebuild of the full prompt from a
@@ -470,8 +478,8 @@ pub struct BashPrompt {
 struct LiveBashVcs {
     cell: Arc<LiveVcsCell>,
     baked_segment: Arc<Mutex<Option<String>>>,
-    rebuild: Arc<dyn Fn(&Option<String>) -> String + Send + Sync>,
-    rebuilt: Arc<Mutex<Option<(String, Option<String>, bool)>>>,
+    rebuild: SegmentRebuild,
+    rebuilt: Arc<Mutex<Option<RebuiltPieces>>>,
 }
 
 impl BashPrompt {
@@ -526,7 +534,7 @@ impl BashPrompt {
         mut self,
         cell: Arc<LiveVcsCell>,
         baked_segment: Option<String>,
-        rebuild: Arc<dyn Fn(&Option<String>) -> String + Send + Sync>,
+        rebuild: SegmentRebuild,
     ) -> Self {
         self.live = Some(LiveBashVcs {
             cell,
@@ -547,7 +555,7 @@ impl BashPrompt {
     /// segment value, when a landing has moved it past the baked
     /// strings; `None` when the bake is current (the common case —
     /// one lock and a string compare per render).
-    fn refreshed(&self) -> Option<(String, Option<String>, bool)> {
+    fn refreshed(&self) -> Option<RebuiltPieces> {
         let live = self.live.as_ref()?;
         let current = live.cell.get();
         {
@@ -783,15 +791,11 @@ mod tests {
         // the cell and the next render rebuilds from the landed
         // value instead of serving the cold bake.
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cell = Arc::new(LiveVcsCell::new(
-            PathBuf::from("/tmp/issue787-bash-repo"),
-            None,
-        ));
-        let rebuild: Arc<dyn Fn(&Option<String>) -> String + Send + Sync> =
-            Arc::new(|segment: &Option<String>| match segment {
-                Some(segment) => format!("user@h /repo ({segment})\r\n$ "),
-                None => "user@h /repo\r\n$ ".to_string(),
-            });
+        let cell = Arc::new(LiveVcsCell::new(None));
+        let rebuild: SegmentRebuild = Arc::new(|segment: &Option<String>| match segment {
+            Some(segment) => format!("user@h /repo ({segment})\r\n$ "),
+            None => "user@h /repo\r\n$ ".to_string(),
+        });
         let prompt = BashPrompt::new("user@h /repo\r\n$ ".to_string(), String::new())
             .with_live_vcs(cell.clone(), None, rebuild);
         assert_eq!(prompt.render_prompt_left(), "user@h /repo\r\n$ ");
