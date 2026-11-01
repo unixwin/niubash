@@ -13,7 +13,7 @@ pub mod path;
 pub mod variables;
 pub mod winuxcmd_assets;
 
-pub use completer::{CommandProbe, CompletionState, NiubashCompleter};
+pub use completer::{CommandProbe, CompletionState, NiubashCompleter, SpecificCompletion};
 pub use file_colors::{CandidateKind, FileColors};
 
 use std::path::PathBuf;
@@ -222,6 +222,16 @@ impl CompletionContext {
             .unwrap_or(0);
         (segment_start, &before_cursor[segment_start..])
     }
+}
+
+/// The replacement span for the word at CURSOR in INPUT, using the
+/// same shell-word parser the completer uses for its suggestions.
+/// A cursor after whitespace has an empty span at the cursor.
+pub fn completion_span(input: &str, cursor: usize) -> (usize, usize) {
+    let cursor = cursor.min(input.len());
+    CompletionContext::new(PathBuf::new(), input.to_string(), cursor)
+        .current_word_span()
+        .unwrap_or((cursor, cursor))
 }
 
 /// Trait for pluggable completion providers.

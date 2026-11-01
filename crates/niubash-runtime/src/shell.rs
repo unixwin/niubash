@@ -2955,6 +2955,39 @@ impl Shell {
         Some(self.session().expand_shell_words(&text))
     }
 
+    /// GNU bash `history-expand-line` (bashline.c:2902): run only the
+    /// history-expansion stage of [`Self::shell_expand_line`]
+    /// (`pre_process_line`, bashhist.c:562) and leave aliases and
+    /// words untouched. The `histexpand` shell option gates it, as it
+    /// gates `pre_process_line`; an expansion error returns `None`
+    /// and the line stays as it was.
+    pub fn history_expand_line(
+        &mut self,
+        line: &str,
+        history_entries: &[String],
+    ) -> Option<String> {
+        if !self
+            .session_mut()
+            .options()
+            .get("histexpand")
+            .unwrap_or(true)
+        {
+            return Some(line.to_string());
+        }
+        let histchars = self.executor().get_env("histchars").map(str::to_owned);
+        let posix = self
+            .executor()
+            .get_env("__RUBASH_POSIX_MODE")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        crate::readline_commands::history_expand_line(
+            line,
+            history_entries,
+            histchars.as_deref(),
+            posix,
+        )
+    }
+
     /// Load user completion declarations from the `NIU_COMPDEFS` variable
     /// declared in the startup rc. Each line is `command:function`, or —
     /// since issue #306 — a path to an existing directory holding
@@ -6509,6 +6542,44 @@ mod tests {
         shell.session_mut().options().set("histexpand", false);
         assert_eq!(
             shell.shell_expand_line("!!", &history).as_deref(),
+            Some("!!")
+        );
+    }
+
+    #[test]
+    fn burndown_history_expand_line_expands_only_history() {
+        let mut shell = test_shell(HookConfig::default());
+        shell.session_mut().options().set("histexpand", true);
+        shell
+            .execute_line("alias greet='echo hello'")
+            .expect("alias registers");
+        shell
+            .execute_line("ISSUE_BURNDOWN_NAME=world")
+            .expect("variable registers");
+        let history = vec!["echo first".to_string(), "greet again".to_string()];
+
+        // bashline.c:2902 history_expand_line -> pre_process_line:
+        // the `!!` designator expands, but the alias in the resulting
+        // line is NOT expanded (that is shell-expand-line's later
+        // stage) and neither are words.
+        assert_eq!(
+            shell.history_expand_line("!!", &history).as_deref(),
+            Some("greet again")
+        );
+        assert_eq!(
+            shell
+                .history_expand_line("greet $ISSUE_BURNDOWN_NAME", &history)
+                .as_deref(),
+            Some("greet $ISSUE_BURNDOWN_NAME")
+        );
+        // A failed designator leaves the line as it was (GNU's
+        // cleanup_expansion_error path clears the message and keeps
+        // the buffer).
+        assert_eq!(shell.history_expand_line("!nosuch", &history), None);
+        // `set +H` gates the stage, exactly as pre_process_line does.
+        shell.session_mut().options().set("histexpand", false);
+        assert_eq!(
+            shell.history_expand_line("!!", &history).as_deref(),
             Some("!!")
         );
     }
