@@ -94,4 +94,4 @@ rubash = { path = "../rubash" }
 # the source and this patch entry stay stable (rename tracked in ruline#9).
 # The rev is pinned and bumped on demand only.
 [patch.crates-io]
-reedline = { git = "https://github.com/unixwin/ruline", rev = "0ec96fea48b5fa50420242f223dca64554be32ab" }
+reedline = { git = "https://github.com/unixwin/ruline", rev = "99cb4cb7e8bd44f664d781a48fb0f538b83d1449" }
