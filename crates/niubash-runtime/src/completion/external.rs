@@ -274,6 +274,29 @@ pub struct ExternalCompletionPlugin {
     cache_dir: Option<PathBuf>,
 }
 
+/// The embedded WinuxCmd completion definitions, parsed once per
+/// process. The parse is the one expensive step in constructing an
+/// [`ExternalCompletionPlugin`] (niubash#755); [`warm_embedded_definitions`]
+/// exists to move it off the interactive startup path.
+static EMBEDDED_DEFS: LazyLock<Vec<CommandDef>> =
+    LazyLock::new(|| crate::completion::winuxcmd_assets::definitions().collect());
+
+/// Start the one-time embedded-definition parse on a background
+/// thread so it overlaps the rest of startup instead of landing
+/// inside the first completion-state seeding (niubash#755). The
+/// LazyLock remains the single source: a consumer that arrives
+/// before the warm-up finishes waits only for the remainder of the
+/// same parse. Identical data, identical order, identical merge
+/// behavior — only the wall-clock placement changes. A spawn failure
+/// is not an error; the lazy path still parses on first use.
+pub fn warm_embedded_definitions() {
+    let _ = std::thread::Builder::new()
+        .name("niu-embedded-defs-warmup".to_string())
+        .spawn(|| {
+            LazyLock::force(&EMBEDDED_DEFS);
+        });
+}
+
 impl ExternalCompletionPlugin {
     /// Number of loaded definitions (for diagnostics)
     pub fn definition_count(&self) -> usize {
@@ -331,8 +354,6 @@ impl ExternalCompletionPlugin {
     /// completion dirs; the hand-curated embedded tables they used to ride
     /// on were removed with the product-TOML deletion (1.5.0).
     pub fn new() -> Self {
-        static EMBEDDED_DEFS: LazyLock<Vec<CommandDef>> =
-            LazyLock::new(|| crate::completion::winuxcmd_assets::definitions().collect());
         let mut plugin = Self {
             definitions: HashMap::new(),
             mem_cache: Mutex::new(HashMap::new()),
