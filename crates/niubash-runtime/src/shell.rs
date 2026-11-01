@@ -2595,6 +2595,37 @@ impl Shell {
         false
     }
 
+    /// Fold the live terminal size into `$COLUMNS`/`$LINES` (niubash#799).
+    ///
+    /// GNU port notes. The SIGWINCH handler itself only latches a flag
+    /// (sig.c:745 `sigwinch_sighandler` -> `sigwinch_received`); the bind
+    /// runs `get_new_window_size` (lib/sh/winsize.c:87), which reads the
+    /// tty winsize and writes both variables through
+    /// `sh_set_lines_and_columns` (variables.c:1040), from two sites:
+    /// `shell_getc`'s `CHECK_WINCH` before the next command line is
+    /// parsed (parse.y:2484), and `wait_for` after every foreground job
+    /// while `checkwinsize` is on (jobs.c:3285/3297/3365/3372; default
+    /// on, config-top.h:148). niubash's equivalent points are the REPL
+    /// loop top (before the prompt — the post-job face) and the moment a
+    /// read returns (before the line executes — the `shell_getc` face);
+    /// both funnel through here. The `checkwinsize` gate mirrors
+    /// jobs.c's guard exactly, and the bind goes through the Session
+    /// contract's `notify_terminal_size`, which writes `LINES` then
+    /// `COLUMNS` as plain (non-exported) shell variables the same way
+    /// `bind_variable` does in the C.
+    pub(crate) fn refresh_winsize_variables(&mut self) {
+        if self.session_mut().options().get("checkwinsize") == Some(false) {
+            return;
+        }
+        let Some((columns, rows)) = crate::terminal::terminal_size() else {
+            return;
+        };
+        if columns > 0 && rows > 0 {
+            self.session_mut()
+                .notify_terminal_size(i32::from(columns), i32::from(rows));
+        }
+    }
+
     /// Compute the current title for `run_title_hooks`.
     ///
     /// Resolution order: `NIU_TITLE` env var (set by plugins or users) wins,

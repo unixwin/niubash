@@ -5673,6 +5673,12 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // `borrow_mut` temporary would otherwise live to the end of the `if
     // let` (edition 2021), and the inner `borrow_mut` for the EXIT trap
     // panicked with "RefCell already borrowed" on every rc/profile exit.
+    // niubash#799: GNU binds COLUMNS/LINES twice around the startup
+    // files (jobs.c:4871 get_tty_state's mirror pre-files, shell.c:816
+    // post-files); the REPL loop-top bind below is the post-files face,
+    // and this one is the pre-files mirror, so an rc that reads
+    // $COLUMNS sees the real console width, not the 80-column seed.
+    shell.borrow_mut().refresh_winsize_variables();
     let startup_exit = shell.borrow_mut().run_startup_rc();
     if let Some(status) = startup_exit {
         // niubash#402: the startup rc executed `exit` — end the session with
@@ -5719,6 +5725,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
 
     loop {
         crate::console_guard::restore(&console_baseline);
+        // niubash#799: fold the live console size into $COLUMNS/$LINES
+        // before every prompt — the jobs.c `wait_for` face of GNU's
+        // checkwinsize re-read (the resize may also have landed while a
+        // foreground command owned the terminal). Shell::refresh_winsize_
+        // variables carries the GNU citations; the seed in
+        // ensure_prompt_terminal_env stays as the no-console fallback.
+        shell.borrow_mut().refresh_winsize_variables();
         typeahead.arm();
         // niubash#775: a plugin's `rl_macro_bind` macro has no editor
         // event of its own; route it into the engine macro registry first
@@ -5874,6 +5887,14 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 None => line_editor.read_line(&prompt),
             }
         };
+        // niubash#799: a resize that arrived while the read was on screen
+        // must be in the variables before the accepted line executes —
+        // GNU binds it at `shell_getc`'s CHECK_WINCH (parse.y:2484), i.e.
+        // before the submitted line is parsed and its words expanded, so
+        // `echo $COLUMNS` right after a resize sees the new width. The
+        // loop-top bind above covers the post-command face; this is the
+        // pre-expansion one.
+        shell.borrow_mut().refresh_winsize_variables();
         // The foreground command (or widget/exit path) below owns the
         // terminal: the guard stays disarmed until the next prompt
         // rebuild at the top of the loop.
@@ -6079,6 +6100,9 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
     let mut pending = PendingReplInput::default();
     loop {
         crate::console_guard::restore(&console_baseline);
+        // niubash#799: same winsize fold as the line-editor loop — the
+        // no-editing reader still expands `$COLUMNS`/`$LINES` per line.
+        shell.refresh_winsize_variables();
         // niubash#180: same live-session apply as the line-editor loop.
         shell.apply_setup_config_if_pending();
         // niubash#646: same settings refresh as the line-editor loop.
