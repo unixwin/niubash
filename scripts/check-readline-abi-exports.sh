@@ -5,18 +5,20 @@
 # Usage: scripts/check-readline-abi-exports.sh [path/to/niu]
 #        NIU_BIN=... PROFILE=release scripts/check-readline-abi-exports.sh
 #
-# The `readline_abi` probe symbols must be in the *dynamic* symbol table
-# because bash loadable builtins (`enable -f`) resolve `rl_*` against the
-# main executable after `dlopen`. `tests/readline_abi_exports.rs` runs the
-# same check against Cargo's test binary; this script exists for release
-# artifacts, where the probe must survive the release profile's thin LTO and
-# strip settings.
+# The symbols in scripts/readline-abi-exports.txt must be in the *dynamic*
+# symbol table because bash loadable builtins (`enable -f`) resolve `rl_*` /
+# `history_*` against the main executable after `dlopen`.
+# tests/readline_abi_exports.rs runs the same audit against Cargo's test
+# binary; this script exists for release artifacts, where the whole surface
+# must survive the release profile's thin LTO and strip settings.
 #
 # Exit 0: all symbols present (or the Windows check skipped for lack of
-# dumpbin). Exit 1: a symbol is missing. Exit 2: no binary to inspect.
+# dumpbin). Exit 1: at least one symbol is missing. Exit 2: no binary / no
+# symbol list to inspect.
 set -eu
 
-symbols="rl_readline_version rl_library_version"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exports=${READLINE_ABI_EXPORTS:-$script_dir/readline-abi-exports.txt}
 
 if [ "$#" -gt 0 ]; then
     binary=$1
@@ -33,8 +35,21 @@ if [ -z "${binary:-}" ]; then
     binary="target/$profile/niu$suffix"
 fi
 
+if [ ! -f "$exports" ]; then
+    echo "error: symbol list $exports not found" >&2
+    exit 2
+fi
+
 if [ ! -f "$binary" ]; then
     echo "error: $binary not found; build niu first (cargo build --locked --bin niu)" >&2
+    exit 2
+fi
+
+# One `F <name>` / `D <name>` per line; comments and blank lines ignored.
+wanted=$(awk '!/^[[:space:]]*(#|$)/ { print $2 }' "$exports")
+total=$(printf '%s\n' "$wanted" | awk 'NF' | wc -l | tr -d ' ')
+if [ "$total" -eq 0 ]; then
+    echo "error: $exports lists no symbols" >&2
     exit 2
 fi
 
@@ -64,24 +79,30 @@ case "$(uname -s)" in
         ;;
 esac
 
-status=0
-for symbol in $symbols; do
-    # nm/readelf/dumpbin all print the name as one whitespace-separated
-    # token; strip the Mach-O leading underscore and compare exactly so
-    # `rl_library_version` cannot match a longer name by substring.
-    if printf '%s\n' "$listing" |
-        tr ' \t' '\n\n' |
-        sed 's/^_//' |
-        grep -qx "$symbol"; then
-        echo "ok: $symbol"
-    else
-        echo "MISSING: $symbol ($binary)" >&2
-        status=1
-    fi
-done
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/niu-readline-abi.XXXXXX") || {
+    echo "error: cannot create a temporary directory (set TMPDIR)" >&2
+    exit 2
+}
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
-if [ "$status" -ne 0 ]; then
-    echo "--- symbol listing ---" >&2
-    printf '%s\n' "$listing" >&2
+# Normalize to one bare name per line: nm/readelf/dumpbin all print the name
+# as one whitespace-separated token; strip the Mach-O leading underscore and
+# any ELF @VERSION suffix. Compare exactly so `rl_library_version` cannot
+# match a longer name by substring.
+printf '%s\n' "$listing" |
+    tr ' \t' '\n\n' |
+    sed -e 's/^_//' -e 's/@.*$//' |
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*$' |
+    sort -u >"$tmp/have" || true
+
+printf '%s\n' "$wanted" | awk 'NF' | sort -u >"$tmp/want"
+missing=$(comm -23 "$tmp/want" "$tmp/have")
+count=$(printf '%s\n' "$missing" | awk 'NF' | wc -l | tr -d ' ')
+
+if [ -n "$missing" ]; then
+    printf 'MISSING (%s of %s, %s):\n%s\n' "$count" "$total" "$binary" "$missing" >&2
+    exit 1
 fi
-exit "$status"
+
+echo "ok: $total readline ABI symbols exported from $binary"
+exit 0

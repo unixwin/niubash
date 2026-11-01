@@ -192,16 +192,19 @@ executable — the live editor — rather than against a second readline
 instance.
 
 The ABI definitions live in the ruline `readline-abi` crate
-(<https://github.com/unixwin/ruline/issues/8>). niu's job is the hosting
-half; `crates/niubash-runtime/src/readline_abi.rs` holds only a visibility
-probe (`rl_readline_version`, `rl_library_version`) until that crate is
-wired in. The module deliberately does not grow readline implementations —
-`readline()`, history, keymaps, funmaps, hooks and completion belong to the
-ABI crate, and the host will route them to the suspended editor.
+(<https://github.com/unixwin/ruline/issues/8>), pinned as a git dependency
+of the root `niu` package. Its lib target is named `readline`
+(`readline_abi` is the package name); `src/main.rs` calls `rl_initialize()`
+once at startup so the exported globals (`rl_line_buffer`, keymaps, funmaps,
+completion defaults) exist before any plugin can load. The host does not
+implement `rl_*` itself: `readline()`, history, keymaps, funmaps, hooks and
+completion belong to the ABI crate.
 
-Publishing the symbols needs a per-platform link switch, done in
-`build.rs` for the `niu` binary only (the `bash` binary re-execs niu and
-never hosts an editor):
+The exported set is checked in at `scripts/readline-abi-exports.txt`
+(one `F <name>` / `D <name>` per line, generated from the built
+`libreadline` with `scripts/gen-readline-abi-exports.sh`). Publishing it
+needs a per-platform link switch, done in `build.rs` for the `niu` binary
+only (the `bash` binary re-execs niu and never hosts an editor):
 
 | Target | Flag | Why |
 |---|---|---|
@@ -215,25 +218,35 @@ table and cannot load shared objects, so `build.rs` skips export setup for
 `crt-static` targets; those builds use the standalone `libreadline.so.8`
 embedding mode instead.
 
-`#[used]` keeps each definition in its object, and the names are also
+Visibility is not retention: a definition in an rlib member is only linked
+when something references it, and plugins reach the ABI through `dlsym`, not
+through Rust code. Every name in the checked-in list is therefore also
 anchored as undefined (`-Wl,--undefined=<sym>`, `-Wl,-u,_<sym>`,
-`/INCLUDE:<sym>`) so the static-library member is pulled into the link even
-under thin LTO. `tests/readline_abi_exports.rs` audits the built binary
-(`nm -D` / `readelf --dyn-syms`, `dumpbin /exports` on Windows) and fails if
-a probe symbol disappears.
+`/INCLUDE:<sym>`) so its member is pulled into the link even under thin LTO
+and `--gc-sections`. MSVC's generated `.def` marks data symbols with `DATA`
+and leaves functions bare.
+
+`tests/readline_abi_exports.rs` audits the entire list against the built
+binary (`nm -D` / `readelf --dyn-syms`, `dumpbin /exports` on Windows), with
+a second focused test for the symbols the `loadable-builtin-niu` plugin
+probe resolves; `scripts/check-readline-abi-exports.sh` runs the same audit
+on release artifacts.
 
 Two embedding modes are supported, and only one shares niu's editor:
 
 - **Host mode (this executable)** — loadable builtins resolve the symbols
-  above from running niu and operate on the live REPL.
+  above from running niu. Today the ABI crate owns a *standalone* editor
+  state that `rl_initialize()` sets up; routing it to the live Reedline
+  editor (`rl_line_buffer` mirroring, `rl_*` edits landing in the prompt) is
+  the remaining follow-up.
 - **Standalone `libreadline.so.8` / `libhistory.so.8`** — the ruline ABI
   crate's `cdylib`; an external embedder that links it owns its own editor
   instance and does not see niu's process state.
 
-Until the ruline crate lands, `bind -x` (engine bindings applied to the
-editor through the `__niu_bindx` host command), `__niu_readline` host
-commands, `READLINE_*` read-back and inputrc handling keep their existing
-paths; the export probe changes no behaviour.
+`bind -x` (engine bindings applied to the editor through the `__niu_bindx`
+host command), `__niu_readline` host commands, `READLINE_*` read-back and
+inputrc handling keep their existing paths; the ABI export changes no
+behaviour until the live routing lands.
 
 ## Data flow
 

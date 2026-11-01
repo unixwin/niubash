@@ -30,6 +30,12 @@ resolver = "2"
 [dependencies]
 niubash-runtime = { path = "crates/niubash-runtime", version = "1.4.3" }
 rubash = { version = "1.4.3", git = "https://github.com/unixwin/rubash.git", branch = "master" }
+# niubash#775 / ruline#8: the full GNU readline 8.x C ABI, implemented by
+# ruline. Linked into niu so `enable -f` loadable builtins resolve `rl_*` /
+# `history_*` against this executable; build.rs anchors every exported symbol
+# in scripts/readline-abi-exports.txt. The lib name is `readline`
+# (readline_abi is the package name).
+readline-abi = { git = "https://github.com/unixwin/ruline", rev = "0bfc7854b0918d42445b889eeb358b1f7ca04f76" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
@@ -94,4 +100,7 @@ rubash = { path = "../rubash" }
 # the source and this patch entry stay stable (rename tracked in ruline#9).
 # The rev is pinned and bumped on demand only.
 [patch.crates-io]
+# Same rev as the `readline-abi` dependency above: the ABI adapter's path
+# dependency on its workspace-root `reedline` must resolve to the copy niu
+# already links, or the graph carries two editors.
 reedline = { git = "https://github.com/unixwin/ruline", rev = "0bfc7854b0918d42445b889eeb358b1f7ca04f76" }
