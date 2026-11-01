@@ -593,9 +593,19 @@ mod tests {
 
     #[test]
     fn command_completion_includes_common_commands_for_partial_input() {
-        let ctx = CompletionContext::new(std::path::PathBuf::from("."), "pw".to_string(), 2);
+        // pwsh is in the Windows common-command table; the Unix edition shows
+        // cross-platform staples instead (see get_common_commands).
+        #[cfg(windows)]
+        let (prefix, expected) = ("pw", "pwsh");
+        #[cfg(unix)]
+        let (prefix, expected) = ("gr", "grep");
+        let ctx = CompletionContext::new(
+            std::path::PathBuf::from("."),
+            prefix.to_string(),
+            prefix.len(),
+        );
         let result = CommandCompleter::complete(&ctx).unwrap().unwrap();
-        assert!(result.completions.contains(&"pwsh".to_string()));
+        assert!(result.completions.contains(&expected.to_string()));
         // The retired oh-my-niu command must not complete any more (#145);
         // with no other "oh-" candidate the completer yields nothing.
         let ctx = CompletionContext::new(std::path::PathBuf::from("."), "oh-".to_string(), 3);

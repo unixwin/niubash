@@ -705,6 +705,43 @@ fn format_shell_path(value: &str, quote: Option<char>) -> String {
     }
 }
 
+/// Undo [`format_shell_path`], recovering the raw filename from a
+/// suggestion. `complete-into-braces` needs the raw names: GNU's
+/// `bracecomp.c` disables readline's filename quoting and applies its own
+/// `sh_backslash_quote` to the unquoted match list.
+pub(crate) fn unescape_shell_path(value: &str) -> String {
+    if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        return inner.replace("'\\''", "'");
+    }
+    if let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return unescape_backslashes(inner);
+    }
+    unescape_backslashes(value)
+}
+
+fn unescape_backslashes(value: &str) -> String {
+    let mut unescaped = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                unescaped.push(next);
+            } else {
+                unescaped.push(ch);
+            }
+        } else {
+            unescaped.push(ch);
+        }
+    }
+    unescaped
+}
+
 fn escape_double_quoted_path(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -1529,6 +1566,27 @@ mod simulated_namespace_tests {
         let values = values(candidates);
         assert!(values.contains(&"/proc/meminfo".to_string()), "{values:?}");
         assert!(values.contains(&"/proc/self/".to_string()), "{values:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue758_proc_pid_tier_lists_root_link() {
+        // niubash#758: /proc/<pid>/root joined the registry's link
+        // table (and with it the per-pid enumeration); the completion
+        // tier reads that same enumeration face, so the entry is
+        // offered beside its sibling links — a face that opens but
+        // does not complete would be a half-face.
+        let q = query("/proc/self/");
+        let context = ctx(&[0, 1, 2]);
+        let candidates = simulated_namespace_candidates(&q, "/proc/self/", &context, false)
+            .expect("/proc/self is simulated on Windows");
+        let values = values(candidates);
+        assert!(
+            values.contains(&"/proc/self/root".to_string()),
+            "{values:?}"
+        );
+        assert!(values.contains(&"/proc/self/cwd".to_string()), "{values:?}");
+        assert!(values.contains(&"/proc/self/exe".to_string()), "{values:?}");
     }
 }
 

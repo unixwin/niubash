@@ -458,6 +458,30 @@ mod tests {
         (root, niu)
     }
 
+    /// A "links work" injector for the report/upgrade logic tests. It uses
+    /// the real hardlink where the host filesystem supports one; Android's
+    /// app-data filesystems refuse hardlinks even inside one directory
+    /// (EPERM from SELinux), so there a symlink is the equivalent
+    /// same-inode face (`same_file` follows it). The product's hardlink
+    /// failure path is not hidden by this: `always_fail_link` drives the
+    /// shim-copy fallback tests explicitly, and Windows still requires a
+    /// real hardlink.
+    fn test_link(source: &Path, link: &Path) -> std::io::Result<()> {
+        match std::fs::hard_link(source, link) {
+            Ok(()) => Ok(()),
+            Err(hardlink_error) => {
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(source, link)
+                }
+                #[cfg(not(unix))]
+                {
+                    Err(hardlink_error)
+                }
+            }
+        }
+    }
+
     #[test]
     fn installation_root_is_found_from_a_hardlinked_entry_name() {
         let root = unique_temp_dir("root-from-link");
@@ -540,7 +564,7 @@ mod tests {
     fn linking_is_idempotent_and_refreshes_stale_names() {
         let (root, niu) = fake_install("refresh");
 
-        let first = link_shell_faces(&root, &niu, false);
+        let first = link_shell_faces_with_linker(&root, &niu, false, &test_link);
         assert_eq!(first.created.len(), 6, "{first:?}");
         assert!(first.failed.is_empty(), "{first:?}");
         for link in planned_shell_links(&root, &niu) {
@@ -552,7 +576,7 @@ mod tests {
         }
 
         // A second run has nothing to do.
-        let second = link_shell_faces(&root, &niu, false);
+        let second = link_shell_faces_with_linker(&root, &niu, false, &test_link);
         assert!(second.created.is_empty(), "{second:?}");
         assert_eq!(second.already_current.len(), 6, "{second:?}");
 
@@ -561,13 +585,13 @@ mod tests {
         let stale = root.join("bin").join(SHELL_FACES[0]);
         std::fs::remove_file(&stale).unwrap();
         std::fs::write(&stale, b"stale shim").unwrap();
-        let kept = link_shell_faces(&root, &niu, false);
+        let kept = link_shell_faces_with_linker(&root, &niu, false, &test_link);
         assert!(kept.created.is_empty(), "{kept:?}");
         assert_eq!(kept.skipped.len(), 1, "{kept:?}");
         assert_eq!(std::fs::read(&stale).unwrap(), b"stale shim");
 
         // ... and replaced with --force, without leaving anything behind.
-        let forced = link_shell_faces(&root, &niu, true);
+        let forced = link_shell_faces_with_linker(&root, &niu, true, &test_link);
         assert_eq!(forced.created.len(), 1, "{forced:?}");
         assert!(forced.failed.is_empty(), "{forced:?}");
         assert!(same_file(&stale, &niu));
@@ -592,7 +616,7 @@ mod tests {
         std::fs::write(&niu, b"niu payload").unwrap();
         std::fs::create_dir_all(root.join("bin")).unwrap();
 
-        let report = link_shell_faces(&root, &niu, false);
+        let report = link_shell_faces_with_linker(&root, &niu, false, &test_link);
         assert_eq!(report.created.len(), 2, "{report:?}");
         assert_eq!(report.skipped.len(), 4, "{report:?}");
         assert!(report
@@ -668,7 +692,7 @@ mod tests {
             std::fs::write(&link, b"shim payload").unwrap();
         }
 
-        let report = link_shell_faces(&root, &niu, false);
+        let report = link_shell_faces_with_linker(&root, &niu, false, &test_link);
         assert_eq!(report.created.len(), 6, "{report:?}");
         assert!(report.shimmed.is_empty(), "{report:?}");
         for link in planned_shell_links(&root, &niu) {
@@ -688,7 +712,7 @@ mod tests {
         let face = root.join("bin").join(SHELL_FACES[0]);
         std::fs::create_dir_all(&face).unwrap();
 
-        let report = link_shell_faces(&root, &niu, true);
+        let report = link_shell_faces_with_linker(&root, &niu, true, &test_link);
         assert!(face.is_dir(), "the directory face must survive relink");
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert!(report.failed[0].1.contains("directory"), "{report:?}");

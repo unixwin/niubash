@@ -1,8 +1,9 @@
-//! niubash#741/#742/#743 zsh-parity completion pins on a real terminal:
+//! niubash#741/#742/#743/#778 zsh-parity completion pins on a real
+//! terminal:
 //!
-//! * select interaction (the default since niubash#742): TAB #1 opens
-//!   the candidate grid WITHOUT splicing a candidate; TAB #2 selects
-//!   the first candidate; further TABs cycle; Esc rolls back.
+//! * select interaction (the default since niubash#742): TAB #1 puts
+//!   the FIRST candidate into the line and highlights it in the grid
+//!   (niubash#778); further TABs cycle; Esc rolls back.
 //! * bare TAB (blank line before the cursor): inserts a four-space
 //!   indent instead of opening the command-position grid (#742).
 //! * large candidate sets keep a multi-column grid even with a long
@@ -30,12 +31,12 @@ fn write_dirs(s: &NiuSession) {
 }
 
 /// select is the built-in default: no NIU_COMPLETION_INTERACTION env.
-/// The execution-level proof that TAB #1 spliced nothing: Enter right
-/// after it submits `cd sel-` — which fails — where a spliced
-/// candidate would have executed `cd sel-one/` instead.
+/// The execution-level proof of the #778 contract: TAB #1 splices the
+/// first candidate and shows it in the grid, so Enter right after it
+/// runs `cd sel-one/`.
 #[test]
-fn issue742_pty_select_first_tab_shows_grid_without_splicing() {
-    if !require_pty_or_skip("issue742_pty_select_first_tab_shows_grid_without_splicing") {
+fn issue742_pty_select_first_tab_splices_first_candidate() {
+    if !require_pty_or_skip("issue742_pty_select_first_tab_splices_first_candidate") {
         return;
     }
     let mut s = NiuSession::spawn("sel-open-742");
@@ -43,24 +44,23 @@ fn issue742_pty_select_first_tab_shows_grid_without_splicing() {
     s.wait_ready();
     s.send("cd sel-");
     s.send(TAB);
-    // The grid is up (a candidate is visible) but nothing was spliced.
+    // The grid is up AND the first candidate is already in the line.
     s.expect("sel-one");
     s.send("\r");
-    s.expect("No such file");
     s.expect_prompt();
     s.send_line("pwd");
-    s.expect("/start");
+    s.expect("/start/sel-one");
     s.expect_prompt();
 }
 
-/// TAB #2 selects the FIRST candidate; TAB #3 moves to the second —
-/// verified end to end through `pwd`.
+/// TAB #1 selects the FIRST candidate; TAB #2 moves to the second and
+/// TAB #3 wraps back — verified end to end through `pwd`.
 #[test]
-fn issue742_pty_select_second_tab_picks_first_and_cycles() {
-    if !require_pty_or_skip("issue742_pty_select_second_tab_picks_first_and_cycles") {
+fn issue742_pty_select_tab_cycles_from_the_first_candidate() {
+    if !require_pty_or_skip("issue742_pty_select_tab_cycles_from_the_first_candidate") {
         return;
     }
-    for (tabs, expected) in [(2usize, "/sel-one"), (3, "/sel-two"), (4, "/sel-one")] {
+    for (tabs, expected) in [(1usize, "/sel-one"), (2, "/sel-two"), (3, "/sel-one")] {
         let mut s = NiuSession::spawn("sel-pick-742");
         write_dirs(&s);
         s.wait_ready();
@@ -81,8 +81,8 @@ fn issue742_pty_select_second_tab_picks_first_and_cycles() {
     }
 }
 
-/// Esc on an unselected open grid just closes it; Esc after a pick
-/// rolls the line back to the pre-completion snapshot.
+/// Esc after a TAB #1 pick (and a further TAB) rolls the line back to
+/// the pre-completion snapshot.
 #[test]
 fn issue742_pty_select_esc_rolls_back_the_pick() {
     if !require_pty_or_skip("issue742_pty_select_esc_rolls_back_the_pick") {
@@ -123,10 +123,18 @@ fn issue742_pty_bare_tab_inserts_indent() {
     s.expect_prompt();
     let transcript = s.transcript();
     // The painted input line carries the indent straight after the
-    // prompt's reset code (`<ESC>[m` + four spaces + `echo` — the
-    // driver's transcript escapes ESC to `<ESC>`).
+    // prompt's reset code (reset + four spaces + `echo` — the driver's
+    // transcript escapes ESC to `<ESC>`). SGR reset has two byte
+    // spellings, `ESC[m` and `ESC[0m`, with identical meaning; the
+    // stream a test sees depends on the hosting layer — ConPTY
+    // normalizes the sequences it forwards (the spelling this pin was
+    // authored against), while a Unix pty carries the painter's own
+    // `ESC[0m` bytes. Canonicalize the spelling before matching so
+    // the pin asserts the behavior (indent directly after the reset),
+    // not one platform's byte form (niubash#753).
+    let canonical = transcript.replace("<ESC>[0m", "<ESC>[m");
     assert!(
-        transcript.contains("<ESC>[m    "),
+        canonical.contains("<ESC>[m    "),
         "the TAB must have left a four-space indent in the line:\n{transcript}"
     );
 }

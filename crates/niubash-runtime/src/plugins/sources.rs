@@ -1979,9 +1979,13 @@ mod tests {
     /// origin, so a multi-source report is attributable).
     #[test]
     fn run_git_bounded_unbudgeted_propagates_exit_status() {
-        let mut ok = Command::new(if cfg!(windows) { "cmd" } else { "true" });
+        // A fixed, non-zero status: `false` exits 1 on Unix, not 3, so drive
+        // the status through the host shell instead of assuming its value.
+        let mut ok = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
         if cfg!(windows) {
             ok.args(["/c", "exit", "0"]);
+        } else {
+            ok.args(["-c", "exit 0"]);
         }
         run_git_bounded(
             ok,
@@ -1991,9 +1995,11 @@ mod tests {
         )
         .expect("exit 0 must pass");
 
-        let mut bad = Command::new(if cfg!(windows) { "cmd" } else { "false" });
+        let mut bad = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
         if cfg!(windows) {
             bad.args(["/c", "exit", "3"]);
+        } else {
+            bad.args(["-c", "exit 3"]);
         }
         let err = run_git_bounded(
             bad,

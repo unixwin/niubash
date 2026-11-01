@@ -627,9 +627,11 @@ version = "1.4.4"
 dependencies = [
  "anyhow",
  "env_logger",
+ "libc",
  "log",
  "niubash-runtime",
  "portable-pty",
+ "readline-abi",
  "rubash",
  "serde",
  "serde_json",
@@ -655,6 +657,7 @@ dependencies = [
  "log",
  "nu-ansi-term",
  "png",
+ "readline-abi",
  "reedline",
  "rubash",
  "serde",
@@ -925,6 +928,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "readline-abi"
+version = "0.1.0"
+source = "git+https://github.com/unixwin/ruline?rev=e5535ce297e22e296e33de6c9caa97ece0223fac#e5535ce297e22e296e33de6c9caa97ece0223fac"
+dependencies = [
+ "libc",
+ "reedline",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -946,8 +958,8 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.52.1"
-source = "git+https://github.com/caomengxuan666/reedline?rev=401393f#401393f9362439394a891ff892f114b9970a34cc"
+version = "0.1.0"
+source = "git+https://github.com/unixwin/ruline?rev=e5535ce297e22e296e33de6c9caa97ece0223fac#e5535ce297e22e296e33de6c9caa97ece0223fac"
 dependencies = [
  "arboard",
  "crossterm 0.29.0",

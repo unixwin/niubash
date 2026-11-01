@@ -43,7 +43,7 @@ Three files, three owners:
 | File | Role | Written by |
 |---|---|---|
 | `~/.niubash/plugins.json` | declarative spec — what should be installed and enabled | `niu plugin` verbs, or hand-edit + `niu plugin sync` |
-| `~/.niubash/sources/registry.json` | lockfile — what is installed (commit + tree checksum pins) | `niu plugin` verbs |
+| `~/.niubash/sources/registry.json` | lockfile — what is installed (commit pins) | `niu plugin` verbs |
 | `~/.niubash/generated/plugins.niu` | derived activation plane — one section per enabled source | `niu plugin` verbs, validate-then-atomic publish |
 
 The loader is **host-owned and read-only**: never edit it — the next verb
@@ -58,23 +58,32 @@ user overrides win. Two conditions keep it off:
 - `NIU_PLUGIN_LOADER=off` (also `false`/`0`/`no`) — the rollback switch.
   It stops loading only; unsetting rolls forward.
 
-Spec shape:
+Spec shape (`~/.niubash/plugins.json`):
 
-```toml
-schema = "niubash:plugin-spec@0.1.0"
-
-[[sources]]
-target = "oh-my-bash"            # catalog id | owner/repo | url | path
-enable = ["git", "npm"]          # manager-native asset names
-theme  = "agnoster"              # theme pick → OSH_THEME in the loader
+```json
+{
+  "schema": "niubash:plugin-spec@0.1.0",
+  "sources": [
+    {
+      "target": "oh-my-bash",
+      "enable": ["git", "npm"],
+      "theme": "agnoster"
+    }
+  ]
+}
 ```
+
+`target` is a catalog id, `owner/repo`, url, or path; `enable` lists
+manager-native asset names; `theme` is the theme pick (→ `OSH_THEME` in
+the loader). A pre-1.5.0 TOML spec (`plugins.toml`) is a one-time
+migration input only — `niu plugin migrate` converts it to this JSON
+shape; nothing reads the TOML form afterwards.
 
 ## External sources — oh-my-bash, bash-it, and friends
 
 ```bash
 niu plugin discover            # read-only overview of the ecosystem
-niu plugin add oh-my-bash      # declare in the spec + git clone (untrusted)
-niu plugin trust oh-my-bash    # review, then pass the execution gate
+niu plugin add oh-my-bash      # declare in the spec + git clone
 niu plugin enable agnoster     # theme pick → OSH_THEME in the loader
 niu plugin enable git          # enable one asset (plugin/alias/completion)
 niu plugin disable oh-my-bash  # deactivate; the floor prompt returns
@@ -84,7 +93,8 @@ niu plugin ui                  # menu over the same verbs
 ```
 
 - Sources are git clones under `~/.niubash/sources/` (`NIU_PLUGIN_SOURCES_ROOT`
-  relocates). Trust is explicit — an untrusted source contributes nothing.
+  relocates). An installed source contributes once it is enabled — there is
+  no trust state and no execution gate.
 - Theme names are the framework's own (`OSH_THEME` for oh-my-bash,
   `BASH_IT_THEME` for bash-it); `niu plugin list` / `discover` name the
   theme assets a source ships. Don't invent names.
@@ -96,7 +106,7 @@ niu plugin ui                  # menu over the same verbs
 ## Validation flow
 
 ```bash
-niu plugin list                # is the source declared + trusted + enabled?
+niu plugin list                # is the source declared + installed + enabled?
 cat ~/.niubash/generated/plugins.niu   # did the loader pick it up?
 niu doctor                     # full install health (links, rc, loader, font)
 printf '%s\n' "$PS1"           # who owns the prompt right now
@@ -104,10 +114,10 @@ printf '%s\n' "$PS1"           # who owns the prompt right now
 
 Symptoms → causes:
 
-- Plugin silent after `enable` → source not trusted yet (`plugin trust`),
-  the spec was hand-edited without a `plugin sync` (verbs republish the
-  loader themselves), or `NIU_PLUGIN_LOADER=off` is set — and the change
-  needs a new shell or `source ~/.niubashrc` to take effect.
+- Plugin silent after `enable` → the spec was hand-edited without a
+  `plugin sync` (verbs republish the loader themselves), or
+  `NIU_PLUGIN_LOADER=off` is set — and the change needs a new shell or
+  `source ~/.niubashrc` to take effect.
 - Old `# >>> niu source` markers still in the rc → the loader stays off
   by design; `niu plugin migrate-rc --diff` shows the post-migration rc.
 - Boxes/garbled glyphs → Nerd Font missing (`niu font`) or the terminal

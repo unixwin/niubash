@@ -44,19 +44,41 @@ fn niu_binary() -> PathBuf {
 }
 
 /// A tiny standalone executable to copy around as the "newly appeared"
-/// command. `whoami`/`true` exist on every CI machine, run in milliseconds,
-/// and exit 0 with no TTY involvement.
+/// command. Windows uses whoami.exe; Unix uses a generated `#!/bin/sh`
+/// script because `/bin/true` is a toybox/coreutils multicall on some hosts
+/// (Termux): copying that binary under the probe name makes it reject the
+/// unknown applet instead of exiting 0.
 fn donor_exe() -> PathBuf {
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         return PathBuf::from(r"C:\Windows\System32\whoami.exe");
     }
-    for candidate in ["/bin/true", "/usr/bin/true"] {
-        let p = PathBuf::from(candidate);
-        if p.is_file() {
-            return p;
-        }
+    #[cfg(unix)]
+    {
+        use std::sync::OnceLock;
+        static DONOR: OnceLock<PathBuf> = OnceLock::new();
+        return DONOR
+            .get_or_init(|| {
+                let path = std::env::temp_dir().join(format!(
+                    "niu392-donor-{}-{}.sh",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write donor script");
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod donor script");
+                path
+            })
+            .clone();
     }
-    panic!("no donor executable found for the issue392 probe");
+    #[cfg(not(any(windows, unix)))]
+    {
+        panic!("no donor executable for the issue392 probe");
+    }
 }
 
 fn unique_scratch_dir(tag: &str) -> PathBuf {

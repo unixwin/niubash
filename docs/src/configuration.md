@@ -44,7 +44,7 @@ read from readline, not from any niu setting.
 | Setting | Environment variable | Values | Default |
 | --- | --- | --- | --- |
 | TAB presentation | `NIU_COMPLETION_STYLE` | `gnu`, `ide`, `column`, `list`, `inline` | `column` |
-| TAB interaction | `NIU_COMPLETION_INTERACTION` | `insert`, `cycle` | `cycle` |
+| TAB interaction | `NIU_COMPLETION_INTERACTION` | `insert`, `cycle`, `select` | `select` |
 | Command-not-found hint | `NIU_COMMAND_NOT_FOUND_HINT` | `off`, `wpm` | `off` |
 | Personal-rc policy | `NIU_RC_POLICY` | `primary-only`, `bashrc-fallback` | `primary-only` |
 

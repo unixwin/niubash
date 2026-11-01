@@ -23,6 +23,13 @@ use std::process::ExitCode;
 
 use rubash::invocation::ShellInvocation;
 
+// niubash#775 / ruline#8: the ruline ABI crate's lib target is named
+// `readline` (package `readline-abi`), so Rust code imports it under that
+// name. Referring to it here is what puts its rlib on the link line;
+// `build.rs` then anchors and exports the whole C surface listed in
+// `scripts/readline-abi-exports.txt`.
+use readline::rl_initialize;
+
 /// #125/#140: std `println!`/`print!` panic on any stdout write error, and
 /// this binary builds with `panic = "abort"`, so a reader closing the pipe
 /// (`niu --version | head -1`; Windows reports os error 232 = ERROR_NO_DATA
@@ -98,6 +105,22 @@ fn main() -> ExitCode {
     // default hook reports; with `panic = "abort"` this is the last code
     // that runs because no Drop guards execute.
     niubash_runtime::panic_restore::install_panic_hook();
+    // niubash#775: initialize the in-process readline ABI exactly once, before
+    // any `enable -f` loadable builtin can be `dlopen`ed. `rl_initialize`
+    // builds the default keymaps/funmaps and allocates `rl_line_buffer`, so a
+    // plugin that reads the exported globals sees an initialized editor
+    // state rather than null pointers. The runtime then mirrors the live
+    // Reedline buffer/point into those globals at every host boundary and
+    // dispatches plugin key bindings from the same keymap arrays.
+    //
+    // SAFETY: the exported ABI is initialized once from the main thread
+    // before the shell's worker thread starts; the call only touches the
+    // crate's own process-wide state.
+    unsafe { rl_initialize() };
+    // Snapshot the default keymaps before any rc file or plugin can register
+    // a defun: the live-routing layer diffs against this baseline to tell a
+    // plugin binding apart from a host default (niubash#775).
+    niubash_runtime::readline_live::capture_baseline();
     let code = std::thread::Builder::new()
         .name("niu-main".to_string())
         .stack_size(NIU_MAIN_STACK_SIZE)
@@ -202,6 +225,15 @@ fn run_main() -> ExitCode {
     // outlives the whole command. Interactive launches keep theirs.
     if !interactive_launch_wanted(&args) {
         niubash_runtime::console_guard::release_orphan_console();
+    }
+
+    // niubash#755: an interactive launch seeds the completion state
+    // during Shell construction and would pay the one-time
+    // embedded-definition parse inline; start that parse now so it
+    // overlaps the remaining startup work instead of serializing
+    // into it.
+    if interactive_launch_wanted(&args) {
+        niubash_runtime::completion::external::warm_embedded_definitions();
     }
 
     // niubash#245: guard a piped stdout for non-interactive executions
@@ -1668,6 +1700,7 @@ fn print_usage() {
     println!("  plugin distro <command>   Collections (list/import/remove/apply)");
     println!("  plugin mirror <command>   Git fetch mirroring (list/show/set)");
     println!("  plugin ui                 Menu UI (sections by state, same verbs)");
+    println!("  plugin tui                Full-screen plugin manager (preview pane, single-key)");
     println!();
     println!("  skill install|status      Install/check the AI agent skill bundle");
     println!("                            ([--target codex|claude|zcode|cursor|all|<dir>])");
@@ -1733,6 +1766,9 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         // Menu-level UI (lazy view IA): sections by state, verbs from the
         // command table, actions through the same runtime calls.
         "ui" => niubash_runtime::plugins::ui::run_ui(),
+        // Full-screen TUI (niubash#186): alternate buffer, single-key
+        // drive, live preview pane; same inventory and verbs as `ui`.
+        "tui" => niubash_runtime::plugins::tui::run_tui(),
         // The external ecosystem is first-class (owner ruling 2026-10-02):
         // vim-plug/lazy.nvim-style verbs over the real manager assets.
         "add" => run_plugin_add_command(&args[3..]),
@@ -4484,7 +4520,7 @@ fn print_version() {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,
-        "Niubash {} \u{2014} bash-compatible shell for Windows",
+        "Niubash {} \u{2014} bash-compatible shell for Windows, Linux, macOS, and Android",
         env!("CARGO_PKG_VERSION")
     );
     let _ = writeln!(out, "  rubash   {}", rubash_revision_label());

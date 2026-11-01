@@ -1,0 +1,17 @@
+# fzf-style bind -x fixture (run under an interactive niu).
+#
+# __probe_fzf reads READLINE_LINE (what the user has typed), runs the fake
+# fzf, rewrites READLINE_LINE, and sets READLINE_POINT into the rewritten
+# line.  The PTY probe types "typed", presses Ctrl-R, then types X and Enter:
+# the expected output is "Xpicked:typed", proving both read-back and point
+# placement.  NIU_PROBE_FAKE_FZF is supplied by run.sh/pty_probes.py.
+PS1='P1> '
+PS2='P2> '
+NIU_DISABLE_DEFAULT_PLUGINS=1
+__probe_fzf() {
+    local selection
+    selection=$(printf '%s\n' "$READLINE_LINE" | "$NIU_PROBE_FAKE_FZF")
+    READLINE_LINE="echo $selection"
+    READLINE_POINT=5
+}
+bind -x '"\C-r": __probe_fzf'

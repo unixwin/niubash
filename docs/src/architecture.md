@@ -11,7 +11,7 @@ aarch64), and macOS, with Windows the flagship. It does **not implement the
 shell language itself** — it is
 the interactive front end to the **rubash lib** (the bash-compatible engine)
 plus the routing layer onto **winuxcmd** (coreutils). Its core value is the
-Windows-native process/environment experience: a reedline REPL, the
+Windows-native process/environment experience: a ruline REPL, the
 completion system, the prompt floor, Ctrl+C handling, terminal integration,
 and a stable non-interactive agent execution contract.
 
@@ -26,7 +26,7 @@ ordinary host process state.
 niu.exe
 ├── Niubash host layer (Rust)
 │   ├── rubash::Executor         ← shell language engine (lexer/parser/execution/builtins)
-│   ├── reedline REPL            ← line editing, history, completion
+│   ├── ruline REPL              ← line editing, history, completion
 │   ├── completion/              ← shell definitions + bash auto-import + 3-level cache
 │   ├── prompt/                  ← prompt floor (defaults-as-floor, §14.5 of the ecosystem design)
 │   ├── config                   ← legacy/managed machine-state reads
@@ -56,8 +56,11 @@ not re-implement lexer/parser/ast/builtins.
 
 ### 2. WinuxCmd is selected by Niubash and integrated via PATH
 
-Not via FFI/DLL — the rubash Executor still finds external commands through
-`PATH`. Version selection is a Niubash session/config responsibility. At
+PATH is the default route and the fallback — the rubash Executor finds
+external commands through `PATH`. A default-off, opt-in FFI acceleration
+route (niubash#567) can serve commands in-process when enabled; it never
+replaces the PATH route's semantics, which remain the equivalence
+reference. Version selection is a Niubash session/config responsibility. At
 startup:
 
 1. Read the explicit `WINUXCMD_PATH`, then fall back to Niubash's own
@@ -149,7 +152,7 @@ packages stage no plugin content (niubash#161). The plugin system is the
 - Plugins cannot extend the rubash parser/executor, and cannot source
   arbitrary legacy `.winsh` files or rc fragments found in user
   directories beyond what the enabled sources themselves declare.
-- Editor capabilities come from reedline and Niubash-native keybinding
+- Editor capabilities come from ruline and Niubash-native keybinding
   presets.
 
 ## Repository layout
@@ -167,7 +170,7 @@ niubash/
 │       └── src/
 │           ├── lib.rs        # library entry
 │           ├── shell.rs      # shell state
-│           ├── repl.rs       # reedline REPL
+│           ├── repl.rs       # ruline REPL
 │           ├── ctrl_c.rs     # Win32 Ctrl+C
 │           ├── config.rs     # config parsing
 │           ├── winuxcmd.rs   # winuxcmd discovery
@@ -182,13 +185,81 @@ niubash/
     └── planning/
 ```
 
+### 6. In-process readline C ABI (niubash#775, ruline#8)
+
+GNU readline is not a separate library inside niu: the editor is ruline
+(the house GNU-readline-compatible editor; the crate still carries
+the `reedline` package name during the rename, ruline#9) compiled
+into the executable. Bash loadable builtins
+(`enable -f ./mybuiltin.so mybuiltin`) are `dlopen`ed into *that* process, so
+their `rl_*` / `history_*` references must resolve against niu's main
+executable — the live editor — rather than against a second readline
+instance.
+
+The ABI definitions live in the ruline `readline-abi` crate
+(<https://github.com/unixwin/ruline/issues/8>), pinned as a git dependency
+of the root `niu` package. Its lib target is named `readline`
+(`readline_abi` is the package name); `src/main.rs` calls `rl_initialize()`
+once at startup so the exported globals (`rl_line_buffer`, keymaps, funmaps,
+completion defaults) exist before any plugin can load. The host does not
+implement `rl_*` itself: `readline()`, history, keymaps, funmaps, hooks and
+completion belong to the ABI crate.
+
+The exported set is checked in at `scripts/readline-abi-exports.txt`
+(one `F <name>` / `D <name>` per line, generated from the built
+`libreadline` with `scripts/gen-readline-abi-exports.sh`). Publishing it
+needs a per-platform link switch, done in `build.rs` for the `niu` binary
+only (the `bash` binary re-execs niu and never hosts an editor):
+
+| Target | Flag | Why |
+|---|---|---|
+| ELF (Linux, Android/Termux, musl) | `-rdynamic` (`--export-dynamic`) | Adds global definitions to the dynamic symbol table so `dlopen` resolves them. |
+| Mach-O (macOS) | `-Wl,-export_dynamic` | ld64's documented "main executable may load a plug-in" switch; `-rdynamic` is not an ld64 option. |
+| Windows MSVC | `/DEF:<generated .def>` | link.exe exports nothing by default; a curated `EXPORTS` list is the MSVC equivalent and avoids publishing every Rust internal. |
+| Windows MinGW | `-Wl,--export-all-symbols` | MinGW ld's host-to-plugin export switch. |
+
+A static ELF build (the `*-unknown-linux-musl` default) has no dynamic symbol
+table and cannot load shared objects, so `build.rs` skips export setup for
+`crt-static` targets; those builds use the standalone `libreadline.so.8`
+embedding mode instead.
+
+Visibility is not retention: a definition in an rlib member is only linked
+when something references it, and plugins reach the ABI through `dlsym`, not
+through Rust code. Every name in the checked-in list is therefore also
+anchored as undefined (`-Wl,--undefined=<sym>`, `-Wl,-u,_<sym>`,
+`/INCLUDE:<sym>`) so its member is pulled into the link even under thin LTO
+and `--gc-sections`. MSVC's generated `.def` marks data symbols with `DATA`
+and leaves functions bare.
+
+`tests/readline_abi_exports.rs` audits the entire list against the built
+binary (`nm -D` / `readelf --dyn-syms`, `dumpbin /exports` on Windows), with
+a second focused test for the symbols the `loadable-builtin-niu` plugin
+probe resolves; `scripts/check-readline-abi-exports.sh` runs the same audit
+on release artifacts.
+
+Two embedding modes are supported, and only one shares niu's editor:
+
+- **Host mode (this executable)** — loadable builtins resolve the symbols
+  above from running niu. Today the ABI crate owns a *standalone* editor
+  state that `rl_initialize()` sets up; routing it to the live ruline
+  editor (`rl_line_buffer` mirroring, `rl_*` edits landing in the prompt) is
+  the remaining follow-up.
+- **Standalone `libreadline.so.8` / `libhistory.so.8`** — the ruline ABI
+  crate's `cdylib`; an external embedder that links it owns its own editor
+  instance and does not see niu's process state.
+
+`bind -x` (engine bindings applied to the editor through the `__niu_bindx`
+host command), `__niu_readline` host commands, `READLINE_*` read-back and
+inputrc handling keep their existing paths; the ABI export changes no
+behaviour until the live routing lands.
+
 ## Data flow
 
 ```text
 user types "ls -la | grep foo"
          │
          ▼
-   reedline (line editing + completion)
+   ruline (line editing + completion)
          │
          ▼
    shell.execute_line(line)      ← niubash-runtime

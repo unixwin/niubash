@@ -108,23 +108,26 @@ Bash-compatible invocation options (GNU semantics, parsed by the engine):
   update-niubash            Alias for self-update
 
   plugin add <id|owner/repo|url|path>
-                            Install an external plugin source (untrusted)
+                            Install an external plugin source
   plugin list [--json]      Sources, their assets, activation state
   plugin enable|disable <t> Activate or deactivate a source or asset
   plugin update|sync|restore|rollback|clean
                             Lockfile verbs (vim-plug/lazy.nvim-style)
-  plugin trust <id>         Review and activate a source's assets
   plugin migrate-rc [--diff]
                             Read-only migration report for legacy managed
                             blocks (never writes the rc)
+  plugin migrate            One-time conversion of pre-1.5.0 TOML plugin
+                            data (distros, spec, source registry,
+                            bootstrap ledger, mirrors) to JSON
   plugin discover [--verbose]
                             Read-only overview of external plugin sources
-  plugin source <command>   Full source protocol (add/trust/sign/verify/
-                            remove/update/rollback/list)
+  plugin source <command>   Full source protocol (add/remove/update/
+                            rollback/list)
   plugin recipe <command>   Recipe index (list/show/add)
   plugin distro <command>   Collections (list/import/remove/apply)
   plugin mirror <command>   Git fetch mirroring (list/show/set)
   plugin ui                 Menu UI (sections by state, same verbs)
+  plugin tui                Full-screen plugin manager (preview pane, single-key)
 
   skill install|status      Install/check the AI agent skill bundle
                             ([--target claude|zcode|cursor|all|<dir>])

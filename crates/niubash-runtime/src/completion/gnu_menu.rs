@@ -45,7 +45,7 @@ use unicode_width::UnicodeWidthChar;
 
 /// Two-space gutter between completion columns — GNU readline separates
 /// fields visually the same way (bash lists read `alpha  beta`).
-const GNU_COLUMN_GUTTER: usize = 2;
+pub(crate) const GNU_COLUMN_GUTTER: usize = 2;
 
 /// Where the double-TAB state machine stands. `Attempted` is the GNU "prefix
 /// completed, line unmodified" state that makes the next TAB print the list.
@@ -96,6 +96,16 @@ pub struct GnuMenu {
     /// Terminal width seen at the last paint; layout falls back to 80 before
     /// the first [`GnuMenu::update_working_details`].
     terminal_columns: usize,
+    /// The queued `Activate` came from the engine's list-only
+    /// `ReedlineEvent::PossibleCompletions` (M-? / M-=), not from a TAB.
+    /// [`GnuMenu::update_values`] sets it: the engine's
+    /// `list_possible_completions` activates the menu and refreshes the
+    /// values directly, without the dispatch-time
+    /// [`GnuMenu::can_partially_complete`] hook a TAB goes through, so the
+    /// paint-time drain must print the candidates without splicing the
+    /// common prefix (GNU `complete.c` `rl_possible_completions` never
+    /// changes `rl_line_buffer` or point).
+    list_only_activation: bool,
 }
 
 impl Default for GnuMenu {
@@ -108,6 +118,7 @@ impl Default for GnuMenu {
             phase: GnuPhase::Idle,
             anchor_buffer: None,
             terminal_columns: 80,
+            list_only_activation: false,
         }
     }
 }
@@ -492,6 +503,7 @@ impl GnuMenu {
         self.anchor_buffer = None;
         self.completions = CompletionDisplay::default();
         self.events.clear();
+        self.list_only_activation = false;
     }
 
     /// Fetch the candidates for the current line into `self.completions`.
@@ -543,6 +555,23 @@ impl GnuMenu {
         }
     }
 
+    /// M-? / M-= (GNU `rl_possible_completions`): print the candidates and
+    /// leave the line exactly as it was. No prefix splice, no lone-candidate
+    /// accept, no point move — readline's possible-completions is a pure
+    /// listing command. The phase becomes `Listed` so the painter draws the
+    /// grid; the anchor is the untouched buffer, so any edit dismisses it.
+    fn apply_list_only(&mut self, editor: &mut Editor, completer: &mut dyn Completer) {
+        self.refresh_values(editor, completer);
+        if self.completions.suggestions().is_empty() {
+            // GNU rings the bell for an empty set; nothing to list.
+            self.reset();
+            return;
+        }
+        self.anchor_buffer = Some(editor.get_buffer().to_string());
+        self.phase = GnuPhase::Listed;
+        self.active = true;
+    }
+
     /// Buffer edited while the list is on screen: a changed line dismisses
     /// the list (GNU's printed list belongs to the line it listed); an
     /// unchanged buffer (TAB #N's `Complete` lands here) keeps it up.
@@ -567,6 +596,10 @@ impl GnuMenu {
     fn drain_events(&mut self, editor: &mut Editor, completer: &mut dyn Completer) {
         while let Some(event) = self.events.pop_front() {
             match event {
+                MenuEvent::Activate(_) if self.list_only_activation => {
+                    self.list_only_activation = false;
+                    self.apply_list_only(editor, completer);
+                }
                 MenuEvent::Activate(_) => self.apply_activate(editor, completer),
                 MenuEvent::Edit(_) => self.apply_edit(editor),
                 // Deactivate was applied by `handle_menu_event`; navigation
@@ -629,10 +662,24 @@ impl Menu for GnuMenu {
         // same TAB twice. Queued `Edit`s keep their paint-time semantics.
         self.events
             .retain(|event| !matches!(event, MenuEvent::Activate(_)));
+        self.list_only_activation = false;
         false
     }
 
     fn update_values(&mut self, editor: &mut Editor, completer: &mut dyn Completer) {
+        // The engine's list_possible_completions calls this right after
+        // queuing its `Activate`; a TAB's activation is consumed by
+        // `can_partially_complete` before this hook and leaves no queued
+        // `Activate` behind. Seeing one here therefore means the menu was
+        // opened by M-? / M-= (or another listing call), which must not
+        // splice the common prefix.
+        if self
+            .events
+            .iter()
+            .any(|event| matches!(event, MenuEvent::Activate(_)))
+        {
+            self.list_only_activation = true;
+        }
         self.refresh_values(editor, completer);
     }
 
@@ -779,6 +826,71 @@ mod tests {
         assert!(!menu.is_active(), "no list after TAB #1");
         assert_eq!(menu.phase, GnuPhase::Attempted);
         assert_eq!(menu.menu_string(10, false), "", "nothing printed yet");
+    }
+
+    /// Drive the engine's `ReedlineEvent::PossibleCompletions` shape: it
+    /// activates the menu and refreshes the values directly, then the paint
+    /// cycle drains the queued `Activate`.
+    fn list_only(menu: &mut GnuMenu, editor: &mut Editor, completer: &mut dyn Completer) {
+        menu.menu_event(MenuEvent::Activate(false));
+        menu.update_values(editor, completer);
+        menu.drain_events(editor, completer);
+    }
+
+    /// GNU `rl_possible_completions` (M-? / M-=) prints the candidates and
+    /// leaves `rl_line_buffer`/`rl_point` untouched — unlike TAB, it never
+    /// splices the common prefix.
+    #[test]
+    fn possible_completions_lists_without_splicing_the_prefix() {
+        let mut completer = PrefixCompleter::new(&["alpha.txt", "alpine.txt"]);
+        let mut menu = GnuMenu::default();
+        let mut editor = editor_with("cat al");
+
+        list_only(&mut menu, &mut editor, &mut completer);
+
+        assert_eq!(editor.get_buffer(), "cat al", "M-? never edits the line");
+        assert_eq!(
+            editor.line_buffer().insertion_point(),
+            6,
+            "M-? never moves point"
+        );
+        assert!(menu.is_active(), "the candidate list is on screen");
+        assert_eq!(menu.phase, GnuPhase::Listed);
+        let list = menu.menu_string(10, false);
+        assert!(list.contains("alpha.txt"), "{list}");
+        assert!(list.contains("alpine.txt"), "{list}");
+    }
+
+    /// A single candidate is still printed: possible-completions lists, it
+    /// does not accept the way TAB #1 does.
+    #[test]
+    fn possible_completions_lists_a_lone_candidate_without_accepting() {
+        let mut completer = PrefixCompleter::new(&["alpha.txt"]);
+        let mut menu = GnuMenu::default();
+        let mut editor = editor_with("cat alph");
+
+        list_only(&mut menu, &mut editor, &mut completer);
+
+        assert_eq!(editor.get_buffer(), "cat alph");
+        assert!(menu.is_active());
+        assert!(menu.menu_string(10, false).contains("alpha.txt"));
+    }
+
+    /// After TAB #1 spliced `alp`, M-? lists the set anchored on that
+    /// buffer without touching it again.
+    #[test]
+    fn possible_completions_after_a_prefix_attempt_keeps_the_buffer() {
+        let mut completer = PrefixCompleter::new(&["alpha.txt", "alpine.txt"]);
+        let mut menu = GnuMenu::default();
+        let mut editor = editor_with("cat al");
+
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "cat alp");
+
+        list_only(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "cat alp", "M-? re-splices nothing");
+        assert_eq!(editor.line_buffer().insertion_point(), 7);
+        assert!(menu.is_active());
     }
 
     #[test]

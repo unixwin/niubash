@@ -137,8 +137,11 @@ hello() {
 one-shot REPL command path. It does not run for `niu -c ...`, script files,
 or stdin script execution, so agent and CI surfaces stay deterministic.
 
-`~/.niubashrc` is the **only** startup file niu reads. Pre-rename
-legacy rc files and `~/.bashrc` are never sourced,
+On Windows, `~/.niubashrc` is the **only** startup file niu reads.
+Login shells on Linux/macOS additionally read the GNU profile chain
+(`/etc/profile`, then the first of `~/.bash_profile` → `~/.bash_login`
+→ `~/.profile`) before it, exactly as GNU bash does. Pre-rename
+legacy rc files and `~/.bashrc` are never sourced directly,
 migrated, or modified — a session that finds no `~/.niubashrc` simply starts
 without one. Plugin enable/disable state, the source registry, and other
 machine state live under `~/.niubash/` and are managed by `niu plugin`, not
