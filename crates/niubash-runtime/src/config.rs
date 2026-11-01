@@ -94,9 +94,13 @@ pub struct EditorConfig {
 /// History configuration. There is deliberately no per-session sharing
 /// mode anymore (niubash#572): the retired `NIU_HISTORY_MODE`
 /// shared/session/private switch was a GNU-less invention whose documented
-/// behaviors did not match the implementation. History now has exactly one
-/// semantics, GNU's: one live file every session appends to and refreshes
-/// from, with `history -a/-n/-r` as the explicit sync verbs.
+/// behaviors did not match the implementation. History has exactly one
+/// semantics, GNU's (niubash#773): a session reads its history file once
+/// at startup and works from its own in-memory list; other sessions'
+/// lines reach it only through the explicit `history -n`/`-r` verbs,
+/// and its own lines reach the file at `history -a`/`-w` or at exit
+/// (bashhist.c: load_history, maybe_append_history,
+/// maybe_save_shell_history).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryConfig {
     pub path: Option<PathBuf>,

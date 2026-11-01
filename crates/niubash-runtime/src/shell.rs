@@ -3675,6 +3675,18 @@ impl Shell {
             .map(|provider| provider.settings())
     }
 
+    /// The provider instance's history state — the session's one
+    /// history list (niubash#773). The editor twin is built over it so
+    /// the builtin faces and line editing read and record the same
+    /// in-memory list, as in GNU. `None` when no provider is
+    /// installed (the editor then loads its own store).
+    pub(crate) fn history_state(&self) -> Option<Arc<Mutex<crate::history::HistoryState>>> {
+        self.history_provider
+            .as_ref()
+            .and_then(|provider| provider.try_borrow().ok())
+            .map(|provider| provider.shared_state())
+    }
+
     /// Refresh the shared HIST* settings cell from the executor's
     /// current state (niubash#646).
     ///
@@ -5984,14 +5996,13 @@ mod tests {
         shell.history_path = path.clone();
         shell.enter_interactive();
 
-        // The editor twin over the shell's shared cells, gated the
+        // The editor twin over the shell's shared state, gated the
         // way build_line_editor gates the instance it hands reedline.
         use reedline::History as _;
-        let mut editor = crate::history::LiveFileBackedHistory::with_shared_ledger_and_settings(
+        let mut editor = crate::history::LiveFileBackedHistory::with_shared_state(
             shell.history_max_size,
-            shell.history_path.clone(),
+            shell.history_state().unwrap(),
             shell.history_ledger().unwrap(),
-            shell.history_settings().unwrap(),
         );
         editor.set_history_option_gate();
 
@@ -6009,6 +6020,9 @@ mod tests {
             .save(reedline::HistoryItem::from_command_line("after-on"))
             .unwrap();
 
+        // niubash#773: recording is memory-only; the file is written
+        // at the session-end flush.
+        shell.flush_session_history();
         let persisted = std::fs::read_to_string(&path).unwrap();
         assert!(persisted.contains("before-off"), "{persisted:?}");
         assert!(
@@ -6057,10 +6071,11 @@ mod tests {
 
         record_accepted_line(&shell, "after-redirect-marker");
         assert!(
-            std::fs::read_to_string(&b)
+            !std::fs::read_to_string(&b)
                 .unwrap()
                 .contains("after-redirect-marker"),
-            "later saves must land in the new file"
+            "recording is memory-only (niubash#773): the save must not \
+             land in the new file before a write face"
         );
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "seedA\n");
 

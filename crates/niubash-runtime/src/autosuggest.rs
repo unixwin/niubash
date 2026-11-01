@@ -270,11 +270,18 @@ mod tests {
     }
 
     #[test]
-    fn autosuggest_sees_history_saved_by_another_session() {
+    fn autosuggest_sees_history_from_a_finished_session_only() {
+        // niubash#773 (was autosuggest_sees_history_saved_by_another_
+        // session, the live-refresh pin): a concurrent session's
+        // history is NOT suggested from — GNU sessions are isolated,
+        // and one Up press (or one ghost-text lookup) must never
+        // surface a command another terminal just typed. Once that
+        // session has ended and its lines are in the file, a fresh
+        // reader suggests them.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         let mut writer = LiveFileBackedHistory::with_file(100, path.clone());
-        let reader = LiveFileBackedHistory::with_file(100, path);
+        let reader = LiveFileBackedHistory::with_file(100, path.clone());
 
         writer
             .save(HistoryItem::from_command_line("cd D:/projects"))
@@ -284,7 +291,14 @@ mod tests {
             &AutosuggestConfig::default(),
             Arc::new(AtomicBool::new(false)),
         );
-        assert_eq!(hinter.handle("cd", 2, &reader, false, ""), " D:/projects");
+        assert_eq!(hinter.handle("cd", 2, &reader, false, ""), "");
+
+        writer.flush_at_session_end();
+        let fresh_reader = LiveFileBackedHistory::with_file(100, path);
+        assert_eq!(
+            hinter.handle("cd", 2, &fresh_reader, false, ""),
+            " D:/projects"
+        );
     }
 
     #[test]
