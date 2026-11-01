@@ -476,6 +476,17 @@ fn ctrl_r_history_search_enter_loads_match_and_executes() {
     session.wait_ms(PROMPT1, CONTROL_TIMEOUT).unwrap();
     session.send_line("printf 'cr373-%s\\n' R42");
     session.expect_take("cr373-R42", CONTROL_TIMEOUT).unwrap();
+    // Wait for the NEXT prompt frame before touching the search keys
+    // (niubash#816): expect_take returns the moment the output bytes
+    // land, while the tty is still in the cooked baseline between cycles
+    // (canonical + IEXTEN), where the line discipline consumes Ctrl-R
+    // as VREPRINT before any reader can see it — GNU bash loses the key
+    // the same way whenever its own rebuild window is non-trivial. The
+    // drain above leaves the buffer positioned past the seed output, so
+    // the PROMPT1 waited on here is the new cycle's frame, painted by
+    // the editor from inside read_line with the tty already in raw
+    // mode: the editor-owns-tty moment real keystrokes land in.
+    session.wait_ms(PROMPT1, CONTROL_TIMEOUT).unwrap();
     // Reverse search, narrow to the seed entry, accept with Enter (the
     // load under test), then submit the loaded line.
     session.send("\u{12}");
