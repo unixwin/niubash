@@ -1262,7 +1262,7 @@ mod tests {
     // shape for every form: TAB #1 splices the first candidate AND
     // paints it selected in the first frame.
     #[test]
-    fn issue778_select_first_tab_splices_first_candidate_and_paints_it_selected() {
+    fn issue778_menu_select_highlight_select_first_tab_splices_and_paints() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
         let (mut menu, session) = menu_with_session();
         let mut editor = editor_with("git ch");
@@ -1304,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    fn issue778_select_navigation_cycles_from_the_spliced_first_candidate() {
+    fn issue778_menu_select_highlight_select_navigation_cycles_from_first() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
         let (mut menu, session) = menu_with_session();
         let mut editor = editor_with("git ch");
@@ -1364,7 +1364,7 @@ mod tests {
     }
 
     #[test]
-    fn issue778_painted_selection_follows_wrapper_navigation_echoes() {
+    fn issue778_menu_select_highlight_painted_selection_follows_echoes() {
         // The wrapper splices TAB #2 itself and the engine echoes the
         // edit to the menu: the painted selection must follow to the
         // new candidate in the same frame, not stay dark (the #778
@@ -1416,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn issue778_grid_neighbor_walks_the_packed_grid() {
+    fn issue778_menu_select_highlight_grid_neighbor_walks_the_packed_grid() {
         // 7 candidates in 3 rows — column-major:
         //   0 3 6
         //   1 4
@@ -1467,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn issue778_menu_move_events_navigate_the_grid() {
+    fn issue778_menu_select_highlight_move_events_navigate_the_grid() {
         // A MenuEvent::Move* delivered straight to the menu (a user
         // binding) walks the highlight through the grid geometry and
         // splices each landing candidate — before #778 the drain

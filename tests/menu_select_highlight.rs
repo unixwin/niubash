@@ -136,8 +136,8 @@ fn painted_selected(chunk: &str, candidate: &str) -> bool {
 }
 
 #[test]
-fn issue778_tab1_highlights_first_candidate_and_arrows_move_the_pick() {
-    if !require_pty_or_skip("issue778_tab1_highlights_first_candidate_and_arrows_move_the_pick") {
+fn issue778_menu_select_highlight_tab1_and_arrows_move_the_pick() {
+    if !require_pty_or_skip("issue778_menu_select_highlight_tab1_and_arrows_move_the_pick") {
         return;
     }
     // 40 columns over the width-11 candidates lays the grid out as

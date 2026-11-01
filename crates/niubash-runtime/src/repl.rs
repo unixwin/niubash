@@ -10430,7 +10430,7 @@ mod tests {
     }
 
     #[test]
-    fn issue778_wrapper_arrows_navigate_the_grid_and_keep_the_session() {
+    fn issue778_menu_select_highlight_wrapper_arrows_navigate_the_grid() {
         use crossterm29::event::KeyCode;
         let (mut detector, session) = cycle_detector();
         arm_cycle_session_with_grid(&session);
@@ -10477,7 +10477,7 @@ mod tests {
     }
 
     #[test]
-    fn issue778_wrapper_arrow_without_a_live_session_falls_through() {
+    fn issue778_menu_select_highlight_wrapper_arrow_without_session_falls_through() {
         use crossterm29::event::KeyCode;
         let (mut detector, session) = cycle_detector();
         assert!(!session.lock().unwrap().is_open());
@@ -10493,7 +10493,7 @@ mod tests {
     }
 
     #[test]
-    fn issue778_wrapper_esc_still_rolls_back_after_arrow_navigation() {
+    fn issue778_menu_select_highlight_wrapper_esc_rolls_back_after_arrows() {
         use crossterm29::event::KeyCode;
         let (mut detector, session) = cycle_detector();
         arm_cycle_session_with_grid(&session);
