@@ -52,30 +52,20 @@ pub(crate) type RepaintRequest = Arc<dyn Fn() + Send + Sync>;
 /// module's landing path (which re-stamps it when a refresh lands
 /// mid-pass). Created at stamp time with the value the pass read from
 /// the segment cache; afterwards only a landing for the same
-/// worktree writes it.
+/// worktree writes it. The cell carries no worktree identity of its
+/// own: the registry matches landings against the displayed pass's
+/// worktree key (`Registry::pass_worktree`), so nothing ever needed
+/// to read one back.
 #[derive(Debug)]
 pub struct LiveVcsCell {
-    /// The worktree the segment belongs to. Identity/debugging
-    /// state: the registry matches landings against the pass's own
-    /// worktree key, so on non-Windows builds (where no production
-    /// face stamps a cell) nothing reads this back.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    worktree: PathBuf,
     value: Mutex<Option<String>>,
 }
 
 impl LiveVcsCell {
-    pub(crate) fn new(worktree: PathBuf, value: Option<String>) -> Self {
+    pub(crate) fn new(value: Option<String>) -> Self {
         Self {
-            worktree,
             value: Mutex::new(value),
         }
-    }
-
-    /// The worktree this cell's segment belongs to.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) fn worktree(&self) -> &Path {
-        &self.worktree
     }
 
     /// The value the prompt currently shows.
@@ -165,11 +155,9 @@ pub(crate) fn end_pass() {
 /// The cache landing observer's production instance: one shared
 /// closure for the process, so repeated editor builds register the
 /// same observer (the cache deduplicates by identity).
-fn landing_observer() -> Arc<dyn Fn(&Path, &Option<String>) + Send + Sync> {
-    static OBSERVER: OnceLock<Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>> = OnceLock::new();
-    OBSERVER
-        .get_or_init(|| Arc::new(|worktree, value| on_segment_landed(worktree, value)))
-        .clone()
+fn landing_observer() -> crate::git_prompt_cache::LandingObserver {
+    static OBSERVER: OnceLock<crate::git_prompt_cache::LandingObserver> = OnceLock::new();
+    OBSERVER.get_or_init(|| Arc::new(on_segment_landed)).clone()
 }
 
 /// Install the landing observer into the segment cache (idempotent;
@@ -241,7 +229,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap();
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-cell-repo");
-        let cell = Arc::new(LiveVcsCell::new(worktree.clone(), None));
+        let cell = Arc::new(LiveVcsCell::new(None));
         register_editor(Arc::new(|| {}), None);
         begin_pass(Some(worktree.clone()), Some(cell.clone()));
         let before = repaint_request_count();
@@ -268,7 +256,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap();
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-other-repo");
-        let cell = Arc::new(LiveVcsCell::new(worktree.clone(), None));
+        let cell = Arc::new(LiveVcsCell::new(None));
         register_editor(Arc::new(|| {}), None);
         begin_pass(Some(worktree.clone()), Some(cell.clone()));
         let before = repaint_request_count();
@@ -290,7 +278,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap();
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-nopass-repo");
-        let cell = Arc::new(LiveVcsCell::new(worktree.clone(), None));
+        let cell = Arc::new(LiveVcsCell::new(None));
         register_editor(Arc::new(|| {}), None);
         let before = repaint_request_count();
         // No begin_pass: a landing while a command executes (or in a
@@ -305,7 +293,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap();
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-menu-repo");
-        let cell = Arc::new(LiveVcsCell::new(worktree.clone(), None));
+        let cell = Arc::new(LiveVcsCell::new(None));
         let session: SharedCycleSession = Arc::new(Mutex::new(CycleSession::default()));
         session.lock().unwrap().open = true;
         register_editor(Arc::new(|| {}), Some(session.clone()));

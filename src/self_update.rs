@@ -678,7 +678,7 @@ fn query_final_url(request: *mut c_void) -> Result<String> {
         return Err(winhttp_error("WinHttpQueryOption URL"));
     }
 
-    let mut buffer = vec![0_u16; (size as usize + 1) / 2];
+    let mut buffer = vec![0_u16; (size as usize).div_ceil(2)];
     if unsafe {
         WinHttpQueryOption(
             request,

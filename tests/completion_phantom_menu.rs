@@ -52,7 +52,8 @@ fn raced_tab_edit_batch_leaves_no_phantom_menu() {
     }
     // The phantom-menu defect lives in GnuMenu's event queue (the menu
     // niubash owns). The reedline-native styles keep their own shape.
-    for style in ["gnu"] {
+    let style = "gnu";
+    {
         let mut s = spawn_style(&format!("phantom-{style}"), style);
         std::fs::write(s.start().join("m4-one.txt"), "m4-body\n").unwrap();
         std::fs::write(s.start().join("m4-two.txt"), "m4-body\n").unwrap();

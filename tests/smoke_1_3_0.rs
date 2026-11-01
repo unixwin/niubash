@@ -627,10 +627,10 @@ fn d1_setup_preset_recommended_writes_a_clean_parseable_rc() {
 
 /// Shared ConPTY driver (portable-pty) — the same expect-style session the
 /// interactive target uses, extended with `spawn_cli` for CLI subcommands.
-/// `allow(dead_code)`: only a slice of the driver's surface is used here;
+/// Only a slice of the driver's surface is used here; the driver module
+/// carries its own `#![allow(dead_code)]` for that per-binary slice, and
 /// the interactive target keeps full dead-code strictness.
 #[path = "interactive/driver.rs"]
-#[allow(dead_code)]
 mod journey_driver;
 
 /// Recursively copy a fixture tree (the mirror seeder; git's own clone is

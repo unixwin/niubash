@@ -179,7 +179,7 @@ fn help_never_lists_an_option_the_invocation_rejects() {
             continue;
         }
         let mut argv = vec![format!("--{name}")];
-        if rubash::usage::LONG_OPTIONS_WITH_VALUE.contains(&name) {
+        if rubash::usage::LONG_OPTIONS_WITH_VALUE.contains(name) {
             argv.push(".".to_string());
         }
         let parsed = rubash::invocation::ShellInvocation::parse(&argv);

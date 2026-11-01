@@ -17,7 +17,7 @@
 //! that IS observable and was the issue's repro: setup never adds
 //! backups, so the set cannot grow.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,7 +44,7 @@ fn unique_temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn backup_names(home: &PathBuf) -> Vec<String> {
+fn backup_names(home: &Path) -> Vec<String> {
     let dir = home.join(".niubash").join("backups");
     let mut names: Vec<String> = match std::fs::read_dir(&dir) {
         Ok(entries) => entries

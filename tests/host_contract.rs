@@ -2047,7 +2047,7 @@ fn real_winuxcmd_for_test() -> Option<PathBuf> {
             .into_iter()
             .find(|path| winuxcmd_test_path_has_command_links(path))
         })
-        .or_else(|| find_winuxcmd_on_path())
+        .or_else(find_winuxcmd_on_path)
 }
 
 fn resolve_winuxcmd_test_path(path: PathBuf) -> Option<PathBuf> {

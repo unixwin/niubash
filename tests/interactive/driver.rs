@@ -165,10 +165,7 @@ impl OutputBuffer {
     /// match of `needle`, or `None` when not (yet) present.
     fn take_match(&self, needle: &str) -> Option<Vec<u8>> {
         let mut pending = self.pending.lock().unwrap();
-        match find_subslice(&pending, needle.as_bytes()) {
-            Some(end) => Some(pending.drain(..end).collect()),
-            None => None,
-        }
+        find_subslice(&pending, needle.as_bytes()).map(|end| pending.drain(..end).collect())
     }
 
     /// Kept for lane tests that poll the raw stream.
@@ -651,7 +648,7 @@ impl NiuSession {
         timeout: Duration,
     ) -> NiuSession {
         let binary = root.join(format!("{face}.exe"));
-        std::fs::create_dir_all(&root).ok();
+        std::fs::create_dir_all(root).ok();
         std::fs::copy(niu_binary(), &binary)
             .unwrap_or_else(|e| panic!("could not stage the {face} face copy: {e}"));
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();

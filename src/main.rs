@@ -169,8 +169,7 @@ fn interactive_launch_wanted(args: &[String]) -> bool {
             if matches!(long, "interactive" | "login") {
                 return true;
             }
-        } else if arg.starts_with('-') {
-            let flags = &arg[1..];
+        } else if let Some(flags) = arg.strip_prefix('-') {
             if flags.bytes().all(|b| b.is_ascii_alphabetic()) && flags.contains(['i', 'l']) {
                 return true;
             }
@@ -1076,6 +1075,7 @@ fn debug_startup_file(invocation: &ShellInvocation) -> Option<String> {
 /// both one-shot and file-fed:
 ///   * `--dump-strings` / `--dump-po-strings` (one arm), and
 ///   * `--pretty-print`.
+///
 /// Per input source:
 ///   * `-c` command string: argv text, no file access, unchanged.
 ///   * script operand: read with the execution path's open
@@ -1369,22 +1369,20 @@ fn run_stdin_script() -> anyhow::Result<()> {
         // script source to the new input. read_unbuffered_line on the raw
         // fd also avoids StdinLock prefetch stealing bytes from `&`
         // children that inherit fd 0 (redir1.sub, redir.tests heredocs).
-        match shell
+        if shell
             .executor_mut()
             .script_fd0_line(&mut line)
             .map(Ok)
             .unwrap_or_else(|| read_unbuffered_line(&mut line))?
+            == 0
         {
-            0 => {
-                // EOF: flush a gathered-but-incomplete tail as the final
-                // batch; its status is the stream's last status.
-                if !pending.is_empty() {
-                    let offset = lines_read - pending.len();
-                    last_code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
-                }
-                break;
+            // EOF: flush a gathered-but-incomplete tail as the final
+            // batch; its status is the stream's last status.
+            if !pending.is_empty() {
+                let offset = lines_read - pending.len();
+                last_code = shell.execute_script_at_line_offset(&pending.join("\n"), offset)?;
             }
-            _ => {}
+            break;
         }
         lines_read += 1;
 
@@ -1600,7 +1598,7 @@ fn print_usage() {
     println!();
     println!("GNU long options:");
     for name in rubash::usage::LONG_OPTIONS {
-        if rubash::usage::LONG_OPTIONS_WITH_VALUE.contains(&name) {
+        if rubash::usage::LONG_OPTIONS_WITH_VALUE.contains(name) {
             println!("    --{name} <file>");
         } else {
             println!("    --{name}");
@@ -2790,7 +2788,7 @@ fn run_plugin_recipe_list_command(args: &[String]) -> anyhow::Result<()> {
         .filter(|recipe| {
             category
                 .as_deref()
-                .map_or(true, |wanted| recipe.category.as_str() == wanted)
+                .is_none_or(|wanted| recipe.category.as_str() == wanted)
         })
         .map(|recipe| {
             serde_json::json!({
@@ -3464,9 +3462,9 @@ fn run_plugin_list_command(args: &[String]) -> anyhow::Result<()> {
         if lines.is_empty() {
             println!(
                 "     {}",
-                niubash_runtime::text_style::dim(&format!(
+                niubash_runtime::text_style::dim(
                     "no assets found in the tree — check the tree contents"
-                ))
+                )
             );
         }
         if !lines.is_empty() {
@@ -3552,7 +3550,9 @@ fn run_plugin_enable_command(args: &[String], enable: bool) -> anyhow::Result<()
 /// bootstrap-failure ledger, and the mirror config — to JSON and
 /// renames the old files aside (never deletes them).
 fn run_plugin_migrate_command(args: &[String]) -> anyhow::Result<()> {
-    for arg in args {
+    // Every arm of the option scan returns; only a first option is ever
+    // examined (none at all falls straight through to the migration).
+    if let Some(arg) = args.first() {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!("usage: niu plugin migrate");
@@ -4787,7 +4787,7 @@ fn record_cwd_state(shell: &niubash_runtime::Shell) {
         "cwd": directory.to_string_lossy(),
         "updatedAt": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| u128::from(d.as_millis()))
+            .map(|d| d.as_millis())
             .unwrap_or(0),
     });
     let body = record.to_string();

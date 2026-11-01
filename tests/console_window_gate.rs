@@ -746,10 +746,7 @@ fn detached_scaling_timing_gate_avoids_per_spawn_console_tax() {
     let niu = std::path::Path::new(env!("CARGO_BIN_EXE_niu"));
     let cmd = "C:/Windows/System32/hostname.exe >NUL";
     let script_1 = cmd.to_string();
-    let script_10 = std::iter::repeat(cmd)
-        .take(10)
-        .collect::<Vec<_>>()
-        .join("; ");
+    let script_10 = std::iter::repeat_n(cmd, 10).collect::<Vec<_>>().join("; ");
 
     // Warmup
     let _ = run_and_observe_exe(niu, &["-c", &script_1], DETACHED_PROCESS, None);
@@ -998,7 +995,7 @@ fn dirs_shim_candidate() -> std::path::PathBuf {
 
 fn encode_base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };

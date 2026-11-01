@@ -51,7 +51,7 @@ fn niu_binary() -> PathBuf {
 fn donor_exe() -> PathBuf {
     #[cfg(windows)]
     {
-        return PathBuf::from(r"C:\Windows\System32\whoami.exe");
+        PathBuf::from(r"C:\Windows\System32\whoami.exe")
     }
     #[cfg(unix)]
     {
@@ -161,7 +161,7 @@ fn command_appears_after_miss_in_one_process() {
         "{}{}",
         probe_call(PROBE_A),
         // Creation happens from INSIDE the same process, after the miss.
-        format!(
+        format_args!(
             "cp \"$NIU392_DONOR\" \"$NIU392_DIR/{}\"\n{}",
             if cfg!(windows) {
                 format!("{PROBE_A}.exe")
@@ -227,7 +227,7 @@ fn second_name_added_after_primed_listing_resolves() {
     let script = format!(
         "{}{}",
         probe_call(PROBE_A),
-        format!(
+        format_args!(
             "cp \"$NIU392_DONOR\" \"$NIU392_DIR/{}\"\n{}",
             if cfg!(windows) {
                 format!("{PROBE_B}.exe")

@@ -7,16 +7,16 @@
 //! - 359.4  explicit verbs never write the rc (success AND failure paths)
 //! - 359.6  the #324 corrupt rc survives every verb byte-identically
 //! - 359.7  loader generation is byte-stable + idempotent (no rewrite when
-//!          nothing changed; validate-then-atomic publish)
+//!   nothing changed; validate-then-atomic publish)
 //! - 359.8  double-execution guard: a legacy managed block keeps the loader
-//!          OFF; removing it by hand turns the loader ON (exactly one path)
+//!   OFF; removing it by hand turns the loader ON (exactly one path)
 //! - 359.9  order and override: loader before rc, user overrides win;
-//!          the rollback switch (`NIU_PLUGIN_LOADER=off`) skips loading
-//!          with zero writes
+//!   the rollback switch (`NIU_PLUGIN_LOADER=off`) skips loading
+//!   with zero writes
 //! - 359.12 structure ratchet: the retired managed-block writers have no
-//!          call sites outside their rollback zone (source-level audit)
+//!   call sites outside their rollback zone (source-level audit)
 //! - migrate-rc: the read-only diagnostic (rc untouched, candidate diff,
-//!          loader publish, hint marker)
+//!   loader publish, hint marker)
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -210,12 +210,11 @@ fn install_omb(sandbox: &Sandbox) {
 /// The write-era managed block for the fixture (what an old niu left in a
 /// pre-migration rc).
 fn legacy_omb_block() -> String {
-    format!(
-        "# >>> niu source oh-my-bash (managed by `niu plugin enable/disable`) >>>\n\
-         OSH_THEME='robbyrussell'\n\
-         export NIU_RC_MARK=rcblock\n\
-         # <<< niu source oh-my-bash <<<\n"
-    )
+    "# >>> niu source oh-my-bash (managed by `niu plugin enable/disable`) >>>\n\
+     OSH_THEME='robbyrussell'\n\
+     export NIU_RC_MARK=rcblock\n\
+     # <<< niu source oh-my-bash <<<\n"
+        .to_string()
 }
 
 /// A minimal valid loader document with one hand-written section.
@@ -1083,13 +1082,13 @@ fn rbash_named_session_loads_the_generated_loader_then_restricts() {
     );
 }
 
-/// ── issue359 pins (1.5.0 containment round) ────────────────────────────────
-///
-/// The 359.4-359.12 cases above pin the case-A slice. The cases below pin
-/// the remaining write entries this round closed: the legacy bootstrap
-/// line's earliest-branch no-op, `niu setup --rc-policy` (the last product
-/// write into an existing rc), the wizard's create-only preset path, and
-/// startup over a managed-block rc.
+// ── issue359 pins (1.5.0 containment round) ────────────────────────────────
+//
+// The 359.4-359.12 cases above pin the case-A slice. The cases below pin
+// the remaining write entries this round closed: the legacy bootstrap
+// line's earliest-branch no-op, `niu setup --rc-policy` (the last product
+// write into an existing rc), the wizard's create-only preset path, and
+// startup over a managed-block rc.
 
 /// Sorted (name, len) inventory of the WHOLE sandbox home — the
 /// zero-side-effect gate: nothing anywhere under HOME may appear, vanish,

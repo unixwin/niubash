@@ -1210,15 +1210,12 @@ fn strip_ansi_escapes(text: &str) -> String {
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            match chars.next() {
-                Some('[') => {
-                    for inner in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&inner) {
-                            break;
-                        }
+            if let Some('[') = chars.next() {
+                for inner in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&inner) {
+                        break;
                     }
                 }
-                Some(_) | None => {}
             }
         } else {
             out.push(c);

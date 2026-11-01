@@ -69,8 +69,9 @@ fn help_covers_the_options_named_in_the_issue() {
     for letter in ['e', 'o', 'u', 'x', 'l', 'i', 's'] {
         let marker = format!("  -{letter}");
         assert!(
-            help.lines().any(|line| line.starts_with(&marker)
-                && line[marker.len()..].starts_with(|c: char| c == ' ' || c == ',')),
+            help.lines()
+                .any(|line| line.starts_with(&marker)
+                    && line[marker.len()..].starts_with([' ', ','])),
             "niu --help has no line for -{letter}:\n{help}"
         );
     }

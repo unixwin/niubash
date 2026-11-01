@@ -14,6 +14,7 @@
 //!   write and does not disturb the in-memory list;
 //! - `history -c` clears the in-memory list only;
 //! - `history -r` re-reads the file into memory.
+//!
 //! The interlock test below drives N prompt cycles under ConPTY with a
 //! deadline and asserts the history file stays bounded and correct.
 

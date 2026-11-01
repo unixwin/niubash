@@ -218,7 +218,7 @@ fn oh_my_bash_assets_enable_disable_through_rc_arrays() {
         "tree survives source disable"
     );
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
 
 /// bash-it assets activate through the manager's own `enabled/` entries;
@@ -287,7 +287,7 @@ fn bash_it_assets_activate_through_enabled_dir() {
         "plugin gone, theme still active"
     );
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
 
 /// bash-completion is whole-source: the guarded rc block is the activation,
@@ -337,7 +337,7 @@ fn bash_completion_activates_as_a_whole_source() {
     assert_success(&engine, "engine bash-completion load");
     assert_eq!(stdout_text(&engine).trim_end(), "1");
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
 
 /// Missing sources surface honestly everywhere and restore repairs them
@@ -390,7 +390,7 @@ fn missing_source_is_reported_and_local_restore_explains() {
     assert_success(&clean, "clean");
     assert!(stdout_text(&clean).contains("nothing to clean"));
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
 
 /// `niu plugin add owner/repo` expands the GitHub shorthand (resolution
@@ -431,7 +431,7 @@ fn plugin_add_catalog_id_resolves_and_hints_the_next_steps() {
     assert!(discover_out.contains("bash-completion"), "{discover_out}");
     assert!(discover_out.contains("GPL-2.0-or-later"), "{discover_out}");
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
 
 /// The setup wizard writes a journal and the undo contract holds for the
@@ -447,7 +447,7 @@ fn setup_writes_a_journal_for_the_noninteractive_run() {
     assert!(journal.contains("\"preset\": \"minimal\""), "{journal}");
     assert!(journal.contains("\"applied_at\":"), "{journal}");
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
 
 /// Run `niu -i` with piped stdin under sandbox envs (interactive rc loads,
@@ -547,7 +547,7 @@ fn omb_framework_assets_enable_only_through_the_native_loader() {
         "loader-path session leaked a command-not-found:\n{stderr}"
     );
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
 
 /// The independent-asset half of the same ruling: a plugin file with no
@@ -616,5 +616,5 @@ fn independent_assets_source_directly_and_framework_deps_stay_honest() {
         "like GNU bash, execution continues past the missing-lib errors:\n{manual_out}"
     );
 
-    let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
