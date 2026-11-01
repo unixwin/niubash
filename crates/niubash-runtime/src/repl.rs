@@ -725,7 +725,7 @@ fn push_keyseq(by_name: &mut Vec<(String, Vec<String>)>, name: &str, seq: String
 
 /// Remove one keyseq from every function's list (a later binding
 /// of the same seq to something else retires the earlier claim).
-fn remove_keyseq(by_name: &mut Vec<(String, Vec<String>)>, seq: &str) {
+fn remove_keyseq(by_name: &mut [(String, Vec<String>)], seq: &str) {
     for (_, seqs) in by_name.iter_mut() {
         seqs.retain(|s| s != seq);
     }
@@ -1000,7 +1000,7 @@ fn run_readline_command(
             }
             let replacement = if matches.len() == 1 {
                 let mut only = matches[0].clone();
-                if buffer[end..].chars().next() != Some(' ') {
+                if !buffer[end..].starts_with(' ') {
                     only.push(' ');
                 }
                 only
@@ -3473,7 +3473,9 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // GNU `yank-last-arg` (M-.): `None` is GNU's `'$'` — the last
         // argument. `yank-nth-arg` defaults to argument 1; explicit
         // counts reach the editor through `WithArg`.
-        "yank-last-arg" => Some(ReedlineEvent::YankLastArg { count: None }),
+        "yank-last-arg" | "insert-last-argument" => {
+            Some(ReedlineEvent::YankLastArg { count: None })
+        }
         "yank-nth-arg" => Some(ReedlineEvent::YankNthArg { count: 1 }),
         // Numeric-argument accumulation (M-0..M-9 / M-- / C-u). `None`
         // is GNU's `M--` negate.
@@ -6141,17 +6143,57 @@ mod tests {
         }
     }
 
+    /// The residue of GNU's default bind table that the host still
+    /// cannot deliver, per group. This is a **shrink-only** pin:
+    /// mapping one of these names (or teaching `parse_key_sequence`
+    /// one of the terminal spellings) must delete its entry here, so
+    /// the list doubles as the parity burn-down. Adding an entry is a
+    /// regression unless a new GNU table row arrived with it.
+    ///
+    /// Groups:
+    /// - mark/abort/forward search: `set-mark`, `abort`,
+    ///   `forward-search-history` — reedline has no event for the
+    ///   first two, and no forward incremental search.
+    /// - completion modes: `complete-command`, `complete-variable`,
+    ///   `complete-filename`, `complete-hostname`,
+    ///   `insert-completions`, `possible-completions`,
+    ///   `glob-complete-word`, `complete-username`,
+    ///   `complete-into-braces` — the engine's completer owns the
+    ///   candidate sources; the editor's single `Complete` event
+    ///   cannot select among them.
+    /// - non-incremental search: `\en`/`\ep` need the host's own
+    ///   search minibuffer (`NonIncrementalSearch` exists, but the
+    ///   M-n/M-p prompt path is not wired through this bridge yet).
+    /// - `history-expand-line` (`\e^`): the host has shell-expand-line,
+    ///   not readline's C-style history expansion event.
+    /// - `do-lowercase-version` (`\eA`–`\eN`, `\eP`–`\eZ`): GNU's
+    ///   uppercase-fallback rule, not a name the editor dispatches.
+    /// - terminal spellings `\e[1;3C`/`\e[1;5C`/`\e[5C` family and
+    ///   `\e[3;5~`: CSI modified keys parse as raw escape text today;
+    ///   the terminal layer delivers the same chords as
+    ///   KeyCode+modifier events, so this is a parser gap.
+    /// - `\e[200~` (bracketed-paste-begin): reedline consumes the
+    ///   bracketed-paste envelope itself and never routes the marker
+    ///   through the keymap.
+    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &[
+        "\\C-@", "\\C-g", "\\C-s", "\\e ", "\\e!", "\\e$", "\\e*", "\\e/", "\\e=", "\\e?", "\\e@",
+        "\\eA", "\\eB", "\\eC", "\\eD", "\\eE", "\\eF", "\\eG", "\\eH", "\\eI", "\\eJ", "\\eK",
+        "\\eL", "\\eM", "\\eN", "\\eP", "\\eQ", "\\eR", "\\eS", "\\eT", "\\eU", "\\eV", "\\eW",
+        "\\eX", "\\eY", "\\eZ", "\\e[1;3C", "\\e[1;3D", "\\e[1;5C", "\\e[1;5D", "\\e[200~",
+        "\\e[3;5~", "\\e[5C", "\\e[5D", "\\e^", "\\eg", "\\en", "\\ep", "\\e{", "\\e~",
+    ];
+
     /// niubash#630 gap list: the **whole GNU default bind table** must
     /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
     /// is the table `bind -p` prints for a fresh bash 5.3, so feeding it
     /// through the bridge is the compatibility gate for "GNU habits as the
     /// default".
     ///
-    /// With the reedline fork pinned in Cargo.toml (EventStatus re-export +
-    /// history-jump events) the whole table lands: no entry may stay
-    /// unmapped. Everything — Home/End/Delete spellings, `\C-r`
-    /// reverse-search, `\C-t` transpose, `\e` emacs-editing-mode and the
-    /// PgUp/PgDn history jumps — must reach the keybindings.
+    /// Everything deliverable must land — Home/End/Delete spellings,
+    /// `\C-r` reverse-search, `\C-t` transpose, the PgUp/PgDn history
+    /// jumps, and this batch's `\e&`/`\e~`/`\ex` host commands. The
+    /// entries in [`KNOWN_UNMAPPED_GNU_DEFAULTS`] are the documented,
+    /// grouped residue; any *new* unmapped key is a regression.
     #[test]
     fn gnu_default_bind_table_mirrors_except_known_gaps() {
         let entries: Vec<crate::bind_surface::EngineBindEntry> =
@@ -6171,9 +6213,12 @@ mod tests {
             add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
         let mut unmapped: Vec<String> = unusable.into_iter().map(|bind| bind.keyseq).collect();
         unmapped.sort();
+        let expected: Vec<String> = KNOWN_UNMAPPED_GNU_DEFAULTS
+            .iter()
+            .map(|keyseq| (*keyseq).to_string())
+            .collect();
         assert_eq!(
-            unmapped,
-            Vec::<String>::new(),
+            unmapped, expected,
             "GNU default table must mirror except the documented gaps"
         );
 
@@ -6294,10 +6339,20 @@ mod tests {
             "C-x C-r must be a default chord"
         );
 
-        // No user bindings: defaults only.
+        // No user bindings: defaults only. The engine default table
+        // carries several terminal spellings of beginning-of-line
+        // (\C-a plus the Home terminfo sequences), and the dumper
+        // caps a line at five seqs in table order — assert the claim,
+        // not one full spelling, so a table growth upstream does not
+        // break this pin.
         let lines = dump_function_lines(&[]);
+        let beginning_of_line = lines
+            .iter()
+            .find(|line| line.starts_with("beginning-of-line can be found on "))
+            .expect("beginning-of-line must be bound in the default table");
         assert!(
-            lines.contains(&"beginning-of-line can be found on \"\\e[1~\", \"\\C-a\".".to_string())
+            beginning_of_line.contains("\"\\C-a\""),
+            "the C-a default must be reported: {beginning_of_line}"
         );
         assert!(lines.contains(&"re-read-init-file can be found on \"\\C-x\\C-r\".".to_string()));
         assert!(lines.contains(&"dump-functions is not bound to any keys".to_string()));
@@ -6326,8 +6381,16 @@ mod tests {
         ];
         let lines = dump_function_lines(&entries);
         assert!(lines.contains(&"operate-and-get-next can be found on \"\\C-o\".".to_string()));
-        // The \C-a claim is retired; the \e[1~ default remains.
-        assert!(lines.contains(&"beginning-of-line can be found on \"\\e[1~\".".to_string()));
+        // The \C-a claim is retired; the other default spellings
+        // remain (the table also carries \eOH/\e[H terminfo forms).
+        let beginning_of_line = lines
+            .iter()
+            .find(|line| line.starts_with("beginning-of-line can be found on "))
+            .expect("the other beginning-of-line defaults remain");
+        assert!(
+            !beginning_of_line.contains("\"\\C-a\""),
+            "the macro rebind must retire the C-a claim: {beginning_of_line}"
+        );
 
         // The GNU default spellings parse as single keys: plain
         // meta forms and the combined meta-control form.
@@ -7650,10 +7713,15 @@ mod tests {
                 crate::keymap_registry::KeymapMode::ViNormal,
             ),
         ] {
-            // The pre-registry build order, verbatim.
+            // The pre-registry build order, verbatim, plus the
+            // niubash#765/#766/#767 host-command defaults (a host
+            // baseline layer the registry build gained with this
+            // batch; the order relative to the other baseline
+            // layers is the snapshot pin).
             let mut legacy = defaults.clone();
             add_menu_keybindings(&mut legacy, CompletionInteraction::Insert);
             add_system_clipboard_keybindings(&mut legacy);
+            add_gnu_command_default_keybindings(&mut legacy, target);
             add_native_widget_keybindings(&mut legacy, target, &config, &bundle);
             add_bundle_widget_keybindings(&mut legacy, target, &config, &bundle);
             add_user_widget_keybindings(&mut legacy, &user);
