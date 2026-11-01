@@ -5325,12 +5325,9 @@ where
     // nothing (download retraction 2026-10-04), so the hint names the
     // platform's primary package-manager command directly — wpm first on
     // Windows (owner correction 2026-10-03), the native manager elsewhere.
-    // `niu plugin add <recipe>` prints the same, fuller recommendation.
     if let Some(recipe) = plugin_recipe_for_command(command) {
         if let Some(install) = crate::plugins::recipes::first_recommendation(recipe) {
-            lines.push(format!(
-                "niubash: try '{install}' to add {command} (or: niu plugin add {recipe})"
-            ));
+            lines.push(format!("niubash: try '{install}' to add {command}"));
         }
     }
 
@@ -7582,11 +7579,7 @@ complete -F _envtooldyn_hook envtooldyn
 
         #[cfg(windows)]
         assert!(
-            lines.contains(
-                &"niubash: try 'wpm install ripgrep' to add rg \
-                             (or: niu plugin add ripgrep)"
-                    .to_string()
-            ),
+            lines.contains(&"niubash: try 'wpm install ripgrep' to add rg".to_string()),
             "{lines:?}"
         );
         #[cfg(not(windows))]
@@ -7772,12 +7765,6 @@ complete -F _envtooldyn_hook envtooldyn
                 "hint recipe '{recipe}' for '{command}' has no executable-tool row in the seed index"
             );
             let lines = native_command_not_found_hint_lines(command, |_| false);
-            assert!(
-                lines
-                    .iter()
-                    .any(|line| line.contains(&format!("niu plugin add {recipe}"))),
-                "{command}: {lines:?}"
-            );
             // The platform's primary install command is named directly
             // (wpm on Windows, a native manager elsewhere).
             let first = crate::plugins::recipes::first_recommendation(recipe)
