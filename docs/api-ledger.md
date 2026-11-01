@@ -158,6 +158,28 @@
 > the record is this addendum, in both copies, per the update
 > rule.
 >
+> Addendum (bind / history_expand census backfill, 2026-11-01):
+> the bind family's function table and plain-form formatters
+> (`builtins::bind::READLINE_FUNCTIONS`,
+> `builtins::bind::format_macro_plain`,
+> `builtins::bind::format_variable_plain`), the
+> history-expansion engine family
+> (`history_expand::HistChars` / `HistCtx` /
+> `HistEngineState` / `HistLookup` / `history_expand`,
+> with the `HistChars::default` /
+> `HistEngineState::default` constructors niubash calls),
+> and the tilde expander
+> (`expand::tilde::tilde::expand_word_prefix`) are
+> recorded (§0 backfill basis, §2.1 rows, §4 rows, §6
+> entries) after §5's completeness check flagged them as
+> consumed-but-unrecorded — niubash's host readline
+> commands (the niubash#765-#767 batch: the funmap,
+> dump-macros / dump-variables, `history-expand-line`,
+> `tilde-expand`) consume them through niubash-runtime's
+> readline_commands and repl modules, but no census ever
+> registered them. The completeness red this raised on
+> every rubash PR's pairing job is what surfaced the gap.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -263,6 +285,31 @@ the one direct `Executor` construction left in the host:
 every `Shell` is built through the Session builder (§2.3)
 and every other Executor arrives through the §2.2 seam.
 
+Backfill census for the bind / history_expand families
+(2026-11-01), same rules:
+
+- rubash master `ee954e9c35b44fbd475d36d601826992fc563e14`
+- niubash master `288b6b5250eab36fef2607eaa45a787079c6812e`
+
+The v4 census missed these families (see the header
+addendum). Occurrences by the rule below:
+`builtins::bind::READLINE_FUNCTIONS` (1),
+`builtins::bind::format_macro_plain` (1),
+`builtins::bind::format_variable_plain` (1),
+`expand::tilde::tilde::expand_word_prefix` (1),
+`history_expand::HistChars::default` (1),
+`history_expand::HistCtx` (1),
+`history_expand::HistEngineState::default` (1),
+`history_expand::HistLookup` (1), and
+`history_expand::history_expand` (1), spread over exactly
+**2 files**: `crates/niubash-runtime/src/readline_commands.rs`
+and `crates/niubash-runtime/src/repl.rs`. The two
+`::default` tokens are recorded under their types (§6
+`item` entries for `HistChars` / `HistEngineState`): a
+`Default` constructor is a trait impl, not a `pub fn`,
+so the §6 `method` kind cannot represent it — the type
+entry is its record, as the §2.1 row states.
+
 Counting rules (so any future re-census is comparable):
 
 - **Path references**: occurrences of the token pattern
@@ -319,8 +366,10 @@ the 1.5.0 tiers exist to fix.
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
-| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface |
+| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `format_macro_plain`, `format_variable_plain`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `READLINE_FUNCTIONS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface. The `READLINE_FUNCTIONS` table and the `format_macro_plain` / `format_variable_plain` plain-form formatters (recorded in the 2026-11-01 backfill, see header addendum) are a further exception: niubash's host readline layer calls them directly — the funmap in niubash-runtime's readline_commands module reads the table, and the repl's dump-macros / dump-variables faces format through the pair, over data the gated bind surface loads |
 | `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today; plus the `SessionHistory::size_limit` associated helper (recorded in v3) |
+| `history_expand` | `HistChars::default` (1), `HistCtx` (1), `HistEngineState::default` (1), `HistLookup` (1), `history_expand` (1) — the history-expansion engine niubash's host readline layer drives directly for its `history-expand-line` face and the first stage of `shell_expand_line`: niubash-runtime's readline_commands module implements `HistLookup` over the session entries, builds the `HistChars` / `HistCtx` context from the session's `histchars` value and posix mode, and calls `history_expand` over a fresh `HistEngineState` (recorded in the 2026-11-01 backfill; see §0 — the `::default` tokens are recorded under their types in §6) |
+| `expand::tilde` | `tilde::expand_word_prefix` (1) — the tilde-prefix expander niubash's host `tilde-expand` readline command applies to the word at point over the session environment; consumed in niubash-runtime's repl module under the defining-module spelling `expand::tilde::tilde::expand_word_prefix`, which is the spelling §6 records (recorded in the 2026-11-01 backfill; see §0) |
 | `script_driver` | `run_source_with_line_offset` (2), `run_script_with_history_at_line_offset_tracked`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `bytes_to_script_text`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER` (1 each unless noted). (Ledger v4: `run_stdin_script`, `run_interactive_stdin`, `prepare_interactive_history`, `pre_process_interactive_line` + `InteractiveExpansion`, and `finish_shell` have exited the consumed surface — `Session::run_stdin` / `run_interactive_stdin` / `prepare_line` / `close` carry that traffic now; the symbols stay `pub` in the engine.) |
 | `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1), `ast_print::pretty_print_input` (1); `Ast` is also consumed under this defining-module spelling (the root re-export above is the other spelling; both recorded in §6) |
 | `lexer` | `tokenize` (2), `tokenize_with_initial_posix` (1), `has_unclosed_input_syntax` (1), `has_unclosed_input_syntax_posix` (1) |
@@ -486,7 +535,9 @@ to the split core crate without changing its shape.
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
 | tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, the post-build provider install, and the `&self` probe reads the `&mut`-shaped views cannot serve. Added with the migration's companion change; its consumer set is expected to shrink, never grow |
 | debugger front doors (`run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) | B | driver-layer front doors at the crate root — the design's §10 forms of the one debug session; they stay driver surface, not `Session` methods, and move with the driver layer at the split |
-| `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers; plus the `InputrcEnv` / `parse_inputrc_with_env` inputrc reader pair) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature — except the inputrc reader pair, which niubash-runtime's config module consumes directly at startup (see the §2 row) |
+| `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers; plus the `InputrcEnv` / `parse_inputrc_with_env` inputrc reader pair; plus `READLINE_FUNCTIONS` and the `format_macro_plain` / `format_variable_plain` plain-form formatters, recorded in the 2026-11-01 backfill) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature — except the inputrc reader pair, which niubash-runtime's config module consumes directly at startup, and the 2026-11-01 trio, which niubash-runtime's readline_commands / repl modules consume directly for the host funmap and the dump-macros / dump-variables faces (see the §2 row) |
+| `history_expand` engine (`HistChars`, `HistCtx`, `HistEngineState`, `HistLookup`, `history_expand`) | B | stays in the `history_expand` module in-tree — the engine's own history faces and the host's readline `history-expand-line` face drive the same engine (recorded in the 2026-11-01 backfill) |
+| `expand::tilde` (`tilde::expand_word_prefix`) | B | stays in the `expand::tilde` module in-tree — the engine's expansion faces and the host's readline `tilde-expand` command share the one tilde expander (recorded in the 2026-11-01 backfill) |
 
 ## 5. The canary: how the freeze is enforced
 
@@ -561,7 +612,10 @@ item rubash::builtins::bind::BindSpecError
 item rubash::builtins::bind::BindingSpec
 item rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
 item rubash::builtins::bind::InputrcEnv
+item rubash::builtins::bind::READLINE_FUNCTIONS
 item rubash::builtins::bind::format_invalid_keymap
+item rubash::builtins::bind::format_macro_plain
+item rubash::builtins::bind::format_variable_plain
 item rubash::builtins::bind::parse_inputrc_with_env
 item rubash::builtins::bind::parse_positional_binding
 item rubash::builtins::bind::parse_unix_command_spec
@@ -572,7 +626,13 @@ item rubash::executor::bytes_to_shell_text
 item rubash::executor::read_process_stdin_bytes
 item rubash::executor::Executor
 item rubash::executor::shell_pwd_display_path
+item rubash::expand::tilde::tilde::expand_word_prefix
 item rubash::history::HistoryProvider
+item rubash::history_expand::HistChars
+item rubash::history_expand::HistCtx
+item rubash::history_expand::HistEngineState
+item rubash::history_expand::HistLookup
+item rubash::history_expand::history_expand
 item rubash::invocation::ShellInvocation
 item rubash::invocation::materialize_command_file
 item rubash::lexer::has_unclosed_input_syntax
@@ -766,6 +826,15 @@ consumed by niubash#694's invocation-input operand reader
 missed by the v4 census (which counted the builder
 construction and the receiver-form seam calls), and
 flagged by §5's completeness check.
+Backfill, 2026-11-01: the bind family's
+`READLINE_FUNCTIONS` / `format_macro_plain` /
+`format_variable_plain`, the `history_expand` engine
+family, and `expand::tilde::tilde::expand_word_prefix`
+are recorded (§0/§2.1/§4/§6) — consumed by the
+niubash#765-#767 host readline batch through
+niubash-runtime's readline_commands and repl modules,
+missed by the v4 census, and flagged by §5's
+completeness check.
 Staged record, 2026-10-31: the invocation-shape family
 (rubash#2084 / rubash#2130) is recorded (§2.1/§4/§6)
 ahead of host adoption — consumed today by the engine's
