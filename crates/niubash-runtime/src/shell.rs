@@ -2908,21 +2908,23 @@ impl Shell {
     /// host-command face (niubash#767): history expansion first
     /// (bashline.c:2989, skipped when the session has histexpand
     /// off), then alias expansion (bashline.c:3003-3011), then
-    /// word expansion against live session state through the
-    /// session's read-only expansion entry. `history_entries` are
-    /// the interactive history (oldest first) from the editor —
-    /// the engine's own list machinery is off on the REPL path.
+    /// `expand_word` + `string_list` against live session state:
+    /// unquoted expansions field-split on IFS and the fields rejoin
+    /// with single spaces (rubash `Session::expand_shell_words`).
+    /// Filename globbing is NOT part of the pipeline — GNU's
+    /// `expand_word`/`expand_string` comment reserves globbing for
+    /// command expansion (subst.c). `history_entries` are the
+    /// interactive history (oldest first) from the editor — the
+    /// engine's own list machinery is off on the REPL path.
     /// Returns `None` when history expansion errors, where GNU
     /// fails the command and keeps the line (bashline.c:3058).
     ///
-    /// Two GNU steps have no host entry yet and are documented
-    /// gaps, not silent ones: the `$"..."` locale translation
-    /// (expand_string_dollar_quote) is skipped, and the expansion
-    /// runs as one word — the result is not re-split or globbed,
-    /// which is also what keeps the line's spacing intact in the
-    /// editor. The explicit-argument form (which would suppress
-    /// command/process substitution) is unreachable here: prefix
-    /// arguments do not travel through the host-command channel.
+    /// One GNU step has no host entry yet and is a documented gap,
+    /// not a silent one: the `$"..."` locale translation
+    /// (expand_string_dollar_quote) is skipped. The explicit-argument
+    /// form (which would suppress command/process substitution) is
+    /// unreachable here: prefix arguments do not travel through the
+    /// host-command channel.
     pub fn shell_expand_line(&mut self, line: &str, history_entries: &[String]) -> Option<String> {
         let mut text = line.to_string();
         if self
@@ -2946,7 +2948,11 @@ impl Shell {
         }
         let aliases = self.session().aliases();
         text = crate::readline_commands::expand_alias_positions(&text, &aliases);
-        Some(self.session().expand_word(&text))
+        // GNU expand_word field-splits unquoted expansions and
+        // string_list rejoins with one space; globbing is not part of
+        // word/string expansion. The engine owns both halves (rubash
+        // Session::expand_shell_words).
+        Some(self.session().expand_shell_words(&text))
     }
 
     /// Load user completion declarations from the `NIU_COMPDEFS` variable
@@ -6470,6 +6476,30 @@ mod tests {
                 .shell_expand_line("greet $ISSUE767_NAME", &history)
                 .as_deref(),
             Some("echo hello world")
+        );
+        // GNU expand_word splits unquoted expansions on IFS and
+        // rejoins with single spaces; a quoted expansion stays one
+        // word; filename globbing is NOT part of the pipeline
+        // (subst.c: "filename globbing is *NOT* done for word or
+        // string expansion").
+        shell
+            .execute_line("ISSUE767_SPACED='a  b'")
+            .expect("spaced variable registers");
+        assert_eq!(
+            shell
+                .shell_expand_line("echo $ISSUE767_SPACED", &history)
+                .as_deref(),
+            Some("echo a b")
+        );
+        assert_eq!(
+            shell
+                .shell_expand_line("echo \"$ISSUE767_SPACED\"", &history)
+                .as_deref(),
+            Some("echo a  b")
+        );
+        assert_eq!(
+            shell.shell_expand_line("echo *", &history).as_deref(),
+            Some("echo *")
         );
         // A failed history expansion leaves the line unexpanded:
         // the caller keeps the buffer as it stood.

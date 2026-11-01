@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "reedline"
 version = "0.52.1"
-source = "git+https://github.com/unixwin/ruline?rev=83ac10b5e737ea1ab022384c5004f0c48cf3007d#83ac10b5e737ea1ab022384c5004f0c48cf3007d"
+source = "git+https://github.com/unixwin/ruline?rev=a0838b562a5e0c5298fa7b8c42070cad46819000#a0838b562a5e0c5298fa7b8c42070cad46819000"
 dependencies = [
  "arboard",
  "crossterm 0.29.0",

@@ -3418,6 +3418,10 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // niubash#731). The backward/old variants stay undelivered —
         // the editor has no open-the-menu-backward event.
         "menu-complete" => Some(completion_event()),
+        // GNU's listing / bulk-insert completion functions (complete.c
+        // `rl_possible_completions`, `rl_insert_completions`).
+        "possible-completions" => Some(ReedlineEvent::PossibleCompletions),
+        "insert-completions" => Some(ReedlineEvent::InsertCompletions),
         "kill-word" => Some(edit_event(EditCommand::CutWordRight)),
         "kill-line" => Some(edit_event(EditCommand::CutToLineEnd)),
         "backward-kill-line" | "unix-line-discard" => {
@@ -3450,6 +3454,8 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             Some(edit_event(EditCommand::CutFilenameLeft))
         }
         "exchange-point-and-mark" => Some(edit_event(EditCommand::SwapCursorAndAnchor)),
+        // GNU `set-mark` (C-@ / M-SPC): drop the mark at point.
+        "set-mark" => Some(edit_event(EditCommand::SetMark)),
         // Verbatim next-key insertion (`rl_quoted_insert`).
         "quoted-insert" => Some(ReedlineEvent::QuotedInsert),
         // Accept the line and preload the following history entry
@@ -3469,6 +3475,18 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         }),
         "character-search-backward" => Some(ReedlineEvent::CharSearch {
             direction: Direction::Backward,
+        }),
+        // GNU non-incremental history search (M-n/M-p): collect a
+        // string in the minibuffer, then search newer/older entries.
+        "non-incremental-forward-search-history" => Some(ReedlineEvent::NonIncrementalSearch {
+            direction: Direction::Forward,
+            prompt_char: ':',
+            pattern: false,
+        }),
+        "non-incremental-reverse-search-history" => Some(ReedlineEvent::NonIncrementalSearch {
+            direction: Direction::Backward,
+            prompt_char: ':',
+            pattern: false,
         }),
         // GNU `yank-last-arg` (M-.): `None` is GNU's `'$'` — the last
         // argument. `yank-nth-arg` defaults to argument 1; explicit
@@ -6151,19 +6169,19 @@ mod tests {
     /// regression unless a new GNU table row arrived with it.
     ///
     /// Groups:
-    /// - mark/abort/forward search: `set-mark`, `abort`,
-    ///   `forward-search-history` — reedline has no event for the
-    ///   first two, and no forward incremental search.
+    /// - abort/forward search: `abort`, `forward-search-history` —
+    ///   reedline has no event for abort (it clears readline's pending
+    ///   command, not the line), and no forward incremental search.
+    ///   `set-mark` is delivered (`EditCommand::SetMark`), and the
+    ///   non-incremental M-n/M-p pair rides
+    ///   `ReedlineEvent::NonIncrementalSearch`.
     /// - completion modes: `complete-command`, `complete-variable`,
     ///   `complete-filename`, `complete-hostname`,
-    ///   `insert-completions`, `possible-completions`,
     ///   `glob-complete-word`, `complete-username`,
     ///   `complete-into-braces` — the engine's completer owns the
     ///   candidate sources; the editor's single `Complete` event
-    ///   cannot select among them.
-    /// - non-incremental search: `\en`/`\ep` need the host's own
-    ///   search minibuffer (`NonIncrementalSearch` exists, but the
-    ///   M-n/M-p prompt path is not wired through this bridge yet).
+    ///   cannot select among them. The listing and bulk-insert forms
+    ///   (`possible-completions`, `insert-completions`) are delivered.
     /// - `history-expand-line` (`\e^`): the host has shell-expand-line,
     ///   not readline's C-style history expansion event.
     /// - `do-lowercase-version` (`\eA`–`\eN`, `\eP`–`\eZ`): GNU's
@@ -6176,11 +6194,11 @@ mod tests {
     ///   bracketed-paste envelope itself and never routes the marker
     ///   through the keymap.
     const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &[
-        "\\C-@", "\\C-g", "\\C-s", "\\e ", "\\e!", "\\e$", "\\e*", "\\e/", "\\e=", "\\e?", "\\e@",
-        "\\eA", "\\eB", "\\eC", "\\eD", "\\eE", "\\eF", "\\eG", "\\eH", "\\eI", "\\eJ", "\\eK",
-        "\\eL", "\\eM", "\\eN", "\\eP", "\\eQ", "\\eR", "\\eS", "\\eT", "\\eU", "\\eV", "\\eW",
-        "\\eX", "\\eY", "\\eZ", "\\e[1;3C", "\\e[1;3D", "\\e[1;5C", "\\e[1;5D", "\\e[200~",
-        "\\e[3;5~", "\\e[5C", "\\e[5D", "\\e^", "\\eg", "\\en", "\\ep", "\\e{", "\\e~",
+        "\\C-g", "\\C-s", "\\e!", "\\e$", "\\e/", "\\e@", "\\eA", "\\eB", "\\eC", "\\eD", "\\eE",
+        "\\eF", "\\eG", "\\eH", "\\eI", "\\eJ", "\\eK", "\\eL", "\\eM", "\\eN", "\\eP", "\\eQ",
+        "\\eR", "\\eS", "\\eT", "\\eU", "\\eV", "\\eW", "\\eX", "\\eY", "\\eZ", "\\e[1;3C",
+        "\\e[1;3D", "\\e[1;5C", "\\e[1;5D", "\\e[200~", "\\e[3;5~", "\\e[5C", "\\e[5D", "\\e^",
+        "\\eg", "\\e{", "\\e~",
     ];
 
     /// niubash#630 gap list: the **whole GNU default bind table** must
@@ -6692,18 +6710,46 @@ mod tests {
             native_widget_event("history-substring-search-forward"),
             Some(ReedlineEvent::Down)
         );
-        // The residual inexpressible set still falls to the sentinel.
-        // `yank-pop`, `operate-and-get-next` and `overwrite-mode` left
-        // this set when the reedline fork parity batch delivered them
-        // (the K3 key-script executor line): they map to real events
-        // in the table above and are pinned by
-        // `native_widget_maps_fork_delivered_gnu_readline_names`.
+        // The fork's descending-gap batch delivered `set-mark`,
+        // `possible-completions`, `insert-completions` and the
+        // non-incremental search pair as real events.
+        assert_eq!(
+            native_widget_event("set-mark"),
+            Some(edit_event(EditCommand::SetMark))
+        );
+        assert_eq!(
+            native_widget_event("possible-completions"),
+            Some(ReedlineEvent::PossibleCompletions)
+        );
+        assert_eq!(
+            native_widget_event("insert-completions"),
+            Some(ReedlineEvent::InsertCompletions)
+        );
+        assert_eq!(
+            native_widget_event("non-incremental-forward-search-history"),
+            Some(ReedlineEvent::NonIncrementalSearch {
+                direction: Direction::Forward,
+                prompt_char: ':',
+                pattern: false,
+            })
+        );
+        assert_eq!(
+            native_widget_event("non-incremental-reverse-search-history"),
+            Some(ReedlineEvent::NonIncrementalSearch {
+                direction: Direction::Backward,
+                prompt_char: ':',
+                pattern: false,
+            })
+        );
+        // The residual inexpressible set still falls to the sentinel:
+        // `abort` has no editor event (GNU's rl_abort clears the
+        // pending command, not the line).
         assert!(
             matches!(
-                native_widget_event("set-mark"),
+                native_widget_event("abort"),
                 Some(ReedlineEvent::ExecuteHostCommand(_))
             ),
-            "set-mark must stay on the sentinel (reported, not mis-delivered)"
+            "abort must stay on the sentinel (reported, not mis-delivered)"
         );
     }
 
