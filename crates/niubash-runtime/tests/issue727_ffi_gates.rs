@@ -457,11 +457,7 @@ fn issue727_ten_thousand_calls_no_drift() {
     let mut provider = scripted_provider(on(), backend);
     for i in 0..10_000 {
         let outcome = provider.execute(&grep_like_request(), true);
-        assert_eq!(
-            outcome,
-            FfiOutcome::Completed(i % 3),
-            "call {i} drifted"
-        );
+        assert_eq!(outcome, FfiOutcome::Completed(i % 3), "call {i} drifted");
     }
     let rec = rec.lock().unwrap();
     assert_eq!(rec.calls, 10_000);
