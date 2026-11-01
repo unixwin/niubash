@@ -22,8 +22,11 @@
 //!    fingerprint (HEAD contents + index stat) still matches and no
 //!    command cycle has completed since it was computed; a stale or
 //!    cold entry is served as-is for that pass while its refresh
-//!    lands for the next one. Repaints within a pass re-read the
-//!    pass's stamp, never the cache, and never spawn. Outside a
+//!    lands — for the next pass, or (niubash#787) for the displayed
+//!    pass itself: the landing re-stamps the pass's live Vcs cell
+//!    and a single editor repaint carries the segment to the idle
+//!    line. Repaints within a pass re-read the pass's stamp, never
+//!    the cache, and never spawn. Outside a
 //!    repository the segment spawns nothing at all, which is already
 //!    better than `__git_ps1`, that forks several times even in
 //!    `$HOME`;
@@ -67,13 +70,22 @@ const RESET: &str = "\x1b[0m";
 /// the raw-terminal column honest (a bare `\n` would land row two at the
 /// break column under ConPTY).
 pub fn render(cwd: &Path) -> String {
+    render_with_segment(cwd, branch_segment(cwd).as_deref())
+}
+
+/// Render the factory prompt with an explicit segment value instead
+/// of reading the cache: the prompt's live Vcs channel
+/// (niubash#787) rebuilds the baked prompt from a landed value
+/// through this entry, so a mid-pass landing and a pass-start read
+/// produce byte-identical prompts for the same value.
+pub(crate) fn render_with_segment(cwd: &Path, branch: Option<&str>) -> String {
     let mut left = format!(
         "{GREEN}{}@{}{RESET} {YELLOW}{}{RESET}",
         user_name(),
         host_name(),
         display_cwd(cwd),
     );
-    if let Some(branch) = branch_segment(cwd) {
+    if let Some(branch) = branch {
         left.push(' ');
         // Git Bash's __git_ps1 shape: the branch rides in parentheses —
         // `(master*)`, dirty star inside (owner note 2026-10-14: next to

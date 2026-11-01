@@ -74,6 +74,7 @@ pub mod fonts;
 pub mod git_prompt;
 pub mod git_prompt_cache;
 pub(crate) mod history;
+pub(crate) mod idle_repaint;
 pub mod interactive_menu;
 pub mod keymap_registry;
 pub mod logo;

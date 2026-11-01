@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::idle_repaint::LiveVcsCell;
 use crate::prompt_segments::SegmentPromptAdapter;
 use nu_ansi_term::{Color, Style};
 use reedline::{
@@ -451,6 +452,26 @@ pub struct BashPrompt {
     right: Option<String>,
     right_on_last_line: bool,
     multiline: String,
+    /// The gitbash factory face's live Vcs channel (niubash#787).
+    /// Only the factory-built prompt carries one — a claimed PS1
+    /// never does: its git content, if any, is the theme's own
+    /// business. When a segment refresh lands mid-pass, the landing
+    /// re-stamps the cell and the next render rebuilds the prompt
+    /// from the landed value instead of serving the stale bake.
+    live: Option<LiveBashVcs>,
+}
+
+/// The live Vcs state of a factory `BashPrompt` (niubash#787):
+/// the shared segment cell, the segment value the baked strings
+/// were built from, and the rebuild of the full prompt from a
+/// segment value. The rebuild result is memoized so the left,
+/// right and last-line renders of one repaint stay consistent.
+#[derive(Clone)]
+struct LiveBashVcs {
+    cell: Arc<LiveVcsCell>,
+    baked_segment: Arc<Mutex<Option<String>>>,
+    rebuild: Arc<dyn Fn(&Option<String>) -> String + Send + Sync>,
+    rebuilt: Arc<Mutex<Option<(String, Option<String>, bool)>>>,
 }
 
 impl BashPrompt {
@@ -492,24 +513,93 @@ impl BashPrompt {
             // real themes do not right-align it, and a dropped tail would
             // have no editor surface to render on.
             multiline,
+            live: None,
         }
+    }
+
+    /// Attach the live Vcs channel of the gitbash factory face
+    /// (niubash#787): `baked_segment` is the segment value the
+    /// strings just built already carry, and `rebuild` re-renders
+    /// the full (pre-split) left prompt from a landed segment value.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn with_live_vcs(
+        mut self,
+        cell: Arc<LiveVcsCell>,
+        baked_segment: Option<String>,
+        rebuild: Arc<dyn Fn(&Option<String>) -> String + Send + Sync>,
+    ) -> Self {
+        self.live = Some(LiveBashVcs {
+            cell,
+            baked_segment: Arc::new(Mutex::new(baked_segment)),
+            rebuild,
+            rebuilt: Arc::new(Mutex::new(None)),
+        });
+        self
+    }
+
+    /// The live Vcs cell this prompt renders through, if it carries
+    /// the factory channel (niubash#787).
+    pub(crate) fn live_vcs_cell(&self) -> Option<Arc<LiveVcsCell>> {
+        self.live.as_ref().map(|live| live.cell.clone())
+    }
+
+    /// The prompt pieces rebuilt from the live cell's current
+    /// segment value, when a landing has moved it past the baked
+    /// strings; `None` when the bake is current (the common case —
+    /// one lock and a string compare per render).
+    fn refreshed(&self) -> Option<(String, Option<String>, bool)> {
+        let live = self.live.as_ref()?;
+        let current = live.cell.get();
+        {
+            let baked = live
+                .baked_segment
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *baked == current {
+                return live
+                    .rebuilt
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+            }
+        }
+        let fresh = BashPrompt::new((live.rebuild)(&current), self.multiline.clone());
+        let pieces = (fresh.left, fresh.right, fresh.right_on_last_line);
+        *live
+            .baked_segment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = current;
+        *live
+            .rebuilt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pieces.clone());
+        Some(pieces)
     }
 }
 
 impl Prompt for BashPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.left)
+        match self.refreshed() {
+            Some((left, _, _)) => Cow::Owned(left),
+            None => Cow::Borrowed(&self.left),
+        }
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        match &self.right {
-            Some(right) => Cow::Borrowed(right),
-            None => Cow::Borrowed(""),
+        match self.refreshed() {
+            Some((_, right, _)) => Cow::Owned(right.unwrap_or_default()),
+            None => match &self.right {
+                Some(right) => Cow::Borrowed(right),
+                None => Cow::Borrowed(""),
+            },
         }
     }
 
     fn right_prompt_on_last_line(&self) -> bool {
-        self.right_on_last_line
+        match self.refreshed() {
+            Some((_, _, on_last_line)) => on_last_line,
+            None => self.right_on_last_line,
+        }
     }
 
     fn render_prompt_indicator(&self, mode: PromptEditMode) -> Cow<'_, str> {
@@ -538,6 +628,20 @@ pub enum PromptBackend {
 }
 
 impl PromptBackend {
+    /// The live Vcs cell this pass's prompt renders through, if its
+    /// face carries one (niubash#787): the stamped Segments face and
+    /// the gitbash factory face do; a template prompt has no Vcs
+    /// surface and a claimed PS1 is never re-stamped. The REPL
+    /// registers the cell with the idle-repaint registry for the
+    /// pass's `read_line`.
+    pub(crate) fn live_vcs_cell(&self) -> Option<Arc<LiveVcsCell>> {
+        match self {
+            PromptBackend::Template(_) => None,
+            PromptBackend::Segments(adapter) => adapter.inner.live_vcs_cell(),
+            PromptBackend::Bash(prompt) => prompt.live_vcs_cell(),
+        }
+    }
+
     /// The vi-mode indicator strings a continuation read should carry.
     ///
     /// Only the template backend carries configured indicators; the segment
@@ -671,6 +775,34 @@ mod tests {
     // terminal-bound prompt carries no \x01/\x02; PS0 is a DIFFERENT channel
     // and keeps them (eval.c:164-176 writes the decoded string straight to
     // stderr — verified `\x1b[31m` arrives wrapped in the raw marker bytes).
+
+    #[test]
+    fn issue787_bash_prompt_rebuilds_from_the_landed_segment() {
+        // niubash#787: the gitbash factory face bakes its prompt per
+        // pass; with the live channel attached, a landing re-stamps
+        // the cell and the next render rebuilds from the landed
+        // value instead of serving the cold bake.
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cell = Arc::new(LiveVcsCell::new(
+            PathBuf::from("/tmp/issue787-bash-repo"),
+            None,
+        ));
+        let rebuild: Arc<dyn Fn(&Option<String>) -> String + Send + Sync> =
+            Arc::new(|segment: &Option<String>| match segment {
+                Some(segment) => format!("user@h /repo ({segment})\r\n$ "),
+                None => "user@h /repo\r\n$ ".to_string(),
+            });
+        let prompt = BashPrompt::new("user@h /repo\r\n$ ".to_string(), String::new())
+            .with_live_vcs(cell.clone(), None, rebuild);
+        assert_eq!(prompt.render_prompt_left(), "user@h /repo\r\n$ ");
+        assert!(cell.set_if_changed(&Some("main".to_string())));
+        let left = prompt.render_prompt_left();
+        assert!(left.contains("(main)"), "{left:?}");
+        // A claimed PS1 (no channel attached) never rebuilds.
+        let claimed = BashPrompt::new("theme$ ".to_string(), String::new());
+        assert!(claimed.live_vcs_cell().is_none());
+        assert_eq!(claimed.render_prompt_left(), "theme$ ");
+    }
 
     #[test]
     fn bash_prompt_strips_ignore_markers_from_left_right_and_multiline() {

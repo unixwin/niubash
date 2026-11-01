@@ -39,13 +39,15 @@
 //! would spawn on idle redraws, outside the per-cycle budget the
 //! design promises.
 //!
-//! Redraw channel: a landed refresh only writes the cache — the value
-//! every prompt draw reads — so it is visible from the next prompt
-//! pass. That is the host's redraw granularity by design: within a
-//! pass, repaints re-read the pass's stamped value (niubash#592 S2),
-//! and reedline re-evaluates the same stamped prompt object on a
-//! repaint signal, so no mid-pass channel can carry a new segment
-//! value without breaking the stamp contract.
+//! Redraw channel: a landed refresh writes the cache — the value
+//! every prompt draw reads — and notifies the landing observers
+//! registered with [`add_landing_observer`]. Within a pass, repaints
+//! re-read the pass's stamped value (niubash#592 S2): renders never
+//! touch the cache. The one mid-pass channel is the host's
+//! (niubash#787): the interactive host observes the landing,
+//! re-stamps the displayed pass's live Vcs cell in place, and
+//! requests a single editor repaint — a host write on the landing
+//! thread, not a render read, so the stamp contract holds.
 //!
 //! Worker hygiene: a refresh thread is scoped to one recompute — it
 //! holds no engine lock, touches the cache lock only to store its
@@ -324,14 +326,35 @@ fn launch_refresh(worktree: PathBuf, fingerprint: RepoFingerprint, cycles: u64) 
                     name
                 }
             });
-            let mut cache = segment_cache_lock();
-            if let Some(entry) = cache.entries.get_mut(&worktree) {
-                entry.value = computed;
-                entry.fingerprint = fingerprint;
-                entry.dirty = entry.cycles != cycles;
-                entry.refreshing = false;
+            let landed = {
+                let mut cache = segment_cache_lock();
+                let mut landed = None;
+                if let Some(entry) = cache.entries.get_mut(&worktree) {
+                    entry.value = computed;
+                    entry.fingerprint = fingerprint;
+                    entry.dirty = entry.cycles != cycles;
+                    entry.refreshing = false;
+                    landed = Some(entry.value.clone());
+                }
+                SEGMENT_CACHE.1.notify_all();
+                landed
+            };
+            // The refresh proper ends at the store above: in test
+            // builds the live-refresh gauge stops counting here, so
+            // the niubash#643 no-leak pin measures recompute threads
+            // exactly as it did before the landing publication
+            // existed. The publication below is host-channel work on
+            // this same thread and exits with it; nothing is parked.
+            #[cfg(test)]
+            drop(_live);
+            // niubash#787: a landing is published to the registered
+            // observers (the interactive host's idle-repaint channel)
+            // after the value is stored and the cache lock released:
+            // an observer may read the cache, and must never run
+            // under its lock.
+            if let Some(value) = landed {
+                notify_landing_observers(&worktree, &value);
             }
-            SEGMENT_CACHE.1.notify_all();
         });
     if spawned.is_err() {
         // The refresh could not start; unstick the entry so a later
@@ -342,6 +365,43 @@ fn launch_refresh(worktree: PathBuf, fingerprint: RepoFingerprint, cycles: u64) 
             entry.refreshing = false;
         }
         SEGMENT_CACHE.1.notify_all();
+    }
+}
+
+/// Observers notified every time a refresh lands a value in the
+/// cache (niubash#787): the interactive host's idle-repaint channel
+/// subscribes here so a landing can re-stamp the displayed prompt
+/// pass and request one editor repaint. Observers run on the
+/// refresh thread, after the value is stored and the cache lock
+/// released; they must be cheap and must never wait on the cache.
+static LANDING_OBSERVERS: std::sync::Mutex<
+    Vec<std::sync::Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// Register a landing observer. Registering the same observer
+/// instance twice is a no-op (the host re-registers on every editor
+/// build with one shared closure).
+pub(crate) fn add_landing_observer(
+    observer: std::sync::Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>,
+) {
+    let mut observers = LANDING_OBSERVERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !observers
+        .iter()
+        .any(|o| std::sync::Arc::ptr_eq(o, &observer))
+    {
+        observers.push(observer);
+    }
+}
+
+fn notify_landing_observers(worktree: &Path, value: &Option<String>) {
+    let observers = LANDING_OBSERVERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    for observer in observers {
+        observer(worktree, value);
     }
 }
 
@@ -689,6 +749,47 @@ mod tests {
         assert!(wait_for_segment_cache_idle(Duration::from_secs(30)));
         assert_eq!(spawns(tmp.path()), 1, "the cold draw costs one spawn");
         assert_eq!(branch_segment(tmp.path()).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn issue787_landing_notifies_observers_once_with_the_landed_value() {
+        // niubash#787: the idle-repaint channel's source — a landing
+        // publishes (worktree, landed value) to the registered
+        // observers exactly once, and observing costs no spawn.
+        let tmp = tempfile::tempdir().unwrap();
+        if !repo_with_commit(tmp.path()) {
+            return;
+        }
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, Option<String>)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = {
+            let seen = seen.clone();
+            std::sync::Arc::new(move |worktree: &Path, value: &Option<String>| {
+                seen.lock()
+                    .unwrap()
+                    .push((worktree.to_path_buf(), value.clone()));
+            }) as std::sync::Arc<dyn Fn(&Path, &Option<String>) + Send + Sync>
+        };
+        add_landing_observer(recorder);
+        assert_eq!(
+            branch_segment(tmp.path()),
+            None,
+            "a cold cache serves no segment instead of waiting"
+        );
+        assert!(wait_for_segment_cache_idle(Duration::from_secs(30)));
+        let mine: Vec<Option<String>> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(worktree, _)| worktree == tmp.path())
+            .map(|(_, value)| value.clone())
+            .collect();
+        assert_eq!(
+            mine,
+            vec![Some("main".to_string())],
+            "exactly one landing notice, carrying the landed value"
+        );
+        assert_eq!(spawns(tmp.path()), 1, "observing a landing spawns nothing");
     }
 
     #[test]
