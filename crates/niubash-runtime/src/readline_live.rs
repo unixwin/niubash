@@ -143,6 +143,10 @@ fn write_abi_line(text: &str, point: usize, mark: Option<c_int>) {
         if buffer.is_null() {
             return;
         }
+        // `rl_line_buffer` is `*mut c_char` and `c_char` is `u8` on Android
+        // (making the cast look redundant) but `i8` on x86_64
+        // Linux/macOS/Windows, where the `*mut u8` cast is required.
+        #[allow(clippy::unnecessary_cast)]
         ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, bytes.len());
         *buffer.add(bytes.len()) = 0;
     }
@@ -387,7 +391,10 @@ fn scan_maps() -> BTreeMap<(usize, Vec<u8>), usize> {
     out
 }
 
-static BASELINE: Mutex<Option<BTreeMap<(usize, Vec<u8>), usize>>> = Mutex::new(None);
+/// Keymap snapshot keyed by `(root, key sequence)` -> bound function.
+type KeymapSnapshot = BTreeMap<(usize, Vec<u8>), usize>;
+
+static BASELINE: Mutex<Option<KeymapSnapshot>> = Mutex::new(None);
 static INSTALLED_FINGERPRINT: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Capture the post-`rl_initialize` keymap state.  Must run before any rc
@@ -452,12 +459,12 @@ fn hex_path(path: &[u8]) -> String {
 }
 
 fn parse_path(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let mut path = Vec::with_capacity(hex.len() / 2);
     let bytes = hex.as_bytes();
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let text = std::str::from_utf8(pair).ok()?;
         path.push(u8::from_str_radix(text, 16).ok()?);
     }
@@ -533,12 +540,12 @@ pub fn plugin_state() -> PluginState {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
 
     for (root, path) in keys {
-        let before = baseline.get(&(root.clone(), path.clone())).copied();
-        let after = current.get(&(root.clone(), path.clone())).copied();
+        let before = baseline.get(&(root, path.clone())).copied();
+        let after = current.get(&(root, path.clone())).copied();
         if before == after {
             continue;
         }
-        (root.clone(), path.clone()).hash(&mut hash);
+        (root, path.clone()).hash(&mut hash);
         after.hash(&mut hash);
 
         let Some(keys) = keys_from_path(&path) else {
@@ -577,7 +584,7 @@ pub fn mark_installed() {
 pub fn is_stale() -> bool {
     let current = fingerprint();
     match INSTALLED_FINGERPRINT.lock() {
-        Ok(slot) => slot.map_or(true, |installed| installed != current),
+        Ok(slot) => slot.is_none_or(|installed| installed != current),
         Err(_) => true,
     }
 }
