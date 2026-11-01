@@ -656,6 +656,7 @@ dependencies = [
  "log",
  "nu-ansi-term",
  "png",
+ "readline-abi",
  "reedline",
  "rubash",
  "serde",

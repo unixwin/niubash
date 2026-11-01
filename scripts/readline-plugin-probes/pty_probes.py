@@ -23,6 +23,14 @@ Scenarios:
              against the live readline buffer.  This validates the fixture
              itself (version, rl_add_defun, rl_bind_key, rl_line_buffer,
              rl_point) independently of niu.
+  niu-builtin
+             load the same .so into interactive niu.  A bind -x command runs
+             rl_probe while a line is being edited; the probe must observe the
+             live rl_line_buffer/rl_point, and with RL_PROBE_MUTATE=1 the
+             editor must adopt the plugin's buffer and point mutation.  The
+             fixture's rl_bind_key slot is also pressed (ESC ~ under GNU's
+             default convert-meta) to prove the plugin binding fires in the
+             host keymap.
 """
 
 import argparse
@@ -205,6 +213,20 @@ def ok(message):
     print("RESULT=pass")
     print("REASON=" + message)
     return PASS
+
+
+def settle(session, seconds=0.35):
+    """Drain repaint traffic so the next keystroke meets an idle editor.
+
+    The editor paints a prompt before the line text, so a `read_until` that
+    stops at the prompt leaves a half-painted line behind.  Draining first
+    makes the following keystroke land in a known state instead of racing
+    that repaint.
+    """
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        session._read_once(0.05)
+    session.buffer = b""
 
 
 def scenario_fzf(args):
@@ -398,9 +420,141 @@ def scenario_builtin(args):
         session.close()
 
 
+def scenario_niu_builtin(args):
+    """The live-editor half of niubash#775.
+
+    Load the C fixture into interactive niu, run it from a bind -x command
+    while a line is being edited, and verify the probe sees and mutates the
+    live buffer/point.  With RL_PROBE_MUTATE=1 the editor must adopt the
+    mutation, which is what a real plugin depends on.  The same fixture also
+    binds a key through rl_add_defun/rl_bind_key; pressing it (ESC ~ is how
+    GNU's default convert-meta stores key 0xfe) must dispatch the plugin
+    function through niu's live keymap.
+    """
+    if not args.niu:
+        return skip("--niu is required for the niu loadable-builtin probe")
+    if not args.builtin:
+        return skip("--builtin is required for the niu loadable-builtin probe")
+    root = os.path.join(args.work, "niu-builtin")
+    home = os.path.join(root, "home")
+    start = os.path.join(root, "start")
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(start, exist_ok=True)
+    builtin = os.path.abspath(args.builtin)
+    with open(os.path.join(home, ".niubashrc"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "PS1='P1> '\n"
+            "PS2='P2> '\n"
+            "enable -f '%s' rl_probe\n"
+            # Register the plugin key slot (0xfe) before the editor is built.
+            "rl_probe\n"
+            # Run the same builtin from a bind -x key while editing.
+            "bind -x '\"\\C-g\": rl_probe'\n" % builtin
+        )
+
+    env = base_env(home)
+    env["RL_PROBE_KEY_MARK"] = "1"
+    env["RL_PROBE_MUTATE"] = "1"
+    session = Session(
+        [args.niu],
+        env,
+        start,
+        args.timeout,
+        transcript_path(args, "niu-builtin.transcript"),
+    )
+    try:
+        if session.read_until(b"P1> ") is None:
+            return fail("interactive niu did not reach the P1> prompt", session)
+
+        # 1. The plugin's rl_bind_key/rl_add_defun slot fires in the live
+        #    editor.  convert-meta is on by default, so key 0xfe is stored as
+        #    ESC ~; that is the sequence a terminal sends for Meta-~.
+        session.send(b"\x1b~")
+        marker = session.read_until(b"RL_PROBE_DEFUN ", 5)
+        if marker is None:
+            return fail(
+                "rl_bind_key slot did not fire through niu's live keymap "
+                "(sent ESC ~ for GNU key 0xfe)",
+                session,
+            )
+        marker_line = session.read_until(b"\n", 3) or b""
+        marker_text = strip_ansi(marker + marker_line).replace("\r", "").replace("\n", " ")
+        if "key=126" not in marker_text or "count=1" not in marker_text:
+            return fail(
+                "plugin function ran with unexpected arguments: " + marker_text,
+                session,
+            )
+        settle(session)
+
+        # 2. Run the builtin from bind -x while editing "echo one", with the
+        #    cursor one character left of the end so the point bump is
+        #    visible when a key is typed afterwards.
+        session.send(b"echo one")
+        settle(session)
+        session.send(b"\x02")  # Ctrl-B: point before the final 'e'
+        time.sleep(0.1)
+        session.send(b"\x07")  # Ctrl-G: bind -x -> rl_probe
+        chunk = session.read_until(b"RL_PROBE ", 10)
+        if chunk is None:
+            return fail("bind -x did not run the rl_probe builtin", session)
+        probe_line = session.read_until(b"\n", 5)
+        if probe_line is None:
+            return fail("rl_probe output did not terminate", session)
+        probe_text = strip_ansi(chunk + probe_line).replace("\r", "").replace("\n", " ")
+        probe_text = probe_text[probe_text.index("RL_PROBE "):]
+        for field in (
+            "line_buffer=ok",
+            "line_mutated=ok",
+            "point=ok",
+            "point_mutated=ok",
+            "mutate=on",
+            "result=ok",
+        ):
+            if field not in probe_text:
+                return fail(
+                    "live ABI probe missing %s: %s" % (field, probe_text), session
+                )
+
+        # 3. The editor must have adopted the plugin's first-byte flip and
+        #    point bump.  Type at the new point and submit: the command line
+        #    is "Xcho oneZ" (buffer flipped + point moved past the final 'e').
+        settle(session, 0.45)
+        session.send(b"Z")
+        time.sleep(0.2)
+        session.send(b"\r")
+        # Wait for the command's own diagnostic rather than the next prompt:
+        # the prompt is repainted before the submitted line reaches the
+        # engine, so a prompt match can return before execution happens.
+        executed = session.read_until(b"command not found", 10)
+        if executed is None:
+            return fail("mutated line did not run after submit", session)
+        executed_text = strip_ansi(executed).replace("\r", "")
+        if "Xcho oneZ" not in executed_text:
+            return fail(
+                "editor did not adopt the plugin's buffer/point mutation "
+                "(expected the command line Xcho oneZ): "
+                + " ".join(executed_text.split()),
+                session,
+            )
+        if "command not found" not in executed_text:
+            return fail(
+                "mutated line did not execute as expected: "
+                + " ".join(executed_text.split()),
+                session,
+            )
+
+        return ok(
+            "niu live ABI: %s; editor adopted Xcho oneZ from the plugin's "
+            "rl_line_buffer/rl_point writes; rl_bind_key slot fired (%s)"
+            % (" ".join(probe_text.split()), " ".join(marker_text.split()))
+        )
+    finally:
+        session.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=["fzf", "inputrc", "builtin"])
+    parser.add_argument("scenario", choices=["fzf", "inputrc", "builtin", "niu-builtin"])
     parser.add_argument("--niu", default="")
     parser.add_argument("--bash", default="")
     parser.add_argument("--builtin", default="")
@@ -411,7 +565,7 @@ def main():
     parser.add_argument("--transcript", default="")
     args = parser.parse_args()
 
-    if args.scenario in ("fzf", "inputrc") and not args.niu:
+    if args.scenario in ("fzf", "inputrc", "niu-builtin") and not args.niu:
         print("RESULT=skip")
         print("REASON=--niu is required for this scenario")
         return SKIP
@@ -425,6 +579,8 @@ def main():
             return scenario_fzf(args)
         if args.scenario == "inputrc":
             return scenario_inputrc(args)
+        if args.scenario == "niu-builtin":
+            return scenario_niu_builtin(args)
         return scenario_builtin(args)
     except OSError as error:
         print("RESULT=fail")
