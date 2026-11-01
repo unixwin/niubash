@@ -22,6 +22,14 @@
 //!   input line *before* that hook — the line would lag the grid's
 //!   highlight by a full paint on every TAB. This menu keeps the
 //!   fallback splice for a navigation event delivered straight to it.
+//! * **Arrow keys** move the highlight through the painted grid the
+//!   zsh menu-select way (niubash#778): up/down step within a column
+//!   (wrapping to the neighbouring column's far edge), left/right
+//!   step across columns — see [`grid_neighbor`]. The wrapper issues
+//!   those splices at translation time too, off the grid geometry
+//!   this menu publishes into the shared cell
+//!   ([`CycleSession::grid_rows`]); a `MenuEvent::Move*` delivered
+//!   straight to the menu takes the fallback path here.
 //! * **Any other edit key** ends the session as *accepted in place*:
 //!   the candidate in the line stays and the key applies on top of it.
 //! * **Enter** accepts the candidate in the line and runs the command;
@@ -129,6 +137,14 @@ pub struct CycleSession {
     /// menu consumes one sequence number per such echo to tell it
     /// apart from a genuine user edit, which ends the session.
     pub nav_seq: u64,
+    /// The row count of the packed column layout the menu is
+    /// currently painting, published by the menu at paint time
+    /// (0 = not painted yet). The wrapper's arrow-key navigation
+    /// reads it to move through the grid with the same geometry the
+    /// menu paints (see [`grid_neighbor`]) — the wrapper knows the
+    /// candidates but not their display widths or the terminal
+    /// width, so the shape has to come from the painter side.
+    pub grid_rows: usize,
 }
 
 impl CycleSession {
@@ -146,6 +162,7 @@ impl CycleSession {
         self.index = 0;
         self.region = span;
         self.nav_seq = 0;
+        self.grid_rows = 0;
     }
 
     fn mark_spliced(&mut self, region: (usize, usize)) {
@@ -160,6 +177,7 @@ impl CycleSession {
         self.candidates = Vec::new();
         self.index = 0;
         self.nav_seq = 0;
+        self.grid_rows = 0;
     }
 
     /// Whether a session is live (the edit-mode wrapper's Enter gate).
@@ -237,6 +255,80 @@ pub fn rollback_edits(snapshot: &CycleSnapshot) -> Vec<EditCommand> {
     whole_line_edits(&snapshot.buffer, snapshot.cursor)
 }
 
+/// The candidate a grid move lands on (niubash#778, zsh menu-select
+/// geometry). The grid is column-major: candidate `index` sits at
+/// column `index / rows`, row `index % rows` of the packed layout.
+/// Exactly one of `dcol`/`drow` is nonzero in every caller.
+///
+/// * Down steps within the column; from a column's bottom it lands
+///   on the next column's top, and from the last candidate it wraps
+///   to the first. Up is the mirror image (from a column's top, the
+///   previous column's bottom; from the first candidate, the last).
+/// * Right steps to the same row of the next column, wrapping to
+///   the first column's same row (in a single-column grid that is
+///   the candidate itself — the move stays). Left mirrors it,
+///   except that wrapping from column 0 onto a short last column
+///   (whose same-row cell does not exist) lands on the last
+///   candidate.
+///
+/// Pure and total (any `rows` is clamped into `1..=len`): pinned by
+/// unit tests.
+pub fn grid_neighbor(index: usize, len: usize, rows: usize, dcol: isize, drow: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let rows = rows.clamp(1, len);
+    let index = index.min(len - 1);
+    let col = index / rows;
+    let row = index % rows;
+    if drow > 0 {
+        // Down.
+        if row + 1 < rows && index + 1 < len {
+            return index + 1;
+        }
+        let next_col_top = (col + 1) * rows;
+        if next_col_top < len {
+            return next_col_top;
+        }
+        return 0;
+    }
+    if drow < 0 {
+        // Up.
+        if row > 0 {
+            return index - 1;
+        }
+        if col > 0 {
+            // Bottom of the previous column (always full: a column
+            // exists only when every column before it is).
+            return col * rows - 1;
+        }
+        return len - 1;
+    }
+    if dcol > 0 {
+        // Right.
+        let target = index + rows;
+        if target < len {
+            return target;
+        }
+        // Wrap to the same row of the first column — which is the
+        // candidate itself in a single-column grid (the move stays).
+        return row;
+    }
+    if dcol < 0 {
+        // Left.
+        if col > 0 {
+            return index - rows;
+        }
+        let last_col = (len - 1) / rows;
+        let target = last_col * rows + row;
+        if target < len {
+            return target;
+        }
+        return len - 1;
+    }
+    index
+}
+
 /// The cycle-interaction completion menu. See the [module docs](self).
 ///
 /// Like [`super::gnu_menu::GnuMenu`], it carries a [`MenuSettings`]
@@ -292,11 +384,15 @@ pub struct CycleMenu {
     menu_open: Option<Arc<AtomicBool>>,
     /// Terminal width seen at the last paint; 80 before the first.
     terminal_columns: usize,
-    /// niubash#742: zsh menu-select form — TAB #1 opens the grid with
-    /// no candidate spliced; the first navigate selects index 0.
-    select_mode: bool,
-    /// Whether a candidate is currently spliced into the line (always
-    /// true once a classic cycle session begins; gated by select_mode).
+    /// Whether a candidate is currently spliced into the line and
+    /// therefore painted highlighted in the grid. True from the
+    /// moment a session begins (TAB #1 splices the first candidate —
+    /// the #631 DESIGN §7 contract, for the `select` form too since
+    /// niubash#778: the #742 select form opened unselected, and the
+    /// edit-mode wrapper's navigation echoes never raised this flag,
+    /// so no TAB ever painted a highlight — only a menu-local
+    /// navigate did, which is what the owner saw as "Down once makes
+    /// a highlight appear").
     has_selection: bool,
 }
 
@@ -318,16 +414,8 @@ impl CycleMenu {
             session,
             menu_open: None,
             terminal_columns: 80,
-            select_mode: false,
             has_selection: false,
         }
-    }
-
-    /// Enable the zsh menu-select form (niubash#742).
-    #[must_use]
-    pub fn with_select_mode(mut self, on: bool) -> Self {
-        self.select_mode = on;
-        self
     }
 
     /// Name the menu (the engine routes `ReedlineEvent::Menu(name)` by it).
@@ -412,20 +500,34 @@ impl CycleMenu {
         if let Ok(mut session) = self.session.lock() {
             session.begin(snapshot, candidates, (span.start, span.end));
         }
+        self.publish_grid_rows();
+        // Every form splices the first candidate and highlights it
+        // (the module contract). niubash#778 removed the #742 select
+        // form's unselected open: it left `has_selection` false, and
+        // the wrapper-driven TAB path could never raise it again —
+        // the grid painted no highlight for any number of TABs.
+        self.splice(editor);
+        self.has_selection = true;
         if self.values.len() == 1 {
             // A lone candidate completes outright and ends the session
             // at once (GNU/zsh shape — nothing left to cycle, under
             // select as well: menu-select has no menu for one match).
-            self.splice(editor);
-            self.has_selection = true;
             self.end_session();
-        } else if self.select_mode {
-            // menu-select: the grid opens unselected; the splice waits
-            // for the first navigate.
-            self.has_selection = false;
-        } else {
-            self.splice(editor);
-            self.has_selection = true;
+        }
+    }
+
+    /// Publish the painted grid's row count into the shared cell, so
+    /// the wrapper's arrow-key navigation moves with the geometry
+    /// this menu paints (see [`CycleSession::grid_rows`]).
+    fn publish_grid_rows(&mut self) {
+        if !self.session_begun || self.values.is_empty() {
+            return;
+        }
+        let (_, rows, _) = packed_column_layout(&self.display_widths, self.terminal_columns);
+        if let Ok(mut session) = self.session.lock() {
+            if session.open {
+                session.grid_rows = rows;
+            }
         }
     }
 
@@ -545,14 +647,8 @@ impl CycleMenu {
             return;
         }
         let len = self.values.len() as isize;
-        if self.select_mode && !self.has_selection {
-            // First navigate after an unselected open picks an edge:
-            // forward -> first candidate, backward -> last (zsh).
-            self.index = if delta >= 0 { 0 } else { len as usize - 1 };
-            self.has_selection = true;
-        } else {
-            self.index = (self.index as isize + delta).rem_euclid(len) as usize;
-        }
+        self.index = (self.index as isize + delta).rem_euclid(len) as usize;
+        self.has_selection = true;
         self.splice(editor);
         // The wrapper normally drives navigation itself (see
         // `CycleSession::nav_seq`); this menu-local path is the
@@ -579,10 +675,57 @@ impl CycleMenu {
                 self.echoes_seen += 1;
                 self.index = session.index;
                 self.region = session.region;
+                // A wrapper navigation splice means a candidate IS in
+                // the line: the painted grid must show it selected.
+                // niubash#778: this sync used to adopt the index but
+                // never the selection, so on the wrapper path (every
+                // TAB inside a live session) the highlight stayed off
+                // for the whole session.
+                if session.spliced {
+                    self.has_selection = true;
+                }
                 return;
             }
         }
         self.end_session();
+    }
+
+    /// Move the highlight through the painted grid (zsh menu-select
+    /// geometry, see [`grid_neighbor`]) and splice the landing
+    /// candidate. This is the fallback for a `MenuEvent::Move*`
+    /// delivered straight to the menu (a user binding to
+    /// MenuUp/MenuDown/MenuLeft/MenuRight): the wrapper normally
+    /// intercepts the arrow keys itself at translation time, off the
+    /// geometry published in [`CycleSession::grid_rows`]. Before
+    /// niubash#778 these events fell into the drain's catch-all and
+    /// were dropped outright.
+    fn apply_grid_move(&mut self, editor: &mut Editor, dcol: isize, drow: isize) {
+        if !self.session_begun {
+            // Belt and braces for a late first answer, as in
+            // `apply_navigate`.
+            if self.activation_pending && !self.values.is_empty() {
+                self.begin_session(editor);
+            }
+            return;
+        }
+        if self.values.len() < 2 {
+            return;
+        }
+        let (_, rows, _) = packed_column_layout(&self.display_widths, self.terminal_columns);
+        let target = grid_neighbor(self.index, self.values.len(), rows, dcol, drow);
+        if target == self.index {
+            return;
+        }
+        self.index = target;
+        self.has_selection = true;
+        self.splice(editor);
+        // Mirror the outcome into the cell, as `apply_navigate` does
+        // — without a nav_seq bump: no Edit echo follows a menu-side
+        // splice.
+        if let Ok(mut session) = self.session.lock() {
+            session.index = self.index;
+            session.region = self.region;
+        }
     }
 
     /// Run every queued engine event in arrival order.
@@ -592,6 +735,10 @@ impl CycleMenu {
                 MenuEvent::Activate(_) => self.apply_activate(editor, completer),
                 MenuEvent::NextElement => self.apply_navigate(editor, 1),
                 MenuEvent::PreviousElement => self.apply_navigate(editor, -1),
+                MenuEvent::MoveUp => self.apply_grid_move(editor, 0, -1),
+                MenuEvent::MoveDown => self.apply_grid_move(editor, 0, 1),
+                MenuEvent::MoveLeft => self.apply_grid_move(editor, -1, 0),
+                MenuEvent::MoveRight => self.apply_grid_move(editor, 1, 0),
                 MenuEvent::Edit(_) => self.apply_edit(),
                 // Deactivate was applied by `handle_menu_event`
                 // (set_active + clear_input); nothing is left to do.
@@ -705,6 +852,9 @@ impl Menu for CycleMenu {
     ) {
         self.terminal_columns = painter.screen_width() as usize;
         self.drain_events(editor, completer);
+        // The frame about to paint uses this layout; the wrapper's
+        // arrow keys must move through exactly it.
+        self.publish_grid_rows();
     }
 
     fn replace_in_buffer(&self, _editor: &mut Editor) {
@@ -1105,49 +1255,65 @@ mod tests {
 
     // ─── niubash#742: select (zsh menu-select) form ───────────────────
 
+    // niubash#778: the #742 select form opened the grid with nothing
+    // spliced and nothing highlighted, and no later TAB could raise
+    // the highlight on the wrapper path — the regression the owner
+    // reported. The corrected contract is the module's DESIGN §7
+    // shape for every form: TAB #1 splices the first candidate AND
+    // paints it selected in the first frame.
     #[test]
-    fn issue742_select_first_tab_opens_grid_without_splicing() {
+    fn issue778_select_first_tab_splices_first_candidate_and_paints_it_selected() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
         let (mut menu, session) = menu_with_session();
-        menu = menu.with_select_mode(true);
         let mut editor = editor_with("git ch");
 
         activate(&mut menu, &mut editor, &mut completer);
 
-        // Grid is live, nothing selected, line untouched.
         assert!(menu.is_active());
-        assert_eq!(editor.get_buffer(), "git ch");
-        let session = session.lock().unwrap();
-        assert!(session.open);
-        assert!(!session.spliced);
-        assert_eq!(
-            session.snapshot,
-            Some(CycleSnapshot {
-                buffer: "git ch".to_string(),
-                cursor: 6,
-            })
+        assert_eq!(editor.get_buffer(), "git checkout");
+        {
+            let session = session.lock().unwrap();
+            assert!(session.open);
+            assert!(session.spliced);
+            assert_eq!(
+                session.snapshot,
+                Some(CycleSnapshot {
+                    buffer: "git ch".to_string(),
+                    cursor: 6,
+                })
+            );
+        }
+        // Frame-level: the painted grid carries the selection style
+        // on the first candidate (the default selected style: green,
+        // bold, reversed — what `menu_string` composes for a
+        // style-less suggestion).
+        let selected_style = nu_ansi_term::Style::new()
+            .fg(nu_ansi_term::Color::Green)
+            .bold()
+            .reverse();
+        let painted = menu.menu_string(20, true);
+        let selected_cell = format!(
+            "{}checkout{}",
+            selected_style.prefix(),
+            selected_style.suffix()
+        );
+        assert!(
+            painted.contains(&selected_cell),
+            "frame #1 must paint candidate 1 selected:\n{painted:?}"
         );
     }
 
     #[test]
-    fn issue742_select_first_navigate_picks_an_edge_then_cycles() {
+    fn issue778_select_navigation_cycles_from_the_spliced_first_candidate() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
         let (mut menu, session) = menu_with_session();
-        menu = menu.with_select_mode(true);
         let mut editor = editor_with("git ch");
         activate(&mut menu, &mut editor, &mut completer);
-
-        // Forward navigate picks the FIRST candidate (zsh menu-select).
-        navigate(
-            &mut menu,
-            &mut editor,
-            &mut completer,
-            MenuEvent::NextElement,
-        );
         assert_eq!(editor.get_buffer(), "git checkout");
         assert!(session.lock().unwrap().spliced);
 
-        // Next steps to candidate 2, then wraps to the last.
+        // TAB steps from the spliced first candidate to candidate 2,
+        // then the last, then wraps to the first.
         navigate(
             &mut menu,
             &mut editor,
@@ -1162,13 +1328,19 @@ mod tests {
             MenuEvent::NextElement,
         );
         assert_eq!(editor.get_buffer(), "git cherry-pick");
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::NextElement,
+        );
+        assert_eq!(editor.get_buffer(), "git checkout");
     }
 
     #[test]
     fn issue742_select_first_backward_navigate_picks_the_last() {
         let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
         let (mut menu, _session) = menu_with_session();
-        menu = menu.with_select_mode(true);
         let mut editor = editor_with("git ch");
         activate(&mut menu, &mut editor, &mut completer);
         navigate(
@@ -1184,12 +1356,150 @@ mod tests {
     fn issue742_select_lone_candidate_completes_outright() {
         let mut completer = PrefixCompleter::new(&["checkout", "status"]);
         let (mut menu, session) = menu_with_session();
-        menu = menu.with_select_mode(true);
         let mut editor = editor_with("git che");
         activate(&mut menu, &mut editor, &mut completer);
         assert_eq!(editor.get_buffer(), "git checkout");
         assert!(!menu.is_active());
         assert!(!session.lock().unwrap().open);
+    }
+
+    #[test]
+    fn issue778_painted_selection_follows_wrapper_navigation_echoes() {
+        // The wrapper splices TAB #2 itself and the engine echoes the
+        // edit to the menu: the painted selection must follow to the
+        // new candidate in the same frame, not stay dark (the #778
+        // regression: index synced, selection flag never did).
+        let mut completer = PrefixCompleter::new(&["checkout", "cherry", "cherry-pick"]);
+        let (mut menu, session) = menu_with_session();
+        let mut editor = editor_with("git ch");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "git checkout");
+
+        {
+            let mut state = session.lock().unwrap();
+            state.index = 1;
+            state.region = (4, 10);
+            state.nav_seq = 1;
+        }
+        editor.edit_buffer(
+            |buffer| {
+                buffer.replace_range(4..12, "cherry");
+                buffer.set_insertion_point(10);
+            },
+            UndoBehavior::CreateUndoPoint,
+        );
+        menu.menu_event(MenuEvent::Edit(false));
+        menu.drain_events(&mut editor, &mut completer);
+        assert!(menu.is_active());
+
+        let selected_style = nu_ansi_term::Style::new()
+            .fg(nu_ansi_term::Color::Green)
+            .bold()
+            .reverse();
+        let painted = menu.menu_string(20, true);
+        let selected_cell = format!(
+            "{}cherry{}",
+            selected_style.prefix(),
+            selected_style.suffix()
+        );
+        assert!(
+            painted.contains(&selected_cell),
+            "the echo's frame must paint candidate 2 selected:\n{painted:?}"
+        );
+        // And candidate 1 no longer wears the selection.
+        let first_cell = format!(
+            "{}checkout{}",
+            selected_style.prefix(),
+            selected_style.suffix()
+        );
+        assert!(!painted.contains(&first_cell), "{painted:?}");
+    }
+
+    #[test]
+    fn issue778_grid_neighbor_walks_the_packed_grid() {
+        // 7 candidates in 3 rows — column-major:
+        //   0 3 6
+        //   1 4
+        //   2 5
+        let down = |i: usize| grid_neighbor(i, 7, 3, 0, 1);
+        let up = |i: usize| grid_neighbor(i, 7, 3, 0, -1);
+        let right = |i: usize| grid_neighbor(i, 7, 3, 1, 0);
+        let left = |i: usize| grid_neighbor(i, 7, 3, -1, 0);
+        assert_eq!(down(0), 1);
+        assert_eq!(down(1), 2);
+        assert_eq!(down(2), 3, "bottom of a column -> next column's top");
+        assert_eq!(down(5), 6);
+        assert_eq!(down(6), 0, "last candidate wraps to the first");
+        assert_eq!(up(0), 6, "first candidate wraps to the last");
+        assert_eq!(up(3), 2, "top of a column -> previous column's bottom");
+        assert_eq!(up(6), 5);
+        assert_eq!(up(2), 1);
+        assert_eq!(right(0), 3);
+        assert_eq!(right(1), 4);
+        assert_eq!(right(2), 5);
+        assert_eq!(
+            right(4),
+            1,
+            "short last column has no row-1 cell: wrap to column 0"
+        );
+        assert_eq!(right(6), 0, "wrap to the first column");
+        assert_eq!(left(3), 0);
+        assert_eq!(left(6), 3);
+        assert_eq!(left(0), 6, "wrap to the last column");
+        assert_eq!(left(1), 6, "short last column: land on the last candidate");
+
+        // Single row: every candidate is its own column, so both
+        // axes walk the strip linearly with wrap.
+        assert_eq!(grid_neighbor(0, 4, 1, 0, 1), 1);
+        assert_eq!(grid_neighbor(3, 4, 1, 0, 1), 0);
+        assert_eq!(grid_neighbor(0, 4, 1, 0, -1), 3);
+        assert_eq!(grid_neighbor(2, 4, 1, 1, 0), 3);
+        assert_eq!(grid_neighbor(3, 4, 1, 1, 0), 0, "right wraps the strip");
+        assert_eq!(grid_neighbor(2, 4, 1, -1, 0), 1);
+        assert_eq!(grid_neighbor(0, 4, 1, -1, 0), 3, "left wraps the strip");
+        // Single column: left/right stay, down/up step with wrap.
+        assert_eq!(grid_neighbor(1, 4, 4, 1, 0), 1);
+        assert_eq!(grid_neighbor(1, 4, 4, -1, 0), 1);
+        assert_eq!(grid_neighbor(3, 4, 4, 0, 1), 0);
+        // Degenerate inputs stay total.
+        assert_eq!(grid_neighbor(0, 0, 3, 0, 1), 0);
+        assert_eq!(grid_neighbor(9, 4, 0, 0, 1), 0);
+    }
+
+    #[test]
+    fn issue778_menu_move_events_navigate_the_grid() {
+        // A MenuEvent::Move* delivered straight to the menu (a user
+        // binding) walks the highlight through the grid geometry and
+        // splices each landing candidate — before #778 the drain
+        // dropped these events entirely.
+        let names: Vec<String> = (1..=9).map(|i| format!("cand-0{i}.txt")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut completer = PrefixCompleter::new(&refs);
+        let (mut menu, session) = menu_with_session();
+        // The harness grid: 40 columns over width-11 candidates lays
+        // out 3 columns x 3 rows, column-major:
+        //   cand-01 cand-04 cand-07
+        //   cand-02 cand-05 cand-08
+        //   cand-03 cand-06 cand-09
+        menu.terminal_columns = 40;
+        let mut editor = editor_with("cat cand-");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "cat cand-01.txt");
+        // The painted geometry was published for the wrapper.
+        assert_eq!(session.lock().unwrap().grid_rows, 3);
+
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveDown);
+        assert_eq!(editor.get_buffer(), "cat cand-02.txt");
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveRight);
+        assert_eq!(editor.get_buffer(), "cat cand-05.txt");
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveLeft);
+        assert_eq!(editor.get_buffer(), "cat cand-02.txt");
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveUp);
+        assert_eq!(editor.get_buffer(), "cat cand-01.txt");
+        navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveUp);
+        assert_eq!(editor.get_buffer(), "cat cand-09.txt", "wrap to the last");
+        // The cell tracked the menu-side moves.
+        assert_eq!(session.lock().unwrap().index, 8);
     }
 
     #[test]
@@ -1294,7 +1604,6 @@ mod tests {
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut completer = PrefixCompleter::new(&refs);
         let (mut menu, _session) = menu_with_session();
-        menu = menu.with_select_mode(true);
         let mut editor = editor_with("c");
         activate(&mut menu, &mut editor, &mut completer);
 
