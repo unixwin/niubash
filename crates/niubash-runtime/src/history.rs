@@ -730,18 +730,16 @@ struct HistoryState {
 /// exact entry semantics — the same record filter, capacity rule,
 /// search-window arithmetic, unsupported-feature errors, and merge
 /// shape, transcribed from reedline 0.52.1's `file_backed.rs` — but owns
-/// `len_on_disk` itself, so the save path appends just the unwritten
-/// tail (`flush`) and the file is re-read only where the wrapper's
-/// signature gate saw it change (`merge_from_disk`, and the reloads
-/// that rebuild the store from the file).
+/// the on-disk accounting itself (one `on_disk` flag per entry), so a
+/// write face appends just the unwritten entries (`flush`) and the
+/// file is re-read only by the faces that rebuild the store from it
+/// (construction and the explicit reloads, via `merge_from_disk`).
 ///
-/// Invariant the flush fast path relies on: the file's first
-/// `len_on_disk` lines are exactly `entries[..len_on_disk]`; foreign
-/// appends land after them and are folded in by the next merge, which
-/// re-derives the list from the file. The one event that breaks the
-/// prefix is the capacity pop retiring a head entry that is already on
-/// disk; `save` flags it (`disk_prefix_stale`) and the next flush takes
-/// the merge path instead, exactly as reedline's sync would have.
+/// The file is written only at the explicit faces (niubash#773: GNU
+/// session semantics — `history -a`/`-w`, the retarget settle, the
+/// session-end flush): `flush` appends exactly the entries whose
+/// `on_disk` flag is unset, in list order, so foreign appends are
+/// never rolled back and writing never has to re-read the file.
 struct HistoryStore {
     capacity: usize,
     entries: VecDeque<String>,
@@ -755,17 +753,21 @@ struct HistoryStore {
     /// the file's stamp line or the read time. The stamps feed the
     /// `HistoryProvider` stamp channel (`entry_timestamps` and the
     /// two timestamped file faces) and, while HISTTIMEFORMAT is
-    /// armed, the host-driven write faces (niubash#734: the live
-    /// sync and the session-end flush write through `flush`); an
+    /// armed, the host-driven write faces (niubash#734: the `-a`
+    /// face and the session-end flush write through `flush`); an
     /// unarmed session's on-disk stream stays stamp-free, so its
     /// file bytes are unchanged.
     stamps: VecDeque<String>,
-    /// How many leading entries the backing file already holds.
-    len_on_disk: usize,
-    /// A capacity pop retired an on-disk head entry: the file's prefix
-    /// no longer matches `entries`, so the next flush must merge rather
-    /// than append.
-    disk_prefix_stale: bool,
+    /// niubash#773: per-entry "already in the backing file" flags,
+    /// parallel to `entries`/`stamps`. GNU's accounting is two
+    /// counters, not a prefix property (bashhist.c:
+    /// `history_lines_in_file` vs `history_lines_this_session`), and
+    /// the same holds here: a line an explicit `history -n` loaded
+    /// sits in the list already on disk, with session lines that are
+    /// not on disk on both sides of it, so "on disk" is a per-entry
+    /// fact, not a split index. `flush` appends exactly the unflagged
+    /// entries, in list order.
+    on_disk: VecDeque<bool>,
 }
 
 impl HistoryStore {
@@ -776,8 +778,7 @@ impl HistoryStore {
             capacity,
             entries: VecDeque::new(),
             stamps: VecDeque::new(),
-            len_on_disk: 0,
-            disk_prefix_stale: false,
+            on_disk: VecDeque::new(),
         }
     }
 
@@ -831,17 +832,15 @@ impl HistoryStore {
                 if self.entries.len() == self.capacity {
                     self.entries.pop_front();
                     self.stamps.pop_front();
-                    if self.len_on_disk > 0 {
-                        // The retired head was already on disk: the
-                        // file's prefix no longer matches `entries`.
-                        self.disk_prefix_stale = true;
-                    }
-                    self.len_on_disk = self.len_on_disk.saturating_sub(1);
+                    self.on_disk.pop_front();
                 }
                 self.entries.push_back(entry.clone());
                 // niubash#703: hist_inittime — every recorded entry
                 // carries its record-time stamp.
                 self.stamps.push_back(now_stamp());
+                // niubash#773: a recorded entry is not on disk until a
+                // write face puts it there.
+                self.on_disk.push_back(false);
                 Some(HistoryItemId::new((self.entries.len() - 1) as i64))
             } else {
                 None
@@ -990,8 +989,7 @@ impl HistoryStore {
     fn clear_entries(&mut self) {
         self.entries.clear();
         self.stamps.clear();
-        self.len_on_disk = 0;
-        self.disk_prefix_stale = false;
+        self.on_disk.clear();
     }
 
     /// The (entry, stamp) pairs in list order (niubash#703). The zip
@@ -1034,24 +1032,23 @@ impl HistoryStore {
         }
     }
 
-    /// Write the unwritten tail to the backing file — reedline `sync`'s
-    /// write half with its read half removed. In the steady state the
-    /// file gains exactly `entries[len_on_disk..]`, appended; when the
-    /// on-disk prefix may no longer match (capacity pop), this takes
-    /// the merge path, which is reedline's sync in full.
+    /// Write the unwritten entries to the backing file — reedline
+    /// `sync`'s write half with its read half removed. The file gains
+    /// exactly the entries whose `on_disk` flag is unset, appended in
+    /// list order (niubash#773: the unflagged entries need not form a
+    /// suffix — read-loaded entries sit among them already flagged —
+    /// so no prefix invariant is needed and no merge fallback runs).
     ///
-    /// niubash#734: this is the one write face behind both the live
-    /// sync and the session-end flush's append step, and GNU stamps
-    /// on both (histfile.c's append face in-session, bashhist.c's
-    /// `maybe_save_shell_history` at exit). With `write_timestamps`
-    /// set (HISTTIMEFORMAT armed), each written entry is preceded by
-    /// its stamp line — the stamp is written only when the entry HAS
-    /// one (histfile.c:738) — fed by the parallel `stamps` vector.
-    /// Unset, the byte stream is exactly the plain one.
+    /// niubash#734: this is the one write face behind the `history
+    /// -a` accounting flush and the session-end flush's append step,
+    /// and GNU stamps on both (histfile.c's append face in-session,
+    /// bashhist.c's `maybe_save_shell_history` at exit). With
+    /// `write_timestamps` set (HISTTIMEFORMAT armed), each written
+    /// entry is preceded by its stamp line — the stamp is written
+    /// only when the entry HAS one (histfile.c:738) — fed by the
+    /// parallel `stamps` vector. Unset, the byte stream is exactly
+    /// the plain one.
     fn flush(&mut self, path: &Path, write_timestamps: bool) -> io::Result<()> {
-        if self.disk_prefix_stale {
-            return self.merge_from_disk(path, write_timestamps);
-        }
         if let Some(base_dir) = path.parent() {
             fs::create_dir_all(base_dir)?;
         }
@@ -1059,18 +1056,22 @@ impl HistoryStore {
             .create(true)
             .append(true)
             .open(path)?;
-        for (line, stamp) in self
+        for ((line, stamp), on_disk) in self
             .entries
-            .range(self.len_on_disk..)
-            .zip(self.stamps.range(self.len_on_disk..))
+            .iter()
+            .zip(self.stamps.iter())
+            .zip(self.on_disk.iter_mut())
         {
+            if *on_disk {
+                continue;
+            }
             if write_timestamps && !stamp.is_empty() {
                 writeln!(file, "{stamp}")?;
             }
             writeln!(file, "{}", encode_history_line(line))?;
+            *on_disk = true;
         }
         file.flush()?;
-        self.len_on_disk = self.entries.len();
         Ok(())
     }
 
@@ -1078,13 +1079,11 @@ impl HistoryStore {
     /// read the whole file, fold this store's unwritten tail onto it,
     /// drop the foreign head when the total exceeds capacity (the file
     /// is rewritten to the kept lines), otherwise append the tail.
-    /// Afterwards the file holds exactly `entries` and
-    /// `len_on_disk == entries.len()`. This is the only store operation
-    /// that reads the file; it runs where reedline's sync used to run
-    /// for a merge (construction, the session-end flush's stale-prefix
-    /// fallback) — the per-operation refresh goes through the
-    /// signature gate and rebuilds from the file instead (see
-    /// `refresh_if_stale`).
+    /// Afterwards the file holds exactly `entries` and every entry is
+    /// flagged on disk. This is the only store operation that reads
+    /// the file, and since niubash#773 it runs only where a store is
+    /// built from the file (construction, the explicit reload faces):
+    /// no per-operation refresh re-reads the file anymore.
     /// niubash#734: `write_timestamps` is `flush`'s arming, threaded
     /// through — the merge's own write legs (the capacity rewrite and
     /// the tail append) stamp exactly the way `flush`'s append leg
@@ -1093,10 +1092,23 @@ impl HistoryStore {
     fn merge_from_disk(&mut self, path: &Path, write_timestamps: bool) -> io::Result<()> {
         use std::io::{BufRead, BufReader};
 
-        // The unwritten entries
-        let start = self.len_on_disk.min(self.entries.len());
-        let own_entries: Vec<String> = self.entries.range(start..).cloned().collect();
-        let own_stamps: Vec<String> = self.stamps.range(start..).cloned().collect();
+        // The unwritten entries (niubash#773: the unflagged ones, in
+        // list order — they need not form a suffix, since read-loaded
+        // entries sit among them already flagged).
+        let own_entries: Vec<String> = self
+            .entries
+            .iter()
+            .zip(self.on_disk.iter())
+            .filter(|(_, on_disk)| !**on_disk)
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        let own_stamps: Vec<String> = self
+            .stamps
+            .iter()
+            .zip(self.on_disk.iter())
+            .filter(|(_, on_disk)| !**on_disk)
+            .map(|(stamp, _)| stamp.clone())
+            .collect();
 
         if let Some(base_dir) = path.parent() {
             fs::create_dir_all(base_dir)?;
@@ -1170,8 +1182,9 @@ impl HistoryStore {
         self.entries = foreign_entries;
         foreign_stamps.extend(own_stamps);
         self.stamps = foreign_stamps;
-        self.len_on_disk = self.entries.len();
-        self.disk_prefix_stale = false;
+        // The merge's write legs leave the file holding exactly the
+        // list, so every entry is on disk now.
+        self.on_disk = self.entries.iter().map(|_| true).collect();
         Ok(())
     }
 }
