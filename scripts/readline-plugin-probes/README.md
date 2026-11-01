@@ -33,11 +33,11 @@ reason: `cc` (C fixture), `python3` (PTY scenarios), `bash` (GNU oracle),
 time; `cargo build` is only attempted when `--build` is passed or no
 `target/debug/niu` exists, and normally uses the local Cargo cache.
 
-Exit status is `0` when every probe is `PASS` or `SKIP`, `1` only when a probe
-`FAIL`s.  A `SKIP` is a *recorded baseline blocker*, never a silent pass; the
-reason is printed in the matrix.  Artifacts are kept automatically on failure
-and with `--keep` (default work dir:
-`$TMPDIR/niu-readline-probes.XXXXXX`).
+Exit status is `0` when every probe is `PASS` or an environment-only `SKIP`,
+`1` when any probe `FAIL`s.  A missing feature of ours is a `FAIL`, never a
+`SKIP`; `SKIP` is only for a genuinely absent external tool.  The reason is
+printed in the matrix.  Artifacts are kept automatically on failure and with
+`--keep` (default work dir: `$TMPDIR/niu-readline-probes.XXXXXX`).
 
 ## Matrix
 
@@ -79,62 +79,38 @@ treated as an ABI failure (the GNU oracle runs under a PTY to observe it).
 
 ## Observed baseline
 
-Run on 2026-11-01, Android/Termux aarch64, `sh` = dash, with:
+Run on 2026-11-01, Android/Termux aarch64, `sh` = dash, after rubash
+`bbc084e7` and the `re-read-init-file` inputrc fix:
 
 | Tool | Version |
 |---|---|
-| niu | `Niubash 1.4.4`, rubash `c7f7dc902215` |
+| niu | `Niubash 1.4.4`, local rubash `bbc084e7` |
 | GNU bash | `5.3.20(1)-release` with readline `8.3` |
-| fzf | `0.74 (devel)` (not used; deterministic fixture used) |
+| fzf | `0.74 (devel)` (deterministic fixture used) |
 | C compiler | clang `21.1.8` |
 | python3 | `3.14.6` |
-| bash-completion | framework absent (`/usr/share/bash-completion/bash_completion` missing); local fixture used |
+| bash-completion | framework absent; local fixture used |
 
-Result: **PASS 8 / FAIL 0 / SKIP 3**.
+Result: **PASS 10 / FAIL 1 / SKIP 0**.
 
 | Probe | Baseline | Why |
 |---|---|---|
 | `niu-build` | PASS | existing `target/debug/niu` |
-| `readline-abi-exports` | PASS | both probe symbols exported |
+| `readline-abi-exports` | PASS | version symbols exported |
 | `loadable-builtin-build` | PASS | `.so` built |
 | `loadable-builtin-gnu-bash` | PASS | live buffer: `line_buffer=ok line_mutated=ok point=ok point_mutated=ok result=ok` |
-| `enable-f` | **SKIP** | rubash loader refuses dlopen (blocker 1) |
-| `loadable-builtin-niu` | **SKIP** | depends on `enable-f` (blocker 1) |
+| `enable-f` | **PASS** | rubash `enable -f` now dlopens and runs `rl_probe` |
+| `loadable-builtin-niu` | **FAIL** | the builtin loads but the full `rl_*` surface is not exported by niu yet — `add_defun=missing bind_key=missing line_buffer=absent` (niubash#775) |
 | `fzf-bindx-register` | PASS | `"\C-r" "__probe_fzf"` listed by `bind -X` |
 | `fzf-bindx-roundtrip` | PASS | `Xpicked:typed` from point insertion + empty-buffer `picked:` |
 | `bash-completion` | PASS | byte-identical to GNU bash for the fixture |
 | `inputrc-startup` | PASS | all four fixture features applied |
-| `inputrc-reread` | **SKIP** | rc reload passes; `$INPUTRC` is not re-read (blocker 2) |
+| `inputrc-reread` | **PASS** | `C-x C-r` re-reads both rc bind lines and the `$include`d `$INPUTRC` binding |
 
-Exact blocker commands:
-
-1. **`enable -f` is refused by the rubash builtin loader** (`enable.rs`
-   returns `EXECUTION_FAILURE` before any `dlopen`):
-
-   ```sh
-   target/debug/niu -c 'enable -f /path/to/librl_probe.so rl_probe; rl_probe'
-   # niu: line 1: enable: rl_probe: dynamic loading from /path/to/librl_probe.so not supported
-   # niu: line 1: rl_probe: command not found
-   # rc=127
-   ```
-
-   Without the operand the diagnostic is
-   `enable: /path/to/librl_probe.so: dynamic loading not supported`.
-   Consequently only the version symbols are live; `rl_add_defun`,
-   `rl_bind_key`, `rl_line_buffer` and `rl_point` are still unexported by the
-   host, so the `.so` cannot be loaded at all yet.  This is the expected
-   baseline until rubash gains `dlopen`/`dlsym` and the ruline
-   `readline-abi` surface lands.
-
-2. **`C-x C-r` does not re-read `$INPUTRC`.**  The chord is bound to
-   `re-read-init-file`, but `run_readline_command` calls
-   `Shell::reread_init_file_bindings`, which re-runs only the top-level
-   `bind` lines of `~/.niubashrc`; GNU `rl_re_read_init_file` re-reads the
-   inputrc.  The PTY probe proves the rc half works (rebinding `C-t` in the
-   rc to `dump-variables` becomes visible after the chord) and then shows a
-   binding added to `$include`d inputrc never appears.  The scenario
-   `SKIP`s with that exact reason; it becomes `PASS` when inputrc reload is
-   wired in.
+Remaining blocker: the in-process ABI export is still the two-symbol probe
+(niubash#775). `enable -f` and the loadable-builtin loader are now real
+(rubash#2440), so the remaining failure is the host-side full-surface export
+and live-editor routing, not rubash.
 
 `loadable-builtin-gnu-bash` is the fixture self-check: when `enable -f` is
 fixed, a failing GNU-bash oracle means the fixture—not niu—is at fault.

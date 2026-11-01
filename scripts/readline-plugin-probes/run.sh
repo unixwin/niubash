@@ -14,8 +14,9 @@
 #   --list           list probe names and exit
 #
 # Exit status: 0 when every probe is PASS or SKIP, 1 when any probe FAILs.
-# A SKIP is a documented baseline blocker (for example rubash's `enable -f`
-# refusal), not a pass: the matrix always prints the reason.
+# SKIP is only for a genuinely absent external prerequisite (no niu binary,
+# no fixture, no fzf). A missing feature of ours (for example rubash's
+# `enable -f` loader) is a FAIL, never a SKIP: see unixwin/rubash#2440.
 
 set -u
 
@@ -326,7 +327,7 @@ if should_run enable-f; then
             "$NIU" "$SO" "$rc" >>"$log"
         if printf '%s\n' "$out" | grep -q 'dynamic loading.*not supported'; then
             diagnostic=$(printf '%s\n' "$out" | grep 'dynamic loading' | head -n 1)
-            skip enable-f "known blocker: rubash loadable-builtin loader refuses dlopen: $diagnostic (command: $NIU -c \"enable -f $SO rl_probe; rl_probe\")"
+            fail enable-f "rubash#2440: loadable-builtin loader refuses dlopen: $diagnostic (command: $NIU -c \"enable -f $SO rl_probe; rl_probe\")"
         elif printf '%s\n' "$out" | grep -q '^RL_PROBE '; then
             pass enable-f "enable -f loaded rl_probe (command: $NIU -c \"enable -f $SO rl_probe; rl_probe\")"
         else
@@ -345,17 +346,17 @@ if should_run loadable-builtin-niu; then
         out=$("$NIU" -c "enable -f '$SO' rl_probe; rl_probe" 2>&1)
         printf '%s\n' "$out" >"$log"
         if printf '%s\n' "$out" | grep -q 'dynamic loading.*not supported'; then
-            skip loadable-builtin-niu "depends on enable -f, which is blocked: $(printf '%s\n' "$out" | grep 'dynamic loading' | head -n 1)"
+            fail loadable-builtin-niu "rubash#2440: depends on enable -f: $(printf '%s\n' "$out" | grep 'dynamic loading' | head -n 1)"
         elif printf '%s\n' "$out" | grep -q '^RL_PROBE '; then
             line=$(printf '%s\n' "$out" | grep '^RL_PROBE ' | head -n 1)
             if printf '%s\n' "$line" | grep -q 'result=ok'; then
                 if printf '%s\n' "$line" | grep -q 'line_buffer=ok'; then
                     pass loadable-builtin-niu "$line"
                 else
-                    skip loadable-builtin-niu "ABI core works but the live editor buffer was absent in -c: $line"
+                    fail loadable-builtin-niu "live editor buffer absent in -c (ABI core works): $line"
                 fi
             else
-                skip loadable-builtin-niu "builtin loaded but the live readline ABI is incomplete: $line"
+                fail loadable-builtin-niu "builtin loaded but the live readline ABI is incomplete: $line"
             fi
         else
             fail loadable-builtin-niu "unexpected result: $(first_line "$out") (see $log)"
