@@ -1011,13 +1011,20 @@ fn run_readline_command(
         "abort" => {
             readline_ding();
         }
-        // bashline.c:3896/3954/3966 bash_complete_filename /
-        // bash_complete_variable / bash_complete_command: the
+        // bashline.c:3896/3954/3966/3980/3890/3795
+        // bash_complete_filename / bash_complete_variable /
+        // bash_complete_command / bash_complete_hostname /
+        // bash_complete_username / bash_brace_completion: the
         // ordinary completion machinery pinned to one candidate
         // source. The shared press rule is rl_complete_internal's:
         // a lone match is inserted, several insert the longest common
         // prefix, and a second press at the same spot lists.
-        "complete-filename" | "complete-variable" | "complete-command" => {
+        "complete-filename"
+        | "complete-variable"
+        | "complete-command"
+        | "complete-hostname"
+        | "complete-username"
+        | "complete-into-braces" => {
             run_specific_completion(shell, line_editor, name);
         }
         // bashline.c:3810 dynamic_complete_history (niubash#767):
@@ -1087,7 +1094,8 @@ fn run_readline_command(
 }
 
 /// One context-specific completion press (`complete-command` /
-/// `complete-variable` / `complete-filename`). Candidates come from
+/// `complete-variable` / `complete-filename` / `complete-hostname` /
+/// `complete-username` / `complete-into-braces`). Candidates come from
 /// [`crate::completion::NiubashCompleter::complete_specific`], which
 /// pins the GNU source while reusing the ordinary completion tables.
 fn run_specific_completion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline, name: &str) {
@@ -1095,6 +1103,9 @@ fn run_specific_completion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedlin
     let mode = match name {
         "complete-command" => SpecificCompletion::Command,
         "complete-variable" => SpecificCompletion::Variable,
+        "complete-hostname" => SpecificCompletion::Hostname,
+        "complete-username" => SpecificCompletion::Username,
+        "complete-into-braces" => SpecificCompletion::Brace,
         _ => SpecificCompletion::Filename,
     };
     let buffer = line_editor.current_buffer_contents().to_string();
@@ -3691,18 +3702,22 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // command and ding without abandoning the line — host work
         // against the suspended editor. `history-expand-line`
         // (bashline.c history_expand_line) expands only the history
-        // stage of the line. The three context-specific completion
-        // entry points (bashline.c bash_complete_command /
-        // bash_complete_variable / bash_complete_filename) pin the
-        // candidate source while reusing the host completion engine.
-        // All ride the readline host-command channel; the remaining
-        // context modes need sources the host does not own (hostnames,
-        // usernames, brace expansion, shell globs) and stay undelivered.
+        // stage of the line. The context-specific completion entry
+        // points (bashline.c bash_complete_command /
+        // bash_complete_variable / bash_complete_filename /
+        // bash_complete_hostname / bash_complete_username /
+        // bash_brace_completion) pin the candidate source while reusing
+        // the host completion engine. All ride the readline host-command
+        // channel; `glob-complete-word` still needs the engine's
+        // `shell_glob_filename` and stays undelivered.
         "abort"
         | "history-expand-line"
         | "complete-command"
         | "complete-variable"
-        | "complete-filename" => Some(ReedlineEvent::ExecuteHostCommand(format!(
+        | "complete-filename"
+        | "complete-hostname"
+        | "complete-username"
+        | "complete-into-braces" => Some(ReedlineEvent::ExecuteHostCommand(format!(
             "{}{}",
             READLINE_HOST_COMMAND_PREFIX, widget
         ))),
@@ -6353,19 +6368,23 @@ mod tests {
     ///   `ReedlineEvent::SearchHistory` for reverse incremental search
     ///   only; direction-aware incremental search still needs a ruline
     ///   event (see the issue).
-    /// - completion modes needing sources the host does not own:
-    ///   `complete-hostname` (`\e@`), `glob-complete-word` (`\eg`),
-    ///   `complete-into-braces` (`\e{`), `complete-username` (`\e~`).
-    ///   The three that map onto existing completion sources
-    ///   (`complete-command`, `complete-variable`, `complete-filename`)
-    ///   are delivered as host readline commands in this batch.
+    /// - `glob-complete-word` (`\eg`): needs the engine's
+    ///   `shell_glob_filename` (`Session` has no public glob entry yet);
+    ///   `complete-command`, `complete-variable`, `complete-filename`,
+    ///   `complete-hostname`, `complete-username` and
+    ///   `complete-into-braces` are delivered as host readline commands.
     ///
     /// Delivered in this batch and removed from the list:
-    /// `abort` (`\C-g`) as a host command that dings without touching
-    /// the line; `history-expand-line` (`\e^`) on the same channel;
-    /// and `do-lowercase-version` (`\eA`–`\eN`, `\eP`–`\eZ`) at
-    /// dispatch time (the editor lowercases modified keys, and the
-    /// chord layer folds an ESC-prefixed uppercase partner).
+    /// `complete-hostname` (`\e@`) from `/etc/hosts` plus the local
+    /// hostname; `complete-username` (`\e~`) from `/etc/passwd`; and
+    /// `complete-into-braces` (`\e{`) via the bracecomp.c port.
+    ///
+    /// Delivered in earlier batches: `abort` (`\C-g`) as a host command
+    /// that dings without touching the line; `history-expand-line`
+    /// (`\e^`) on the same channel; and `do-lowercase-version`
+    /// (`\eA`–`\eN`, `\eP`–`\eZ`) at dispatch time (the editor
+    /// lowercases modified keys, and the chord layer folds an
+    /// ESC-prefixed uppercase partner).
     ///
     /// The CSI modified-arrow/Delete spellings (`\e[1;3C`, `\e[1;5C`,
     /// `\e[5C`, `\e[3;5~`, ...) are delivered: `parse_key_sequence`
@@ -6379,7 +6398,7 @@ mod tests {
     /// bridge to *report* it, then excludes exactly this list.
     const EDITOR_CONSUMED_GNU_DEFAULTS: &[&str] = &["\\e[200~"];
 
-    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s", "\\e@", "\\eg", "\\e{", "\\e~"];
+    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s", "\\eg"];
 
     /// niubash#630 gap list: the **whole GNU default bind table** must
     /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
@@ -6485,6 +6504,18 @@ mod tests {
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('/')),
             host("complete-filename")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('@')),
+            host("complete-hostname")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('~')),
+            host("complete-username")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('{')),
+            host("complete-into-braces")
         );
         // do-lowercase-version installs no flat binding: Meta-A stays
         // unbound while Meta-B keeps its own command (the default
@@ -6622,8 +6653,8 @@ mod tests {
     /// This batch's GNU default functions ride the readline host
     /// channel — never the shell-function widget sentinel. `abort`
     /// (util.c rl_abort) and `history-expand-line` (bashline.c)
-    /// and the three context-specific completion entry points all
-    /// need the live session/editor, so the host performs them.
+    /// and the context-specific completion entry points all need the
+    /// live session/editor, so the host performs them.
     #[test]
     fn readline_burndown_host_commands_use_readline_sentinel() {
         for name in [
@@ -6632,6 +6663,9 @@ mod tests {
             "complete-command",
             "complete-variable",
             "complete-filename",
+            "complete-hostname",
+            "complete-username",
+            "complete-into-braces",
         ] {
             assert_eq!(
                 native_widget_event(name),
@@ -6771,10 +6805,9 @@ mod tests {
             "{}tilde-expand",
             READLINE_HOST_COMMAND_PREFIX
         ));
-        assert_eq!(
-            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('~')),
-            Some(tilde_event.clone())
-        );
+        // emacs_keymap.c binds both M-& and M-~ to rl_tilde_expand, but
+        // bashline.c:565-569 replaces M-~ with bash_complete_username, so
+        // only M-& keeps tilde-expand.
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('&')),
             Some(tilde_event)
@@ -6810,6 +6843,18 @@ mod tests {
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('/')),
             Some(host("complete-filename"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('@')),
+            Some(host("complete-hostname"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('~')),
+            Some(host("complete-username"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('{')),
+            Some(host("complete-into-braces"))
         );
 
         // The vi target carries none of the emacs defaults.
