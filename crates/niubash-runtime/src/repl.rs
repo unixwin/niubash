@@ -91,6 +91,15 @@ pub const WIDGET_HOST_COMMAND_PREFIX: &str = "__niu_widget ";
 /// the READLINE_* read-back to the editor.
 pub const BINDX_HOST_COMMAND_PREFIX: &str = "__niu_bindx ";
 
+/// `ExecuteHostCommand` payload prefix for the host-implemented GNU
+/// readline commands of [`crate::readline_commands`] (niubash#765,
+/// #766, #767): the payload is the command name; the host performs
+/// the command against the suspended editor and the live session
+/// in [`run_readline_command`]. These names are readline functions,
+/// never shell functions — the prefix keeps them out of the
+/// shell-function widget path below.
+pub const READLINE_HOST_COMMAND_PREFIX: &str = "__niu_readline ";
+
 /// A widget trigger parsed from a `WIDGET_HOST_COMMAND_PREFIX` payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidgetInvocation {
@@ -658,6 +667,9 @@ fn run_host_sentinel(
     line_editor: &mut Reedline,
     payload: &str,
 ) -> SentinelOutcome {
+    if let Some(name) = payload.strip_prefix(READLINE_HOST_COMMAND_PREFIX) {
+        return run_readline_command(shell, line_editor, name);
+    }
     if let Some(bindx) = BindXInvocation::parse(payload) {
         let editor_buffer = line_editor.current_buffer_contents().to_string();
         let editor_cursor = line_editor.current_insertion_point();
@@ -686,6 +698,150 @@ fn run_host_sentinel(
         apply_widget_outcome(line_editor, &outcome);
         SentinelOutcome::Resumed
     }
+}
+
+/// Print text to the terminal while the editor is suspended for a
+/// host command (the dumps of niubash#765): the prompt redraws over
+/// the next `read_line`, so the text lands above it exactly like a
+/// `bind -x` command's output does.
+fn print_suspended_output(text: &str) {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = lock.write_all(text.as_bytes());
+    let _ = lock.flush();
+}
+
+/// Group keyseqs by function name, preserving first-seen order
+/// (the construction the engine's own `bind -P` face uses).
+fn push_keyseq(by_name: &mut Vec<(String, Vec<String>)>, name: &str, seq: String) {
+    if let Some((_, seqs)) = by_name.iter_mut().find(|(n, _)| n == name) {
+        if !seqs.contains(&seq) {
+            seqs.push(seq);
+        }
+    } else {
+        by_name.push((name.to_string(), vec![seq]));
+    }
+}
+
+/// Remove one keyseq from every function's list (a later binding
+/// of the same seq to something else retires the earlier claim).
+fn remove_keyseq(by_name: &mut Vec<(String, Vec<String>)>, seq: &str) {
+    for (_, seqs) in by_name.iter_mut() {
+        seqs.retain(|s| s != seq);
+    }
+}
+
+/// The `dump-functions` listing (lib/readline/bind.c:2820
+/// `rl_dump_functions` → `rl_function_dumper(0)`): every funmap
+/// name, with the keyseqs that invoke it. The binding state is the
+/// emacs keymap's: the engine default table, this batch's GNU
+/// default command bindings, and the engine registry's function
+/// entries for the emacs keymap, later layers overriding earlier
+/// ones per keyseq — the same sources `bind -P` answers from,
+/// plus the host defaults. The readable form (GNU's explicit-
+/// argument variant) does not travel the host-command channel,
+/// which carries no prefix argument.
+fn dump_function_lines(entries: &[crate::bind_surface::EngineBindEntry]) -> Vec<String> {
+    let mut by_name: Vec<(String, Vec<String>)> = Vec::new();
+    for (seq, name) in rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS {
+        push_keyseq(&mut by_name, name, seq.to_string());
+    }
+    for (seq, name) in crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS {
+        push_keyseq(&mut by_name, name, seq.to_string());
+    }
+    for entry in entries {
+        if !engine_keymap_applies(entry.keymap.as_deref(), NativeKeymapTarget::Emacs) {
+            continue;
+        }
+        remove_keyseq(&mut by_name, &entry.keyseq);
+        if let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind {
+            push_keyseq(&mut by_name, name, entry.keyseq.clone());
+        }
+    }
+    let mut names: Vec<String> = crate::readline_commands::funmap_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for (name, _) in &by_name {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names.sort();
+    names
+        .iter()
+        .map(|name| {
+            let seqs = by_name
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| s.as_slice())
+                .unwrap_or(&[]);
+            crate::readline_commands::format_dump_function_line(name, seqs)
+        })
+        .collect()
+}
+
+/// Perform one host readline command (see
+/// [`READLINE_HOST_COMMAND_PREFIX`]) against the suspended editor
+/// and the live session.
+fn run_readline_command(
+    shell: &Rc<RefCell<Shell>>,
+    _line_editor: &mut Reedline,
+    name: &str,
+) -> SentinelOutcome {
+    match name {
+        // bind.c:2820 rl_dump_functions: the "\r\n" of the dispatch
+        // plus the dumper's own leading "\n" — one blank line —
+        // then one line per funmap name.
+        "dump-functions" => {
+            let (entries, _) = crate::bind_surface::load_engine_bindings(shell.borrow().executor());
+            let lines = dump_function_lines(&entries);
+            let mut out = String::from("\n\n");
+            for line in lines {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            print_suspended_output(&out);
+        }
+        // bind.c:2905 rl_dump_macros → rl_macro_dumper(0): the
+        // registry's macro entries in GNU plain form.
+        "dump-macros" => {
+            let (entries, _) = crate::bind_surface::load_engine_bindings(shell.borrow().executor());
+            let mut out = String::from("\n");
+            for entry in &entries {
+                if !engine_keymap_applies(entry.keymap.as_deref(), NativeKeymapTarget::Emacs) {
+                    continue;
+                }
+                if let crate::bind_surface::EngineBindKind::Macro { text } = &entry.kind {
+                    out.push_str(&rubash::builtins::bind::format_macro_plain(
+                        &entry.keyseq,
+                        text,
+                    ));
+                    out.push('\n');
+                }
+            }
+            print_suspended_output(&out);
+        }
+        // bind.c:3076 rl_dump_variables → rl_variable_dumper(0):
+        // the registry's variable table in GNU plain form.
+        "dump-variables" => {
+            let variables = crate::bind_surface::load_readline_variables(shell.borrow().executor());
+            let mut out = String::from("\n");
+            for (name, value) in &variables {
+                out.push_str(&rubash::builtins::bind::format_variable_plain(name, value));
+                out.push('\n');
+            }
+            print_suspended_output(&out);
+        }
+        // bind.c:1025 rl_re_read_init_file: re-read the rc's bind
+        // state; the between-prompts staleness rebuild re-mirrors
+        // any registry movement before the next prompt.
+        "re-read-init-file" => {
+            shell.borrow_mut().reread_init_file_bindings();
+        }
+        _ => {}
+    }
+    SentinelOutcome::Resumed
 }
 
 /// One editor keymap under construction, remembering which registry
@@ -781,6 +937,9 @@ fn build_keymap_for_target(
         add_system_clipboard_keybindings(keybindings)
     });
     builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_gnu_command_default_keybindings(keybindings, target)
+    });
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
         add_native_widget_keybindings(keybindings, target, native_widgets, native_widget_bindings)
     });
     if native_widgets.import_bindkeys {
@@ -863,7 +1022,12 @@ fn build_edit_mode(
                     dropped,
                 },
                 ChordLayerParts {
-                    chords: collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0),
+                    chords: {
+                        let mut chords =
+                            collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
+                        chords.extend(gnu_default_chord_bindings());
+                        chords
+                    },
                     alt_keys,
                     quote_sequences: collect_quote_sequences(
                         engine_bindings,
@@ -2934,6 +3098,21 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // GNU `tab-insert` inserts a literal tab where TAB itself is
         // the completion key (niubash#731).
         "tab-insert" => Some(edit_event(EditCommand::InsertChar('\t'))),
+        // The host-implemented readline commands (niubash#765):
+        // dump-functions / dump-macros / dump-variables print editor
+        // and registry state (bind.c rl_dump_functions /
+        // rl_dump_macros / rl_dump_variables) and re-read-init-file
+        // re-reads the rc's bind state (bind.c
+        // rl_re_read_init_file). The pinned editor has no events
+        // for them, so they ride the readline host-command channel
+        // and `run_readline_command` performs them against the
+        // suspended editor — never the shell-function sentinel.
+        "dump-functions" | "dump-macros" | "dump-variables" | "re-read-init-file" => {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, widget
+            )))
+        }
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -2942,6 +3121,72 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             WIDGET_HOST_COMMAND_PREFIX, widget
         ))),
     }
+}
+
+/// Whether a GNU readline name is actually delivered by the host
+/// (a native editor event, a host composite, or a readline
+/// host-command) rather than falling through to the shell-function
+/// widget sentinel. Only delivered names earn their GNU default
+/// bindings from [`crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS`].
+fn gnu_name_is_delivered(name: &str) -> bool {
+    match native_widget_event(name) {
+        Some(ReedlineEvent::ExecuteHostCommand(payload)) => {
+            !payload.starts_with(WIDGET_HOST_COMMAND_PREFIX)
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// The one-key entries of the GNU default command bindings
+/// (niubash#765/#766/#767), applied in the host baseline of the
+/// emacs keymap — GNU's defaults live in the emacs keymap; the vi
+/// keymaps carry their own spellings. Multi-key entries ride the
+/// chord layer instead (see [`gnu_default_chord_bindings`]).
+fn add_gnu_command_default_keybindings(keybindings: &mut Keybindings, target: NativeKeymapTarget) {
+    if target != NativeKeymapTarget::Emacs {
+        return;
+    }
+    for (keyseq, name) in crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS {
+        if !gnu_name_is_delivered(name) {
+            continue;
+        }
+        // Single keys only; `parse_key_sequence` returns None for
+        // multi-key spellings (those ride the chord layer).
+        let Some((modifiers, code)) = parse_key_sequence(keyseq) else {
+            continue;
+        };
+        if let Some(event) = native_widget_event(name) {
+            keybindings.add_binding(modifiers, code, event.clone());
+            // Terminals encode Meta-TAB as ESC TAB, not ESC Ctrl-I:
+            // the `\M-\C-i` spelling (CONTROL|ALT + 'i') also answers
+            // to ALT+Tab, the byte shape that actually arrives.
+            if (modifiers, code)
+                == (
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    KeyCode::Char('i'),
+                )
+            {
+                keybindings.add_binding(KeyModifiers::ALT, KeyCode::Tab, event);
+            }
+        }
+    }
+}
+
+/// The multi-key entries of the GNU default command bindings
+/// (C-x C-r for re-read-init-file), joining the engine chord
+/// bindings in the chord layer.
+fn gnu_default_chord_bindings() -> Vec<ChordBinding> {
+    crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS
+        .iter()
+        .filter_map(|(keyseq, name)| {
+            let keys = parse_chord_sequence(keyseq)?;
+            if keys.len() < 2 || !gnu_name_is_delivered(name) {
+                return None;
+            }
+            native_widget_event(name).map(|event| ChordBinding { keys, event })
+        })
+        .collect()
 }
 
 /// One multi-key binding: the key units and the event the last unit fires.
@@ -3585,7 +3830,8 @@ pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)>
         // were matched above.
         "\\e" | "^[" => Some((KeyModifiers::NONE, KeyCode::Esc)),
         "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
-        _ => parse_alt_key_sequence(value)
+        _ => parse_meta_control_combined(value)
+            .or_else(|| parse_alt_key_sequence(value))
             .or_else(|| parse_meta_key_sequence(value))
             .or_else(|| parse_control_key_sequence(value))
             .or_else(|| parse_plain_key_sequence(value)),
@@ -3621,7 +3867,13 @@ fn split_key_units(value: &str) -> Option<Vec<&str>> {
             .strip_prefix("\\C-")
             .or_else(|| rest.strip_prefix("\\M-"))
         {
-            // The unit is the prefix plus one (possibly escaped) character.
+            // The unit is the prefix plus one (possibly escaped)
+            // character — or, for the combined `\M-\C-x` spelling,
+            // the second prefix plus its character.
+            let tail = tail
+                .strip_prefix("\\C-")
+                .or_else(|| tail.strip_prefix("\\M-"))
+                .unwrap_or(tail);
             let ch = tail.chars().next()?;
             let end = rest.len() - tail.len() + ch.len_utf8();
             (&rest[..end], &rest[end..])
@@ -3677,6 +3929,25 @@ fn parse_meta_control_sequence(
 fn parse_meta_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     parse_meta_control_sequence(value, "\\C-", KeyModifiers::CONTROL)
         .or_else(|| parse_meta_control_sequence(value, "\\M-", KeyModifiers::ALT))
+}
+
+/// The combined meta-control spelling `\M-\C-x` (either prefix
+/// order), one key carrying both modifiers — GNU's
+/// rl_translate_keyseq accepts it (e.g. `\M-\C-e` for
+/// shell-expand-line, `\M-\C-i` for dynamic-complete-history).
+fn parse_meta_control_combined(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+    let rest = value
+        .strip_prefix("\\M-\\C-")
+        .or_else(|| value.strip_prefix("\\C-\\M-"))?;
+    let mut chars = rest.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+        KeyCode::Char(ch.to_ascii_lowercase()),
+    ))
 }
 
 fn parse_named_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
@@ -5558,6 +5829,103 @@ mod tests {
             native_widget_event("no_such_readline_fn"),
             Some(ReedlineEvent::ExecuteHostCommand(_))
         ));
+    }
+
+    /// niubash#765: the dump commands and re-read-init-file are
+    /// readline functions performed by the host, so their names map
+    /// to the readline host-command sentinel — never to the
+    /// shell-function widget sentinel.
+    #[test]
+    fn issue765_readline_host_commands_use_readline_sentinel() {
+        for name in [
+            "dump-functions",
+            "dump-macros",
+            "dump-variables",
+            "re-read-init-file",
+        ] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+    }
+
+    /// niubash#765: the GNU default C-x C-r chord for
+    /// re-read-init-file joins the chord layer, and the dump lists
+    /// every funmap name in GNU's plain form.
+    #[test]
+    fn issue765_gnu_defaults_and_dump_lines() {
+        let chords = gnu_default_chord_bindings();
+        assert!(
+            chords.iter().any(|chord| {
+                chord.keys
+                    == vec![
+                        (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                        (KeyModifiers::CONTROL, KeyCode::Char('r')),
+                    ]
+            }),
+            "C-x C-r must be a default chord"
+        );
+
+        // No user bindings: defaults only.
+        let lines = dump_function_lines(&[]);
+        assert!(
+            lines.contains(&"beginning-of-line can be found on \"\\e[1~\", \"\\C-a\".".to_string())
+        );
+        assert!(lines.contains(&"re-read-init-file can be found on \"\\C-x\\C-r\".".to_string()));
+        assert!(lines.contains(&"dump-functions is not bound to any keys".to_string()));
+        // Sorted like rl_funmap_names.
+        let mut sorted = lines.clone();
+        sorted.sort();
+        assert_eq!(lines, sorted);
+
+        // A user function binding joins its function's list, and a
+        // macro rebind of a default seq retires the function claim.
+        let entries = vec![
+            crate::bind_surface::EngineBindEntry {
+                keyseq: "\\C-o".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Function {
+                    name: "operate-and-get-next".to_string(),
+                },
+                keymap: None,
+            },
+            crate::bind_surface::EngineBindEntry {
+                keyseq: "\\C-a".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Macro {
+                    text: "home".to_string(),
+                },
+                keymap: None,
+            },
+        ];
+        let lines = dump_function_lines(&entries);
+        assert!(lines.contains(&"operate-and-get-next can be found on \"\\C-o\".".to_string()));
+        // The \C-a claim is retired; the \e[1~ default remains.
+        assert!(lines.contains(&"beginning-of-line can be found on \"\\e[1~\".".to_string()));
+
+        // The GNU default spellings parse as single keys: plain
+        // meta forms and the combined meta-control form.
+        assert_eq!(
+            parse_key_sequence("\\M-~"),
+            Some((KeyModifiers::ALT, KeyCode::Char('~')))
+        );
+        assert_eq!(
+            parse_key_sequence("\\M-\\C-e"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('e')
+            ))
+        );
+        assert_eq!(
+            parse_key_sequence("\\M-\\C-i"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('i')
+            ))
+        );
     }
 
     /// Second niubash#630 batch: readline functions deliverable only since
