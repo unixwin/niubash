@@ -60,7 +60,7 @@ Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it 
 
 <!-- BEGIN GENERATED:capability-snapshot -->
 - **77 shell built-ins & reserved words** — the GNU bash 5.3 `shell_builtins[]` table (`alias`, `cd`, `declare`, `printf`, `set`, `trap`, `if`/`while`/`case`, ...); every one documents itself via `help <name>`.
-- **180 winuxcmd applets** on PATH (`ls`, `grep`, `sed`, `awk`, `find`, `tar`, `top`, `xxd`, ...) — real Windows binaries, not emulated inside the shell; full inventory in `references/quickref.md`.
+- **178 winuxcmd applets** on PATH (`ls`, `grep`, `sed`, `awk`, `find`, `tar`, `top`, `xxd`, ...) — 176 commands plus the internal `wpm` package manager and `[`; real Windows binaries, not emulated inside the shell; full inventory in `references/quickref.md`.
 - **Launcher verbs** — `setup`, `font`, `doctor`, `config`, `plugin`, `skill`, `--self-update`; table in `references/quickref.md`.
 - **Verbatim handoff** — `--encoded-command`/`-EncodedCommand`/`--ec <b64>` runs a base64 payload with zero quoting; optional `v1:` prefix guards MSYS-family rewriting in transit.
 - **Plugin system** — git-clone-only external sources (oh-my-bash, bash-it, bpkg), driven by a declarative spec (`~/.niubash/plugins.json`) with lockfile verbs (`add/list/enable/disable/sync/update/restore/rollback/clean/migrate-rc/source/recipe/distro/mirror/ui`). An installed source contributes once it is enabled — there is no trust state.

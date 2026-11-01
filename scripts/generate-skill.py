@@ -176,14 +176,20 @@ def render_region(key: str, builtins: list[tuple[str, str]], applets: list[str],
                   niu_help: list[str]) -> str:
     version = bundle_version()
     if key == "capability-snapshot":
+        # Applet-count prose follows the WinuxCmd audit tracker
+        # (winx#1462): 178 applets total, 176 commands excluding the
+        # internal `wpm` and `[`. The completion corpus that feeds the
+        # quickref inventory also carries completion-only faces, so
+        # len(applets) is not the prose count.
         return "\n".join([
             f"- **{len(builtins)} shell built-ins & reserved words** — the GNU "
             "bash 5.3 `shell_builtins[]` table (`alias`, `cd`, `declare`, "
             "`printf`, `set`, `trap`, `if`/`while`/`case`, ...); every one "
             "documents itself via `help <name>`.",
-            f"- **{len(applets)} winuxcmd applets** on PATH (`ls`, `grep`, `sed`, "
-            "`awk`, `find`, `tar`, `top`, `xxd`, ...) — real Windows binaries, "
-            "not emulated inside the shell; full inventory in "
+            "- **178 winuxcmd applets** on PATH (`ls`, `grep`, `sed`, "
+            "`awk`, `find`, `tar`, `top`, `xxd`, ...) — 176 commands plus "
+            "the internal `wpm` package manager and `[`; real Windows "
+            "binaries, not emulated inside the shell; full inventory in "
             "`references/quickref.md`.",
             "- **Launcher verbs** — `setup`, `font`, `doctor`, `config`, "
             "`plugin`, `skill`, `--self-update`; table in "

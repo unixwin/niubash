@@ -309,7 +309,7 @@ rot. `scripts/generate-skill.py` fills the GENERATED-marked regions of
 `SKILL.md` and `references/quickref.md` from the engine's own surfaces:
 a captured `help -s '*'` transcript (builtin table), a captured
 `niu --help` transcript (launcher/plugin verbs), and the applet completion
-inventory (180 winuxcmd applets). After changing the launcher help or the
+inventory (178 winuxcmd applets). After changing the launcher help or the
 builtin table, refresh and re-check:
 
 ```bash
