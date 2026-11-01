@@ -4111,6 +4111,66 @@ mod tests {
     }
 
     #[test]
+    fn issue773_write_history_settles_the_store_for_the_session_end_flush() {
+        // niubash#773: `history -w` settles both accountings — the
+        // ledger's pending set AND the store's on-disk bits. The
+        // session-end flush appends through the store's bits, so a
+        // line the rewrite already placed must not ride it a second
+        // time; only lines recorded after the rewrite are appended.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "seed\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        provider.append("echo before".to_string()).unwrap();
+        provider.write_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "seed\necho before\n"
+        );
+
+        provider.append("echo after".to_string()).unwrap();
+        provider.flush_at_session_end();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "seed\necho before\necho after\n",
+            "the session-end flush appends only the line recorded after -w"
+        );
+    }
+
+    #[test]
+    fn issue773_write_history_settles_the_store_for_the_reread_preflush() {
+        // The niubash#571 chain shape at provider level: the `-r`
+        // fast path flushes the session's unwritten entries before
+        // its rebuild — after a `-w`, that pre-flush must find
+        // nothing the rewrite already placed, or the `-w` line lands
+        // in the file twice and the rebuild loads the duplicate.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "seed\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        provider.append("echo before".to_string()).unwrap();
+        provider.write_history(path.to_str().unwrap()).unwrap();
+        provider.append("echo after".to_string()).unwrap();
+        provider.read_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "seed\necho before\necho after\n",
+            "the -r pre-flush appends only the line recorded after -w"
+        );
+        assert_eq!(
+            provider.entries().unwrap(),
+            vec![
+                "seed".to_string(),
+                "echo before".to_string(),
+                "echo after".to_string()
+            ],
+            "the rebuilt list holds each line exactly once"
+        );
+    }
+
+    #[test]
     fn session_end_write_carries_a_cleared_list_to_the_file() {
         // Interactive `history -c` as the last command of a session leaves
         // an EMPTY history file. The
