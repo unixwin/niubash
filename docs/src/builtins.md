@@ -8,7 +8,7 @@ where the inventory overlaps with WinuxCmd.
 | --- | --- | --- |
 | Real built-in | Runs in-process, no child process. Listed in the rubash whitelist (`src/executor/builtin_names.rs`). | Reports as **builtin** |
 | Fast path | Hidden optimization: runs in-process only for simple argument shapes; falls back to the external WinuxCmd command otherwise. Deliberately **not** in the whitelist. | Reports as **external** — same as GNU Bash, where these commands are external too |
-| External command | Resolved via `PATH`, provided by WinuxCmd (176 commands). | Reports as external |
+| External command | Resolved via `PATH`, provided by WinuxCmd (176 commands; 178 applets including the internal `wpm` and `[`). | Reports as external |
 
 ## Real built-ins (64)
 

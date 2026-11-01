@@ -11,7 +11,7 @@ aarch64), and macOS, with Windows the flagship. It does **not implement the
 shell language itself** — it is
 the interactive front end to the **rubash lib** (the bash-compatible engine)
 plus the routing layer onto **winuxcmd** (coreutils). Its core value is the
-Windows-native process/environment experience: a reedline REPL, the
+Windows-native process/environment experience: a ruline REPL, the
 completion system, the prompt floor, Ctrl+C handling, terminal integration,
 and a stable non-interactive agent execution contract.
 
@@ -26,7 +26,7 @@ ordinary host process state.
 niu.exe
 ├── Niubash host layer (Rust)
 │   ├── rubash::Executor         ← shell language engine (lexer/parser/execution/builtins)
-│   ├── reedline REPL            ← line editing, history, completion
+│   ├── ruline REPL              ← line editing, history, completion
 │   ├── completion/              ← shell definitions + bash auto-import + 3-level cache
 │   ├── prompt/                  ← prompt floor (defaults-as-floor, §14.5 of the ecosystem design)
 │   ├── config                   ← legacy/managed machine-state reads
@@ -56,8 +56,11 @@ not re-implement lexer/parser/ast/builtins.
 
 ### 2. WinuxCmd is selected by Niubash and integrated via PATH
 
-Not via FFI/DLL — the rubash Executor still finds external commands through
-`PATH`. Version selection is a Niubash session/config responsibility. At
+PATH is the default route and the fallback — the rubash Executor finds
+external commands through `PATH`. A default-off, opt-in FFI acceleration
+route (niubash#567) can serve commands in-process when enabled; it never
+replaces the PATH route's semantics, which remain the equivalence
+reference. Version selection is a Niubash session/config responsibility. At
 startup:
 
 1. Read the explicit `WINUXCMD_PATH`, then fall back to Niubash's own
@@ -149,7 +152,7 @@ packages stage no plugin content (niubash#161). The plugin system is the
 - Plugins cannot extend the rubash parser/executor, and cannot source
   arbitrary legacy `.winsh` files or rc fragments found in user
   directories beyond what the enabled sources themselves declare.
-- Editor capabilities come from reedline and Niubash-native keybinding
+- Editor capabilities come from ruline and Niubash-native keybinding
   presets.
 
 ## Repository layout
@@ -167,7 +170,7 @@ niubash/
 │       └── src/
 │           ├── lib.rs        # library entry
 │           ├── shell.rs      # shell state
-│           ├── repl.rs       # reedline REPL
+│           ├── repl.rs       # ruline REPL
 │           ├── ctrl_c.rs     # Win32 Ctrl+C
 │           ├── config.rs     # config parsing
 │           ├── winuxcmd.rs   # winuxcmd discovery
@@ -184,8 +187,10 @@ niubash/
 
 ### 6. In-process readline C ABI (niubash#775, ruline#8)
 
-GNU readline is not a separate library inside niu: the editor is Reedline
-(ruline) compiled into the executable. Bash loadable builtins
+GNU readline is not a separate library inside niu: the editor is ruline
+(the house GNU-readline-compatible editor; the crate still carries
+the `reedline` package name during the rename, ruline#9) compiled
+into the executable. Bash loadable builtins
 (`enable -f ./mybuiltin.so mybuiltin`) are `dlopen`ed into *that* process, so
 their `rl_*` / `history_*` references must resolve against niu's main
 executable — the live editor — rather than against a second readline
@@ -236,7 +241,7 @@ Two embedding modes are supported, and only one shares niu's editor:
 
 - **Host mode (this executable)** — loadable builtins resolve the symbols
   above from running niu. Today the ABI crate owns a *standalone* editor
-  state that `rl_initialize()` sets up; routing it to the live Reedline
+  state that `rl_initialize()` sets up; routing it to the live ruline
   editor (`rl_line_buffer` mirroring, `rl_*` edits landing in the prompt) is
   the remaining follow-up.
 - **Standalone `libreadline.so.8` / `libhistory.so.8`** — the ruline ABI
@@ -254,7 +259,7 @@ behaviour until the live routing lands.
 user types "ls -la | grep foo"
          │
          ▼
-   reedline (line editing + completion)
+   ruline (line editing + completion)
          │
          ▼
    shell.execute_line(line)      ← niubash-runtime

@@ -4520,7 +4520,7 @@ fn print_version() {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,
-        "Niubash {} \u{2014} bash-compatible shell for Windows",
+        "Niubash {} \u{2014} bash-compatible shell for Windows, Linux, macOS, and Android",
         env!("CARGO_PKG_VERSION")
     );
     let _ = writeln!(out, "  rubash   {}", rubash_revision_label());

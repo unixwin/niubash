@@ -35,7 +35,7 @@ niu is not MSYS2, Cygwin, Git Bash, or WSL — there is no POSIX emulation layer
 
 All downloads start at [unixwin.dev](https://unixwin.dev). Latest release: **v1.4.4** (as of 2026-10-30; the [releases page](https://github.com/unixwin/niubash/releases) always carries the newest build).
 
-Windows via winget (installs **1.4.4** today):
+Windows via winget (installs **1.4.3** today; 1.4.4 is in Microsoft's review queue):
 
 ```powershell
 winget install --id Unixwin.Niubash
@@ -54,7 +54,7 @@ Android (aarch64, armv7): release `.zip` assets ship since v1.4.3 and run on rea
 From source (Rust 1.95+):
 `git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
 
-Configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — it is the **only** startup file niu reads (`~/.bashrc` is never sourced; run `niu plugin migrate-rc --diff` to see exactly what is worth carrying over) — start with [Getting started](docs/src/getting-started.md).
+On Windows, configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — the only startup file niu reads there. Login shells on Linux/macOS additionally read the GNU profile chain (`/etc/profile`, then the first of `~/.bash_profile` → `~/.bash_login` → `~/.profile`), exactly as GNU bash does; `~/.bashrc` is never sourced directly (run `niu plugin migrate-rc --diff` to see exactly what is worth carrying over) — start with [Getting started](docs/src/getting-started.md).
 
 ## Why not Git Bash / MSYS2 / Cygwin
 
@@ -81,7 +81,7 @@ The long version — including same-command-line side-by-sides of what actually 
 
 ## The command layer: built for a shell
 
-The bundled commands are **WinuxCmd**: 176 commands / 1,924 options, native Windows builds designed for shell use and evolved in lockstep with this shell — path forms, argument passing, and shell interplay are designed against shell semantics. The obvious alternative, Microsoft's own coreutils package, is an upstream uutils build *packaged* for PowerShell/CMD (its repo describes itself as "Installer & Packaging", and the package is in preview). Its README states its own limits: **no `/dev/null`**, **no POSIX signals**, `kill` and `timeout` not shipped, and twenty-plus commands — `chmod`, `chown`, `id`, `tty`, `mkfifo`, `nohup`, `stty`, … — dropped wholesale as "POSIX-only concepts". A command layer for a shell cannot start by discarding the concepts a shell lives on.
+The bundled commands are **WinuxCmd**: 178 applets (176 commands, excluding the internal `wpm` and `[`) / 1,924 options, native Windows builds designed for shell use and evolved in lockstep with this shell — path forms, argument passing, and shell interplay are designed against shell semantics. The obvious alternative, Microsoft's own coreutils package, is an upstream uutils build *packaged* for PowerShell/CMD (its repo describes itself as "Installer & Packaging", and the package is in preview). Its README states its own limits: **no `/dev/null`**, **no POSIX signals**, `kill` and `timeout` not shipped, and twenty-plus commands — `chmod`, `chown`, `id`, `tty`, `mkfifo`, `nohup`, `stty`, … — dropped wholesale as "POSIX-only concepts". A command layer for a shell cannot start by discarding the concepts a shell lives on.
 
 ## And the "lightweight replacement" shells
 
