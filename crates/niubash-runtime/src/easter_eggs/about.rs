@@ -64,24 +64,39 @@ fn print_info() -> anyhow::Result<i32> {
 
     // Title
     stdout.write_all(b"\n  \x1b[1;97mniubash\x1b[0m")?;
-    stdout.write_all(b" - A bash-compatible shell for Windows\n")?;
+    stdout.write_all(b" - A bash-compatible shell for Windows, Linux, macOS, and Android\n")?;
     stdout.write_all(b"  \x1b[90m--------------------------------------------\x1b[0m\n")?;
 
     // Features
     stdout.write_all(b"\n  \x1b[1;93mFeatures:\x1b[0m\n")?;
     stdout.write_all(b"    \x1b[92m*\x1b[0m Bash-compatible scripting via rubash\n")?;
+    #[cfg(windows)]
     stdout.write_all(b"    \x1b[92m*\x1b[0m Native Windows integration (winuxcmd)\n")?;
-    stdout.write_all(b"    \x1b[92m*\x1b[0m External plugin sources (oh-my-bash et al.)\n")?;
-    stdout.write_all(b"    \x1b[92m*\x1b[0m Reedline-based interactive input\n")?;
+    stdout.write_all(b"    \x1b[92m*\x1b[0m Built-in plugin system (oh-my-niu)\n")?;
+    stdout.write_all(b"    \x1b[92m*\x1b[0m GNU readline-compatible input via ruline\n")?;
 
     // Runtime facts — the self-verifiable "no emulation" claim
     stdout.write_all(b"\n  \x1b[1;93mRuntime:\x1b[0m\n")?;
-    stdout.write_all(b"    \x1b[92m*\x1b[0m native Win32 process - no POSIX emulation layer\n")?;
-    stdout
-        .write_all(b"    \x1b[92m*\x1b[0m no cygwin1.dll / msys-2.0.dll anywhere in the stack\n")?;
-    stdout.write_all(
-        b"    \x1b[92m*\x1b[0m no path conversion layer: native paths are first-class\n",
-    )?;
+    #[cfg(windows)]
+    {
+        stdout
+            .write_all(b"    \x1b[92m*\x1b[0m native Win32 process - no POSIX emulation layer\n")?;
+        stdout.write_all(
+            b"    \x1b[92m*\x1b[0m no cygwin1.dll / msys-2.0.dll anywhere in the stack\n",
+        )?;
+        stdout.write_all(
+            b"    \x1b[92m*\x1b[0m no MSYS/Cygwin-style blanket path conversion: native paths are first-class\n",
+        )?;
+    }
+    #[cfg(not(windows))]
+    {
+        stdout.write_all(
+            b"    \x1b[92m*\x1b[0m native process - no emulation or compatibility layer\n",
+        )?;
+        stdout.write_all(
+            b"    \x1b[92m*\x1b[0m single binary - the same rubash engine on every platform\n",
+        )?;
+    }
 
     // Where to go next
     stdout.write_all(b"\n  \x1b[1;93mNext steps:\x1b[0m\n")?;
