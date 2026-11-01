@@ -732,14 +732,51 @@ pub static WINUXCMD_COMPLETION_TOMLS: &[(&str, &str)] = &[
 /// Parse every embedded definition. Files that fail to parse are
 /// skipped with a warning; a broken asset is a build/CI problem (the
 /// golden test regenerates and diffs these files), not a runtime one.
+///
+/// The parse fans out over the available cores (niubash#755: the 180
+/// tables cost ~166 ms single-threaded in a debug build on an idle
+/// VM, all of it on the interactive startup path). Each worker
+/// parses a contiguous chunk and the chunk results are concatenated
+/// in table order, so the yielded sequence — and therefore every
+/// downstream merge — is identical to the sequential parse. A worker
+/// that somehow panics falls back to parsing its chunk inline.
 pub fn definitions() -> impl Iterator<Item = crate::completion::external::CommandDef> {
-    WINUXCMD_COMPLETION_TOMLS
-        .iter()
-        .filter_map(|(command, toml)| match toml::from_str(toml) {
+    fn parse_one(
+        (command, toml): &(&str, &str),
+    ) -> Option<crate::completion::external::CommandDef> {
+        match toml::from_str(toml) {
             Ok(def) => Some(def),
             Err(e) => {
                 log::warn!("embedded winuxcmd completion {command} failed to parse: {e}");
                 None
             }
+        }
+    }
+
+    let tables = WINUXCMD_COMPLETION_TOMLS;
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(tables.len().max(1));
+    let parsed: Vec<crate::completion::external::CommandDef> = if workers <= 1 {
+        tables.iter().filter_map(parse_one).collect()
+    } else {
+        let chunk_len = tables.len().div_ceil(workers);
+        let chunks: Vec<&[(&str, &str)]> = tables.chunks(chunk_len).collect();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunks
+                .iter()
+                .map(|chunk| scope.spawn(|| chunk.iter().filter_map(parse_one).collect::<Vec<_>>()))
+                .collect();
+            handles
+                .into_iter()
+                .zip(chunks.iter())
+                .flat_map(|(handle, chunk)| match handle.join() {
+                    Ok(defs) => defs,
+                    Err(_) => chunk.iter().filter_map(parse_one).collect(),
+                })
+                .collect()
         })
+    };
+    parsed.into_iter()
 }
