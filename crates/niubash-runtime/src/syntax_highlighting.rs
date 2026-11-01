@@ -1499,6 +1499,7 @@ mod tests {
             "/dev/udp/example.invalid/53",
             "/proc/self/status",
             "/proc/self/exe",
+            "/proc/self/root",
             "/dev/fd",
             "/dev/tcp",
             "/proc/self",
@@ -1516,6 +1517,9 @@ mod tests {
         assert!(is_simulated_path("/dev/fd/3"));
         assert!(is_simulated_path("/dev/tcp/127.0.0.1/80"));
         assert_eq!(is_simulated_path("/proc/self"), cfg!(windows));
+        // niubash#758: the root link classifies through the same
+        // registry arm as its sibling links.
+        assert_eq!(is_simulated_path("/proc/self/root"), cfg!(windows));
         // The zero/full devices joined the registry as first-class
         // classes with the audit-D5 simulation (rubash#1898, landed
         // via rubash#2015), so the registry arm serves them now —
