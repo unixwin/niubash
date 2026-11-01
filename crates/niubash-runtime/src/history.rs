@@ -156,16 +156,18 @@ impl Drop for RubashHistoryProvider {
         // GNU bash ends every session that remembers history by writing
         // the final list to $HISTFILE (bashhist.c exit_shell ->
         // write_history; the shell overwrites HISTFILE unless histappend
-        // is set). niu's hosted history syncs every save immediately, so
-        // this write is normally a no-op — but it is also the only thing
-        // that carries a GNU `history -c` to the file: the builtin clears
-        // the in-memory list only (builtins/history.def:185, niubash#182),
-        // and bash's file-side counterpart of a cleared list is exactly
-        // this exit write. Best-effort like every history-file write: it
-        // never fails the session and never reaches stderr. Sessions that
-        // terminate through std::process::exit (nonzero `-c` statuses, the
-        // exit-jump path) skip Drop and keep the pre-clear file, the same
-        // as the pre-existing drop-time sync.
+        // is set). niubash#773: recording never writes mid-session, so
+        // this exit write (flush_at_session_end's reconcile) is the
+        // primary write for the session's lines — and it is also the
+        // only thing that carries a GNU `history -c` to the file: the
+        // builtin clears the in-memory list only
+        // (builtins/history.def:169-176, niubash#182), and bash's
+        // file-side counterpart of a cleared list is exactly this exit
+        // write. Best-effort like every history-file write: it never
+        // fails the session and never reaches stderr. Sessions that
+        // terminate through std::process::exit (nonzero `-c` statuses,
+        // the exit-jump path) skip Drop; the host's explicit
+        // flush_session_history call covers the normal exit paths.
         self.flush_at_session_end();
     }
 }
@@ -426,8 +428,9 @@ impl RubashHistoryProvider {
 /// `#<epoch>` lines under histfile.c's model. A snapshot feeding
 /// THOSE faces would be a second, diverging arming source for the
 /// same face. The one snapshot below (`histtimeformat_armed`,
-/// niubash#734) feeds only the two write faces the engine never
-/// invokes — the live sync and the session-end flush's write path —
+/// niubash#734) feeds only the write faces the engine never
+/// invokes — the store flushes (the `-r` pre-flush, the retarget and
+/// replace settles) and the session-end flush's write path —
 /// whose GNU counterparts (histfile.c's append/write faces, driven
 /// in-session and by bashhist.c's exit path) stamp while armed and
 /// which have no other arming source on this side of the boundary.
@@ -460,7 +463,7 @@ pub(crate) struct HistorySettings {
     /// niubash#734: the `HISTTIMEFORMAT` arming bit — armed iff the
     /// variable exists (variables.c sv_histtimefmt; set-but-empty
     /// arms too). Consulted ONLY by the host-driven write faces (the
-    /// live sync's appends and the session-end flush's write path):
+    /// store flush's appends and the session-end flush's write path):
     /// while armed, each entry they write is preceded by its
     /// `#<epoch>` stamp from the store's stamps vector (histfile.c:
     /// a stamped entry is two file lines, on the append face as on
@@ -653,9 +656,8 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
             // the read position settles to the file's entry total
             // even when nothing was delivered (a shrunk file simply
             // re-bases the position).
-            let units = group_history_file_units(
-                content.lines().map(|line| line.to_string()).collect(),
-            );
+            let units =
+                group_history_file_units(content.lines().map(|line| line.to_string()).collect());
             let total = units.iter().filter(|unit| unit.entry.is_some()).count();
             let ledger = self.inner.ledger();
             let position = {
@@ -778,7 +780,7 @@ pub(crate) struct HistoryState {
 /// reedline's only write path is `sync()`, which re-reads and re-merges
 /// the WHOLE history file on every call — so every recorded line cost a
 /// full-file read even though the wrapper already tracks the file with
-/// its own signature gate and session ledger. The store keeps reedline's
+/// its own per-entry accounting and session ledger. The store keeps reedline's
 /// exact entry semantics — the same record filter, capacity rule,
 /// search-window arithmetic, unsupported-feature errors, and merge
 /// shape, transcribed from reedline 0.52.1's `file_backed.rs` — but owns
@@ -1297,12 +1299,21 @@ impl HistoryStore {
     }
 }
 
-/// A Reedline file history that is visible across concurrently running shells.
+/// A Reedline file history with GNU session semantics (niubash#773).
 ///
-/// The entry store (`HistoryStore`) is host-owned: saves append their
-/// line to the file immediately, and the wrapper reloads the file
-/// before queries when another process has changed it, so concurrently
-/// running shells see each other's lines without waiting for an exit.
+/// The entry store (`HistoryStore`) is host-owned. A session loads
+/// the file once at construction and answers every query from its
+/// own in-memory list: lines another shell writes to the file
+/// mid-session are never merged in on access (the pre-#773 signature
+/// gate did exactly that, so one Up press could surface a command
+/// another terminal had just typed). Cross-session visibility is
+/// explicit only — `history -n`/`-r` — and this session's lines
+/// reach the file only at the explicit write faces (`history
+/// -a`/`-w`) and at session end, matching bashhist.c (load_history
+/// at startup, maybe_append_history at `-a`,
+/// maybe_save_shell_history at exit). The type keeps its pre-#773
+/// name; "live" now refers to the shared in-session state, not to
+/// live file refresh.
 ///
 /// The history file is auxiliary state: a sandboxed restricted token may be
 /// able to execute commands while being unable to open, stat, or update the
@@ -1350,9 +1361,9 @@ fn warn_io_failure(state: &mut HistoryState, context: &str, error: impl std::fmt
 impl LiveFileBackedHistory {
     /// Build the live history. Infallible: a history file that cannot be
     /// opened degrades to an in-memory history (see the struct docs for the
-    /// GNU citation). A file that opens but cannot be stat-ed (restricted
-    /// token denying `metadata` while `CreateFileW` succeeded) degrades the
-    /// same way instead of aborting shell startup with `os error 5`.
+    /// GNU citation). A file that cannot be loaded at all (restricted
+    /// token, denied ACL) degrades the same way instead of aborting
+    /// shell startup with `os error 5`.
     ///
     /// There is exactly one sharing semantics (niubash#572): every session
     /// refreshes from the shared file, so cross-session lines are visible
@@ -1515,15 +1526,15 @@ impl LiveFileBackedHistory {
     }
 
     /// Apply the ledger's latest list-view generation to this instance
-    /// (niubash#614). Reedline's sync/refresh always merges the whole
-    /// file back into the reader, and the file deliberately keeps a
-    /// cleared session's lines until the session-end write
-    /// (niubash#569) — so without a view filter, the first list query
-    /// after any later append rebuilt the reader from the file and the
-    /// whole pre-clear list resurrected. The filter is a prefix length,
-    /// not a text set: the live sync keeps the raw list equal to the
-    /// file, so everything the clear emptied is exactly the raw prefix
-    /// that predates it, in this instance and in the twin alike.
+    /// (niubash#614). The file deliberately keeps a cleared session's
+    /// lines until the session-end write (niubash#569), and a twin
+    /// instance with its own store still holds those lines at the head
+    /// of its raw list — the view filter masks exactly that raw prefix
+    /// so the cleared lines stay out of its answers. niubash#773: in
+    /// the shared-state wiring the clearing instance empties the one
+    /// store itself and zeroes its own prefix (see `clear_memory`);
+    /// the hide remains for the separate-store twin. The filter is a
+    /// prefix length, not a text set.
     fn sync_view(state: &mut HistoryState, ledger: &Mutex<SessionLedger>) {
         if let Ok(ledger) = ledger.lock() {
             if ledger.view_gen != state.applied_view_gen {
@@ -1701,21 +1712,6 @@ impl LiveFileBackedHistory {
         synced
     }
 
-    /// Replace the in-memory view with the file's contents WITHOUT writing
-    /// anything back — the provider-side `history -r`/`-n` fast path.
-    ///
-    /// Re-feeding the file through per-entry saves cannot be used here:
-    /// reedline's `sync` appends its unwritten buffer to the file verbatim
-    /// (no dedupe), so a `-c`+`-r` cycle re-appended the entire file every
-    /// time it ran — the second half of the bash-it theme interlock
-    /// (niubash#182). Rebuilding the reader from disk (as
-    /// `refresh_if_stale` already does) leaves the file byte-identical,
-    /// matching histfile.c read_history_range, which only ever appends to
-    /// the in-memory list.
-    ///
-    /// Fails (without touching state) when this session degraded to
-    /// memory-only history, so the caller can fall back to the in-memory
-    /// replace path.
     /// The number of entries the in-memory list currently holds.
     pub(crate) fn loaded_entry_count(&self) -> usize {
         self.state
@@ -1749,6 +1745,22 @@ impl LiveFileBackedHistory {
         }
     }
 
+    /// Replace the in-memory view with the file's contents — the
+    /// provider-side `history -r` fast path. The session's unwritten
+    /// entries are flushed first (the flush leg in the body), so
+    /// nothing the session recorded is lost to the rebuild.
+    ///
+    /// Re-feeding the file through per-entry saves cannot be used here:
+    /// reedline's `sync` appends its unwritten buffer to the file verbatim
+    /// (no dedupe), so a `-c`+`-r` cycle re-appended the entire file every
+    /// time it ran — the second half of the bash-it theme interlock
+    /// (niubash#182). Rebuilding the reader from disk leaves the file
+    /// byte-identical, matching histfile.c read_history_range, which
+    /// only ever appends to the in-memory list.
+    ///
+    /// Fails (without touching state) when this session degraded to
+    /// memory-only history, so the caller can fall back to the in-memory
+    /// replace path.
     pub(crate) fn reload_from_file(&mut self) -> Result<()> {
         // niubash#773: an explicit re-read rebuilds the list from the
         // file, so this session's unwritten entries are flushed
@@ -2211,14 +2223,16 @@ impl LiveFileBackedHistory {
             return;
         }
         // niubash#569: reconcile the file with this session's ledger.
-        // (a) Append pending lines the live sync never wrote (the
-        // read-only-recovery shape: save succeeded in memory, sync
-        // failed, and the file became writable again by exit time).
-        // Write them THROUGH the store, not by raw appends: the store's
-        // unwritten tail (entries past its on-disk accounting) holds
-        // exactly the lines whose live sync failed, and its flush
-        // advances that accounting as it writes them, so no later write
-        // can place the same lines a second time — the duplication
+        // (a) Append the session's unwritten entries (niubash#773:
+        // recording never wrote them, so in the common case this is
+        // the session's only write; it is also the read-only-recovery
+        // leg — a save that succeeded in memory while the file was
+        // unwritable lands here when the file is writable again).
+        // Write them THROUGH the store, not by raw appends: the
+        // store's unwritten entries (their unset on-disk flags) are
+        // exactly those lines, and its flush advances that accounting
+        // as it writes them, so no later write can place the same
+        // lines a second time — the duplication
         // session_end_write_appends_missing_entries_without_duplicates
         // catches where the read-only leg behaves (Windows CI; the
         // local uid-0 artifact masks the leg and hides this one).
@@ -2251,10 +2265,11 @@ impl LiveFileBackedHistory {
         // (bashhist.c maybe_save_shell_history + force_append_history)
         // and `history -c` has already zeroed the session-line counter
         // (bash_clear_history): only post-clear lines are appended and
-        // the base lines stay. niu's live sync HAS written the cleared
-        // own lines to the file mid-session, so the first pass still
-        // runs in append mode — it is what makes the end state match
-        // GNU's (the niubash#569 grid: seeds plus post-clear lines).
+        // the base lines stay. An earlier write face (`-a`/`-w`, an
+        // erasedups rewrite) may have written the cleared own lines to
+        // the file mid-session, so the first pass still runs in append
+        // mode — it is what makes the end state match GNU's (the
+        // niubash#569 grid: seeds plus post-clear lines).
         // Only the base pass is append-mode-exempt: removing cleared
         // base lines is #642's stronger-than-GNU contract, and it
         // belongs to the overwrite-flavored default mode.
@@ -2784,8 +2799,9 @@ fn write_pairs_staged(path: &Path, entries: &[String], stamps: &[String]) -> io:
 }
 
 /// Append one history line to the file using reedline's on-disk encoding,
-/// without touching the reader. The reader's own accounting is rebuilt by
-/// the caller afterwards, so this never leaves a stale `len_on_disk`.
+/// without touching the reader. Callers that append on the store's behalf
+/// (`history -a`) flip the store's on-disk flags for exactly the lines
+/// they wrote, so the accounting never goes stale (niubash#773).
 fn append_line_to_file(path: &Path, text: &str) -> io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -3097,10 +3113,11 @@ struct PendingLine {
 /// GNU model this implements (bashhist.c): a session's typed lines are
 /// "pending" until an explicit -a/-w commits them; `history -c` drops the
 /// pending set, and the session-end write must not contain lines that
-/// were pending at clear time. niu's live sync writes pending lines to
-/// the file immediately (that is what makes them visible cross-session),
-/// so -c's file effect is deferred to the session-end write, which
-/// removes exactly the cleared lines instead of truncating the file.
+/// were pending at clear time. A write face can land a pending line
+/// mid-session, so -c's file effect is deferred to the session-end
+/// write, which removes exactly the cleared lines that reached the
+/// file instead of truncating it (niubash#773: lines never written
+/// need no removal — the reconcile reads the file as it stands).
 pub(crate) struct SessionLedger {
     pending: Vec<PendingLine>,
     cleared: Vec<String>,
@@ -3201,10 +3218,12 @@ impl SessionLedger {
     /// niubash#614: the clear also hides the whole in-memory list from
     /// this session's list view until an explicit re-read — GNU -c
     /// empties the list, seeds included. `view_len` is the raw entry
-    /// count at clear time. The live sync keeps every instance's raw
-    /// list equal to the file, so that count is a prefix length in each
-    /// instance's raw list; lines appended afterwards (by any session)
-    /// land past the prefix and stay visible.
+    /// count at clear time. For a twin instance with its own store,
+    /// whose raw list still begins with the cleared lines, that count
+    /// is the prefix length to mask; lines it records afterwards land
+    /// past the prefix and stay visible. (In the shared-state wiring
+    /// the clearing instance empties the one store outright — see
+    /// `clear_memory`, niubash#773.)
     fn note_cleared(&mut self, view_len: usize, cleared_base: Vec<String>) {
         self.cleared.extend(self.pending.drain(..).map(|p| p.text));
         // niubash#642: the base lines this clear retires are the
@@ -3213,11 +3232,11 @@ impl SessionLedger {
         // startup, in entry units (niubash#733 — stamp lines are not
         // entries and never enter the set). Lines another shell
         // appended after startup sit past the window and are never
-        // this session's to remove. Replace, don't extend: the file
-        // is unchanged since any earlier clear in this session, so
-        // its snapshot captures the same base window again (extending
-        // would double-count a text and could eat a foreign same-text
-        // line at flush time).
+        // this session's to remove. Replace, don't extend: appends
+        // since any earlier clear land past the base window, so a
+        // later clear's snapshot captures the same base window again
+        // (extending would double-count a text and could eat a
+        // foreign same-text line at flush time).
         self.cleared_base = cleared_base;
         self.view_hidden_len = view_len;
         self.view_gen += 1;
