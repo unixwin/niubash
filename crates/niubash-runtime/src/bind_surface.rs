@@ -81,6 +81,52 @@ pub fn load_engine_bindings(_executor: &rubash::Executor) -> (Vec<EngineBindEntr
     (Vec::new(), 0)
 }
 
+/// The engine's `bind -r` / `bind -u` tombstones, as `(keyseq, keymap)`
+/// pairs.  A host mirroring GNU's keymaps must subtract these from the
+/// defaults (`rubash#2337`: GNU's unbind mutates the keymap, defaults
+/// included). Outside the `internals` feature the list is empty.
+#[cfg(feature = "internals")]
+pub fn load_engine_bind_removals(executor: &rubash::Executor) -> Vec<(String, Option<String>)> {
+    executor.bind_removed_keyseqs()
+}
+
+#[cfg(not(feature = "internals"))]
+pub fn load_engine_bind_removals(_executor: &rubash::Executor) -> Vec<(String, Option<String>)> {
+    Vec::new()
+}
+
+/// Register one macro in the engine's readline registry — the same data
+/// plane a rc `bind '"\C-t": "text"'` writes.  A plugin's `rl_macro_bind`
+/// arrives here so the macro joins the host macro/chord layer and shows up
+/// in `bind -s` / `bind -p`.  Returns whether the entry was accepted.
+#[cfg(feature = "internals")]
+pub fn register_engine_macro(
+    executor: &mut rubash::Executor,
+    keyseq: String,
+    text: String,
+    keymap: Option<String>,
+) -> bool {
+    if keyseq.is_empty() {
+        return false;
+    }
+    executor.register_bind_entry(rubash::shell::bind_registry::BindEntry {
+        keyseq,
+        kind: rubash::shell::bind_registry::BindKind::Macro { text },
+        keymap,
+    });
+    true
+}
+
+#[cfg(not(feature = "internals"))]
+pub fn register_engine_macro(
+    _executor: &mut rubash::Executor,
+    _keyseq: String,
+    _text: String,
+    _keymap: Option<String>,
+) -> bool {
+    false
+}
+
 #[cfg(not(feature = "internals"))]
 pub fn current_generation(_executor: &rubash::Executor) -> u64 {
     0
