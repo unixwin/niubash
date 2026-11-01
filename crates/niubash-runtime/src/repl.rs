@@ -6593,10 +6593,14 @@ mod tests {
                 direction: Direction::Backward
             })
         );
-        assert_eq!(
-            native_widget_event("yank-last-arg"),
-            Some(ReedlineEvent::YankLastArg { count: None })
-        );
+        // bashline.c:491 registers rl_yank_last_arg under the
+        // insert-last-argument name; funmap.c carries yank-last-arg.
+        for widget in ["yank-last-arg", "insert-last-argument"] {
+            assert_eq!(
+                native_widget_event(widget),
+                Some(ReedlineEvent::YankLastArg { count: None })
+            );
+        }
         assert_eq!(
             native_widget_event("yank-nth-arg"),
             Some(ReedlineEvent::YankNthArg { count: 1 })
