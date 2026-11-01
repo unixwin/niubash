@@ -607,19 +607,20 @@ fn scan_maps() -> BTreeMap<(usize, Vec<u8>), AbiSlot> {
     out
 }
 
+/// `(root, key sequence)`: the key every live-routing map is indexed by.
+type SlotKey = (usize, Vec<u8>);
 /// Keymap snapshot keyed by `(root, key sequence)` -> ABI slot.
-type KeymapSnapshot = BTreeMap<(usize, Vec<u8>), AbiSlot>;
+type KeymapSnapshot = BTreeMap<SlotKey, AbiSlot>;
 
 static BASELINE: Mutex<Option<KeymapSnapshot>> = Mutex::new(None);
 static INSTALLED_FINGERPRINT: Mutex<Option<u64>> = Mutex::new(None);
 /// Host-owned keymap slots (engine `bind` / `bind -x` / macros / inputrc),
 /// as last written into the ABI arrays.  `None` is an explicit host unbind
 /// (`bind -r`), which is distinct from "the host has no opinion" (absent).
-static HOST_MIRROR: Mutex<BTreeMap<(usize, Vec<u8>), Option<AbiSlot>>> =
-    Mutex::new(BTreeMap::new());
+static HOST_MIRROR: Mutex<BTreeMap<SlotKey, Option<AbiSlot>>> = Mutex::new(BTreeMap::new());
 /// Plugin macro binds already forwarded into the engine macro registry, so
 /// the REPL does not re-register the same entry every prompt.
-static FORWARDED_MACROS: Mutex<BTreeMap<(usize, Vec<u8>), Vec<u8>>> = Mutex::new(BTreeMap::new());
+static FORWARDED_MACROS: Mutex<BTreeMap<SlotKey, Vec<u8>>> = Mutex::new(BTreeMap::new());
 
 /// Capture the post-`rl_initialize` keymap state.  Must run before any rc
 /// file, `enable -f`, or plugin can register a defun; the diff against this
