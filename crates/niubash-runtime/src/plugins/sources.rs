@@ -1662,6 +1662,28 @@ pub fn remove_source(id: &str) -> anyhow::Result<PathBuf> {
         fs::remove_dir_all(&record.path)
             .with_context(|| format!("failed to remove {}", record.path.display()))?;
     }
+    // niubash#809 F4: the removal is not done until the generated loader
+    // stops sourcing the tree — dropping only the registry/spec/tree left
+    // the source's active loader section in place until the NEXT sync
+    // dropped it. Republish the generation now with exactly this id gone
+    // (every other current section carried over; a full regeneration is
+    // wrong here — it would also drop the sections of imperative,
+    // spec-less installs).
+    let current = crate::plugins::loader::read_loader_text().unwrap_or_default();
+    let mut keep_current: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for section in super::loader::parse_sections(&current) {
+        if section.id != record.id {
+            keep_current.insert(section.id);
+        }
+    }
+    let drop_silent = std::collections::BTreeSet::from([record.id.clone()]);
+    if let Err(err) = super::assets::publish_loader_generation(&[], &keep_current, &drop_silent) {
+        return Err(err.context(format!(
+            "removed '{}' and its tree, but the generated loader could not be updated — \
+             `niu plugin sync` finishes the job",
+            record.id
+        )));
+    }
     Ok(record.path)
 }
 
@@ -1770,7 +1792,11 @@ pub fn restore_source(id: &str) -> anyhow::Result<SourceSyncOutcome> {
 /// `niu plugin sync` (vim-plug `:PlugUpdate` semantics): update every
 /// git-origin source to its recorded ref's current tip. Local snapshots are
 /// reported as skipped. Returns one row per source.
-pub fn sync_sources() -> Vec<SourceSyncOutcome> {
+/// Update every registered source to its ref's tip (the pre-14.6 meaning
+/// of bare `niu plugin sync`; `niu plugin update` with no id).
+/// `fetch_budget` is the caller's `--timeout` override (niubash#809 F5):
+/// absent, each update gets the verb default.
+pub fn sync_sources(fetch_budget: Option<Duration>) -> Vec<SourceSyncOutcome> {
     let mut out = Vec::new();
     for record in read_source_registry() {
         if record.ref_name == LOCAL_ORIGIN_REF && record.commit_sha.is_none() {
@@ -1792,6 +1818,7 @@ pub fn sync_sources() -> Vec<SourceSyncOutcome> {
                 adapter: Some(record.adapter.clone()),
                 origin: record.url.clone(),
                 ref_name: Some(ref_name),
+                fetch_budget,
                 ..SourceInstallRequest::default()
             },
         ) {
@@ -2367,6 +2394,12 @@ mod tests {
         let root = temp.join("sources");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
         let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        // niubash#809 F4: remove republishes the generated loader — keep
+        // it off the real ~/.niubash.
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
         let _budget =
             EnvVarGuard::set_os("NIU_PLUGIN_FETCH_TIMEOUT_MS", std::ffi::OsStr::new("300"));
 
@@ -2588,8 +2621,14 @@ mod tests {
         write_omb_fixture(&origin, "v1");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
         // Removal is spec-aware since 1.3.1 (an uninstall drops the
-        // declaration); keep the test off the real ~/.niubash spec.
+        // declaration); keep the test off the real ~/.niubash spec. The
+        // removal also republishes the generated loader (niubash#809 F4)
+        // — keep that off the real ~/.niubash too.
         let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
 
         let record = add_source(local_request(&origin)).expect("add must succeed");
         assert_eq!(record.id, "oh-my-bash");
@@ -2998,6 +3037,12 @@ mod tests {
         write_omb_fixture(&origin, "v1");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
         let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        // niubash#809 F4: remove republishes the generated loader — keep
+        // it off the real ~/.niubash.
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
         add_source(local_request(&origin)).unwrap();
         use crate::plugins::spec;
         spec::save_spec(&spec::PluginSpec {
@@ -3017,6 +3062,110 @@ mod tests {
         let spec = spec::load_spec().unwrap().expect("spec present");
         assert!(spec.sources.is_empty(), "{:?}", spec.sources);
         assert!(read_source_registry().is_empty());
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#809 F4: `remove` is complete only when the generated loader
+    /// stops sourcing the tree — the active section must drop in the SAME
+    /// verb, not survive until the next `sync` (T8 A5/A6: the section
+    /// lingered behind its `-f` guard). A neighbor source's section and a
+    /// hand-niubash-managed section of an unrelated id survive untouched.
+    #[test]
+    fn remove_source_drops_the_loader_section_immediately() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("remove-loader");
+        let origin = temp.join("origin");
+        let root = temp.join("sources");
+        let loader = temp.join("generated/plugins.niu");
+        write_omb_fixture(&origin, "v1");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let _loader = EnvVarGuard::set("NIU_PLUGIN_LOADER_PATH", &loader);
+        add_source(local_request(&origin)).unwrap();
+
+        // A generation carrying this source plus an unrelated neighbor
+        // section (the imperative/legacy shape: sections niu did not
+        // compute this pass).
+        let mut sections = vec![crate::plugins::loader::LoaderSection {
+            id: "oh-my-bash".to_string(),
+            body: "OSH_THEME='agnoster'".to_string(),
+        }];
+        sections.push(crate::plugins::loader::LoaderSection {
+            id: "other-framework".to_string(),
+            body: "export OTHER=1".to_string(),
+        });
+        let rendered =
+            crate::plugins::loader::render_document(&sections, &std::collections::BTreeSet::new());
+        crate::plugins::loader::publish(&rendered).unwrap();
+        assert!(
+            crate::plugins::loader::read_loader_text()
+                .unwrap()
+                .contains("niu plugin source: oh-my-bash"),
+            "fixture must carry the section before the remove"
+        );
+
+        remove_source("oh-my-bash").expect("remove");
+        let text = crate::plugins::loader::read_loader_text().unwrap_or_default();
+        assert!(
+            !text.contains("niu plugin source: oh-my-bash"),
+            "the removed source's section must drop in the same verb: {text}"
+        );
+        assert!(!text.contains("OSH_THEME"), "{text}");
+        assert!(
+            text.contains("niu plugin source: other-framework"),
+            "the neighbor section must survive: {text}"
+        );
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#809 F5: the no-id update (`niu plugin update --timeout N`)
+    /// must honor the caller's budget — the override flows through
+    /// [`sync_sources`] into each update's fetch. A blackholed origin with
+    /// a 300ms budget fails at that budget instead of the 120s default.
+    #[test]
+    fn sync_sources_honors_the_caller_fetch_budget() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("f5-budget");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
+        // A git-origin record whose origin is never routable (RFC 5737
+        // TEST-NET-3): the update hangs in the connect phase, so the ONLY
+        // way it fails fast is the passed budget.
+        write_source_registry(&[SourceRecord {
+            id: "blackholed".to_string(),
+            adapter: "file".to_string(),
+            url: "https://203.0.113.1/repo.git".to_string(),
+            ref_name: "HEAD".to_string(),
+            version: "unknown".to_string(),
+            path: root.join("blackholed"),
+            license: "MIT".to_string(),
+            installed_at: String::new(),
+            commit_sha: None,
+            previous: None,
+            spec_enabled: None,
+            spec_theme: None,
+        }])
+        .unwrap();
+
+        let start = Instant::now();
+        let outcomes = sync_sources(Some(Duration::from_millis(300)));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the caller budget must bound the update, took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+        assert_eq!(outcomes[0].outcome, "failed", "{outcomes:?}");
+        assert!(
+            outcomes[0].detail.contains("timed out"),
+            "the failure must be the budget kill: {}",
+            outcomes[0].detail
+        );
         let _ = fs::remove_dir_all(&temp);
     }
 

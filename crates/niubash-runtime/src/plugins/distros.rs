@@ -856,6 +856,12 @@ mod tests {
             "NIU_PLUGIN_SOURCES_ROOT",
             &temp.join("sources").to_string_lossy(),
         );
+        // niubash#809 F4: the trailing remove_source republishes the
+        // generated loader — keep it off the real ~/.niubash.
+        let _loader = EnvGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu").to_string_lossy(),
+        );
         let _distros = EnvGuard::set(
             "NIU_PLUGIN_DISTROS_ROOT",
             &temp.join("distros").to_string_lossy(),
