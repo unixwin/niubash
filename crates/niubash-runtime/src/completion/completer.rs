@@ -250,6 +250,11 @@ pub enum SpecificCompletion {
     /// csh-style brace expression (bashline.c:3795 `bash_brace_completion`,
     /// bracecomp.c).
     Brace,
+    /// `glob-complete-word` — bashline.c:4068 `bash_glob_complete_word`
+    /// globs the word (with `*` appended, as `rl_explicit_arg` does in
+    /// emacs mode) through `shell_glob_filename`, then completes against
+    /// those matches through the ordinary completion machinery.
+    Glob,
 }
 
 /// Custom completer for WinSH
@@ -368,6 +373,21 @@ impl NiubashCompleter {
                         crate::completion::brace::compress_braces(&names)
                             .map(|compressed| CompletionResult::new(vec![compressed]))
                     }),
+                // bashline.c:4068 `bash_glob_complete_word`: in emacs mode
+                // `rl_explicit_arg = 1` makes `glob_complete_word` append a
+                // `*` to the word before `shell_glob_filename`, then the
+                // ordinary `rl_complete_internal` machinery completes
+                // against the resulting file names. The engine's pathname
+                // expansion is the glob source; no second glob engine.
+                SpecificCompletion::Glob => {
+                    let word = context.get_current_word().unwrap_or_default();
+                    let pattern = format!("{word}*");
+                    let matches = crate::shell::with_completion_bridge(|shell| {
+                        shell.session().glob_filename(&pattern)
+                    })
+                    .unwrap_or_default();
+                    (!matches.is_empty()).then(|| CompletionResult::new(matches))
+                }
             };
 
         match result {
@@ -1052,6 +1072,46 @@ niu_git_comp() {
             vec!["zzz"],
             "a compspec must suppress the static table and the path fallback"
         );
+    }
+
+    #[test]
+    fn glob_completion_uses_the_engine_glob_filename() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp_dir = unique_temp_dir("niubash-glob-completion");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        for name in ["alpha.txt", "alpine.txt", "beta.txt"] {
+            std::fs::write(temp_dir.join(name), name).unwrap();
+        }
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        let script = format!("cd {}", temp_dir.display());
+        assert!(shell.execute_script(&script).is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions =
+            completer.complete_specific(SpecificCompletion::Glob, "cat al*", "cat al*".len());
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha.txt", "alpine.txt"],
+            "glob-complete-word globs the word plus '*' through Session::glob_filename"
+        );
+        for suggestion in &suggestions {
+            assert_eq!(suggestion.span.start, 4);
+            assert_eq!(suggestion.span.end, 7);
+        }
+
+        crate::shell::uninstall_completion_bridge();
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

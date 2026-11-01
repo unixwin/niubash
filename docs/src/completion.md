@@ -3,21 +3,59 @@
 How niu completes, key by key. The contract below is pinned by tests —
 if the shell ever surprises you here, that's a bug, not a feature.
 
-## The two-step rule (zsh/bash parity)
+## Interaction: what TAB does
+
+Completion has two independent axes: **interaction** (what TAB does to the
+line) and **presentation** (how the candidate list is painted). The default
+is the owner's zsh-style rule: `select`.
+
+### `select` (default) — zsh menu-select
+
+TAB #1 queries the candidates once, puts the **first candidate** into the
+line and paints the grid with that candidate highlighted:
+
+* **TAB / Shift-TAB** cycle through the frozen set (wrap-around).
+* **Down / Up** move one row.
+* **Right / Left** move one column; both edge directions wrap, as in zsh.
+* **Enter** accepts the highlighted candidate and runs the command in the
+  same press.
+* **Esc** rolls the line back to its pre-completion snapshot.
+* A **lone candidate** completes outright and closes the menu.
+* **Bare TAB** on a blank line inserts a four-space indent instead of
+  opening the command-position grid.
+
+The candidate set is frozen when the session starts, so cycling never
+re-queries against the spliced text. This is a product rule: zsh's
+menu-select starts with the first match selected; niu also enters that state
+on TAB #1 rather than after oh-my-zsh's `auto_menu` delay.
+
+### `insert` — two-step common-prefix contract
 
 TAB never shows you things you did not ask for:
 
 1. **First TAB: complete and stop.** The longest common prefix is spliced
-   into the line and the menu closes. Typing `cd proj` and pressing TAB
-   lands on `cd projects/` — no grid, no list, nothing else. If that's
-   all you wanted, press Enter and it runs exactly what's on the line.
-2. **Second TAB: show candidates.** Pressing TAB again on the settled
-   line opens the grid with the children (`projects/` contents) or the
-   ambiguous set.
-3. **TAB with nothing to splice shows the grid immediately.** When the
-   typed text is already the whole common prefix (e.g. `cd r` matching
-   `rubash/` and `repro/`), there is nothing to complete, so the grid
-   acts as the disambiguation aid right away.
+   into the line and no menu opens. If that is all you wanted, Enter runs
+   exactly what is on the line.
+2. **Second TAB: show candidates.** Pressing TAB again on the settled line
+   opens the menu for the ambiguous set (or the completed directory's
+   children).
+3. **TAB with nothing to splice shows the menu immediately.** When the
+   typed text is already the whole common prefix, the menu is the
+   disambiguation aid right away.
+
+With the menu open, **Enter** commits the highlighted candidate into the
+line without running it; a second Enter submits. **Esc** keeps what was
+already inserted.
+
+### `cycle` — TAB cycles candidates
+
+TAB #1 puts the first candidate into the line and opens the grid; further
+TAB / Shift-TAB steps through the frozen set with wrap-around. **Enter**
+accepts the candidate in the line and runs it; **Esc** restores the
+pre-completion line.
+
+Choose it with `export NIU_COMPLETION_INTERACTION=insert|cycle|select` in
+`~/.niubashrc` or the environment.
 
 ## Where candidates come from
 
@@ -37,18 +75,32 @@ The embedded tables are generated data (`assets/completions/winuxcmd/*.toml`),
 not configuration: nothing about them is user-editable, and they never
 override what `complete` registered.
 
-## Completion styles
+## Presentation styles
 
-Five shapes, one TAB contract. Switch any time; it takes effect on the
-next prompt:
+The style controls how candidates are painted; it does not change the
+interaction contract above (the one exception is `gnu`, whose literal
+readline behavior is intentionally inert to the interaction axis). Switch
+any time; it takes effect on the next prompt:
 
 ```sh
-export NIU_COMPLETION_STYLE=column   # default: multi-per-row grid
-export NIU_COMPLETION_STYLE=gnu      # GNU readline: printed transcript list
+export NIU_COMPLETION_STYLE=column   # default: multi-column grid
+export NIU_COMPLETION_STYLE=gnu      # opt-in: GNU readline printed transcript list
 export NIU_COMPLETION_STYLE=ide      # VS Code-style popup with descriptions
 export NIU_COMPLETION_STYLE=list     # fish-style vertical list
-export NIU_COMPLETION_STYLE=inline   # cycle candidates in place (bash menu-complete)
+export NIU_COMPLETION_STYLE=inline   # candidate stays in the line and cycles
 ```
+
+* `column` (default) — multi-column grid. When any candidate carries a
+  description, the whole list is shown as a single vertical column with
+  each description beside its value.
+* `gnu` (opt-in) — literal GNU readline: TAB completes the longest common
+  prefix, TAB again prints a width-adaptive columnar list and repaints the
+  prompt. Nothing is selected; arrow keys stay on history. This preset keeps
+  that behavior regardless of the interaction axis.
+* `ide` — multi-column popup with descriptions beside their candidates.
+* `list` — vertical list with descriptions (fish-style).
+* `inline` — candidates are inserted into the line and TAB cycles through
+  them in place.
 
 Put the line in `~/.niubashrc` (or export it in the environment). The
 environment is the only source for this knob — there is no config file
@@ -71,10 +123,16 @@ the ghost stands down; it returns as soon as the menu closes.
 
 ## Enter with the menu open
 
-If the grid (or any interactive menu) is showing candidates, Enter
-commits the highlighted candidate into the line instead of submitting
-it. Press Enter again to run the completed line. With no menu open,
-Enter always submits what you see.
+The interaction decides what Enter means while candidates are visible:
+
+* `select` / `cycle`: Enter accepts the highlighted candidate and runs the
+  completed line in the same press.
+* `insert`: Enter commits the highlighted candidate into the line without
+  running it; press Enter again to submit.
+* `gnu`: the list is printed output, not a menu, so Enter always submits the
+  current line.
+
+With no menu open, Enter always submits what you see.
 
 ## Key bindings from other tools
 

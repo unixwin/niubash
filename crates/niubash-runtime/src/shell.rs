@@ -2789,8 +2789,28 @@ impl Shell {
         // through the gated bind surface, already converted to
         // niu-owned mirror types (PLAN row 11, M-3).
         let (entries, generation) = crate::bind_surface::load_engine_bindings(self.executor());
+        let removals = crate::bind_surface::load_engine_bind_removals(self.executor());
         self.engine_bindings = entries;
         self.engine_bind_generation = generation;
+        // niubash#775: the same engine bindings are the host keymap half of
+        // the in-process readline ABI.  Mirroring them into the exported
+        // `emacs_standard_keymap` / vi keymaps is what lets a loadable
+        // builtin's `rl_function_of_keyseq` see a host `bind` / `bind -x` /
+        // macro (and a `bind -r`, through the engine's tombstones).
+        crate::readline_live::sync_host_keymap(&self.engine_bindings, &removals);
+    }
+
+    /// Route one macro a plugin bound with `rl_macro_bind` into the engine's
+    /// readline registry (the host macro/chord data plane).  The next editor
+    /// build installs it through the ordinary engine `bind` path and the
+    /// host mirror copies it back into the ABI keymap.
+    pub fn register_macro_binding(&mut self, keyseq: &str, text: &str, keymap: &str) -> bool {
+        crate::bind_surface::register_engine_macro(
+            self.executor_mut(),
+            keyseq.to_string(),
+            text.to_string(),
+            Some(keymap.to_string()),
+        )
     }
 
     /// Whether the engine's bind registry has moved since the
@@ -7485,6 +7505,10 @@ complete -F _envtooldyn_hook envtooldyn
     fn run_startup_rc_syncs_process_path_from_executor() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
+        // run_startup_rc writes the executor PATH into the process env by
+        // design; capture and restore it so this test neither sees nor
+        // leaves a caller PATH.
+        let _path_guard = EnvVarGuard::capture("PATH");
         let temp = unique_temp_dir("niubash-rc-path-sync");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -7504,10 +7528,19 @@ complete -F _envtooldyn_hook envtooldyn
 
         // After rc, std::env must reflect the executor PATH (including the new dir).
         let process_path = std::env::var("PATH").unwrap_or_default();
-        let normalized_extra = forward.to_uppercase().replace('/', "\\");
+        #[cfg(windows)]
+        {
+            let normalized_extra = forward.to_uppercase().replace('/', "\\");
+            assert!(
+                process_path.to_uppercase().contains(&normalized_extra),
+                "std::env PATH should contain the new directory after run_startup_rc;              got: {}",
+                process_path
+            );
+        }
+        #[cfg(not(windows))]
         assert!(
-            process_path.to_uppercase().contains(&normalized_extra),
-            "std::env PATH should contain the new directory after run_startup_rc;              got: {}",
+            process_path.contains(&forward),
+            "std::env PATH should contain the new directory after run_startup_rc; got: {}",
             process_path
         );
 
@@ -8300,6 +8333,10 @@ complete -F _envtooldyn_hook envtooldyn
         }
     }
 
+    /// Windows-only: `is_windows_drive_colon` is gated on cfg!(windows), so
+    /// off Windows every ':' is a separator and `D:/repo/bin` is two entries.
+    /// The drive-prefix preservation is a Win32 PATH parsing contract.
+    #[cfg(windows)]
     #[test]
     fn split_shell_path_list_preserves_windows_drive_colons() {
         assert_eq!(
@@ -10160,6 +10197,17 @@ complete -F _envtooldyn_hook envtooldyn
     }
 
     impl EnvVarGuard {
+        /// Record the current value without changing it; Drop restores it.
+        /// For code under test that mutates the process environment itself
+        /// (e.g. run_startup_rc syncing PATH) and must not leak into the
+        /// caller's environment.
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                previous: std::env::var_os(key),
+            }
+        }
+
         fn set(key: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);

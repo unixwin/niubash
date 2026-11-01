@@ -35,7 +35,7 @@ rubash = { version = "1.4.3", git = "https://github.com/unixwin/rubash.git", bra
 # `history_*` against this executable; build.rs anchors every exported symbol
 # in scripts/readline-abi-exports.txt. The lib name is `readline`
 # (readline_abi is the package name).
-readline-abi = { git = "https://github.com/unixwin/ruline", rev = "edc490df7273b32fc4d4cfc5bb163c74bc72172a" }
+readline-abi = { git = "https://github.com/unixwin/ruline", rev = "e5535ce297e22e296e33de6c9caa97ece0223fac" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
@@ -66,6 +66,11 @@ sha2 = "0.10"
 # portable-pty 0.9 drives ConPTY correctly on the same host, so the driver
 # is built on it for every case, on both Windows and Unix.
 portable-pty = "0.9"
+# tests/repl_command.rs reproduces rubash's GNU login-shell fallback
+# (getpwuid(getuid())->pw_shell) when SHELL is missing, so the Unix
+# expectation is the host's passwd shell rather than a hardcoded path or the
+# shell binary itself (rubash#1143).
+libc = "0.2"
 
 # Published-binary profile (measured on x64 MSVC against the default release
 # profile): thin LTO + one codegen unit enables cross-crate DCE/inlining
@@ -103,4 +108,4 @@ rubash = { path = "../rubash" }
 # Same rev as the `readline-abi` dependency above: the ABI adapter's path
 # dependency on its workspace-root `reedline` must resolve to the copy niu
 # already links, or the graph carries two editors.
-reedline = { git = "https://github.com/unixwin/ruline", rev = "edc490df7273b32fc4d4cfc5bb163c74bc72172a" }
+reedline = { git = "https://github.com/unixwin/ruline", rev = "e5535ce297e22e296e33de6c9caa97ece0223fac" }
