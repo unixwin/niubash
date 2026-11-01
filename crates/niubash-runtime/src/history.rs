@@ -688,16 +688,8 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
 
 const HISTORY_LOCK_ERROR: &str = "history mutex is poisoned";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct FileSignature {
-    exists: bool,
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
 pub(crate) struct HistoryState {
     history: HistoryStore,
-    signature: FileSignature,
     /// File backing for this history. `None` once the shell degraded to a
     /// memory-only history because the file was or became inaccessible.
     path: Option<PathBuf>,
@@ -1246,22 +1238,6 @@ fn warn_io_failure(state: &mut HistoryState, context: &str, error: impl std::fmt
     }
 }
 
-/// Best-effort staleness signature: an inaccessible file yields the default
-/// (nonexistent) signature instead of an error, with a one-time warning.
-fn file_signature_lossy(path: &Path, state: &mut HistoryState) -> FileSignature {
-    match file_signature(path) {
-        Ok(signature) => signature,
-        Err(error) => {
-            warn_io_failure(
-                state,
-                &format!("history file {} is not accessible", path.display()),
-                error,
-            );
-            FileSignature::default()
-        }
-    }
-}
-
 impl LiveFileBackedHistory {
     /// Build the live history. Infallible: a history file that cannot be
     /// opened degrades to an in-memory history (see the struct docs for the
@@ -1317,9 +1293,8 @@ impl LiveFileBackedHistory {
 
         let state = match HistoryStore::load_from_file(capacity, &path) {
             Ok(history) => {
-                let mut state = HistoryState {
+                let state = HistoryState {
                     history,
-                    signature: FileSignature::default(),
                     path: Some(path.clone()),
                     warned_io_failure: false,
                     hidden_prefix: 0,
@@ -1327,9 +1302,6 @@ impl LiveFileBackedHistory {
                     settings: Arc::clone(&settings),
                     view_histsize: None,
                 };
-                // The file opened, but a restricted token can still deny the
-                // metadata read; never let that abort the shell.
-                state.signature = file_signature_lossy(&path, &mut state);
                 state
             }
             Err(error) => {
@@ -1339,7 +1311,6 @@ impl LiveFileBackedHistory {
                 // shell usable with an in-memory history in that case.
                 let mut state = HistoryState {
                     history: in_memory_history(capacity),
-                    signature: FileSignature::default(),
                     path: None,
                     warned_io_failure: true,
                     hidden_prefix: 0,
@@ -1420,59 +1391,6 @@ impl LiveFileBackedHistory {
         self.state
             .lock()
             .map_err(|_| ReedlineError::from(history_lock_error()))
-    }
-
-    fn refresh_if_stale(capacity: usize, state: &mut HistoryState) {
-        let Some(path) = state.path.clone() else {
-            return;
-        };
-
-        // On Windows, fix ACLs before re-reading the file from disk.
-        ensure_history_file_accessible(&path);
-
-        let signature = match file_signature(&path) {
-            Ok(signature) => signature,
-            Err(error) => {
-                warn_io_failure(
-                    state,
-                    &format!("history file {} became inaccessible", path.display()),
-                    error,
-                );
-                return;
-            }
-        };
-        if signature == state.signature {
-            return;
-        }
-
-        // Preserve commands submitted by this process before replacing the
-        // in-memory view with the latest file contents. The flush is the
-        // store's append-only write (no read); the reload below is the
-        // single full read this refresh pays — reedline's sync used to
-        // read the whole file for the flush as well, and its merge
-        // result was then discarded for this same reload (audit item
-        // H-03).
-        if let Err(error) = state
-            .history
-            .flush(&path, Self::write_timestamps_armed(state))
-        {
-            warn_io_failure(state, "history flush before reload failed", error);
-        }
-        match HistoryStore::load_from_file(capacity, &path) {
-            Ok(history) => {
-                state.history = history;
-                state.signature = file_signature_lossy(&path, state);
-            }
-            Err(error) => {
-                // Keep the current in-memory view; the file stays stale for
-                // this session instead of failing history operations.
-                warn_io_failure(
-                    state,
-                    &format!("history file {} could not be reloaded", path.display()),
-                    error,
-                );
-            }
-        }
     }
 
     /// Apply the ledger's latest list-view generation to this instance
@@ -1659,11 +1577,6 @@ impl LiveFileBackedHistory {
             },
             None => false,
         };
-        let path = state.path.clone();
-        state.signature = match path.as_deref() {
-            Some(path) => file_signature_lossy(path, state),
-            None => FileSignature::default(),
-        };
         synced
     }
 
@@ -1707,7 +1620,6 @@ impl LiveFileBackedHistory {
         match HistoryStore::load_from_file(capacity, &path) {
             Ok(history) => {
                 state.history = history;
-                state.signature = file_signature_lossy(&path, state);
                 if consume_clear {
                     // An explicit re-read (`history -r`/`-n`) loads the
                     // file back into the list on purpose, so the clear's
@@ -1807,9 +1719,6 @@ impl LiveFileBackedHistory {
             Ok(history) => {
                 state.history = history;
                 state.history.realign_stamps(&keep_pairs);
-                if let Some(path) = state.path.clone() {
-                    state.signature = file_signature_lossy(&path, state);
-                }
                 // niubash#569: the file now holds exactly `entries`, so
                 // this session's pending and cleared sets both reset and
                 // the base moves to the rewritten file's line count.
@@ -1847,25 +1756,20 @@ impl LiveFileBackedHistory {
     }
 
     /// GNU `history -c`: empty the in-memory list WITHOUT touching the
-    /// backing file (builtins/history.def:185 clears entries/timestamps
-    /// only; the file is written by `-a`/`-w` explicitly).
-    ///
-    /// The store's clear only empties the list; the wrapper removes the
-    /// backing file itself (reedline's clear did both in one call), so
-    /// the file bytes are snapshotted and restored around that removal
-    /// (niubash#182). The signature is refreshed either way so
-    /// `refresh_if_stale` does not mistake the restore for an external
-    /// change and reload the list the theme just cleared.
+    /// backing file (builtins/history.def:169-176 clears the list
+    /// only; the file changes only via `-a`/`-w` or the session-end
+    /// write). niubash#773: nothing here writes to the file at all —
+    /// the snapshot read below only captures which base lines this
+    /// clear retires, for the ledger's session-end removal pass
+    /// (niubash#642/#733).
     pub(crate) fn clear_memory(&mut self) -> Result<()> {
-        let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock (see save).
         let ledger = Arc::clone(&self.ledger);
         let mut state = self.lock()?;
         let state = &mut *state;
-        Self::refresh_if_stale(capacity, state);
-        // niubash#614: the raw list length at clear time — post-refresh
-        // the reader equals the file — is the prefix the ledger records
-        // for the view hide (see SessionLedger::note_cleared).
+        // niubash#614: the raw list length at clear time is the prefix
+        // the ledger records for the view hide (see
+        // SessionLedger::note_cleared).
         let view_len_at_clear = state
             .history
             .count(SearchQuery::all_that_contain_rev(String::new()))
@@ -1876,8 +1780,9 @@ impl LiveFileBackedHistory {
             .as_deref()
             .and_then(|path| std::fs::read(path).ok());
         // niubash#642: the snapshot's decoded lines are what the ledger
-        // captures as the cleared base set — post-refresh the reader
-        // equals the file, so the snapshot IS the file the clear sees.
+        // captures as the cleared base set — the file still holds the
+        // base lines mid-session (they leave only at the session-end
+        // write), so the snapshot IS the base the clear retires.
         // niubash#733: the snapshot is grouped into entry+stamp units
         // first — the cleared base set is an ENTRY view (a stamp line
         // is the following entry's timestamp, histfile.c:140, never an
@@ -1894,34 +1799,7 @@ impl LiveFileBackedHistory {
                 )
             })
             .unwrap_or_default();
-        // Reedline's `clear` emptied the list AND removed the backing
-        // file; the store only owns the list, so the removal is spelled
-        // out here — the snapshot restore below recreates the file with
-        // its original bytes, exactly as it did around reedline's clear.
         state.history.clear_entries();
-        if let Some(path) = state.path.clone() {
-            std::fs::remove_file(&path).map_err(ReedlineError::from)?;
-        }
-        let outcome = match (state.path.clone(), snapshot) {
-            (Some(path), Some(bytes)) => {
-                if std::fs::write(&path, &bytes).is_ok() {
-                    state.signature = file_signature_lossy(&path, state);
-                    Ok(())
-                } else {
-                    // Could not restore: degrade the signature so the next
-                    // query reloads whatever is on disk.
-                    state.signature = file_signature_lossy(&path, state);
-                    Ok(())
-                }
-            }
-            (path, _) => {
-                state.signature = match path.as_deref() {
-                    Some(path) => file_signature_lossy(path, state),
-                    None => FileSignature::default(),
-                };
-                Ok(())
-            }
-        };
         // niubash#569: -c drops this session's pending lines from the
         // session's set. The file is untouched mid-session (the pinned
         // #182 behavior); the session-end write removes exactly these
@@ -1944,7 +1822,7 @@ impl LiveFileBackedHistory {
             ledger.note_cleared(view_len_at_clear, cleared_base);
         }
         Self::sync_view(state, &ledger);
-        outcome
+        Ok(())
     }
 
     /// The file this history is backed by, when it has one.
@@ -1959,12 +1837,10 @@ impl LiveFileBackedHistory {
     /// every history read: a poisoned lock yields the empty vec and
     /// the engine falls back to its own dispatch-time stamp ledger.
     pub(crate) fn view_stamps(&self) -> Vec<String> {
-        let capacity = self.capacity;
         let ledger = Arc::clone(&self.ledger);
         let Ok(mut state) = self.state.lock() else {
             return Vec::new();
         };
-        Self::refresh_if_stale(capacity, &mut state);
         Self::sync_view(&mut state, &ledger);
         let (hidden, raw_len) = Self::view_bounds(&state);
         state
@@ -2035,7 +1911,6 @@ impl LiveFileBackedHistory {
             Ok(history) => {
                 state.history = history;
                 state.history.realign_stamps(&keep_pairs);
-                state.signature = file_signature_lossy(&new_path, state);
                 state.path = Some(new_path);
                 // The staged file IS the list now (niubash#614: the
                 // reset also ends any clear hide).
@@ -2086,10 +1961,11 @@ impl LiveFileBackedHistory {
             // and none must be created.
             return;
         };
-        // See the file as it is now: another shell may have appended since
-        // the last sync, and the empty-list decision below must not erase
-        // those lines.
-        Self::refresh_if_stale(capacity, state);
+        // niubash#773: the list below is this session's own — it is NOT
+        // re-read from the file here. The reconcile further down reads
+        // the file directly for its removal and truncation passes, so
+        // lines another shell appended survive without ever entering
+        // this session's list.
         let entries: Vec<String> = match state
             .history
             .search(SearchQuery::all_that_contain_rev(String::new()))
@@ -2156,7 +2032,6 @@ impl LiveFileBackedHistory {
             if let Ok(mut ledger) = ledger.lock() {
                 ledger.reset(0);
             }
-            state.signature = file_signature_lossy(&path, state);
             return;
         }
         // niubash#569: reconcile the file with this session's ledger.
@@ -2364,8 +2239,7 @@ impl LiveFileBackedHistory {
         }
         if let Ok(mut ledger) = ledger.lock() {
             ledger.settle(appended_ok, removed_ok, count_file_lines(&path));
-        }
-        state.signature = file_signature_lossy(&path, state);
+        };
     }
 
     /// Save one entry without the niubash#646 record filters. Only
@@ -2398,7 +2272,6 @@ impl LiveFileBackedHistory {
         let gate_on_history_option = self.gate_on_history_option;
         let mut state = self.lock()?;
         let state = &mut *state;
-        Self::refresh_if_stale(capacity, state);
         let text = item.command_line.clone();
         if text.is_empty() {
             // Reedline drops empty saves, and GNU records no empty lines
@@ -2520,7 +2393,6 @@ impl LiveFileBackedHistory {
                 if appended {
                     if let Ok(history) = HistoryStore::load_from_file(capacity, &path) {
                         state.history = history;
-                        state.signature = file_signature_lossy(&path, state);
                         // The line is in the file now, by construction.
                         // niubash#703: the appended line is the rebuilt
                         // list's last entry; an override stamp replaces
@@ -2661,9 +2533,6 @@ impl LiveFileBackedHistory {
             Ok(history) => {
                 state.history = history;
                 state.history.realign_stamps(&keep_pairs);
-                if let Some(path) = state.path.clone() {
-                    state.signature = file_signature_lossy(&path, state);
-                }
                 if let Ok(mut ledger) = ledger.lock() {
                     ledger.pending.retain(|pending| pending.text != text);
                     ledger.base_lines = kept_in_base;
@@ -3225,9 +3094,7 @@ impl History for LiveFileBackedHistory {
         self.save_entry(item, true, None)
     }
     fn load(&self, id: HistoryItemId) -> Result<HistoryItem> {
-        let capacity = self.capacity;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &mut state);
         Self::sync_view(&mut state, &self.ledger);
         let (hidden, _) = Self::view_bounds(&state);
         if hidden == 0 {
@@ -3245,9 +3112,7 @@ impl History for LiveFileBackedHistory {
     }
 
     fn count(&self, query: SearchQuery) -> Result<i64> {
-        let capacity = self.capacity;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &mut state);
         Self::sync_view(&mut state, &self.ledger);
         let (hidden, _) = Self::view_bounds(&state);
         if hidden == 0 {
@@ -3257,9 +3122,7 @@ impl History for LiveFileBackedHistory {
     }
 
     fn search(&self, query: SearchQuery) -> Result<Vec<HistoryItem>> {
-        let capacity = self.capacity;
         let mut state = self.lock()?;
-        Self::refresh_if_stale(capacity, &mut state);
         Self::sync_view(&mut state, &self.ledger);
         let (hidden, _) = Self::view_bounds(&state);
         let not_command_line = Self::cursor_not_command_line(&state, &query);
@@ -3276,10 +3139,8 @@ impl History for LiveFileBackedHistory {
         id: HistoryItemId,
         updater: &dyn Fn(HistoryItem) -> HistoryItem,
     ) -> Result<()> {
-        let capacity = self.capacity;
         let mut state = self.lock()?;
         let state = &mut *state;
-        Self::refresh_if_stale(capacity, state);
         // The store keeps reedline's answer verbatim: file-backed
         // histories do not support update.
         let _ = (id, updater);
@@ -3287,10 +3148,8 @@ impl History for LiveFileBackedHistory {
     }
 
     fn clear(&mut self) -> Result<()> {
-        let capacity = self.capacity;
         let mut state = self.lock()?;
         let state = &mut *state;
-        Self::refresh_if_stale(capacity, state);
         // Reedline's clear emptied the list AND removed the backing
         // file; the store only owns the list, so the removal is spelled
         // out here, in the same order (entries first, then the file).
@@ -3301,19 +3160,12 @@ impl History for LiveFileBackedHistory {
         // The reader is empty now; a stale view hide must not mask
         // entries recorded after this clear (niubash#614).
         state.hidden_prefix = 0;
-        let path = state.path.clone();
-        state.signature = match path.as_deref() {
-            Some(path) => file_signature_lossy(path, state),
-            None => FileSignature::default(),
-        };
         Ok(())
     }
 
     fn delete(&mut self, id: HistoryItemId) -> Result<()> {
-        let capacity = self.capacity;
         let mut state = self.lock()?;
         let state = &mut *state;
-        Self::refresh_if_stale(capacity, state);
         // The store keeps reedline's answer verbatim: file-backed
         // histories do not support delete.
         let _ = id;
@@ -3340,34 +3192,6 @@ fn history_lock_error() -> io::Error {
 impl Drop for LiveFileBackedHistory {
     fn drop(&mut self) {
         let _ = self.sync();
-    }
-}
-
-fn file_signature(path: &Path) -> io::Result<FileSignature> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(FileSignature {
-            exists: true,
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        }),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(FileSignature::default()),
-        #[cfg(windows)]
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            // On Windows, the history file may have restrictive ACLs from a
-            // different security context (e.g., Codex sandbox). Reset the
-            // DACL and retry once.
-            reset_history_file_dacl(path);
-            match fs::metadata(path) {
-                Ok(metadata) => Ok(FileSignature {
-                    exists: true,
-                    len: metadata.len(),
-                    modified: metadata.modified().ok(),
-                }),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(FileSignature::default()),
-                Err(e) => Err(e),
-            }
-        }
-        Err(error) => Err(error),
     }
 }
 
