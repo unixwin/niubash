@@ -535,6 +535,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         ));
     }
 
+    // niubash#775: the keymap generation this editor was built from.  The
+    // REPL compares it between prompts so a plugin that registered or
+    // unbound a key at runtime gets a lossless rebuild before the next line.
+    crate::readline_live::mark_installed();
+
     Ok(editor)
 }
 
@@ -687,14 +692,41 @@ fn run_host_sentinel(
     if let Some(name) = payload.strip_prefix(READLINE_HOST_COMMAND_PREFIX) {
         return run_readline_command(shell, line_editor, name);
     }
+    // niubash#775: a key a loadable builtin bound through the readline ABI.
+    // Mirror the live editor into the exported globals first, run the
+    // plugin's C function, and adopt whatever it left in rl_line_buffer.
+    if let Some((root, path)) = crate::readline_live::parse_payload(payload) {
+        let editor_buffer = line_editor.current_buffer_contents().to_string();
+        let editor_cursor = line_editor.current_insertion_point();
+        crate::readline_live::sync_editor_to_abi(&editor_buffer, editor_cursor, None);
+        let before = crate::readline_live::snapshot_abi_line();
+        crate::readline_live::dispatch_state_begin();
+        let fired = crate::readline_live::dispatch(root, &path);
+        crate::readline_live::dispatch_state_end();
+        if fired && crate::readline_live::abi_line_changed(&before) {
+            crate::readline_live::sync_abi_to_editor(line_editor);
+        }
+        return SentinelOutcome::Resumed;
+    }
     if let Some(bindx) = BindXInvocation::parse(payload) {
         let editor_buffer = line_editor.current_buffer_contents().to_string();
         let editor_cursor = line_editor.current_insertion_point();
+        // A `bind -x` command (and any plugin builtin it invokes) must see
+        // the line being edited, not the last line readline accepted.
+        crate::readline_live::sync_editor_to_abi(&editor_buffer, editor_cursor, None);
+        let before = crate::readline_live::snapshot_abi_line();
+        crate::readline_live::dispatch_state_begin();
         let outcome =
             shell
                 .borrow_mut()
                 .run_bind_x_command(bindx.index, &editor_buffer, editor_cursor);
+        crate::readline_live::dispatch_state_end();
         apply_widget_outcome(line_editor, &outcome);
+        // The host's READLINE_* read-back wins unless a plugin touched the
+        // exported ABI too; then the plugin's mutation is the newer one.
+        if crate::readline_live::abi_line_changed(&before) {
+            crate::readline_live::sync_abi_to_editor(line_editor);
+        }
         return SentinelOutcome::Resumed;
     }
     let Some(widget) = WidgetInvocation::parse(payload) else {
@@ -705,6 +737,8 @@ fn run_host_sentinel(
     }
     let editor_buffer = line_editor.current_buffer_contents().to_string();
     let editor_cursor = line_editor.current_insertion_point();
+    crate::readline_live::sync_editor_to_abi(&editor_buffer, editor_cursor, None);
+    let before = crate::readline_live::snapshot_abi_line();
     let outcome =
         shell
             .borrow_mut()
@@ -713,6 +747,9 @@ fn run_host_sentinel(
         SentinelOutcome::Accept(outcome.buffer)
     } else {
         apply_widget_outcome(line_editor, &outcome);
+        if crate::readline_live::abi_line_changed(&before) {
+            crate::readline_live::sync_abi_to_editor(line_editor);
+        }
         SentinelOutcome::Resumed
     }
 }
@@ -1510,6 +1547,12 @@ fn build_keymap_for_target(
             add_engine_bind_keybindings_recorded(keybindings, target, engine_bindings, 0)
         })
         .1;
+    // niubash#775: plugin registrations made through the live readline ABI
+    // (`rl_add_defun`/`rl_bind_key*`) join the script layer.  The user's own
+    // NIU_BINDKEYS layer still applies last, matching GNU's last-write rule.
+    builder.layer(KeymapSource::Script, |keybindings| {
+        crate::readline_live::add_plugin_keybindings(keybindings, target)
+    });
     builder.layer(
         KeymapSource::User {
             via: UserBindingVia::NiuBindkeys,
@@ -1575,6 +1618,14 @@ fn build_edit_mode(
                         let mut chords =
                             collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
                         chords.extend(gnu_default_chord_bindings());
+                        let abi_unbinds =
+                            crate::readline_live::plugin_chord_unbinds(NativeKeymapTarget::Emacs);
+                        chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
+                        chords.extend(
+                            crate::readline_live::plugin_chords(NativeKeymapTarget::Emacs)
+                                .into_iter()
+                                .map(|(keys, event)| ChordBinding { keys, event }),
+                        );
                         chords
                     },
                     alt_keys,
@@ -1633,7 +1684,18 @@ fn build_edit_mode(
                         let mut chords = Vec::new();
                         for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
                             chords.extend(collect_chord_bindings(engine_bindings, target, 0));
+                            chords.extend(
+                                crate::readline_live::plugin_chords(target)
+                                    .into_iter()
+                                    .map(|(keys, event)| ChordBinding { keys, event }),
+                            );
                         }
+                        let abi_unbinds: Vec<_> =
+                            [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal]
+                                .into_iter()
+                                .flat_map(crate::readline_live::plugin_chord_unbinds)
+                                .collect();
+                        chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
                         chords
                     },
                     alt_keys,
@@ -3370,7 +3432,7 @@ fn add_system_clipboard_keybindings(keybindings: &mut Keybindings) {
 fn add_system_clipboard_keybindings(_keybindings: &mut Keybindings) {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeKeymapTarget {
+pub(crate) enum NativeKeymapTarget {
     Emacs,
     ViInsert,
     ViNormal,
@@ -5553,6 +5615,28 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             shell.borrow_mut().load_engine_bindings();
             line_editor = build_line_editor(&shell)?;
         }
+        // niubash#775: a loadable builtin may have called rl_add_defun /
+        // rl_bind_key / rl_unbind_* since the last build (at startup or from
+        // a bind -x command).  Rebuild from the live ABI keymaps so a binding
+        // registered mid-session fires on the very next key.  A host-command
+        // keypress returns to the loop with the edit buffer intact, so carry
+        // the buffer/point into the fresh editor rather than dropping them.
+        if crate::readline_live::is_stale() {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let point = line_editor.current_insertion_point();
+            let mut rebuilt = build_line_editor(&shell)?;
+            if !buffer.is_empty() {
+                rebuilt.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(buffer),
+                    EditCommand::MoveToPosition {
+                        position: point,
+                        select: false,
+                    },
+                ]);
+            }
+            line_editor = rebuilt;
+        }
         // niubash#646: refresh the HIST* settings snapshot before the
         // line is read, so the record-time filters, the list stifle,
         // and the session-end write all see the values the previous
@@ -5625,11 +5709,25 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 line_editor = build_line_editor(&shell)?;
             }
             let prompt = shell.borrow_mut().prompt_for_display();
+            let prompt_text = prompt.render_prompt_left().into_owned();
+            // niubash#775: before the read loop dispatches any key, the ABI
+            // sees the editor's fresh (empty) buffer and the prompt.
+            crate::readline_live::begin_read(
+                line_editor.current_buffer_contents(),
+                line_editor.current_insertion_point(),
+                &prompt_text,
+            );
             typeahead.disarm_and_reinject();
             line_editor.read_line(&prompt)
         } else {
             let prompt = shell.borrow().prompt.clone();
             let prompt = ContinuationPrompt::new(&prompt, prompt.vi_indicators());
+            let prompt_text = prompt.render_prompt_left().into_owned();
+            crate::readline_live::begin_read(
+                line_editor.current_buffer_contents(),
+                line_editor.current_insertion_point(),
+                &prompt_text,
+            );
             typeahead.disarm_and_reinject();
             line_editor.read_line(&prompt)
         };
@@ -5682,6 +5780,10 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             }
             Ok(Signal::Success(buffer)) => {
                 let mut line = buffer.trim_end_matches(['\r', '\n']).to_string();
+                // niubash#775: GNU keeps the accepted line in rl_line_buffer
+                // while the command runs, so a plugin builtin invoked as an
+                // ordinary command observes the line the user submitted.
+                crate::readline_live::finish_accepted(&line);
                 if pending.is_empty() {
                     // Older reedline releases delivered ExecuteHostCommand
                     // as Success; keep the sentinel check on the submitted
@@ -5750,6 +5852,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 }
             }
             Ok(Signal::CtrlD) => {
+                crate::readline_live::finish_abandoned();
                 println!();
                 if !pending.is_empty() {
                     pending.clear();
@@ -5759,6 +5862,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 break;
             }
             Ok(Signal::CtrlC) => {
+                crate::readline_live::finish_abandoned();
                 // niubash#600: GNU shows a literal `^C` where the line
                 // was abandoned (the kernel's ECHOCTL echoes it in
                 // cooked mode; readline echoes it in raw mode). Reedline
@@ -5798,6 +5902,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             }
             Ok(_) => continue,
             Err(e) => {
+                crate::readline_live::finish_abandoned();
                 eprintln!("niubash: line editor error: {}", e);
                 let _ = shell.borrow_mut().finish_with_exit_trap(1);
                 break;

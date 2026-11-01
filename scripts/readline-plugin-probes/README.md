@@ -48,8 +48,8 @@ printed in the matrix.  Artifacts are kept automatically on failure and with
 | `readline-abi-exports` | every symbol in `scripts/readline-abi-exports.txt` (~274) is in the **dynamic** symbol table (`scripts/check-readline-abi-exports.sh`) | `nm` or `readelf`, or `dumpbin` on Windows |
 | `loadable-builtin-build` | `loadable_builtin.c` compiles as a shared object | `cc` (`CC` overrides) |
 | `loadable-builtin-gnu-bash` | the same `.so` loads in interactive GNU bash and reads/writes the **live** `rl_line_buffer`/`rl_point` | `bash`, ideally `python3` |
-| `enable-f` | niu's `enable -f` can dlopen the fixture (currently refused by rubash) | `niu` |
-| `loadable-builtin-niu` | the fixture runs against niu and reports complete ABI fields (currently depends on `enable-f`) | `niu` |
+| `enable-f` | niu's `enable -f` can dlopen the fixture | `niu` |
+| `loadable-builtin-niu` | PTY: the fixture runs from `bind -x` while a line is being edited, observes the **live** `rl_line_buffer`/`rl_point`, and the editor adopts its write-back; its `rl_bind_key` slot fires in the host keymap | `niu`, `python3` |
 | `fzf-bindx-register` | `bind -x` registration survives `bind -X` listing | `niu` |
 | `fzf-bindx-roundtrip` | PTY Ctrl-R runs a fake fzf, reads `READLINE_LINE`, rewrites it, and honors `READLINE_POINT` | `niu`, `python3` |
 | `bash-completion` | local `complete -F` fixture: `complete -p`, `COMPREPLY`, `compgen`, `COMP_WORDBREAKS` match GNU bash | `niu`, `bash` |
@@ -65,19 +65,32 @@ is broken".  It calls:
 * `rl_readline_version` / `rl_library_version` (data symbols),
 * `rl_add_defun` and `rl_bind_key` (registered function `rl-probe-defun`),
 * `rl_line_buffer` (reads the exported buffer, flips and restores its first
-  byte; standalone ABI state until live-editor routing lands),
+  byte),
 * `rl_point` (reads, bumps, restores).
+
+Two environment variables turn the fixture into the live-routing acceptance
+probe:
+
+* `RL_PROBE_MUTATE=1` leaves the first-byte flip and point bump in place, so
+  the PTY test can prove the editor adopted the plugin's write-back.  With
+  the variable unset every mutation is restored, which is why the GNU oracle
+  still runs the line unchanged.
+* `RL_PROBE_KEY_MARK=1` makes the `rl_add_defun` callback print
+  `RL_PROBE_DEFUN key=... count=...` when the host's keymap dispatches the
+  registered key.  GNU's default `convert-meta` stores key `0xfe` as the
+  two-byte `ESC ~` sequence, which is what the niu PTY probe sends.
 
 One machine-readable line is printed:
 
 ```text
 RL_PROBE version=0x0803 library=8.3 header=0x0803 add_defun=ok bind_key=ok \
-  line_buffer=ok line_mutated=ok point=ok point_mutated=ok result=ok
+  line_buffer=ok line_mutated=ok point=ok point_mutated=ok mutate=off result=ok
 ```
 
 `result=missing-abi` means the version/add_defun/bind_key core is incomplete;
 `line_buffer=absent` is expected for a non-interactive `bash -c` and is *not*
 treated as an ABI failure (the GNU oracle runs under a PTY to observe it).
+`mutate=on` appears only with `RL_PROBE_MUTATE=1`.
 
 ## Observed baseline
 
@@ -93,29 +106,31 @@ Run on 2026-11-01, Android/Termux aarch64, `sh` = dash, after rubash
 | python3 | `3.14.6` |
 | bash-completion | framework absent; local fixture used |
 
-Result: **PASS 10 / FAIL 1 / SKIP 0**.
+Result: **PASS 11 / FAIL 0 / SKIP 0**.
 
 | Probe | Baseline | Why |
 |---|---|---|
 | `niu-build` | PASS | existing `target/debug/niu` |
-| `readline-abi-exports` | PASS | version symbols exported |
+| `readline-abi-exports` | PASS | all 274 ABI symbols exported |
 | `loadable-builtin-build` | PASS | `.so` built |
 | `loadable-builtin-gnu-bash` | PASS | live buffer: `line_buffer=ok line_mutated=ok point=ok point_mutated=ok result=ok` |
-| `enable-f` | **PASS** | rubash `enable -f` now dlopens and runs `rl_probe` |
-| `loadable-builtin-niu` | **FAIL** | the builtin loads but the full `rl_*` surface is not exported by niu yet — `add_defun=missing bind_key=missing line_buffer=absent` (niubash#775) |
+| `enable-f` | PASS | rubash `enable -f` dlopens and runs `rl_probe` |
+| `loadable-builtin-niu` | **PASS** | PTY live path: probe sees/mutates the edited line, editor adopts `Xcho oneZ`, and the `rl_bind_key` slot fires (`RL_PROBE_DEFUN key=126 count=1`) |
 | `fzf-bindx-register` | PASS | `"\C-r" "__probe_fzf"` listed by `bind -X` |
 | `fzf-bindx-roundtrip` | PASS | `Xpicked:typed` from point insertion + empty-buffer `picked:` |
 | `bash-completion` | PASS | byte-identical to GNU bash for the fixture |
 | `inputrc-startup` | PASS | all four fixture features applied |
-| `inputrc-reread` | **PASS** | `C-x C-r` re-reads both rc bind lines and the `$include`d `$INPUTRC` binding |
+| `inputrc-reread` | PASS | `C-x C-r` re-reads both rc bind lines and the `$include`d `$INPUTRC` binding |
 
-Remaining blocker: the in-process ABI export is still the two-symbol probe
-(niubash#775). `enable -f` and the loadable-builtin loader are now real
-(rubash#2440), so the remaining failure is the host-side full-surface export
-and live-editor routing, not rubash.
+The in-process ABI is now routed to the live editor (`crates/niubash-runtime/
+src/readline_live.rs`): editor buffer/point are mirrored at every host
+boundary, plugin writes to `rl_line_buffer`/`rl_point`/`rl_mark` are copied
+back clamped to UTF-8, and defun/key bindings from the exported keymap arrays
+join the live Reedline keymap (with a lossless rebuild between prompts for a
+registration made mid-session).
 
-`loadable-builtin-gnu-bash` is the fixture self-check: when `enable -f` is
-fixed, a failing GNU-bash oracle means the fixture—not niu—is at fault.
+`loadable-builtin-gnu-bash` is the fixture self-check: a failing GNU-bash
+oracle means the fixture—not niu—is at fault.
 
 ## Files
 

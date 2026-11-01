@@ -22,6 +22,7 @@ All notable changes to Niubash are documented in this file.
 
 ### Fixed
 
+- **The in-process readline ABI now drives the live editor** (#775): the exported `rl_line_buffer`/`rl_point`/`rl_end`/`rl_mark` are mirrored from the interactive Reedline buffer at every host boundary and copied back (UTF-8 clamped) after `bind -x`, widgets, and loadable-builtin callbacks. Plugin registrations through `rl_add_defun`/`rl_bind_key*`/`rl_unbind_*` join the host keymap, so a binding installed by an `enable -f` builtin fires in the interactive editor.
 - **Bundled WinuxCmd applets lost the shell tree on installed layouts** (#746): the winux purge pair (niubash#715, rubash#2206) stopped the engine from exporting the shell root to children, and only the MSIX layout published `NIU_ROOT`, so an installed layout derived the root for Rubash but never handed it to the applets. `ls.exe /usr/bin` / `stat /usr/bin` failed with ENOENT, while `realpath /etc` and `readlink -f /tmp` leaked drive-relative native paths — even though a foreign child such as `eza` kept working through the engine's argument translation. Startup now publishes the derived root as `NIU_ROOT`; the same variable is what host-side syntax highlighting and completion read, so those resolve the tree again too.
 
 ## [1.4.4] - 2026-10-22

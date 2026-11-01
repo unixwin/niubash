@@ -27,6 +27,11 @@
  * a non-interactive `bash -c` may have no editor buffer even when the ABI is
  * otherwise live.
  *
+ * `RL_PROBE_MUTATE=1` leaves the buffer/point mutations in place (the default
+ * restores them) so a PTY test can prove the editor adopted the write-back.
+ * `RL_PROBE_KEY_MARK=1` makes the rl_add_defun callback print a marker when
+ * the host dispatches its key, proving a plugin binding fires live.
+ *
  * The builtin struct is the stable GNU bash loadable-builtin contract
  * (builtins.h): name, function, flags, long_doc, short_doc, handle.  It is
  * declared here rather than including bash headers so the fixture builds on
@@ -45,6 +50,7 @@
 #endif
 
 #include <dlfcn.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef RL_PROBE_HAVE_READLINE_HEADER
@@ -79,12 +85,17 @@ struct builtin {
  * printable key that a human might press next. */
 #define RL_PROBE_KEY 0xfe
 
-/* A function registered through rl_add_defun.  The probe only proves that
- * registration returns success; it never fires this function itself. */
+/* A function registered through rl_add_defun.  The default proves only that
+ * registration returns success.  With RL_PROBE_KEY_MARK=1 it prints a marker
+ * when the host's live editor dispatches the key, which is how the PTY probe
+ * proves a plugin binding actually fires through the host keymap. */
 static int rl_probe_defun(int count, int key)
 {
-    (void)count;
-    (void)key;
+    const char *mark = getenv("RL_PROBE_KEY_MARK");
+    if (mark != NULL && mark[0] != '\0' && strcmp(mark, "0") != 0) {
+        printf("RL_PROBE_DEFUN key=%d count=%d\n", key, count);
+        fflush(stdout);
+    }
     return 0;
 }
 
@@ -106,10 +117,25 @@ static int rl_probe_builtin(WORD_LIST *list)
     const char *line_mutated = "absent";
     const char *point = "absent";
     const char *point_mutated = "absent";
+    const char *mutate = "off";
+    int leave_mutation;
     char version_buffer[32];
     char library_buffer[128];
 
     (void)list;
+
+    /* Acceptance probe mode: the default restores every mutation so the
+     * host's line survives a plugin call unchanged.  With RL_PROBE_MUTATE=1
+     * the first-byte flip and point bump are left in place, which lets the
+     * PTY probe prove the interactive editor adopts the plugin's write-back
+     * (niubash#775), not merely that the fixture can see the live storage. */
+    {
+        const char *value = getenv("RL_PROBE_MUTATE");
+        leave_mutation = value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+        if (leave_mutation) {
+            mutate = "on";
+        }
+    }
 
     {
         int *value = (int *)probe_sym("rl_readline_version");
@@ -160,7 +186,9 @@ static int rl_probe_builtin(WORD_LIST *list)
                 char original = line[0];
                 line[0] = (original == 'X') ? 'Y' : 'X';
                 line_mutated = (line[0] != original) ? "ok" : "error";
-                line[0] = original;
+                if (!leave_mutation) {
+                    line[0] = original;
+                }
             }
         }
     }
@@ -172,15 +200,18 @@ static int rl_probe_builtin(WORD_LIST *list)
             point = "ok";
             *value = original + 1;
             point_mutated = (*value == original + 1) ? "ok" : "error";
-            *value = original;
+            if (!leave_mutation) {
+                *value = original;
+            }
         }
     }
 
     printf("RL_PROBE version=%s library=%s header=0x%04x "
            "add_defun=%s bind_key=%s line_buffer=%s line_mutated=%s "
-           "point=%s point_mutated=%s result=%s\n",
+           "point=%s point_mutated=%s mutate=%s result=%s\n",
            version, library, (unsigned)RL_READLINE_VERSION, add_defun,
            bind_key, line_buffer, line_mutated, point, point_mutated,
+           mutate,
            (strcmp(version, "missing") != 0 && strcmp(library, "missing") != 0 &&
             strcmp(add_defun, "ok") == 0 && strcmp(bind_key, "ok") == 0)
                ? "ok"
