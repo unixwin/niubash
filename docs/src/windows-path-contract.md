@@ -106,6 +106,20 @@ paths — never both, and never a guess about the child's capabilities:
   `eza /` (a native program) is the current drive root. That is the
   boundary, not a bug; niubash#748 records the decision to keep it rather
   than add a `NO_CONV`-style switch.
+- **Drive-root forms — `/d` and `/d/` — are handed verbatim to native
+  children too** (niubash#779). With-components forms such as `/d/repo`
+  translate unconditionally, but the bare root form is also a switch
+  spelling in native grammars: `/c` is both the C-drive root and
+  `cmd.exe`'s run-and-exit switch, and `xcopy /D` and `robocopy /E` have
+  the same collision. No boundary rule can tell the two apart — an
+  existence test cannot help, because a drive root always exists — so
+  the root forms stay as typed and the child resolves them by its own
+  (Win32, drive-relative) semantics. That is the boundary, not a bug;
+  niubash#779 records the experiment corpus behind the decision, and it
+  applies to every drive uniformly (a former drive-C exception, which
+  also mistranslated data such as `tr '/c/' X`, was removed by the same
+  ruling). To name a drive root for a native program, spell it `/d/.`,
+  `/mnt/d/`, or `D:/` — all three reach the drive root today.
 - **One exception, and it is not a capability probe: `cmd.exe`.** A
   single-letter drive form such as `/d/repo` or `/c/Users` reaches `cmd.exe`
   verbatim, because `/d` and `/c` are indistinguishable from `cmd`'s own
