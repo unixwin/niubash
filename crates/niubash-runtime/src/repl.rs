@@ -572,14 +572,15 @@ fn configured_completion_menu(
     // menus below are exactly the pre-#631 behavior.
     if let Some(session) = cycle_session {
         if config.completion_style != CompletionStyle::Gnu {
+            // One menu for both grid interactions: `cycle` and
+            // `select` differ in ruling history, not in the menu —
+            // since niubash#778 both open with the first candidate
+            // spliced and highlighted (the #742 select form's
+            // unselected open was the highlight regression).
             return Box::new(
                 crate::completion::cycle_menu::CycleMenu::new(session)
                     .with_name(name)
-                    .with_menu_open_flag(menu_open)
-                    .with_select_mode(matches!(
-                        config.completion_interaction,
-                        CompletionInteraction::Select
-                    )),
+                    .with_menu_open_flag(menu_open),
             );
         }
     }
@@ -2127,44 +2128,36 @@ impl PasteChunkEditMode {
             .is_some_and(|state| state.is_open())
     }
 
-    /// niubash#631: the navigation splice for a TAB (`delta` +1) or
-    /// Shift-TAB (-1) inside a live cycle session, as the edit batch
-    /// that replaces the current candidate with the next one
-    /// (wrap-around). Issued HERE, at key-translation time, because
-    /// the menu cannot: a menu-side splice runs at paint time in
+    /// niubash#631: the navigation splice inside a live cycle
+    /// session, as the edit batch that replaces the current candidate
+    /// with the one `target_of` picks from the shared cell. Issued
+    /// HERE, at key-translation time, because the menu cannot: a
+    /// menu-side splice runs at paint time in
     /// `update_working_details`, and the painter composes the frame's
     /// input line before that hook — the line would lag the grid's
-    /// highlight by a full paint on every TAB. The batch is the
-    /// rollback's proven whole-line shape (Clear + InsertString +
-    /// MoveToPosition): mid-session the buffer is always the snapshot
-    /// with its span replaced by the current candidate, so the next
-    /// buffer is a pure string computation over the shared cell,
-    /// which this also advances (index, region, nav_seq — the menu
-    /// consumes one nav_seq per Edit echo the engine reports back).
-    /// `None` when no live session can navigate (the key then takes
-    /// its normal translation: TAB #1 opens the menu through the
-    /// bindings, and the menu begins the session itself).
-    fn cycle_navigation_edits(&self, delta: isize) -> Option<Vec<EditCommand>> {
+    /// highlight by a full paint on every navigation key. The batch
+    /// is the rollback's proven whole-line shape (Clear +
+    /// InsertString + MoveToPosition): mid-session the buffer is
+    /// always the snapshot with its span replaced by the current
+    /// candidate, so the next buffer is a pure string computation
+    /// over the shared cell, which this also advances (index, region,
+    /// nav_seq — the menu consumes one nav_seq per Edit echo the
+    /// engine reports back). `None` when no live session can navigate
+    /// (the key then takes its normal translation: TAB #1 opens the
+    /// menu through the bindings, and the menu begins the session
+    /// itself).
+    fn cycle_splice_edits(
+        &self,
+        target_of: impl FnOnce(&crate::completion::cycle_menu::CycleSession) -> Option<usize>,
+    ) -> Option<Vec<EditCommand>> {
         let session = self.cycle_session.as_ref()?;
         let mut state = session.lock().ok()?;
         if !state.is_open() || state.candidates.len() < 2 {
             return None;
         }
+        let target = target_of(&state)?;
         let snapshot = state.snapshot.clone()?;
-        let len = state.candidates.len() as isize;
-        state.index = if !state.spliced {
-            // niubash#742 select form: the grid opened with nothing
-            // spliced — the first navigate picks an edge (forward ->
-            // first candidate, backward -> last), exactly like the
-            // menu-side select path in CycleMenu::apply_navigate.
-            if delta >= 0 {
-                0
-            } else {
-                len as usize - 1
-            }
-        } else {
-            (state.index as isize + delta).rem_euclid(len) as usize
-        };
+        state.index = target;
         let text = state.candidates[state.index].splice_text();
         let (start, span_end) = state.span;
         let mut new_buffer = String::with_capacity(snapshot.buffer.len() + text.len());
@@ -2178,6 +2171,47 @@ impl PasteChunkEditMode {
             &new_buffer,
             start + text.len(),
         ))
+    }
+
+    /// The TAB (`delta` +1) / Shift-TAB (-1) walk: the next candidate
+    /// in cycle order, with wrap-around.
+    fn cycle_navigation_edits(&self, delta: isize) -> Option<Vec<EditCommand>> {
+        self.cycle_splice_edits(|state| {
+            let len = state.candidates.len() as isize;
+            Some((state.index as isize + delta).rem_euclid(len) as usize)
+        })
+    }
+
+    /// niubash#778: an arrow key inside a live cycle session moves
+    /// the highlight through the painted grid — up/down within a
+    /// column, left/right across columns, per
+    /// [`grid_neighbor`](crate::completion::cycle_menu::grid_neighbor)
+    /// over the geometry the menu published into the cell. Before
+    /// #778 the wrapper classified every arrow as session-ending, so
+    /// Down silently killed the session (and the NEXT TAB then took
+    /// the menu-local path, which is why a highlight mysteriously
+    /// "appeared" only after a Down+TAB), while Left/Right closed
+    /// the menu outright through the engine's Edit notification.
+    /// A move that cannot change the candidate (left/right in a
+    /// single-column grid) still splices the current candidate: the
+    /// key is consumed as navigation and the session lives on.
+    fn cycle_arrow_edits(&self, dcol: isize, drow: isize) -> Option<Vec<EditCommand>> {
+        self.cycle_splice_edits(|state| {
+            // No paint yet (or a stale cell): a single column is the
+            // conservative shape — vertical steps still walk the set.
+            let rows = if state.grid_rows == 0 {
+                state.candidates.len()
+            } else {
+                state.grid_rows
+            };
+            Some(crate::completion::cycle_menu::grid_neighbor(
+                state.index,
+                state.candidates.len(),
+                rows,
+                dcol,
+                drow,
+            ))
+        })
     }
 
     /// The test constructor: a scripted lookahead queue in place of the
@@ -2671,6 +2705,9 @@ impl PasteChunkEditMode {
         // paint time, one frame behind the grid's highlight. With no
         // live session the key falls through to its normal
         // translation (TAB #1 opens the menu through the bindings).
+        // niubash#778: the arrow keys are navigation inside a live
+        // session too (see `cycle_arrow_edits`) — grid movement, not
+        // history or cursor motion, and never a session end.
         if let crossterm29::event::Event::Key(key) = &raw {
             if key.kind == crossterm29::event::KeyEventKind::Press {
                 let delta = match (key.code, key.modifiers) {
@@ -2688,6 +2725,35 @@ impl PasteChunkEditMode {
                         return ReedlineEvent::Edit(edits);
                     }
                 }
+                let arrow = match (key.code, key.modifiers) {
+                    (crossterm29::event::KeyCode::Down, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((0, 1))
+                    }
+                    (crossterm29::event::KeyCode::Up, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((0, -1))
+                    }
+                    (crossterm29::event::KeyCode::Right, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((1, 0))
+                    }
+                    (crossterm29::event::KeyCode::Left, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((-1, 0))
+                    }
+                    _ => None,
+                };
+                if let Some((dcol, drow)) = arrow {
+                    if let Some(edits) = self.cycle_arrow_edits(dcol, drow) {
+                        self.menu_possible = true;
+                        return ReedlineEvent::Edit(edits);
+                    }
+                }
             }
         }
         // niubash#631: classify the raw key against a live cycle
@@ -2697,7 +2763,8 @@ impl PasteChunkEditMode {
         // end states are decided here: deciding them in the menu would
         // let an Esc in the same key burst be translated before the
         // menu knew the session had been edited or rolled back.
-        // Navigation keys (TAB / Shift-TAB) leave the session to the
+        // Navigation keys (TAB / Shift-TAB and, since niubash#778,
+        // the plain arrow keys) leave the session to the
         // menu; Enter is decided with the submit shape below; a bare
         // Esc consumes the session and (when a candidate was spliced)
         // arms the rollback edits; every other editing key ends the
@@ -2725,6 +2792,18 @@ impl PasteChunkEditMode {
                             CycleKey::Navigate
                         }
                         (crossterm29::event::KeyCode::BackTab, _) => CycleKey::Navigate,
+                        // niubash#778: plain arrows navigate the grid
+                        // (handled above); they must never read as a
+                        // session-ending edit — that misclassification
+                        // is what killed the session on the first Down.
+                        (crossterm29::event::KeyCode::Up, modifiers)
+                        | (crossterm29::event::KeyCode::Down, modifiers)
+                        | (crossterm29::event::KeyCode::Left, modifiers)
+                        | (crossterm29::event::KeyCode::Right, modifiers)
+                            if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                        {
+                            CycleKey::Navigate
+                        }
                         (crossterm29::event::KeyCode::Esc, modifiers)
                             if modifiers == crossterm29::event::KeyModifiers::NONE =>
                         {
@@ -10317,5 +10396,125 @@ mod tests {
             matches!(event, ReedlineEvent::Esc),
             "the accepted session leaves nothing to roll back: {event:?}"
         );
+    }
+
+    /// niubash#778: publish a live cycle session over `git ch` with
+    /// four candidates painted in a 2-row packed grid (column-major):
+    ///   checkout    cherry-pick
+    ///   cherry      chmod
+    fn arm_cycle_session_with_grid(session: &SharedCycleSession) {
+        use crate::completion::cycle_menu::CycleCandidate;
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "git ch".to_string(),
+            cursor: 6,
+        });
+        state.spliced = true;
+        state.candidates = ["checkout", "cherry", "cherry-pick", "chmod"]
+            .into_iter()
+            .map(|value| CycleCandidate {
+                value: value.to_string(),
+                append_whitespace: false,
+            })
+            .collect();
+        state.span = (4, 6);
+        state.index = 0;
+        state.region = (4, 12);
+        state.nav_seq = 0;
+        state.grid_rows = 2;
+    }
+
+    fn arrow(code: crossterm29::event::KeyCode) -> ReedlineRawEvent {
+        paste_key(code, crossterm29::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn issue778_wrapper_arrows_navigate_the_grid_and_keep_the_session() {
+        use crossterm29::event::KeyCode;
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_grid(&session);
+        let edits = |buffer: &str, cursor: usize| {
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                buffer, cursor,
+            ))
+        };
+
+        // Down steps within the column; the wrapper issues the splice
+        // itself (line and highlight move in the same frame) and the
+        // session stays live — before #778 this key ended it.
+        let event = detector.parse_event(arrow(KeyCode::Down));
+        assert_eq!(event, edits("git cherry", 10));
+        assert!(session.lock().unwrap().is_open());
+        // Right steps to the same row of the next column; Left back.
+        let event = detector.parse_event(arrow(KeyCode::Right));
+        assert_eq!(event, edits("git chmod", 9));
+        let event = detector.parse_event(arrow(KeyCode::Left));
+        assert_eq!(event, edits("git cherry", 10));
+        // Down from the column's bottom wraps to the next column's top.
+        let event = detector.parse_event(arrow(KeyCode::Down));
+        assert_eq!(event, edits("git cherry-pick", 15));
+        // Up from a column's top lands on the previous column's
+        // bottom; then within the column; then wraps to the last.
+        let event = detector.parse_event(arrow(KeyCode::Up));
+        assert_eq!(event, edits("git cherry", 10));
+        let event = detector.parse_event(arrow(KeyCode::Up));
+        assert_eq!(event, edits("git checkout", 12));
+        let event = detector.parse_event(arrow(KeyCode::Up));
+        assert_eq!(event, edits("git chmod", 9));
+
+        {
+            let state = session.lock().unwrap();
+            assert!(state.is_open());
+            assert_eq!(state.index, 3);
+            assert_eq!(state.nav_seq, 7, "one echo per arrow splice");
+        }
+
+        // TAB continues the linear cycle from the arrow's landing.
+        let event = detector.parse_event(tab());
+        assert_eq!(event, edits("git checkout", 12));
+        assert!(session.lock().unwrap().is_open());
+    }
+
+    #[test]
+    fn issue778_wrapper_arrow_without_a_live_session_falls_through() {
+        use crossterm29::event::KeyCode;
+        let (mut detector, session) = cycle_detector();
+        assert!(!session.lock().unwrap().is_open());
+        // No session: the arrow keeps its normal translation (history
+        // / cursor motion from the wrapped edit mode) — it is NOT
+        // swallowed as a navigation splice.
+        let event = detector.parse_event(arrow(KeyCode::Down));
+        assert!(
+            !matches!(event, ReedlineEvent::Edit(_)),
+            "no live session, no navigation splice: {event:?}"
+        );
+        assert!(!session.lock().unwrap().is_open());
+    }
+
+    #[test]
+    fn issue778_wrapper_esc_still_rolls_back_after_arrow_navigation() {
+        use crossterm29::event::KeyCode;
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_grid(&session);
+        detector.parse_event(arrow(KeyCode::Down));
+        // The session survived the arrow, so Esc still owns it: the
+        // rollback edits restore the pre-completion snapshot.
+        let event = detector.parse_event(esc());
+        match &event {
+            ReedlineEvent::Multiple(events) => {
+                assert_eq!(
+                    events[0],
+                    ReedlineEvent::Edit(crate::completion::cycle_menu::rollback_edits(
+                        &crate::completion::cycle_menu::CycleSnapshot {
+                            buffer: "git ch".to_string(),
+                            cursor: 6,
+                        },
+                    ))
+                );
+            }
+            other => panic!("expected rollback + Esc, got {other:?}"),
+        }
+        assert!(!session.lock().unwrap().is_open());
     }
 }
