@@ -19,9 +19,8 @@ were painted from different state.  The scenarios pin:
   TAB Right Left  -> candidate 0 again
   TAB Down        -> next-row candidate (column-major), selected
   TAB Down Up     -> candidate 0 again (one row up)
-  TAB Up          -> zsh's top-edge wrap through wishcol (the same
-                     column's last row; the diagonal left step is
-                     blocked by the wrap bit, exactly as zsh does)
+  TAB Up          -> zsh's top-edge `goto left` transition, landing on
+                     the bottom-right cell (wrap==2 adjustment)
 
 Usage:
   scripts/readline-keyboard-oracle/select_first_tab_frame.py
@@ -190,7 +189,7 @@ def main(argv: list[str]) -> int:
         check("right_left_back", TAB + RIGHT + LEFT, CANDIDATES[0], opts.settle)
         check("down_next_row", TAB + DOWN, CANDIDATES[1], opts.settle)
         check("down_up_back", TAB + DOWN + UP, CANDIDATES[0], opts.settle)
-        check("up_top_wrap", TAB + UP, CANDIDATES[1], opts.settle)
+        check("up_top_wrap", TAB + UP, CANDIDATES[3], opts.settle)
     except FrameFailure as exc:
         print(f"FAIL  {exc}", file=sys.stderr)
         return 1

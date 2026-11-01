@@ -444,6 +444,20 @@ fn step_up_with(
     }
     if *wrap == 1 {
         if col == wish {
+            // Up at the top row takes zsh's `goto left` edge transition
+            // (complist.c L3014-3025). From the first column that Left
+            // wraps to the right edge; the `wrap == 2` adjustment
+            // (complist.c L3181-3196) then selects the bottom-right
+            // cell, which is where the merged matrix pins Up. The
+            // adjustment already resolves a short last column to the
+            // nearest occupied cell, so stop there instead of entering
+            // the follow-up `goto up` that would climb to the top row.
+            if col == 0 {
+                let last = grid.mcols.saturating_sub(1);
+                if let Some(target) = adjust_mcol(grid, len, row, last, last) {
+                    return (row, target, last);
+                }
+            }
             return step_left_with(grid, len, row, col, wish, wrap, budget);
         }
         wish = col;
@@ -1845,6 +1859,40 @@ mod tests {
                 "zsh menuselect grid walk"
             );
         }
+    }
+
+    /// The merged matrix's 6-candidate, 40-column grid:
+    /// `cmp-aa/ cmp-cc/ cmp-ee/ / cmp-bb/ cmp-dd/ cmp-ff/`.
+    /// Up at the top row must follow zsh's `goto left` edge transition
+    /// (`Src/Zle/complist.c` L3014-3025) through the `wrap == 2`
+    /// adjustment (L3181-3196) and land on the bottom-right cell —
+    /// `cmp-ff/`, not the same column's `cmp-bb/`.
+    #[test]
+    fn issue778_up_at_top_wraps_to_bottom_right() {
+        let mut completer = PrefixCompleter::new(&[
+            "cmp-aa/", "cmp-bb/", "cmp-cc/", "cmp-dd/", "cmp-ee/", "cmp-ff/",
+        ]);
+        let (mut menu, session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        menu.terminal_columns = 40;
+        let mut editor = editor_with("cd cmp-");
+        activate(&mut menu, &mut editor, &mut completer);
+        assert_eq!(editor.get_buffer(), "cd cmp-aa/");
+        {
+            let state = session.lock().unwrap();
+            assert_eq!(state.grid.rows, 2);
+            assert_eq!(state.index, 0);
+        }
+
+        navigate(
+            &mut menu,
+            &mut editor,
+            &mut completer,
+            MenuEvent::MoveUp,
+        );
+        assert_eq!(editor.get_buffer(), "cd cmp-ff/");
+        let state = session.lock().unwrap();
+        assert_eq!(state.index, 5);
     }
 
     #[test]
