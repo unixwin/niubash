@@ -66,6 +66,11 @@ sha2 = "0.10"
 # portable-pty 0.9 drives ConPTY correctly on the same host, so the driver
 # is built on it for every case, on both Windows and Unix.
 portable-pty = "0.9"
+# tests/repl_command.rs reproduces rubash's GNU login-shell fallback
+# (getpwuid(getuid())->pw_shell) when SHELL is missing, so the Unix
+# expectation is the host's passwd shell rather than a hardcoded path or the
+# shell binary itself (rubash#1143).
+libc = "0.2"
 
 # Published-binary profile (measured on x64 MSVC against the default release
 # profile): thin LTO + one codegen unit enables cross-crate DCE/inlining

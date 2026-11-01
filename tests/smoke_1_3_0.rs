@@ -783,7 +783,16 @@ fn d2_wizard_one_run_theme_journey() {
     // collection install clones through it) on top of the system dirs.
     let system_root = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                std::path::PathBuf::from(r"C:\Windows")
+            } else {
+                // No System32 off Windows; a `C:\Windows` placeholder would
+                // break join_paths on the ':' in "C:". The wizard journey
+                // only needs git and niu on PATH.
+                std::path::PathBuf::from("/tmp")
+            }
+        });
     let path_dirs = vec![system_root.join("System32"), system_root.clone(), git_dir];
     let mut s = journey_driver::NiuSession::spawn_cli(
         "d2-journey",
@@ -999,7 +1008,15 @@ fn d3_setup_rerun_applies_in_the_live_session() {
         .to_path_buf();
     let system_root = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                std::path::PathBuf::from(r"C:\Windows")
+            } else {
+                // Same non-Windows placeholder as the d2 journey above: the
+                // live session needs niu on PATH, not a System32 directory.
+                std::path::PathBuf::from("/tmp")
+            }
+        });
     let path_dirs = vec![system_root.join("System32"), system_root, niu_dir];
     let extra_env: Vec<(String, String)> = envs
         .iter()

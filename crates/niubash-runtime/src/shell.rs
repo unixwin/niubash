@@ -7485,6 +7485,10 @@ complete -F _envtooldyn_hook envtooldyn
     fn run_startup_rc_syncs_process_path_from_executor() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
+        // run_startup_rc writes the executor PATH into the process env by
+        // design; capture and restore it so this test neither sees nor
+        // leaves a caller PATH.
+        let _path_guard = EnvVarGuard::capture("PATH");
         let temp = unique_temp_dir("niubash-rc-path-sync");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -7504,10 +7508,19 @@ complete -F _envtooldyn_hook envtooldyn
 
         // After rc, std::env must reflect the executor PATH (including the new dir).
         let process_path = std::env::var("PATH").unwrap_or_default();
-        let normalized_extra = forward.to_uppercase().replace('/', "\\");
+        #[cfg(windows)]
+        {
+            let normalized_extra = forward.to_uppercase().replace('/', "\\");
+            assert!(
+                process_path.to_uppercase().contains(&normalized_extra),
+                "std::env PATH should contain the new directory after run_startup_rc;              got: {}",
+                process_path
+            );
+        }
+        #[cfg(not(windows))]
         assert!(
-            process_path.to_uppercase().contains(&normalized_extra),
-            "std::env PATH should contain the new directory after run_startup_rc;              got: {}",
+            process_path.contains(&forward),
+            "std::env PATH should contain the new directory after run_startup_rc; got: {}",
             process_path
         );
 
@@ -8300,6 +8313,10 @@ complete -F _envtooldyn_hook envtooldyn
         }
     }
 
+    /// Windows-only: `is_windows_drive_colon` is gated on cfg!(windows), so
+    /// off Windows every ':' is a separator and `D:/repo/bin` is two entries.
+    /// The drive-prefix preservation is a Win32 PATH parsing contract.
+    #[cfg(windows)]
     #[test]
     fn split_shell_path_list_preserves_windows_drive_colons() {
         assert_eq!(
@@ -10160,6 +10177,17 @@ complete -F _envtooldyn_hook envtooldyn
     }
 
     impl EnvVarGuard {
+        /// Record the current value without changing it; Drop restores it.
+        /// For code under test that mutates the process environment itself
+        /// (e.g. run_startup_rc syncing PATH) and must not leak into the
+        /// caller's environment.
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                previous: std::env::var_os(key),
+            }
+        }
+
         fn set(key: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);

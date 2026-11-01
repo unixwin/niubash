@@ -8680,6 +8680,13 @@ mod tests {
     }
 
     // ---- PasteChunkEditMode (Windows paste-chunk detection, niubash#202/#284) ----
+    //
+    // The detection layer is compiled everywhere but armed only when
+    // `PASTE_CHUNK_DETECTION` is true (cfg!(windows)); on Unix the editor
+    // uses bracketed paste and `translate_event` delegates untouched. Tests
+    // that pin the rewrite state machine are therefore Windows-only
+    // (`#[cfg(windows)]`); the cross-platform wrapper/menu and console-record
+    // mapping tests below stay runnable on every host.
 
     fn paste_key(
         code: crossterm29::event::KeyCode,
@@ -9051,6 +9058,7 @@ mod tests {
         detector.last_event = Some(Instant::now() - PASTE_CHUNK_GAP - Duration::from_millis(1));
     }
 
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_absorbs_crlf_paste_and_flushes_on_gap() {
         // Typing before the paste is delegated normally.
@@ -9140,6 +9148,7 @@ mod tests {
     /// submits in ONE batch on the FIRST Enter. The pre-#308 behavior
     /// pushed the Enter into the chunk as a newline and nothing executed
     /// until a second Enter.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_enter_in_paste_burst_submits_the_chunk() {
         let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event()]);
@@ -9187,6 +9196,7 @@ mod tests {
     /// CR with the LF partner queued right behind it, the real CRLF-feed
     /// queue shape — stays paste data mid-burst. Only the partner-less bare
     /// CR (block complete) submits.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_interior_crlf_pair_stays_data_mid_burst() {
         let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
@@ -9296,6 +9306,7 @@ mod tests {
     /// \n\n`, then a separate submit Enter — must reach reedline byte for
     /// byte: whatever the chunk's line handling does at the `\n\n`
     /// boundary, reassembly may not lose the `e` of `echo two`.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_empty_line_paste_byte_exact() {
         let input = "echo one\r\n\r\necho two\r\n\n";
@@ -9309,6 +9320,7 @@ mod tests {
 
     /// Two consecutive empty lines inside the chunk: both boundaries stay
     /// byte-exact (no break lost, none doubled).
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_two_consecutive_empty_lines_byte_exact() {
         let input = "echo one\r\n\r\n\r\necho two\r\n\n";
@@ -9322,6 +9334,7 @@ mod tests {
 
     /// An indented line right after an empty line: leading spaces are data,
     /// not a swallow-into-the-previous-line cue.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_indented_line_after_empty_line_byte_exact() {
         let input = "echo one\r\n\r\n  echo two\r\n\n";
@@ -9336,6 +9349,7 @@ mod tests {
     /// Control: the same shape WITHOUT the empty line (pure CRLF block) —
     /// guards that whatever the empty-line handling does, the plain block
     /// stays byte-exact too.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_crlf_block_without_empty_lines_byte_exact() {
         let input = "echo one\r\necho two\r\n";
@@ -9352,6 +9366,7 @@ mod tests {
     /// and the typeahead key goes back to the input stream's head at the
     /// submit (niubash#417), so it lands, in order, in the NEXT line's
     /// buffer — GNU typeahead semantics, never absorption.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_pending_enter_with_typeahead_behind_submits_in_order() {
         let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
@@ -9581,6 +9596,7 @@ mod tests {
     /// A bare Ctrl+J (the console's shape for a fed LF) with no chunk
     /// pending is a paste newline by itself: it opens the chunk instead of
     /// reaching reedline (humans do not submit with Ctrl+J).
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_opens_chunk_on_lf_alone() {
         let mut detector = paste_detector();
@@ -9599,6 +9615,7 @@ mod tests {
 
     /// ConPTY focus flicker between pasted lines must not hide the LF
     /// partner from the lookahead: the CR still identifies as paste.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_skips_flicker_to_find_lf_partner() {
         let mut detector = paste_detector_with_queue(vec![
@@ -9665,6 +9682,7 @@ mod tests {
     /// by an LF partner (the ConPTY CRLF shape), then a bare CR with a CR
     /// behind it MID-CHUNK — the WT empty line inside a live paste — still
     /// folds as two line breaks of data.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_midchunk_cr_pair_still_folds_341() {
         let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event(), cr_key_event()]);
