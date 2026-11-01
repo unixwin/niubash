@@ -2868,6 +2868,93 @@ impl Shell {
         self.executor().has_function(name)
     }
 
+    /// Re-read the startup rc's bind state — the host face of GNU
+    /// `re-read-init-file` (lib/readline/bind.c:1025
+    /// `rl_re_read_init_file` re-reads the keybinding file;
+    /// niubash's keybinding state lives in `~/.niubashrc`, so its
+    /// top-level `bind` lines are what re-reading means here,
+    /// niubash#765). The lines run against the live engine, so
+    /// edited bindings land in the bind registry; the REPL's
+    /// between-prompts staleness rebuild re-mirrors them into the
+    /// editor before the next prompt. The rest of the rc (aliases,
+    /// exports, arbitrary commands) is startup state, not
+    /// keybinding state, and does not re-run. Returns how many
+    /// bind lines ran.
+    pub fn reread_init_file_bindings(&mut self) -> usize {
+        let Some(path) = self.startup_rc_path() else {
+            return 0;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return 0;
+        };
+        let mut applied = 0;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.split_whitespace().next() != Some("bind") {
+                continue;
+            }
+            if self.execute_line(trimmed).is_ok() {
+                applied += 1;
+            }
+        }
+        applied
+    }
+
+    /// Expand a line the way GNU `shell-expand-line` does
+    /// (bashline.c:2982 `shell_expand_line`), for the REPL's
+    /// host-command face (niubash#767): history expansion first
+    /// (bashline.c:2989, skipped when the session has histexpand
+    /// off), then alias expansion (bashline.c:3003-3011), then
+    /// `expand_word` + `string_list` against live session state:
+    /// unquoted expansions field-split on IFS and the fields rejoin
+    /// with single spaces (rubash `Session::expand_shell_words`).
+    /// Filename globbing is NOT part of the pipeline — GNU's
+    /// `expand_word`/`expand_string` comment reserves globbing for
+    /// command expansion (subst.c). `history_entries` are the
+    /// interactive history (oldest first) from the editor — the
+    /// engine's own list machinery is off on the REPL path.
+    /// Returns `None` when history expansion errors, where GNU
+    /// fails the command and keeps the line (bashline.c:3058).
+    ///
+    /// One GNU step has no host entry yet and is a documented gap,
+    /// not a silent one: the `$"..."` locale translation
+    /// (expand_string_dollar_quote) is skipped. The explicit-argument
+    /// form (which would suppress command/process substitution) is
+    /// unreachable here: prefix arguments do not travel through the
+    /// host-command channel.
+    pub fn shell_expand_line(&mut self, line: &str, history_entries: &[String]) -> Option<String> {
+        let mut text = line.to_string();
+        if self
+            .session_mut()
+            .options()
+            .get("histexpand")
+            .unwrap_or(true)
+        {
+            let histchars = self.executor().get_env("histchars").map(str::to_owned);
+            let posix = self
+                .executor()
+                .get_env("__RUBASH_POSIX_MODE")
+                .map(|value| value == "1")
+                .unwrap_or(false);
+            text = crate::readline_commands::history_expand_line(
+                &text,
+                history_entries,
+                histchars.as_deref(),
+                posix,
+            )?;
+        }
+        let aliases = self.session().aliases();
+        text = crate::readline_commands::expand_alias_positions(&text, &aliases);
+        // GNU expand_word field-splits unquoted expansions and
+        // string_list rejoins with one space; globbing is not part of
+        // word/string expansion. The engine owns both halves (rubash
+        // Session::expand_shell_words).
+        Some(self.session().expand_shell_words(&text))
+    }
+
     /// Load user completion declarations from the `NIU_COMPDEFS` variable
     /// declared in the startup rc. Each line is `command:function`, or —
     /// since issue #306 — a path to an existing directory holding
@@ -6324,6 +6411,106 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn issue765_reread_init_file_bindings_reruns_only_bind_lines() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-reread-init-file");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            "export NIUBASH_REREAD_MARK=first\nbind '\"\\C-o\": operate-and-get-next'\n",
+        )
+        .unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home.clone();
+        // The bind line lands in the registry…
+        assert_eq!(shell.reread_init_file_bindings(), 1);
+        let (entries, _) = crate::bind_surface::load_engine_bindings(shell.executor());
+        assert!(entries.iter().any(|e| e.keyseq == "\\C-o"));
+        // …while the export line is startup state, not bind state,
+        // and does not re-run.
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("NIUBASH_REREAD_MARK")
+                .as_deref(),
+            None
+        );
+        // Editing the rc and re-reading picks the new binding up.
+        std::fs::write(home.join(NIU_RC_FILE), "bind '\"\\C-g\": abort'\n").unwrap();
+        assert_eq!(shell.reread_init_file_bindings(), 1);
+        let (entries, _) = crate::bind_surface::load_engine_bindings(shell.executor());
+        assert!(entries.iter().any(|e| e.keyseq == "\\C-g"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn issue767_shell_expand_line_expands_history_alias_and_words() {
+        let mut shell = test_shell(HookConfig::default());
+        // test_shell builds a bare session; the interactive entry
+        // asserts histexpand on (enter_interactive, mirroring
+        // bashhist.c's HISTEXPAND_DEFAULT) — do the same here.
+        shell.session_mut().options().set("histexpand", true);
+        shell
+            .execute_line("alias greet='echo hello'")
+            .expect("alias registers");
+        shell
+            .execute_line("ISSUE767_NAME=world")
+            .expect("variable registers");
+        let history = vec!["echo first".to_string(), "greet again".to_string()];
+        // History expansion runs first: !! is the newest entry,
+        // whose alias then expands, in the same pass (bashline.c
+        // shell_expand_line's order).
+        assert_eq!(
+            shell.shell_expand_line("!!", &history).as_deref(),
+            Some("echo hello again")
+        );
+        // Alias + word expansion on a plain line.
+        assert_eq!(
+            shell
+                .shell_expand_line("greet $ISSUE767_NAME", &history)
+                .as_deref(),
+            Some("echo hello world")
+        );
+        // GNU expand_word splits unquoted expansions on IFS and
+        // rejoins with single spaces; a quoted expansion stays one
+        // word; filename globbing is NOT part of the pipeline
+        // (subst.c: "filename globbing is *NOT* done for word or
+        // string expansion").
+        shell
+            .execute_line("ISSUE767_SPACED='a  b'")
+            .expect("spaced variable registers");
+        assert_eq!(
+            shell
+                .shell_expand_line("echo $ISSUE767_SPACED", &history)
+                .as_deref(),
+            Some("echo a b")
+        );
+        assert_eq!(
+            shell
+                .shell_expand_line("echo \"$ISSUE767_SPACED\"", &history)
+                .as_deref(),
+            Some("echo a  b")
+        );
+        assert_eq!(
+            shell.shell_expand_line("echo *", &history).as_deref(),
+            Some("echo *")
+        );
+        // A failed history expansion leaves the line unexpanded:
+        // the caller keeps the buffer as it stood.
+        assert_eq!(shell.shell_expand_line("!nosuch", &history), None);
+        // With histexpand off (a user's `set +H`), the history
+        // step is gated and `!!` stays literal.
+        shell.session_mut().options().set("histexpand", false);
+        assert_eq!(
+            shell.shell_expand_line("!!", &history).as_deref(),
+            Some("!!")
+        );
     }
 
     #[test]

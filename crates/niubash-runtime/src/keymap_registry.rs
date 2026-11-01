@@ -496,6 +496,10 @@ pub fn action_summary(
             } else if let Some(name) = payload.strip_prefix(crate::repl::WIDGET_HOST_COMMAND_PREFIX)
             {
                 format!("widget: {name}")
+            } else if let Some(name) =
+                payload.strip_prefix(crate::repl::READLINE_HOST_COMMAND_PREFIX)
+            {
+                format!("readline: {name}")
             } else {
                 format!("host command: {payload}")
             }
