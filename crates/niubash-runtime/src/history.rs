@@ -1412,18 +1412,15 @@ impl LiveFileBackedHistory {
         ensure_history_file_accessible(&path);
 
         let state = match HistoryStore::load_from_file(capacity, &path) {
-            Ok(history) => {
-                let state = HistoryState {
-                    history,
-                    path: Some(path.clone()),
-                    warned_io_failure: false,
-                    hidden_prefix: 0,
-                    applied_view_gen: 0,
-                    settings: Arc::clone(&settings),
-                    view_histsize: None,
-                };
-                state
-            }
+            Ok(history) => HistoryState {
+                history,
+                path: Some(path.clone()),
+                warned_io_failure: false,
+                hidden_prefix: 0,
+                applied_view_gen: 0,
+                settings: Arc::clone(&settings),
+                view_histsize: None,
+            },
             Err(error) => {
                 // History is auxiliary state. A restricted token may be
                 // able to execute in the workspace while being unable to
