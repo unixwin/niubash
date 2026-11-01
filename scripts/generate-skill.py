@@ -192,10 +192,11 @@ def render_region(key: str, builtins: list[tuple[str, str]], applets: list[str],
             "`--ec <b64>` runs a base64 payload with zero quoting; optional "
             "`v1:` prefix guards MSYS-family rewriting in transit.",
             "- **Plugin system** — git-clone-only external sources (oh-my-bash, "
-            "bash-it, bpkg) behind an explicit trust gate, driven by a "
-            "declarative spec (`~/.niubash/plugins.json`) with lockfile verbs "
-            "(`add/list/enable/disable/trust/sync/update/restore/rollback/"
-            "clean/migrate-rc/source/recipe/distro/mirror/ui`).",
+            "bash-it, bpkg), driven by a declarative spec "
+            "(`~/.niubash/plugins.json`) with lockfile verbs "
+            "(`add/list/enable/disable/sync/update/restore/rollback/clean/"
+            "migrate-rc/source/recipe/distro/mirror/ui`). An installed source "
+            "contributes once it is enabled — there is no trust state.",
             "- **TUI surfaces** — `niu setup` wizard (theme/prompt/tools), "
             "`niu plugin ui` menu, theme gallery, `niu font` picker; all "
             "non-interactive-friendly and safe to skip (`-c` loads none of "

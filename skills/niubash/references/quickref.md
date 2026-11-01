@@ -55,30 +55,34 @@ own parse tables), plus these host-level verbs:
 Invoke the binary as `bash`/`sh` (the bundled hardlinks) for the
 byte-for-byte GNU face: `bash --help`, `bash -c`, POSIX `sh` mode.
 
-Plugin system verbs (git-clone-only external sources, explicit trust gate,
-declarative spec `~/.niubash/plugins.json` + lockfile
-`~/.niubash/sources/registry.json` driving the generated loader):
+Plugin system verbs (git-clone-only external sources, declarative spec
+`~/.niubash/plugins.json` + lockfile
+`~/.niubash/sources/registry.json` driving the generated loader; an
+installed source contributes once it is enabled — there is no trust gate):
 
 ```text
 <!-- BEGIN GENERATED:plugin-verbs -->
   plugin add <id|owner/repo|url|path>
-                            Install an external plugin source (untrusted)
+                            Install an external plugin source
   plugin list [--json]      Sources, their assets, activation state
   plugin enable|disable <t> Activate or deactivate a source or asset
   plugin update|sync|restore|rollback|clean
                             Lockfile verbs (vim-plug/lazy.nvim-style)
-  plugin trust <id>         Review and activate a source's assets
   plugin migrate-rc [--diff]
                             Read-only migration report for legacy managed
                             blocks (never writes the rc)
+  plugin migrate            One-time conversion of pre-1.5.0 TOML plugin
+                            data (distros, spec, source registry,
+                            bootstrap ledger, mirrors) to JSON
   plugin discover [--verbose]
                             Read-only overview of external plugin sources
-  plugin source <command>   Full source protocol (add/trust/sign/verify/
-                            remove/update/rollback/list)
+  plugin source <command>   Full source protocol (add/remove/update/
+                            rollback/list)
   plugin recipe <command>   Recipe index (list/show/add)
   plugin distro <command>   Collections (list/import/remove/apply)
   plugin mirror <command>   Git fetch mirroring (list/show/set)
   plugin ui                 Menu UI (sections by state, same verbs)
+  plugin tui                Full-screen plugin manager (preview pane, single-key)
 <!-- END GENERATED:plugin-verbs -->
 ```
 

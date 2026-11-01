@@ -73,8 +73,7 @@ theme  = "agnoster"              # theme pick → OSH_THEME in the loader
 
 ```bash
 niu plugin discover            # read-only overview of the ecosystem
-niu plugin add oh-my-bash      # declare in the spec + git clone (untrusted)
-niu plugin trust oh-my-bash    # review, then pass the execution gate
+niu plugin add oh-my-bash      # declare in the spec + git clone
 niu plugin enable agnoster     # theme pick → OSH_THEME in the loader
 niu plugin enable git          # enable one asset (plugin/alias/completion)
 niu plugin disable oh-my-bash  # deactivate; the floor prompt returns
@@ -84,7 +83,8 @@ niu plugin ui                  # menu over the same verbs
 ```
 
 - Sources are git clones under `~/.niubash/sources/` (`NIU_PLUGIN_SOURCES_ROOT`
-  relocates). Trust is explicit — an untrusted source contributes nothing.
+  relocates). An installed source contributes once it is enabled — there is
+  no trust state and no execution gate.
 - Theme names are the framework's own (`OSH_THEME` for oh-my-bash,
   `BASH_IT_THEME` for bash-it); `niu plugin list` / `discover` name the
   theme assets a source ships. Don't invent names.
@@ -96,7 +96,7 @@ niu plugin ui                  # menu over the same verbs
 ## Validation flow
 
 ```bash
-niu plugin list                # is the source declared + trusted + enabled?
+niu plugin list                # is the source declared + installed + enabled?
 cat ~/.niubash/generated/plugins.niu   # did the loader pick it up?
 niu doctor                     # full install health (links, rc, loader, font)
 printf '%s\n' "$PS1"           # who owns the prompt right now
@@ -104,10 +104,10 @@ printf '%s\n' "$PS1"           # who owns the prompt right now
 
 Symptoms → causes:
 
-- Plugin silent after `enable` → source not trusted yet (`plugin trust`),
-  the spec was hand-edited without a `plugin sync` (verbs republish the
-  loader themselves), or `NIU_PLUGIN_LOADER=off` is set — and the change
-  needs a new shell or `source ~/.niubashrc` to take effect.
+- Plugin silent after `enable` → the spec was hand-edited without a
+  `plugin sync` (verbs republish the loader themselves), or
+  `NIU_PLUGIN_LOADER=off` is set — and the change needs a new shell or
+  `source ~/.niubashrc` to take effect.
 - Old `# >>> niu source` markers still in the rc → the loader stays off
   by design; `niu plugin migrate-rc --diff` shows the post-migration rc.
 - Boxes/garbled glyphs → Nerd Font missing (`niu font`) or the terminal
