@@ -253,26 +253,37 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // Infallible since niubash#134: a history file that cannot be opened
     // (sandboxed restricted token, os error 5) degrades to an in-memory
     // history instead of aborting the interactive session.
-    // niubash#569: the editor history instance and the provider instance
-    // are distinct objects over one file. When the provider is installed
-    // (every interactive entry), the editor adopts its ledger, so lines
-    // the editor records are visible to the provider's -a/-c/-w and to
-    // the session-end write; without the shared ledger, -c could not
-    // account for lines the editor recorded. Edit-mode rebuilds re-adopt
-    // the same ledger, so the sharing survives refreshes.
+    // niubash#569/#773: the editor history instance and the provider
+    // instance are distinct objects, but a session has ONE history
+    // list (GNU: the builtin and readline read the same in-memory
+    // list). When the provider is installed (every interactive
+    // entry), the editor adopts its state wholesale — the same store,
+    // not a second load of the file — plus its ledger (niubash#569:
+    // so -c accounts for lines the editor recorded) and, inside the
+    // state, its settings cell (niubash#646: so recorded lines are
+    // filtered/stifled by the same HIST* snapshot the provider's
+    // builtins consult). Edit-mode rebuilds re-adopt the same state,
+    // so the sharing survives rebuilds. Without a provider, the
+    // editor falls back to adopting just the shared cells, or to its
+    // own file load.
     let shared_ledger = shell_ref.history_ledger();
-    // niubash#646: the editor adopts the provider's settings cell the
-    // same way, so the lines it records are filtered/stifled by the
-    // same HIST* snapshot the provider's builtins consult.
     let shared_settings = shell_ref.history_settings();
-    let mut history = match (shared_ledger, shared_settings) {
-        (Some(ledger), Some(settings)) => LiveFileBackedHistory::with_shared_ledger_and_settings(
+    let shared_state = shell_ref.history_state();
+    let mut history = match (shared_state, shared_ledger, shared_settings) {
+        (Some(state), Some(ledger), _) => LiveFileBackedHistory::with_shared_state(
             shell_ref.history_max_size,
-            shell_ref.history_path.clone(),
+            state,
             ledger,
-            settings,
         ),
-        (Some(ledger), None) => LiveFileBackedHistory::with_shared_ledger(
+        (None, Some(ledger), Some(settings)) => {
+            LiveFileBackedHistory::with_shared_ledger_and_settings(
+                shell_ref.history_max_size,
+                shell_ref.history_path.clone(),
+                ledger,
+                settings,
+            )
+        }
+        (None, Some(ledger), None) => LiveFileBackedHistory::with_shared_ledger(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
             ledger,

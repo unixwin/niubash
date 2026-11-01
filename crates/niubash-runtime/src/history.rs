@@ -210,6 +210,13 @@ impl RubashHistoryProvider {
         self.inner.ledger()
     }
 
+    /// The session's shared history state (niubash#773): the editor
+    /// twin is built over it, so both instances hold the session's
+    /// one list.
+    pub(crate) fn shared_state(&self) -> Arc<Mutex<HistoryState>> {
+        self.inner.shared_state()
+    }
+
     /// The HIST* settings cell shared with this provider's editor twin
     /// (niubash#646).
     pub(crate) fn settings(&self) -> Arc<Mutex<HistorySettings>> {
@@ -688,7 +695,7 @@ struct FileSignature {
     modified: Option<SystemTime>,
 }
 
-struct HistoryState {
+pub(crate) struct HistoryState {
     history: HistoryStore,
     signature: FileSignature,
     /// File backing for this history. `None` once the shell degraded to a
@@ -1204,7 +1211,12 @@ impl HistoryStore {
 /// `bashhist.c:320 load_history()`.
 pub(crate) struct LiveFileBackedHistory {
     capacity: usize,
-    state: Mutex<HistoryState>,
+    /// niubash#773: shared with the twin instance (provider/editor) —
+    /// one session has ONE history list, as in GNU, where the builtin
+    /// and readline read the same in-memory list. Before #773 the
+    /// twins held separate stores over one file and stayed in sync
+    /// only through the per-access file refresh this issue removes.
+    state: Arc<Mutex<HistoryState>>,
     /// Shared with the provider/editor twin over the same file (niubash#569).
     ledger: Arc<Mutex<SessionLedger>>,
     /// Shared with the provider/editor twin over the same file
@@ -1348,11 +1360,41 @@ impl LiveFileBackedHistory {
         };
         Self {
             capacity,
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
             ledger,
             settings,
             gate_on_history_option: false,
         }
+    }
+
+    /// Build the editor twin over the provider instance's state
+    /// (niubash#773): the twin adopts the provider's store wholesale —
+    /// no file load of its own — so both instances answer from the
+    /// session's one list. The ledger is adopted the same way
+    /// (niubash#569); the settings cell rides inside the shared state
+    /// and is re-exposed here for the instance-level accessor.
+    pub(crate) fn with_shared_state(
+        capacity: usize,
+        state: Arc<Mutex<HistoryState>>,
+        ledger: Arc<Mutex<SessionLedger>>,
+    ) -> Self {
+        let settings = state
+            .lock()
+            .map(|state| Arc::clone(&state.settings))
+            .unwrap_or_else(|_| Arc::new(Mutex::new(HistorySettings::default())));
+        Self {
+            capacity,
+            state,
+            ledger,
+            settings,
+            gate_on_history_option: false,
+        }
+    }
+
+    /// The shared session state (niubash#773): the handle the editor
+    /// twin is built over, via [`Self::with_shared_state`].
+    pub(crate) fn shared_state(&self) -> Arc<Mutex<HistoryState>> {
+        Arc::clone(&self.state)
     }
 
     /// Mark this instance as the editor's recording surface
@@ -1377,12 +1419,6 @@ impl LiveFileBackedHistory {
     fn lock(&self) -> Result<MutexGuard<'_, HistoryState>> {
         self.state
             .lock()
-            .map_err(|_| ReedlineError::from(history_lock_error()))
-    }
-
-    fn lock_mut(&mut self) -> Result<&mut HistoryState> {
-        self.state
-            .get_mut()
             .map_err(|_| ReedlineError::from(history_lock_error()))
     }
 
@@ -1663,7 +1699,8 @@ impl LiveFileBackedHistory {
         let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock (see save).
         let ledger = Arc::clone(&self.ledger);
-        let state = self.lock_mut()?;
+        let mut state = self.lock()?;
+        let state = &mut *state;
         let Some(path) = state.path.clone() else {
             return Err(ReedlineError::from(history_lock_error()));
         };
@@ -1732,7 +1769,8 @@ impl LiveFileBackedHistory {
         let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock (see save).
         let ledger = Arc::clone(&self.ledger);
-        let state = self.lock_mut()?;
+        let mut state = self.lock()?;
+        let state = &mut *state;
         // niubash#703: the pairs the rebuild must preserve — the
         // caller's own pairings for a stamped load, the current
         // list's pairings otherwise (see `HistoryStore::realign_stamps`).
@@ -1822,7 +1860,8 @@ impl LiveFileBackedHistory {
         let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock (see save).
         let ledger = Arc::clone(&self.ledger);
-        let state = self.lock_mut()?;
+        let mut state = self.lock()?;
+        let state = &mut *state;
         Self::refresh_if_stale(capacity, state);
         // niubash#614: the raw list length at clear time — post-refresh
         // the reader equals the file — is the prefix the ledger records
@@ -1984,9 +2023,10 @@ impl LiveFileBackedHistory {
         // store keeps the pairings (see `HistoryStore::realign_stamps`).
         let keep_pairs: Vec<(String, String)> =
             entries.iter().cloned().zip(self.view_stamps()).collect();
-        let Ok(state) = self.state.get_mut() else {
+        let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let state = &mut *state;
         // Settle the unwritten tail into the file of record so far.
         Self::sync_state(state);
         let staged = write_entries_staged(&new_path, &entries)
@@ -2037,9 +2077,10 @@ impl LiveFileBackedHistory {
         let capacity = self.capacity;
         // Clone the ledger handle before taking the state lock (see save).
         let ledger = Arc::clone(&self.ledger);
-        let Ok(state) = self.state.get_mut() else {
+        let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let state = &mut *state;
         let Some(path) = state.path.clone() else {
             // Degraded memory-only session: no backing file to reconcile,
             // and none must be created.
@@ -2355,7 +2396,8 @@ impl LiveFileBackedHistory {
         // borrows `self` mutably, so the handle must already be owned.
         let ledger = Arc::clone(&self.ledger);
         let gate_on_history_option = self.gate_on_history_option;
-        let state = self.lock_mut()?;
+        let mut state = self.lock()?;
+        let state = &mut *state;
         Self::refresh_if_stale(capacity, state);
         let text = item.command_line.clone();
         if text.is_empty() {
@@ -3235,7 +3277,8 @@ impl History for LiveFileBackedHistory {
         updater: &dyn Fn(HistoryItem) -> HistoryItem,
     ) -> Result<()> {
         let capacity = self.capacity;
-        let state = self.lock_mut()?;
+        let mut state = self.lock()?;
+        let state = &mut *state;
         Self::refresh_if_stale(capacity, state);
         // The store keeps reedline's answer verbatim: file-backed
         // histories do not support update.
@@ -3245,7 +3288,8 @@ impl History for LiveFileBackedHistory {
 
     fn clear(&mut self) -> Result<()> {
         let capacity = self.capacity;
-        let state = self.lock_mut()?;
+        let mut state = self.lock()?;
+        let state = &mut *state;
         Self::refresh_if_stale(capacity, state);
         // Reedline's clear emptied the list AND removed the backing
         // file; the store only owns the list, so the removal is spelled
@@ -3267,7 +3311,8 @@ impl History for LiveFileBackedHistory {
 
     fn delete(&mut self, id: HistoryItemId) -> Result<()> {
         let capacity = self.capacity;
-        let state = self.lock_mut()?;
+        let mut state = self.lock()?;
+        let state = &mut *state;
         Self::refresh_if_stale(capacity, state);
         // The store keeps reedline's answer verbatim: file-backed
         // histories do not support delete.
@@ -3276,8 +3321,8 @@ impl History for LiveFileBackedHistory {
     }
 
     fn sync(&mut self) -> io::Result<()> {
-        let state = self.state.get_mut().map_err(|_| history_lock_error())?;
-        Self::sync_state(state);
+        let mut state = self.state.lock().map_err(|_| history_lock_error())?;
+        Self::sync_state(&mut state);
         Ok(())
     }
 
