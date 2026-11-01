@@ -355,6 +355,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // Shared visibility flag between the completion grid and the history
     // autosuggest hinter: while the grid is on screen the ghost stands
     // down instead of painting over the same word (fish parity).
+    // `InsertCompletions` (M-*) and other engine-level completion paths
+    // read `Reedline`'s own completer, not the menu's. The menu owns a
+    // separate instance over the same shared state, so give the engine one
+    // too instead of leaving M-* without a candidate source.
+    let engine_completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     let menu_open = Arc::new(AtomicBool::new(false));
     let completion_menu = ReedlineMenu::WithCompleter {
         menu: configured_completion_menu(
@@ -429,6 +434,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
 
     let mut editor = Reedline::create()
         .with_validator(Box::new(ReplValidator))
+        .with_completer(Box::new(engine_completer))
         .with_history(Box::new(history))
         .with_history_exclusion_prefix(history_exclusion_prefix(
             shell_ref.history_ignore_space_prefixed,
@@ -3796,7 +3802,7 @@ fn add_gnu_command_default_keybindings(keybindings: &mut Keybindings, target: Na
 /// (C-x C-r for re-read-init-file), joining the engine chord
 /// bindings in the chord layer.
 fn gnu_default_chord_bindings() -> Vec<ChordBinding> {
-    crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS
+    let mut chords: Vec<ChordBinding> = crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS
         .iter()
         .filter_map(|(keyseq, name)| {
             let keys = parse_chord_sequence(keyseq)?;
@@ -3805,7 +3811,28 @@ fn gnu_default_chord_bindings() -> Vec<ChordBinding> {
             }
             native_widget_event(name).map(|event| ChordBinding { keys, event })
         })
-        .collect()
+        .collect();
+    // GNU emacs_ctlx_keymap: the keyboard-macro trio, C-x C-u undo and
+    // C-x C-x exchange-point-and-mark. The native Emacs machine resolves
+    // these through `pending_prefix`, but niu's ChordEditMode sits in
+    // front of it and claims C-x as a chord prefix; without explicit
+    // entries the C-x half is consumed and the macro commands never run.
+    for (key, event) in [
+        ('(', ReedlineEvent::StartKbdMacro),
+        (')', ReedlineEvent::EndKbdMacro),
+        ('e', ReedlineEvent::CallLastKbdMacro),
+        ('u', edit_event(EditCommand::Undo)),
+        ('x', edit_event(EditCommand::SwapCursorAndAnchor)),
+    ] {
+        chords.push(ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char(key)),
+            ],
+            event,
+        });
+    }
+    chords
 }
 
 /// One multi-key binding: the key units and the event the last unit fires.

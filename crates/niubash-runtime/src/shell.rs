@@ -2832,12 +2832,15 @@ impl Shell {
             return WidgetOutcome::default();
         };
         let command = command.clone();
-        let safe_cursor = buffer
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .filter(|offset| *offset <= cursor_byte)
-            .max()
-            .unwrap_or(0);
+        // GNU reports READLINE_POINT as a CHARACTER offset (bashline.c:4540
+        // readline_get_char_offset). Clamp to the buffer end and walk back to
+        // a UTF-8 boundary; `char_indices().max()` has no entry at len(), so
+        // the old form reported len-1 at end-of-line and moved the editor
+        // cursor back one column after every bind -x command.
+        let mut safe_cursor = cursor_byte.min(buffer.len());
+        while safe_cursor > 0 && !buffer.is_char_boundary(safe_cursor) {
+            safe_cursor -= 1;
+        }
         let old_point = buffer[..safe_cursor].chars().count();
         let outcome = self
             .executor_mut()
