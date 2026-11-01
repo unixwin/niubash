@@ -38,10 +38,10 @@ use std::os::raw::{c_char, c_int};
 /// surface lands.
 #[no_mangle]
 #[used]
-pub static rl_readline_version: c_int = 0x0802;
+pub static rl_readline_version: c_int = 0x0803;
 
-/// The backing bytes for [`rl_library_version`] (`b"8.2\0"`).
-const LIBRARY_VERSION: &[u8] = b"8.2\0";
+/// The backing bytes for [`rl_library_version`] (`b"8.3\0"`).
+const LIBRARY_VERSION: &[u8] = b"8.3\0";
 
 /// GNU readline's `extern const char *rl_library_version;` — a
 /// pointer-valued data symbol, not a string. It has to be `static mut`:
@@ -59,14 +59,14 @@ mod tests {
 
     #[test]
     fn version_symbols_carry_the_advertised_revision() {
-        assert_eq!(rl_readline_version, 0x0802);
-        assert_eq!(LIBRARY_VERSION, b"8.2\0");
+        assert_eq!(rl_readline_version, 0x0803);
+        assert_eq!(LIBRARY_VERSION, b"8.3\0");
 
         // `&raw const` avoids creating a reference to a `static mut`
         // (`static_mut_refs`); only the pointer value is read.
         let pointer = unsafe { (&raw const rl_library_version).read() };
         assert!(!pointer.is_null());
         let version = unsafe { CStr::from_ptr(pointer) };
-        assert_eq!(version.to_str().unwrap(), "8.2");
+        assert_eq!(version.to_str().unwrap(), "8.3");
     }
 }
