@@ -225,14 +225,6 @@ impl RubashHistoryProvider {
         self.inner.settings()
     }
 
-    /// niubash#703: exact-list rewrite whose entries keep their own
-    /// stamps (`read_history`'s fallback for a timestamped file).
-    fn replace_stamped(&mut self, entries: Vec<String>, stamps: Vec<String>) -> io::Result<()> {
-        self.inner
-            .replace_all_stamped(entries, stamps)
-            .map_err(|error| io::Error::other(error.to_string()))
-    }
-
     /// The `history -w` face, plain or timestamped (niubash#703).
     /// With `timestamps` present — the engine passes it only while
     /// HISTTIMEFORMAT exists as a variable (variables.c sv_histtimefmt
@@ -568,54 +560,71 @@ impl rubash::history::HistoryProvider for RubashHistoryProvider {
 
     fn read_history(&mut self, path: &str) -> io::Result<()> {
         ensure_history_file_accessible(std::path::Path::new(path));
-        // Fast path (niubash#182): when the requested file IS this history's
-        // backing file, rebuild the reader from disk. The previous path
-        // (replace = clear + per-entry saves) made reedline re-append the
-        // whole file to itself on every save, so a bash-it theme's per-prompt
-        // `history -c && history -r` doubled the history each cycle.
+        // niubash#800: GNU `history -r` (builtins/history.def:300 -> histfile.c:267
+        // read_history_range(filename, 0, -1)) reads the WHOLE file and APPENDS
+        // every entry to the existing in-memory list through add_history
+        // (histfile.c:439) — nothing is replaced, cleared, or deduped, so a
+        // second `-r` appends the same lines again (verified WSL GNU 5.3.20:
+        // L1/L2 re-appended at list positions 422-423 on the second `-r`).
+        // The old host face flushed the session's unwritten lines and rebuilt
+        // the list from the file (the niubash#182 fast path), which made `-r`
+        // an observable no-op whenever the file already matched the list —
+        // the marker probe of niubash#800 never surfaced the file's lines.
+        // The cycle safety #182 actually needed is that `-r` never WRITES the
+        // file: pure append keeps it byte-identical, the `-a && -c && -r`
+        // cycle still reaches its fixed point (-c empties the list, `-r`
+        // appends the file back once), and the delivered entries arrive
+        // flagged on-disk (`load_from_read`), so neither a later `-a` nor
+        // the session-end write can re-append them.
+        //
+        // A missing file is a silent failure that still returns rc 1:
+        // histfile.c's `error_and_exit` returns errno and history.def:344
+        // maps a nonzero result to EXECUTION_FAILURE with the read-error
+        // report compiled out (history.def:303, rubash#1852) — NotFound
+        // therefore maps to Err, which the engine's file face turns into
+        // status 1 with no diagnostic.
+        let content = std::fs::read_to_string(path)?;
         let requested = std::path::Path::new(path);
-        if self
+        let is_backing = self
             .inner
             .backing_file()
-            .is_some_and(|backing| backing == requested)
-            && self.inner.reload_from_file().is_ok()
-        {
-            return Ok(());
-        }
-        // Fallback (memory-only degraded session, or a foreign path): load
-        // into the in-memory list only.
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        // niubash#703: `#<epoch>` lines are consumed as the following
-        // entry's stamp, never loaded as entries (histfile.c
-        // read_history_range; a pending stamp survives blank lines —
-        // histfile.c:451-453 skips leading blanks after a timestamp).
-        // A file without stamp lines takes the plain replace exactly
-        // as before.
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        let mut pending_stamp: Option<String> = None;
-        let mut saw_stamp_line = false;
-        for line in content.lines() {
-            if is_stamp_line(line) {
-                pending_stamp = Some(line.to_string());
-                saw_stamp_line = true;
+            .is_some_and(|backing| backing == requested);
+        let units =
+            group_history_file_units(content.lines().map(|line| line.to_string()).collect());
+        let mut total = 0usize;
+        for unit in &units {
+            let Some(raw) = &unit.entry else {
+                continue;
+            };
+            total += 1;
+            let entry = decode_history_line(raw);
+            if entry.is_empty() {
                 continue;
             }
-            if line.trim().is_empty() {
-                continue;
+            // niubash#703: a `#<epoch>` line travels as the following
+            // entry's stamp (histfile.c:424-456); an unstamped entry takes
+            // the read time (hist_inittime via add_history).
+            let stamp = unit.stamps.last().cloned();
+            self.inner
+                .load_from_read(entry, stamp)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        // history.def:301 `history_lines_in_file = history_lines_read_from_file`:
+        // after reading the whole file, a later `history -n` must not
+        // re-deliver the lines `-r` just appended. The position is a fact
+        // about the BACKING file only — a foreign `-r` read never re-bases
+        // it (this session's `-n` positions against its own backing).
+        // The re-read also ends the `-c` view hide and cancels the #642
+        // session-end removal of the cleared base lines (`note_view_reloaded`):
+        // GNU's exit write rewrites the file from the LIST, and after `-r`
+        // the list holds those lines again, so they must survive the write.
+        if is_backing {
+            if let Ok(mut ledger) = self.inner.ledger().lock() {
+                ledger.read_position = Some(total);
+                ledger.note_view_reloaded();
             }
-            let stamp = pending_stamp.take().unwrap_or_else(now_stamp);
-            pairs.push((line.to_string(), stamp));
         }
-        if saw_stamp_line {
-            let (entries, stamps): (Vec<String>, Vec<String>) = pairs.into_iter().unzip();
-            self.replace_stamped(entries, stamps)
-        } else {
-            self.replace(pairs.into_iter().map(|(entry, _)| entry).collect())
-        }
+        Ok(())
     }
 
     fn append_history(&mut self, path: &str) -> io::Result<()> {
@@ -1780,70 +1789,6 @@ impl LiveFileBackedHistory {
         }
     }
 
-    /// Replace the in-memory view with the file's contents — the
-    /// provider-side `history -r` fast path. The session's unwritten
-    /// entries are flushed first (the flush leg in the body), so
-    /// nothing the session recorded is lost to the rebuild.
-    ///
-    /// Re-feeding the file through per-entry saves cannot be used here:
-    /// reedline's `sync` appends its unwritten buffer to the file verbatim
-    /// (no dedupe), so a `-c`+`-r` cycle re-appended the entire file every
-    /// time it ran — the second half of the bash-it theme interlock
-    /// (niubash#182). Rebuilding the reader from disk leaves the file
-    /// byte-identical, matching histfile.c read_history_range, which
-    /// only ever appends to the in-memory list.
-    ///
-    /// Fails (without touching state) when this session degraded to
-    /// memory-only history, so the caller can fall back to the in-memory
-    /// replace path.
-    pub(crate) fn reload_from_file(&mut self) -> Result<()> {
-        // niubash#773: an explicit re-read rebuilds the list from the
-        // file, so this session's unwritten entries are flushed
-        // first — GNU's `-r` reads the file INTO the existing list,
-        // and lines the deferred write has not landed yet must not
-        // be dropped by the rebuild. Their pending lines flip to
-        // synced with the flush, keeping the ledger's `-a`
-        // accounting exact.
-        if let Ok(mut state) = self.lock() {
-            if Self::sync_state(&mut state) {
-                if let Ok(mut ledger) = self.ledger.lock() {
-                    ledger.mark_all_synced();
-                }
-            }
-        }
-        self.reload_from_file_inner()
-    }
-
-    fn reload_from_file_inner(&mut self) -> Result<()> {
-        let capacity = self.capacity;
-        // Clone the ledger handle before taking the state lock (see save).
-        let ledger = Arc::clone(&self.ledger);
-        let mut state = self.lock()?;
-        let state = &mut *state;
-        let Some(path) = state.path.clone() else {
-            return Err(ReedlineError::from(history_lock_error()));
-        };
-        match HistoryStore::load_from_file(capacity, &path) {
-            Ok(history) => {
-                state.history = history;
-                // An explicit re-read (`history -r`/`-n`) loads the
-                // file back into the list on purpose, so the clear's
-                // view hide ends here — for both instances, via the
-                // ledger generation (niubash#614).
-                if let Ok(mut ledger) = ledger.lock() {
-                    ledger.note_view_reloaded();
-                    // niubash#773: the rebuilt list IS the file's
-                    // entries, so the `-n` read position settles to
-                    // its entry total.
-                    ledger.read_position = Some(state.history.entries.len());
-                }
-                Self::sync_view(state, &ledger);
-                Ok(())
-            }
-            Err(error) => Err(ReedlineError::from(io::Error::other(error.to_string()))),
-        }
-    }
-
     /// Replace the whole list with exactly `entries` — the
     /// `HistoryProvider::replace` contract (`history -d`, the interactive
     /// recording veto, and pre_process_line's rewrite of a recorded raw
@@ -1858,27 +1803,13 @@ impl LiveFileBackedHistory {
     /// entry (`!!` expands to it), so a clear-and-save rewrite silently
     /// lost exactly that entry (rubash#1248). Reedline's load path
     /// applies no such filter, so the exact list is staged through a
-    /// file and the reader rebuilt from it — the same rebuild
-    /// [`Self::reload_from_file`] performs. A degraded memory-only
+    /// file and the reader rebuilt from it. A degraded memory-only
     /// session stages through a scratch file in the temp dir and keeps
     /// the rebuilt reader bound to it (the wrapper still reports no
     /// backing file); if even the staging fails there, fall back to the
     /// clear-and-save rewrite rather than failing the caller.
     pub(crate) fn replace_all(&mut self, entries: Vec<String>) -> Result<()> {
         self.replace_all_inner(entries, None)
-    }
-
-    /// niubash#703: `replace_all` for a list loaded from a timestamped
-    /// file (`read_history`'s fallback): the entries' own stamps
-    /// stage with them and are restored exactly, so the loaded list
-    /// keeps the file's pairings instead of degrading every stamp
-    /// to the read time.
-    pub(crate) fn replace_all_stamped(
-        &mut self,
-        entries: Vec<String>,
-        stamps: Vec<String>,
-    ) -> Result<()> {
-        self.replace_all_inner(entries, Some(stamps))
     }
 
     fn replace_all_inner(
@@ -3939,11 +3870,18 @@ mod tests {
     }
 
     #[test]
-    fn read_history_leaves_the_file_byte_identical() {
+    fn read_history_appends_the_whole_file_and_leaves_it_byte_identical() {
+        // niubash#800: GNU `history -r` APPENDS the whole file to the
+        // existing list (histfile.c read_history_range -> add_history per
+        // line; verified WSL GNU 5.3.20 — a second `-r` re-appends the same
+        // lines as duplicates). The startup load already put the file's
+        // lines in the list, so the first `-r` doubles them.
         // niubash#182 interlock: the theme cycle is `history -a && history
-        // -c && history -r` per prompt. `-r` rebuilds the reader from disk
-        // instead of re-saving each line (which re-appended the whole file
-        // to itself), so the cycle reaches a fixed point.
+        // -c && history -r` per prompt. `-r` must never WRITE the file —
+        // pure append keeps it byte-identical and the cycle reaches a
+        // fixed point (-c empties the list, `-r` appends the file back
+        // once, and the delivered entries are flagged on-disk so `-a`
+        // finds nothing pending).
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "loaded-one\nloaded-two\n").unwrap();
@@ -3952,7 +3890,13 @@ mod tests {
         provider.read_history(path.to_str().unwrap()).unwrap();
         assert_eq!(
             provider.entries().unwrap(),
-            vec!["loaded-one", "loaded-two"]
+            vec![
+                "loaded-one".to_string(),
+                "loaded-two".to_string(),
+                "loaded-one".to_string(),
+                "loaded-two".to_string()
+            ],
+            "-r appends the file's lines after the session's own (GNU shape)"
         );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -3971,6 +3915,66 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "loaded-one\nloaded-two\n",
             "repeated -a/-c/-r cycles must not grow the history"
+        );
+    }
+
+    #[test]
+    fn read_history_missing_file_fails_silently() {
+        // history.def:344 maps read_history's nonzero result (histfile.c
+        // error_and_exit returns errno for a missing file) to
+        // EXECUTION_FAILURE, with the read-error report compiled out
+        // (history.def:303) — so the provider reports Err(NotFound) and the
+        // engine's file face returns status 1 with no diagnostic
+        // (niubash#800; verified WSL GNU 5.3.20: rc=1, silent).
+        let temp = tempfile::tempdir().unwrap();
+        // A foreign operand path: the backing file itself is created (empty)
+        // by the provider's construction, so the missing-file face is only
+        // reachable through an explicit operand that never existed.
+        let backing = temp.path().join("backing");
+        let path = temp.path().join("absent-history");
+        let mut provider = RubashHistoryProvider::with_file(100, backing);
+        let error = provider
+            .read_history(path.to_str().unwrap())
+            .expect_err("-r on a missing file is a failure");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn read_history_marks_delivered_lines_read_for_a_later_dash_n() {
+        // history.def:301 `history_lines_in_file = history_lines_read_from_file`:
+        // after `-r` read the whole file, a following `history -n` must not
+        // re-deliver the lines `-r` just appended (niubash#800).
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "seedcmd\n").unwrap();
+
+        let mut provider = RubashHistoryProvider::with_file(100, path.clone());
+        provider.append("own-line".to_string()).unwrap();
+        provider.read_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            vec![
+                "seedcmd".to_string(),
+                "own-line".to_string(),
+                "seedcmd".to_string()
+            ]
+        );
+        provider.read_new_history(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            provider.entries().unwrap(),
+            vec![
+                "seedcmd".to_string(),
+                "own-line".to_string(),
+                "seedcmd".to_string()
+            ],
+            "-n after -r re-delivers nothing"
+        );
+        // The session-end write places the one unwritten session line
+        // exactly once — the -r-appended seedcmd copy is on-disk already.
+        provider.flush_at_session_end();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "seedcmd\nown-line\n"
         );
     }
 
@@ -4138,12 +4142,13 @@ mod tests {
     }
 
     #[test]
-    fn issue773_write_history_settles_the_store_for_the_reread_preflush() {
-        // The niubash#571 chain shape at provider level: the `-r`
-        // fast path flushes the session's unwritten entries before
-        // its rebuild — after a `-w`, that pre-flush must find
-        // nothing the rewrite already placed, or the `-w` line lands
-        // in the file twice and the rebuild loads the duplicate.
+    fn issue773_read_history_never_writes_the_file_after_a_write() {
+        // niubash#571's chain shape at provider level, under the niubash#800
+        // append face: after `-w` placed the whole list in the file, `-r`
+        // appends the file's lines to the list WITHOUT touching the file —
+        // there is no pre-flush anymore, so the rewrite's lines cannot land
+        // twice, and the one line recorded after `-w` reaches the file
+        // exactly once at the session end.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history");
         std::fs::write(&path, "seed\n").unwrap();
@@ -4155,17 +4160,25 @@ mod tests {
         provider.read_history(path.to_str().unwrap()).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "seed\necho before\necho after\n",
-            "the -r pre-flush appends only the line recorded after -w"
+            "seed\necho before\n",
+            "-r never writes the file, so nothing can land twice"
         );
         assert_eq!(
             provider.entries().unwrap(),
             vec![
                 "seed".to_string(),
                 "echo before".to_string(),
-                "echo after".to_string()
+                "echo after".to_string(),
+                "seed".to_string(),
+                "echo before".to_string()
             ],
-            "the rebuilt list holds each line exactly once"
+            "the GNU append shape: session lines, then the whole file"
+        );
+        provider.flush_at_session_end();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "seed\necho before\necho after\n",
+            "the session-end write appends only the post-`-w` line, once"
         );
     }
 
