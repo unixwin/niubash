@@ -1567,6 +1567,24 @@ mod simulated_namespace_tests {
         assert!(values.contains(&"/proc/meminfo".to_string()), "{values:?}");
         assert!(values.contains(&"/proc/self/".to_string()), "{values:?}");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue758_proc_pid_tier_lists_root_link() {
+        // niubash#758: /proc/<pid>/root joined the registry's link
+        // table (and with it the per-pid enumeration); the completion
+        // tier reads that same enumeration face, so the entry is
+        // offered beside its sibling links — a face that opens but
+        // does not complete would be a half-face.
+        let q = query("/proc/self/");
+        let context = ctx(&[0, 1, 2]);
+        let candidates = simulated_namespace_candidates(&q, "/proc/self/", &context, false)
+            .expect("/proc/self is simulated on Windows");
+        let values = values(candidates);
+        assert!(values.contains(&"/proc/self/root".to_string()), "{values:?}");
+        assert!(values.contains(&"/proc/self/cwd".to_string()), "{values:?}");
+        assert!(values.contains(&"/proc/self/exe".to_string()), "{values:?}");
+    }
 }
 
 #[cfg(test)]

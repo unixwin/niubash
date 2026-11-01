@@ -141,6 +141,23 @@
 > the structured face supersedes both setters, which
 > stay public inherent faces of the builder.
 >
+> Addendum (synthetic-link root face signature change, 2026-11-01,
+> niubash#758): the special_paths registry's synthetic-link family
+> grows the `/proc/<pid>/root` entry, and the family's resolution
+> face changes signature in the same engine change:
+> `special_paths::synthetic_link_target` and
+> `proc_vfs::proc_link_target` now take the caller-fed
+> payload-root forms (`proc_vfs::ProcSelfRoot`, built by
+> `proc_vfs::self_root_forms`) beside the session-cwd forms —
+> the root's target is session state (the payload root the path
+> mapper serves for `/`), so it travels the same caller-fed
+> channel as self/cwd. The family stays engine-consumed:
+> niubash's completion and highlighting faces read the new entry
+> through the already-recorded classification and enumeration
+> faces, so no §2 census count moves and no §6 entry is added;
+> the record is this addendum, in both copies, per the update
+> rule.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
