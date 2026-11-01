@@ -786,7 +786,7 @@ fn dump_function_lines(entries: &[crate::bind_surface::EngineBindEntry]) -> Vec<
 /// and the live session.
 fn run_readline_command(
     shell: &Rc<RefCell<Shell>>,
-    _line_editor: &mut Reedline,
+    line_editor: &mut Reedline,
     name: &str,
 ) -> SentinelOutcome {
     match name {
@@ -839,9 +839,257 @@ fn run_readline_command(
         "re-read-init-file" => {
             shell.borrow_mut().reread_init_file_bindings();
         }
+        // lib/readline/util.c:181 rl_tilde_expand (niubash#766):
+        // expand the tilde at the start of the whitespace-delimited
+        // word at point; point lands just past the replacement, as
+        // _rl_replace_text (text.c:194) leaves it.
+        "tilde-expand" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            if let Some((start, end)) = crate::readline_commands::tilde_word_span(&buffer, cursor) {
+                let word = &buffer[start..end];
+                let env: std::collections::HashMap<String, String> =
+                    shell.borrow().session().environment().into_iter().collect();
+                if let Some(expanded) =
+                    rubash::expand::tilde::tilde::expand_word_prefix(word, &env)
+                {
+                    if expanded != word {
+                        let mut next =
+                            String::with_capacity(buffer.len() - (end - start) + expanded.len());
+                        next.push_str(&buffer[..start]);
+                        next.push_str(&expanded);
+                        next.push_str(&buffer[end..]);
+                        let position = start + expanded.len();
+                        line_editor.run_edit_commands(&[
+                            EditCommand::Clear,
+                            EditCommand::InsertString(next),
+                            EditCommand::MoveToPosition {
+                                position,
+                                select: false,
+                            },
+                        ]);
+                    }
+                }
+            }
+        }
+        // lib/readline/text.c:2358 rl_execute_named_command
+        // (niubash#766): read a command name in the minibuffer and
+        // dispatch it.
+        "execute-named-command" => {
+            return execute_named_command(shell, line_editor);
+        }
         _ => {}
     }
     SentinelOutcome::Resumed
+}
+
+/// GNU's rl_ding: ring the terminal bell.
+fn readline_ding() {
+    print_suspended_output("\u{7}");
+}
+
+/// `execute-named-command` (text.c:2358): read the name with
+/// `_rl_read_command_name` (text.c:2309), then dispatch the named
+/// function. An unknown name dings and returns 1 — nothing
+/// dispatches. Dispatch fidelity: edit events apply to the
+/// suspended editor, `Multiple` folds, nested host commands recurse
+/// through the sentinel dispatcher, and accept-line submits the
+/// current buffer; editor events that need the live editor (menus,
+/// mode switches, suspension) cannot be injected into a suspended
+/// editor and ding instead.
+fn execute_named_command(
+    shell: &Rc<RefCell<Shell>>,
+    line_editor: &mut Reedline,
+) -> SentinelOutcome {
+    let Some(name) = read_command_name() else {
+        return SentinelOutcome::Resumed;
+    };
+    if !crate::readline_commands::funmap_names().contains(&name.as_str()) {
+        readline_ding();
+        return SentinelOutcome::Resumed;
+    }
+    dispatch_named_event(shell, line_editor, native_widget_event(&name))
+}
+
+fn dispatch_named_event(
+    shell: &Rc<RefCell<Shell>>,
+    line_editor: &mut Reedline,
+    event: Option<ReedlineEvent>,
+) -> SentinelOutcome {
+    match event {
+        Some(ReedlineEvent::Edit(commands)) => {
+            line_editor.run_edit_commands(&commands);
+            SentinelOutcome::Resumed
+        }
+        Some(ReedlineEvent::Multiple(events)) => {
+            for event in events {
+                if let SentinelOutcome::Accept(line) =
+                    dispatch_named_event(shell, line_editor, Some(event))
+                {
+                    return SentinelOutcome::Accept(line);
+                }
+            }
+            SentinelOutcome::Resumed
+        }
+        Some(ReedlineEvent::Enter) => {
+            SentinelOutcome::Accept(Some(line_editor.current_buffer_contents().to_string()))
+        }
+        Some(ReedlineEvent::ExecuteHostCommand(payload)) => {
+            run_host_sentinel(shell, line_editor, &payload)
+        }
+        _ => {
+            readline_ding();
+            SentinelOutcome::Resumed
+        }
+    }
+}
+
+/// The minibuffer read behind execute-named-command:
+/// `_rl_read_command_name` (text.c:2309) reads one line with
+/// completion over the funmap names (`readcmd_completion_function`).
+/// The host reads keys in raw mode while the editor is suspended —
+/// the same posture as the interactive menu's raw-mode loop. TAB
+/// completes to the longest common prefix; a second consecutive
+/// TAB lists the matches, like readline's completion display.
+/// Returns None when the read is aborted (ESC / C-g / C-c).
+fn read_command_name() -> Option<String> {
+    use crossterm29::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+
+    fn render(text: &str, cursor: usize) {
+        let mut out = String::from("\r\u{1b}[K");
+        out.push_str("M-x ");
+        out.push_str(text);
+        let tail = text[cursor..].chars().count();
+        if tail > 0 {
+            out.push_str(&format!("\u{1b}[{tail}D"));
+        }
+        print_suspended_output(&out);
+    }
+
+    let _ = crossterm29::terminal::enable_raw_mode();
+    let mut text = String::new();
+    let mut cursor: usize = 0;
+    let mut last_was_tab = false;
+    print_suspended_output("\r\n");
+    render(&text, cursor);
+    let result = loop {
+        let Ok(Event::Key(key)) = crossterm29::event::read() else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => break Some(text.clone()),
+            KeyCode::Char('j' | 'm') if ctrl => break Some(text.clone()),
+            KeyCode::Esc => break None,
+            KeyCode::Char('g' | 'c') if ctrl => break None,
+            KeyCode::Tab => {
+                let matches: Vec<String> = crate::readline_commands::funmap_names()
+                    .iter()
+                    .filter(|name| name.starts_with(text.as_str()))
+                    .map(|name| name.to_string())
+                    .collect();
+                if matches.is_empty() {
+                    readline_ding();
+                } else {
+                    let lcp = crate::readline_commands::common_prefix(&matches);
+                    if lcp.len() > text.len() {
+                        text = lcp;
+                        cursor = text.len();
+                        render(&text, cursor);
+                    } else if last_was_tab {
+                        let mut out = String::from("\r\n");
+                        out.push_str(&matches.join("  "));
+                        out.push_str("\r\n");
+                        print_suspended_output(&out);
+                        render(&text, cursor);
+                    }
+                }
+                last_was_tab = true;
+                continue;
+            }
+            KeyCode::Backspace => {
+                if cursor > 0 {
+                    let prev = text[..cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    text.replace_range(prev..cursor, "");
+                    cursor = prev;
+                }
+            }
+            KeyCode::Delete => {
+                if cursor < text.len() {
+                    let next = text[cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| cursor + i)
+                        .unwrap_or(text.len());
+                    text.replace_range(cursor..next, "");
+                }
+            }
+            KeyCode::Left => {
+                cursor = text[..cursor]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            KeyCode::Right => {
+                if cursor < text.len() {
+                    cursor = text[cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| cursor + i)
+                        .unwrap_or(text.len());
+                }
+            }
+            KeyCode::Home => cursor = 0,
+            KeyCode::End => cursor = text.len(),
+            KeyCode::Char('a') if ctrl => cursor = 0,
+            KeyCode::Char('e') if ctrl => cursor = text.len(),
+            KeyCode::Char('b') if ctrl => {
+                cursor = text[..cursor]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            KeyCode::Char('f') if ctrl => {
+                if cursor < text.len() {
+                    cursor = text[cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| cursor + i)
+                        .unwrap_or(text.len());
+                }
+            }
+            KeyCode::Char('u') if ctrl => {
+                text.clear();
+                cursor = 0;
+            }
+            KeyCode::Char('k') if ctrl => {
+                text.truncate(cursor);
+            }
+            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                text.insert(cursor, c);
+                cursor += c.len_utf8();
+            }
+            _ => {
+                readline_ding();
+                last_was_tab = false;
+                continue;
+            }
+        }
+        last_was_tab = false;
+        render(&text, cursor);
+    };
+    let _ = crossterm29::terminal::disable_raw_mode();
+    print_suspended_output("\r\n");
+    result
 }
 
 /// One editor keymap under construction, remembering which registry
@@ -3113,6 +3361,16 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
                 READLINE_HOST_COMMAND_PREFIX, widget
             )))
         }
+        // niubash#766: tilde-expand (util.c rl_tilde_expand) edits
+        // the word at point and execute-named-command (text.c
+        // rl_execute_named_command) reads a name in the minibuffer —
+        // both are host work against the suspended editor, so they
+        // ride the same readline host-command channel.
+        // insert-comment needs no arm here: it shipped as a host
+        // composite in the #731 line.
+        "tilde-expand" | "execute-named-command" => Some(ReedlineEvent::ExecuteHostCommand(
+            format!("{}{}", READLINE_HOST_COMMAND_PREFIX, widget),
+        )),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -5926,6 +6184,55 @@ mod tests {
                 KeyCode::Char('i')
             ))
         );
+    }
+
+    /// niubash#766: tilde-expand and execute-named-command map to
+    /// the readline host channel, and their GNU default keys land
+    /// in the emacs baseline now that the names are delivered.
+    /// insert-comment stays the #731 host composite.
+    #[test]
+    fn issue766_tilde_expand_and_execute_named_command_are_host_delivered() {
+        for name in ["tilde-expand", "execute-named-command"] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+        assert!(matches!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(_))
+        ));
+
+        let mut keybindings = Keybindings::default();
+        add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
+        let tilde_event = ReedlineEvent::ExecuteHostCommand(format!(
+            "{}tilde-expand",
+            READLINE_HOST_COMMAND_PREFIX
+        ));
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('~')),
+            Some(tilde_event.clone())
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('&')),
+            Some(tilde_event)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('x')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}execute-named-command",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
+        );
+
+        // The vi target carries none of the emacs defaults.
+        let mut vi = Keybindings::default();
+        add_gnu_command_default_keybindings(&mut vi, NativeKeymapTarget::ViInsert);
+        assert_eq!(vi.find_binding(KeyModifiers::ALT, KeyCode::Char('~')), None);
     }
 
     /// Second niubash#630 batch: readline functions deliverable only since
