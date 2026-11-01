@@ -70,7 +70,7 @@ C:\Program Files
 | [Bash Compatibility Matrix](rubash-bash-compat-matrix.md) | What Bash surface is verified, layer by layer |
 | [Performance](performance.md) | Every number pinned to the issue or PR that measured it |
 | [Built-ins & Fast Paths](builtins.md) | All 64 built-ins, fast-path fallbacks, WinuxCmd overlap |
-| [Architecture](architecture.md) | rubash + WinuxCmd + reedline, path model, host contract |
+| [Architecture](architecture.md) | rubash + WinuxCmd + ruline, path model, host contract |
 | [Windows Path Contract](windows-path-contract.md) | logical root, dispatcher selection, and layer ownership |
 | [Roadmap](niubash-roadmap.md) | What is done, what is next |
 

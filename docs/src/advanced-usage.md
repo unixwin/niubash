@@ -309,7 +309,7 @@ rot. `scripts/generate-skill.py` fills the GENERATED-marked regions of
 `SKILL.md` and `references/quickref.md` from the engine's own surfaces:
 a captured `help -s '*'` transcript (builtin table), a captured
 `niu --help` transcript (launcher/plugin verbs), and the applet completion
-inventory (180 winuxcmd applets). After changing the launcher help or the
+inventory (178 winuxcmd applets). After changing the launcher help or the
 builtin table, refresh and re-check:
 
 ```bash
@@ -323,7 +323,7 @@ Defaults are a floor, not an identity. The built-in prompt renders only
 while nothing claims `PS1`. It has two faces: on Windows, a Git
 Bash-compatible two-row prompt (green `user@host`, yellow cwd, cyan
 `(branch)` git segment — see [Getting Started](getting-started.md));
-elsewhere, a reedline template (`user@host cwd symbol`).
+elsewhere, a ruline template (`user@host cwd symbol`).
 Whoever sets `PS1` last owns the prompt completely — your own rc line, an
 enabled oh-my-bash theme, or starship:
 

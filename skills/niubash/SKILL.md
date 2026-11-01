@@ -16,24 +16,27 @@ proven to be GNU Bash's own coproc reap-timing race** (ledger in rubash's
 [README, "Compatibility at a
 Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it is not matters as much:
 
-- **No POSIX emulation layer.** No `cygwin1.dll`/`msys-2.0.dll`, no fork,
-  no POSIX signal delivery, **no PTY emulation** — job control and terminal
-  handling ride on Win32/ConPTY. Interactive fullscreen TUI programs built
+- **No POSIX emulation layer on Windows.** The Windows stack carries no
+  `cygwin1.dll`/`msys-2.0.dll`, no fork, no POSIX signal delivery, **no PTY
+  emulation** — job control and terminal handling ride on Win32/ConPTY. Interactive fullscreen TUI programs built
   for a POSIX pty (and pty-only tools like `script`/`ssh -t`) are the known
   rough edge, not path or quoting behavior.
 - **No MSYS path rules.** The Windows-native path is the first-class
   internal representation; `/c/...`, `/mnt/c/...`, `/usr/bin`, `/tmp` are
-  input dialects that resolve to real Windows locations. There is no
-  conversion heuristic to misfire, so `MSYS_NO_PATHCONV`-style variables do
-  not exist here and are never needed. Full contract:
-  `references/paths.md`.
+  input dialects that resolve to real Windows locations. Translation at
+  the boundary is one deterministic contract, not a heuristic: classified
+  POSIX spellings are translated for native children, while data-shaped
+  tokens, the bare `/`, and drive-root forms go verbatim — so
+  `MSYS_NO_PATHCONV`-style variables do not exist here and are never
+  needed. Full contract: `references/paths.md`.
 - **Verbatim argv at the boundary** ("Option B"): the bundled `bash.exe` /
   `sh.exe` are hardlinks to `niu.exe` — the same binary taking the GNU
   face from `argv[0]` (a forwarding shim stands in only where the
-  filesystem cannot hardlink). No re-quoting, no path rewriting at the
-  boundary. What a child process receives is always a native Windows path
-  when the argument is a shell path; literal data arguments
-  (`printf '%s\n' /tmp/x`) are never rewritten (GNU bash behavior).
+  filesystem cannot hardlink). No re-quoting at the boundary. What a
+  native child process receives for a classified shell-path spelling is
+  the native Windows path; literal data arguments
+  (`printf '%s\n' /tmp/x`), the bare `/`, and drive-root forms (`/d`,
+  `/d/`) are never rewritten.
 - **No bundler downloads.** Plugin sources arrive by git clone only; fonts
   and CLI tools are package-manager recommendations. `wpm`/WinuxCmd is the
   separate command-layer package manager.
@@ -57,10 +60,10 @@ Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it 
 
 <!-- BEGIN GENERATED:capability-snapshot -->
 - **77 shell built-ins & reserved words** — the GNU bash 5.3 `shell_builtins[]` table (`alias`, `cd`, `declare`, `printf`, `set`, `trap`, `if`/`while`/`case`, ...); every one documents itself via `help <name>`.
-- **180 winuxcmd applets** on PATH (`ls`, `grep`, `sed`, `awk`, `find`, `tar`, `top`, `xxd`, ...) — real Windows binaries, not emulated inside the shell; full inventory in `references/quickref.md`.
+- **178 winuxcmd applets** on PATH (`ls`, `grep`, `sed`, `awk`, `find`, `tar`, `top`, `xxd`, ...) — 176 commands plus the internal `wpm` package manager and `[`; real Windows binaries, not emulated inside the shell; full inventory in `references/quickref.md`.
 - **Launcher verbs** — `setup`, `font`, `doctor`, `config`, `plugin`, `skill`, `--self-update`; table in `references/quickref.md`.
 - **Verbatim handoff** — `--encoded-command`/`-EncodedCommand`/`--ec <b64>` runs a base64 payload with zero quoting; optional `v1:` prefix guards MSYS-family rewriting in transit.
-- **Plugin system** — git-clone-only external sources (oh-my-bash, bash-it, bpkg) behind an explicit trust gate, driven by a declarative spec (`~/.niubash/plugins.json`) with lockfile verbs (`add/list/enable/disable/trust/sync/update/restore/rollback/clean/migrate-rc/source/recipe/distro/mirror/ui`).
+- **Plugin system** — git-clone-only external sources (oh-my-bash, bash-it, bpkg), driven by a declarative spec (`~/.niubash/plugins.json`) with lockfile verbs (`add/list/enable/disable/sync/update/restore/rollback/clean/migrate-rc/source/recipe/distro/mirror/ui`). An installed source contributes once it is enabled — there is no trust state.
 - **TUI surfaces** — `niu setup` wizard (theme/prompt/tools), `niu plugin ui` menu, theme gallery, `niu font` picker; all non-interactive-friendly and safe to skip (`-c` loads none of them).
 - **Bundle version**: niubash 1.4.4 (generated; see `scripts/generate-skill.py`).
 <!-- END GENERATED:capability-snapshot -->
@@ -82,7 +85,12 @@ Every built-in documents itself: `help <name>` (`help -s '*'` for the one
 line per command). Launcher verbs and the plugin verb table:
 `references/quickref.md`.
 
-## Debugging scripts
+## Debugging scripts (new in niubash 1.5.0)
+
+The debugger front ends below ship with niubash **1.5.0**; they are not
+in 1.4.4 (this bundle's version). On 1.4.4, `--debug` keeps the legacy
+extdebug-arming behavior described in the last bullet, and `--debugger`
+is the GNU bashdb starter path.
 
 - **`niu --debug script.sh [args…]`** starts the native interactive debugger
   stopped at the entry stop. The prompt is `(niu-dbg)`; the M1 command set
@@ -162,7 +170,7 @@ line per command). Launcher verbs and the plugin verb table:
 | Task | Use |
 | --- | --- |
 | Anything with bash syntax (loops, pipes, substitution, globs, scripts) | **niu** — directly in-session |
-| Running Windows-native programs (`git.exe`, `node.exe`, `cargo.exe`) | **niu** — your PATH is your PATH, no conversion step |
+| Running Windows-native programs (`git.exe`, `node.exe`, `cargo.exe`) | **niu** — your PATH is your PATH, no heuristic conversion step |
 | `cmd`-specific quirks (batch files needing `cmd` semantics, `reg` legacy forms) | `cmd /c ...` from niu, but prefer native equivalents |
 | .NET/COM, Windows management, registry scripting, remoting | **powershell** — call it from niu when needed |
 | Linux-only tooling, systemd, Linux binaries | **WSL** — niubash does not emulate Linux |
