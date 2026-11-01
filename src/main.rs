@@ -23,6 +23,13 @@ use std::process::ExitCode;
 
 use rubash::invocation::ShellInvocation;
 
+// niubash#775 / ruline#8: the ruline ABI crate's lib target is named
+// `readline` (package `readline-abi`), so Rust code imports it under that
+// name. Referring to it here is what puts its rlib on the link line;
+// `build.rs` then anchors and exports the whole C surface listed in
+// `scripts/readline-abi-exports.txt`.
+use readline::rl_initialize;
+
 /// #125/#140: std `println!`/`print!` panic on any stdout write error, and
 /// this binary builds with `panic = "abort"`, so a reader closing the pipe
 /// (`niu --version | head -1`; Windows reports os error 232 = ERROR_NO_DATA
@@ -98,6 +105,18 @@ fn main() -> ExitCode {
     // default hook reports; with `panic = "abort"` this is the last code
     // that runs because no Drop guards execute.
     niubash_runtime::panic_restore::install_panic_hook();
+    // niubash#775: initialize the in-process readline ABI exactly once, before
+    // any `enable -f` loadable builtin can be `dlopen`ed. `rl_initialize`
+    // builds the default keymaps/funmaps and allocates `rl_line_buffer`, so a
+    // plugin that reads the exported globals sees an initialized editor
+    // state rather than null pointers. Interactive routing between this ABI
+    // and the live Reedline editor is the remaining follow-up (the ABI state
+    // is standalone today).
+    //
+    // SAFETY: the exported ABI is initialized once from the main thread
+    // before the shell's worker thread starts; the call only touches the
+    // crate's own process-wide state.
+    unsafe { rl_initialize() };
     let code = std::thread::Builder::new()
         .name("niu-main".to_string())
         .stack_size(NIU_MAIN_STACK_SIZE)

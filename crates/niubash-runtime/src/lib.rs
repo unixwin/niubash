@@ -83,7 +83,6 @@ pub mod plugins;
 pub mod prompt;
 pub mod prompt_right_align;
 pub mod prompt_segments;
-pub mod readline_abi;
 pub mod readline_commands;
 pub mod repl;
 pub mod setup_wizard;

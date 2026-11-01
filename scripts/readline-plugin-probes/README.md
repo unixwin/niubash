@@ -8,8 +8,9 @@ routing).
 
 This is deliberately a **script**, not part of `cargo test`.  PTY probes are
 flaky by nature; `cargo test` keeps its deterministic non-PTY suite.  Run the
-harness explicitly when changing `readline_abi.rs`, `build.rs`, `bind -x`,
-inputrc handling, completion, or the loadable-builtin path.
+harness explicitly when changing `scripts/readline-abi-exports.txt`,
+`build.rs`, the `readline-abi` pin, `bind -x`, inputrc handling, completion,
+or the loadable-builtin path.
 
 ## Quick start
 
@@ -44,7 +45,7 @@ printed in the matrix.  Artifacts are kept automatically on failure and with
 | Probe | What it proves | Needs |
 |---|---|---|
 | `niu-build` | binary under test exists / `--build` succeeds | `cargo` (or prebuilt) |
-| `readline-abi-exports` | `rl_readline_version` + `rl_library_version` are in the **dynamic** symbol table (`scripts/check-readline-abi-exports.sh`) | `nm` or `readelf`, or `dumpbin` on Windows |
+| `readline-abi-exports` | every symbol in `scripts/readline-abi-exports.txt` (~274) is in the **dynamic** symbol table (`scripts/check-readline-abi-exports.sh`) | `nm` or `readelf`, or `dumpbin` on Windows |
 | `loadable-builtin-build` | `loadable_builtin.c` compiles as a shared object | `cc` (`CC` overrides) |
 | `loadable-builtin-gnu-bash` | the same `.so` loads in interactive GNU bash and reads/writes the **live** `rl_line_buffer`/`rl_point` | `bash`, ideally `python3` |
 | `enable-f` | niu's `enable -f` can dlopen the fixture (currently refused by rubash) | `niu` |
@@ -63,7 +64,8 @@ is broken".  It calls:
 
 * `rl_readline_version` / `rl_library_version` (data symbols),
 * `rl_add_defun` and `rl_bind_key` (registered function `rl-probe-defun`),
-* `rl_line_buffer` (reads the live line, flips and restores its first byte),
+* `rl_line_buffer` (reads the exported buffer, flips and restores its first
+  byte; standalone ABI state until live-editor routing lands),
 * `rl_point` (reads, bumps, restores).
 
 One machine-readable line is printed:
