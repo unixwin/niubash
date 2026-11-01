@@ -5597,6 +5597,28 @@ fn print_first_run_hint() {
     println!("{hint}");
 }
 
+/// niubash#775: consume the plugin-controlled one-shot readline state at
+/// the point GNU's `readline()` would look at it.  `rl_done` returns the
+/// line immediately (readline.c `while (rl_done == 0)`); otherwise
+/// `rl_pending_input` is the next key, injected before the editor resumes
+/// reading (input.c `rl_read_key`).  Returns the accepted line when the
+/// key/flag finished the line.
+fn consume_abi_control(line_editor: &mut Reedline) -> Option<String> {
+    if crate::readline_live::take_done() {
+        let line = line_editor.current_buffer_contents().to_string();
+        // The forced accept bypasses `read_line`, so clear the editor the
+        // way its own accept path does before the next prompt.
+        line_editor.run_edit_commands(&[EditCommand::Clear]);
+        return Some(line);
+    }
+    let key = crate::readline_live::take_pending_input()?;
+    if let Some(line) = crate::readline_live::apply_pending_key(line_editor, key) {
+        line_editor.run_edit_commands(&[EditCommand::Clear]);
+        return Some(line);
+    }
+    None
+}
+
 /// Takes ownership of the shell and shares it with the completer through an
 /// `Rc<RefCell<Shell>>` bridge so shell-function completions can execute in
 /// the engine while the line editor is active. No borrow is held across
@@ -5678,6 +5700,22 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     loop {
         crate::console_guard::restore(&console_baseline);
         typeahead.arm();
+        // niubash#775: a plugin's `rl_macro_bind` macro has no editor
+        // event of its own; route it into the engine macro registry first
+        // (the same data plane a rc `bind '"\C-t": "text"'` writes), so
+        // the generation check below reloads the bindings and the next
+        // build installs it exactly like a host macro.
+        let plugin_macros = crate::readline_live::plugin_macros_pending();
+        if !plugin_macros.is_empty() {
+            for binding in &plugin_macros {
+                shell.borrow_mut().register_macro_binding(
+                    &binding.keyseq,
+                    &binding.text,
+                    crate::readline_live::root_keymap_for_registry(binding.root),
+                );
+            }
+            crate::readline_live::mark_plugin_macros_forwarded(&plugin_macros);
+        }
         // A command (rc script, PROMPT_COMMAND, or user command) may have
         // registered or removed bindings at runtime. GNU mutates the live
         // readline keymap immediately; reedline keymaps are baked at
@@ -5785,25 +5823,23 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             let prompt = shell.borrow_mut().prompt_for_display();
             let prompt_text = prompt.render_prompt_left().into_owned();
             // niubash#775: before the read loop dispatches any key, the ABI
-            // sees the editor's fresh (empty) buffer and the prompt.
-            crate::readline_live::begin_read(
-                line_editor.current_buffer_contents(),
-                line_editor.current_insertion_point(),
-                &prompt_text,
-            );
+            // sees the editor's buffer and the prompt, and the hooks run.
+            crate::readline_live::begin_read(&mut line_editor, &prompt_text);
             typeahead.disarm_and_reinject();
-            line_editor.read_line(&prompt)
+            match consume_abi_control(&mut line_editor) {
+                Some(line) => Ok(Signal::Success(line)),
+                None => line_editor.read_line(&prompt),
+            }
         } else {
             let prompt = shell.borrow().prompt.clone();
             let prompt = ContinuationPrompt::new(&prompt, prompt.vi_indicators());
             let prompt_text = prompt.render_prompt_left().into_owned();
-            crate::readline_live::begin_read(
-                line_editor.current_buffer_contents(),
-                line_editor.current_insertion_point(),
-                &prompt_text,
-            );
+            crate::readline_live::begin_read(&mut line_editor, &prompt_text);
             typeahead.disarm_and_reinject();
-            line_editor.read_line(&prompt)
+            match consume_abi_control(&mut line_editor) {
+                Some(line) => Ok(Signal::Success(line)),
+                None => line_editor.read_line(&prompt),
+            }
         };
         // The foreground command (or widget/exit path) below owns the
         // terminal: the guard stays disarmed until the next prompt
@@ -5835,6 +5871,11 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                         // A widget that accepts from a host-command
                         // keypress submits its buffer as ordinary input.
                         flush_repl_output();
+                        let mark = line_editor
+                            .current_selection()
+                            .map(|(start, _)| start as std::os::raw::c_int);
+                        crate::readline_live::finish_accepted(&buffer, mark);
+                        line_editor.run_edit_commands(&[EditCommand::Clear]);
                         let _ = shell.borrow_mut().execute_interactive_line(buffer.trim());
                         flush_repl_output();
                         // niubash R1: the widget's line can carry a top-level
@@ -5856,8 +5897,12 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 let mut line = buffer.trim_end_matches(['\r', '\n']).to_string();
                 // niubash#775: GNU keeps the accepted line in rl_line_buffer
                 // while the command runs, so a plugin builtin invoked as an
-                // ordinary command observes the line the user submitted.
-                crate::readline_live::finish_accepted(&line);
+                // ordinary command observes the line the user submitted.  A
+                // live selection anchor survives as `rl_mark`.
+                let mark = line_editor
+                    .current_selection()
+                    .map(|(start, _)| start as std::os::raw::c_int);
+                crate::readline_live::finish_accepted(&line, mark);
                 if pending.is_empty() {
                     // Older reedline releases delivered ExecuteHostCommand
                     // as Success; keep the sentinel check on the submitted
@@ -5974,7 +6019,10 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 }
                 continue;
             }
-            Ok(_) => continue,
+            Ok(_) => {
+                crate::readline_live::finish_abandoned();
+                continue;
+            }
             Err(e) => {
                 crate::readline_live::finish_abandoned();
                 eprintln!("niubash: line editor error: {}", e);

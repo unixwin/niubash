@@ -2789,8 +2789,28 @@ impl Shell {
         // through the gated bind surface, already converted to
         // niu-owned mirror types (PLAN row 11, M-3).
         let (entries, generation) = crate::bind_surface::load_engine_bindings(self.executor());
+        let removals = crate::bind_surface::load_engine_bind_removals(self.executor());
         self.engine_bindings = entries;
         self.engine_bind_generation = generation;
+        // niubash#775: the same engine bindings are the host keymap half of
+        // the in-process readline ABI.  Mirroring them into the exported
+        // `emacs_standard_keymap` / vi keymaps is what lets a loadable
+        // builtin's `rl_function_of_keyseq` see a host `bind` / `bind -x` /
+        // macro (and a `bind -r`, through the engine's tombstones).
+        crate::readline_live::sync_host_keymap(&self.engine_bindings, &removals);
+    }
+
+    /// Route one macro a plugin bound with `rl_macro_bind` into the engine's
+    /// readline registry (the host macro/chord data plane).  The next editor
+    /// build installs it through the ordinary engine `bind` path and the
+    /// host mirror copies it back into the ABI keymap.
+    pub fn register_macro_binding(&mut self, keyseq: &str, text: &str, keymap: &str) -> bool {
+        crate::bind_surface::register_engine_macro(
+            self.executor_mut(),
+            keyseq.to_string(),
+            text.to_string(),
+            Some(keymap.to_string()),
+        )
     }
 
     /// Whether the engine's bind registry has moved since the
