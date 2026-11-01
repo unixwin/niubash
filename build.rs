@@ -2,8 +2,100 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Checked-in inventory of the ruline `readline-abi` C surface that `niu`
+/// must publish from its executable (niubash#775, ruline#8).
+///
+/// One entry per line, `F <name>` for a function or `D <name>` for a data
+/// symbol (`rl_line_buffer`, `rl_point`, history globals, keymaps). Generated
+/// from the built ruline `libreadline` with `nm -D --defined-only`; see
+/// `scripts/gen-readline-abi-exports.sh`. `scripts/check-readline-abi-exports.sh`
+/// and `tests/readline_abi_exports.rs` audit the built binary against it.
+const READLINE_ABI_EXPORTS: &str = "scripts/readline-abi-exports.txt";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbiKind {
+    Function,
+    Data,
+}
+
+struct AbiExport {
+    kind: AbiKind,
+    name: String,
+}
+
+/// Parse [`READLINE_ABI_EXPORTS`]. Comments (`# ...`) and blank lines are
+/// ignored. A malformed or duplicated entry is a hard error: silently
+/// skipping one would leave a symbol neither anchored nor exported, which is
+/// exactly the failure this file exists to prevent.
+fn readline_abi_exports() -> Vec<AbiExport> {
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"),
+    );
+    let path = manifest_dir.join(READLINE_ABI_EXPORTS);
+    println!("cargo:rerun-if-changed={}", path.display());
+
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let mut exports = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line_number = index + 1;
+        let mut fields = line.split_whitespace();
+        let kind = match fields.next() {
+            Some("F") => AbiKind::Function,
+            Some("D") => AbiKind::Data,
+            other => panic!(
+                "{}:{line_number}: expected `F` or `D`, found {other:?}",
+                path.display()
+            ),
+        };
+        let name = fields.next().unwrap_or_else(|| {
+            panic!(
+                "{}:{line_number}: missing symbol name after the kind",
+                path.display()
+            )
+        });
+        if fields.next().is_some() {
+            panic!(
+                "{}:{line_number}: expected two fields (`kind name`)",
+                path.display()
+            );
+        }
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            panic!(
+                "{}:{line_number}: {name:?} is not a C identifier",
+                path.display()
+            );
+        }
+        if !seen.insert(name.to_string()) {
+            panic!(
+                "{}:{line_number}: duplicate entry for {name}",
+                path.display()
+            );
+        }
+        exports.push(AbiExport {
+            kind,
+            name: name.to_string(),
+        });
+    }
+
+    assert!(!exports.is_empty(), "{}: no exports listed", path.display());
+    exports
+}
+
 fn main() {
     emit_rubash_revision();
+    export_readline_abi();
 
     // Gate on the TARGET OS, not the host: the .res only links into PE
     // binaries. `#[cfg(windows)]` here would describe the host and make
@@ -15,6 +107,126 @@ fn main() {
     // skipping the icon.
     if std::env::var_os("CARGO_CFG_TARGET_OS").as_deref() == Some(std::ffi::OsStr::new("windows")) {
         embed_windows_icon();
+    }
+}
+
+/// Publish the in-process readline symbols from the `niu` executable
+/// (niubash#775, ruline#8).
+///
+/// A bash loadable builtin (`enable -f ./mybuiltin.so mybuiltin`) is a shared
+/// object `dlopen`ed into niu. Its undefined `rl_*` / `history_*` references
+/// are resolved by the dynamic loader against the *global* symbol table of the
+/// images already in the process; a normal executable only exposes symbols for
+/// its own runtime needs, so the ABI would not be found. Each platform needs a
+/// different switch for that, and no single flag works everywhere:
+///
+/// * **ELF (Linux, Android/Termux, *BSD, musl)** — `-rdynamic` (gcc/clang
+///   driver spelling of `--export-dynamic`) adds every global symbol to the
+///   dynamic symbol table. Termux's clang/lld accepts the driver flag and
+///   expands it to `--export-dynamic`, verified by the export check in
+///   `scripts/check-readline-abi-exports.sh`.
+/// * **Mach-O (macOS)** — `-rdynamic` is not an ld64 option; the documented
+///   equivalent is `-export_dynamic` ("preserves all global symbols in main
+///   executables during LTO ... used when a main executable may load a plug-in
+///   which requires certain symbols from the main executable", ld(1)).
+/// * **Windows MSVC** — link.exe has no "export everything": an executable
+///   exports only what a module-definition file or `__declspec(dllexport)`
+///   names. `build.rs` writes a `.def` listing the ABI symbols (the C ABI
+///   needs a curated list anyway — `--export-all-symbols` would publish every
+///   Rust internal too) and passes it with `/DEF:`.
+/// * **Windows MinGW/LLVM-GNU** — GNU ld/lld does support
+///   `--export-all-symbols`, which is what MinGW projects use to expose a
+///   host executable to plugins.
+///
+/// A second problem is retention, not just visibility: `#[no_mangle]` puts the
+/// definition in a static-library member, but a member is only extracted when
+/// something references it, and the ABI is reached at runtime by `dlsym`, not
+/// by Rust code. `-Wl,--undefined=<sym>` / `-Wl,-u,_<sym>` / `/INCLUDE:<sym>`
+/// enters every name from [`READLINE_ABI_EXPORTS`] as an undefined reference,
+/// so the rlib member defining it is linked in even with thin LTO and
+/// `--gc-sections` (ruline's definitions carry `#[no_mangle]`; anchoring is
+/// what makes them survive a "nobody calls this from Rust" build).
+///
+/// Data and function symbols are tracked separately because MSVC's `.def`
+/// needs the `DATA` attribute for globals (`rl_line_buffer`, `rl_point`,
+/// `rl_readline_version`, history/keymap globals) and rejects it for code.
+///
+/// Scoped to the `niu` binary: the `bash` binary is a forwarding shim that
+/// re-execs niu and never hosts the editor.
+fn export_readline_abi() {
+    let exports = readline_abi_exports();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let static_crt = std::env::var("CARGO_CFG_TARGET_FEATURE")
+        .unwrap_or_default()
+        .split(',')
+        .any(|feature| feature == "crt-static");
+
+    if target_os == "windows" {
+        if target_env == "msvc" {
+            let out_dir = PathBuf::from(
+                std::env::var_os("OUT_DIR").expect("cargo always sets OUT_DIR for build scripts"),
+            );
+            let def_file = out_dir.join("niubash-readline-abi.def");
+            // No `LIBRARY niu` line: that names a DLL image, while this
+            // .def is the export list of an executable. Only EXPORTS is
+            // meaningful for link.exe here.
+            // ASCII only: link.exe reads the .def with the host code page.
+            let mut def = String::from(
+                "; Generated by build.rs -- exports the in-process readline C ABI\n\
+                 ; (niubash#775, ruline#8). Generated from\n\
+                 ; scripts/readline-abi-exports.txt; do not edit by hand.\n\
+                 EXPORTS\n",
+            );
+            for export in &exports {
+                def.push_str("    ");
+                def.push_str(&export.name);
+                if export.kind == AbiKind::Data {
+                    // A globals export must say `DATA`; link.exe treats a
+                    // bare name as code and the plugin's dlsym read fails.
+                    def.push_str(" DATA");
+                }
+                def.push('\n');
+            }
+            fs::write(&def_file, def).expect("write readline ABI module-definition file");
+            println!("cargo:rustc-link-arg-bin=niu=/DEF:{}", def_file.display());
+            for export in &exports {
+                println!("cargo:rustc-link-arg-bin=niu=/INCLUDE:{}", export.name);
+            }
+        } else {
+            // GNU ld/lld's host-to-plugin switch. The anchors below are still
+            // needed for retention: an exported name that never got linked is
+            // not exported.
+            println!("cargo:rustc-link-arg-bin=niu=-Wl,--export-all-symbols");
+            for export in &exports {
+                println!(
+                    "cargo:rustc-link-arg-bin=niu=-Wl,--undefined={}",
+                    export.name
+                );
+            }
+        }
+    } else if static_crt {
+        // Fully static ELF (the default for `*-unknown-linux-musl`) has no
+        // dynamic symbol table and cannot `dlopen` shared objects at all, so
+        // there is no plugin host to export to. Passing --export-dynamic
+        // there ranges from a no-op warning to a GNU ld error depending on
+        // the linker; skip the whole export setup instead. The standalone
+        // `libreadline.so.8` path (ruline readline-abi) covers embedders
+        // that cannot use a static niu.
+    } else if target_os == "macos" || target_os == "ios" {
+        println!("cargo:rustc-link-arg-bin=niu=-Wl,-export_dynamic");
+        for export in &exports {
+            // Mach-O C symbols carry a leading underscore.
+            println!("cargo:rustc-link-arg-bin=niu=-Wl,-u,_{}", export.name);
+        }
+    } else {
+        println!("cargo:rustc-link-arg-bin=niu=-rdynamic");
+        for export in &exports {
+            println!(
+                "cargo:rustc-link-arg-bin=niu=-Wl,--undefined={}",
+                export.name
+            );
+        }
     }
 }
 

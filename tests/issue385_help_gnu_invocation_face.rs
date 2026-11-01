@@ -98,6 +98,27 @@ fn help_opens_with_the_complete_gnu_invocation_face() {
     }
 }
 
+/// The native debugger frontends are advertised on the product face: the
+/// interactive CLI, the DAP server, the spelled-out editor form, and GNU
+/// bashdb parity. The lines are deliberately not in the GNU long-option
+/// column (`--dap` is a native citizen, not a shell.c option), so the
+/// long-option manifest count above still matches the engine parser.
+#[test]
+fn help_advertises_the_native_debugger_frontends() {
+    let help = niu_help();
+    for marker in [
+        "niu --debug <script> [args]",
+        "niu --dap <script> [args]",
+        "niu --debug --dap <script>",
+        "niu --debugger <script>",
+    ] {
+        assert!(
+            help.contains(marker),
+            "niu --help lost the debugger line `{marker}`:\n{help}"
+        );
+    }
+}
+
 /// The face leads the help: the GNU long-options header comes before the
 /// product Options block, and the usage pair comes first of all.
 #[test]

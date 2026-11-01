@@ -133,17 +133,47 @@ itself and is not a user configuration entry point.
 
 ## Script Debugging Flags
 
-Two startup flags wire debugger support. Neither affects `-c` automation
-unless you pass them explicitly.
+Niubash embeds the native script debugger: one debug session, two
+frontends. `--debug` drives it from an interactive terminal and `--dap`
+speaks the Debug Adapter Protocol for editors. Both imply `extdebug`
+internally and never change your observable `shopt extdebug` setting.
 
-### `--debug` — arm the DEBUG-trap substrate (niu extension)
+### `--debug <script>` — interactive debugger
 
-`niu --debug script.sh` turns `extdebug` on from the first command: DEBUG
-traps fire at every GNU stop site with `BASH_ARGC`/`BASH_ARGV` populated,
-so a trap-based debugger or profiler can install itself without editing
-the script. GNU bash accepts the same flag as a no-op (its internal
-`debugging` variable is write-only — nothing in bash reads it), so scripts
-that pass `--debug` keep running unchanged under GNU bash too.
+`niu --debug script.sh [args…]` starts the session stopped at the entry
+stop, before the first command runs. Commands are read from the controlling
+terminal, never from the debuggee's stdin; the debuggee keeps its own stdio,
+and the debugger prompt is `(niu-dbg)`. The M1 command set includes
+`break`/`tbreak`/`enable`/`disable`/`delete`, `step`/`step+`/`step-`/`next`/
+`finish`, `where`/`frame`/`up`/`down`, `list`, `print`/`eval`, `set var`,
+`info locals|variables|args|functions|files|breakpoints`, `exceptions`, and
+`continue`/`quit`/`kill`.
+
+Batch driving is the `source <file>` command inside the session, not a piped
+debugger: when no terminal device opens and stdin is not itself a terminal,
+the frontend refuses with a clear diagnostic and exit status 2.
+
+`--debug` with `-c`, `-s`, or interactive `-i` keeps the legacy behavior:
+it arms `extdebug` (DEBUG traps fire at every GNU stop site with
+`BASH_ARGC`/`BASH_ARGV` populated) without opening the debugger frontend.
+GNU bash accepts the same flag as a no-op, so scripts that pass `--debug`
+keep running unchanged under GNU bash too.
+
+### `--dap <script>` — editor frontend
+
+`niu --dap script.sh [args…]` serves DAP on stdio (Content-Length framed
+JSON). `niu --dap` without a script is a pure server; the client's `launch`
+request then names the program. `niu --debug --dap script.sh` is the
+spelled-out editor launch form used by the bundled zero-JS VS Code
+extension (`editors/vscode/`).
+
+The adapter covers `initialize`, `launch`/`attach` (launch-equivalent),
+`setBreakpoints` (line, function, conditional), `setExceptionBreakpoints`
+(`err-trap`, `set -e`, `parse-error`), `configurationDone`, `threads`,
+`stackTrace`, `scopes`, `variables`, `setVariable`, `evaluate`
+(hover/watch/repl), `next`/`stepIn`/`stepOut`, `continue`, `pause`,
+`terminate`, and `disconnect`, with `initialized`, `stopped`, `terminated`,
+`exited`, `output`, `thread`, and `breakpoint` events.
 
 ### `--debugger` — run bashdb (GNU parity)
 
@@ -164,40 +194,57 @@ needed environment variables directly to `niu -c` or the script process, or
 use `NIU_ENV` / `BASH_ENV` to source a dedicated one-shot init file (see
 [One-shot init file](#one-shot-init-file-niu_env--bash_env)).
 
-## Completion Styles
+## Completion
 
-TAB completion comes in five shapes. The default since 1.4.0 is `column`
-(the GNU listing look, without GNU's two-TAB listing dance); before
-that it was `ide`. The literal GNU readline behavior is the opt-in `gnu`
-style below. Pick one with `export NIU_COMPLETION_STYLE=<name>` in
-`~/.niubashrc` or the environment (see
+TAB completion has two independent axes: **interaction** (what TAB does to
+the line) and **presentation** (how candidates are painted). The defaults are
+`select` + `column`.
+
+### Interaction
+
+`NIU_COMPLETION_INTERACTION` picks the TAB behavior:
+
+- `select` (default) — zsh menu-select. TAB #1 splices the first candidate
+  into the line and highlights it; TAB/Shift-TAB cycle; Up/Down move one row;
+  Left/Right move one column with zsh edge wrap; Enter accepts and runs; Esc
+  rolls back. A lone candidate completes outright, and bare TAB on a blank
+  line inserts a four-space indent.
+- `insert` — the two-step common-prefix contract: TAB #1 completes the common
+  prefix and stops, TAB #2 opens the menu. Enter commits the highlighted
+  candidate without running it; Esc keeps the inserted text.
+- `cycle` — TAB #1 inserts the first candidate and opens the grid; further
+  TAB/Shift-TAB cycle. Enter runs the candidate; Esc restores the line.
+
+See [TAB Completion & Ghost Text](completion.md) for the key-by-key contract.
+
+### Presentation
+
+`NIU_COMPLETION_STYLE` picks the shape. Styles are presentation-only; they do
+not change the interaction above, except `gnu`, whose literal readline
+behavior is intentionally inert to the interaction axis. Pick one with
+`export NIU_COMPLETION_STYLE=<name>` in `~/.niubashrc` or the environment (see
 [Configuration Sources & Precedence](configuration.md)):
 
-- `gnu` — GNU readline: TAB completes the longest common prefix
-  (a lone candidate completes outright); pressing TAB again on an unchanged
-  line prints the candidates as width-adaptive columns next to the prompt
-  and repaints it. The list is printed output, not a menu: nothing is
-  selected, arrow keys stay on history, no popup.
+- `column` (default) — multi-column grid. When any candidate carries a
+  description (e.g. flag completions such as `git checkout -<TAB>`), the
+  whole list is shown as a single vertical column with each description
+  beside its value.
+- `gnu` (opt-in) — literal GNU readline: TAB completes the longest common
+  prefix (a lone candidate completes outright); TAB again on an unchanged
+  line prints the candidates as width-adaptive columns and repaints the
+  prompt. The list is printed output, not a menu: nothing is selected, arrow
+  keys stay on history, no popup.
 - `ide` — multi-column popup with descriptions, VS Code style. Column count
-  adapts to the terminal width; the description of the selected candidate
-  renders beside it.
-- `column` (default) — plain multi-column grid (like zsh `compinit`),
-  drawn by reedline's `ColumnarMenu`. The menu recomputes its layout on
-  every draw, and the presentation follows the candidate list: when any
-  candidate in the list carries a description (e.g. flag completions
-  such as `git checkout -<TAB>`), the whole list is presented as a
-  single vertical column, each description beside its value. That
-  single-column presentation is by design (owner ruling 2026-10-26):
-  it keeps the descriptions readable instead of squeezing them into
-  grid cells. When no candidate carries a description, the list is
-  presented as a grid of as many columns as the terminal width fits,
-  down to one column when the width fits only one.
-- `list` — vertical list with descriptions (like fish).
-- `inline` — first match inserted directly, Tab cycles (like bash
-  `menu-complete`).
+  adapts to the terminal width; descriptions render beside their candidates.
+- `list` — vertical list with descriptions (fish-style).
+- `inline` — the candidate stays in the line and TAB cycles through the set
+  in place (like bash `menu-complete`).
 
 `show-all-if-ambiguous` / `show-all-if-unmodified`-style readline variables
-are not implemented yet; the double-TAB listing is the fixed shape.
+are not implemented. In `select`/`cycle` the menu appears on TAB #1; in
+`insert` the second TAB is the listing. `completion.page_size` and
+`completion.behavior` are internal implementation settings, not user-facing
+options — there is no environment variable or config key for either.
 
 Flag completions (`ls --a<Tab>` → `--all` with its description) come from the
 bundle's generated completion assets and work in every style; `ide` and

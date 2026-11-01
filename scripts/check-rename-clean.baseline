@@ -43,6 +43,9 @@ scripts/audit/l22-migration/migrate.sh	export WINUXSH_LEGACY_MARKER=1
 scripts/audit/wt82-L02/conpty_lib.py	           "WINUXSH_ROOT", "NIU_THEME", "OSH_THEME", "BASH_IT_THEME",
 scripts/audit/wt82-L02/conpty_lib.py	        "compat_rc_exists": (home / ".winuxshrc").is_file(),
 #
+# ── 活代码注释 · 历史事实记录 (live code comments recording demolished bridges, verbatim) ──
+crates/niubash-runtime/src/shell.rs	/// variable (rubash 4a4e0ff9 demolished the exported `WINUXSH_ROOT`
+#
 # ── 历史记录 · CHANGELOG (release history, verbatim) ──
 CHANGELOG.md	- **MSIX Store 版静默降级**（#504/#505）：旧 NSIS 安装残留的 `WINUXCMD_PATH`/`WINUXSH_ROOT` 环境变量会让 packaged 进程解析到旧安装树；package identity 下现按外来安装忽略。
 #

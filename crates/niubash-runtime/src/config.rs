@@ -94,9 +94,13 @@ pub struct EditorConfig {
 /// History configuration. There is deliberately no per-session sharing
 /// mode anymore (niubash#572): the retired `NIU_HISTORY_MODE`
 /// shared/session/private switch was a GNU-less invention whose documented
-/// behaviors did not match the implementation. History now has exactly one
-/// semantics, GNU's: one live file every session appends to and refreshes
-/// from, with `history -a/-n/-r` as the explicit sync verbs.
+/// behaviors did not match the implementation. History has exactly one
+/// semantics, GNU's (niubash#773): a session reads its history file once
+/// at startup and works from its own in-memory list; other sessions'
+/// lines reach it only through the explicit `history -n`/`-r` verbs,
+/// and its own lines reach the file at `history -a`/`-w` or at exit
+/// (bashhist.c: load_history, maybe_append_history,
+/// maybe_save_shell_history).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryConfig {
     pub path: Option<PathBuf>,
@@ -171,18 +175,24 @@ impl CompletionStyle {
 /// display (niubash#631): the *interaction* axis, orthogonal to
 /// [`CompletionStyle`], which is the *presentation* axis.
 ///
-/// The default is [`CompletionInteraction::Cycle`] (owner ruling
-/// 2026-10-28): TAB puts the first candidate into the line and further
-/// TABs cycle through the candidate set; Enter accepts the candidate in
-/// the line and runs the command; Esc rolls the line back.
+/// The default is [`CompletionInteraction::Select`] (owner ruling
+/// niubash#742, superseding the 2026-10-28 cycle pick): TAB #1 puts
+/// the first candidate into the line and opens the candidate grid
+/// with it highlighted (niubash#778); later TABs / Shift-TABs and
+/// Down / Up cycle the highlight; Enter accepts the candidate in the
+/// line and runs the command; Esc rolls the line back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionInteraction {
     /// zsh menu-completion form: TAB cycles candidates into the line.
-    #[default]
     Cycle,
     /// TAB completes the common prefix / opens the presentation menu,
     /// Enter confirms the pick, and Esc keeps what was inserted.
     Insert,
+    /// zsh menu-select form (niubash#742): TAB #1 splices the first
+    /// candidate and highlights it in the grid, later TABs / Shift-TABs
+    /// and Down / Up cycle down the set; Esc rolls the line back.
+    #[default]
+    Select,
 }
 
 impl CompletionInteraction {
@@ -190,6 +200,7 @@ impl CompletionInteraction {
         match value.trim().to_ascii_lowercase().as_str() {
             "cycle" => Some(Self::Cycle),
             "insert" => Some(Self::Insert),
+            "select" => Some(Self::Select),
             _ => None,
         }
     }
@@ -198,6 +209,7 @@ impl CompletionInteraction {
         match self {
             Self::Cycle => "cycle",
             Self::Insert => "insert",
+            Self::Select => "select",
         }
     }
 }
@@ -556,13 +568,15 @@ pub fn resolve_completion_style() -> (CompletionStyle, SettingSource) {
 }
 
 /// Resolve the effective TAB completion interaction:
-/// `NIU_COMPLETION_INTERACTION` env > built-in default (cycle).
+/// `NIU_COMPLETION_INTERACTION` env > built-in default (select).
 pub fn resolve_completion_interaction() -> (CompletionInteraction, SettingSource) {
     if let Some(value) = env_value(COMPLETION_INTERACTION_ENV) {
         match CompletionInteraction::parse(&value) {
             Some(interaction) => return (interaction, SettingSource::Env),
             None => {
-                eprintln!("niubash: {COMPLETION_INTERACTION_ENV} must be one of: insert, cycle")
+                eprintln!(
+                    "niubash: {COMPLETION_INTERACTION_ENV} must be one of: insert, cycle, select"
+                )
             }
         }
     }
@@ -869,38 +883,51 @@ pub fn remove_primary_rc_block(marker: &str) -> anyhow::Result<(PathBuf, bool)> 
     Ok((path, true))
 }
 
-/// How `niu setup --rc-policy` persisted (or could not persist) the pick.
+/// How `niu setup --rc-policy` answers a pick (niubash#359): the command
+/// never writes the user's rc. The rc is user-owned shell code, so a pick
+/// is delivered as an instruction the user applies by hand — the shape the
+/// no-rc case always had, now universal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RcPolicyWrite {
-    /// The primary rc exists and now carries the policy block.
-    Written(PathBuf),
-    /// No primary rc exists, so writing one would suppress the very
-    /// fallback being selected. The caller prints this export line instead.
+pub enum RcPolicyAdvice {
+    /// Apply this `export NIU_RC_POLICY=...` line yourself (in the rc or
+    /// in the terminal environment). Nothing was written anywhere.
     Instruction(String),
-    /// The default policy needs no persistence.
+    /// An earlier niu release persisted a pick as a marked block inside
+    /// this rc. The block was left byte-identical — niu no longer edits
+    /// the rc, so changing or revoking the pick means editing those
+    /// marked lines by hand. `replace_with` is the export line the
+    /// requested pick needs (`None` for the default: delete the block).
+    StaleBlock {
+        path: PathBuf,
+        replace_with: Option<String>,
+    },
+    /// The default policy and no stale block: nothing to do anywhere.
     Default,
 }
 
-/// Persist an explicit `niu setup --rc-policy` pick into the primary rc.
-/// The policy itself is read from the environment at startup, so the line
-/// is an `export NIU_RC_POLICY=...` (a child session inherits it; a fresh
-/// terminal needs the variable exported by the environment).
-pub fn persist_rc_policy(policy: RcPolicy) -> anyhow::Result<RcPolicyWrite> {
+/// Answer an explicit `niu setup --rc-policy` pick WITHOUT touching the
+/// primary rc (niubash#359 read-only contract). The policy is read from
+/// the `NIU_RC_POLICY` environment variable at startup, so persistence is
+/// the user's own export line in the rc (or the environment) — the
+/// product only prints it. An rc that already carries an earlier release's
+/// marked policy block is reported, never edited or removed.
+pub fn advise_rc_policy(policy: RcPolicy) -> RcPolicyAdvice {
     const MARKER: &str = "niu setup rc-policy";
+    let path = primary_rc_path();
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if block_bounds(&existing, MARKER).is_some() {
+            return RcPolicyAdvice::StaleBlock {
+                path,
+                replace_with: (policy != RcPolicy::default())
+                    .then(|| rc_policy_export_line(policy)),
+            };
+        }
+    }
     if policy == RcPolicy::default() {
-        remove_primary_rc_block(MARKER)?;
-        return Ok(RcPolicyWrite::Default);
+        RcPolicyAdvice::Default
+    } else {
+        RcPolicyAdvice::Instruction(rc_policy_export_line(policy))
     }
-    if !primary_rc_path().exists() {
-        return Ok(RcPolicyWrite::Instruction(rc_policy_export_line(policy)));
-    }
-    let lines = vec![rc_policy_export_line(policy)];
-    let (path, _) = upsert_primary_rc_block(
-        MARKER,
-        "Personal-rc policy selected by `niu setup --rc-policy`.",
-        &lines,
-    )?;
-    Ok(RcPolicyWrite::Written(path))
 }
 
 /// Result of a one-time legacy migration.
@@ -1258,7 +1285,7 @@ mod tests {
     fn menu_config_default_completion_style() {
         let config = MenuConfig::default();
         assert_eq!(config.completion_style, CompletionStyle::Column);
-        assert_eq!(config.completion_interaction, CompletionInteraction::Cycle);
+        assert_eq!(config.completion_interaction, CompletionInteraction::Select);
     }
 
     #[test]
@@ -1294,7 +1321,7 @@ mod tests {
         std::env::remove_var(COMPLETION_INTERACTION_ENV);
         assert_eq!(
             resolve_completion_interaction(),
-            (CompletionInteraction::Cycle, SettingSource::Default)
+            (CompletionInteraction::Select, SettingSource::Default)
         );
         std::env::set_var(COMPLETION_INTERACTION_ENV, "insert");
         assert_eq!(
@@ -1304,7 +1331,7 @@ mod tests {
         std::env::set_var(COMPLETION_INTERACTION_ENV, "spiral");
         assert_eq!(
             resolve_completion_interaction(),
-            (CompletionInteraction::Cycle, SettingSource::Default)
+            (CompletionInteraction::Select, SettingSource::Default)
         );
     }
 
@@ -1599,7 +1626,7 @@ unbind = ['"\C-a"']
     }
 
     #[test]
-    fn persist_rc_policy_writes_marker_and_revokes_it() {
+    fn advise_rc_policy_never_writes_the_rc() {
         let _lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1608,39 +1635,63 @@ unbind = ['"\C-a"']
         let _restore = EnvRestore::capture(&["HOME"]);
         std::env::set_var("HOME", &home);
         // No primary rc: selecting fallback must not create one (that
-        // would suppress the fallback it selects).
+        // would suppress the fallback it selects) — the pick is an
+        // instruction, as it always was for this case.
         assert_eq!(
-            persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
-            RcPolicyWrite::Instruction("export NIU_RC_POLICY=bashrc-fallback".to_string())
+            advise_rc_policy(RcPolicy::BashrcFallback),
+            RcPolicyAdvice::Instruction("export NIU_RC_POLICY=bashrc-fallback".to_string())
         );
         assert!(!home.join(".niubashrc").exists());
 
+        // An existing rc is answered with the same instruction and stays
+        // byte-identical (niubash#359: setup never edits the user rc).
         std::fs::write(home.join(".niubashrc"), "# mine\n").unwrap();
         assert_eq!(
-            persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
-            RcPolicyWrite::Written(crate::path_utils::normalize_existing_host_path(
-                home.join(".niubashrc")
-            ))
+            advise_rc_policy(RcPolicy::BashrcFallback),
+            RcPolicyAdvice::Instruction("export NIU_RC_POLICY=bashrc-fallback".to_string())
         );
-        let rc = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
-        assert!(rc.starts_with("# mine\n"), "{rc}");
-        assert!(rc.contains("export NIU_RC_POLICY=bashrc-fallback"), "{rc}");
         assert_eq!(
-            persist_rc_policy(RcPolicy::BashrcFallback).unwrap(),
-            RcPolicyWrite::Written(crate::path_utils::normalize_existing_host_path(
-                home.join(".niubashrc")
-            ))
+            std::fs::read_to_string(home.join(".niubashrc")).unwrap(),
+            "# mine\n"
         );
-        let rc_again = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
-        assert_eq!(rc, rc_again, "the same pick is idempotent");
+        assert_eq!(
+            advise_rc_policy(RcPolicy::PrimaryOnly),
+            RcPolicyAdvice::Default
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(".niubashrc")).unwrap(),
+            "# mine\n"
+        );
 
+        // An rc carrying an earlier release's marked policy block is
+        // reported as stale and left byte-identical in BOTH directions:
+        // niu no longer edits or removes the block; the user does.
+        let (path, _) = upsert_primary_rc_block(
+            "niu setup rc-policy",
+            "Personal-rc policy selected by `niu setup --rc-policy`.",
+            &["export NIU_RC_POLICY=bashrc-fallback".to_string()],
+        )
+        .unwrap();
+        let with_block = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
         assert_eq!(
-            persist_rc_policy(RcPolicy::PrimaryOnly).unwrap(),
-            RcPolicyWrite::Default
+            advise_rc_policy(RcPolicy::BashrcFallback),
+            RcPolicyAdvice::StaleBlock {
+                path: path.clone(),
+                replace_with: Some("export NIU_RC_POLICY=bashrc-fallback".to_string()),
+            }
         );
-        let rc = std::fs::read_to_string(home.join(".niubashrc")).unwrap();
-        assert!(!rc.contains("NIU_RC_POLICY"), "{rc}");
-        assert!(rc.contains("# mine"), "{rc}");
+        assert_eq!(
+            advise_rc_policy(RcPolicy::PrimaryOnly),
+            RcPolicyAdvice::StaleBlock {
+                path,
+                replace_with: None,
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(".niubashrc")).unwrap(),
+            with_block,
+            "the stale block stays byte-identical — advice never writes"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

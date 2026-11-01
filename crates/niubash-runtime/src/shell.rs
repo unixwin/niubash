@@ -495,6 +495,7 @@ impl Shell {
         };
         crate::startup_trace::tick("winuxcmd selected");
         let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
+        publish_process_shell_root(shell_root.as_deref());
         crate::startup_trace::tick("shell root prepared");
 
         // 3. Build rubash Executor after host path selection.
@@ -2788,8 +2789,28 @@ impl Shell {
         // through the gated bind surface, already converted to
         // niu-owned mirror types (PLAN row 11, M-3).
         let (entries, generation) = crate::bind_surface::load_engine_bindings(self.executor());
+        let removals = crate::bind_surface::load_engine_bind_removals(self.executor());
         self.engine_bindings = entries;
         self.engine_bind_generation = generation;
+        // niubash#775: the same engine bindings are the host keymap half of
+        // the in-process readline ABI.  Mirroring them into the exported
+        // `emacs_standard_keymap` / vi keymaps is what lets a loadable
+        // builtin's `rl_function_of_keyseq` see a host `bind` / `bind -x` /
+        // macro (and a `bind -r`, through the engine's tombstones).
+        crate::readline_live::sync_host_keymap(&self.engine_bindings, &removals);
+    }
+
+    /// Route one macro a plugin bound with `rl_macro_bind` into the engine's
+    /// readline registry (the host macro/chord data plane).  The next editor
+    /// build installs it through the ordinary engine `bind` path and the
+    /// host mirror copies it back into the ABI keymap.
+    pub fn register_macro_binding(&mut self, keyseq: &str, text: &str, keymap: &str) -> bool {
+        crate::bind_surface::register_engine_macro(
+            self.executor_mut(),
+            keyseq.to_string(),
+            text.to_string(),
+            Some(keymap.to_string()),
+        )
     }
 
     /// Whether the engine's bind registry has moved since the
@@ -2831,12 +2852,15 @@ impl Shell {
             return WidgetOutcome::default();
         };
         let command = command.clone();
-        let safe_cursor = buffer
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .filter(|offset| *offset <= cursor_byte)
-            .max()
-            .unwrap_or(0);
+        // GNU reports READLINE_POINT as a CHARACTER offset (bashline.c:4540
+        // readline_get_char_offset). Clamp to the buffer end and walk back to
+        // a UTF-8 boundary; `char_indices().max()` has no entry at len(), so
+        // the old form reported len-1 at end-of-line and moved the editor
+        // cursor back one column after every bind -x command.
+        let mut safe_cursor = cursor_byte.min(buffer.len());
+        while safe_cursor > 0 && !buffer.is_char_boundary(safe_cursor) {
+            safe_cursor -= 1;
+        }
         let old_point = buffer[..safe_cursor].chars().count();
         let outcome = self
             .executor_mut()
@@ -2865,6 +2889,144 @@ impl Shell {
     /// True when the named widget function exists in the shell engine.
     pub fn widget_function_available(&self, name: &str) -> bool {
         self.executor().has_function(name)
+    }
+
+    /// Re-read the keybinding files — the host face of GNU
+    /// `re-read-init-file` (lib/readline/bind.c:1025
+    /// `rl_re_read_init_file` re-reads `$INPUTRC` / `~/.inputrc`).
+    /// GNU's inputrc leg runs first through the engine's `bind -f`;
+    /// niu then re-runs the startup rc's top-level `bind` lines because
+    /// its bindings also live in `~/.niubashrc` (niubash#765). The
+    /// lines run against the live engine, so edited bindings land in
+    /// the bind registry; the REPL's between-prompts staleness rebuild
+    /// re-mirrors them into the editor before the next prompt. The rest
+    /// of the rc (aliases, exports, arbitrary commands) is startup
+    /// state, not keybinding state, and does not re-run. Returns how
+    /// many rc bind lines ran (the inputrc leg is reported by `bind`).
+    pub fn reread_init_file_bindings(&mut self) -> usize {
+        // GNU rl_re_read_init_file re-reads the inputrc first
+        // (bind.c:1025 -> rl_read_init_file(NULL)); that is $INPUTRC,
+        // else ~/.inputrc. Niu also re-runs the startup rc's top-level
+        // `bind` lines because its bindings live there. The inputrc
+        // leg goes through the engine's own `bind -f`, so its parser
+        // and diagnostics stay the single source of truth.
+        let inputrc = self
+            .executor()
+            .get_env("INPUTRC")
+            .map(str::to_string)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.home_dir.join(".inputrc"));
+        if inputrc.is_file() {
+            let quoted = format!("'{}'", inputrc.display().to_string().replace('\'', "'\\''"));
+            let _ = self.execute_line(&format!("bind -f {quoted}"));
+        }
+
+        let Some(path) = self.startup_rc_path() else {
+            return 0;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return 0;
+        };
+        let mut applied = 0;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.split_whitespace().next() != Some("bind") {
+                continue;
+            }
+            if self.execute_line(trimmed).is_ok() {
+                applied += 1;
+            }
+        }
+        applied
+    }
+
+    /// Expand a line the way GNU `shell-expand-line` does
+    /// (bashline.c:2982 `shell_expand_line`), for the REPL's
+    /// host-command face (niubash#767): history expansion first
+    /// (bashline.c:2989, skipped when the session has histexpand
+    /// off), then alias expansion (bashline.c:3003-3011), then
+    /// `expand_word` + `string_list` against live session state:
+    /// unquoted expansions field-split on IFS and the fields rejoin
+    /// with single spaces (rubash `Session::expand_shell_words`).
+    /// Filename globbing is NOT part of the pipeline — GNU's
+    /// `expand_word`/`expand_string` comment reserves globbing for
+    /// command expansion (subst.c). `history_entries` are the
+    /// interactive history (oldest first) from the editor — the
+    /// engine's own list machinery is off on the REPL path.
+    /// Returns `None` when history expansion errors, where GNU
+    /// fails the command and keeps the line (bashline.c:3058).
+    ///
+    /// One GNU step has no host entry yet and is a documented gap,
+    /// not a silent one: the `$"..."` locale translation
+    /// (expand_string_dollar_quote) is skipped. The explicit-argument
+    /// form (which would suppress command/process substitution) is
+    /// unreachable here: prefix arguments do not travel through the
+    /// host-command channel.
+    pub fn shell_expand_line(&mut self, line: &str, history_entries: &[String]) -> Option<String> {
+        let mut text = line.to_string();
+        if self
+            .session_mut()
+            .options()
+            .get("histexpand")
+            .unwrap_or(true)
+        {
+            let histchars = self.executor().get_env("histchars").map(str::to_owned);
+            let posix = self
+                .executor()
+                .get_env("__RUBASH_POSIX_MODE")
+                .map(|value| value == "1")
+                .unwrap_or(false);
+            text = crate::readline_commands::history_expand_line(
+                &text,
+                history_entries,
+                histchars.as_deref(),
+                posix,
+            )?;
+        }
+        let aliases = self.session().aliases();
+        text = crate::readline_commands::expand_alias_positions(&text, &aliases);
+        // GNU expand_word field-splits unquoted expansions and
+        // string_list rejoins with one space; globbing is not part of
+        // word/string expansion. The engine owns both halves (rubash
+        // Session::expand_shell_words).
+        Some(self.session().expand_shell_words(&text))
+    }
+
+    /// GNU bash `history-expand-line` (bashline.c:2902): run only the
+    /// history-expansion stage of [`Self::shell_expand_line`]
+    /// (`pre_process_line`, bashhist.c:562) and leave aliases and
+    /// words untouched. The `histexpand` shell option gates it, as it
+    /// gates `pre_process_line`; an expansion error returns `None`
+    /// and the line stays as it was.
+    pub fn history_expand_line(
+        &mut self,
+        line: &str,
+        history_entries: &[String],
+    ) -> Option<String> {
+        if !self
+            .session_mut()
+            .options()
+            .get("histexpand")
+            .unwrap_or(true)
+        {
+            return Some(line.to_string());
+        }
+        let histchars = self.executor().get_env("histchars").map(str::to_owned);
+        let posix = self
+            .executor()
+            .get_env("__RUBASH_POSIX_MODE")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        crate::readline_commands::history_expand_line(
+            line,
+            history_entries,
+            histchars.as_deref(),
+            posix,
+        )
     }
 
     /// Load user completion declarations from the `NIU_COMPDEFS` variable
@@ -3533,6 +3695,18 @@ impl Shell {
             .map(|provider| provider.settings())
     }
 
+    /// The provider instance's history state — the session's one
+    /// history list (niubash#773). The editor twin is built over it so
+    /// the builtin faces and line editing read and record the same
+    /// in-memory list, as in GNU. `None` when no provider is
+    /// installed (the editor then loads its own store).
+    pub(crate) fn history_state(&self) -> Option<Arc<Mutex<crate::history::HistoryState>>> {
+        self.history_provider
+            .as_ref()
+            .and_then(|provider| provider.try_borrow().ok())
+            .map(|provider| provider.shared_state())
+    }
+
     /// Refresh the shared HIST* settings cell from the executor's
     /// current state (niubash#646).
     ///
@@ -3549,9 +3723,13 @@ impl Shell {
     /// unset/empty/negative/non-numeric means no limit); histappend is
     /// read from the engine's `__RUBASH_SHOPT_STATE` carrier, the same
     /// read `resync_parse_extglob_gate` performs for extglob.
-    /// HISTTIMEFORMAT is not snapshotted: its arming is decided by
-    /// the engine, which invokes the provider's timestamped faces
-    /// only while the variable exists (see `HistorySettings`).
+    /// HISTTIMEFORMAT's arming for the engine-driven faces is not
+    /// snapshotted: it is decided by the engine, which invokes the
+    /// provider's timestamped faces only while the variable exists.
+    /// The arming bit IS snapshotted (niubash#734) for the two
+    /// host-driven write faces the engine never invokes — the live
+    /// sync and the session-end flush's write path (see
+    /// `HistorySettings`).
     ///
     /// Two live-state faces ride along (niubash#660/#661): the
     /// `history` shell option is snapshotted into the same cell (the
@@ -3562,6 +3740,17 @@ impl Shell {
         let Some(settings) = self.history_settings() else {
             return;
         };
+        // niubash#734: the HISTTIMEFORMAT arming bit. Presence is the
+        // whole predicate — variables.c sv_histtimefmt arms
+        // history_write_timestamps when the variable exists,
+        // set-but-empty included — the same `is_some()` the engine
+        // checks for the faces it drives (rubash job_builtins'
+        // write_ts).
+        let histtimeformat_armed = self
+            .session_mut()
+            .variables()
+            .resolved_value("HISTTIMEFORMAT")
+            .is_some();
         let histcontrol = self
             .session_mut()
             .variables()
@@ -3610,6 +3799,7 @@ impl Shell {
             settings.histfilesize = histfilesize;
             settings.histappend = histappend;
             settings.history_enabled = history_enabled;
+            settings.histtimeformat_armed = histtimeformat_armed;
         }
         self.apply_history_redirect();
     }
@@ -5446,10 +5636,49 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
 
     // /tmp is intentionally absent: it is backed by the real Windows temp
     // directory (unixwin/niubash#94), never by the install tree.
-    for relative in ["bin", "usr/bin", "usr/local/bin", "etc", "var", "dev"] {
+    // dev/shm is provisioned with the tree (niubash#758): scripts use it
+    // as the POSIX shared-memory scratch directory, and on the payload
+    // root it is simply a real directory — the MSYS2/Cygwin arrangement,
+    // where /dev/shm is likewise a plain directory in the install tree.
+    for relative in [
+        "bin",
+        "usr/bin",
+        "usr/local/bin",
+        "etc",
+        "var",
+        "dev",
+        "dev/shm",
+    ] {
         std::fs::create_dir_all(root.join(relative))?;
     }
     Ok(Some(root))
+}
+
+/// Publish the session's shell root to the process environment as
+/// `NIU_ROOT`.
+///
+/// Bundled WinuxCmd applets own the shell-tree spellings (`/usr/bin`,
+/// `/etc`, the bare `/`) and resolve them from their own process
+/// environment (`WinuxCmd src/utils/native_path.cppm`, `shell_ns::root`,
+/// which reads `__RUBASH_SHELL_ROOT`, then `NIU_ROOT`). The engine writes
+/// the configured root only into the session's `__RUBASH_SHELL_ROOT`
+/// variable (rubash 4a4e0ff9 demolished the exported `WINUXSH_ROOT`
+/// bridge), so it never reaches a child; and the MSIX layout was the only
+/// one that published `NIU_ROOT` (niubash#495). An installed layout
+/// therefore derived the root for its own path handling, while children
+/// fell back to WinuxCmd's native dialect — `ls.exe /usr/bin` resolved to
+/// the drive root and failed — even though a foreign child such as `eza`
+/// kept working because the engine translates its arguments. Host-side
+/// readers (syntax highlighting, completion) read the same process
+/// variable, so the export belongs here and not only in the session env.
+fn publish_process_shell_root(root: Option<&Path>) {
+    let Some(root) = root else {
+        return;
+    };
+    if std::env::var_os("NIU_ROOT").is_some_and(|value| !value.is_empty()) {
+        return;
+    }
+    std::env::set_var("NIU_ROOT", root);
 }
 
 fn is_slash_drive_path(value: &str) -> bool {
@@ -5787,14 +6016,13 @@ mod tests {
         shell.history_path = path.clone();
         shell.enter_interactive();
 
-        // The editor twin over the shell's shared cells, gated the
+        // The editor twin over the shell's shared state, gated the
         // way build_line_editor gates the instance it hands reedline.
         use reedline::History as _;
-        let mut editor = crate::history::LiveFileBackedHistory::with_shared_ledger_and_settings(
+        let mut editor = crate::history::LiveFileBackedHistory::with_shared_state(
             shell.history_max_size,
-            shell.history_path.clone(),
+            shell.history_state().unwrap(),
             shell.history_ledger().unwrap(),
-            shell.history_settings().unwrap(),
         );
         editor.set_history_option_gate();
 
@@ -5812,6 +6040,9 @@ mod tests {
             .save(reedline::HistoryItem::from_command_line("after-on"))
             .unwrap();
 
+        // niubash#773: recording is memory-only; the file is written
+        // at the session-end flush.
+        shell.flush_session_history();
         let persisted = std::fs::read_to_string(&path).unwrap();
         assert!(persisted.contains("before-off"), "{persisted:?}");
         assert!(
@@ -5860,10 +6091,11 @@ mod tests {
 
         record_accepted_line(&shell, "after-redirect-marker");
         assert!(
-            std::fs::read_to_string(&b)
+            !std::fs::read_to_string(&b)
                 .unwrap()
                 .contains("after-redirect-marker"),
-            "later saves must land in the new file"
+            "recording is memory-only (niubash#773): the save must not \
+             land in the new file before a write face"
         );
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "seedA\n");
 
@@ -6268,6 +6500,150 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn issue765_reread_init_file_bindings_reruns_only_bind_lines() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-reread-init-file");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            "export NIUBASH_REREAD_MARK=first\nbind '\"\\C-o\": operate-and-get-next'\n",
+        )
+        .unwrap();
+        std::fs::write(home.join(".inputrc"), "\"\\C-t\": transpose-chars\n").unwrap();
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home.clone();
+        // The bind line lands in the registry…
+        assert_eq!(shell.reread_init_file_bindings(), 1);
+        let (entries, _) = crate::bind_surface::load_engine_bindings(shell.executor());
+        assert!(entries.iter().any(|e| e.keyseq == "\\C-o"));
+        // GNU's inputrc leg is re-read too ($INPUTRC/~/.inputrc).
+        assert!(
+            entries.iter().any(|e| e.keyseq == "\\C-t"),
+            "inputrc binding must be re-read: {entries:?}"
+        );
+        // …while the export line is startup state, not bind state,
+        // and does not re-run.
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("NIUBASH_REREAD_MARK")
+                .as_deref(),
+            None
+        );
+        // Editing the rc and re-reading picks the new binding up.
+        std::fs::write(home.join(NIU_RC_FILE), "bind '\"\\C-g\": abort'\n").unwrap();
+        assert_eq!(shell.reread_init_file_bindings(), 1);
+        let (entries, _) = crate::bind_surface::load_engine_bindings(shell.executor());
+        assert!(entries.iter().any(|e| e.keyseq == "\\C-g"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn issue767_shell_expand_line_expands_history_alias_and_words() {
+        let mut shell = test_shell(HookConfig::default());
+        // test_shell builds a bare session; the interactive entry
+        // asserts histexpand on (enter_interactive, mirroring
+        // bashhist.c's HISTEXPAND_DEFAULT) — do the same here.
+        shell.session_mut().options().set("histexpand", true);
+        shell
+            .execute_line("alias greet='echo hello'")
+            .expect("alias registers");
+        shell
+            .execute_line("ISSUE767_NAME=world")
+            .expect("variable registers");
+        let history = vec!["echo first".to_string(), "greet again".to_string()];
+        // History expansion runs first: !! is the newest entry,
+        // whose alias then expands, in the same pass (bashline.c
+        // shell_expand_line's order).
+        assert_eq!(
+            shell.shell_expand_line("!!", &history).as_deref(),
+            Some("echo hello again")
+        );
+        // Alias + word expansion on a plain line.
+        assert_eq!(
+            shell
+                .shell_expand_line("greet $ISSUE767_NAME", &history)
+                .as_deref(),
+            Some("echo hello world")
+        );
+        // GNU expand_word splits unquoted expansions on IFS and
+        // rejoins with single spaces; a quoted expansion stays one
+        // word; filename globbing is NOT part of the pipeline
+        // (subst.c: "filename globbing is *NOT* done for word or
+        // string expansion").
+        shell
+            .execute_line("ISSUE767_SPACED='a  b'")
+            .expect("spaced variable registers");
+        assert_eq!(
+            shell
+                .shell_expand_line("echo $ISSUE767_SPACED", &history)
+                .as_deref(),
+            Some("echo a b")
+        );
+        assert_eq!(
+            shell
+                .shell_expand_line("echo \"$ISSUE767_SPACED\"", &history)
+                .as_deref(),
+            Some("echo a  b")
+        );
+        assert_eq!(
+            shell.shell_expand_line("echo *", &history).as_deref(),
+            Some("echo *")
+        );
+        // A failed history expansion leaves the line unexpanded:
+        // the caller keeps the buffer as it stood.
+        assert_eq!(shell.shell_expand_line("!nosuch", &history), None);
+        // With histexpand off (a user's `set +H`), the history
+        // step is gated and `!!` stays literal.
+        shell.session_mut().options().set("histexpand", false);
+        assert_eq!(
+            shell.shell_expand_line("!!", &history).as_deref(),
+            Some("!!")
+        );
+    }
+
+    #[test]
+    fn burndown_history_expand_line_expands_only_history() {
+        let mut shell = test_shell(HookConfig::default());
+        shell.session_mut().options().set("histexpand", true);
+        shell
+            .execute_line("alias greet='echo hello'")
+            .expect("alias registers");
+        shell
+            .execute_line("ISSUE_BURNDOWN_NAME=world")
+            .expect("variable registers");
+        let history = vec!["echo first".to_string(), "greet again".to_string()];
+
+        // bashline.c:2902 history_expand_line -> pre_process_line:
+        // the `!!` designator expands, but the alias in the resulting
+        // line is NOT expanded (that is shell-expand-line's later
+        // stage) and neither are words.
+        assert_eq!(
+            shell.history_expand_line("!!", &history).as_deref(),
+            Some("greet again")
+        );
+        assert_eq!(
+            shell
+                .history_expand_line("greet $ISSUE_BURNDOWN_NAME", &history)
+                .as_deref(),
+            Some("greet $ISSUE_BURNDOWN_NAME")
+        );
+        // A failed designator leaves the line as it was (GNU's
+        // cleanup_expansion_error path clears the message and keeps
+        // the buffer).
+        assert_eq!(shell.history_expand_line("!nosuch", &history), None);
+        // `set +H` gates the stage, exactly as pre_process_line does.
+        shell.session_mut().options().set("histexpand", false);
+        assert_eq!(
+            shell.history_expand_line("!!", &history).as_deref(),
+            Some("!!")
+        );
     }
 
     #[test]
@@ -7129,6 +7505,10 @@ complete -F _envtooldyn_hook envtooldyn
     fn run_startup_rc_syncs_process_path_from_executor() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
+        // run_startup_rc writes the executor PATH into the process env by
+        // design; capture and restore it so this test neither sees nor
+        // leaves a caller PATH.
+        let _path_guard = EnvVarGuard::capture("PATH");
         let temp = unique_temp_dir("niubash-rc-path-sync");
         let home = temp.join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -7148,10 +7528,19 @@ complete -F _envtooldyn_hook envtooldyn
 
         // After rc, std::env must reflect the executor PATH (including the new dir).
         let process_path = std::env::var("PATH").unwrap_or_default();
-        let normalized_extra = forward.to_uppercase().replace('/', "\\");
+        #[cfg(windows)]
+        {
+            let normalized_extra = forward.to_uppercase().replace('/', "\\");
+            assert!(
+                process_path.to_uppercase().contains(&normalized_extra),
+                "std::env PATH should contain the new directory after run_startup_rc;              got: {}",
+                process_path
+            );
+        }
+        #[cfg(not(windows))]
         assert!(
-            process_path.to_uppercase().contains(&normalized_extra),
-            "std::env PATH should contain the new directory after run_startup_rc;              got: {}",
+            process_path.contains(&forward),
+            "std::env PATH should contain the new directory after run_startup_rc; got: {}",
             process_path
         );
 
@@ -7944,6 +8333,10 @@ complete -F _envtooldyn_hook envtooldyn
         }
     }
 
+    /// Windows-only: `is_windows_drive_colon` is gated on cfg!(windows), so
+    /// off Windows every ':' is a separator and `D:/repo/bin` is two entries.
+    /// The drive-prefix preservation is a Win32 PATH parsing contract.
+    #[cfg(windows)]
     #[test]
     fn split_shell_path_list_preserves_windows_drive_colons() {
         assert_eq!(
@@ -7984,6 +8377,9 @@ complete -F _envtooldyn_hook envtooldyn
         std::fs::write(&winuxcmd, b"test").unwrap();
         let shell_root = prepare_shell_root(Some(&winuxcmd)).unwrap();
         assert_eq!(shell_root, Some(configured.clone()));
+        // niubash#758: the payload root carries the /dev/shm scratch
+        // directory from first provisioning.
+        assert!(configured.join("dev").join("shm").is_dir());
 
         let mut env = HashMap::new();
         env.insert(
@@ -8011,6 +8407,37 @@ complete -F _envtooldyn_hook envtooldyn
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_shell_root_is_published_to_the_child_environment() {
+        // Mutates the process env (NIU_ROOT): serialize with every other
+        // env-touching test (Windows env races — wt61).
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _root_guard = EnvVarGuard::set_value("NIU_ROOT", "");
+        let root = unique_temp_dir("niubash-published-root");
+
+        // An absent root leaves the environment alone.
+        publish_process_shell_root(None);
+        assert!(std::env::var_os("NIU_ROOT").is_none_or(|value| value.is_empty()));
+
+        // A derived root becomes a real process variable, which is what a
+        // bundled WinuxCmd applet reads through native_path.cppm::
+        // shell_ns::root before it resolves `/usr/bin` in the shell tree.
+        publish_process_shell_root(Some(&root));
+        assert_eq!(
+            std::env::var_os("NIU_ROOT").map(PathBuf::from),
+            Some(root.clone())
+        );
+
+        // A root the process already carries (MSIX, or a parent session)
+        // is never overwritten.
+        let other = unique_temp_dir("niubash-other-root");
+        publish_process_shell_root(Some(&other));
+        assert_eq!(std::env::var_os("NIU_ROOT").map(PathBuf::from), Some(root));
+
+        let _ = std::fs::remove_dir_all(other);
     }
 
     #[test]
@@ -9770,6 +10197,17 @@ complete -F _envtooldyn_hook envtooldyn
     }
 
     impl EnvVarGuard {
+        /// Record the current value without changing it; Drop restores it.
+        /// For code under test that mutates the process environment itself
+        /// (e.g. run_startup_rc syncing PATH) and must not leak into the
+        /// caller's environment.
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                previous: std::env::var_os(key),
+            }
+        }
+
         fn set(key: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);

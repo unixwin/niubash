@@ -9,6 +9,7 @@ use std::{borrow::Cow, io::Write};
 
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::cycle_menu::SharedCycleSession;
+use crate::completion::insert_menu::InsertStopMenu;
 use crate::completion::NiubashCompleter;
 use crate::config::{
     CompletionInteraction, CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding,
@@ -19,10 +20,10 @@ use crate::shell::Shell;
 use crate::syntax_highlighting::NiubashSyntaxHighlighter;
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    default_vi_visual_keybindings, ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode,
-    KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
-    PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent, Signal,
-    ValidationResult, Validator, Vi,
+    default_vi_visual_keybindings, ColumnarMenu, Direction, EditCommand, EditMode, Emacs, KeyCode,
+    KeyCombination, KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode,
+    PromptHistorySearch, PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
+    Signal, ValidationResult, Validator, Vi,
 };
 
 const COMPLETION_MENU: &str = "completion_menu";
@@ -90,6 +91,15 @@ pub const WIDGET_HOST_COMMAND_PREFIX: &str = "__niu_widget ";
 /// [`Shell::run_bind_x_command`] with the current edit buffer and applies
 /// the READLINE_* read-back to the editor.
 pub const BINDX_HOST_COMMAND_PREFIX: &str = "__niu_bindx ";
+
+/// `ExecuteHostCommand` payload prefix for the host-implemented GNU
+/// readline commands of [`crate::readline_commands`] (niubash#765,
+/// #766, #767): the payload is the command name; the host performs
+/// the command against the suspended editor and the live session
+/// in [`run_readline_command`]. These names are readline functions,
+/// never shell functions — the prefix keeps them out of the
+/// shell-function widget path below.
+pub const READLINE_HOST_COMMAND_PREFIX: &str = "__niu_readline ";
 
 /// A widget trigger parsed from a `WIDGET_HOST_COMMAND_PREFIX` payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,26 +263,35 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // Infallible since niubash#134: a history file that cannot be opened
     // (sandboxed restricted token, os error 5) degrades to an in-memory
     // history instead of aborting the interactive session.
-    // niubash#569: the editor history instance and the provider instance
-    // are distinct objects over one file. When the provider is installed
-    // (every interactive entry), the editor adopts its ledger, so lines
-    // the editor records are visible to the provider's -a/-c/-w and to
-    // the session-end write; without the shared ledger, -c could not
-    // account for lines the editor recorded. Edit-mode rebuilds re-adopt
-    // the same ledger, so the sharing survives refreshes.
+    // niubash#569/#773: the editor history instance and the provider
+    // instance are distinct objects, but a session has ONE history
+    // list (GNU: the builtin and readline read the same in-memory
+    // list). When the provider is installed (every interactive
+    // entry), the editor adopts its state wholesale — the same store,
+    // not a second load of the file — plus its ledger (niubash#569:
+    // so -c accounts for lines the editor recorded) and, inside the
+    // state, its settings cell (niubash#646: so recorded lines are
+    // filtered/stifled by the same HIST* snapshot the provider's
+    // builtins consult). Edit-mode rebuilds re-adopt the same state,
+    // so the sharing survives rebuilds. Without a provider, the
+    // editor falls back to adopting just the shared cells, or to its
+    // own file load.
     let shared_ledger = shell_ref.history_ledger();
-    // niubash#646: the editor adopts the provider's settings cell the
-    // same way, so the lines it records are filtered/stifled by the
-    // same HIST* snapshot the provider's builtins consult.
     let shared_settings = shell_ref.history_settings();
-    let mut history = match (shared_ledger, shared_settings) {
-        (Some(ledger), Some(settings)) => LiveFileBackedHistory::with_shared_ledger_and_settings(
-            shell_ref.history_max_size,
-            shell_ref.history_path.clone(),
-            ledger,
-            settings,
-        ),
-        (Some(ledger), None) => LiveFileBackedHistory::with_shared_ledger(
+    let shared_state = shell_ref.history_state();
+    let mut history = match (shared_state, shared_ledger, shared_settings) {
+        (Some(state), Some(ledger), _) => {
+            LiveFileBackedHistory::with_shared_state(shell_ref.history_max_size, state, ledger)
+        }
+        (None, Some(ledger), Some(settings)) => {
+            LiveFileBackedHistory::with_shared_ledger_and_settings(
+                shell_ref.history_max_size,
+                shell_ref.history_path.clone(),
+                ledger,
+                settings,
+            )
+        }
+        (None, Some(ledger), None) => LiveFileBackedHistory::with_shared_ledger(
             shell_ref.history_max_size,
             shell_ref.history_path.clone(),
             ledger,
@@ -287,11 +306,13 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // are dropped while `set +o history` is in effect. The provider
     // instance is never gated, so `history -s` keeps adding, as in GNU.
     history.set_history_option_gate();
-    // No construction-time reload (audit item H-01): every constructor
-    // above already loads the backing file into the store, so a second
-    // full read here bought nothing — and on an editor rebuild after
-    // `history -c` it silently undid the ledger's view hide (#614) and
-    // cleared-base accounting (#642) that the provider twin maintains.
+    // No construction-time reload (audit item H-01): the shared-state
+    // constructor above adopts the provider's store as-is (niubash#773:
+    // one list per session), and the fallback constructors load the
+    // backing file exactly once, so a second full read here bought
+    // nothing — and on an editor rebuild after `history -c` it silently
+    // undid the ledger's view hide (#614) and cleared-base accounting
+    // (#642) that the provider maintains.
 
     let completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     // Shell-function completions reach the engine through the main-thread
@@ -307,8 +328,9 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // and Enter (accept the candidate and run). Only built when the
     // interaction applies: `cycle` on a non-GNU style (the GNU style's
     // literal readline interaction is inert to the axis by design).
-    let cycle_session: Option<SharedCycleSession> = if menu_config.completion_interaction
+    let cycle_session: Option<SharedCycleSession> = if (menu_config.completion_interaction
         == CompletionInteraction::Cycle
+        || menu_config.completion_interaction == CompletionInteraction::Select)
         && menu_config.completion_style != CompletionStyle::Gnu
     {
         Some(Arc::new(std::sync::Mutex::new(
@@ -334,6 +356,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // Shared visibility flag between the completion grid and the history
     // autosuggest hinter: while the grid is on screen the ghost stands
     // down instead of painting over the same word (fish parity).
+    // `InsertCompletions` (M-*) and other engine-level completion paths
+    // read `Reedline`'s own completer, not the menu's. The menu owns a
+    // separate instance over the same shared state, so give the engine one
+    // too instead of leaving M-* without a candidate source.
+    let engine_completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     let menu_open = Arc::new(AtomicBool::new(false));
     let completion_menu = ReedlineMenu::WithCompleter {
         menu: configured_completion_menu(
@@ -359,7 +386,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         shell_ref.engine_bind_generation,
         menu_config.completion_interaction,
     );
-    let (edit_mode, keymap_registry, chord_bindings, alt_keys) = build_edit_mode(
+    let (edit_mode, keymap_registry, layer_parts) = build_edit_mode(
         shell_ref.editor_mode,
         build_args.0,
         build_args.1,
@@ -377,7 +404,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // `bind -m` entries and user rules — so a flip keeps the user's
     // bindings in the target keymap. Its registry snapshot is discarded:
     // the published one describes the active mode.
-    let (standby_edit_mode, _, standby_chord_bindings, standby_alt_keys) = build_edit_mode(
+    let (standby_edit_mode, _, standby_layer_parts) = build_edit_mode(
         match shell_ref.editor_mode {
             EditorMode::Emacs => EditorMode::Vi,
             EditorMode::Vi => EditorMode::Emacs,
@@ -408,6 +435,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
 
     let mut editor = Reedline::create()
         .with_validator(Box::new(ReplValidator))
+        .with_completer(Box::new(engine_completer))
         .with_history(Box::new(history))
         .with_history_exclusion_prefix(history_exclusion_prefix(
             shell_ref.history_ignore_space_prefixed,
@@ -459,26 +487,32 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         // normally (niubash#284). Ctrl+V (PasteSystem, bound below)
         // remains the one-shot clipboard path.
         .use_bracketed_paste(cfg!(not(target_os = "windows")))
-        .with_edit_mode(Box::new(ChordEditMode::new(
-            Box::new(
-                PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
-                    .with_cycle_session(cycle_session.clone()),
-            ),
-            chord_bindings,
-            alt_keys,
-            Some(Box::new(live_lookahead)),
-            keyseq_timeout,
-        )))
-        .with_additional_edit_mode(Box::new(ChordEditMode::new(
-            Box::new(
-                PasteChunkEditMode::new(standby_edit_mode, menu_config.completion_style)
-                    .with_cycle_session(cycle_session),
-            ),
-            standby_chord_bindings,
-            standby_alt_keys,
-            Some(Box::new(live_lookahead)),
-            keyseq_timeout,
-        )));
+        .with_edit_mode(Box::new(
+            ChordEditMode::new(
+                Box::new(
+                    PasteChunkEditMode::new(edit_mode, menu_config.completion_style)
+                        .with_cycle_session(cycle_session.clone()),
+                ),
+                layer_parts.chords,
+                layer_parts.alt_keys,
+                Some(Box::new(live_lookahead)),
+                keyseq_timeout,
+            )
+            .with_quote_sequences(layer_parts.quote_sequences),
+        ))
+        .with_additional_edit_mode(Box::new(
+            ChordEditMode::new(
+                Box::new(
+                    PasteChunkEditMode::new(standby_edit_mode, menu_config.completion_style)
+                        .with_cycle_session(cycle_session),
+                ),
+                standby_layer_parts.chords,
+                standby_layer_parts.alt_keys,
+                Some(Box::new(live_lookahead)),
+                keyseq_timeout,
+            )
+            .with_quote_sequences(standby_layer_parts.quote_sequences),
+        ));
 
     if shell_ref.autosuggest.history_strategy_enabled() {
         editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(
@@ -501,6 +535,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
             ),
         ));
     }
+
+    // niubash#775: the keymap generation this editor was built from.  The
+    // REPL compares it between prompts so a plugin that registered or
+    // unbound a key at runtime gets a lossless rebuild before the next line.
+    crate::readline_live::mark_installed();
 
     Ok(editor)
 }
@@ -537,7 +576,12 @@ fn configured_completion_menu(
             return Box::new(
                 crate::completion::cycle_menu::CycleMenu::new(session)
                     .with_name(name)
-                    .with_menu_open_flag(menu_open),
+                    .with_menu_open_flag(menu_open)
+                    .with_select_mode(matches!(
+                        config.completion_interaction,
+                        CompletionInteraction::Select
+                    ))
+                    .with_style(config.completion_style),
             );
         }
     }
@@ -564,7 +608,13 @@ fn configured_completion_menu(
                 .with_max_completion_height(config.completion_page_size.min(20) as u16)
                 .with_padding(1)
                 .with_description_mode(reedline::DescriptionMode::PreferRight);
-            Box::new(menu)
+            // insert interaction: first TAB splices the common prefix and
+            // stops; TAB #2 opens the popup (niubash#778 follow-up).
+            if config.completion_interaction == CompletionInteraction::Insert {
+                Box::new(InsertStopMenu::new(Box::new(menu)))
+            } else {
+                Box::new(menu)
+            }
         }
         CompletionStyle::Column => {
             let page_cols = if config.completion_page_size <= 4 {
@@ -588,20 +638,26 @@ fn configured_completion_menu(
                 menu_open,
             ))
         }
-        CompletionStyle::List => Box::new(configured_list_menu(
-            name,
-            config.completion_page_size,
-            config,
-        )),
+        CompletionStyle::List => {
+            let menu = configured_list_menu(name, config.completion_page_size, config);
+            if config.completion_interaction == CompletionInteraction::Insert {
+                Box::new(InsertStopMenu::new(Box::new(menu)))
+            } else {
+                Box::new(menu)
+            }
+        }
         CompletionStyle::Inline => {
             // Inline mode: use ListMenu with page_size 1 to highlight one at a time
-            Box::new(
-                ListMenu::default()
-                    .with_name(name)
-                    .with_page_size(1)
-                    .with_max_entry_lines(config.max_entry_lines)
-                    .with_only_buffer_difference(false),
-            )
+            let menu = ListMenu::default()
+                .with_name(name)
+                .with_page_size(1)
+                .with_max_entry_lines(config.max_entry_lines)
+                .with_only_buffer_difference(false);
+            if config.completion_interaction == CompletionInteraction::Insert {
+                Box::new(InsertStopMenu::new(Box::new(menu)))
+            } else {
+                Box::new(menu)
+            }
         }
     }
 }
@@ -647,14 +703,44 @@ fn run_host_sentinel(
     line_editor: &mut Reedline,
     payload: &str,
 ) -> SentinelOutcome {
+    if let Some(name) = payload.strip_prefix(READLINE_HOST_COMMAND_PREFIX) {
+        return run_readline_command(shell, line_editor, name);
+    }
+    // niubash#775: a key a loadable builtin bound through the readline ABI.
+    // Mirror the live editor into the exported globals first, run the
+    // plugin's C function, and adopt whatever it left in rl_line_buffer.
+    if let Some((root, path)) = crate::readline_live::parse_payload(payload) {
+        let editor_buffer = line_editor.current_buffer_contents().to_string();
+        let editor_cursor = line_editor.current_insertion_point();
+        crate::readline_live::sync_editor_to_abi(&editor_buffer, editor_cursor, None);
+        let before = crate::readline_live::snapshot_abi_line();
+        crate::readline_live::dispatch_state_begin();
+        let fired = crate::readline_live::dispatch(root, &path);
+        crate::readline_live::dispatch_state_end();
+        if fired && crate::readline_live::abi_line_changed(&before) {
+            crate::readline_live::sync_abi_to_editor(line_editor);
+        }
+        return SentinelOutcome::Resumed;
+    }
     if let Some(bindx) = BindXInvocation::parse(payload) {
         let editor_buffer = line_editor.current_buffer_contents().to_string();
         let editor_cursor = line_editor.current_insertion_point();
+        // A `bind -x` command (and any plugin builtin it invokes) must see
+        // the line being edited, not the last line readline accepted.
+        crate::readline_live::sync_editor_to_abi(&editor_buffer, editor_cursor, None);
+        let before = crate::readline_live::snapshot_abi_line();
+        crate::readline_live::dispatch_state_begin();
         let outcome =
             shell
                 .borrow_mut()
                 .run_bind_x_command(bindx.index, &editor_buffer, editor_cursor);
+        crate::readline_live::dispatch_state_end();
         apply_widget_outcome(line_editor, &outcome);
+        // The host's READLINE_* read-back wins unless a plugin touched the
+        // exported ABI too; then the plugin's mutation is the newer one.
+        if crate::readline_live::abi_line_changed(&before) {
+            crate::readline_live::sync_abi_to_editor(line_editor);
+        }
         return SentinelOutcome::Resumed;
     }
     let Some(widget) = WidgetInvocation::parse(payload) else {
@@ -665,6 +751,8 @@ fn run_host_sentinel(
     }
     let editor_buffer = line_editor.current_buffer_contents().to_string();
     let editor_cursor = line_editor.current_insertion_point();
+    crate::readline_live::sync_editor_to_abi(&editor_buffer, editor_cursor, None);
+    let before = crate::readline_live::snapshot_abi_line();
     let outcome =
         shell
             .borrow_mut()
@@ -673,8 +761,687 @@ fn run_host_sentinel(
         SentinelOutcome::Accept(outcome.buffer)
     } else {
         apply_widget_outcome(line_editor, &outcome);
+        if crate::readline_live::abi_line_changed(&before) {
+            crate::readline_live::sync_abi_to_editor(line_editor);
+        }
         SentinelOutcome::Resumed
     }
+}
+
+/// Print text to the terminal while the editor is suspended for a
+/// host command (the dumps of niubash#765): the prompt redraws over
+/// the next `read_line`, so the text lands above it exactly like a
+/// `bind -x` command's output does.
+fn print_suspended_output(text: &str) {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = lock.write_all(text.as_bytes());
+    let _ = lock.flush();
+}
+
+/// Group keyseqs by function name, preserving first-seen order
+/// (the construction the engine's own `bind -P` face uses).
+fn push_keyseq(by_name: &mut Vec<(String, Vec<String>)>, name: &str, seq: String) {
+    if let Some((_, seqs)) = by_name.iter_mut().find(|(n, _)| n == name) {
+        if !seqs.contains(&seq) {
+            seqs.push(seq);
+        }
+    } else {
+        by_name.push((name.to_string(), vec![seq]));
+    }
+}
+
+/// Remove one keyseq from every function's list (a later binding
+/// of the same seq to something else retires the earlier claim).
+fn remove_keyseq(by_name: &mut [(String, Vec<String>)], seq: &str) {
+    for (_, seqs) in by_name.iter_mut() {
+        seqs.retain(|s| s != seq);
+    }
+}
+
+/// The `dump-functions` listing (lib/readline/bind.c:2820
+/// `rl_dump_functions` → `rl_function_dumper(0)`): every funmap
+/// name, with the keyseqs that invoke it. The binding state is the
+/// emacs keymap's: the engine default table, this batch's GNU
+/// default command bindings, and the engine registry's function
+/// entries for the emacs keymap, later layers overriding earlier
+/// ones per keyseq — the same sources `bind -P` answers from,
+/// plus the host defaults. The readable form (GNU's explicit-
+/// argument variant) does not travel the host-command channel,
+/// which carries no prefix argument.
+fn dump_function_lines(entries: &[crate::bind_surface::EngineBindEntry]) -> Vec<String> {
+    let mut by_name: Vec<(String, Vec<String>)> = Vec::new();
+    for (seq, name) in rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS {
+        push_keyseq(&mut by_name, name, seq.to_string());
+    }
+    for (seq, name) in crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS {
+        push_keyseq(&mut by_name, name, seq.to_string());
+    }
+    for entry in entries {
+        if !engine_keymap_applies(entry.keymap.as_deref(), NativeKeymapTarget::Emacs) {
+            continue;
+        }
+        remove_keyseq(&mut by_name, &entry.keyseq);
+        if let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind {
+            push_keyseq(&mut by_name, name, entry.keyseq.clone());
+        }
+    }
+    let mut names: Vec<String> = crate::readline_commands::funmap_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for (name, _) in &by_name {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names.sort();
+    names
+        .iter()
+        .map(|name| {
+            let seqs = by_name
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| s.as_slice())
+                .unwrap_or(&[]);
+            crate::readline_commands::format_dump_function_line(name, seqs)
+        })
+        .collect()
+}
+
+thread_local! {
+    /// The (buffer, point) a dynamic-complete-history invocation
+    /// left behind, so the next invocation at the identical spot
+    /// reads as the second consecutive press and lists the matches
+    /// (niubash#767).
+    static LAST_HISTORY_COMPLETION: std::cell::RefCell<Option<(String, usize)>> =
+        const { std::cell::RefCell::new(None) };
+    /// The (command, buffer, point) the last context-specific
+    /// completion press left behind (GNU's repeated-TAB rule: the
+    /// second press at the same spot lists instead of editing).
+    static LAST_SPECIFIC_COMPLETION: std::cell::RefCell<Option<(String, usize, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The interactive history as the editor holds it, oldest first —
+/// the list shell-expand-line's history expansion and
+/// dynamic-complete-history's tokenization read (niubash#767). The
+/// engine-side history list is empty on the REPL path, so the
+/// editor is the only honest source.
+fn editor_history_entries(line_editor: &Reedline) -> Vec<String> {
+    line_editor
+        .history()
+        .search(reedline::SearchQuery::everything(
+            reedline::SearchDirection::Forward,
+            None,
+        ))
+        .map(|items| items.into_iter().map(|item| item.command_line).collect())
+        .unwrap_or_default()
+}
+
+/// `rl_forward_word` (lib/readline/text.c:482) from POSITION:
+/// if the character there is not a word character, advance to
+/// the next word character first; then advance to the end of
+/// the word. Word characters are alphanumerics and `_`
+/// (readline's `_rl_walphabetic`).
+fn forward_word_end(text: &str, mut position: usize) -> usize {
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+    let mut rest = text[position..].chars().peekable();
+    if matches!(rest.peek(), Some(&c) if !is_word_char(c)) {
+        while let Some(&c) = rest.peek() {
+            if is_word_char(c) {
+                break;
+            }
+            position += c.len_utf8();
+            rest.next();
+        }
+    }
+    while let Some(&c) = rest.peek() {
+        if !is_word_char(c) {
+            break;
+        }
+        position += c.len_utf8();
+        rest.next();
+    }
+    position
+}
+
+/// Replace the suspended editor's line with EXPANDED, placing the
+/// point the way bash's `set_up_new_line` does (bashline.c:2845):
+/// a point at the end stays at the new end; any other point keeps
+/// its offset, and when the character there is not whitespace
+/// `rl_forward_word` (text.c:482) advances it to the end of that
+/// word. No change when EXPANDED equals the line.
+fn replace_line_set_up_new_line(
+    line_editor: &mut Reedline,
+    buffer: &str,
+    cursor: usize,
+    expanded: String,
+) {
+    if expanded == buffer {
+        return;
+    }
+    let position = if cursor >= buffer.len() {
+        expanded.len()
+    } else {
+        let mut position = cursor.min(expanded.len());
+        while !expanded.is_char_boundary(position) {
+            position -= 1;
+        }
+        if position < expanded.len() && !matches!(expanded.as_bytes()[position], b' ' | b'\t') {
+            position = forward_word_end(&expanded, position);
+        }
+        position
+    };
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(expanded),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
+}
+
+/// Perform one host readline command (see
+/// [`READLINE_HOST_COMMAND_PREFIX`]) against the suspended editor
+/// and the live session.
+fn run_readline_command(
+    shell: &Rc<RefCell<Shell>>,
+    line_editor: &mut Reedline,
+    name: &str,
+) -> SentinelOutcome {
+    match name {
+        // bind.c:2820 rl_dump_functions: the "\r\n" of the dispatch
+        // plus the dumper's own leading "\n" — one blank line —
+        // then one line per funmap name.
+        "dump-functions" => {
+            let (entries, _) = crate::bind_surface::load_engine_bindings(shell.borrow().executor());
+            let lines = dump_function_lines(&entries);
+            let mut out = String::from("\n\n");
+            for line in lines {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            print_suspended_output(&out);
+        }
+        // bind.c:2905 rl_dump_macros → rl_macro_dumper(0): the
+        // registry's macro entries in GNU plain form.
+        "dump-macros" => {
+            let (entries, _) = crate::bind_surface::load_engine_bindings(shell.borrow().executor());
+            let mut out = String::from("\n");
+            for entry in &entries {
+                if !engine_keymap_applies(entry.keymap.as_deref(), NativeKeymapTarget::Emacs) {
+                    continue;
+                }
+                if let crate::bind_surface::EngineBindKind::Macro { text } = &entry.kind {
+                    out.push_str(&rubash::builtins::bind::format_macro_plain(
+                        &entry.keyseq,
+                        text,
+                    ));
+                    out.push('\n');
+                }
+            }
+            print_suspended_output(&out);
+        }
+        // bind.c:3076 rl_dump_variables → rl_variable_dumper(0):
+        // the registry's variable table in GNU plain form.
+        "dump-variables" => {
+            let variables = crate::bind_surface::load_readline_variables(shell.borrow().executor());
+            let mut out = String::from("\n");
+            for (name, value) in &variables {
+                out.push_str(&rubash::builtins::bind::format_variable_plain(name, value));
+                out.push('\n');
+            }
+            print_suspended_output(&out);
+        }
+        // bind.c:1025 rl_re_read_init_file: re-read the rc's bind
+        // state; the between-prompts staleness rebuild re-mirrors
+        // any registry movement before the next prompt.
+        "re-read-init-file" => {
+            shell.borrow_mut().reread_init_file_bindings();
+        }
+        // lib/readline/util.c:181 rl_tilde_expand (niubash#766):
+        // expand the tilde at the start of the whitespace-delimited
+        // word at point; point lands just past the replacement, as
+        // _rl_replace_text (text.c:194) leaves it.
+        "tilde-expand" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            if let Some((start, end)) = crate::readline_commands::tilde_word_span(&buffer, cursor) {
+                let word = &buffer[start..end];
+                let env: std::collections::HashMap<String, String> =
+                    shell.borrow().session().environment().into_iter().collect();
+                if let Some(expanded) = rubash::expand::tilde::tilde::expand_word_prefix(word, &env)
+                {
+                    if expanded != word {
+                        let mut next =
+                            String::with_capacity(buffer.len() - (end - start) + expanded.len());
+                        next.push_str(&buffer[..start]);
+                        next.push_str(&expanded);
+                        next.push_str(&buffer[end..]);
+                        let position = start + expanded.len();
+                        line_editor.run_edit_commands(&[
+                            EditCommand::Clear,
+                            EditCommand::InsertString(next),
+                            EditCommand::MoveToPosition {
+                                position,
+                                select: false,
+                            },
+                        ]);
+                    }
+                }
+            }
+        }
+        // lib/readline/text.c:2358 rl_execute_named_command
+        // (niubash#766): read a command name in the minibuffer and
+        // dispatch it.
+        "execute-named-command" => {
+            return execute_named_command(shell, line_editor);
+        }
+        // bashline.c:2982 shell_expand_line (niubash#767): history
+        // expansion, alias expansion, then word expansion of the
+        // whole line, as one edit. GNU leaves the line untouched on
+        // an expansion error. Point placement follows the C tail:
+        // a point at the end of the old line goes to the end of
+        // the new one; any other point keeps its offset, and when
+        // the character there is not whitespace, rl_forward_word
+        // (text.c:482) advances it to the end of that word.
+        "shell-expand-line" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let entries = editor_history_entries(line_editor);
+            if let Some(expanded) = shell.borrow_mut().shell_expand_line(&buffer, &entries) {
+                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            }
+        }
+        // bashline.c:2902 history_expand_line: only the history
+        // expansion stage of shell_expand_line (pre_process_line,
+        // bashhist.c:562). An expansion error leaves the line as it
+        // was, like GNU's cleanup path.
+        "history-expand-line" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let entries = editor_history_entries(line_editor);
+            if let Some(expanded) = shell.borrow_mut().history_expand_line(&buffer, &entries) {
+                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            }
+        }
+        // util.c:99 _rl_abort_internal / util.c:122 rl_abort: clear
+        // the pending command and ding. The line buffer is NOT
+        // touched — C-g must not abandon what the user typed. The
+        // suspended editor has already resolved and dropped any
+        // chord/prefix state before this event; the remaining GNU
+        // state (numeric argument, mark, keyboard macro) has no host
+        // seam, so the observable delivery here is the bell.
+        "abort" => {
+            readline_ding();
+        }
+        // bashline.c:3896/3954/3966/3980/3890/3795
+        // bash_complete_filename / bash_complete_variable /
+        // bash_complete_command / bash_complete_hostname /
+        // bash_complete_username / bash_brace_completion: the
+        // ordinary completion machinery pinned to one candidate
+        // source. The shared press rule is rl_complete_internal's:
+        // a lone match is inserted, several insert the longest common
+        // prefix, and a second press at the same spot lists.
+        // bashline.c:4068 `bash_glob_complete_word` joins them with
+        // `shell_glob_filename` as its candidate source.
+        "complete-filename"
+        | "complete-variable"
+        | "complete-command"
+        | "complete-hostname"
+        | "complete-username"
+        | "complete-into-braces"
+        | "glob-complete-word" => {
+            run_specific_completion(shell, line_editor, name);
+        }
+        // bashline.c:3810 dynamic_complete_history (niubash#767):
+        // completion whose candidates are the tokenized history
+        // (history_completion_generator, bashline.c:3782), sorted.
+        // The first press completes to the longest common prefix (a
+        // unique match completes fully); a second consecutive press
+        // at the same buffer and point lists the matches, like
+        // readline's TAB/TAB completion display.
+        "dynamic-complete-history" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
+            let word = &buffer[start..end];
+            let entries = editor_history_entries(line_editor);
+            let matches = crate::readline_commands::history_completion_matches(&entries, word);
+            if matches.is_empty() {
+                readline_ding();
+                return SentinelOutcome::Resumed;
+            }
+            let repeated = LAST_HISTORY_COMPLETION.with(|last| {
+                matches!(last.borrow().as_ref(), Some((b, c)) if b == &buffer && *c == cursor)
+            });
+            if repeated {
+                let mut out = String::from("\n");
+                out.push_str(&matches.join("  "));
+                out.push('\n');
+                print_suspended_output(&out);
+                return SentinelOutcome::Resumed;
+            }
+            let replacement = if matches.len() == 1 {
+                let mut only = matches[0].clone();
+                if !buffer[end..].starts_with(' ') {
+                    only.push(' ');
+                }
+                only
+            } else {
+                crate::readline_commands::common_prefix(&matches)
+            };
+            if replacement != word {
+                let mut next =
+                    String::with_capacity(buffer.len() - (end - start) + replacement.len());
+                next.push_str(&buffer[..start]);
+                next.push_str(&replacement);
+                next.push_str(&buffer[end..]);
+                let position = start + replacement.len();
+                line_editor.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(next.clone()),
+                    EditCommand::MoveToPosition {
+                        position,
+                        select: false,
+                    },
+                ]);
+                LAST_HISTORY_COMPLETION.with(|last| {
+                    *last.borrow_mut() = Some((next, position));
+                });
+            } else {
+                LAST_HISTORY_COMPLETION.with(|last| {
+                    *last.borrow_mut() = Some((buffer.clone(), cursor));
+                });
+            }
+        }
+        _ => {}
+    }
+    SentinelOutcome::Resumed
+}
+
+/// One context-specific completion press (`complete-command` /
+/// `complete-variable` / `complete-filename` / `complete-hostname` /
+/// `complete-username` / `complete-into-braces`). Candidates come from
+/// [`crate::completion::NiubashCompleter::complete_specific`], which
+/// pins the GNU source while reusing the ordinary completion tables.
+fn run_specific_completion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline, name: &str) {
+    use crate::completion::SpecificCompletion;
+    let mode = match name {
+        "complete-command" => SpecificCompletion::Command,
+        "complete-variable" => SpecificCompletion::Variable,
+        "complete-hostname" => SpecificCompletion::Hostname,
+        "complete-username" => SpecificCompletion::Username,
+        "complete-into-braces" => SpecificCompletion::Brace,
+        "glob-complete-word" => SpecificCompletion::Glob,
+        _ => SpecificCompletion::Filename,
+    };
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    let matches: Vec<String> = {
+        let mut completer = NiubashCompleter::new(shell.borrow().completion_state.clone());
+        completer
+            .complete_specific(mode, &buffer, cursor)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect()
+    };
+    if matches.is_empty() {
+        readline_ding();
+        return;
+    }
+    let repeated = LAST_SPECIFIC_COMPLETION.with(|last| {
+        matches!(
+            last.borrow().as_ref(),
+            Some((b, c, n)) if b == &buffer && *c == cursor && n == name
+        )
+    });
+    LAST_SPECIFIC_COMPLETION.with(|last| {
+        *last.borrow_mut() = Some((buffer.clone(), cursor, name.to_string()));
+    });
+    if repeated && matches.len() > 1 {
+        // Second press at the same spot: list, like the TAB/TAB
+        // display in rl_complete_internal.
+        let mut sorted = matches;
+        sorted.sort();
+        let mut out = String::from("\n");
+        out.push_str(&sorted.join("  "));
+        out.push('\n');
+        print_suspended_output(&out);
+        return;
+    }
+    let (start, end) = crate::completion::completion_span(&buffer, cursor);
+    let word = &buffer[start..end];
+    let Some(replacement) = crate::readline_commands::completion_replacement(&matches, word) else {
+        readline_ding();
+        return;
+    };
+    let mut next = String::with_capacity(buffer.len() - (end - start) + replacement.len());
+    next.push_str(&buffer[..start]);
+    next.push_str(&replacement);
+    next.push_str(&buffer[end..]);
+    let position = start + replacement.len();
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(next),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
+}
+
+/// GNU's rl_ding: ring the terminal bell.
+fn readline_ding() {
+    print_suspended_output("\u{7}");
+}
+
+/// `execute-named-command` (text.c:2358): read the name with
+/// `_rl_read_command_name` (text.c:2309), then dispatch the named
+/// function. An unknown name dings and returns 1 — nothing
+/// dispatches. Dispatch fidelity: edit events apply to the
+/// suspended editor, `Multiple` folds, nested host commands recurse
+/// through the sentinel dispatcher, and accept-line submits the
+/// current buffer; editor events that need the live editor (menus,
+/// mode switches, suspension) cannot be injected into a suspended
+/// editor and ding instead.
+fn execute_named_command(
+    shell: &Rc<RefCell<Shell>>,
+    line_editor: &mut Reedline,
+) -> SentinelOutcome {
+    let Some(name) = read_command_name() else {
+        return SentinelOutcome::Resumed;
+    };
+    if !crate::readline_commands::funmap_names().contains(&name.as_str()) {
+        readline_ding();
+        return SentinelOutcome::Resumed;
+    }
+    dispatch_named_event(shell, line_editor, native_widget_event(&name))
+}
+
+fn dispatch_named_event(
+    shell: &Rc<RefCell<Shell>>,
+    line_editor: &mut Reedline,
+    event: Option<ReedlineEvent>,
+) -> SentinelOutcome {
+    match event {
+        Some(ReedlineEvent::Edit(commands)) => {
+            line_editor.run_edit_commands(&commands);
+            SentinelOutcome::Resumed
+        }
+        Some(ReedlineEvent::Multiple(events)) => {
+            for event in events {
+                if let SentinelOutcome::Accept(line) =
+                    dispatch_named_event(shell, line_editor, Some(event))
+                {
+                    return SentinelOutcome::Accept(line);
+                }
+            }
+            SentinelOutcome::Resumed
+        }
+        Some(ReedlineEvent::Enter) => {
+            SentinelOutcome::Accept(Some(line_editor.current_buffer_contents().to_string()))
+        }
+        Some(ReedlineEvent::ExecuteHostCommand(payload)) => {
+            run_host_sentinel(shell, line_editor, &payload)
+        }
+        _ => {
+            readline_ding();
+            SentinelOutcome::Resumed
+        }
+    }
+}
+
+/// The minibuffer read behind execute-named-command:
+/// `_rl_read_command_name` (text.c:2309) reads one line with
+/// completion over the funmap names (`readcmd_completion_function`).
+/// The host reads keys in raw mode while the editor is suspended —
+/// the same posture as the interactive menu's raw-mode loop. TAB
+/// completes to the longest common prefix; a second consecutive
+/// TAB lists the matches, like readline's completion display.
+/// Returns None when the read is aborted (ESC / C-g / C-c).
+fn read_command_name() -> Option<String> {
+    use crossterm29::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+
+    fn render(text: &str, cursor: usize) {
+        let mut out = String::from("\r\u{1b}[K");
+        out.push_str("M-x ");
+        out.push_str(text);
+        let tail = text[cursor..].chars().count();
+        if tail > 0 {
+            out.push_str(&format!("\u{1b}[{tail}D"));
+        }
+        print_suspended_output(&out);
+    }
+
+    let _ = crossterm29::terminal::enable_raw_mode();
+    let mut text = String::new();
+    let mut cursor: usize = 0;
+    let mut last_was_tab = false;
+    print_suspended_output("\r\n");
+    render(&text, cursor);
+    let result = loop {
+        let Ok(Event::Key(key)) = crossterm29::event::read() else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => break Some(text.clone()),
+            KeyCode::Char('j' | 'm') if ctrl => break Some(text.clone()),
+            KeyCode::Esc => break None,
+            KeyCode::Char('g' | 'c') if ctrl => break None,
+            KeyCode::Tab => {
+                let matches: Vec<String> = crate::readline_commands::funmap_names()
+                    .iter()
+                    .filter(|name| name.starts_with(text.as_str()))
+                    .map(|name| name.to_string())
+                    .collect();
+                if matches.is_empty() {
+                    readline_ding();
+                } else {
+                    let lcp = crate::readline_commands::common_prefix(&matches);
+                    if lcp.len() > text.len() {
+                        text = lcp;
+                        cursor = text.len();
+                        render(&text, cursor);
+                    } else if last_was_tab {
+                        let mut out = String::from("\r\n");
+                        out.push_str(&matches.join("  "));
+                        out.push_str("\r\n");
+                        print_suspended_output(&out);
+                        render(&text, cursor);
+                    }
+                }
+                last_was_tab = true;
+                continue;
+            }
+            KeyCode::Backspace => {
+                if cursor > 0 {
+                    let prev = text[..cursor]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    text.replace_range(prev..cursor, "");
+                    cursor = prev;
+                }
+            }
+            KeyCode::Delete => {
+                if cursor < text.len() {
+                    let next = text[cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| cursor + i)
+                        .unwrap_or(text.len());
+                    text.replace_range(cursor..next, "");
+                }
+            }
+            KeyCode::Left => {
+                cursor = text[..cursor]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            KeyCode::Right => {
+                if cursor < text.len() {
+                    cursor = text[cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| cursor + i)
+                        .unwrap_or(text.len());
+                }
+            }
+            KeyCode::Home => cursor = 0,
+            KeyCode::End => cursor = text.len(),
+            KeyCode::Char('a') if ctrl => cursor = 0,
+            KeyCode::Char('e') if ctrl => cursor = text.len(),
+            KeyCode::Char('b') if ctrl => {
+                cursor = text[..cursor]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            KeyCode::Char('f') if ctrl => {
+                if cursor < text.len() {
+                    cursor = text[cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| cursor + i)
+                        .unwrap_or(text.len());
+                }
+            }
+            KeyCode::Char('u') if ctrl => {
+                text.clear();
+                cursor = 0;
+            }
+            KeyCode::Char('k') if ctrl => {
+                text.truncate(cursor);
+            }
+            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                text.insert(cursor, c);
+                cursor += c.len_utf8();
+            }
+            _ => {
+                readline_ding();
+                last_was_tab = false;
+                continue;
+            }
+        }
+        last_was_tab = false;
+        render(&text, cursor);
+    };
+    let _ = crossterm29::terminal::disable_raw_mode();
+    print_suspended_output("\r\n");
+    result
 }
 
 /// One editor keymap under construction, remembering which registry
@@ -770,6 +1537,9 @@ fn build_keymap_for_target(
         add_system_clipboard_keybindings(keybindings)
     });
     builder.layer(KeymapSource::HostBaseline, |keybindings| {
+        add_gnu_command_default_keybindings(keybindings, target)
+    });
+    builder.layer(KeymapSource::HostBaseline, |keybindings| {
         add_native_widget_keybindings(keybindings, target, native_widgets, native_widget_bindings)
     });
     if native_widgets.import_bindkeys {
@@ -791,6 +1561,12 @@ fn build_keymap_for_target(
             add_engine_bind_keybindings_recorded(keybindings, target, engine_bindings, 0)
         })
         .1;
+    // niubash#775: plugin registrations made through the live readline ABI
+    // (`rl_add_defun`/`rl_bind_key*`) join the script layer.  The user's own
+    // NIU_BINDKEYS layer still applies last, matching GNU's last-write rule.
+    builder.layer(KeymapSource::Script, |keybindings| {
+        crate::readline_live::add_plugin_keybindings(keybindings, target)
+    });
     builder.layer(
         KeymapSource::User {
             via: UserBindingVia::NiuBindkeys,
@@ -805,6 +1581,16 @@ fn build_keymap_for_target(
     )
 }
 
+/// Everything the chord layer needs on top of the inner machine,
+/// built from the engine snapshot for one edit mode (niubash#731:
+/// the quote sequences joined the chords here; the parts travel as
+/// one struct so `build_edit_mode`'s return stays a plain triple).
+struct ChordLayerParts {
+    chords: Vec<ChordBinding>,
+    alt_keys: std::collections::HashSet<KeyCode>,
+    quote_sequences: Vec<Vec<(KeyModifiers, KeyCode)>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_edit_mode(
     mode: EditorMode,
@@ -817,8 +1603,7 @@ fn build_edit_mode(
 ) -> (
     Box<dyn EditMode>,
     crate::keymap_registry::KeymapRegistry,
-    Vec<ChordBinding>,
-    std::collections::HashSet<KeyCode>,
+    ChordLayerParts,
 ) {
     use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
@@ -842,8 +1627,27 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
-                collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0),
-                alt_keys,
+                ChordLayerParts {
+                    chords: {
+                        let mut chords =
+                            collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
+                        chords.extend(gnu_default_chord_bindings());
+                        let abi_unbinds =
+                            crate::readline_live::plugin_chord_unbinds(NativeKeymapTarget::Emacs);
+                        chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
+                        chords.extend(
+                            crate::readline_live::plugin_chords(NativeKeymapTarget::Emacs)
+                                .into_iter()
+                                .map(|(keys, event)| ChordBinding { keys, event }),
+                        );
+                        chords
+                    },
+                    alt_keys,
+                    quote_sequences: collect_quote_sequences(
+                        engine_bindings,
+                        NativeKeymapTarget::Emacs,
+                    ),
+                },
             )
         }
         EditorMode::Vi => {
@@ -889,14 +1693,34 @@ fn build_edit_mode(
                     entries,
                     dropped,
                 },
-                {
-                    let mut chords = Vec::new();
-                    for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
-                        chords.extend(collect_chord_bindings(engine_bindings, target, 0));
-                    }
-                    chords
+                ChordLayerParts {
+                    chords: {
+                        let mut chords = Vec::new();
+                        for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                            chords.extend(collect_chord_bindings(engine_bindings, target, 0));
+                            chords.extend(
+                                crate::readline_live::plugin_chords(target)
+                                    .into_iter()
+                                    .map(|(keys, event)| ChordBinding { keys, event }),
+                            );
+                        }
+                        let abi_unbinds: Vec<_> =
+                            [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal]
+                                .into_iter()
+                                .flat_map(crate::readline_live::plugin_chord_unbinds)
+                                .collect();
+                        chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
+                        chords
+                    },
+                    alt_keys,
+                    quote_sequences: {
+                        let mut quotes = Vec::new();
+                        for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                            quotes.extend(collect_quote_sequences(engine_bindings, target));
+                        }
+                        quotes
+                    },
                 },
-                alt_keys,
             )
         }
     }
@@ -1318,7 +2142,10 @@ impl PasteChunkEditMode {
     }
 
     /// niubash#631: the navigation splice for a TAB (`delta` +1) or
-    /// Shift-TAB (-1) inside a live cycle session, as the edit batch
+    /// Shift-TAB (-1), and (niubash#778, menu-select) the arrow keys,
+    /// inside a live cycle session, as the edit batch. `horizontal`
+    /// selects the grid column stride (`rows` candidates, for
+    /// Left/Right); the row stride is one candidate (TAB / Up / Down).
     /// that replaces the current candidate with the next one
     /// (wrap-around). Issued HERE, at key-translation time, because
     /// the menu cannot: a menu-side splice runs at paint time in
@@ -1333,16 +2160,47 @@ impl PasteChunkEditMode {
     /// consumes one nav_seq per Edit echo the engine reports back).
     /// `None` when no live session can navigate (the key then takes
     /// its normal translation: TAB #1 opens the menu through the
-    /// bindings, and the menu begins the session itself).
-    fn cycle_navigation_edits(&self, delta: isize) -> Option<Vec<EditCommand>> {
+    /// bindings, and the menu begins the session itself — with
+    /// candidate 0 already spliced and highlighted, niubash#778). An
+    /// arrow key is a menu-select navigation only: under `cycle` it
+    /// keeps its line/history meaning.
+    fn cycle_navigation_edits(
+        &self,
+        movement: crate::completion::cycle_menu::CycleMove,
+        via_arrow: bool,
+    ) -> Option<Vec<EditCommand>> {
+        use crate::completion::cycle_menu::{grid_move, CycleMove};
         let session = self.cycle_session.as_ref()?;
         let mut state = session.lock().ok()?;
         if !state.is_open() || state.candidates.len() < 2 {
             return None;
         }
+        if via_arrow && !state.select_mode {
+            return None;
+        }
         let snapshot = state.snapshot.clone()?;
-        let len = state.candidates.len() as isize;
-        state.index = (state.index as isize + delta).rem_euclid(len) as usize;
+        let len = state.candidates.len();
+        // TAB #1 selected index 0 (niubash#778); TAB / Shift-TAB step
+        // linearly, the arrows walk the painted cell grid with zsh's
+        // mcol/wishcol edge wrap (short last column included).
+        let (index, mcol, wish_col) = match movement {
+            CycleMove::Linear(delta) => {
+                let index = (state.index as isize + delta).rem_euclid(len as isize) as usize;
+                let start = state.grid.position(index).1;
+                (index, start, start)
+            }
+            CycleMove::Grid(direction) => grid_move(
+                &state.grid,
+                len,
+                state.index,
+                state.mcol,
+                state.wish_col,
+                direction,
+            ),
+        };
+        state.index = index;
+        state.mcol = mcol;
+        state.wish_col = wish_col;
         let text = state.candidates[state.index].splice_text();
         let (start, span_end) = state.span;
         let mut new_buffer = String::with_capacity(snapshot.buffer.len() + text.len());
@@ -1849,19 +2707,48 @@ impl PasteChunkEditMode {
         // paint time, one frame behind the grid's highlight. With no
         // live session the key falls through to its normal
         // translation (TAB #1 opens the menu through the bindings).
+        // niubash#778: under menu-select, the arrow keys are the same
+        // grid navigation (Down/Up one row, Right/Left one column with
+        // wrap), so the highlight and the line move in one frame too.
+        // Outside a live select session none of this matches, so the
+        // keys fall through to `UntilFound([MenuUp, Up])` & co. and
+        // keep their history / cursor meaning.
         if let crossterm29::event::Event::Key(key) = &raw {
             if key.kind == crossterm29::event::KeyEventKind::Press {
-                let delta = match (key.code, key.modifiers) {
+                use crate::completion::cycle_menu::{CycleMove, GridMove};
+                let navigation = match (key.code, key.modifiers) {
                     (crossterm29::event::KeyCode::Tab, modifiers)
                         if modifiers == crossterm29::event::KeyModifiers::NONE =>
                     {
-                        Some(1)
+                        Some((CycleMove::Linear(1), false))
                     }
-                    (crossterm29::event::KeyCode::BackTab, _) => Some(-1),
+                    (crossterm29::event::KeyCode::BackTab, _) => {
+                        Some((CycleMove::Linear(-1), false))
+                    }
+                    (crossterm29::event::KeyCode::Down, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Down), true))
+                    }
+                    (crossterm29::event::KeyCode::Up, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Up), true))
+                    }
+                    (crossterm29::event::KeyCode::Right, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Right), true))
+                    }
+                    (crossterm29::event::KeyCode::Left, modifiers)
+                        if modifiers == crossterm29::event::KeyModifiers::NONE =>
+                    {
+                        Some((CycleMove::Grid(GridMove::Left), true))
+                    }
                     _ => None,
                 };
-                if let Some(delta) = delta {
-                    if let Some(edits) = self.cycle_navigation_edits(delta) {
+                if let Some((movement, via_arrow)) = navigation {
+                    if let Some(edits) = self.cycle_navigation_edits(movement, via_arrow) {
                         self.menu_possible = true;
                         return ReedlineEvent::Edit(edits);
                     }
@@ -2235,42 +3122,102 @@ fn add_engine_bind_keybindings_recorded(
             }
             crate::bind_surface::EngineBindKind::Macro { text } => {
                 if crate::keymap_registry::is_script_macro_text(text) {
-                    dropped.push(crate::keymap_registry::dropped_bind_for(
-                        entry,
-                        crate::keymap_registry::DroppedReason::ScriptMacro,
-                    ));
+                    // K3: the key-script executor — the macro decodes to
+                    // the keystrokes it carries and binds
+                    // `ReedlineEvent::KeySequence`, reedline's replay
+                    // queue; each key then dispatches through the live
+                    // keymap exactly like readline replay. A macro that
+                    // decodes to no keys (or pure self-insert text, where
+                    // the literal path is identical) keeps the literal
+                    // insert; one that decodes to nothing at all keeps
+                    // its dropped record too.
+                    match script_macro_key_sequence(text) {
+                        Some(event) => event,
+                        None => {
+                            dropped.push(crate::keymap_registry::dropped_bind_for(
+                                entry,
+                                crate::keymap_registry::DroppedReason::ScriptMacro,
+                            ));
+                            edit_event(EditCommand::InsertString(text.clone()))
+                        }
+                    }
+                } else {
+                    edit_event(EditCommand::InsertString(text.clone()))
                 }
-                edit_event(EditCommand::InsertString(text.clone()))
             }
             // A readline function name the editor cannot deliver is
             // skipped; the sentinel fallthrough of native_widget_event is
             // for zsh-style shell-function widgets, which `bind` to a
             // readline function position has no meaning for.
             crate::bind_surface::EngineBindKind::Function { name } => {
-                match native_widget_event(name) {
-                    // native_widget_event's sentinel fallthrough means
-                    // "unknown readline function": skipped, like GNU's
-                    // silent rl_parse_and_bind drop (wt100 probe).
-                    Some(ReedlineEvent::ExecuteHostCommand(payload))
-                        if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
-                    {
-                        note_unusable_bind(
-                            &mut unusable,
-                            &mut dropped,
-                            entry,
-                            unusable_function_reason(name),
-                        );
-                        continue;
+                // GNU `do-lowercase-version` (text.c:1179) is not a
+                // command: `_rl_dispatch_subseq` (readline.c:916-922)
+                // special-cases it and re-dispatches the pressed key
+                // lowercased in the same map. The editor's emacs
+                // machine already lowercases every modified character
+                // before lookup (emacs.rs `single_key_event`), and the
+                // chord layer folds an ESC-prefixed uppercase partner
+                // to its lowercase Meta form, so installing a flat
+                // binding here would be wrong twice over: parse_key_sequence
+                // has already lowercased `\eA` to Alt+a, and a binding
+                // there would shadow Meta+a's own command. Skip it;
+                // the fallback is the dispatch layer's job.
+                if name == "do-lowercase-version" {
+                    continue;
+                }
+                // `quoted-insert` is delivered by the chord layer's
+                // quote state (see `collect_quote_sequences`), not by
+                // a flat binding: the key itself must never reach the
+                // inner machine (niubash#731). Multi-key sequences
+                // bound to it never get this far — the chord check
+                // above already passed them to the layer.
+                if name == "quoted-insert" {
+                    continue;
+                }
+                // `self-insert` means "insert the pressed key's own
+                // character": the event depends on the key, which only
+                // this layer knows, so it is translated here instead of
+                // in the name table (niubash#731). A key with no
+                // character of its own keeps the actionable record.
+                if name == "self-insert" {
+                    match key_literal_text(modifiers, key_code) {
+                        Some(text) => edit_event(EditCommand::InsertString(text)),
+                        None => {
+                            note_unusable_bind(
+                                &mut unusable,
+                                &mut dropped,
+                                entry,
+                                UnusableBindReason::Other,
+                            );
+                            continue;
+                        }
                     }
-                    Some(event) => event,
-                    None => {
-                        note_unusable_bind(
-                            &mut unusable,
-                            &mut dropped,
-                            entry,
-                            unusable_function_reason(name),
-                        );
-                        continue;
+                } else {
+                    match native_widget_event(name) {
+                        // native_widget_event's sentinel fallthrough means
+                        // "unknown readline function": skipped, like GNU's
+                        // silent rl_parse_and_bind drop (wt100 probe).
+                        Some(ReedlineEvent::ExecuteHostCommand(payload))
+                            if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                        {
+                            note_unusable_bind(
+                                &mut unusable,
+                                &mut dropped,
+                                entry,
+                                unusable_function_reason(name),
+                            );
+                            continue;
+                        }
+                        Some(event) => event,
+                        None => {
+                            note_unusable_bind(
+                                &mut unusable,
+                                &mut dropped,
+                                entry,
+                                unusable_function_reason(name),
+                            );
+                            continue;
+                        }
                     }
                 }
             }
@@ -2309,6 +3256,196 @@ pub(crate) fn char_offset_to_byte(buffer: &str, chars: usize) -> usize {
         .unwrap_or(buffer.len())
 }
 
+/// Decode an engine macro's stored byte text into reedline key
+/// combinations for [`ReedlineEvent::KeySequence`] replay (K3).
+///
+/// The engine hands the host the post-translation form: `\C-`/`\e`
+/// escapes are already raw bytes, so a control byte is a keystroke
+/// token and a printable char is a literal insertion key. ESC starts a
+/// meta unit — `\e`+char is Alt, `\e`+control is Ctrl-Alt, and a CSI
+/// (`\e[..`) or SS3 (`\eO.`) terminal sequence resolves through the
+/// same spellings [`parse_key_sequence`] owns. An unresolvable
+/// terminal sequence contributes nothing, like an unbound key inside
+/// a readline macro.
+///
+/// Returns `None` only when the text carried no keys at all (the
+/// caller then keeps the literal insert and the dropped record);
+/// a pure self-insert decode collapses back to the literal insert
+/// event, which is identical for every byte it could carry.
+fn script_macro_key_sequence(text: &str) -> Option<ReedlineEvent> {
+    let kc = |modifier: KeyModifiers, key_code: KeyCode| KeyCombination { modifier, key_code };
+    let mut keys: Vec<KeyCombination> = Vec::new();
+    let normalized = normalize_macro_escapes(text);
+    let mut chars = normalized.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                None => keys.push(kc(KeyModifiers::NONE, KeyCode::Esc)),
+                Some(open @ ('[' | 'O')) => {
+                    // Reassemble the terminal sequence into the textual
+                    // spelling parse_key_sequence owns ("\e[3~", "\eOA").
+                    let mut seq = String::from("\\e");
+                    seq.push(open);
+                    if open == '[' {
+                        // CSI: parameter/intermediate bytes until a final
+                        // byte in 0x40..=0x7e.
+                        while let Some(&next) = chars.peek() {
+                            chars.next();
+                            seq.push(next);
+                            if ('\u{40}'..='\u{7e}').contains(&next) {
+                                break;
+                            }
+                        }
+                    } else if let Some(&next) = chars.peek() {
+                        chars.next();
+                        seq.push(next);
+                    }
+                    if let Some((modifier, key_code)) = parse_key_sequence(&seq) {
+                        keys.push(kc(modifier, key_code));
+                    }
+                }
+                Some(next) if next.is_control() => {
+                    if let Some(key_code) = control_byte_key_code(next) {
+                        keys.push(kc(KeyModifiers::CONTROL | KeyModifiers::ALT, key_code));
+                    }
+                }
+                Some(next) => keys.push(kc(KeyModifiers::ALT, KeyCode::Char(next))),
+            },
+            '\u{7f}' => keys.push(kc(KeyModifiers::NONE, KeyCode::Backspace)),
+            '\t' => keys.push(kc(KeyModifiers::NONE, KeyCode::Tab)),
+            '\n' | '\r' => keys.push(kc(KeyModifiers::NONE, KeyCode::Enter)),
+            c if c.is_control() => {
+                if let Some(key_code) = control_byte_key_code(c) {
+                    keys.push(kc(KeyModifiers::CONTROL, key_code));
+                }
+            }
+            c => keys.push(kc(KeyModifiers::NONE, KeyCode::Char(c))),
+        }
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    if keys
+        .iter()
+        .all(|key| key.modifier == KeyModifiers::NONE && matches!(key.key_code, KeyCode::Char(_)))
+    {
+        return Some(edit_event(EditCommand::InsertString(text.to_string())));
+    }
+    Some(ReedlineEvent::KeySequence(keys))
+}
+
+/// Fold the written `\C-x`/`\M-x`/`\e`/`\\` escape spellings in a macro
+/// text down to the raw-byte form the engine normally stores. The
+/// stored form passes through untouched (it carries no backslashes the
+/// caller did not write); the written form arrives via `[keymap].bind`
+/// rules and tests. Unknown escapes keep their backslash, like GNU's
+/// permissive keyseq reader.
+fn normalize_macro_escapes(text: &str) -> String {
+    if !text.contains('\\') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            None => out.push('\\'),
+            Some(tag @ ('C' | 'M')) if chars.peek() == Some(&'-') => {
+                chars.next(); // consume '-'
+                match chars.next() {
+                    Some(key) => {
+                        if tag == 'M' {
+                            out.push('\u{1b}');
+                            out.push(key);
+                        } else {
+                            out.push(control_byte_for_letter(key));
+                        }
+                    }
+                    None => {
+                        out.push('\\');
+                        out.push(tag);
+                        out.push('-');
+                    }
+                }
+            }
+            Some('e') => out.push('\u{1b}'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('a') => out.push('\u{7}'),
+            Some('b') => out.push('\u{8}'),
+            Some('d') => out.push('\u{7f}'),
+            Some('f') => out.push('\u{c}'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('v') => out.push('\u{b}'),
+            Some('x') => {
+                // \xHH: two hex digits; fewer keeps the escape literal.
+                let hi = chars.next();
+                let lo = chars.next();
+                match (hi, lo) {
+                    (Some(h), Some(l)) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
+                        let byte = u8::from_str_radix(&format!("{h}{l}"), 16).unwrap_or(0);
+                        out.push(byte as char);
+                    }
+                    _ => {
+                        out.push('\\');
+                        out.push('x');
+                        if let Some(h) = hi {
+                            out.push(h);
+                        }
+                        if let Some(l) = lo {
+                            out.push(l);
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+/// The control byte a `\C-` letter names (readline translate_keyseq):
+/// letters fold into the low five bits, `@ [ \ ] ^ _` land on their
+/// partners, `?` is DEL. Characters outside the table pass through so
+/// a stray `\C-(` stays visible instead of silently vanishing.
+fn control_byte_for_letter(key: char) -> char {
+    match key {
+        '@' => '\u{0}',
+        'a'..='z' | 'A'..='Z' => char::from_u32((key as u32) & 0x1f).unwrap_or(key),
+        '[' => '\u{1b}',
+        '\\' => '\u{1c}',
+        ']' => '\u{1d}',
+        '^' => '\u{1e}',
+        '_' => '\u{1f}',
+        '?' => '\u{7f}',
+        other => other,
+    }
+}
+
+/// The `KeyCode` a raw control byte names, minus the exceptions the
+/// caller maps first (ESC, DEL, Tab, Enter): C-@ is space, C-\ through
+/// C-_ are their punctuation partners, and the rest are the letter
+/// block. Returns `None` for bytes with no crossterm spelling.
+fn control_byte_key_code(byte: char) -> Option<KeyCode> {
+    match byte as u32 {
+        0 => Some(KeyCode::Char(' ')),
+        0x01..=0x1a => char::from_u32(byte as u32 + 0x60).map(KeyCode::Char),
+        0x1c => Some(KeyCode::Char('\\')),
+        0x1d => Some(KeyCode::Char(']')),
+        0x1e => Some(KeyCode::Char('^')),
+        0x1f => Some(KeyCode::Char('_')),
+        _ => None,
+    }
+}
+
 fn add_menu_keybindings(
     keybindings: &mut Keybindings,
     completion_interaction: CompletionInteraction,
@@ -2328,10 +3465,12 @@ fn add_menu_keybindings(
             ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
             ReedlineEvent::Edit(vec![EditCommand::Complete]),
         ]),
-        CompletionInteraction::Cycle => ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::MenuNext,
-            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
-        ]),
+        CompletionInteraction::Cycle | CompletionInteraction::Select => {
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuNext,
+                ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+            ])
+        }
     };
     keybindings.add_binding(KeyModifiers::NONE, KeyCode::Tab, tab_event);
     keybindings.add_binding(
@@ -2339,6 +3478,15 @@ fn add_menu_keybindings(
         KeyCode::BackTab,
         ReedlineEvent::MenuPrevious,
     );
+    // niubash#778: the unmodified arrows already carry the same
+    // menu-first shape in the editor defaults — Up/Down/Left are
+    // `UntilFound([MenuUp|MenuDown|MenuLeft, Up|Down|Left])` and Right
+    // is `UntilFound([HistoryHintComplete, MenuRight, Right])` — so a
+    // select menu takes them and every other context keeps history /
+    // cursor motion. They are not rebound here: a baseline override
+    // would also flatten the vi-visual map's arrow rebinding. The
+    // wrapper intercepts them only while a live select session exists;
+    // see `cycle_navigation_edits`.
 }
 
 /// Ctrl+V -> system clipboard paste. Only wired when reedline carries the
@@ -2358,7 +3506,7 @@ fn add_system_clipboard_keybindings(keybindings: &mut Keybindings) {
 fn add_system_clipboard_keybindings(_keybindings: &mut Keybindings) {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeKeymapTarget {
+pub(crate) enum NativeKeymapTarget {
     Emacs,
     ViInsert,
     ViNormal,
@@ -2446,6 +3594,48 @@ fn native_widget_keymap_applies(keymap: Option<&str>, target: NativeKeymapTarget
     )
 }
 
+/// The literal text a key itself carries, for the readline functions
+/// whose meaning is the pressed key's own character: `self-insert`
+/// (the bound key) and `quoted-insert` (the key pressed after the
+/// quoting key, niubash#731). A control combination carries its
+/// control byte; a meta combination carries the character itself
+/// (the ESC is the prefix mechanism, not data). Keys with no
+/// character of their own (arrows, function keys, ...) carry nothing.
+fn key_literal_text(modifiers: KeyModifiers, code: KeyCode) -> Option<String> {
+    match code {
+        KeyCode::Char(c) => {
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                control_char(c).map(|ch| ch.to_string())
+            } else {
+                Some(c.to_string())
+            }
+        }
+        KeyCode::Enter => Some("\n".to_string()),
+        KeyCode::Tab => Some("\t".to_string()),
+        KeyCode::Backspace => Some("\u{7f}".to_string()),
+        KeyCode::Esc => Some("\u{1b}".to_string()),
+        _ => None,
+    }
+}
+
+/// The control byte a Ctrl+key combination names: letters fold to
+/// 0x01–0x1a, and the symbol row keeps its ASCII control names
+/// (C-@ / C-Space is NUL, C-? is DEL, ...).
+fn control_char(c: char) -> Option<char> {
+    match c {
+        'a'..='z' => char::from_u32(c as u32 - 'a' as u32 + 1),
+        'A'..='Z' => char::from_u32(c as u32 - 'A' as u32 + 1),
+        '@' | ' ' => Some('\0'),
+        '[' => Some('\u{1b}'),
+        '\\' => Some('\u{1c}'),
+        ']' => Some('\u{1d}'),
+        '^' => Some('\u{1e}'),
+        '_' => Some('\u{1f}'),
+        '?' => Some('\u{7f}'),
+        _ => None,
+    }
+}
+
 fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
     match widget {
         "autosuggest-accept" => Some(ReedlineEvent::HistoryHintComplete),
@@ -2454,12 +3644,17 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             ReedlineEvent::Enter,
         ])),
         "autosuggest-partial-accept" => Some(ReedlineEvent::HistoryHintWordComplete),
-        "history-substring-search-up" | "history-search-backward" | "up-line-or-history" => {
-            Some(ReedlineEvent::Up)
-        }
-        "history-substring-search-down" | "history-search-forward" | "down-line-or-history" => {
-            Some(ReedlineEvent::Down)
-        }
+        // GNU's own spellings of the substring-search pair
+        // (`history-substring-search-backward`/`-forward`, funmap.c)
+        // ride the same arms as the zsh spellings (niubash#731).
+        "history-substring-search-up"
+        | "history-substring-search-backward"
+        | "history-search-backward"
+        | "up-line-or-history" => Some(ReedlineEvent::Up),
+        "history-substring-search-down"
+        | "history-substring-search-forward"
+        | "history-search-forward"
+        | "down-line-or-history" => Some(ReedlineEvent::Down),
         "accept-line" => Some(ReedlineEvent::Enter),
         "beginning-of-line" => Some(edit_event(EditCommand::MoveToLineStart { select: false })),
         "end-of-line" => Some(edit_event(EditCommand::MoveToLineEnd { select: false })),
@@ -2483,7 +3678,13 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // "not in the host's deliverable set" (niubash#630 gap list).
         "upcase-word" => Some(edit_event(EditCommand::UppercaseWord)),
         "downcase-word" => Some(edit_event(EditCommand::LowercaseWord)),
+        // The third word-case transform and the word transpose: the
+        // editor carries both edits (`CapitalizeWord`, `SwapWords`),
+        // so a bind of the GNU names mirrors like its siblings
+        // (niubash#731).
+        "capitalize-word" => Some(edit_event(EditCommand::CapitalizeWord)),
         "transpose-chars" => Some(edit_event(EditCommand::SwapGraphemes)),
+        "transpose-words" => Some(edit_event(EditCommand::SwapWords)),
         // GNU `unix-word-rubout` (Ctrl+W) is the same "kill the word
         // before the cursor into the cut buffer" gesture as
         // `backward-kill-word`; readline keeps both names.
@@ -2511,6 +3712,15 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // completion event is exactly that (menu first, then the
         // editor's own completion).
         "complete" => Some(completion_event()),
+        // `menu-complete` is GNU's cycling completion: the same event
+        // (the menu cycles under the host's interaction rules,
+        // niubash#731). The backward/old variants stay undelivered —
+        // the editor has no open-the-menu-backward event.
+        "menu-complete" => Some(completion_event()),
+        // GNU's listing / bulk-insert completion functions (complete.c
+        // `rl_possible_completions`, `rl_insert_completions`).
+        "possible-completions" => Some(ReedlineEvent::PossibleCompletions),
+        "insert-completions" => Some(ReedlineEvent::InsertCompletions),
         "kill-word" => Some(edit_event(EditCommand::CutWordRight)),
         "kill-line" => Some(edit_event(EditCommand::CutToLineEnd)),
         "backward-kill-line" | "unix-line-discard" => {
@@ -2519,12 +3729,157 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
         "yank" => Some(edit_event(EditCommand::PasteCutBufferBefore)),
         "undo" => Some(edit_event(EditCommand::Undo)),
+        "suspend" => Some(ReedlineEvent::Suspend),
         "redo" => Some(edit_event(EditCommand::Redo)),
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
+        // GNU `clear-display` clears the screen AND the scrollback,
+        // then redraws (text.c `rl_clear_display` calls
+        // `_rl_clear_screen (1)`): the editor's `ClearScrollback` is
+        // that shape, where `clear-screen` above is the milder one
+        // (niubash#731).
+        "clear-display" => Some(ReedlineEvent::ClearScrollback),
         "redisplay" | "redraw-current-line" => Some(ReedlineEvent::Repaint),
         "expand-or-complete" | "complete-word" => Some(completion_event()),
         "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
+        // GNU kill-ring and word-transform functions the fork's
+        // `EditCommand` set delivers directly.
+        "yank-pop" => Some(edit_event(EditCommand::YankPop)),
+        "revert-line" => Some(edit_event(EditCommand::RevertLine)),
+        "delete-horizontal-space" => Some(edit_event(EditCommand::DeleteHorizontalSpace)),
+        // GNU keeps the emacs and vi spellings for the same
+        // "delete back to the last path separator" gesture.
+        "unix-filename-rubout" | "vi-filename-rubout" => {
+            Some(edit_event(EditCommand::CutFilenameLeft))
+        }
+        "exchange-point-and-mark" => Some(edit_event(EditCommand::SwapCursorAndAnchor)),
+        // GNU `set-mark` (C-@ / M-SPC): drop the mark at point.
+        "set-mark" => Some(edit_event(EditCommand::SetMark)),
+        // Verbatim next-key insertion (`rl_quoted_insert`).
+        "quoted-insert" => Some(ReedlineEvent::QuotedInsert),
+        // Accept the line and preload the following history entry
+        // (`rl_operate_and_get_next`, C-o).
+        "operate-and-get-next" => Some(ReedlineEvent::OperateAndGetNext),
+        // Insert-key toggle; `None` flips, matching GNU's no-argument
+        // `rl_overwrite_mode`.
+        "overwrite-mode" => Some(ReedlineEvent::OverwriteMode(None)),
+        // GNU keyboard-macro trio (C-x ( / C-x ) / C-x e).
+        "start-kbd-macro" => Some(ReedlineEvent::StartKbdMacro),
+        "end-kbd-macro" => Some(ReedlineEvent::EndKbdMacro),
+        "call-last-kbd-macro" => Some(ReedlineEvent::CallLastKbdMacro),
+        // GNU `character-search` (C-]) / `character-search-backward`
+        // (M-C-]): the next key is the search target.
+        "character-search" => Some(ReedlineEvent::CharSearch {
+            direction: Direction::Forward,
+        }),
+        "character-search-backward" => Some(ReedlineEvent::CharSearch {
+            direction: Direction::Backward,
+        }),
+        // GNU non-incremental history search (M-n/M-p): collect a
+        // string in the minibuffer, then search newer/older entries.
+        "non-incremental-forward-search-history" => Some(ReedlineEvent::NonIncrementalSearch {
+            direction: Direction::Forward,
+            prompt_char: ':',
+            pattern: false,
+        }),
+        "non-incremental-reverse-search-history" => Some(ReedlineEvent::NonIncrementalSearch {
+            direction: Direction::Backward,
+            prompt_char: ':',
+            pattern: false,
+        }),
+        // GNU `yank-last-arg` (M-.): `None` is GNU's `'$'` — the last
+        // argument. `yank-nth-arg` defaults to argument 1; explicit
+        // counts reach the editor through `WithArg`.
+        "yank-last-arg" | "insert-last-argument" => {
+            Some(ReedlineEvent::YankLastArg { count: None })
+        }
+        "yank-nth-arg" => Some(ReedlineEvent::YankNthArg { count: 1 }),
+        // Numeric-argument accumulation (M-0..M-9 / M-- / C-u). `None`
+        // is GNU's `M--` negate.
+        "digit-argument" => Some(ReedlineEvent::DigitArgument(None)),
+        "universal-argument" => Some(ReedlineEvent::UniversalArgument),
+        // GNU `edit-and-execute-command` (C-x C-e): open the line in
+        // $VISUAL/$EDITOR.
+        "edit-and-execute-command" => Some(ReedlineEvent::OpenEditor),
+        // GNU `insert-comment` (text.c `rl_insert_comment`, no
+        // explicit argument — the only shape reachable without
+        // readline's prefix-argument machinery): move to the line
+        // start, insert the comment-begin string (GNU's default is
+        // `#`, rlconf.h `RL_COMMENT_BEGIN_DEFAULT`), and accept the
+        // line. A customized comment-begin is not consulted, the same
+        // static-arm limit as the rest of this table (niubash#731).
+        "insert-comment" => Some(ReedlineEvent::Multiple(vec![
+            ReedlineEvent::Edit(vec![
+                EditCommand::MoveToLineStart { select: false },
+                EditCommand::InsertString("#".to_string()),
+            ]),
+            ReedlineEvent::Enter,
+        ])),
+        // GNU `tab-insert` inserts a literal tab where TAB itself is
+        // the completion key (niubash#731).
+        "tab-insert" => Some(edit_event(EditCommand::InsertChar('\t'))),
+        // The host-implemented readline commands (niubash#765):
+        // dump-functions / dump-macros / dump-variables print editor
+        // and registry state (bind.c rl_dump_functions /
+        // rl_dump_macros / rl_dump_variables) and re-read-init-file
+        // re-reads the rc's bind state (bind.c
+        // rl_re_read_init_file). The pinned editor has no events
+        // for them, so they ride the readline host-command channel
+        // and `run_readline_command` performs them against the
+        // suspended editor — never the shell-function sentinel.
+        "dump-functions" | "dump-macros" | "dump-variables" | "re-read-init-file" => {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, widget
+            )))
+        }
+        // niubash#766: tilde-expand (util.c rl_tilde_expand) edits
+        // the word at point and execute-named-command (text.c
+        // rl_execute_named_command) reads a name in the minibuffer —
+        // both are host work against the suspended editor, so they
+        // ride the same readline host-command channel.
+        // insert-comment needs no arm here: it shipped as a host
+        // composite in the #731 line.
+        "tilde-expand" | "execute-named-command" => Some(ReedlineEvent::ExecuteHostCommand(
+            format!("{}{}", READLINE_HOST_COMMAND_PREFIX, widget),
+        )),
+        // niubash#767: shell-expand-line (bashline.c
+        // shell_expand_line) expands the line through the engine
+        // and dynamic-complete-history (bashline.c
+        // dynamic_complete_history) completes from history tokens —
+        // both need the session and the editor's history, so they
+        // ride the same readline host-command channel.
+        "shell-expand-line" | "dynamic-complete-history" => {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, widget
+            )))
+        }
+        // GNU `abort` (util.c _rl_abort_internal): clear the pending
+        // command and ding without abandoning the line — host work
+        // against the suspended editor. `history-expand-line`
+        // (bashline.c history_expand_line) expands only the history
+        // stage of the line. The context-specific completion entry
+        // points (bashline.c bash_complete_command /
+        // bash_complete_variable / bash_complete_filename /
+        // bash_complete_hostname / bash_complete_username /
+        // bash_brace_completion) pin the candidate source while reusing
+        // the host completion engine, and glob-complete-word
+        // (bashline.c:4068) uses the engine's pathname expansion through
+        // Session::glob_filename. All ride the readline host-command
+        // channel.
+        "abort"
+        | "history-expand-line"
+        | "complete-command"
+        | "complete-variable"
+        | "complete-filename"
+        | "complete-hostname"
+        | "complete-username"
+        | "complete-into-braces"
+        | "glob-complete-word" => Some(ReedlineEvent::ExecuteHostCommand(format!(
+            "{}{}",
+            READLINE_HOST_COMMAND_PREFIX, widget
+        ))),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -2533,6 +3888,93 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             WIDGET_HOST_COMMAND_PREFIX, widget
         ))),
     }
+}
+
+/// Whether a GNU readline name is actually delivered by the host
+/// (a native editor event, a host composite, or a readline
+/// host-command) rather than falling through to the shell-function
+/// widget sentinel. Only delivered names earn their GNU default
+/// bindings from [`crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS`].
+fn gnu_name_is_delivered(name: &str) -> bool {
+    match native_widget_event(name) {
+        Some(ReedlineEvent::ExecuteHostCommand(payload)) => {
+            !payload.starts_with(WIDGET_HOST_COMMAND_PREFIX)
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// The one-key entries of the GNU default command bindings
+/// (niubash#765/#766/#767), applied in the host baseline of the
+/// emacs keymap — GNU's defaults live in the emacs keymap; the vi
+/// keymaps carry their own spellings. Multi-key entries ride the
+/// chord layer instead (see [`gnu_default_chord_bindings`]).
+fn add_gnu_command_default_keybindings(keybindings: &mut Keybindings, target: NativeKeymapTarget) {
+    if target != NativeKeymapTarget::Emacs {
+        return;
+    }
+    for (keyseq, name) in crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS {
+        if !gnu_name_is_delivered(name) {
+            continue;
+        }
+        // Single keys only; `parse_key_sequence` returns None for
+        // multi-key spellings (those ride the chord layer).
+        let Some((modifiers, code)) = parse_key_sequence(keyseq) else {
+            continue;
+        };
+        if let Some(event) = native_widget_event(name) {
+            keybindings.add_binding(modifiers, code, event.clone());
+            // Terminals encode Meta-TAB as ESC TAB, not ESC Ctrl-I:
+            // the `\M-\C-i` spelling (CONTROL|ALT + 'i') also answers
+            // to ALT+Tab, the byte shape that actually arrives.
+            if (modifiers, code)
+                == (
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    KeyCode::Char('i'),
+                )
+            {
+                keybindings.add_binding(KeyModifiers::ALT, KeyCode::Tab, event);
+            }
+        }
+    }
+}
+
+/// The multi-key entries of the GNU default command bindings
+/// (C-x C-r for re-read-init-file), joining the engine chord
+/// bindings in the chord layer.
+fn gnu_default_chord_bindings() -> Vec<ChordBinding> {
+    let mut chords: Vec<ChordBinding> = crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS
+        .iter()
+        .filter_map(|(keyseq, name)| {
+            let keys = parse_chord_sequence(keyseq)?;
+            if keys.len() < 2 || !gnu_name_is_delivered(name) {
+                return None;
+            }
+            native_widget_event(name).map(|event| ChordBinding { keys, event })
+        })
+        .collect();
+    // GNU emacs_ctlx_keymap: the keyboard-macro trio, C-x C-u undo and
+    // C-x C-x exchange-point-and-mark. The native Emacs machine resolves
+    // these through `pending_prefix`, but niu's ChordEditMode sits in
+    // front of it and claims C-x as a chord prefix; without explicit
+    // entries the C-x half is consumed and the macro commands never run.
+    for (key, event) in [
+        ('(', ReedlineEvent::StartKbdMacro),
+        (')', ReedlineEvent::EndKbdMacro),
+        ('e', ReedlineEvent::CallLastKbdMacro),
+        ('u', edit_event(EditCommand::Undo)),
+        ('x', edit_event(EditCommand::SwapCursorAndAnchor)),
+    ] {
+        chords.push(ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char(key)),
+            ],
+            event,
+        });
+    }
+    chords
 }
 
 /// One multi-key binding: the key units and the event the last unit fires.
@@ -2628,20 +4070,72 @@ fn collect_chord_bindings(
                 edit_event(EditCommand::InsertString(text.clone()))
             }
             crate::bind_surface::EngineBindKind::Function { name } => {
-                match native_widget_event(name) {
-                    Some(ReedlineEvent::ExecuteHostCommand(payload))
-                        if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                // `quoted-insert` sequences arm the chord layer's
+                // quote state; they are not chord events (see
+                // `collect_quote_sequences`, niubash#731).
+                if name == "quoted-insert" {
+                    continue;
+                }
+                // A chord ending in `self-insert` inserts the chord's
+                // last key — the same key-dependent translation as the
+                // flat path (niubash#731).
+                if name == "self-insert" {
+                    match keys
+                        .last()
+                        .and_then(|(mods, code)| key_literal_text(*mods, *code))
                     {
-                        continue
+                        Some(text) => edit_event(EditCommand::InsertString(text)),
+                        None => continue,
                     }
-                    Some(event) => event,
-                    None => continue,
+                } else {
+                    match native_widget_event(name) {
+                        Some(ReedlineEvent::ExecuteHostCommand(payload))
+                            if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
+                        {
+                            continue
+                        }
+                        Some(event) => event,
+                        None => continue,
+                    }
                 }
             }
         };
         chords.push(ChordBinding { keys, event });
     }
     chords
+}
+
+/// Collect the key sequences bound to GNU `quoted-insert` for the
+/// chord layer's quote state (niubash#731): any parseable sequence
+/// counts — a single key (`"\C-v"`) or a chain — filtered by the
+/// same keymap targeting as every other engine-bind consumer. The
+/// pinned reedline fork has no quoted-insert event of its own (no
+/// such variant in its `ReedlineEvent`/`EditCommand` at rev
+/// 401393f), so the delivery is the host layer's: completing one of
+/// these sequences arms the quote, and the next key inserts its own
+/// character literally.
+fn collect_quote_sequences(
+    entries: &[crate::bind_surface::EngineBindEntry],
+    target: NativeKeymapTarget,
+) -> Vec<Vec<(KeyModifiers, KeyCode)>> {
+    let mut sequences = Vec::new();
+    for entry in entries {
+        if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+            continue;
+        }
+        let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind else {
+            continue;
+        };
+        if name != "quoted-insert" {
+            continue;
+        }
+        let keys = parse_chord_sequence(&entry.keyseq)
+            .or_else(|| parse_key_sequence(&entry.keyseq).map(|single| vec![single]));
+        if let Some(keys) = keys {
+            sequences.push(keys);
+        }
+    }
+    sequences
 }
 
 /// Multi-key (chord) dispatch, layered above the paste/typeahead machine.
@@ -2657,13 +4151,26 @@ fn collect_chord_bindings(
 struct ChordEditMode {
     inner: Box<dyn EditMode>,
     chords: ChordIndex,
+    /// Sequences bound to GNU `quoted-insert`, indexed like the
+    /// chords; completing one ARMS the quote state below instead of
+    /// firing an event (the stored event is a dummy, never
+    /// returned). Empty when nothing binds `quoted-insert` — the
+    /// layer is then exactly the pre-#731 machine (niubash#731).
+    quotes: ChordIndex,
+    /// Armed by a completed quote sequence: the next key inserts
+    /// its own character literally, bypassing every binding (GNU
+    /// `rl_quoted_insert`). No expiry: GNU waits as long as the
+    /// user takes to press the quoted key.
+    quote_armed: bool,
     /// The configured chord wait. `Duration::ZERO` is readline's `0`:
     /// wait forever (no expiry).
     keyseq_timeout: Duration,
     pending: Vec<crossterm29::event::Event>,
-    /// When the first pending unit was parked. readline's
-    /// `keyseq-timeout` applies here too: a prefix that does not complete
-    /// inside the window stops being a chord prefix.
+    /// When the latest pending unit was parked: the keyseq-timeout
+    /// deadline restarts at each key (GNU's per-key wait,
+    /// niubash#731), so this is the last key's arrival, not the
+    /// first's. A prefix that does not complete inside the window
+    /// stops being a chord prefix.
     pending_since: Option<std::time::Instant>,
     /// Keys that carry a real ALT binding: terminals spell Alt-C as
     /// `ESC c`, and emacs-mode readline treats ESC as the meta prefix.
@@ -2687,6 +4194,8 @@ impl ChordEditMode {
         Self {
             inner,
             chords: ChordIndex::new(&chords),
+            quotes: ChordIndex::default(),
+            quote_armed: false,
             keyseq_timeout,
             pending: Vec::new(),
             pending_since: None,
@@ -2695,12 +4204,37 @@ impl ChordEditMode {
         }
     }
 
+    /// Register the sequences that arm the quote state (see
+    /// `collect_quote_sequences`). Builder form so the many test
+    /// constructions of this layer keep their shape; with no call,
+    /// the quote layer is empty and inert.
+    fn with_quote_sequences(mut self, sequences: Vec<Vec<(KeyModifiers, KeyCode)>>) -> Self {
+        self.quotes = ChordIndex::new(
+            &sequences
+                .into_iter()
+                .map(|keys| ChordBinding {
+                    keys,
+                    event: ReedlineEvent::None,
+                })
+                .collect::<Vec<_>>(),
+        );
+        self
+    }
+
     fn exact(&self, keys: &[(KeyModifiers, KeyCode)]) -> Option<ReedlineEvent> {
         self.chords.exact(keys)
     }
 
     fn is_prefix(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
         self.chords.is_prefix(keys)
+    }
+
+    fn quote_exact(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
+        self.quotes.exact(keys).is_some()
+    }
+
+    fn quote_is_prefix(&self, keys: &[(KeyModifiers, KeyCode)]) -> bool {
+        self.quotes.is_prefix(keys)
     }
 
     fn forward(&mut self, event: ReedlineRawEvent) -> ReedlineEvent {
@@ -2717,6 +4251,27 @@ fn chord_key(event: &crossterm29::event::Event) -> Option<(KeyModifiers, KeyCode
         }
         _ => None,
     }
+}
+
+/// GNU's `rl_do_lowercase_version` dispatch rule (readline.c:916-922):
+/// when the pressed Meta key is an uppercase letter whose entry is
+/// `do-lowercase-version`, readline re-dispatches the *lowercase* key
+/// in the same map. The pinned editor lowercases modified characters
+/// before looking them up, but a terminal spells Meta as `ESC` + the
+/// character, so an uppercase partner (`ESC B`, i.e. Meta-B) reaches
+/// this layer as `(NONE, 'B')` and would otherwise be delivered as a
+/// literal `B`. Folding it to the ALT-bound lowercase key here keeps
+/// Meta-A…Meta-Z meaningful. A letter with no ALT-bound lowercase form
+/// stays an ordinary ESC + letter (GNU dings for the unbound map).
+fn meta_fallback_key(
+    code: KeyCode,
+    alt_keys: &std::collections::HashSet<KeyCode>,
+) -> Option<KeyCode> {
+    let candidate = match code {
+        KeyCode::Char(c) if c.is_ascii_uppercase() => KeyCode::Char(c.to_ascii_lowercase()),
+        other => other,
+    };
+    alt_keys.contains(&candidate).then_some(candidate)
 }
 
 fn push_event(events: &mut Vec<ReedlineEvent>, event: ReedlineEvent) {
@@ -2748,8 +4303,27 @@ impl EditMode for ChordEditMode {
 impl ChordEditMode {
     fn dispatch(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
         let Some(key) = chord_key(&raw) else {
-            return self.forward(ReedlineRawEvent::try_from(raw).expect("non-key event"));
+            // Non-key traffic (key releases, focus flicker, resize): the
+            // lookahead can pull one in as an Esc partner and hand it
+            // straight here — an unconvertible event must be inert, not
+            // a panic (niubash#742's select-Esc drive exposed this).
+            return match ReedlineRawEvent::try_from(raw) {
+                Ok(raw) => self.forward(raw),
+                Err(_) => ReedlineEvent::None,
+            };
         };
+        // An armed quote consumes the key as data before anything
+        // else can claim it — including the meta fold below, so a
+        // quoted ESC inserts the ESC byte itself (niubash#731). A
+        // key with no character of its own is simply spent (GNU
+        // rings the bell and inserts nothing).
+        if self.quote_armed {
+            self.quote_armed = false;
+            return match key_literal_text(key.0, key.1) {
+                Some(text) => edit_event(EditCommand::InsertString(text)),
+                None => ReedlineEvent::None,
+            };
+        }
         // ESC as readline's meta prefix (emacs mode only: vi uses ESC to
         // leave insert mode). Only when the peeked partner actually has an
         // ALT binding, so a bare Escape keeps its immediate meaning.
@@ -2762,8 +4336,8 @@ impl ChordEditMode {
                 .as_mut()
                 .and_then(|peek| peek(ESC_META_BUDGET))
             {
-                if let Some((_mods, code)) =
-                    chord_key(&partner).filter(|(_, code)| self.alt_keys.contains(code))
+                if let Some(code) = chord_key(&partner)
+                    .and_then(|(_, code)| meta_fallback_key(code, &self.alt_keys))
                 {
                     let synthetic = crossterm29::event::Event::Key(
                         crossterm29::event::KeyEvent::new(code, KeyModifiers::ALT),
@@ -2790,13 +4364,34 @@ impl ChordEditMode {
             return self.forward(ReedlineRawEvent::try_from(raw).expect("escape"));
         }
         if self.pending.is_empty() {
+            // A lone quote key arms the quote state at once — unless
+            // the key also starts a longer sequence, where the
+            // both-binding-and-prefix rule below (wait for the chord)
+            // wins, as it does for any other single binding
+            // (niubash#731).
+            if !self.is_prefix(std::slice::from_ref(&key))
+                && !self.quote_is_prefix(std::slice::from_ref(&key))
+                && self.quote_exact(std::slice::from_ref(&key))
+            {
+                self.quote_armed = true;
+                return ReedlineEvent::None;
+            }
             // A key that starts a chord waits, even when it also has its own
             // binding: readline fires the single binding only after
             // `keyseq-timeout` expires, which the flush below reproduces.
-            if self.is_prefix(std::slice::from_ref(&key)) {
+            if self.is_prefix(std::slice::from_ref(&key))
+                || self.quote_is_prefix(std::slice::from_ref(&key))
+            {
                 self.pending.push(raw);
                 self.pending_since = Some(std::time::Instant::now());
-                return ReedlineEvent::None;
+                // `Pending` is the editor's "half a multi-key sequence"
+                // signal: the parse loop erases that key from a macro
+                // recording (GNU subtracts rl_key_sequence_length at
+                // macro.c:276), and the engine drops it without a repaint.
+                // Returning `None` here made the `C-x` of `C-x )` part of
+                // the recorded macro, so a later replay left a lone C-x
+                // parked and swallowed the next chord.
+                return ReedlineEvent::Pending;
             }
             return self.forward(ReedlineRawEvent::try_from(raw).expect("key event"));
         }
@@ -2830,8 +4425,29 @@ impl ChordEditMode {
             self.pending_since = None;
             return event;
         }
+        // A completed quote sequence arms instead of firing
+        // (niubash#731).
+        if self.quote_exact(&candidate) {
+            self.pending.clear();
+            self.pending_since = None;
+            self.quote_armed = true;
+            return ReedlineEvent::None;
+        }
         if self.is_prefix(&candidate) {
             self.pending.push(raw);
+            // The wait restarts at each key: GNU gives every key of
+            // the sequence its own keyseq-timeout window (the #704
+            // review's chord observation ② — the deadline used to
+            // run from the FIRST parked key, so a slow-but-steady
+            // 3+ key chord expired mid-sequence, niubash#731).
+            self.pending_since = Some(std::time::Instant::now());
+            // Same `Pending` contract as the first parked key above: a
+            // chord's prefix half is not a macro-recording key.
+            return ReedlineEvent::Pending;
+        }
+        if self.quote_is_prefix(&candidate) {
+            self.pending.push(raw);
+            self.pending_since = Some(std::time::Instant::now());
             return ReedlineEvent::None;
         }
         // Mismatch: replay the parked keys, then the current one, in order.
@@ -3032,12 +4648,22 @@ pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)>
         "\\e[3~" | "^[[3~" => Some((KeyModifiers::NONE, KeyCode::Delete)),
         "\\e[5~" | "^[[5~" | "\\e[I" | "^[[I" => Some((KeyModifiers::NONE, KeyCode::PageUp)),
         "\\e[6~" | "^[[6~" | "\\e[G" | "^[[G" => Some((KeyModifiers::NONE, KeyCode::PageDown)),
+        // CSI modifier spellings in GNU's terminal table (xterm/rxvt
+        // send these for modified arrows and Delete). The terminal
+        // layer delivers the same chord as KeyCode+modifier, so map
+        // both spellings to one key.
+        "\\e[1;3C" => Some((KeyModifiers::ALT, KeyCode::Right)),
+        "\\e[1;3D" => Some((KeyModifiers::ALT, KeyCode::Left)),
+        "\\e[1;5C" | "\\e[5C" => Some((KeyModifiers::CONTROL, KeyCode::Right)),
+        "\\e[1;5D" | "\\e[5D" => Some((KeyModifiers::CONTROL, KeyCode::Left)),
+        "\\e[3;5~" => Some((KeyModifiers::CONTROL, KeyCode::Delete)),
         // A bare ESC is one of GNU's default binds (`"\e": emacs-editing-mode`).
         // It arrives here only when it is the whole keyseq; `\e[...` forms
         // were matched above.
         "\\e" | "^[" => Some((KeyModifiers::NONE, KeyCode::Esc)),
         "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
-        _ => parse_alt_key_sequence(value)
+        _ => parse_meta_control_combined(value)
+            .or_else(|| parse_alt_key_sequence(value))
             .or_else(|| parse_meta_key_sequence(value))
             .or_else(|| parse_control_key_sequence(value))
             .or_else(|| parse_plain_key_sequence(value)),
@@ -3073,7 +4699,13 @@ fn split_key_units(value: &str) -> Option<Vec<&str>> {
             .strip_prefix("\\C-")
             .or_else(|| rest.strip_prefix("\\M-"))
         {
-            // The unit is the prefix plus one (possibly escaped) character.
+            // The unit is the prefix plus one (possibly escaped)
+            // character — or, for the combined `\M-\C-x` spelling,
+            // the second prefix plus its character.
+            let tail = tail
+                .strip_prefix("\\C-")
+                .or_else(|| tail.strip_prefix("\\M-"))
+                .unwrap_or(tail);
             let ch = tail.chars().next()?;
             let end = rest.len() - tail.len() + ch.len_utf8();
             (&rest[..end], &rest[end..])
@@ -3129,6 +4761,25 @@ fn parse_meta_control_sequence(
 fn parse_meta_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     parse_meta_control_sequence(value, "\\C-", KeyModifiers::CONTROL)
         .or_else(|| parse_meta_control_sequence(value, "\\M-", KeyModifiers::ALT))
+}
+
+/// The combined meta-control spelling `\M-\C-x` (either prefix
+/// order), one key carrying both modifiers — GNU's
+/// rl_translate_keyseq accepts it (e.g. `\M-\C-e` for
+/// shell-expand-line, `\M-\C-i` for dynamic-complete-history).
+fn parse_meta_control_combined(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+    let rest = value
+        .strip_prefix("\\M-\\C-")
+        .or_else(|| value.strip_prefix("\\C-\\M-"))?;
+    let mut chars = rest.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+        KeyCode::Char(ch.to_ascii_lowercase()),
+    ))
 }
 
 fn parse_named_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
@@ -3946,6 +5597,28 @@ fn print_first_run_hint() {
     println!("{hint}");
 }
 
+/// niubash#775: consume the plugin-controlled one-shot readline state at
+/// the point GNU's `readline()` would look at it.  `rl_done` returns the
+/// line immediately (readline.c `while (rl_done == 0)`); otherwise
+/// `rl_pending_input` is the next key, injected before the editor resumes
+/// reading (input.c `rl_read_key`).  Returns the accepted line when the
+/// key/flag finished the line.
+fn consume_abi_control(line_editor: &mut Reedline) -> Option<String> {
+    if crate::readline_live::take_done() {
+        let line = line_editor.current_buffer_contents().to_string();
+        // The forced accept bypasses `read_line`, so clear the editor the
+        // way its own accept path does before the next prompt.
+        line_editor.run_edit_commands(&[EditCommand::Clear]);
+        return Some(line);
+    }
+    let key = crate::readline_live::take_pending_input()?;
+    if let Some(line) = crate::readline_live::apply_pending_key(line_editor, key) {
+        line_editor.run_edit_commands(&[EditCommand::Clear]);
+        return Some(line);
+    }
+    None
+}
+
 /// Takes ownership of the shell and shares it with the completer through an
 /// `Rc<RefCell<Shell>>` bridge so shell-function completions can execute in
 /// the engine while the line editor is active. No borrow is held across
@@ -4027,6 +5700,22 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     loop {
         crate::console_guard::restore(&console_baseline);
         typeahead.arm();
+        // niubash#775: a plugin's `rl_macro_bind` macro has no editor
+        // event of its own; route it into the engine macro registry first
+        // (the same data plane a rc `bind '"\C-t": "text"'` writes), so
+        // the generation check below reloads the bindings and the next
+        // build installs it exactly like a host macro.
+        let plugin_macros = crate::readline_live::plugin_macros_pending();
+        if !plugin_macros.is_empty() {
+            for binding in &plugin_macros {
+                shell.borrow_mut().register_macro_binding(
+                    &binding.keyseq,
+                    &binding.text,
+                    crate::readline_live::root_keymap_for_registry(binding.root),
+                );
+            }
+            crate::readline_live::mark_plugin_macros_forwarded(&plugin_macros);
+        }
         // A command (rc script, PROMPT_COMMAND, or user command) may have
         // registered or removed bindings at runtime. GNU mutates the live
         // readline keymap immediately; reedline keymaps are baked at
@@ -4037,6 +5726,28 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         if shell.borrow().engine_bindings_stale() {
             shell.borrow_mut().load_engine_bindings();
             line_editor = build_line_editor(&shell)?;
+        }
+        // niubash#775: a loadable builtin may have called rl_add_defun /
+        // rl_bind_key / rl_unbind_* since the last build (at startup or from
+        // a bind -x command).  Rebuild from the live ABI keymaps so a binding
+        // registered mid-session fires on the very next key.  A host-command
+        // keypress returns to the loop with the edit buffer intact, so carry
+        // the buffer/point into the fresh editor rather than dropping them.
+        if crate::readline_live::is_stale() {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let point = line_editor.current_insertion_point();
+            let mut rebuilt = build_line_editor(&shell)?;
+            if !buffer.is_empty() {
+                rebuilt.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(buffer),
+                    EditCommand::MoveToPosition {
+                        position: point,
+                        select: false,
+                    },
+                ]);
+            }
+            line_editor = rebuilt;
         }
         // niubash#646: refresh the HIST* settings snapshot before the
         // line is read, so the record-time filters, the list stifle,
@@ -4110,13 +5821,25 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 line_editor = build_line_editor(&shell)?;
             }
             let prompt = shell.borrow_mut().prompt_for_display();
+            let prompt_text = prompt.render_prompt_left().into_owned();
+            // niubash#775: before the read loop dispatches any key, the ABI
+            // sees the editor's buffer and the prompt, and the hooks run.
+            crate::readline_live::begin_read(&mut line_editor, &prompt_text);
             typeahead.disarm_and_reinject();
-            line_editor.read_line(&prompt)
+            match consume_abi_control(&mut line_editor) {
+                Some(line) => Ok(Signal::Success(line)),
+                None => line_editor.read_line(&prompt),
+            }
         } else {
             let prompt = shell.borrow().prompt.clone();
             let prompt = ContinuationPrompt::new(&prompt, prompt.vi_indicators());
+            let prompt_text = prompt.render_prompt_left().into_owned();
+            crate::readline_live::begin_read(&mut line_editor, &prompt_text);
             typeahead.disarm_and_reinject();
-            line_editor.read_line(&prompt)
+            match consume_abi_control(&mut line_editor) {
+                Some(line) => Ok(Signal::Success(line)),
+                None => line_editor.read_line(&prompt),
+            }
         };
         // The foreground command (or widget/exit path) below owns the
         // terminal: the guard stays disarmed until the next prompt
@@ -4148,6 +5871,11 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                         // A widget that accepts from a host-command
                         // keypress submits its buffer as ordinary input.
                         flush_repl_output();
+                        let mark = line_editor
+                            .current_selection()
+                            .map(|(start, _)| start as std::os::raw::c_int);
+                        crate::readline_live::finish_accepted(&buffer, mark);
+                        line_editor.run_edit_commands(&[EditCommand::Clear]);
                         let _ = shell.borrow_mut().execute_interactive_line(buffer.trim());
                         flush_repl_output();
                         // niubash R1: the widget's line can carry a top-level
@@ -4167,6 +5895,14 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             }
             Ok(Signal::Success(buffer)) => {
                 let mut line = buffer.trim_end_matches(['\r', '\n']).to_string();
+                // niubash#775: GNU keeps the accepted line in rl_line_buffer
+                // while the command runs, so a plugin builtin invoked as an
+                // ordinary command observes the line the user submitted.  A
+                // live selection anchor survives as `rl_mark`.
+                let mark = line_editor
+                    .current_selection()
+                    .map(|(start, _)| start as std::os::raw::c_int);
+                crate::readline_live::finish_accepted(&line, mark);
                 if pending.is_empty() {
                     // Older reedline releases delivered ExecuteHostCommand
                     // as Success; keep the sentinel check on the submitted
@@ -4235,6 +5971,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 }
             }
             Ok(Signal::CtrlD) => {
+                crate::readline_live::finish_abandoned();
                 println!();
                 if !pending.is_empty() {
                     pending.clear();
@@ -4244,6 +5981,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 break;
             }
             Ok(Signal::CtrlC) => {
+                crate::readline_live::finish_abandoned();
                 // niubash#600: GNU shows a literal `^C` where the line
                 // was abandoned (the kernel's ECHOCTL echoes it in
                 // cooked mode; readline echoes it in raw mode). Reedline
@@ -4281,8 +6019,12 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 }
                 continue;
             }
-            Ok(_) => continue,
+            Ok(_) => {
+                crate::readline_live::finish_abandoned();
+                continue;
+            }
             Err(e) => {
+                crate::readline_live::finish_abandoned();
                 eprintln!("niubash: line editor error: {}", e);
                 let _ = shell.borrow_mut().finish_with_exit_trap(1);
                 break;
@@ -4899,17 +6641,92 @@ mod tests {
         }
     }
 
+    /// The GNU meta-keymap completion commands that the pinned editor's
+    /// own defaults do not carry are installed by the host baseline, not
+    /// only by a `bind` at startup: M-* (insert-completions) has no
+    /// engine-registry entry on a fresh shell, so without this table the
+    /// key fell through and M-* was a no-op. M-g rides the readline host
+    /// channel (glob-complete-word → Session::glob_filename). M-? and M-=
+    /// (possible-completions) are list-only — the GNU menu distinguishes
+    /// the engine's PossibleCompletions activation from a TAB and leaves
+    /// the line untouched.
+    #[test]
+    fn gnu_default_command_bindings_install_meta_completion_keys() {
+        let mut keybindings = default_emacs_keybindings();
+        add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('*')),
+            Some(ReedlineEvent::InsertCompletions)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('?')),
+            Some(ReedlineEvent::PossibleCompletions)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('=')),
+            Some(ReedlineEvent::PossibleCompletions)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('g')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}glob-complete-word",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
+        );
+    }
+
+    /// The residue of GNU's default bind table that the host still
+    /// cannot deliver, per group. This is a **shrink-only** pin:
+    /// mapping one of these names (or teaching `parse_key_sequence`
+    /// one of the terminal spellings) must delete its entry here, so
+    /// the list doubles as the parity burn-down. Adding an entry is a
+    /// regression unless a new GNU table row arrived with it.
+    ///
+    /// Groups:
+    /// - `forward-search-history` (`\C-s`): the editor has
+    ///   `ReedlineEvent::SearchHistory` for reverse incremental search
+    ///   only; direction-aware incremental search still needs a ruline
+    ///   event (see the issue).
+    ///
+    /// Delivered in this batch and removed from the list:
+    /// `glob-complete-word` (`\eg`) through the engine's
+    /// `Session::glob_filename` and the host readline channel;
+    /// `complete-hostname` (`\e@`) from `/etc/hosts` plus the local
+    /// hostname; `complete-username` (`\e~`) from `/etc/passwd`; and
+    /// `complete-into-braces` (`\e{`) via the bracecomp.c port.
+    ///
+    /// Delivered in earlier batches: `abort` (`\C-g`) as a host command
+    /// that dings without touching the line; `history-expand-line`
+    /// (`\e^`) on the same channel; and `do-lowercase-version`
+    /// (`\eA`–`\eN`, `\eP`–`\eZ`) at dispatch time (the editor
+    /// lowercases modified keys, and the chord layer folds an
+    /// ESC-prefixed uppercase partner).
+    ///
+    /// The CSI modified-arrow/Delete spellings (`\e[1;3C`, `\e[1;5C`,
+    /// `\e[5C`, `\e[3;5~`, ...) are delivered: `parse_key_sequence`
+    /// maps them to the same KeyCode+modifier chords the terminal
+    /// layer sends.
+    /// GNU default spellings the editor consumes before key dispatch:
+    /// reedline's bracketed-paste envelope turns `\e[200~`…`\e[201~`
+    /// into paste data (`Reedline::use_bracketed_paste`; the raw CSI
+    /// sequence never reaches a keymap), so it is not a binding and
+    /// must not be faked as one. The gate below still requires the
+    /// bridge to *report* it, then excludes exactly this list.
+    const EDITOR_CONSUMED_GNU_DEFAULTS: &[&str] = &["\\e[200~"];
+
+    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s"];
+
     /// niubash#630 gap list: the **whole GNU default bind table** must
     /// mirror. rust line: `rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS`
     /// is the table `bind -p` prints for a fresh bash 5.3, so feeding it
     /// through the bridge is the compatibility gate for "GNU habits as the
     /// default".
     ///
-    /// With the reedline fork pinned in Cargo.toml (EventStatus re-export +
-    /// history-jump events) the whole table lands: no entry may stay
-    /// unmapped. Everything — Home/End/Delete spellings, `\C-r`
-    /// reverse-search, `\C-t` transpose, `\e` emacs-editing-mode and the
-    /// PgUp/PgDn history jumps — must reach the keybindings.
+    /// Everything deliverable must land — Home/End/Delete spellings,
+    /// `\C-r` reverse-search, `\C-t` transpose, the PgUp/PgDn history
+    /// jumps, and this batch's `\e&`/`\e~`/`\ex` host commands. The
+    /// entries in [`KNOWN_UNMAPPED_GNU_DEFAULTS`] are the documented,
+    /// grouped residue; any *new* unmapped key is a regression.
     #[test]
     fn gnu_default_bind_table_mirrors_except_known_gaps() {
         let entries: Vec<crate::bind_surface::EngineBindEntry> =
@@ -4927,11 +6744,32 @@ mod tests {
         let mut keybindings = default_emacs_keybindings();
         let unusable =
             add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
-        let mut unmapped: Vec<String> = unusable.into_iter().map(|bind| bind.keyseq).collect();
-        unmapped.sort();
+        let all_unmapped: Vec<String> = unusable.into_iter().map(|bind| bind.keyseq).collect();
+        // The bracketed-paste marker is genuinely unconsumed by the
+        // keymap — the editor's paste envelope owns it. Pin that
+        // exclusion too, so it cannot silently grow or vanish.
+        let mut editor_consumed: Vec<String> = all_unmapped
+            .iter()
+            .filter(|keyseq| EDITOR_CONSUMED_GNU_DEFAULTS.contains(&keyseq.as_str()))
+            .cloned()
+            .collect();
+        editor_consumed.sort();
         assert_eq!(
-            unmapped,
-            Vec::<String>::new(),
+            editor_consumed,
+            vec!["\\e[200~".to_string()],
+            "only the editor-consumed bracketed-paste marker may leave the keymap"
+        );
+        let mut unmapped: Vec<String> = all_unmapped
+            .into_iter()
+            .filter(|keyseq| !EDITOR_CONSUMED_GNU_DEFAULTS.contains(&keyseq.as_str()))
+            .collect();
+        unmapped.sort();
+        let expected: Vec<String> = KNOWN_UNMAPPED_GNU_DEFAULTS
+            .iter()
+            .map(|keyseq| (*keyseq).to_string())
+            .collect();
+        assert_eq!(
+            unmapped, expected,
             "GNU default table must mirror except the documented gaps"
         );
 
@@ -4956,6 +6794,99 @@ mod tests {
         assert_eq!(
             keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
             Some(edit_event(EditCommand::SwapGraphemes))
+        );
+        let host = |name: &str| {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, name
+            )))
+        };
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            host("abort")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('^')),
+            host("history-expand-line")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('!')),
+            host("complete-command")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('$')),
+            host("complete-variable")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('/')),
+            host("complete-filename")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('@')),
+            host("complete-hostname")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('~')),
+            host("complete-username")
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('{')),
+            host("complete-into-braces")
+        );
+        // do-lowercase-version installs no flat binding: Meta-A stays
+        // unbound while Meta-B keeps its own command (the default
+        // table lists \eB before \eF, so a flat insert would have
+        // overwritten this).
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('a')),
+            None
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('b')),
+            Some(edit_event(EditCommand::MoveWordLeft { select: false }))
+        );
+    }
+
+    /// GNU `do-lowercase-version` (text.c:1179, dispatched at
+    /// readline.c:916-922) is a dispatch rule, not a bindable command:
+    /// the bridge must leave the lowercase Meta slots alone, and the
+    /// ESC-meta layer must fold an uppercase partner to the lowercase
+    /// Meta key. This is what the 25 `\eA`–`\eN`/`\eP`–`\eZ` default
+    /// rows deliver.
+    #[test]
+    fn gnu_uppercase_meta_keys_fall_back_to_lowercase_commands() {
+        use crossterm29::event::{Event, KeyEvent};
+        let inner = Emacs::new(default_emacs_keybindings());
+        // The real ALT binding set for the letters this test presses.
+        let alt: HashSet<KeyCode> = [KeyCode::Char('b'), KeyCode::Char('f')]
+            .into_iter()
+            .collect();
+        let partner = Event::Key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE));
+        let lookahead: Lookahead = Box::new(move |_| Some(partner.clone()));
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            Vec::new(),
+            alt,
+            Some(lookahead),
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Esc, KeyModifiers::NONE)),
+            edit_event(EditCommand::MoveWordLeft { select: false }),
+            "ESC B must dispatch Meta-b (backward-word), not insert B"
+        );
+
+        // A lowercase form with no ALT binding is not synthesized: GNU
+        // keeps the unbound Meta key (and dings).
+        assert_eq!(meta_fallback_key(KeyCode::Char('A'), &HashSet::new()), None);
+        assert_eq!(
+            meta_fallback_key(KeyCode::Char('B'), &HashSet::from([KeyCode::Char('b')])),
+            Some(KeyCode::Char('b'))
+        );
+        // Non-letters pass through unchanged when ALT-bound.
+        assert_eq!(
+            meta_fallback_key(KeyCode::Right, &HashSet::from([KeyCode::Right])),
+            Some(KeyCode::Right)
         );
     }
 
@@ -5010,6 +6941,710 @@ mod tests {
             native_widget_event("no_such_readline_fn"),
             Some(ReedlineEvent::ExecuteHostCommand(_))
         ));
+    }
+
+    /// niubash#765: the dump commands and re-read-init-file are
+    /// readline functions performed by the host, so their names map
+    /// to the readline host-command sentinel — never to the
+    /// shell-function widget sentinel.
+    #[test]
+    fn issue765_readline_host_commands_use_readline_sentinel() {
+        for name in [
+            "dump-functions",
+            "dump-macros",
+            "dump-variables",
+            "re-read-init-file",
+        ] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+    }
+
+    /// This batch's GNU default functions ride the readline host
+    /// channel — never the shell-function widget sentinel. `abort`
+    /// (util.c rl_abort) and `history-expand-line` (bashline.c)
+    /// and the context-specific completion entry points all need the
+    /// live session/editor, so the host performs them.
+    #[test]
+    fn readline_burndown_host_commands_use_readline_sentinel() {
+        for name in [
+            "abort",
+            "history-expand-line",
+            "complete-command",
+            "complete-variable",
+            "complete-filename",
+            "complete-hostname",
+            "complete-username",
+            "complete-into-braces",
+            "glob-complete-word",
+        ] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+        assert!(
+            crate::readline_commands::HOST_COMMAND_NAMES.contains(&"abort"),
+            "abort is a readline host command"
+        );
+        assert!(
+            crate::readline_commands::funmap_names().contains(&"history-expand-line"),
+            "the dump must list history-expand-line"
+        );
+    }
+
+    /// niubash#765: the GNU default C-x C-r chord for
+    /// re-read-init-file joins the chord layer, and the dump lists
+    /// every funmap name in GNU's plain form.
+    #[test]
+    fn issue765_gnu_defaults_and_dump_lines() {
+        let chords = gnu_default_chord_bindings();
+        assert!(
+            chords.iter().any(|chord| {
+                chord.keys
+                    == vec![
+                        (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                        (KeyModifiers::CONTROL, KeyCode::Char('r')),
+                    ]
+            }),
+            "C-x C-r must be a default chord"
+        );
+
+        // No user bindings: defaults only. The engine default table
+        // carries several terminal spellings of beginning-of-line
+        // (\C-a plus the Home terminfo sequences), and the dumper
+        // caps a line at five seqs in table order — assert the claim,
+        // not one full spelling, so a table growth upstream does not
+        // break this pin.
+        let lines = dump_function_lines(&[]);
+        let beginning_of_line = lines
+            .iter()
+            .find(|line| line.starts_with("beginning-of-line can be found on "))
+            .expect("beginning-of-line must be bound in the default table");
+        assert!(
+            beginning_of_line.contains("\"\\C-a\""),
+            "the C-a default must be reported: {beginning_of_line}"
+        );
+        assert!(lines.contains(&"re-read-init-file can be found on \"\\C-x\\C-r\".".to_string()));
+        assert!(lines.contains(&"dump-functions is not bound to any keys".to_string()));
+        // Sorted like rl_funmap_names.
+        let mut sorted = lines.clone();
+        sorted.sort();
+        assert_eq!(lines, sorted);
+
+        // A user function binding joins its function's list, and a
+        // macro rebind of a default seq retires the function claim.
+        let entries = vec![
+            crate::bind_surface::EngineBindEntry {
+                keyseq: "\\C-o".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Function {
+                    name: "operate-and-get-next".to_string(),
+                },
+                keymap: None,
+            },
+            crate::bind_surface::EngineBindEntry {
+                keyseq: "\\C-a".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Macro {
+                    text: "home".to_string(),
+                },
+                keymap: None,
+            },
+        ];
+        let lines = dump_function_lines(&entries);
+        assert!(lines.contains(&"operate-and-get-next can be found on \"\\C-o\".".to_string()));
+        // The \C-a claim is retired; the other default spellings
+        // remain (the table also carries \eOH/\e[H terminfo forms).
+        let beginning_of_line = lines
+            .iter()
+            .find(|line| line.starts_with("beginning-of-line can be found on "))
+            .expect("the other beginning-of-line defaults remain");
+        assert!(
+            !beginning_of_line.contains("\"\\C-a\""),
+            "the macro rebind must retire the C-a claim: {beginning_of_line}"
+        );
+
+        // The GNU default spellings parse as single keys: plain
+        // meta forms and the combined meta-control form.
+        assert_eq!(
+            parse_key_sequence("\\M-~"),
+            Some((KeyModifiers::ALT, KeyCode::Char('~')))
+        );
+        assert_eq!(
+            parse_key_sequence("\\M-\\C-e"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('e')
+            ))
+        );
+        assert_eq!(
+            parse_key_sequence("\\M-\\C-i"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('i')
+            ))
+        );
+    }
+
+    /// niubash#766: tilde-expand and execute-named-command map to
+    /// the readline host channel, and their GNU default keys land
+    /// in the emacs baseline now that the names are delivered.
+    /// insert-comment stays the #731 host composite.
+    #[test]
+    fn issue766_tilde_expand_and_execute_named_command_are_host_delivered() {
+        for name in ["tilde-expand", "execute-named-command"] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+        assert!(matches!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(_))
+        ));
+
+        let mut keybindings = Keybindings::default();
+        add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
+        let tilde_event = ReedlineEvent::ExecuteHostCommand(format!(
+            "{}tilde-expand",
+            READLINE_HOST_COMMAND_PREFIX
+        ));
+        // emacs_keymap.c binds both M-& and M-~ to rl_tilde_expand, but
+        // bashline.c:565-569 replaces M-~ with bash_complete_username, so
+        // only M-& keeps tilde-expand.
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('&')),
+            Some(tilde_event)
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('x')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}execute-named-command",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
+        );
+        // This batch's host commands are real default bindings, not
+        // gate-only translations.
+        let host = |name: &str| {
+            ReedlineEvent::ExecuteHostCommand(format!("{}{}", READLINE_HOST_COMMAND_PREFIX, name))
+        };
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+            Some(host("abort"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('^')),
+            Some(host("history-expand-line"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('!')),
+            Some(host("complete-command"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('$')),
+            Some(host("complete-variable"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('/')),
+            Some(host("complete-filename"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('@')),
+            Some(host("complete-hostname"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('~')),
+            Some(host("complete-username"))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('{')),
+            Some(host("complete-into-braces"))
+        );
+
+        // The vi target carries none of the emacs defaults.
+        let mut vi = Keybindings::default();
+        add_gnu_command_default_keybindings(&mut vi, NativeKeymapTarget::ViInsert);
+        assert_eq!(vi.find_binding(KeyModifiers::ALT, KeyCode::Char('~')), None);
+    }
+
+    /// niubash#767: shell-expand-line and dynamic-complete-history
+    /// map to the readline host channel, and their GNU default keys
+    /// (M-C-e, M-TAB in both its spellings) bind in the emacs
+    /// baseline now that the names are delivered.
+    #[test]
+    fn issue767_shell_expand_and_history_complete_are_host_delivered() {
+        for name in ["shell-expand-line", "dynamic-complete-history"] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+
+        let mut keybindings = Keybindings::default();
+        add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
+        assert_eq!(
+            keybindings.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('e')
+            ),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}shell-expand-line",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
+        );
+        let history_event = ReedlineEvent::ExecuteHostCommand(format!(
+            "{}dynamic-complete-history",
+            READLINE_HOST_COMMAND_PREFIX
+        ));
+        assert_eq!(
+            keybindings.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('i')
+            ),
+            Some(history_event.clone())
+        );
+        // The byte shape terminals actually send for Meta-TAB.
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Tab),
+            Some(history_event)
+        );
+    }
+
+    /// Second niubash#630 batch: readline functions deliverable only since
+    /// the reedline fork gained `Suspend`/`QuotedInsert`/`OverwriteMode`/
+    /// `CharSearch`/the yank-arg pair/`OperateAndGetNext`/the kbd-macro
+    /// trio/the numeric-argument events/`ClearScrollback`/`OpenEditor` and
+    /// the `EditCommand` additions (`YankPop`, `SwapWords`,
+    /// `CapitalizeWord`, `SwapCursorAndAnchor`, `RevertLine`,
+    /// `CutFilenameLeft`, `DeleteHorizontalSpace`). Every arm below must
+    /// produce the real event shape, not the unknown-widget sentinel.
+    #[test]
+    fn native_widget_maps_fork_delivered_gnu_readline_names() {
+        // EditCommand-backed arms.
+        assert_eq!(
+            native_widget_event("yank-pop"),
+            Some(edit_event(EditCommand::YankPop))
+        );
+        assert_eq!(
+            native_widget_event("transpose-words"),
+            Some(edit_event(EditCommand::SwapWords))
+        );
+        assert_eq!(
+            native_widget_event("capitalize-word"),
+            Some(edit_event(EditCommand::CapitalizeWord))
+        );
+        assert_eq!(
+            native_widget_event("exchange-point-and-mark"),
+            Some(edit_event(EditCommand::SwapCursorAndAnchor))
+        );
+        assert_eq!(
+            native_widget_event("revert-line"),
+            Some(edit_event(EditCommand::RevertLine))
+        );
+        assert_eq!(
+            native_widget_event("delete-horizontal-space"),
+            Some(edit_event(EditCommand::DeleteHorizontalSpace))
+        );
+        for widget in ["unix-filename-rubout", "vi-filename-rubout"] {
+            assert_eq!(
+                native_widget_event(widget),
+                Some(edit_event(EditCommand::CutFilenameLeft))
+            );
+        }
+        assert_eq!(
+            native_widget_event("tab-insert"),
+            Some(edit_event(EditCommand::InsertChar('\t')))
+        );
+
+        // ReedlineEvent-backed arms.
+        assert_eq!(
+            native_widget_event("quoted-insert"),
+            Some(ReedlineEvent::QuotedInsert)
+        );
+        assert_eq!(
+            native_widget_event("operate-and-get-next"),
+            Some(ReedlineEvent::OperateAndGetNext)
+        );
+        assert_eq!(
+            native_widget_event("overwrite-mode"),
+            Some(ReedlineEvent::OverwriteMode(None))
+        );
+        assert_eq!(
+            native_widget_event("start-kbd-macro"),
+            Some(ReedlineEvent::StartKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("end-kbd-macro"),
+            Some(ReedlineEvent::EndKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("call-last-kbd-macro"),
+            Some(ReedlineEvent::CallLastKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("character-search"),
+            Some(ReedlineEvent::CharSearch {
+                direction: Direction::Forward
+            })
+        );
+        assert_eq!(
+            native_widget_event("character-search-backward"),
+            Some(ReedlineEvent::CharSearch {
+                direction: Direction::Backward
+            })
+        );
+        // bashline.c:491 registers rl_yank_last_arg under the
+        // insert-last-argument name; funmap.c carries yank-last-arg.
+        for widget in ["yank-last-arg", "insert-last-argument"] {
+            assert_eq!(
+                native_widget_event(widget),
+                Some(ReedlineEvent::YankLastArg { count: None })
+            );
+        }
+        assert_eq!(
+            native_widget_event("yank-nth-arg"),
+            Some(ReedlineEvent::YankNthArg { count: 1 })
+        );
+        assert_eq!(
+            native_widget_event("digit-argument"),
+            Some(ReedlineEvent::DigitArgument(None))
+        );
+        assert_eq!(
+            native_widget_event("universal-argument"),
+            Some(ReedlineEvent::UniversalArgument)
+        );
+        assert_eq!(
+            native_widget_event("clear-display"),
+            Some(ReedlineEvent::ClearScrollback)
+        );
+        assert_eq!(
+            native_widget_event("edit-and-execute-command"),
+            Some(ReedlineEvent::OpenEditor)
+        );
+
+        // `insert-comment` is the composite: go to line start, insert
+        // `#`, accept the line.
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![
+                    EditCommand::MoveToLineStart { select: false },
+                    EditCommand::InsertString("#".to_string()),
+                ]),
+                ReedlineEvent::Enter,
+            ]))
+        );
+    }
+
+    /// niubash#731 (K3 widening): GNU readline names the editor could
+    /// already express but the bridge still dropped — the remaining
+    /// word transforms, the cycling completion, the scrollback clear,
+    /// the comment-and-accept composition, the literal tab, and GNU's
+    /// own substring-search spellings. `redraw-current-line` (the
+    /// #630 K3 note) is pinned here too: it already maps to `Repaint`.
+    /// Names with no editor expression (kill-ring rotation, the mark
+    /// register, prefix arguments...) keep the sentinel, so the
+    /// bridge keeps reporting them instead of mis-delivering.
+    #[test]
+    fn issue731_native_widget_maps_widened_gnu_names() {
+        assert_eq!(
+            native_widget_event("capitalize-word"),
+            Some(edit_event(EditCommand::CapitalizeWord))
+        );
+        assert_eq!(
+            native_widget_event("transpose-words"),
+            Some(edit_event(EditCommand::SwapWords))
+        );
+        assert_eq!(
+            native_widget_event("clear-display"),
+            Some(ReedlineEvent::ClearScrollback)
+        );
+        assert_eq!(
+            native_widget_event("redraw-current-line"),
+            Some(ReedlineEvent::Repaint)
+        );
+        assert_eq!(
+            native_widget_event("tab-insert"),
+            Some(edit_event(EditCommand::InsertChar('\t')))
+        );
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![
+                    EditCommand::MoveToLineStart { select: false },
+                    EditCommand::InsertString("#".to_string()),
+                ]),
+                ReedlineEvent::Enter,
+            ]))
+        );
+        // `menu-complete` shares the completion event, like `complete`.
+        match native_widget_event("menu-complete") {
+            Some(ReedlineEvent::UntilFound(events)) => {
+                assert!(matches!(events.first(), Some(ReedlineEvent::Menu(_))));
+            }
+            other => panic!("menu-complete must map to the completion event, got {other:?}"),
+        }
+        assert_eq!(
+            native_widget_event("history-substring-search-backward"),
+            Some(ReedlineEvent::Up)
+        );
+        assert_eq!(
+            native_widget_event("history-substring-search-forward"),
+            Some(ReedlineEvent::Down)
+        );
+        // The fork's descending-gap batch delivered `set-mark`,
+        // `possible-completions`, `insert-completions` and the
+        // non-incremental search pair as real events.
+        assert_eq!(
+            native_widget_event("set-mark"),
+            Some(edit_event(EditCommand::SetMark))
+        );
+        assert_eq!(
+            native_widget_event("possible-completions"),
+            Some(ReedlineEvent::PossibleCompletions)
+        );
+        assert_eq!(
+            native_widget_event("insert-completions"),
+            Some(ReedlineEvent::InsertCompletions)
+        );
+        assert_eq!(
+            native_widget_event("non-incremental-forward-search-history"),
+            Some(ReedlineEvent::NonIncrementalSearch {
+                direction: Direction::Forward,
+                prompt_char: ':',
+                pattern: false,
+            })
+        );
+        assert_eq!(
+            native_widget_event("non-incremental-reverse-search-history"),
+            Some(ReedlineEvent::NonIncrementalSearch {
+                direction: Direction::Backward,
+                prompt_char: ':',
+                pattern: false,
+            })
+        );
+        // `abort` is a host readline command (GNU's rl_abort clears
+        // the pending command and dings, never the line), so it rides
+        // the readline sentinel rather than the shell-function widget
+        // sentinel.
+        assert_eq!(
+            native_widget_event("abort"),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}abort",
+                READLINE_HOST_COMMAND_PREFIX
+            )))
+        );
+    }
+
+    /// niubash#731: `self-insert` is key-dependent — the bridge
+    /// delivers it as inserting the bound key's own character (a
+    /// control key inserts its control byte), on the flat path and
+    /// at the end of a chord alike; a key with no character of its
+    /// own stays an actionable drop.
+    #[test]
+    fn issue731_self_insert_inserts_the_bound_key() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        let function = |keyseq: &str, name: &str| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: None,
+        };
+        let mut keybindings = default_emacs_keybindings();
+        let entries = vec![
+            function("x", "self-insert"),
+            function(r"\C-a", "self-insert"),
+            function(r"\e[5~", "self-insert"),
+        ];
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Char('x')),
+            Some(edit_event(EditCommand::InsertString("x".to_string())))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('a')),
+            Some(edit_event(EditCommand::InsertString("\u{1}".to_string())))
+        );
+        // PgUp carries no character: recorded, not delivered.
+        assert_eq!(unusable.len(), 1);
+        assert_eq!(unusable[0].keyseq, r"\e[5~");
+
+        // Chord-final self-insert inserts the chord's last key.
+        let chords = collect_chord_bindings(
+            &[function(r"\C-xa", "self-insert")],
+            NativeKeymapTarget::Emacs,
+            0,
+        );
+        assert_eq!(chords.len(), 1);
+        assert_eq!(
+            chords[0].event,
+            edit_event(EditCommand::InsertString("a".to_string()))
+        );
+    }
+
+    /// niubash#731: a `quoted-insert` bind is delivered by the chord
+    /// layer's quote state — it is neither flat-bound nor recorded
+    /// as dropped — and its sequences (single key or chain) are
+    /// collected per keymap target.
+    #[test]
+    fn issue731_quoted_insert_bind_is_collected_not_dropped() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        let function = |keyseq: &str, keymap: Option<&str>, name: &str| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: keymap.map(str::to_string),
+        };
+        let entries = vec![
+            function(r"\C-v", Some("emacs-standard"), "quoted-insert"),
+            function(r"\C-x\C-q", None, "quoted-insert"),
+            function(r"\C-g", None, "no-such-fn"),
+        ];
+        let mut keybindings = default_emacs_keybindings();
+        let unusable =
+            add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
+        assert_eq!(
+            unusable,
+            vec![UnusableBind {
+                keyseq: r"\C-g".to_string(),
+                reason: UnusableBindReason::Other,
+            }],
+            "only the genuinely unknown function is recorded"
+        );
+        assert_eq!(
+            collect_quote_sequences(&entries, NativeKeymapTarget::Emacs),
+            vec![
+                vec![(KeyModifiers::CONTROL, KeyCode::Char('v'))],
+                vec![
+                    (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                    (KeyModifiers::CONTROL, KeyCode::Char('q')),
+                ],
+            ]
+        );
+        // Keymap-targeted collection does not leak across keymaps.
+        assert!(collect_quote_sequences(&entries, NativeKeymapTarget::ViInsert).is_empty());
+        // And with no quoted-insert binds the layer stays empty.
+        let plain = vec![function(r"\C-g", None, "redisplay")];
+        assert!(collect_quote_sequences(&plain, NativeKeymapTarget::Emacs).is_empty());
+    }
+
+    /// niubash#731: with a quote sequence registered, the quoting
+    /// key arms the state and the next key inserts literally — a
+    /// bound key inserts its byte instead of firing, and a quoted
+    /// ESC is data, not a meta prefix. The state spends itself on
+    /// exactly one key.
+    #[test]
+    fn issue731_quoted_insert_inserts_the_next_key_literally() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            Vec::new(),
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        )
+        .with_quote_sequences(vec![vec![(KeyModifiers::CONTROL, KeyCode::Char('v'))]]);
+
+        // C-v arms; C-a (bound to line-start) inserts its byte.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            edit_event(EditCommand::InsertString("\u{1}".to_string()))
+        );
+        // Disarmed again: C-a is the inner machine's own binding.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            edit_event(EditCommand::MoveToLineStart { select: false })
+        );
+        // A quoted ESC inserts the ESC byte (it is not meta-folded).
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Esc, KeyModifiers::NONE)),
+            edit_event(EditCommand::InsertString("\u{1b}".to_string()))
+        );
+        // A quoted key with no character of its own is simply spent.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Up, KeyModifiers::NONE)),
+            ReedlineEvent::None
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            edit_event(EditCommand::MoveToLineStart { select: false })
+        );
+    }
+
+    /// niubash#731 (the #704 review's chord observation ②): the
+    /// keyseq-timeout window restarts at each parked key — GNU
+    /// waits per key, so a three-key chord typed steadily, each
+    /// gap inside the window but the total past it, still fires.
+    /// (Under the old first-key accounting the prefix expired
+    /// before the third key and the chord never completed.)
+    #[test]
+    fn issue731_chord_timeout_restarts_at_each_key() {
+        use crossterm29::event::{KeyCode as Code, KeyModifiers as Mods};
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (Mods::CONTROL, Code::Char('x')),
+                (Mods::NONE, Code::Char('a')),
+                (Mods::NONE, Code::Char('b')),
+            ],
+            event: edit_event(EditCommand::InsertString("TRIPLE".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            Duration::from_millis(600),
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(Code::Char('x'), Mods::CONTROL)),
+            ReedlineEvent::Pending
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            mode.parse_event(chord_test_key(Code::Char('a'), Mods::NONE)),
+            ReedlineEvent::Pending
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        // ~700 ms since the first key (past the 600 ms window),
+        // ~300 ms since the second: only the per-key deadline lets
+        // the chord complete.
+        assert_eq!(
+            mode.parse_event(chord_test_key(Code::Char('b'), Mods::NONE)),
+            edit_event(EditCommand::InsertString("TRIPLE".to_string()))
+        );
     }
 
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
@@ -5280,7 +7915,7 @@ mod tests {
         // The key is parked even though it has its own binding.
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)),
@@ -5290,7 +7925,7 @@ mod tests {
         // Past the timeout the single binding fires, then the key stands alone.
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         match mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)) {
@@ -5326,7 +7961,7 @@ mod tests {
         // Inside the window: parked, then completed.
         assert_eq!(
             mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         assert_eq!(
             mode.parse_event(key(Code::Char('z'), Mods::NONE)),
@@ -5335,7 +7970,7 @@ mod tests {
         // Past the window: the prefix is replayed on its own, the key is fresh.
         assert_eq!(
             mode.parse_event(key(Code::Char('x'), Mods::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         let event = mode.parse_event(key(Code::Char('z'), Mods::NONE));
@@ -5414,7 +8049,7 @@ mod tests {
         );
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(TEST_KEYSEQ_TIMEOUT + std::time::Duration::from_millis(50));
         assert_eq!(
@@ -5443,7 +8078,7 @@ mod tests {
         );
         assert_eq!(
             mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            ReedlineEvent::None
+            ReedlineEvent::Pending
         );
         std::thread::sleep(Duration::from_millis(80));
         let event = mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE));
@@ -5828,10 +8463,15 @@ mod tests {
                 crate::keymap_registry::KeymapMode::ViNormal,
             ),
         ] {
-            // The pre-registry build order, verbatim.
+            // The pre-registry build order, verbatim, plus the
+            // niubash#765/#766/#767 host-command defaults (a host
+            // baseline layer the registry build gained with this
+            // batch; the order relative to the other baseline
+            // layers is the snapshot pin).
             let mut legacy = defaults.clone();
             add_menu_keybindings(&mut legacy, CompletionInteraction::Insert);
             add_system_clipboard_keybindings(&mut legacy);
+            add_gnu_command_default_keybindings(&mut legacy, target);
             add_native_widget_keybindings(&mut legacy, target, &config, &bundle);
             add_bundle_widget_keybindings(&mut legacy, target, &config, &bundle);
             add_user_widget_keybindings(&mut legacy, &user);
@@ -5986,19 +8626,80 @@ mod tests {
             vec![
                 (r"\e[0n", DroppedReason::ResponseSequence),
                 (r"\C-g", DroppedReason::UnknownFunction),
-                (r"\ec", DroppedReason::ScriptMacro),
-                (r"\C-x", DroppedReason::ScriptMacro),
             ],
-            "the chord and the mode toggle are delivered now, not dropped"
+            "the chord, the mode toggle and both macros are delivered now"
         );
         assert_eq!(dropped[0].kind, DroppedKind::Execute);
-        // K1 records the macro; the translation is unchanged until K3.
-        assert_eq!(
-            built.find_binding(KeyModifiers::ALT, KeyCode::Char('c')),
-            Some(edit_event(EditCommand::InsertString(
-                r" \C-b\C-k \C-u`__fzf_cd__`\e\C-e".to_string()
-            )))
+        // K3: a script macro is replay, not literal text. The written
+        // `\ec` form decodes to the same bytes the stored form carries:
+        // space, C-b, C-k, C-u, `__fzf_cd__`, Alt-Ctrl-e — a
+        // `KeySequence`, not an InsertString.
+        let alt_c = built
+            .find_binding(KeyModifiers::ALT, KeyCode::Char('c'))
+            .expect("the fzf macro stays bound");
+        let ReedlineEvent::KeySequence(keys) = alt_c else {
+            panic!("the script macro replays, it does not insert text: {alt_c:?}")
+        };
+        assert!(keys.iter().any(|key| {
+            key.modifier == KeyModifiers::CONTROL && key.key_code == KeyCode::Char('b')
+        }));
+        // The stored form (raw control bytes) decodes identically.
+        let ctrl_x = built
+            .find_binding(KeyModifiers::CONTROL, KeyCode::Char('x'))
+            .expect("the stored-form macro stays bound");
+        assert!(
+            matches!(ctrl_x, ReedlineEvent::KeySequence(_)),
+            "raw-byte macros replay too: {ctrl_x:?}"
         );
+    }
+
+    #[test]
+    fn k3_script_macro_decodes_keystrokes() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        // fzf Alt-C, stored form: " \x02\x0b \x15`__fzf_cd__`\x1b\x05\x1br\r"
+        // = space C-b C-k space C-u `__fzf_cd__` M-C-e M-r Enter.
+        let entry = BindEntry {
+            keyseq: r"\ec".to_string(),
+            kind: BindKind::Macro {
+                text: " \u{2}\u{b} \u{15}`__fzf_cd__`\u{1b}\u{5}\u{1b}r\r".to_string(),
+            },
+            keymap: None,
+        };
+        let (built, _, dropped) = build_keymap_for_target(
+            default_emacs_keybindings(),
+            NativeKeymapTarget::Emacs,
+            crate::keymap_registry::KeymapMode::Emacs,
+            &NativeWidgetConfig::default(),
+            &[],
+            &[],
+            std::slice::from_ref(&entry),
+            CompletionInteraction::Insert,
+        );
+        assert!(dropped.is_empty(), "a replayable macro is not dropped");
+        let ReedlineEvent::KeySequence(keys) = built
+            .find_binding(KeyModifiers::ALT, KeyCode::Char('c'))
+            .expect("bound")
+        else {
+            panic!("expected KeySequence")
+        };
+        let at = |i: usize| (keys[i].modifier, keys[i].key_code);
+        assert_eq!(at(0), (KeyModifiers::NONE, KeyCode::Char(' ')));
+        assert_eq!(at(1), (KeyModifiers::CONTROL, KeyCode::Char('b')));
+        assert_eq!(at(2), (KeyModifiers::CONTROL, KeyCode::Char('k')));
+        assert_eq!(at(4), (KeyModifiers::CONTROL, KeyCode::Char('u')));
+        // `__fzf_cd__` is literal text keys, then Alt+Ctrl-e, Alt-r, Enter.
+        assert_eq!(
+            *keys.last().unwrap(),
+            KeyCombination {
+                modifier: KeyModifiers::NONE,
+                key_code: KeyCode::Enter
+            }
+        );
+        assert!(keys.iter().any(|key| key
+            == &KeyCombination {
+                modifier: KeyModifiers::CONTROL | KeyModifiers::ALT,
+                key_code: KeyCode::Char('e')
+            }));
     }
 
     // niubash#630, K4: the `[keymap].bind` rule parser takes the bind
@@ -6109,6 +8810,13 @@ mod tests {
     }
 
     // ---- PasteChunkEditMode (Windows paste-chunk detection, niubash#202/#284) ----
+    //
+    // The detection layer is compiled everywhere but armed only when
+    // `PASTE_CHUNK_DETECTION` is true (cfg!(windows)); on Unix the editor
+    // uses bracketed paste and `translate_event` delegates untouched. Tests
+    // that pin the rewrite state machine are therefore Windows-only
+    // (`#[cfg(windows)]`); the cross-platform wrapper/menu and console-record
+    // mapping tests below stay runnable on every host.
 
     fn paste_key(
         code: crossterm29::event::KeyCode,
@@ -6480,6 +9188,7 @@ mod tests {
         detector.last_event = Some(Instant::now() - PASTE_CHUNK_GAP - Duration::from_millis(1));
     }
 
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_absorbs_crlf_paste_and_flushes_on_gap() {
         // Typing before the paste is delegated normally.
@@ -6569,6 +9278,7 @@ mod tests {
     /// submits in ONE batch on the FIRST Enter. The pre-#308 behavior
     /// pushed the Enter into the chunk as a newline and nothing executed
     /// until a second Enter.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_enter_in_paste_burst_submits_the_chunk() {
         let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event()]);
@@ -6616,6 +9326,7 @@ mod tests {
     /// CR with the LF partner queued right behind it, the real CRLF-feed
     /// queue shape — stays paste data mid-burst. Only the partner-less bare
     /// CR (block complete) submits.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_interior_crlf_pair_stays_data_mid_burst() {
         let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
@@ -6725,6 +9436,7 @@ mod tests {
     /// \n\n`, then a separate submit Enter — must reach reedline byte for
     /// byte: whatever the chunk's line handling does at the `\n\n`
     /// boundary, reassembly may not lose the `e` of `echo two`.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_empty_line_paste_byte_exact() {
         let input = "echo one\r\n\r\necho two\r\n\n";
@@ -6738,6 +9450,7 @@ mod tests {
 
     /// Two consecutive empty lines inside the chunk: both boundaries stay
     /// byte-exact (no break lost, none doubled).
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_two_consecutive_empty_lines_byte_exact() {
         let input = "echo one\r\n\r\n\r\necho two\r\n\n";
@@ -6751,6 +9464,7 @@ mod tests {
 
     /// An indented line right after an empty line: leading spaces are data,
     /// not a swallow-into-the-previous-line cue.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_indented_line_after_empty_line_byte_exact() {
         let input = "echo one\r\n\r\n  echo two\r\n\n";
@@ -6765,6 +9479,7 @@ mod tests {
     /// Control: the same shape WITHOUT the empty line (pure CRLF block) —
     /// guards that whatever the empty-line handling does, the plain block
     /// stays byte-exact too.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_reassembles_crlf_block_without_empty_lines_byte_exact() {
         let input = "echo one\r\necho two\r\n";
@@ -6781,6 +9496,7 @@ mod tests {
     /// and the typeahead key goes back to the input stream's head at the
     /// submit (niubash#417), so it lands, in order, in the NEXT line's
     /// buffer — GNU typeahead semantics, never absorption.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_pending_enter_with_typeahead_behind_submits_in_order() {
         let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
@@ -7010,6 +9726,7 @@ mod tests {
     /// A bare Ctrl+J (the console's shape for a fed LF) with no chunk
     /// pending is a paste newline by itself: it opens the chunk instead of
     /// reaching reedline (humans do not submit with Ctrl+J).
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_opens_chunk_on_lf_alone() {
         let mut detector = paste_detector();
@@ -7028,6 +9745,7 @@ mod tests {
 
     /// ConPTY focus flicker between pasted lines must not hide the LF
     /// partner from the lookahead: the CR still identifies as paste.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_skips_flicker_to_find_lf_partner() {
         let mut detector = paste_detector_with_queue(vec![
@@ -7094,6 +9812,7 @@ mod tests {
     /// by an LF partner (the ConPTY CRLF shape), then a bare CR with a CR
     /// behind it MID-CHUNK — the WT empty line inside a live paste — still
     /// folds as two line breaks of data.
+    #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_midchunk_cr_pair_still_folds_341() {
         let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event(), cr_key_event()]);
@@ -7727,6 +10446,258 @@ mod tests {
         let state = session.lock().unwrap();
         assert_eq!(state.index, 1);
         assert_eq!(state.nav_seq, 3);
+    }
+
+    /// The menu-select session the CycleMenu publishes after TAB #1
+    /// (niubash#778): three candidates, candidate 0 spliced and
+    /// highlighted.
+    fn arm_select_session_with_three_candidates(session: &SharedCycleSession) {
+        use crate::completion::cycle_menu::CycleCandidate;
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.select_mode = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "git ch".to_string(),
+            cursor: 6,
+        });
+        state.spliced = true;
+        state.candidates = vec![
+            CycleCandidate {
+                value: "checkout".to_string(),
+                append_whitespace: false,
+            },
+            CycleCandidate {
+                value: "cherry".to_string(),
+                append_whitespace: false,
+            },
+            CycleCandidate {
+                value: "cherry-pick".to_string(),
+                append_whitespace: false,
+            },
+        ];
+        state.span = (4, 6);
+        state.index = 0;
+        state.region = (4, 12);
+        state.nav_seq = 0;
+    }
+
+    #[test]
+    fn issue778_select_down_moves_to_candidate_1_and_up_wraps_to_the_last() {
+        let (mut detector, session) = cycle_detector();
+        arm_select_session_with_three_candidates(&session);
+
+        // Down from the TAB-#1 highlight (index 0) is candidate 1 —
+        // spliced by the wrapper in THIS key batch, so the line and the
+        // grid highlight move together.
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Down,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        {
+            let state = session.lock().unwrap();
+            assert!(state.is_open(), "the arrow navigates, it does not close");
+            assert_eq!(state.index, 1);
+            assert_eq!(state.region, (4, 10));
+            assert_eq!(state.nav_seq, 1);
+        }
+
+        // Up steps back to candidate 0, then up again wraps to the last.
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Up,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git checkout",
+                12,
+            ))
+        );
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Up,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry-pick",
+                15,
+            ))
+        );
+        let state = session.lock().unwrap();
+        assert_eq!(state.index, 2);
+        assert_eq!(state.region, (4, 15));
+        assert_eq!(state.nav_seq, 3);
+    }
+
+    /// A 3-column, 2-row select session over `c0`..`c4` (niubash#778):
+    /// the last column is one cell short, exactly the painted geometry
+    /// (`c0 c2 c4 / c1 c3`) and the zsh `domenuselect` cell table.
+    fn arm_select_grid_session(session: &SharedCycleSession) {
+        use crate::completion::cycle_menu::{CycleCandidate, CycleGrid};
+        let mut state = session.lock().unwrap();
+        state.open = true;
+        state.select_mode = true;
+        state.snapshot = Some(crate::completion::cycle_menu::CycleSnapshot {
+            buffer: "c".to_string(),
+            cursor: 1,
+        });
+        state.spliced = true;
+        state.candidates = (0..5)
+            .map(|index| CycleCandidate {
+                value: format!("c{index}"),
+                append_whitespace: false,
+            })
+            .collect();
+        state.span = (0, 1);
+        state.index = 0;
+        state.region = (0, 2);
+        state.grid = CycleGrid {
+            rows: 2,
+            mcols: 12,
+            starts: vec![0, 4, 8],
+            fields: vec![4, 4, 4],
+        };
+        state.mcol = 0;
+        state.wish_col = 0;
+        state.nav_seq = 0;
+    }
+
+    #[test]
+    fn issue778_select_arrow_grid_splices_every_step_like_zsh() {
+        // The same 3x2-short-last-column walk as the menu unit test,
+        // driven through the wrapper: every arrow's target is spliced in
+        // THAT key batch, so the line never lags the grid highlight. The
+        // expected sequence is zsh 5.9.2 under a PTY for this list
+        // (Src/Zle/complist.c domenuselect, mcol/wishcol + adjust_mcol).
+        let (mut detector, session) = cycle_detector();
+        arm_select_grid_session(&session);
+        let arrow = |code| paste_key(code, crossterm29::event::KeyModifiers::NONE);
+        use crossterm29::event::KeyCode;
+        let walk = [
+            (KeyCode::Down, "c1"),
+            (KeyCode::Down, "c2"),
+            (KeyCode::Down, "c3"),
+            (KeyCode::Right, "c1"),
+            (KeyCode::Right, "c3"),
+            (KeyCode::Right, "c1"),
+            (KeyCode::Left, "c4"),
+            (KeyCode::Up, "c3"),
+            (KeyCode::Up, "c2"),
+            (KeyCode::Up, "c1"),
+            (KeyCode::Left, "c4"),
+            (KeyCode::Right, "c1"),
+            (KeyCode::Up, "c0"),
+            (KeyCode::Down, "c1"),
+        ];
+        for (step, (code, expected)) in walk.into_iter().enumerate() {
+            let event = detector.parse_event(arrow(code));
+            assert_eq!(
+                event,
+                ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(expected, 2)),
+                "step {step} ({code:?})"
+            );
+            let state = session.lock().unwrap();
+            assert_eq!(state.index, expected[1..].parse::<usize>().unwrap());
+            assert_eq!(state.nav_seq as usize, step + 1);
+            assert!(state.is_open(), "arrow navigation keeps the menu open");
+        }
+    }
+
+    #[test]
+    fn issue778_arrows_keep_their_normal_translation_without_a_menu() {
+        // The wrapper only intercepts arrows inside a live select
+        // session; the default bindings keep MenuUp/Down/Left/Right
+        // first with the line/history fallback, so nothing is stolen.
+        let mut map = default_emacs_keybindings();
+        add_menu_keybindings(&mut map, CompletionInteraction::Select);
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Up),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuUp,
+                ReedlineEvent::Up,
+            ]))
+        );
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Down),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuDown,
+                ReedlineEvent::Down,
+            ]))
+        );
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Left),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::MenuLeft,
+                ReedlineEvent::Left,
+            ]))
+        );
+        assert_eq!(
+            map.find_binding(KeyModifiers::NONE, KeyCode::Right),
+            Some(ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::HistoryHintComplete,
+                ReedlineEvent::MenuRight,
+                ReedlineEvent::Right,
+            ]))
+        );
+
+        // With a closed session the same keys reach the bindings.
+        let (mut detector, session) = cycle_detector();
+        assert!(!session.lock().unwrap().is_open());
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Down,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::UntilFound(vec![ReedlineEvent::MenuDown, ReedlineEvent::Down])
+        );
+    }
+
+    #[test]
+    fn issue778_select_up_from_the_first_highlight_wraps_to_the_last() {
+        let (mut detector, session) = cycle_detector();
+        arm_select_session_with_three_candidates(&session);
+
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Up,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry-pick",
+                15,
+            ))
+        );
+        let state = session.lock().unwrap();
+        assert_eq!(state.index, 2);
+        assert_eq!(state.nav_seq, 1);
+    }
+
+    #[test]
+    fn issue778_cycle_interaction_keeps_the_arrows_on_the_line() {
+        // The arrow capture is a menu-select feature: under `cycle`
+        // the same key still ends the session and keeps its normal
+        // line/history translation.
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_candidates(&session);
+        let event = detector.parse_event(paste_key(
+            crossterm29::event::KeyCode::Down,
+            crossterm29::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            !matches!(event, ReedlineEvent::Edit(_)),
+            "cycle mode does not splice on Down: {event:?}"
+        );
+        assert!(!session.lock().unwrap().is_open());
     }
 
     #[test]

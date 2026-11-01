@@ -23,6 +23,13 @@ use std::process::ExitCode;
 
 use rubash::invocation::ShellInvocation;
 
+// niubash#775 / ruline#8: the ruline ABI crate's lib target is named
+// `readline` (package `readline-abi`), so Rust code imports it under that
+// name. Referring to it here is what puts its rlib on the link line;
+// `build.rs` then anchors and exports the whole C surface listed in
+// `scripts/readline-abi-exports.txt`.
+use readline::rl_initialize;
+
 /// #125/#140: std `println!`/`print!` panic on any stdout write error, and
 /// this binary builds with `panic = "abort"`, so a reader closing the pipe
 /// (`niu --version | head -1`; Windows reports os error 232 = ERROR_NO_DATA
@@ -98,6 +105,22 @@ fn main() -> ExitCode {
     // default hook reports; with `panic = "abort"` this is the last code
     // that runs because no Drop guards execute.
     niubash_runtime::panic_restore::install_panic_hook();
+    // niubash#775: initialize the in-process readline ABI exactly once, before
+    // any `enable -f` loadable builtin can be `dlopen`ed. `rl_initialize`
+    // builds the default keymaps/funmaps and allocates `rl_line_buffer`, so a
+    // plugin that reads the exported globals sees an initialized editor
+    // state rather than null pointers. The runtime then mirrors the live
+    // Reedline buffer/point into those globals at every host boundary and
+    // dispatches plugin key bindings from the same keymap arrays.
+    //
+    // SAFETY: the exported ABI is initialized once from the main thread
+    // before the shell's worker thread starts; the call only touches the
+    // crate's own process-wide state.
+    unsafe { rl_initialize() };
+    // Snapshot the default keymaps before any rc file or plugin can register
+    // a defun: the live-routing layer diffs against this baseline to tell a
+    // plugin binding apart from a host default (niubash#775).
+    niubash_runtime::readline_live::capture_baseline();
     let code = std::thread::Builder::new()
         .name("niu-main".to_string())
         .stack_size(NIU_MAIN_STACK_SIZE)
@@ -202,6 +225,15 @@ fn run_main() -> ExitCode {
     // outlives the whole command. Interactive launches keep theirs.
     if !interactive_launch_wanted(&args) {
         niubash_runtime::console_guard::release_orphan_console();
+    }
+
+    // niubash#755: an interactive launch seeds the completion state
+    // during Shell construction and would pay the one-time
+    // embedded-definition parse inline; start that parse now so it
+    // overlaps the remaining startup work instead of serializing
+    // into it.
+    if interactive_launch_wanted(&args) {
+        niubash_runtime::completion::external::warm_embedded_definitions();
     }
 
     // niubash#245: guard a piped stdout for non-interactive executions
@@ -1583,6 +1615,16 @@ fn print_usage() {
     println!("    -s reads commands from standard input; --init-file and --rcfile each");
     println!("    take <file>, replacing the default startup file (profile chain / rc).");
     println!();
+    println!("Script debugging:");
+    println!("  niu --debug <script> [args]  Debug a script in the interactive CLI");
+    println!("                               (commands come from the controlling terminal)");
+    println!("  niu --dap <script> [args]    Serve the Debug Adapter Protocol on stdio");
+    println!("  niu --debug --dap <script>   The spelled-out editor launch form");
+    println!("  niu --debugger <script>      Source the GNU bashdb starter (GNU parity)");
+    println!("  --dap with no script runs a pure DAP server; the client's `launch`");
+    println!("  request names the program. `--debug` with -c, -s, or -i keeps the");
+    println!("  legacy extdebug-arming behavior (no debugger frontend).");
+    println!();
     println!("Type `niu -c \"help set\"` for more information about shell options.");
     println!("Type `niu -c help` for more information about shell builtin commands.");
     println!("Report bugs at <https://github.com/unixwin/niubash/issues>.");
@@ -1658,6 +1700,7 @@ fn print_usage() {
     println!("  plugin distro <command>   Collections (list/import/remove/apply)");
     println!("  plugin mirror <command>   Git fetch mirroring (list/show/set)");
     println!("  plugin ui                 Menu UI (sections by state, same verbs)");
+    println!("  plugin tui                Full-screen plugin manager (preview pane, single-key)");
     println!();
     println!("  skill install|status      Install/check the AI agent skill bundle");
     println!("                            ([--target codex|claude|zcode|cursor|all|<dir>])");
@@ -1723,6 +1766,9 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         // Menu-level UI (lazy view IA): sections by state, verbs from the
         // command table, actions through the same runtime calls.
         "ui" => niubash_runtime::plugins::ui::run_ui(),
+        // Full-screen TUI (niubash#186): alternate buffer, single-key
+        // drive, live preview pane; same inventory and verbs as `ui`.
+        "tui" => niubash_runtime::plugins::tui::run_tui(),
         // The external ecosystem is first-class (owner ruling 2026-10-02):
         // vim-plug/lazy.nvim-style verbs over the real manager assets.
         "add" => run_plugin_add_command(&args[3..]),
@@ -3808,8 +3854,8 @@ fn run_plugin_restore_command(args: &[String]) -> anyhow::Result<()> {
 
 /// `niu plugin sync` — reconcile the declarative spec with the machine
 /// (§14.6.3; lazy.nvim `:Lazy sync`): install declared-but-missing sources,
-/// materialize the managed rc
-/// blocks from the spec idempotently, and suggest cleanup for installed
+/// materialize the generated loader from the spec idempotently (the user
+/// rc is never written, niubash#359), and suggest cleanup for installed
 /// sources the spec no longer declares (`--prune` is the explicit confirm).
 /// `--timeout <seconds>` (`niu plugin sync` / `niu plugin add`, niubash#293):
 /// the per-source fetch budget override for this run. Parsed from either
@@ -3825,17 +3871,25 @@ fn parse_timeout_seconds(raw: &str) -> anyhow::Result<std::time::Duration> {
     Ok(std::time::Duration::from_secs(secs))
 }
 
-/// `--bootstrap` is a silent compatibility no-op for existing rc files.
+/// `--bootstrap` is a silent compatibility no-op for existing rc files
+/// (niubash#359): the legacy rc startup line must succeed silently with
+/// zero side effects — no network, install, directory creation, registry
+/// read or repair, adoption, or loader generation. It is therefore the
+/// EARLIEST branch of this verb: the flag is scanned for before any
+/// other argument is validated, so no mixture of management flags (or
+/// even a malformed one) can route the legacy invocation back into the
+/// mutating sync path or turn it into an error at every shell launch.
 fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|arg| arg == "--bootstrap") {
+        return Ok(());
+    }
     let mut prune = false;
-    let mut bootstrap = false;
     let mut adopt = false;
     let mut timeout: Option<std::time::Duration> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--prune" => prune = true,
-            "--bootstrap" => bootstrap = true,
             "--adopt" => adopt = true,
             "--timeout" => {
                 let value = iter
@@ -3851,9 +3905,6 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
                 }
             }
         }
-    }
-    if bootstrap {
-        return Ok(());
     }
     let report =
         niubash_runtime::plugins::sync::sync_spec(niubash_runtime::plugins::sync::SyncOptions {
@@ -4153,13 +4204,15 @@ fn setup_rc_policy_arg(args: &[String]) -> anyhow::Result<Option<String>> {
 }
 
 /// `niu setup --rc-policy <primary-only|bashrc-fallback>` (niubash#359):
-/// the policy is read from `NIU_RC_POLICY` at startup. An existing
-/// `~/.niubashrc` receives a marked `export NIU_RC_POLICY=...` block; when
-/// no primary exists, selecting the fallback must NOT create one (that
-/// would suppress the very fallback being selected), so the command prints
-/// the export line for the user's environment instead.
+/// the policy is read from `NIU_RC_POLICY` at startup. The command never
+/// edits `~/.niubashrc` — the rc is user-owned shell code, so the pick is
+/// printed as an export line for the user to apply by hand (in the rc or
+/// in the terminal environment). Creating a primary rc to hold the line
+/// would also suppress the very fallback being selected, so no file is
+/// created either. A marked policy block left in the rc by an earlier
+/// release is reported and left byte-identical, never removed.
 fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
-    use niubash_runtime::config::{persist_rc_policy, RcPolicy, RcPolicyWrite};
+    use niubash_runtime::config::{advise_rc_policy, RcPolicy, RcPolicyAdvice};
     let Some(policy) = RcPolicy::parse(value) else {
         anyhow::bail!("unknown rc policy '{value}' — valid values: primary-only, bashrc-fallback");
     };
@@ -4168,23 +4221,36 @@ fn run_setup_rc_policy(args: &[String], value: &str) -> anyhow::Result<()> {
     if setup_preset_arg(args).is_some() {
         anyhow::bail!("--rc-policy and --preset are separate runs: pick one");
     }
-    match persist_rc_policy(policy)? {
-        RcPolicyWrite::Written(path) => {
+    match advise_rc_policy(policy) {
+        RcPolicyAdvice::Instruction(line) => {
             println!("NIU_RC_POLICY = {}", policy.as_str());
-            println!("  persisted in {}", path.display());
-            println!("  the variable is read at startup; a new session picks it up.");
-        }
-        RcPolicyWrite::Instruction(line) => {
-            println!("NIU_RC_POLICY = {}", policy.as_str());
-            println!("  No ~/.niubashrc exists, and creating one would suppress the");
-            println!("  fallback it selects. Export this line in your terminal");
+            println!("  niu never edits ~/.niubashrc (niubash#359) — apply the pick yourself:");
+            println!("  add this line to ~/.niubashrc, or export it in your terminal");
             println!("  environment (or Windows user environment / shell profile):");
             println!("    {line}");
+            println!("  the variable is read at startup; a new session picks it up.");
         }
-        RcPolicyWrite::Default => {
+        RcPolicyAdvice::StaleBlock { path, replace_with } => {
+            println!("NIU_RC_POLICY = {}", policy.as_str());
+            println!(
+                "  An earlier niu release persisted a pick as a marked block in {};",
+                path.display()
+            );
+            println!("  it was left untouched — niu no longer edits your rc (niubash#359).");
+            match replace_with {
+                Some(line) => {
+                    println!("  To make this pick yours, replace those marked lines with:");
+                    println!("    {line}");
+                }
+                None => {
+                    println!("  To revoke the pick, delete those marked lines by hand.");
+                }
+            }
+        }
+        RcPolicyAdvice::Default => {
             println!("NIU_RC_POLICY = primary-only (the built-in default)");
             println!("  ~/.niubashrc is the only personal rc; ~/.bashrc is never considered.");
-            println!("  Any setup-persisted policy block was removed.");
+            println!("  Nothing to persist: the default needs no export line.");
         }
     }
     match policy {
@@ -4226,7 +4292,7 @@ fn show_setup_usage() {
     println!("  niu setup                       Re-run the interactive setup wizard");
     println!("  niu setup --preset <name>       Apply a preset non-interactively");
     println!("                                  (e.g. recommended, minimal)");
-    println!("  niu setup --rc-policy <policy>  Persist NIU_RC_POLICY in ~/.niubashrc");
+    println!("  niu setup --rc-policy <policy>  Print the NIU_RC_POLICY export line for a policy");
     println!("                                  without running the wizard: primary-only");
     println!("                                  (default) | bashrc-fallback — ~/.bashrc");
     println!("                                  fills the slot only while ~/.niubashrc");

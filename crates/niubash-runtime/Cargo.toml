@@ -18,12 +18,18 @@ internals = []
 
 [dependencies]
 rubash = { version = "1.4.3", git = "https://github.com/unixwin/rubash.git", branch = "master" }
-# niubash#373: 0.52 anchors the prompt without turning a missing
+# niubash#775: the REPL bridges its live Reedline buffer/point and plugin key
+# registrations to the process-wide GNU readline ABI (`rl_line_buffer`,
+# `rl_point`, the exported keymaps). Same pinned rev as the `niu` binary's
+# dependency, so both name one linked crate instance.
+readline-abi = { git = "https://github.com/unixwin/ruline", rev = "e5535ce297e22e296e33de6c9caa97ece0223fac" }
+# niubash#373: the 0.52-era prompt anchors without turning a missing
 # cursor-position reply into a read_line abort — a DSR-silent terminal
 # (dumb terminals, script(1) recordings, some serial/tmux links) gets its
 # prompt painted instead of paying a ~2.6 s stall, a line-editor error, and
 # a dead session on every startup (niubash#355 finding 3). 0.50 aborted.
-reedline = { version = "0.52" }
+# ruline is on its own 0.1.x version line; keep this semver floor in sync.
+reedline = { version = "=0.1.0" }
 fd-lock = "4.0"
 anyhow = "1.0"
 thiserror = "1.0"
@@ -45,7 +51,7 @@ globset = "0.4"
 glob = "0.3"
 png = "0.17"
 crossterm = { version = "0.27", default-features = false, features = ["event-stream", "windows"] }
-# reedline 0.52 speaks crossterm 0.29; the paste-chunk detector inspects the
+# the 0.52-era editor API speaks crossterm 0.29; the paste-chunk detector inspects the
 # raw key events reedline hands it (ReedlineRawEvent wraps a crossterm 0.29
 # Event), so it must name the SAME event types or the patterns would not
 # typecheck against the payload.
@@ -78,7 +84,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 # honest (niubash#207 step 1); EditCommand::PasteSystem stays wired up and
 # simply has no system clipboard behind it on android.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-reedline = { version = "0.52", features = ["system_clipboard"] }
+reedline = { version = "=0.1.0", features = ["system_clipboard"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -105,6 +105,81 @@
 > completeness red this raised on every rubash PR's
 > pairing job is what surfaced the gap.
 >
+> Addendum (invocation shape record, 2026-10-31,
+> rubash#2084 / rubash#2130): the typed invocation-shape
+> family — the `rubash::api` types `InvocationShape`
+> (+ constructors `new` / `interactive` /
+> `login_interactive`) and `RespawnSource` (+ variants
+> `Fresh` / `EngineChild`), the builder face
+> `SessionBuilder::invocation_shape`, the readback
+> `Session::invocation_shape`, and the Executor state
+> accessors `invocation_interactive` / `invocation_login`
+> / `set_invocation_shape` — is recorded (§2.1 row, §4
+> row, §6 entries). The family is new on the engine side
+> in the same change (rubash#2324): the builder applies
+> the declared shape to the executor's typed invocation
+> state at build, and the migrated carrier reads — 38
+> decision-point reads of the two read accessors across
+> 15 executor files, which used to key off the
+> `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL`
+> env-table entries — read through them. niubash
+> consumes none of it yet (its Shell construction names
+> no shape), so the record is staged ahead of the host's
+> adoption, like the kill-hook records before it.
+> (§5's completeness check stays green with no new
+> warnings: the host already names the `rubash::api`
+> module itself, which covers the module's entries
+> under the check's module-prefix rule — the staged
+> status is a fact of this record, not of the check.)
+> The
+> recorded methods are inherent faces, not trait
+> methods, so no UFCS-token caveat applies to them.
+> The same change's per-flag builder setter
+> `SessionBuilder::interactive` is recorded in §6
+> with them, pairing its twin
+> `SessionBuilder::login_shell` (recorded since v4);
+> the structured face supersedes both setters, which
+> stay public inherent faces of the builder.
+>
+> Addendum (synthetic-link root face signature change, 2026-11-01,
+> niubash#758): the special_paths registry's synthetic-link family
+> grows the `/proc/<pid>/root` entry, and the family's resolution
+> face changes signature in the same engine change:
+> `special_paths::synthetic_link_target` and
+> `proc_vfs::proc_link_target` now take the caller-fed
+> payload-root forms (`proc_vfs::ProcSelfRoot`, built by
+> `proc_vfs::self_root_forms`) beside the session-cwd forms —
+> the root's target is session state (the payload root the path
+> mapper serves for `/`), so it travels the same caller-fed
+> channel as self/cwd. The family stays engine-consumed:
+> niubash's completion and highlighting faces read the new entry
+> through the already-recorded classification and enumeration
+> faces, so no §2 census count moves and no §6 entry is added;
+> the record is this addendum, in both copies, per the update
+> rule.
+>
+> Addendum (bind / history_expand census backfill, 2026-11-01):
+> the bind family's function table and plain-form formatters
+> (`builtins::bind::READLINE_FUNCTIONS`,
+> `builtins::bind::format_macro_plain`,
+> `builtins::bind::format_variable_plain`), the
+> history-expansion engine family
+> (`history_expand::HistChars` / `HistCtx` /
+> `HistEngineState` / `HistLookup` / `history_expand`,
+> with the `HistChars::default` /
+> `HistEngineState::default` constructors niubash calls),
+> and the tilde expander
+> (`expand::tilde::tilde::expand_word_prefix`) are
+> recorded (§0 backfill basis, §2.1 rows, §4 rows, §6
+> entries) after §5's completeness check flagged them as
+> consumed-but-unrecorded — niubash's host readline
+> commands (the niubash#765-#767 batch: the funmap,
+> dump-macros / dump-variables, `history-expand-line`,
+> `tilde-expand`) consume them through niubash-runtime's
+> readline_commands and repl modules, but no census ever
+> registered them. The completeness red this raised on
+> every rubash PR's pairing job is what surfaced the gap.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -210,6 +285,31 @@ the one direct `Executor` construction left in the host:
 every `Shell` is built through the Session builder (§2.3)
 and every other Executor arrives through the §2.2 seam.
 
+Backfill census for the bind / history_expand families
+(2026-11-01), same rules:
+
+- rubash master `ee954e9c35b44fbd475d36d601826992fc563e14`
+- niubash master `288b6b5250eab36fef2607eaa45a787079c6812e`
+
+The v4 census missed these families (see the header
+addendum). Occurrences by the rule below:
+`builtins::bind::READLINE_FUNCTIONS` (1),
+`builtins::bind::format_macro_plain` (1),
+`builtins::bind::format_variable_plain` (1),
+`expand::tilde::tilde::expand_word_prefix` (1),
+`history_expand::HistChars::default` (1),
+`history_expand::HistCtx` (1),
+`history_expand::HistEngineState::default` (1),
+`history_expand::HistLookup` (1), and
+`history_expand::history_expand` (1), spread over exactly
+**2 files**: `crates/niubash-runtime/src/readline_commands.rs`
+and `crates/niubash-runtime/src/repl.rs`. The two
+`::default` tokens are recorded under their types (§6
+`item` entries for `HistChars` / `HistEngineState`): a
+`Default` constructor is a trait impl, not a `pub fn`,
+so the §6 `method` kind cannot represent it — the type
+entry is its record, as the §2.1 row states.
+
 Counting rules (so any future re-census is comparable):
 
 - **Path references**: occurrences of the token pattern
@@ -262,12 +362,14 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the route family `ExternalRouteProvider` / `ExternalRouteRequest` / `ExternalRouteStdio` / `ExternalRouteHandle` (+ variants `Inherit`, `Handle`) / `ExternalRouteOutcome` (+ variants `Completed`, `Declined`, `Cancelled`) — the niubash#567 route capability (see the header addendum) |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the route family `ExternalRouteProvider` / `ExternalRouteRequest` / `ExternalRouteStdio` / `ExternalRouteHandle` (+ variants `Inherit`, `Handle`) / `ExternalRouteOutcome` (+ variants `Completed`, `Declined`, `Cancelled`) — the niubash#567 route capability (see the header addendum); plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
-| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface |
+| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `format_macro_plain`, `format_variable_plain`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `READLINE_FUNCTIONS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface. The `READLINE_FUNCTIONS` table and the `format_macro_plain` / `format_variable_plain` plain-form formatters (recorded in the 2026-11-01 backfill, see header addendum) are a further exception: niubash's host readline layer calls them directly — the funmap in niubash-runtime's readline_commands module reads the table, and the repl's dump-macros / dump-variables faces format through the pair, over data the gated bind surface loads |
 | `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today; plus the `SessionHistory::size_limit` associated helper (recorded in v3) |
+| `history_expand` | `HistChars::default` (1), `HistCtx` (1), `HistEngineState::default` (1), `HistLookup` (1), `history_expand` (1) — the history-expansion engine niubash's host readline layer drives directly for its `history-expand-line` face and the first stage of `shell_expand_line`: niubash-runtime's readline_commands module implements `HistLookup` over the session entries, builds the `HistChars` / `HistCtx` context from the session's `histchars` value and posix mode, and calls `history_expand` over a fresh `HistEngineState` (recorded in the 2026-11-01 backfill; see §0 — the `::default` tokens are recorded under their types in §6) |
+| `expand::tilde` | `tilde::expand_word_prefix` (1) — the tilde-prefix expander niubash's host `tilde-expand` readline command applies to the word at point over the session environment; consumed in niubash-runtime's repl module under the defining-module spelling `expand::tilde::tilde::expand_word_prefix`, which is the spelling §6 records (recorded in the 2026-11-01 backfill; see §0) |
 | `script_driver` | `run_source_with_line_offset` (2), `run_script_with_history_at_line_offset_tracked`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `bytes_to_script_text`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER` (1 each unless noted). (Ledger v4: `run_stdin_script`, `run_interactive_stdin`, `prepare_interactive_history`, `pre_process_interactive_line` + `InteractiveExpansion`, and `finish_shell` have exited the consumed surface — `Session::run_stdin` / `run_interactive_stdin` / `prepare_line` / `close` carry that traffic now; the symbols stay `pub` in the engine.) |
 | `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1), `ast_print::pretty_print_input` (1); `Ast` is also consumed under this defining-module spelling (the root re-export above is the other spelling; both recorded in §6) |
 | `lexer` | `tokenize` (2), `tokenize_with_initial_posix` (1), `has_unclosed_input_syntax` (1), `has_unclosed_input_syntax_posix` (1) |
@@ -412,7 +514,7 @@ to the split core crate without changing its shape.
 | `complete_line`, `has_compspec` | A | `Session::complete` + compspec view |
 | `set_history_provider` + `HistoryProvider` | A | builder-injected capability (trait unchanged) |
 | external route capability (`ExternalRouteProvider` + the request / stdio / handle / outcome family) | A | builder-injected capability in the §5.5 family, beside `ExternalCommandHandler`: the dispatcher consults it after resolution and redirection with the spawn prepared; the provider runs the call in-process over live handles or declines to the spawn (niubash#567) |
-| `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` + functions view |
+| `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` / `Session::call_function_with_env` + functions view (the env channel landed on the contract surface with rubash#2001; until then this row's env half was carried by the tier-C seam below) |
 | `inherit_process_stdin` | A | builder stream binding |
 | `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome` |
 | `script_driver` run family | A (driver wrappers B) | `Session::run`; thin wrappers stay in the driver crate |
@@ -427,12 +529,15 @@ to the split core crate without changing its shape.
 | `invocation` (`ShellInvocation`, `materialize_command_file`) | B (row-11 ruling) | driver-layer input type: both binaries' `main()` parse through it identically, and the RFC's own §8 puts driver wrappers at B; it stays in the `invocation` module in-tree and moves with the driver layer at the split |
 | `builtins::kill` console hooks | C → **replaced (row 11)** | `Executor::inject_signal` / `Executor::interrupt` (Tier A, RFC §6.4) for session-scoped delivery; `script_driver::inject_console_ctrl_c` / `script_driver::consume_background_wrapper_handshake` (Tier B) for the two host-launcher shapes that have no executor yet. The kill items themselves were demoted to `pub(crate)` in the migration's companion change (Ledger v4) |
 | session configuration (`set_winuxcmd_path`, `set_shell_root`, `set_compatible_shell_path`, `set_builtin_disabled`, `mark_login_shell`) | A (row-11 ruling) | builder-time session initialization — M-2's own language ("the 55 set_env sites collapse into builder initialization"); these five are the same shape: host facts installed before the first run |
+| invocation shape (`InvocationShape`, `RespawnSource`, `SessionBuilder::invocation_shape`, `Session::invocation_shape`; the Executor accessors `invocation_interactive` / `invocation_login` / `set_invocation_shape`) | A | construction-time session state in `rubash::api`, beside the session-configuration row: the builder applies the declared shape to the executor's typed invocation state at build — the structured declaration is authoritative for the fields it names, over the environment seeds — and `Session::invocation_shape` reads it back; the Executor accessors are the state's engine-side face, behind which the migrated carrier reads of rubash#2130 sit (recorded staged ahead of host adoption; see the header addendum) |
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
 | tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, the post-build provider install, and the `&self` probe reads the `&mut`-shaped views cannot serve. Added with the migration's companion change; its consumer set is expected to shrink, never grow |
 | debugger front doors (`run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) | B | driver-layer front doors at the crate root — the design's §10 forms of the one debug session; they stay driver surface, not `Session` methods, and move with the driver layer at the split |
-| `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers; plus the `InputrcEnv` / `parse_inputrc_with_env` inputrc reader pair) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature — except the inputrc reader pair, which niubash-runtime's config module consumes directly at startup (see the §2 row) |
+| `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers; plus the `InputrcEnv` / `parse_inputrc_with_env` inputrc reader pair; plus `READLINE_FUNCTIONS` and the `format_macro_plain` / `format_variable_plain` plain-form formatters, recorded in the 2026-11-01 backfill) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature — except the inputrc reader pair, which niubash-runtime's config module consumes directly at startup, and the 2026-11-01 trio, which niubash-runtime's readline_commands / repl modules consume directly for the host funmap and the dump-macros / dump-variables faces (see the §2 row) |
+| `history_expand` engine (`HistChars`, `HistCtx`, `HistEngineState`, `HistLookup`, `history_expand`) | B | stays in the `history_expand` module in-tree — the engine's own history faces and the host's readline `history-expand-line` face drive the same engine (recorded in the 2026-11-01 backfill) |
+| `expand::tilde` (`tilde::expand_word_prefix`) | B | stays in the `expand::tilde` module in-tree — the engine's expansion faces and the host's readline `tilde-expand` command share the one tilde expander (recorded in the 2026-11-01 backfill) |
 
 ## 5. The canary: how the freeze is enforced
 
@@ -496,7 +601,9 @@ item rubash::api::ExternalRouteProvider
 item rubash::api::ExternalRouteRequest
 item rubash::api::ExternalRouteStdio
 item rubash::api::Flow
+item rubash::api::InvocationShape
 item rubash::api::PreparedLine
+item rubash::api::RespawnSource
 item rubash::api::RunOptions
 item rubash::api::RunOutcome
 item rubash::api::Session
@@ -505,7 +612,10 @@ item rubash::builtins::bind::BindSpecError
 item rubash::builtins::bind::BindingSpec
 item rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
 item rubash::builtins::bind::InputrcEnv
+item rubash::builtins::bind::READLINE_FUNCTIONS
 item rubash::builtins::bind::format_invalid_keymap
+item rubash::builtins::bind::format_macro_plain
+item rubash::builtins::bind::format_variable_plain
 item rubash::builtins::bind::parse_inputrc_with_env
 item rubash::builtins::bind::parse_positional_binding
 item rubash::builtins::bind::parse_unix_command_spec
@@ -516,7 +626,13 @@ item rubash::executor::bytes_to_shell_text
 item rubash::executor::read_process_stdin_bytes
 item rubash::executor::Executor
 item rubash::executor::shell_pwd_display_path
+item rubash::expand::tilde::tilde::expand_word_prefix
 item rubash::history::HistoryProvider
+item rubash::history_expand::HistChars
+item rubash::history_expand::HistCtx
+item rubash::history_expand::HistEngineState
+item rubash::history_expand::HistLookup
+item rubash::history_expand::history_expand
 item rubash::invocation::ShellInvocation
 item rubash::invocation::materialize_command_file
 item rubash::lexer::has_unclosed_input_syntax
@@ -572,6 +688,8 @@ variant rubash::api::ExternalRouteOutcome::Declined
 variant rubash::api::Flow::ExitRequested
 variant rubash::api::PreparedLine::Discard
 variant rubash::api::PreparedLine::Execute
+variant rubash::api::RespawnSource::EngineChild
+variant rubash::api::RespawnSource::Fresh
 variant rubash::builtins::bind::BindingSpec::Function
 variant rubash::builtins::bind::BindingSpec::Macro
 variant rubash::executor::ExecuteError::CommandNotFound
@@ -587,9 +705,13 @@ variant rubash::shell::bind_registry::BindKind::Macro
 variant rubash::special_paths::SpecialPathClass::Filesystem
 method rubash::Executor::new
 method rubash::api::ExternalRouteHandle::raw_or_zero
+method rubash::api::InvocationShape::interactive
+method rubash::api::InvocationShape::login_interactive
+method rubash::api::InvocationShape::new
 method rubash::api::OptionsView::set
 method rubash::api::Session::aliases
 method rubash::api::Session::builder
+method rubash::api::Session::call_function_with_env
 method rubash::api::Session::close
 method rubash::api::Session::complete
 method rubash::api::Session::executor
@@ -598,6 +720,7 @@ method rubash::api::Session::expand_prompt
 method rubash::api::Session::functions
 method rubash::api::Session::has_compspec
 method rubash::api::Session::inherit_process_stdin
+method rubash::api::Session::invocation_shape
 method rubash::api::Session::last_status
 method rubash::api::Session::options
 method rubash::api::Session::prepare_line
@@ -614,6 +737,8 @@ method rubash::api::SessionBuilder::compatible_shell_path
 method rubash::api::SessionBuilder::disable_builtin
 method rubash::api::SessionBuilder::external_route_provider
 method rubash::api::SessionBuilder::env
+method rubash::api::SessionBuilder::interactive
+method rubash::api::SessionBuilder::invocation_shape
 method rubash::api::SessionBuilder::login_shell
 method rubash::api::SessionBuilder::shell_root
 method rubash::api::SessionBuilder::winuxcmd_path
@@ -639,6 +764,8 @@ method rubash::executor::Executor::has_function
 method rubash::executor::Executor::last_exit_code
 method rubash::executor::Executor::inject_signal
 method rubash::executor::Executor::interrupt
+method rubash::executor::Executor::invocation_interactive
+method rubash::executor::Executor::invocation_login
 method rubash::executor::Executor::last_command_inverted
 method rubash::executor::Executor::mark_login_shell
 method rubash::executor::Executor::resolve_shell_path
@@ -650,6 +777,7 @@ method rubash::executor::Executor::script_fd0_line
 method rubash::executor::Executor::set_env
 method rubash::executor::Executor::set_external_route_provider
 method rubash::executor::Executor::set_history_provider
+method rubash::executor::Executor::set_invocation_shape
 method rubash::executor::Executor::set_shopt_option
 method rubash::executor::Executor::take_exit_jump_pending
 method rubash::executor::Executor::take_signal_discard_pending
@@ -698,6 +826,23 @@ consumed by niubash#694's invocation-input operand reader
 missed by the v4 census (which counted the builder
 construction and the receiver-form seam calls), and
 flagged by §5's completeness check.
+Backfill, 2026-11-01: the bind family's
+`READLINE_FUNCTIONS` / `format_macro_plain` /
+`format_variable_plain`, the `history_expand` engine
+family, and `expand::tilde::tilde::expand_word_prefix`
+are recorded (§0/§2.1/§4/§6) — consumed by the
+niubash#765-#767 host readline batch through
+niubash-runtime's readline_commands and repl modules,
+missed by the v4 census, and flagged by §5's
+completeness check.
+Staged record, 2026-10-31: the invocation-shape family
+(rubash#2084 / rubash#2130) is recorded (§2.1/§4/§6)
+ahead of host adoption — consumed today by the engine's
+own build path, its migrated carrier reads, and the
+in-tree consumer tests; niubash names none of it yet.
+The same change's per-flag setter
+`SessionBuilder::interactive` is recorded in §6 with
+the family, pairing `SessionBuilder::login_shell` (v4).
 Ledger v1, 2026-10-25. Update rule: any change to the consumed
 surface (a symbol appears, vanishes, or moves tiers) updates this
 file — both copies — in the same change that causes it, with the

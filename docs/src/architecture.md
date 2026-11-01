@@ -182,6 +182,72 @@ niubash/
     └── planning/
 ```
 
+### 6. In-process readline C ABI (niubash#775, ruline#8)
+
+GNU readline is not a separate library inside niu: the editor is Reedline
+(ruline) compiled into the executable. Bash loadable builtins
+(`enable -f ./mybuiltin.so mybuiltin`) are `dlopen`ed into *that* process, so
+their `rl_*` / `history_*` references must resolve against niu's main
+executable — the live editor — rather than against a second readline
+instance.
+
+The ABI definitions live in the ruline `readline-abi` crate
+(<https://github.com/unixwin/ruline/issues/8>), pinned as a git dependency
+of the root `niu` package. Its lib target is named `readline`
+(`readline_abi` is the package name); `src/main.rs` calls `rl_initialize()`
+once at startup so the exported globals (`rl_line_buffer`, keymaps, funmaps,
+completion defaults) exist before any plugin can load. The host does not
+implement `rl_*` itself: `readline()`, history, keymaps, funmaps, hooks and
+completion belong to the ABI crate.
+
+The exported set is checked in at `scripts/readline-abi-exports.txt`
+(one `F <name>` / `D <name>` per line, generated from the built
+`libreadline` with `scripts/gen-readline-abi-exports.sh`). Publishing it
+needs a per-platform link switch, done in `build.rs` for the `niu` binary
+only (the `bash` binary re-execs niu and never hosts an editor):
+
+| Target | Flag | Why |
+|---|---|---|
+| ELF (Linux, Android/Termux, musl) | `-rdynamic` (`--export-dynamic`) | Adds global definitions to the dynamic symbol table so `dlopen` resolves them. |
+| Mach-O (macOS) | `-Wl,-export_dynamic` | ld64's documented "main executable may load a plug-in" switch; `-rdynamic` is not an ld64 option. |
+| Windows MSVC | `/DEF:<generated .def>` | link.exe exports nothing by default; a curated `EXPORTS` list is the MSVC equivalent and avoids publishing every Rust internal. |
+| Windows MinGW | `-Wl,--export-all-symbols` | MinGW ld's host-to-plugin export switch. |
+
+A static ELF build (the `*-unknown-linux-musl` default) has no dynamic symbol
+table and cannot load shared objects, so `build.rs` skips export setup for
+`crt-static` targets; those builds use the standalone `libreadline.so.8`
+embedding mode instead.
+
+Visibility is not retention: a definition in an rlib member is only linked
+when something references it, and plugins reach the ABI through `dlsym`, not
+through Rust code. Every name in the checked-in list is therefore also
+anchored as undefined (`-Wl,--undefined=<sym>`, `-Wl,-u,_<sym>`,
+`/INCLUDE:<sym>`) so its member is pulled into the link even under thin LTO
+and `--gc-sections`. MSVC's generated `.def` marks data symbols with `DATA`
+and leaves functions bare.
+
+`tests/readline_abi_exports.rs` audits the entire list against the built
+binary (`nm -D` / `readelf --dyn-syms`, `dumpbin /exports` on Windows), with
+a second focused test for the symbols the `loadable-builtin-niu` plugin
+probe resolves; `scripts/check-readline-abi-exports.sh` runs the same audit
+on release artifacts.
+
+Two embedding modes are supported, and only one shares niu's editor:
+
+- **Host mode (this executable)** — loadable builtins resolve the symbols
+  above from running niu. Today the ABI crate owns a *standalone* editor
+  state that `rl_initialize()` sets up; routing it to the live Reedline
+  editor (`rl_line_buffer` mirroring, `rl_*` edits landing in the prompt) is
+  the remaining follow-up.
+- **Standalone `libreadline.so.8` / `libhistory.so.8`** — the ruline ABI
+  crate's `cdylib`; an external embedder that links it owns its own editor
+  instance and does not see niu's process state.
+
+`bind -x` (engine bindings applied to the editor through the `__niu_bindx`
+host command), `__niu_readline` host commands, `READLINE_*` read-back and
+inputrc handling keep their existing paths; the ABI export changes no
+behaviour until the live routing lands.
+
 ## Data flow
 
 ```text
