@@ -49,11 +49,13 @@
 //! A decorator over the presentation menus was weighed and rejected:
 //! reedline's stock menus expose no selected index, re-query on every
 //! event (narrowing the frozen set), and recompute spans against a
-//! buffer the cycling itself mutates. So under `interaction = cycle`
-//! this menu renders its own grid (the GNU menu's column geometry) for
-//! every non-GNU style; `completion.style` keeps owning the `insert`
-//! interaction's presentation, and the GNU style is exempt from the
-//! axis entirely (its printed list is the literal readline shape).
+//! buffer the cycling itself mutates. So under `interaction = cycle` /
+//! `select` this menu owns the frozen set and renders the configured
+//! *presentation* style's shape: the packed column grid (or its
+//! description-forced vertical column), the ide popup, or the vertical
+//! list. The interaction axis still owns selection/splicing; the GNU
+//! style is exempt from the interaction axis entirely (its printed list
+//! is the literal readline shape).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,7 +68,10 @@ use reedline::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::gnu_menu::{packed_column_layout, render_list_packed, GNU_COLUMN_GUTTER};
+use super::gnu_menu::{
+    packed_column_layout, render_list_packed, truncate_display, GNU_COLUMN_GUTTER,
+};
+use crate::config::CompletionStyle;
 
 /// The line as it stood when a cycle session began: what Esc restores.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,6 +685,11 @@ pub struct CycleMenu {
     /// published to [`CycleSession`] so the wrapper lets the arrow keys
     /// navigate a `select` menu too.
     select_mode: bool,
+    /// The presentation style this interaction menu paints. The stocks
+    /// menus are replaced here so the candidate set stays frozen while
+    /// cycling; the style still owns the shape (grid, description column,
+    /// vertical list). `gnu` never reaches this menu.
+    style: CompletionStyle,
     /// Whether a candidate is currently spliced into the line. TAB #1
     /// sets it (niubash#778); it only goes false when a session ends.
     has_selection: bool,
@@ -707,6 +717,7 @@ impl CycleMenu {
             terminal_columns: 80,
             select_mode: false,
             has_selection: false,
+            style: CompletionStyle::Column,
         }
     }
 
@@ -714,6 +725,13 @@ impl CycleMenu {
     #[must_use]
     pub fn with_select_mode(mut self, on: bool) -> Self {
         self.select_mode = on;
+        self
+    }
+
+    /// Choose the presentation shape painted inside the interaction menu.
+    #[must_use]
+    pub fn with_style(mut self, style: CompletionStyle) -> Self {
+        self.style = style;
         self
     }
 
@@ -1092,6 +1110,120 @@ impl CycleMenu {
     }
 }
 
+impl CycleMenu {
+    /// Whether any candidate carries a description (the column style's
+    /// documented switch to a single vertical description column).
+    fn has_descriptions(&self) -> bool {
+        self.values.iter().any(|suggestion| {
+            suggestion
+                .description
+                .as_deref()
+                .is_some_and(|description| !description.trim().is_empty())
+        })
+    }
+
+    /// Render the interaction menu in the configured presentation style.
+    ///
+    /// The candidate set/selection index stay here (they are the interaction
+    /// contract); only the painted shape follows `completion.style`:
+    ///
+    /// * `column` — packed grid, or one vertical column with descriptions
+    ///   when any candidate carries one (docs/src/advanced-usage.md);
+    /// * `ide` — packed popup; descriptions ride beside their value;
+    /// * `list` — one vertical row per candidate, descriptions included;
+    /// * `inline` — packed grid (the line already cycles in place).
+    ///
+    /// Returns the painted string and its line count.
+    fn render_menu(
+        &self,
+        terminal_columns: usize,
+        available_lines: u16,
+        use_ansi_coloring: bool,
+    ) -> (String, u16) {
+        if !self.session_begun || self.values.is_empty() {
+            return (String::new(), 0);
+        }
+        let has_descriptions = self.has_descriptions();
+        let show_description = has_descriptions
+            && matches!(
+                self.style,
+                CompletionStyle::Column | CompletionStyle::Ide | CompletionStyle::List
+            );
+        let selected_style = nu_ansi_term::Style::new()
+            .fg(nu_ansi_term::Color::Green)
+            .bold()
+            .reverse();
+        let mut cells = Vec::with_capacity(self.values.len());
+        let mut widths = Vec::with_capacity(self.values.len());
+        for (position, suggestion) in self.values.iter().enumerate() {
+            let mut text = suggestion.display_value().to_string();
+            if show_description {
+                if let Some(description) = suggestion.description.as_deref() {
+                    if !description.trim().is_empty() {
+                        text.push_str("  ");
+                        text.push_str(description);
+                    }
+                }
+            }
+            widths.push(text.width());
+            let painted = if !use_ansi_coloring {
+                text
+            } else if self.has_selection && position == self.index {
+                let style = suggestion
+                    .style
+                    .map(|style| style.bold().reverse())
+                    .unwrap_or(selected_style);
+                format!("{}{}{}", style.prefix(), text, style.suffix())
+            } else if let Some(style) = suggestion.style {
+                format!("{}{}{}", style.prefix(), text, style.suffix())
+            } else {
+                text
+            };
+            cells.push(painted);
+        }
+
+        let vertical = self.style == CompletionStyle::List
+            || (self.style == CompletionStyle::Column && has_descriptions);
+        if vertical {
+            let rows = cells.len().min(available_lines.max(1) as usize).max(1);
+            (
+                render_vertical_cells(&cells, &widths, terminal_columns, rows),
+                rows as u16,
+            )
+        } else {
+            let (_, rows, _) = packed_column_layout(&widths, terminal_columns.max(1));
+            let values: Vec<&str> = cells.iter().map(String::as_str).collect();
+            (
+                render_list_packed(&values, &widths, terminal_columns, available_lines),
+                rows.min(u16::MAX as usize) as u16,
+            )
+        }
+    }
+}
+
+/// Paint a one-candidate-per-row list, clipping to `available_lines` and
+/// truncating over-wide cells (the same middle cut the packed grid uses).
+fn render_vertical_cells(
+    cells: &[String],
+    widths: &[usize],
+    terminal_columns: usize,
+    rows: usize,
+) -> String {
+    let mut out = String::new();
+    for (index, cell) in cells.iter().take(rows).enumerate() {
+        let text = truncate_display(
+            cell,
+            widths.get(index).copied().unwrap_or(0),
+            terminal_columns,
+        );
+        out.push_str(text.trim_end());
+        if index + 1 < rows {
+            out.push_str("\r\n");
+        }
+    }
+    out
+}
+
 impl Menu for CycleMenu {
     fn settings(&self) -> &MenuSettings {
         &self.settings
@@ -1211,54 +1343,13 @@ impl Menu for CycleMenu {
         if !self.session_begun {
             return 0;
         }
-        let (_, rows, _) = packed_column_layout(&self.display_widths, terminal_columns as usize);
-        rows.min(u16::MAX as usize) as u16
+        let (_, rows) = self.render_menu(terminal_columns as usize, u16::MAX, false);
+        rows
     }
 
     fn menu_string(&self, available_lines: u16, use_ansi_coloring: bool) -> String {
-        if !self.session_begun || self.values.is_empty() {
-            return String::new();
-        }
-        // The selected cell wears the stock selected style
-        // (MenuTextStyle's default: green, bold, reversed) — the
-        // settings' own color is not readable outside reedline, and
-        // the default is what every stock menu paints. niubash#743: an
-        // unselected cell keeps the candidate's own LS_COLORS style;
-        // the selected cell composes it with the selection marker
-        // (reverse over the file color, like zsh's menu-select).
-        let selected_style = nu_ansi_term::Style::new()
-            .fg(nu_ansi_term::Color::Green)
-            .bold()
-            .reverse();
-        let cells: Vec<String> = self
-            .values
-            .iter()
-            .enumerate()
-            .map(|(position, suggestion)| {
-                let text = suggestion.display_value();
-                if !use_ansi_coloring {
-                    return text.to_string();
-                }
-                if self.has_selection && position == self.index {
-                    let style = suggestion
-                        .style
-                        .map(|style| style.bold().reverse())
-                        .unwrap_or(selected_style);
-                    format!("{}{}{}", style.prefix(), text, style.suffix())
-                } else if let Some(style) = suggestion.style {
-                    format!("{}{}{}", style.prefix(), text, style.suffix())
-                } else {
-                    text.to_string()
-                }
-            })
-            .collect();
-        let values: Vec<&str> = cells.iter().map(String::as_str).collect();
-        render_list_packed(
-            &values,
-            &self.display_widths,
-            self.terminal_columns,
-            available_lines,
-        )
+        self.render_menu(self.terminal_columns, available_lines, use_ansi_coloring)
+            .0
     }
 
     fn min_rows(&self) -> u16 {
@@ -1832,6 +1923,59 @@ mod tests {
         activate(&mut menu, &mut editor, &mut completer);
         assert_eq!(editor.get_buffer(), "git checkout");
         assert!(menu.is_active());
+    }
+
+    // ─── presentation style inside the interaction menu ─────────────
+    fn styled_menu(style: CompletionStyle) -> (CycleMenu, Editor) {
+        let mut completer = PrefixCompleter::new(&["start", "stop", "status"]);
+        let (mut menu, _session) = menu_with_session();
+        menu = menu.with_style(style);
+        let mut editor = editor_with("m ");
+        activate(&mut menu, &mut editor, &mut completer);
+        for suggestion in menu.values.iter_mut() {
+            suggestion.description = Some(format!("desc-{}", suggestion.value));
+        }
+        (menu, editor)
+    }
+
+    #[test]
+    fn style_column_with_descriptions_renders_one_vertical_column() {
+        let (menu, _editor) = styled_menu(CompletionStyle::Column);
+        let rendered = menu.menu_string(20, false);
+        let lines: Vec<&str> = rendered.split("\r\n").collect();
+        assert_eq!(lines.len(), 3, "one row per candidate:\n{rendered}");
+        for (line, name) in lines.iter().zip(["start", "stop", "status"]) {
+            assert!(line.contains(name), "missing {name} in {line:?}");
+            assert!(
+                line.contains(&format!("desc-{name}")),
+                "missing description in {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn style_list_with_descriptions_renders_one_vertical_column() {
+        let (menu, _editor) = styled_menu(CompletionStyle::List);
+        let rendered = menu.menu_string(20, false);
+        let lines: Vec<&str> = rendered.split("\r\n").collect();
+        assert_eq!(lines.len(), 3, "list is one row per candidate:\n{rendered}");
+        assert!(rendered.contains("desc-start") && rendered.contains("desc-status"));
+    }
+
+    #[test]
+    fn style_ide_with_descriptions_keeps_a_popup_and_shows_them() {
+        let (menu, _editor) = styled_menu(CompletionStyle::Ide);
+        let rendered = menu.menu_string(20, false);
+        assert!(
+            !rendered.contains('\r'),
+            "ide stays a packed popup:\n{rendered}"
+        );
+        for description in ["desc-start", "desc-stop", "desc-status"] {
+            assert!(
+                rendered.contains(description),
+                "missing {description}:\n{rendered}"
+            );
+        }
     }
 
     // ─── niubash#743: LS_COLORS-style candidate coloring ──────────────

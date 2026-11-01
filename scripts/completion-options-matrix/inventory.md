@@ -11,7 +11,7 @@ that pins it in `baseline/summary.md`.
 | `gnu` | `readline` | literal readline: TAB #1 common prefix, TAB #2 printed columnar list, nothing selected | `insert/gnu_prefix_two_step`, `styles/select_gnu_printed`, `aliases/readline_gnu` |
 | `ide` | `smart`, `popup` (code-only, undocumented) | multi-column popup with descriptions; selected description beside it | `insert/ide_prefix_two_step`, `styles/select_ide_descriptions`, `aliases/smart_ide_code`, `aliases/popup_ide_code` |
 | `list` | `vertical` | fish-style vertical list with descriptions | `insert/list_prefix_two_step`, `styles/select_list_descriptions`, `aliases/vertical_list` |
-| `inline` | `cycle`, `menu` | first match inserted directly, TAB cycles (bash `menu-complete`) | `insert/inline_first_match`, `inline/cycle_first_match_then_next`, `styles/select_inline_cycles`, `aliases/cycle_inline`, `aliases/menu_inline` |
+| `inline` | `cycle`, `menu` | first match inserted directly, TAB cycles (bash `menu-complete`) | `insert/inline_prefix_two_step` (insert axis), `inline/cycle_first_match_then_next` (cycle style), `styles/select_inline_cycles`, `aliases/cycle_inline`, `aliases/menu_inline` |
 
 Source: `crates/niubash-runtime/src/config.rs:129-176` (parse/aliases),
 `docs/src/completion.md:41-50`, `docs/src/advanced-usage.md:202-231`,
@@ -49,8 +49,8 @@ Source: `config.rs:482-487, 556-590`,
 
 | Knob | Claim | Status | Matrix |
 | --- | --- | --- | --- |
-| `completion.page_size` | menu page size, `MenuConfig::completion_page_size` default 10 | **MISSING**: no env/config key, value fixed at 10 | `knobs/page_size_not_exposed` |
-| `completion.behavior` (prefix/substring) | not implemented/documented | **MISSING**: no key, no substring matching | `knobs/completion_behavior_not_exposed` |
+| `completion.page_size` | internal `MenuConfig::completion_page_size` only, default 10 | **N/A**: internal-only; no env/config key is documented | `knobs/page_size_not_an_option` |
+| `completion.behavior` (prefix/substring) | internal `CompletionBehavior` (mod.rs); no env/config key | **N/A**: internal-only, not an option | `knobs/completion_behavior_not_an_option` |
 | Bare-TAB indent | blank line + TAB inserts four spaces, never opens the command grid | PASS (select) | `select/bare_tab_indent` |
 | Menu Enter | commits highlighted candidate, does not submit; second Enter runs | PASS (insert) | `insert/enter_confirms_then_runs` |
 | Menu Esc | select/cycle roll the line back to the pre-completion snapshot; insert keeps the inserted prefix | PASS (select/cycle/insert) | `select/esc_rollback`, `cycle/esc_rollback`, `insert/esc_keeps_prefix` |

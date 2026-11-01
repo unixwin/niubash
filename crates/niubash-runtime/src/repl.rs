@@ -9,6 +9,7 @@ use std::{borrow::Cow, io::Write};
 
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::cycle_menu::SharedCycleSession;
+use crate::completion::insert_menu::InsertStopMenu;
 use crate::completion::NiubashCompleter;
 use crate::config::{
     CompletionInteraction, CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding,
@@ -579,7 +580,8 @@ fn configured_completion_menu(
                     .with_select_mode(matches!(
                         config.completion_interaction,
                         CompletionInteraction::Select
-                    )),
+                    ))
+                    .with_style(config.completion_style),
             );
         }
     }
@@ -606,7 +608,13 @@ fn configured_completion_menu(
                 .with_max_completion_height(config.completion_page_size.min(20) as u16)
                 .with_padding(1)
                 .with_description_mode(reedline::DescriptionMode::PreferRight);
-            Box::new(menu)
+            // insert interaction: first TAB splices the common prefix and
+            // stops; TAB #2 opens the popup (niubash#778 follow-up).
+            if config.completion_interaction == CompletionInteraction::Insert {
+                Box::new(InsertStopMenu::new(Box::new(menu)))
+            } else {
+                Box::new(menu)
+            }
         }
         CompletionStyle::Column => {
             let page_cols = if config.completion_page_size <= 4 {
@@ -630,20 +638,26 @@ fn configured_completion_menu(
                 menu_open,
             ))
         }
-        CompletionStyle::List => Box::new(configured_list_menu(
-            name,
-            config.completion_page_size,
-            config,
-        )),
+        CompletionStyle::List => {
+            let menu = configured_list_menu(name, config.completion_page_size, config);
+            if config.completion_interaction == CompletionInteraction::Insert {
+                Box::new(InsertStopMenu::new(Box::new(menu)))
+            } else {
+                Box::new(menu)
+            }
+        }
         CompletionStyle::Inline => {
             // Inline mode: use ListMenu with page_size 1 to highlight one at a time
-            Box::new(
-                ListMenu::default()
-                    .with_name(name)
-                    .with_page_size(1)
-                    .with_max_entry_lines(config.max_entry_lines)
-                    .with_only_buffer_difference(false),
-            )
+            let menu = ListMenu::default()
+                .with_name(name)
+                .with_page_size(1)
+                .with_max_entry_lines(config.max_entry_lines)
+                .with_only_buffer_difference(false);
+            if config.completion_interaction == CompletionInteraction::Insert {
+                Box::new(InsertStopMenu::new(Box::new(menu)))
+            } else {
+                Box::new(menu)
+            }
         }
     }
 }

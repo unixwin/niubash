@@ -1,15 +1,15 @@
 {
   "harness": 1,
   "description": "niubash completion option matrix (styles x interactions, precedence, compdefs)",
-  "base": "3018703",
+  "base": "2e8485a",
   "niu": {
     "bin": "/data/data/com.termux/files/home/wt/niu-completion-matrix/target/debug/niu",
     "version": "Niubash 1.4.4 \u2014 bash-compatible shell for Windows\n  rubash   git c9604443ae09\nHome: <https://unixwin.dev>\nDocs & downloads: <https://unixwin.dev>"
   },
   "counts": {
-    "PASS": 38,
-    "FAIL": 18,
-    "MISSING": 2,
+    "PASS": 47,
+    "FAIL": 9,
+    "N/A": 2,
     "SKIP": 0
   },
   "cases": [
@@ -236,9 +236,9 @@
     {
       "id": "insert/ide_prefix_two_step",
       "group": "insert",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "TAB1 completes common prefix 'ls alp', TAB2 lists",
-      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls alp' menu=[(2, 'alpha.txt'), (3, 'alpine.txt')], TAB2 'ls alp' menu=[(2, 'alpha.txt'), (3, 'alpine.txt')]",
+      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls alp' menu=[], TAB2 'ls alp' menu=[(2, 'alpha.txt'), (3, 'alpine.txt')]",
       "source": "docs/src/completion.md#completion-styles two-step rule; style=ide",
       "note": "",
       "issue": ""
@@ -246,19 +246,19 @@
     {
       "id": "insert/list_prefix_two_step",
       "group": "insert",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "TAB1 completes common prefix 'ls alp', TAB2 lists",
-      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls al' menu=[(2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')], TAB2 'ls al' menu=[(2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')]",
+      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls alp' menu=[], TAB2 'ls alp' menu=[(2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')]",
       "source": "docs/src/completion.md#completion-styles two-step rule; style=list",
       "note": "",
       "issue": ""
     },
     {
-      "id": "insert/inline_first_match",
+      "id": "insert/inline_prefix_two_step",
       "group": "insert",
-      "status": "FAIL",
-      "expected": "TAB1 completes common prefix 'ls alpha.txt', TAB2 lists",
-      "actual": "expected: TAB1 'ls alpha.txt' with no menu, TAB2 lists; actual: TAB1 'ls al' menu=[(2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')], TAB2 'ls al' menu=[(2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')]",
+      "status": "PASS",
+      "expected": "TAB1 completes common prefix 'ls alp', TAB2 lists",
+      "actual": "expected: TAB1 'ls alp' with no menu, TAB2 lists; actual: TAB1 'ls alp' menu=[], TAB2 'ls alp' menu=[(2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')]",
       "source": "docs/src/completion.md#completion-styles two-step rule; style=inline",
       "note": "",
       "issue": ""
@@ -286,9 +286,9 @@
     {
       "id": "styles/select_column_descriptions",
       "group": "styles",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "column description vertical",
-      "actual": "expected: any description forces the column style to a single vertical column with descriptions; actual: lines=['start  stop  status']",
+      "actual": "expected: any description forces the column style to a single vertical column with descriptions; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status']",
       "source": "docs/src/completion.md#completion-styles; style=column",
       "note": "",
       "issue": ""
@@ -296,9 +296,9 @@
     {
       "id": "styles/select_ide_descriptions",
       "group": "styles",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "ide descriptions",
-      "actual": "expected: popup shows each candidate's description; actual: lines=['start  stop  status']",
+      "actual": "expected: popup shows each candidate's description; actual: lines=['start  desc-start  stop  desc-stop  status  desc-status']",
       "source": "docs/src/completion.md#completion-styles; style=ide",
       "note": "",
       "issue": ""
@@ -306,9 +306,9 @@
     {
       "id": "styles/select_list_descriptions",
       "group": "styles",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "list descriptions",
-      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status'], highlighted=[]",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status'], highlighted=[]",
       "source": "docs/src/completion.md#completion-styles; style=list",
       "note": "",
       "issue": ""
@@ -326,9 +326,9 @@
     {
       "id": "styles/cycle_column_descriptions",
       "group": "styles",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "the style's documented shape survives the cycle interaction",
-      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status']",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status']",
       "source": "docs/src/completion.md#completion-styles; style=column, interaction=cycle",
       "note": "",
       "issue": ""
@@ -336,9 +336,9 @@
     {
       "id": "styles/cycle_ide_descriptions",
       "group": "styles",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "the style's documented shape survives the cycle interaction",
-      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status']",
+      "actual": "expected: popup with all candidate descriptions visible; actual: lines=['start  desc-start  stop  desc-stop  status  desc-status']",
       "source": "docs/src/completion.md#completion-styles; style=ide, interaction=cycle",
       "note": "",
       "issue": ""
@@ -346,9 +346,9 @@
     {
       "id": "styles/cycle_list_descriptions",
       "group": "styles",
-      "status": "FAIL",
+      "status": "PASS",
       "expected": "the style's documented shape survives the cycle interaction",
-      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  stop  status']",
+      "actual": "expected: vertical list, one candidate per row, all descriptions visible; actual: lines=['start  desc-start', 'stop  desc-stop', 'status  desc-status']",
       "source": "docs/src/completion.md#completion-styles; style=list, interaction=cycle",
       "note": "",
       "issue": ""
@@ -408,7 +408,7 @@
       "group": "aliases",
       "status": "PASS",
       "expected": "vertical -> list",
-      "actual": "expected: alias 'vertical' behaves exactly like 'list': ('ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2'))); actual: alias screen ('ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')))",
+      "actual": "expected: alias 'vertical' behaves exactly like 'list': ('ls alp', (), 'ls alp', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2'))); actual: alias screen ('ls alp', (), 'ls alp', ((2, '0: alpha.txt'), (3, '1: alpine.txt'), (4, 'Page 1: records 0 - 1  total: 2')))",
       "source": "config.rs CompletionStyle::parse aliases",
       "note": "",
       "issue": ""
@@ -418,7 +418,7 @@
       "group": "aliases",
       "status": "PASS",
       "expected": "cycle -> inline",
-      "actual": "expected: alias 'cycle' behaves exactly like 'inline': ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2'))); actual: alias screen ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')))",
+      "actual": "expected: alias 'cycle' behaves exactly like 'inline': ('ls alp', (), 'ls alp', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2'))); actual: alias screen ('ls alp', (), 'ls alp', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')))",
       "source": "config.rs CompletionStyle::parse aliases",
       "note": "",
       "issue": ""
@@ -428,7 +428,7 @@
       "group": "aliases",
       "status": "PASS",
       "expected": "menu -> inline",
-      "actual": "expected: alias 'menu' behaves exactly like 'inline': ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2'))); actual: alias screen ('ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')), 'ls al', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')))",
+      "actual": "expected: alias 'menu' behaves exactly like 'inline': ('ls alp', (), 'ls alp', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2'))); actual: alias screen ('ls alp', (), 'ls alp', ((2, '0: alpha.txt'), (3, 'Page 1: records 0 - 0  total: 2')))",
       "source": "config.rs CompletionStyle::parse aliases",
       "note": "",
       "issue": ""
@@ -438,7 +438,7 @@
       "group": "aliases",
       "status": "PASS",
       "expected": "smart -> ide",
-      "actual": "expected: alias 'smart' behaves exactly like 'ide': ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt'))); actual: alias screen ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')))",
+      "actual": "expected: alias 'smart' behaves exactly like 'ide': ('ls alp', (), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt'))); actual: alias screen ('ls alp', (), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')))",
       "source": "config.rs CompletionStyle::parse aliases",
       "note": "",
       "issue": ""
@@ -448,7 +448,7 @@
       "group": "aliases",
       "status": "PASS",
       "expected": "popup -> ide",
-      "actual": "expected: alias 'popup' behaves exactly like 'ide': ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt'))); actual: alias screen ('ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')))",
+      "actual": "expected: alias 'popup' behaves exactly like 'ide': ('ls alp', (), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt'))); actual: alias screen ('ls alp', (), 'ls alp', ((2, 'alpha.txt'), (3, 'alpine.txt')))",
       "source": "config.rs CompletionStyle::parse aliases",
       "note": "",
       "issue": ""
@@ -524,22 +524,22 @@
       "issue": ""
     },
     {
-      "id": "knobs/page_size_not_exposed",
+      "id": "knobs/page_size_not_an_option",
       "group": "knobs",
-      "status": "MISSING",
-      "expected": "page size is exposed as a documented knob",
-      "actual": "expected: a completion.page_size/env knob exists and limits the page; actual: env ignored; no config row; 12/12 candidates shown",
+      "status": "N/A",
+      "expected": "N/A: internal-only, not a documented option",
+      "actual": "expected: N/A: internal-only MenuConfig value; no documented option; actual: internal-only: env ignored, no config row, 12/12 candidates shown",
       "source": "config.rs MenuConfig::completion_page_size (fixed 10); no env/config key documented",
       "note": "",
       "issue": ""
     },
     {
-      "id": "knobs/completion_behavior_not_exposed",
+      "id": "knobs/completion_behavior_not_an_option",
       "group": "knobs",
-      "status": "MISSING",
-      "expected": "prefix/substring behavior is a documented, working knob",
-      "actual": "expected: completion.behavior=substring matches inside the word; actual: line='ls pha', menu=[]",
-      "source": "config.rs only resolves style/interaction; no completion.behavior key",
+      "status": "N/A",
+      "expected": "N/A: internal-only, not a documented option",
+      "actual": "expected: N/A: internal-only CompletionBehavior; no documented option; actual: internal-only: no substring match; line='ls pha', menu=[]",
+      "source": "completion/mod.rs CompletionBehavior is internal; no env/config key",
       "note": "",
       "issue": ""
     },

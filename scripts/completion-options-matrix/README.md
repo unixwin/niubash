@@ -25,15 +25,14 @@ scripts/completion-options-matrix/run.sh --record-baseline
 ```
 
 `NIU_BIN=/path/to/niu` overrides the binary. The harness never builds; build
-under the global lock first:
+in this worktree with cargo's default jobs:
 
 ```sh
-flock /data/data/com.termux/files/home/.ruline-build.lock sh -c \
-  'cd /data/data/com.termux/files/home/wt/niu-completion-matrix && \
-   CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --bin niu'
+cd /data/data/com.termux/files/home/wt/niu-completion-matrix
+CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --bin niu
 ```
 
-Exit status is `0` when every case is PASS/MISSING/SKIP and `1` on any FAIL.
+Exit status is `0` when every case is PASS/N/A/SKIP and `1` on any FAIL.
 Run one matrix at a time: the scratch root (`.work/`) is shared by default;
 use `--work <dir>` if two runs must overlap.
 
@@ -49,7 +48,7 @@ use `--work <dir>` if two runs must overlap.
 | `styles` | each style's documented shape under the default interaction: column grid, ide popup + descriptions, list vertical + descriptions, inline in-place, gnu printed list with no selection |
 | `aliases` | `readline→gnu`, `col/grid→column`, `vertical→list`, `cycle/menu→inline`; the code-only `smart/popup→ide` aliases are asserted too |
 | `precedence` | env > default; invalid values warn once and fall back; `config.toml` is not read (1.5.0) and prints the migration notice |
-| `knobs` | `completion.page_size` and `completion.behavior`: documented/claimed or not exposed |
+| `knobs` | `completion.page_size` / `completion.behavior`: internal-only, marked N/A (not invented as env options) |
 | `compdefs` | `NIU_COMPDEFS` beats static tables; a compspec owns the command over static tables; compdef + compspec merge; external `.toml`/`.bash` definition directories |
 
 The zsh menu-select expectations cite the local zsh 5.9.2 source:
@@ -79,7 +78,7 @@ in `zsh-parity.md`; it is not scored as a zsh deviation.
 | `vt.py` | small VT screen model (cursor motion, SGR, scroll, UTF-8 widths) |
 | `run.sh` | entry point |
 | `baseline/results.json` | machine-readable baseline for the pinned binary |
-| `baseline/summary.md` | human-readable PASS/FAIL/MISSING report |
+| `baseline/summary.md` | human-readable PASS/FAIL/N/A report |
 | `zsh-parity.md` | source-cited zsh menu-select evidence and product overlay |
 
 Scratch trees live under `.work/` (deleted at the start of every run).

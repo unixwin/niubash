@@ -87,7 +87,7 @@ first-TAB splice/highlight path is the non-select branch at
 
 The 9 failures above (eight `defaults/select_*` + `select/*` cases plus
 `styles/select_inline_cycles`) are one defect cluster (#778), not nine
-independent completion-option gaps. The remaining matrix failures — style
-shapes under `select`/`cycle`, and ide/list/inline first-TAB behavior under
-`insert` — are recorded separately in `failures.md` and are not attributed
-to #778.
+independent completion-option gaps. On `fix/completion-options-honored` the
+style-presentation and insert-first-TAB gaps were fixed separately; only this
+#778 cluster remains, with the evidence and file:line anchors in
+`failures.md`.

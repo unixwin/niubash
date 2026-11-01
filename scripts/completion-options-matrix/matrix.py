@@ -8,7 +8,7 @@ HOME/INPUTRC, a fixed window, and a deterministic fixture tree.
 Status policy
   PASS    the documented contract holds
   FAIL    the shell does something else; expected vs actual is recorded
-  MISSING the option is documented/claimed but not exposed at all
+  N/A     internal-only knob, not a documented option
   SKIP    external precondition absent (currently unused)
 
 Run: scripts/completion-options-matrix/run.sh [--filter SUBSTR] [--record-baseline]
@@ -525,7 +525,10 @@ def cases() -> list[Case]:
     insert_prefix_case("insert/gnu_prefix_two_step", "gnu")
     insert_prefix_case("insert/ide_prefix_two_step", "ide")
     insert_prefix_case("insert/list_prefix_two_step", "list")
-    insert_prefix_case("insert/inline_first_match", "inline", expected="ls alpha.txt")
+    # The insert axis owns TAB #1 (common prefix, no candidate); the inline
+    # style's "first match, then cycle" shape is pinned under the cycle
+    # interaction in inline/cycle_first_match_then_next.
+    insert_prefix_case("insert/inline_prefix_two_step", "inline")
 
     def insert_enter(c: Case):
         e = Env(BINARY, WORK_ROOT, c)
@@ -623,7 +626,7 @@ def cases() -> list[Case]:
     style_select("styles/select_list_descriptions", "list", "list_descriptions")
     style_select("styles/select_gnu_printed", "gnu", "gnu_printed_no_selection")
 
-    def style_cycle_descriptions(name: str, style: str):
+    def style_cycle_descriptions(name: str, style: str, vertical: bool = True):
         def run(c: Case):
             e = Env(BINARY, WORK_ROOT, c)
             e.session_env = select_env(style, "cycle")
@@ -634,18 +637,23 @@ def cases() -> list[Case]:
                 s.key(TAB)
                 text = s.visible_text()
                 lines = [ln for _r, ln in s.menu_rows()]
-                ok = (
-                    len(lines) >= 3
-                    and all(desc in text for desc in ("desc-start", "desc-stop", "desc-status"))
-                    and all(sum(1 for n in ("start", "stop", "status") if n in ln) == 1 for ln in lines[:3])
+                ok = all(desc in text for desc in ("desc-start", "desc-stop", "desc-status"))
+                if vertical:
+                    ok = ok and len(lines) >= 3 and all(
+                        sum(1 for n in ("start", "stop", "status") if n in ln) == 1
+                        for ln in lines[:3]
+                    )
+                expected = (
+                    "vertical list, one candidate per row, all descriptions visible"
+                    if vertical
+                    else "popup with all candidate descriptions visible"
                 )
-                return verdict(ok, "vertical list, one candidate per row, all descriptions visible",
-                               f"lines={lines!r}")
+                return verdict(ok, expected, f"lines={lines!r}")
         add(Case(name, "styles", f"{STYLE_DOC}; style={style}, interaction=cycle",
                  "the style's documented shape survives the cycle interaction", run))
 
     style_cycle_descriptions("styles/cycle_column_descriptions", "column")
-    style_cycle_descriptions("styles/cycle_ide_descriptions", "ide")
+    style_cycle_descriptions("styles/cycle_ide_descriptions", "ide", vertical=False)
     style_cycle_descriptions("styles/cycle_list_descriptions", "list")
 
     def style_cycle_gnu(c: Case):
@@ -857,11 +865,11 @@ def cases() -> list[Case]:
             shown = sum(1 for i in range(12) if f"page-{i:02}" in s.visible_text())
             rows = e.config_rows({"NIU_COMPLETION_PAGE_SIZE": "3"})
             ok = "completion.page_size" in rows or "page_size" in rows
-            return verdict(ok, "a completion.page_size/env knob exists and limits the page",
-                           f"env ignored; no config row; {shown}/12 candidates shown")
-    add(Case("knobs/page_size_not_exposed", "knobs",
+            return verdict(ok, "N/A: internal-only MenuConfig value; no documented option",
+                           f"internal-only: env ignored, no config row, {shown}/12 candidates shown")
+    add(Case("knobs/page_size_not_an_option", "knobs",
              "config.rs MenuConfig::completion_page_size (fixed 10); no env/config key documented",
-             "page size is exposed as a documented knob", page_size_probe))
+             "N/A: internal-only, not a documented option", page_size_probe))
 
     def behavior_probe(c: Case):
         e = Env(BINARY, WORK_ROOT, c)
@@ -873,11 +881,11 @@ def cases() -> list[Case]:
             s.key(TAB)
             line = s.input_line()
             ok = "alpha" in s.visible_text()
-            return verdict(ok, "completion.behavior=substring matches inside the word",
-                           f"line={line!r}, menu={s.menu_rows()!r}")
-    add(Case("knobs/completion_behavior_not_exposed", "knobs",
-             "config.rs only resolves style/interaction; no completion.behavior key",
-             "prefix/substring behavior is a documented, working knob", behavior_probe))
+            return verdict(ok, "N/A: internal-only CompletionBehavior; no documented option",
+                           f"internal-only: no substring match; line={line!r}, menu={s.menu_rows()!r}")
+    add(Case("knobs/completion_behavior_not_an_option", "knobs",
+             "completion/mod.rs CompletionBehavior is internal; no env/config key",
+             "N/A: internal-only, not a documented option", behavior_probe))
 
     # ── NIU_COMPDEFS / compspec priority ────────────────────────────
     def compdef_priority(c: Case):
@@ -1019,7 +1027,7 @@ def main() -> int:
     print()
 
     results = []
-    counts = {"PASS": 0, "FAIL": 0, "MISSING": 0, "SKIP": 0}
+    counts = {"PASS": 0, "FAIL": 0, "N/A": 0, "SKIP": 0}
     for case in selected:
         try:
             ok, detail = case.run(case)
@@ -1028,7 +1036,7 @@ def main() -> int:
             status = "FAIL"
             detail = f"harness error: {type(exc).__name__}: {exc}"
         if case.id.startswith("knobs/") and status == "FAIL":
-            status = "MISSING"
+            status = "N/A"
         counts[status] += 1
         results.append({
             "id": case.id,
@@ -1081,7 +1089,7 @@ def write_baseline(results, counts, binary, version):
         f"- base: `{base}`",
         f"- niu: `{binary}`",
         f"- version: `{version.splitlines()[0] if version else 'unknown'}`",
-        f"- **PASS {counts['PASS']} / FAIL {counts['FAIL']} / MISSING {counts['MISSING']} / SKIP {counts['SKIP']}** ({len(results)} cases)",
+        f"- **PASS {counts['PASS']} / FAIL {counts['FAIL']} / N/A {counts['N/A']} / SKIP {counts['SKIP']}** ({len(results)} cases)",
         "",
         "Expected values are the documented contract. Selection/highlight assertions are",
         "frame-level (reverse-video cell), not buffer text.",

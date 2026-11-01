@@ -1,160 +1,126 @@
-# Baseline failures and exact gaps
+# Completion matrix: fixed gaps and remaining #778 baseline
 
-Binary: `target/debug/niu`, niu 1.4.4, master `fade8ab`, built with
-`CARGO_PROFILE_DEV_DEBUG=0`.
-Full matrix: `baseline/summary.md` / `baseline/results.json`
-(**PASS 38 / FAIL 18 / MISSING 2**, 58 cases).
+Branch: `fix/completion-options-honored`, based on the matrix commit
+`524b2f8` (which sits on master `3018703`).
+Binary: `target/debug/niu`, built in this worktree with cargo's default jobs.
 
-The 18 FAILs split into one #778 cluster (9), one style-presentation gap
-(6), and one insert-contract gap (3). The 2 MISSING entries are not
-implemented knobs, not broken ones.
+| Run | PASS | FAIL | N/A | Total |
+| --- | --- | --- | --- | --- |
+| before (matrix branch) | 38 | 18 | 2 (MISSING) | 58 |
+| after (this branch) | **47** | **9** | **2** | 58 |
 
-## A. #778 cluster — 9 FAILs
+The 9 remaining FAILs are exactly the #778 menu-select cluster owned by
+`fix/778-select-first-tab`. This branch did **not** change that interaction.
 
-All are the default `column` + `select` path. Repro fixture: a cwd with
-directories `cmp-aa … cmp-ff`, a 40-column window, no completion env (so the
-built-in `select` default applies).
+## Fixed: style presentation under `select` / `cycle` (6 cases)
 
-```sh
-cd <fixture>          # cmp-aa cmp-bb cmp-cc cmp-dd cmp-ee cmp-ff
-# type:
-cd cmp-<TAB>
-```
+Before, `repl.rs:573-582` returned one `CycleMenu` for every non-GNU style,
+so column/ide/list lost their shapes and descriptions. The interaction menu
+now carries the selected style (`CycleMenu::with_style`) and renders:
+
+* `column` — packed grid; when any candidate has a description, a single
+  vertical column with the description beside each value;
+* `ide` — packed popup; descriptions ride beside their value;
+* `list` — one vertical row per candidate, description included;
+* `inline` — unchanged packed grid (the line still cycles in place).
+
+Selection/splicing/freeze behaviour is untouched. The shape is chosen only
+in the paint helpers (`render_menu`, `render_vertical_cells`).
+
+| Case | Before | After |
+| --- | --- | --- |
+| `styles/select_column_descriptions` | `start stop status` horizontal, no desc | 3 vertical rows with descriptions |
+| `styles/select_ide_descriptions` | horizontal grid, no desc | popup with all descriptions |
+| `styles/select_list_descriptions` | horizontal grid, no desc | vertical rows with descriptions |
+| `styles/cycle_column_descriptions` | horizontal grid, no desc | vertical rows with descriptions |
+| `styles/cycle_ide_descriptions` | horizontal grid, no desc | popup with all descriptions |
+| `styles/cycle_list_descriptions` | horizontal grid, no desc | vertical rows with descriptions |
+
+Source: `crates/niubash-runtime/src/completion/cycle_menu.rs`
+(`with_style`, `render_menu`, `render_vertical_cells`) and
+`crates/niubash-runtime/src/repl.rs` (`.with_style(config.completion_style)`).
+
+## Fixed: `insert` first-TAB contract (3 cases)
+
+New `crates/niubash-runtime/src/completion/insert_menu.rs` wraps the stock
+Ide/List/Inline menus only for `completion.interaction = insert`. On a fresh
+activation it queries the full candidate set (ListMenu's page cache hides all
+but one candidate under inline), splices the longest common prefix — or the
+whole value for a lone candidate — and deactivates. If the typed word already
+is the common prefix, it keeps the menu up, so TAB #2 is the list. Navigation,
+Enter and the painted style still belong to the wrapped menu.
+
+| Case | Before | After |
+| --- | --- | --- |
+| `insert/ide_prefix_two_step` | TAB #1 opened a two-row popup | TAB #1 `ls alp`, no menu; TAB #2 popup |
+| `insert/list_prefix_two_step` | TAB #1 left `ls al` + pager | TAB #1 `ls alp`, no menu; TAB #2 list |
+| `insert/inline_prefix_two_step` | TAB #1 left `ls al` + pager | TAB #1 `ls alp`, no menu; TAB #2 list |
+
+The insert axis owns TAB #1 (common prefix), so the inline case now asserts
+that axis; the inline style's first-match/then-cycle shape remains pinned by
+`inline/cycle_first_match_then_next` under `cycle`. `insert/enter_confirms_then_runs`
+and `insert/esc_keeps_prefix` still pass, as do the existing `#486` Enter
+tests for all four styles.
+
+Source: `insert_menu.rs`; wiring at `repl.rs:598-660`
+(The wrapper is constructed only when `completion_interaction == Insert`).
+
+## N/A: internal-only knobs (2)
+
+`completion.page_size` and `completion.behavior` are internal implementation
+settings, not documented env/config options. No env names were invented; the
+matrix now reports them as **N/A**:
+
+* `knobs/page_size_not_an_option` — fixed `MenuConfig::completion_page_size`
+  (10) in `crates/niubash-runtime/src/config.rs:218,228`; no resolver.
+* `knobs/completion_behavior_not_an_option` — internal
+  `CompletionBehavior` in `completion/mod.rs`; no resolver.
+
+## Remaining: #778 menu-select cluster (9 FAILs, not touched)
+
+Repro: cwd with `cmp-aa … cmp-ff`, 40 columns, default `column`+`select`,
+type `cd cmp-<TAB>`.
 
 | Case | Expected | Actual |
 | --- | --- | --- |
-| `defaults/select_tab1_first_candidate` | `cd cmp-aa/`, first cell reverse-video | `cd cmp-`, no selection |
-| `defaults/select_tab2_cycles` | `cd cmp-bb/`, second cell selected | `cd cmp-aa/` (first splice lands on TAB #2), no cell selected |
-| `select/shift_tab_previous` | `cd cmp-ff/`, selected | `cd cmp-ff/`, no cell selected |
-| `select/down_one_row` | `cd cmp-bb/` | `cd cmp-` (unchanged) |
-| `select/up_one_row_wraps` | `cd cmp-ff/` | `cd cmp-` |
-| `select/right_one_column` | `cd cmp-cc/` | `cd cmp-` |
-| `select/left_one_column_wraps` | `cd cmp-ee/` | `cd cmp-` |
-| `select/enter_accept_runs` | Enter runs `cd cmp-aa/` | Enter runs `cd cmp-` → error, cwd stays `work` |
+| `defaults/select_tab1_first_candidate` | `cd cmp-aa/`, first cell reversed | `cd cmp-`, nothing selected |
+| `defaults/select_tab2_cycles` | `cd cmp-bb/`, second cell selected | `cd cmp-aa/`, no highlighted cell |
+| `select/shift_tab_previous` | `cd cmp-ff/`, selected | `cd cmp-ff/`, no highlighted cell |
+| `select/down_one_row` | `cd cmp-bb/` | unchanged |
+| `select/up_one_row_wraps` | `cd cmp-ff/` | unchanged |
+| `select/right_one_column` | `cd cmp-cc/` | unchanged |
+| `select/left_one_column_wraps` | `cd cmp-ee/` | unchanged |
+| `select/enter_accept_runs` | runs `cd cmp-aa/` | runs `cd cmp-` → error |
 | `styles/select_inline_cycles` | TAB1 `cmp-aa/`, TAB2 `cmp-bb/` | TAB1 `cd cmp-` + grid, TAB2 `cmp-aa/` |
 
-Source of the defect:
+Still in `cycle_menu.rs`: the unselected select start (`:422-426`), the
+first-navigate edge pick (`:548-556`), ignored `Move*` events (`:592-597`),
+and the `has_selection` highlight gate (`:748-752`; line numbers shifted by
+this branch's render helpers, same code). `fix/778-select-first-tab` owns
+those.
 
-* `crates/niubash-runtime/src/completion/cycle_menu.rs:422-426` — select mode
-  intentionally opens unselected (`has_selection = false`) instead of
-  splicing candidate 0 (zsh `Src/Zle/complist.c:2813` sets `mselect` to the
-  first match at menu entry).
-* `crates/niubash-runtime/src/completion/cycle_menu.rs:548-556` — the first
-  navigate special case is what makes TAB #2 splice candidate 0 and Shift-TAB
-  splice the last, instead of stepping from the TAB-#1 selection.
-* `crates/niubash-runtime/src/completion/cycle_menu.rs:592-597` —
-  `drain_events` handles `NextElement` / `PreviousElement` only; the engine's
-  `MoveUp` / `MoveDown` / `MoveLeft` / `MoveRight` events fall into `_ => {}`,
-  so the zsh arrow bindings are swallowed.
-* `crates/niubash-runtime/src/completion/cycle_menu.rs:748-752` — the
-  selection style is gated on `has_selection`, which select mode only sets
-  after the first navigate; this is the missing first highlight on TAB #1/#2.
-* `tests/issue742_completion_zsh.rs:37,59` still pins the old unselected
-  TAB #1 behavior; `fix/778-select-first-tab` updates both tests and the
-  `config.rs`/`cycle_menu.rs` comments to the owner contract.
+## Overlap with #778
 
-Not the cause: `cycle` interaction (same fixture) passes all five of its
-cases, and `select/esc_rollback`, `select/lone_candidate`,
-`select/bare_tab_indent`, `select/grid_column_major`, `select/lscolors` pass.
-`styles/select_inline_cycles` fails on the same first-TAB splice; its line
-behavior should pass once #778 lands.
+* Both branches touch `cycle_menu.rs` and `repl.rs`.
+* This branch adds presentation only: `style` field/`with_style`, render
+  helpers, and the `InsertStopMenu` wrapper. It does not change
+  `begin_session`, `apply_navigate`, `drain_events`, the selection style
+  decision, or the TAB/Shift-TAB bindings.
+* #778 changes the select start (`has_selection`/first splice), arrow event
+  handling, and the highlight gate. Those edits compose with `render_menu`:
+  the helper already paints `has_selection && index` when set, and the column
+  no-description path is byte-identical to the old packed grid.
+* The one shared assertion is `styles/select_inline_cycles`; it stays in the
+  #778 baseline here and should flip on that branch.
 
-## B. Style presentation ignored under `select`/`cycle` — 6 FAILs
+## Focused tests
 
-Repro: an rc with a describing provider, then `mytool <TAB>` in the default
-`column` + `select` mode:
-
-```sh
-_mytool_comp() {
-  NIU_COMP_RESULT="$(printf 'start\tdesc-start\nstop\tdesc-stop\nstatus\tdesc-status')"
-}
-NIU_COMPDEFS="mytool:_mytool_comp"
-
-# NIU_COMPLETION_STYLE=column|ide|list; then:
-mytool <TAB>
-```
-
-Every style renders the *same* packed grid `start  stop  status`, with no
-descriptions:
-
-| Case | Documented shape | Actual |
-| --- | --- | --- |
-| `styles/select_column_descriptions` | descriptions force one vertical column, description beside value | horizontal `start stop status`, no description |
-| `styles/select_ide_descriptions` | multi-column popup, description of the selected candidate | horizontal grid, no description |
-| `styles/select_list_descriptions` | fish-style vertical list, one candidate per row, descriptions | horizontal grid, no description |
-| `styles/cycle_column_descriptions` | same column shape under `cycle` | horizontal `start stop status`, no description |
-| `styles/cycle_ide_descriptions` | same ide popup under `cycle` | horizontal grid, no description |
-| `styles/cycle_list_descriptions` | same fish list under `cycle` | horizontal grid, no description |
-
-Source:
-
-* `crates/niubash-runtime/src/repl.rs:573-582` — when interaction is
-  `select` or `cycle`, every non-GNU style returns the same `CycleMenu`
-  before the `match config.completion_style` at line 590, so the per-style
-  menus at `repl.rs:598-646` are unreachable. The `cycle` style cases prove
-  the same gap is not select-specific.
-* `crates/niubash-runtime/src/completion/cycle_menu.rs:744-753` — the grid
-  paints `Suggestion::display_value()` and the style; it never reads
-  `Suggestion::description`, so descriptions cannot render.
-
-The docs claim the axes are orthogonal (“Five shapes, one TAB contract”,
-`docs/src/completion.md:41-50`; per-style shapes
-`docs/src/advanced-usage.md:211-231`). Under `select` the presentation axis
-is ignored; `gnu` is the documented exception (its interaction stays literal
-and the matrix confirms that).
-
-## C. `insert` first-TAB contract for ide/list/inline — 3 FAILs
-
-Repro: `NIU_COMPLETION_INTERACTION=insert`, fixture `alpha.txt`,
-`alpine.txt`, type `ls al<TAB>`.
-
-| Case | Expected (docs two-step rule) | Actual |
-| --- | --- | --- |
-| `insert/ide_prefix_two_step` | TAB #1 `ls alp`, no menu; TAB #2 lists | TAB #1 already opens a two-row Ide menu |
-| `insert/list_prefix_two_step` | TAB #1 `ls alp`, no menu; TAB #2 lists | TAB #1 leaves `ls al` and opens a pager `0: alpha.txt`, `1: alpine.txt`, `Page 1…` |
-| `insert/inline_first_match` | TAB #1 inserts first match `ls alpha.txt` | TAB #1 leaves `ls al` and opens a one-row pager |
-
-Source:
-
-* `crates/niubash-runtime/src/repl.rs:3398-3402` — under `insert`, TAB is
-  `Menu(COMPLETION_MENU)` first and only falls back to `Edit(Complete)`;
-  whether the first TAB prefixes or lists is therefore delegated to the
-  stock menu.
-* `crates/niubash-runtime/src/repl.rs:633-645` — `List` uses the stock
-  `ListMenu` page (index prefixes + `Page 1: records …`), and `Inline` uses
-  `ListMenu` with page size 1; neither splices the common prefix or the
-  first match on TAB #1.
-* `crates/niubash-runtime/src/repl.rs:598-610` — `Ide` is the stock
-  `IdeMenu` with no niu stop rule, so it opens on TAB #1; only `Column`
-  has the `ColumnMenu` stop rule (`repl.rs:611-631`).
-
-`column` and `gnu` insert cases pass; `insert/esc_keeps_prefix` and
-`insert/enter_confirms_then_runs` pass. The 5 styles x 3 interactions grid
-is complete: `insert/*` (5), `styles/select_*` (5), `styles/cycle_*` (5).
-
-## D. MISSING knobs — 2
-
-| Knob | Evidence | Where |
-| --- | --- | --- |
-| `completion.page_size` | `NIU_COMPLETION_PAGE_SIZE=3` ignored; 12/12 candidates shown; `niu config` has no row | fixed at `crates/niubash-runtime/src/config.rs:218,228` (`completion_page_size: 10`); no resolver/env |
-| `completion.behavior` (prefix/substring) | `NIU_COMPLETION_BEHAVIOR=substring`, `ls pha<TAB>` produces no candidates; no code path/key | no occurrences in `crates/`; only prefix matching is implemented |
-
-These are recorded as MISSING rather than FAIL because the option is not
-exposed at all; the matrix asserts the absence explicitly.
-
-## PASS coverage worth naming
-
-* `NIU_COMPLETION_STYLE` all five values + all documented aliases
-  (`readline`, `col`, `grid`, `vertical`, `cycle`, `menu`) and the code-only
-  `smart`/`popup` aliases.
-* `NIU_COMPLETION_INTERACTION` `insert`/`cycle`; `select` is the default.
-* env > default, invalid-value diagnostic + fallback for both knobs.
-* config file `[completion] style/interaction` is **not** read; one
-  migration notice is printed (`precedence/config_file_ignored`,
-  `precedence/config_migration_notice`).
-* bare-TAB indent, lone candidate, Esc rollback (select/cycle), insert
-  Enter-confirm-then-run.
-* column-major packed grid and LS_COLORS `di=01;35`.
-* `NIU_COMPDEFS` function beats static tables; a GNU compspec owns the
-  command over static tables; compdef + compspec merge; `NIU_COMPDEFS`
-  directory `.toml` and `.bash` files serve candidates.
+* `cargo test --locked -p niubash-runtime --lib 'completion::'` —
+  127 passed, 0 failed (includes new
+  `style_column_with_descriptions_renders_one_vertical_column`,
+  `style_list_with_descriptions_renders_one_vertical_column`,
+  `style_ide_with_descriptions_keeps_a_popup_and_shows_them`, and the
+  `insert_menu` common-prefix tests).
+* `NIU_INTERACTIVE_TESTS=1 cargo test --test interactive
+  completion_menu_enter_commits_highlighted_candidate` — see run log.
+* Full matrix: `scripts/completion-options-matrix/run.sh --record-baseline`.
