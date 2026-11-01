@@ -294,11 +294,19 @@ impl RubashHistoryProvider {
         // set resets too and the base moves to the rewritten file; to a
         // foreign file only the pending set commits (the backing file
         // still holds the cleared lines for the session-end removal).
+        // niubash#773: the rewrite settles BOTH accountings — the
+        // ledger's reset below and the store's on-disk bits
+        // (`note_backing_rewritten`): the store's flags are what the
+        // flush faces read, so leaving them unset let the next flush
+        // re-append the lines this rewrite had just placed.
         let requested = std::path::Path::new(path);
         let is_backing = self
             .inner
             .backing_file()
             .is_some_and(|backing| backing == requested);
+        if is_backing {
+            self.inner.note_backing_rewritten();
+        }
         let ledger = self.inner.ledger();
         if let Ok(mut ledger) = ledger.lock() {
             if is_backing {
@@ -939,6 +947,26 @@ impl HistoryStore {
         self.entries.push_back(entry);
         self.stamps.push_back(stamp.unwrap_or_else(now_stamp));
         self.on_disk.push_back(true);
+    }
+
+    /// niubash#773: every entry in the store is settled against the
+    /// backing file — an authoritative rewrite (`history -w` to the
+    /// backing file) has just disposed of the whole list: the entries
+    /// it wrote are in the file, and the ones its cuts left out (the
+    /// HISTFILESIZE tail cut in `write_history_face`, the HISTSIZE
+    /// view stifle) were dropped from the file deliberately — GNU's
+    /// write_history leaves them out for good, and append faces only
+    /// ever take the list's tail, so a later `flush` must write only
+    /// entries recorded after the rewrite. The store-side twin of
+    /// the ledger's `reset` (which settles the pending set on the
+    /// same face); without it, the first later flush (the `-r`
+    /// pre-flush, the session-end append) re-appended every entry
+    /// the rewrite had already placed, starting with the `-w` line
+    /// itself (niubash#571's chain drive caught exactly that).
+    pub(crate) fn mark_all_on_disk(&mut self) {
+        for bit in &mut self.on_disk {
+            *bit = true;
+        }
     }
 
     /// niubash#773: mark the oldest `count` unwritten entries as on
@@ -1739,6 +1767,17 @@ impl LiveFileBackedHistory {
         }
         if let Ok(mut state) = self.state.lock() {
             state.history.mark_oldest_unwritten_on_disk(count);
+        }
+    }
+
+    /// niubash#773: the provider's `history -w` face rewrote the
+    /// backing file from the list — settle the store's on-disk bits
+    /// wholesale, the store-side half of the ledger's `reset` on
+    /// that face (see `HistoryStore::mark_all_on_disk`). The list
+    /// itself does not change, so nothing is reloaded.
+    pub(crate) fn note_backing_rewritten(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.history.mark_all_on_disk();
         }
     }
 
