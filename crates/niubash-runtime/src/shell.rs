@@ -1470,6 +1470,23 @@ impl Shell {
         invocation: &rubash::invocation::ShellInvocation,
     ) -> Result<(), String> {
         invocation.apply_to_executor_before_startup(self.executor_mut())?;
+        // niubash#806 (R4): GNU's `-i` sets forced_interactive during option
+        // parsing (shell.c parse_shell_options' 'i' arm), and an interactive
+        // shell then runs change_flag ('i', FLAG_ON) (shell.c:672) — the
+        // letter `$-` prints between `h` and `k` reads that very global
+        // (flags.c:174 { 'i', &forced_interactive }). The engine's own argv
+        // walk writes the interactive shape at its `-i` arm (rubash main.rs:
+        // OWN_INTERACTIVE_SHELL + `__RUBASH_INTERACTIVE`); a Session-
+        // contract host declares the same shape through the published
+        // funnel (`Executor::set_invocation_shape`), so `niu -ic 'echo $-'`
+        // reports `i` in `$-` exactly like GNU (WSL GNU 5.3.20 oracle:
+        // `bash --noprofile --norc -i -c 'echo $-'` -> himBHc; plain `-c`
+        // stays hBc). The login half passes the invocation's own value,
+        // which the mark_login_shell arm above already applied.
+        if invocation.interactive {
+            self.executor_mut()
+                .set_invocation_shape(true, invocation.login);
+        }
         // rubash#2129 (niu companion): the parse is this process's own
         // word on its shape. An earned `--login`/`-l` joins the
         // construction-time argv[0] seed in the host classification
