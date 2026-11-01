@@ -43,7 +43,7 @@ Three files, three owners:
 | File | Role | Written by |
 |---|---|---|
 | `~/.niubash/plugins.json` | declarative spec — what should be installed and enabled | `niu plugin` verbs, or hand-edit + `niu plugin sync` |
-| `~/.niubash/sources/registry.json` | lockfile — what is installed (commit + tree checksum pins) | `niu plugin` verbs |
+| `~/.niubash/sources/registry.json` | lockfile — what is installed (commit pins) | `niu plugin` verbs |
 | `~/.niubash/generated/plugins.niu` | derived activation plane — one section per enabled source | `niu plugin` verbs, validate-then-atomic publish |
 
 The loader is **host-owned and read-only**: never edit it — the next verb
@@ -58,16 +58,26 @@ user overrides win. Two conditions keep it off:
 - `NIU_PLUGIN_LOADER=off` (also `false`/`0`/`no`) — the rollback switch.
   It stops loading only; unsetting rolls forward.
 
-Spec shape:
+Spec shape (`~/.niubash/plugins.json`):
 
-```toml
-schema = "niubash:plugin-spec@0.1.0"
-
-[[sources]]
-target = "oh-my-bash"            # catalog id | owner/repo | url | path
-enable = ["git", "npm"]          # manager-native asset names
-theme  = "agnoster"              # theme pick → OSH_THEME in the loader
+```json
+{
+  "schema": "niubash:plugin-spec@0.1.0",
+  "sources": [
+    {
+      "target": "oh-my-bash",
+      "enable": ["git", "npm"],
+      "theme": "agnoster"
+    }
+  ]
+}
 ```
+
+`target` is a catalog id, `owner/repo`, url, or path; `enable` lists
+manager-native asset names; `theme` is the theme pick (→ `OSH_THEME` in
+the loader). A pre-1.5.0 TOML spec (`plugins.toml`) is a one-time
+migration input only — `niu plugin migrate` converts it to this JSON
+shape; nothing reads the TOML form afterwards.
 
 ## External sources — oh-my-bash, bash-it, and friends
 
