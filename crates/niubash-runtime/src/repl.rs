@@ -1211,7 +1211,12 @@ fn run_readline_command(
                 });
             }
         }
-        _ => {}
+        _ => {
+            // niubash#835: a name that lands here rode the readline
+            // host channel but has no host implementation — name it
+            // in the log instead of swallowing it silently.
+            log::warn!("readline command {name:?} has no host implementation; ignoring");
+        }
     }
     SentinelOutcome::Resumed
 }
@@ -3838,9 +3843,21 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "complete" => Some(completion_event()),
         // `menu-complete` is GNU's cycling completion: the same event
         // (the menu cycles under the host's interaction rules,
-        // niubash#731). The backward/old variants stay undelivered —
-        // the editor has no open-the-menu-backward event.
+        // niubash#731).
         "menu-complete" => Some(completion_event()),
+        // GNU `menu-complete-backward` (complete.c
+        // `rl_menu_complete_backward`, niubash#835): step the open
+        // menu backwards, opening it when closed — the mirror of the
+        // cycle interaction's TAB composition in
+        // `add_menu_keybindings`. `MenuPrevious` is Handled only
+        // while a menu is active and `Menu(name)` is Inapplicable
+        // while one is, so the UntilFound order delivers exactly one
+        // of them per press. (The `old-menu-complete` spelling stays
+        // undelivered.)
+        "menu-complete-backward" => Some(ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::MenuPrevious,
+            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+        ])),
         // GNU's listing / bulk-insert completion functions (complete.c
         // `rl_possible_completions`, `rl_insert_completions`).
         "possible-completions" => Some(ReedlineEvent::PossibleCompletions),
@@ -4257,11 +4274,16 @@ fn collect_chord_bindings(
 /// chord layer's quote state (niubash#731): any parseable sequence
 /// counts — a single key (`"\C-v"`) or a chain — filtered by the
 /// same keymap targeting as every other engine-bind consumer. The
-/// pinned reedline fork has no quoted-insert event of its own (no
-/// such variant in its `ReedlineEvent`/`EditCommand` at rev
-/// 401393f), so the delivery is the host layer's: completing one of
-/// these sequences arms the quote, and the next key inserts its own
-/// character literally.
+/// pinned ruline fork DOES carry a quoted-insert event of its own
+/// (`ReedlineEvent::QuotedInsert` at rev 8351932, dispatched in its
+/// engine — the `native_widget_event` arm returns it), but sequences
+/// arriving through the engine-bind/chord layer are intercepted by
+/// this layer's quote state before the engine sees them, so the host
+/// delivery still stands for that path: completing one of these
+/// sequences arms the quote, and the next key inserts its own
+/// character literally. (niubash#835: this comment previously claimed
+/// the fork had no such variant, citing the superseded rev 401393f —
+/// that claim was stale.)
 fn collect_quote_sequences(
     entries: &[crate::bind_surface::EngineBindEntry],
     target: NativeKeymapTarget,
@@ -7758,6 +7780,32 @@ mod tests {
                 ReedlineEvent::Enter,
             ]))
         );
+    }
+
+    /// niubash#835: `menu-complete-backward` used to fall through to
+    /// the shell-function widget sentinel and be swallowed — a dead
+    /// key via NIU_BINDKEYS/bundle binds. It now dispatches the
+    /// backward-cycling composition: step the open menu backwards,
+    /// opening it when closed (and it counts as delivered, so GNU
+    /// default bindings for it can land).
+    #[test]
+    fn issue835_menu_complete_backward_dispatches_backward_cycling() {
+        match native_widget_event("menu-complete-backward") {
+            Some(ReedlineEvent::UntilFound(events)) => {
+                assert_eq!(
+                    events,
+                    vec![
+                        ReedlineEvent::MenuPrevious,
+                        ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+                    ]
+                );
+            }
+            other => panic!(
+                "menu-complete-backward must dispatch the backward-cycling \
+                 composition, got {other:?}"
+            ),
+        }
+        assert!(gnu_name_is_delivered("menu-complete-backward"));
     }
 
     /// niubash#731 (K3 widening): GNU readline names the editor could
