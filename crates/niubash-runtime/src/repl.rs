@@ -1654,9 +1654,25 @@ fn build_edit_mode(
                 },
                 ChordLayerParts {
                     chords: {
-                        let mut chords =
-                            collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
-                        chords.extend(gnu_default_chord_bindings());
+                        // niubash#848: layered lowest-first in the DESIGN
+                        // §5.3 build order (defaults < host < bundle <
+                        // script < user — the same order
+                        // `build_keymap_for_target` applies to the flat
+                        // keymap, where a later `layer()` call overwrites
+                        // an earlier slot): GNU defaults (Default) first,
+                        // engine `bind` chords (Script) next, plugin
+                        // chords last so they win. `ChordIndex` keeps the
+                        // LAST exact match, mirroring the flat keymap's
+                        // last-write-wins layering; the old order (engine
+                        // → GNU → plugin, first match kept) silently
+                        // inverted this and made every plugin chord on an
+                        // engine/GNU-claimed sequence dead.
+                        let mut chords = gnu_default_chord_bindings();
+                        chords.extend(collect_chord_bindings(
+                            engine_bindings,
+                            NativeKeymapTarget::Emacs,
+                            0,
+                        ));
                         let abi_unbinds =
                             crate::readline_live::plugin_chord_unbinds(NativeKeymapTarget::Emacs);
                         chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
@@ -1720,6 +1736,10 @@ fn build_edit_mode(
                 },
                 ChordLayerParts {
                     chords: {
+                        // niubash#848: same DESIGN §5.3 last-write-wins
+                        // order as the emacs arm — engine chords first,
+                        // plugin chords after them, so a plugin claim
+                        // wins an exact-match collision in `ChordIndex`.
                         let mut chords = Vec::new();
                         for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
                             chords.extend(collect_chord_bindings(engine_bindings, target, 0));
@@ -4113,8 +4133,13 @@ struct ChordBinding {
 /// built once at editor build, where the old code scanned on every key.
 #[derive(Default)]
 struct ChordIndex {
-    /// Full sequences. Duplicates keep the FIRST binding, matching the old
-    /// `iter().find()` priority.
+    /// Full sequences. Duplicates keep the LAST binding (niubash#848):
+    /// callers build the chord vec lowest-layer-first in the DESIGN §5.3
+    /// order, and the flat keymap this layer sits beside resolves a slot
+    /// last-write-wins (`LayeredKeymap::layer` overwrites), so the index
+    /// does the same. First-match here inverted the documented layer
+    /// order and made plugin (Script/user-layer) chords on sequences the
+    /// defaults or the engine already claimed silently dead.
     exact: HashMap<Vec<(KeyModifiers, KeyCode)>, ReedlineEvent>,
     /// Every proper prefix of every chord. A full sequence that is also a
     /// prefix of a longer chord belongs here too (readline waits for the
@@ -4134,10 +4159,10 @@ impl ChordIndex {
             for len in 1..chord.keys.len() {
                 index.prefixes.insert(chord.keys[..len].to_vec());
             }
-            index
-                .exact
-                .entry(chord.keys.clone())
-                .or_insert_with(|| chord.event.clone());
+            // Last write wins (niubash#848, DESIGN §5.3 layer order —
+            // see the `exact` field doc): the vec arrives lowest-first,
+            // so a later layer's binding replaces an earlier one's.
+            index.exact.insert(chord.keys.clone(), chord.event.clone());
         }
         index
     }
@@ -8326,8 +8351,11 @@ mod tests {
         let b = (KeyModifiers::NONE, KeyCode::Char('b'));
         let index = ChordIndex::new(&[
             chord(&[ctrl_x, z], "first"),
-            // Duplicate sequences keep the first binding, like the old
-            // `iter().find()` scan.
+            // Duplicate sequences keep the LAST binding (niubash#848):
+            // the vec is built lowest-layer-first in the DESIGN §5.3
+            // order, so the later entry is the higher layer's win —
+            // the flat keymap's last-write-wins, not the old
+            // `iter().find()` first-match scan.
             chord(&[ctrl_x, z], "second"),
             chord(&[ctrl_x, z, e], "longer"),
             chord(&[ctrl_a, b], "other"),
@@ -8335,7 +8363,7 @@ mod tests {
 
         assert_eq!(
             index.exact(&[ctrl_x, z]),
-            Some(edit_event(EditCommand::InsertString("first".to_string())))
+            Some(edit_event(EditCommand::InsertString("second".to_string())))
         );
         assert_eq!(
             index.exact(&[ctrl_x, z, e]),
@@ -8360,6 +8388,61 @@ mod tests {
         );
         assert!(!index.is_prefix(&[ctrl_x, b]), "mismatched tail");
         assert!(!index.is_prefix(&[e]), "unrelated key");
+    }
+
+    /// niubash#848: the chord vec is built lowest-layer-first in the
+    /// DESIGN §5.3 order (GNU defaults < engine `bind` script chords <
+    /// plugin chords), and the index resolves an exact sequence to the
+    /// HIGHEST layer that claimed it — a plugin `rl_bind_keyseq` on a
+    /// GNU/engine-claimed sequence (here C-x e, the GNU kbd-macro
+    /// chord) must fire, not die behind the default. Before the fix
+    /// the order was engine → GNU → plugin with first-match kept, so
+    /// the plugin chord never won.
+    #[test]
+    fn issue848_plugin_chord_beats_gnu_and_engine_chords() {
+        let chord = |keys: &[(KeyModifiers, KeyCode)], text: &str| ChordBinding {
+            keys: keys.to_vec(),
+            event: edit_event(EditCommand::InsertString(text.to_string())),
+        };
+        let cx_e = [
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::CONTROL, KeyCode::Char('e')),
+        ];
+        // The build order `build_edit_mode` now produces: defaults,
+        // then engine, then plugin.
+        let index = ChordIndex::new(&[
+            chord(&cx_e, "gnu-default"),
+            chord(&cx_e, "engine-bind"),
+            chord(&cx_e, "plugin"),
+        ]);
+        assert_eq!(
+            index.exact(&cx_e),
+            Some(edit_event(EditCommand::InsertString("plugin".to_string()))),
+            "the plugin (highest) layer must win the claimed sequence"
+        );
+        // Without a plugin claim the engine (Script) still beats the
+        // GNU default, per the same §5.3 order.
+        let index = ChordIndex::new(&[chord(&cx_e, "gnu-default"), chord(&cx_e, "engine-bind")]);
+        assert_eq!(
+            index.exact(&cx_e),
+            Some(edit_event(EditCommand::InsertString(
+                "engine-bind".to_string()
+            )))
+        );
+        // And the real GNU defaults really do claim the C-x family
+        // (the kbd-macro spelling C-x e is pushed unconditionally by
+        // `gnu_default_chord_bindings`), so the collision class above
+        // is the live one, not a synthetic shape.
+        let cx_macro_e = [
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::NONE, KeyCode::Char('e')),
+        ];
+        assert!(
+            gnu_default_chord_bindings()
+                .iter()
+                .any(|binding| binding.keys == cx_macro_e),
+            "GNU defaults claim C-x e (call-last-kbd-macro)"
+        );
     }
 
     #[test]
