@@ -5882,7 +5882,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // editor before the next prompt. The buffer is empty at this
         // boundary (the previous line was submitted or interrupted) and
         // history writes through to the file, so the rebuild is lossless.
-        if shell.borrow().engine_bindings_stale() {
+        // niubash#849: the staleness probe also covers the rc
+        // declarations (NIU_BINDKEYS / NIU_COMPDEFS) — they used to join
+        // a rebuild only when the engine bind generation happened to
+        // move for an unrelated reason.
+        let engine_stale = shell.borrow().engine_bindings_stale();
+        let declarations_stale = shell.borrow_mut().user_declarations_stale();
+        if engine_stale || declarations_stale {
+            shell.borrow_mut().load_user_widget_bindings();
+            shell.borrow_mut().load_user_compdefs();
             shell.borrow_mut().load_engine_bindings();
             line_editor = build_line_editor(&shell)?;
         }
@@ -5976,7 +5984,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // applied by rebuilding through `build_line_editor` — the same
             // construction path as startup, so menus, hinter and bindings
             // come along.
-            if shell.borrow_mut().refresh_edit_mode().is_some() {
+            // niubash#849: a setup re-apply above may already have
+            // consumed the edit-mode flip through its own
+            // `refresh_edit_mode` call; it flags the change so this
+            // rebuild still happens.
+            let edit_mode_changed = shell.borrow_mut().refresh_edit_mode().is_some();
+            let setup_mode_changed = shell.borrow_mut().take_edit_mode_rebuild_pending();
+            if edit_mode_changed || setup_mode_changed {
                 line_editor = build_line_editor(&shell)?;
             }
             let prompt = shell.borrow_mut().prompt_for_display();

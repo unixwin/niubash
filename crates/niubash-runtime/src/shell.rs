@@ -225,6 +225,22 @@ pub struct Shell {
     /// mirrored keymaps (GNU takes effect immediately; reedline
     /// keymaps are baked at editor build time).
     pub engine_bind_generation: u64,
+    /// The `NIU_BINDKEYS` text the last `load_user_widget_bindings` call
+    /// parsed (niubash#849): the staleness probe compares the live
+    /// variable against this snapshot, so a re-sourced rc (setup
+    /// re-apply, a wizard edit, a plain `source`) that changes the
+    /// declarations is noticed instead of waiting for an unrelated
+    /// engine-bind generation bump.
+    user_bindkeys_seen: Option<String>,
+    /// The `NIU_COMPDEFS` text the last `load_user_compdefs` call
+    /// parsed (niubash#849); same staleness role as `user_bindkeys_seen`.
+    user_compdefs_seen: Option<String>,
+    /// Set when `apply_setup_config_if_pending` consumed an edit-mode
+    /// flip itself (niubash#849): `refresh_edit_mode` normalizes the
+    /// observed flags as it resolves, so the REPL loop's own
+    /// `refresh_edit_mode` probe would see "no change" afterwards and
+    /// never rebuild the editor. The flag carries the change across.
+    edit_mode_rebuild_pending: bool,
     /// User-declared completion functions parsed from `NIU_COMPDEFS` in the
     /// startup rc: `(command, function)` pairs.
     pub compdefs: Vec<(String, String)>,
@@ -820,6 +836,9 @@ impl Shell {
             user_widget_bindings: Vec::new(),
             engine_bindings: Vec::new(),
             engine_bind_generation: 0,
+            user_bindkeys_seen: None,
+            user_compdefs_seen: None,
+            edit_mode_rebuild_pending: false,
             compdefs: Vec::new(),
             config_completion_dirs: config.completion_dirs.clone(),
             hooks: config.hooks,
@@ -1671,6 +1690,21 @@ impl Shell {
             Ok(0) => {
                 self.sync_process_path_from_executor_path();
                 self.sync_niu_environment_from_engine();
+                // niubash#849: the re-sourced rc's declarations must be
+                // re-read here, exactly as startup reads them after the
+                // first rc source (repl.rs run_repl). Without this, a
+                // wizard/theme that adds NIU_BINDKEYS / NIU_COMPDEFS
+                // lines produces an rc whose declarations stay inert
+                // until some unrelated engine-bind change happens to
+                // trigger a rebuild. An edit-mode flip consumed here is
+                // flagged so the REPL still rebuilds the editor (see
+                // `edit_mode_rebuild_pending`).
+                self.load_user_widget_bindings();
+                self.load_user_compdefs();
+                self.load_engine_bindings();
+                if self.refresh_edit_mode().is_some() {
+                    self.edit_mode_rebuild_pending = true;
+                }
                 self.update_completion_state();
                 println!("{}", crate::setup_wizard::session_apply_notice());
             }
@@ -2697,7 +2731,43 @@ impl Shell {
             .variables()
             .resolved_value("NIU_BINDKEYS")
             .unwrap_or_default();
+        self.user_bindkeys_seen = Some(value.clone());
         self.user_widget_bindings = crate::repl::parse_user_bindkeys(&value);
+    }
+
+    /// Whether the rc-declared binding/completion variables
+    /// (`NIU_BINDKEYS`, `NIU_COMPDEFS`) have moved since the readers
+    /// last parsed them (niubash#849). This joins the REPL's
+    /// between-prompts staleness check alongside
+    /// [`Shell::engine_bindings_stale`]: previously only the engine
+    /// bind registry's generation was probed, so a changed
+    /// `NIU_BINDKEYS` alone never rebuilt the editor. A shell whose
+    /// readers have never run (both snapshots unset) is not stale —
+    /// startup performs the first load unconditionally.
+    pub fn user_declarations_stale(&mut self) -> bool {
+        if self.user_bindkeys_seen.is_none() && self.user_compdefs_seen.is_none() {
+            return false;
+        }
+        let bindkeys = self
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_BINDKEYS")
+            .unwrap_or_default();
+        if self.user_bindkeys_seen.as_deref() != Some(bindkeys.as_str()) {
+            return true;
+        }
+        let compdefs = self
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_COMPDEFS")
+            .unwrap_or_default();
+        self.user_compdefs_seen.as_deref() != Some(compdefs.as_str())
+    }
+
+    /// Consume the edit-mode rebuild flag a setup re-apply set
+    /// (niubash#849; see `edit_mode_rebuild_pending`).
+    pub fn take_edit_mode_rebuild_pending(&mut self) -> bool {
+        std::mem::take(&mut self.edit_mode_rebuild_pending)
     }
 
     /// Re-resolve the live editing mode from the engine's `set -o emacs` /
@@ -3092,6 +3162,8 @@ impl Shell {
             .variables()
             .resolved_value("NIU_COMPDEFS")
             .unwrap_or_default();
+        // niubash#849: snapshot for `user_declarations_stale`.
+        self.user_compdefs_seen = Some(value.clone());
         let mut compdefs = Vec::new();
         let mut compdef_dirs: Vec<PathBuf> = Vec::new();
         for entry in value.lines().map(str::trim) {
@@ -7331,6 +7403,96 @@ __fzf_history_stub() {
         let _ = std::fs::remove_dir_all(temp);
     }
 
+    /// niubash#849: a finished `niu setup` leaves the apply marker and
+    /// a re-written rc carrying NIU_BINDKEYS / NIU_COMPDEFS lines. The
+    /// re-apply must re-read those declarations (the four startup
+    /// readers), not just re-source the rc: before the fix the new
+    /// bindings/compdefs stayed inert until an unrelated engine-bind
+    /// change triggered a rebuild.
+    #[test]
+    fn issue849_setup_reapply_rereads_bindkeys_and_compdefs() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-issue849-apply");
+        let home = temp.join("home");
+        std::fs::create_dir_all(home.join(".niubash")).unwrap();
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            "NIU_BINDKEYS=\"Ctrl+X:niu_fzf_file\"\nNIU_COMPDEFS=\"git:niu_git_comp\"\n",
+        )
+        .unwrap();
+        std::fs::write(home.join(".niubash").join("setup-apply-pending"), "").unwrap();
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        assert!(shell.user_widget_bindings.is_empty());
+        assert!(shell.compdefs.is_empty());
+
+        shell.apply_setup_config_if_pending();
+
+        assert_eq!(
+            shell.user_widget_bindings.len(),
+            1,
+            "the re-apply must re-read NIU_BINDKEYS from the re-sourced rc"
+        );
+        assert_eq!(shell.user_widget_bindings[0].widget, "niu_fzf_file");
+        assert_eq!(
+            shell.compdefs,
+            vec![("git".to_string(), "niu_git_comp".to_string())],
+            "the re-apply must re-read NIU_COMPDEFS from the re-sourced rc"
+        );
+        assert!(
+            !shell.user_declarations_stale(),
+            "after the re-apply readers run, the declarations are current"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// niubash#849: NIU_BINDKEYS / NIU_COMPDEFS join the staleness
+    /// check — a changed declaration alone (no engine-bind generation
+    /// movement) must read as stale so the REPL rebuilds the editor.
+    #[test]
+    fn issue849_user_declarations_join_the_staleness_check() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-issue849-stale");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell
+            .session_mut()
+            .variables()
+            .set("NIU_BINDKEYS", "Ctrl+X:niu_fzf_file");
+        shell.load_user_widget_bindings();
+        shell.load_user_compdefs();
+        assert!(!shell.user_declarations_stale());
+
+        shell
+            .session_mut()
+            .variables()
+            .set("NIU_BINDKEYS", "Alt+G:niu_git_status");
+        assert!(
+            shell.user_declarations_stale(),
+            "a NIU_BINDKEYS change alone must be stale"
+        );
+        shell.load_user_widget_bindings();
+        assert!(!shell.user_declarations_stale());
+
+        shell
+            .session_mut()
+            .variables()
+            .set("NIU_COMPDEFS", "git:niu_git_comp");
+        assert!(
+            shell.user_declarations_stale(),
+            "a NIU_COMPDEFS change alone must be stale"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     #[test]
     fn user_compdefs_load_from_rc_and_run_in_engine() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -10150,6 +10312,9 @@ complete -F _envtooldyn_hook envtooldyn
             user_widget_bindings: Vec::new(),
             engine_bindings: Vec::new(),
             engine_bind_generation: 0,
+            user_bindkeys_seen: None,
+            user_compdefs_seen: None,
+            edit_mode_rebuild_pending: false,
             compdefs: Vec::new(),
             config_completion_dirs: Vec::new(),
             hooks,
