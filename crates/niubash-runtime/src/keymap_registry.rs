@@ -883,8 +883,8 @@ pub fn how_to_change_block() -> String {
          persistent   : put the same bind line in ~/.niubashrc (or ~/.inputrc)\n                 \
          remove a key  : bind -r '\"\\C-t\"' in ~/.niubashrc (or ~/.inputrc)\n                 \
          shell-function widgets can also ride NIU_BINDKEYS in ~/.niubashrc\n  \
-         completion   : completion.style = {} ({}) — set NIU_COMPLETION_STYLE in the environment or ~/.niubashrc\n                 \
-         interaction  : completion.interaction = {} ({}) — set NIU_COMPLETION_INTERACTION in the environment or ~/.niubashrc\n",
+         completion   : completion.style = {} ({}) — set NIU_COMPLETION_STYLE in the environment or ~/.niubashrc (an interactive export takes effect from the next prompt)\n                 \
+         interaction  : completion.interaction = {} ({}) — set NIU_COMPLETION_INTERACTION in the environment or ~/.niubashrc (an interactive export takes effect from the next prompt)\n",
         style.as_str(),
         style_origin,
         interaction.as_str(),

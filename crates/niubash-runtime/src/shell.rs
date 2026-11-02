@@ -286,6 +286,14 @@ pub struct Shell {
     pub aliases: HashMap<String, String>,
     pub last_interactive_command: Option<String>,
     pub last_interactive_exit_code: Option<i32>,
+    /// niubash#846: wall-clock duration of the last executed
+    /// interactive line, measured by the host around the engine call.
+    /// This is the REAL producer behind the prompt's
+    /// `NIU_CMD_EXEC_TIME_MS` / `NIU_LAST_COMMAND_DURATION` channels:
+    /// `run_precmd_hooks` publishes it to the process env the prompt
+    /// segments read, once per prompt pass. `None` until a line has
+    /// actually executed (a discarded line measures nothing).
+    pub last_command_duration_ms: Option<u64>,
     pub line_editor: Option<Reedline>,
     process_stdin_pipeline_bridge: bool,
     bash_prompt_command_running: bool,
@@ -875,6 +883,7 @@ impl Shell {
             aliases,
             last_interactive_command: None,
             last_interactive_exit_code: None,
+            last_command_duration_ms: None,
             line_editor: None,
             process_stdin_pipeline_bridge: false,
             bash_prompt_command_running: false,
@@ -1491,7 +1500,14 @@ impl Shell {
         // this used to call directly; same funnel, same outcomes).
         let code = match self.session_mut().prepare_line(line) {
             PreparedLine::Execute(expanded) => {
-                let code = self.execute_line_with_options(&expanded, true, line_offset)?;
+                // niubash#846: measure the line's wall-clock duration
+                // here, where the execution actually happens — the
+                // prompt's execution-time channels are published from
+                // this measurement in `run_precmd_hooks`.
+                let started = std::time::Instant::now();
+                let outcome = self.execute_line_with_options(&expanded, true, line_offset);
+                self.last_command_duration_ms = Some(started.elapsed().as_millis() as u64);
+                let code = outcome?;
                 self.invalidate_command_probe_after_line(&expanded);
                 self.invalidate_git_prompt_after_line();
                 code
@@ -1509,6 +1525,12 @@ impl Shell {
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
             self.run_chpwd_hooks_if_changed(&old_pwd, &new_pwd);
         }
+        // niubash#846: re-run the NIU_* env sync after every
+        // interactive line — an interactive `export
+        // NIU_COMPLETION_STYLE=gnu` (or `NIU_SEGMENT_*`, or any knob
+        // on the sync list) must take effect in THIS session from the
+        // next prompt, not only in child processes / the next launch.
+        self.sync_niu_environment_from_engine();
         self.update_completion_state();
         Ok(code)
     }
@@ -1529,7 +1551,10 @@ impl Shell {
         self.run_preexec_hooks(script);
         let line_offset = self.interactive_lines_read;
         self.interactive_lines_read += script.split_inclusive('\n').count().max(1);
-        let code = self.execute_script_with_options(script, true, line_offset)?;
+        let started = std::time::Instant::now();
+        let outcome = self.execute_script_with_options(script, true, line_offset);
+        self.last_command_duration_ms = Some(started.elapsed().as_millis() as u64);
+        let code = outcome?;
         self.invalidate_command_probe_after_line(script);
         self.invalidate_git_prompt_after_line();
         self.remember_interactive_command(script, code);
@@ -1537,6 +1562,12 @@ impl Shell {
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
             self.run_chpwd_hooks_if_changed(&old_pwd, &new_pwd);
         }
+        // niubash#846: re-run the NIU_* env sync after every
+        // interactive line — an interactive `export
+        // NIU_COMPLETION_STYLE=gnu` (or `NIU_SEGMENT_*`, or any knob
+        // on the sync list) must take effect in THIS session from the
+        // next prompt, not only in child processes / the next launch.
+        self.sync_niu_environment_from_engine();
         self.update_completion_state();
         Ok(code)
     }
@@ -1646,6 +1677,12 @@ impl Shell {
     /// the rc ran. This is what makes `export NIU_COMPLETION_STYLE=...`
     /// (and the migration's `export NIU_*` lines) take effect in the
     /// session that sourced them, not only in child processes.
+    ///
+    /// niubash#846: this used to run ONLY here at startup (plus the
+    /// setup re-apply), so an interactive `export NIU_COMPLETION_STYLE=
+    /// ...` written to the engine env mid-session was never observed
+    /// by the process-env readers. It now also runs after every
+    /// interactive line and at the end of every precmd pass.
     pub fn sync_niu_environment_from_engine(&mut self) {
         const NAMES: &[&str] = &[
             "NIU_COMPLETION_STYLE",
@@ -1665,6 +1702,38 @@ impl Shell {
                 if !value.is_empty() {
                     std::env::set_var(name, value);
                 }
+            }
+        }
+        // niubash#846: `NIU_SEGMENT_<NAME>` is an OPEN family (the
+        // prompt's Custom segment reads `NIU_SEGMENT_<NAME>` from the
+        // process env), so it cannot ride the fixed list above.
+        // Mirror the whole family from the session env, reconciling
+        // removals: a name the session unset must stop feeding the
+        // segment instead of lingering in the process env forever.
+        // The session env starts as a superset of the inherited
+        // process env, so a value exported before launch is mirrored
+        // (unchanged), never deleted by this reconciliation.
+        let segment_values: Vec<(String, String)> = self
+            .executor()
+            .env_vars()
+            .iter()
+            .filter(|(name, _)| name.starts_with("NIU_SEGMENT_"))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        for (name, value) in &segment_values {
+            std::env::set_var(name, value);
+        }
+        let mirrored: std::collections::HashSet<&str> = segment_values
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let process_segment_names: Vec<String> = std::env::vars_os()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .filter(|name| name.starts_with("NIU_SEGMENT_"))
+            .collect();
+        for name in process_segment_names {
+            if !mirrored.contains(name.as_str()) {
+                std::env::remove_var(&name);
             }
         }
         self.menu_config = self.menu_config.with_env_overrides();
@@ -2682,6 +2751,26 @@ impl Shell {
         {
             self.invalidate_git_prompt_after_line();
         }
+        // niubash#846: publish the prompt channels the shell core
+        // genuinely owns, through the same process-env surface the
+        // existing NIU_LAST_EXIT_CODE producer above already uses.
+        // The duration is the host's own measurement of the last
+        // executed line (see `execute_interactive_line`); both
+        // historical spellings are written because two readers exist
+        // (the segment engine reads NIU_CMD_EXEC_TIME_MS, the
+        // template prompt reads NIU_LAST_COMMAND_DURATION first).
+        // Before this, neither name had any writer anywhere: both
+        // readers were orphans and the segments were permanently
+        // empty.
+        if let Some(duration_ms) = self.last_command_duration_ms {
+            let duration = duration_ms.to_string();
+            std::env::set_var("NIU_CMD_EXEC_TIME_MS", &duration);
+            std::env::set_var("NIU_LAST_COMMAND_DURATION", &duration);
+        }
+        // A precmd hook / PROMPT_COMMAND can itself export NIU_*
+        // knobs or NIU_SEGMENT_* values; re-run the sync so this same
+        // prompt pass already observes them.
+        self.sync_niu_environment_from_engine();
         self.sync_bash_prompt_from_env();
         let title = self.resolve_title_value();
         self.run_title_hooks(&title);
@@ -9566,6 +9655,86 @@ complete -F _envtooldyn_hook envtooldyn
         );
     }
 
+    /// niubash#846: an interactive `export` lands in the session env
+    /// only — the per-line re-sync must mirror it into the process
+    /// env channels the prompt readers consult, in the SAME session:
+    /// a sync-list knob (`NIU_COMPLETION_STYLE`) and an open-family
+    /// Custom segment value (`NIU_SEGMENT_*`). Unsetting the segment
+    /// value in the session must also un-feed the segment.
+    #[test]
+    fn issue846_interactive_export_resyncs_prompt_channels() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_COMPLETION_STYLE",
+            "NIU_SEGMENT_T846",
+        ]);
+        std::env::remove_var("NIU_COMPLETION_STYLE");
+        std::env::remove_var("NIU_SEGMENT_T846");
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_interactive_line("export NIU_COMPLETION_STYLE=gnu NIU_SEGMENT_T846=segval")
+            .unwrap();
+        assert_eq!(
+            std::env::var("NIU_COMPLETION_STYLE").as_deref(),
+            Ok("gnu"),
+            "the sync-list knob must reach the process env after one interactive line"
+        );
+        assert_eq!(
+            std::env::var("NIU_SEGMENT_T846").as_deref(),
+            Ok("segval"),
+            "the NIU_SEGMENT_* family must be mirrored after one interactive line"
+        );
+        shell
+            .execute_interactive_line("unset NIU_SEGMENT_T846")
+            .unwrap();
+        assert!(
+            std::env::var("NIU_SEGMENT_T846").is_err(),
+            "a session unset must un-feed the Custom segment (reconciled mirror)"
+        );
+    }
+
+    /// niubash#846: the prompt's duration channels have a real
+    /// producer — after a line executes, the precmd pass publishes
+    /// the host-measured duration under both historical spellings,
+    /// next to the already-produced last-exit-code channel.
+    #[test]
+    fn issue846_precmd_publishes_measured_command_duration() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_CMD_EXEC_TIME_MS",
+            "NIU_LAST_COMMAND_DURATION",
+            "NIU_LAST_EXIT_CODE",
+        ]);
+        std::env::remove_var("NIU_CMD_EXEC_TIME_MS");
+        std::env::remove_var("NIU_LAST_COMMAND_DURATION");
+        let mut shell = test_shell(HookConfig::default());
+        assert_eq!(shell.last_command_duration_ms, None, "nothing executed yet");
+        shell.execute_interactive_line("false").unwrap();
+        assert!(
+            shell.last_command_duration_ms.is_some(),
+            "executing a line records its measured duration"
+        );
+        shell.run_precmd_hooks();
+        let segment_ms: u64 = std::env::var("NIU_CMD_EXEC_TIME_MS")
+            .expect("the segment channel must be published by the precmd pass")
+            .parse()
+            .expect("the published duration is a plain millisecond count");
+        let template_ms: u64 = std::env::var("NIU_LAST_COMMAND_DURATION")
+            .expect("the template channel must be published by the precmd pass")
+            .parse()
+            .expect("the published duration is a plain millisecond count");
+        assert_eq!(
+            segment_ms, template_ms,
+            "both spellings carry the one measurement"
+        );
+        assert_eq!(
+            std::env::var("NIU_LAST_EXIT_CODE").as_deref(),
+            Ok("1"),
+            "the exit-code channel keeps publishing the real last status"
+        );
+    }
+
     /// Probe cells 1+2 (§6) and the §5 rows they cover (first frame,
     /// ordinary pass, repaint storm, completion/resize repaints — all
     /// repaints of the handed-out prompt), under the niubash#685
@@ -10321,6 +10490,7 @@ complete -F _envtooldyn_hook envtooldyn
             aliases: HashMap::new(),
             last_interactive_command: None,
             last_interactive_exit_code: None,
+            last_command_duration_ms: None,
             line_editor: None,
             process_stdin_pipeline_bridge: false,
             bash_prompt_command_running: false,

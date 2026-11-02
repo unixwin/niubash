@@ -220,11 +220,24 @@ fn render_content(
             Some(format!("{}@{}", user, host))
         }
         SegmentId::BackgroundJobs => {
-            let jobs = std::env::var("NIU_BACKGROUND_JOBS").ok();
-            jobs.filter(|j| !j.is_empty() && j != "0")
-                .map(|j| format!("{}&", j))
+            // niubash#846: this arm used to read `NIU_BACKGROUND_JOBS`
+            // from the process env — an orphan read with no writer
+            // anywhere in the product, so the segment was permanently
+            // empty while pretending to be data-driven. There is
+            // still no honest producer to wire: the engine's job
+            // table is crate-private in rubash and the Session
+            // contract exposes no job-count accessor, and a hardcoded
+            // or guessed count would be fake data. The read is
+            // deleted; the segment renders nothing until a real
+            // Session jobs channel exists (residual in the #846
+            // report).
+            None
         }
         SegmentId::CommandExecutionTime => {
+            // niubash#846: `NIU_CMD_EXEC_TIME_MS` now has a real
+            // producer — `Shell::run_precmd_hooks` publishes the
+            // host-measured duration of the last executed line before
+            // every prompt pass.
             let ms = std::env::var("NIU_CMD_EXEC_TIME_MS").ok();
             ms.filter(|m| !m.is_empty()).map(|m| format!("{}ms", m))
         }
@@ -243,6 +256,12 @@ fn render_content(
         },
         SegmentId::Newline => Some(String::new()),
         SegmentId::Custom(name) => {
+            // niubash#846: fed honestly now — the value a user sets in
+            // the session (`export NIU_SEGMENT_<NAME>=...`) lands in
+            // the engine env, and `Shell::sync_niu_environment_from_
+            // engine` mirrors the whole NIU_SEGMENT_* family into the
+            // process env after every interactive line (startup values
+            // were already inherited directly).
             let env_name = format!("NIU_SEGMENT_{}", name.to_ascii_uppercase());
             std::env::var(&env_name).ok()
         }
@@ -930,6 +949,49 @@ mod tests {
         let cfg = default_cfg();
         let content = render_content(&SegmentId::Newline, &cfg, None, None);
         assert_eq!(content, Some(String::new()));
+    }
+
+    /// niubash#846: the BackgroundJobs segment's env read is deleted —
+    /// `NIU_BACKGROUND_JOBS` has no producer anywhere and the Session
+    /// contract exposes no job count, so even a hand-set process value
+    /// must NOT be rendered as if it were shell data.
+    #[test]
+    fn issue846_background_jobs_segment_has_no_fake_producer() {
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["NIU_BACKGROUND_JOBS"]);
+        let cfg = default_cfg();
+        std::env::set_var("NIU_BACKGROUND_JOBS", "3");
+        let content = render_content(&SegmentId::BackgroundJobs, &cfg, None, None);
+        assert!(
+            content.is_none(),
+            "no honest producer → no segment, not env fiction"
+        );
+    }
+
+    /// niubash#846: the Custom segment reads the process-env value the
+    /// per-line NIU_SEGMENT_* mirror publishes (the shell-level mirror
+    /// itself is pinned in shell.rs `issue846_interactive_export_
+    /// resyncs_prompt_channels`).
+    #[test]
+    fn issue846_custom_segment_reads_mirrored_value() {
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["NIU_SEGMENT_T846"]);
+        let cfg = default_cfg();
+        std::env::set_var("NIU_SEGMENT_T846", "segval");
+        let content = render_content(&SegmentId::Custom("t846".to_string()), &cfg, None, None);
+        assert_eq!(content.as_deref(), Some("segval"));
+    }
+
+    /// niubash#846: the CommandExecutionTime segment renders the
+    /// value its (now real) producer publishes.
+    #[test]
+    fn issue846_command_execution_time_segment_renders_published_value() {
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["NIU_CMD_EXEC_TIME_MS"]);
+        let cfg = default_cfg();
+        std::env::set_var("NIU_CMD_EXEC_TIME_MS", "42");
+        let content = render_content(&SegmentId::CommandExecutionTime, &cfg, None, None);
+        assert_eq!(content.as_deref(), Some("42ms"));
     }
 
     #[test]
