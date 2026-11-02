@@ -195,9 +195,26 @@ impl CompletionContext {
     /// Get the command name at the start of the current input line segment
     pub fn get_command_name(&self) -> Option<String> {
         let (segment_start, segment) = self.current_segment_before_cursor();
-        shell_words_in_segment(segment, segment_start)
-            .first()
-            .map(|word| word.value.clone())
+        let words = shell_words_in_segment(segment, segment_start);
+        // niubash#830: the command word is not always the segment's
+        // first word — grouping openers (`( git …`, `{ git …`) and
+        // environment assignment prefixes (`VAR=1 git …`) precede it.
+        // Skip those so callers (the compspec probe, the external
+        // plugin's definition lookup, the path completer's
+        // directory-only check) name the command GNU would name. An
+        // assignment with no following word still reports itself:
+        // the line names no command yet.
+        for (index, word) in words.iter().enumerate() {
+            let value = word.value.trim_start_matches('(');
+            if value.is_empty() || value == "{" {
+                continue;
+            }
+            if is_assignment_word(value) && index + 1 < words.len() {
+                continue;
+            }
+            return Some(value.to_string());
+        }
+        None
     }
 
     /// Get the token immediately before the current word (the previous token)
@@ -411,6 +428,20 @@ fn last_command_separator(input: &str) -> Option<usize> {
     }
 
     last
+}
+
+/// True for a `NAME=value` environment assignment word (a valid
+/// shell identifier before the first `=`).
+fn is_assignment_word(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn shell_words_in_segment(segment: &str, offset: usize) -> Vec<ShellWord> {
