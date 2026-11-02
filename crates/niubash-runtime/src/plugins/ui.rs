@@ -366,7 +366,7 @@ pub fn apply_verb(verb_id: &str, target: &str) -> anyhow::Result<String> {
             Ok(lines.join("\n"))
         }
         "sync" => {
-            let outcomes = sources::sync_sources();
+            let outcomes = sources::sync_sources(None);
             if outcomes.is_empty() {
                 return Ok("(no sources installed)".into());
             }
