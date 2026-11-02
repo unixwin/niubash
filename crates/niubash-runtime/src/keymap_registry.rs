@@ -168,6 +168,15 @@ pub enum DroppedReason {
     /// A terminal response sequence (e.g. the DSR answer `\e[0n`):
     /// the input layer does not deliver it as a key event.
     ResponseSequence,
+    /// A `bind -m <name>` whose keymap name the host does not know
+    /// at all (niubash#834): the entry was filtered out before any
+    /// mirror path could see it, most likely a typo.
+    KeymapMismatch,
+    /// A bind addressed to a real keymap that is not the session's
+    /// active editing mode (niubash#834): e.g. a no-`-m` bind under
+    /// `set -o vi` lands in the emacs map, which this session never
+    /// builds, so the key can never fire.
+    NotActiveKeymap,
 }
 
 impl DroppedReason {
@@ -196,6 +205,14 @@ impl DroppedReason {
                 "key sequence shape the input layer does not deliver"
             }
             DroppedReason::UnknownFunction => "function is not in the host's deliverable set",
+            DroppedReason::KeymapMismatch => {
+                "keymap name the host does not know — the bind was \
+                 discarded before it could be mirrored"
+            }
+            DroppedReason::NotActiveKeymap => {
+                "bind targets a keymap that is not this session's \
+                 active editing mode — the key can never fire"
+            }
             DroppedReason::ResponseSequence => {
                 "terminal response sequence — the input layer does not \
                  deliver it as a key"
@@ -244,6 +261,14 @@ impl DroppedBind {
             ),
             DroppedReason::UnknownFunction => {
                 format!("bind -x '\"{}\": <your command>'", self.keyseq)
+            }
+            DroppedReason::KeymapMismatch => format!(
+                "bind -m emacs '\"{}\": {}'",
+                self.keyseq,
+                self.target_name.as_deref().unwrap_or("<function>")
+            ),
+            DroppedReason::NotActiveKeymap => {
+                "set -o vi / set -o emacs, or re-bind with -m <the active keymap>".to_string()
             }
             DroppedReason::ChainedSequence
             | DroppedReason::UnparseableKeyseq
