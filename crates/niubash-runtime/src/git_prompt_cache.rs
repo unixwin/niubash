@@ -409,8 +409,8 @@ fn notify_landing_observers(worktree: &Path, value: &Option<String>) {
 /// Mark the cached segment for the repository containing `cwd` dirty:
 /// the host's command-cycle invalidation (see the freshness contract
 /// above). A repository with no entry needs no mark — its next pass
-/// computes cold anyway.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// computes cold anyway. Called on every platform since niubash#842
+/// un-gated the host's per-line invalidation.
 pub(crate) fn invalidate_segment_for_cwd(cwd: &Path) {
     let Some(worktree) = find_worktree(cwd) else {
         return;

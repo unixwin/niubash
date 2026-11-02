@@ -3449,14 +3449,22 @@ impl Shell {
     /// an empty submission never reaches either site, so it costs
     /// nothing.
     fn invalidate_git_prompt_after_line(&self) {
-        #[cfg(windows)]
-        {
-            if self.one_shot {
-                return;
-            }
-            if let Ok(cwd) = std::env::current_dir() {
-                crate::git_prompt::invalidate_segment_for_cwd(&cwd);
-            }
+        // niubash#842: this body used to be `#[cfg(windows)]`-only, so
+        // on Unix the command-cycle mark never landed and the cached
+        // segment could serve a stale clean/dirty state indefinitely.
+        // The un-gating rests on a verified negative: the cache's
+        // fingerprint (`git_prompt_cache::RepoFingerprint`) covers
+        // ONLY the HEAD contents and the index stat — the cache core's
+        // own freshness contract states a command "can rewrite
+        // worktree files without touching HEAD or the index — exactly
+        // what the fingerprint cannot see", which is why the cycle
+        // mark exists. Worktree content mtimes are not fingerprinted
+        // on any platform, so the mark must land on every platform.
+        if self.one_shot {
+            return;
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            crate::git_prompt_cache::invalidate_segment_for_cwd(&cwd);
         }
     }
 
@@ -9485,6 +9493,79 @@ complete -F _envtooldyn_hook envtooldyn
         reedline::Prompt::render_prompt_left(prompt).into_owned()
     }
 
+    /// niubash#842: on every platform (this pin is deliberately NOT
+    /// windows-gated — the bug was a windows-only body), a worktree-only
+    /// edit is invisible to the fingerprint, and ONE interactive line
+    /// must land the command-cycle mark that refreshes the segment.
+    /// Before the un-gating, the Unix half of this sequence served
+    /// "main" forever: no mark, no refresh, no dirty star.
+    #[test]
+    fn issue842_interactive_line_invalidates_git_prompt_segment() {
+        fn git(dir: &std::path::Path, args: &[&str]) -> bool {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("tracked.txt"), b"v1").unwrap();
+        if !git(
+            tmp.path(),
+            &["init", "--quiet", "--initial-branch=main", "."],
+        ) || !git(tmp.path(), &["add", "tracked.txt"])
+            || !git(tmp.path(), &["commit", "--quiet", "-m", "add"])
+        {
+            return; // git unusable on this machine: abort quietly
+        }
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let key = crate::git_prompt_cache::worktree_key_for(tmp.path()).unwrap();
+        // Settle the cold entry: one spawn, clean segment.
+        let _ = crate::git_prompt_cache::branch_segment(tmp.path());
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
+        assert_eq!(
+            crate::git_prompt_cache::branch_segment(tmp.path()).as_deref(),
+            Some("main")
+        );
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 1);
+        // A worktree-only edit moves neither HEAD nor the index: the
+        // fingerprint cannot see it, and without a cycle mark nothing
+        // refreshes.
+        std::fs::write(tmp.path().join("tracked.txt"), b"v2").unwrap();
+        assert_eq!(
+            crate::git_prompt_cache::branch_segment(tmp.path()).as_deref(),
+            Some("main")
+        );
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 1);
+        // One interactive line lands the mark on this platform too:
+        // exactly one background refresh, and the star appears.
+        let mut shell = test_shell(HookConfig::default());
+        shell.execute_interactive_line("true").unwrap();
+        let _ = crate::git_prompt_cache::branch_segment(tmp.path());
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
+        assert_eq!(
+            crate::git_prompt_cache::read_status_call_count(&key),
+            2,
+            "the command cycle costs exactly one refresh after the un-gating"
+        );
+        assert_eq!(
+            crate::git_prompt_cache::branch_segment(tmp.path()).as_deref(),
+            Some("main*")
+        );
+    }
+
     /// Probe cells 1+2 (§6) and the §5 rows they cover (first frame,
     /// ordinary pass, repaint storm, completion/resize repaints — all
     /// repaints of the handed-out prompt), under the niubash#685
@@ -9521,10 +9602,10 @@ complete -F _envtooldyn_hook envtooldyn
             let _ = render_left_of(&prompt);
             let _ = reedline::Prompt::render_prompt_right(&prompt);
         }
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
-        let after_storm = crate::git_prompt::read_status_call_count(&key);
+        let after_storm = crate::git_prompt_cache::read_status_call_count(&key);
         eprintln!("issue592 probe cell1 (#685): after_10_repaints_spawns={after_storm}");
         assert_eq!(after_storm, 1, "one background spawn; repaints never spawn");
 
@@ -9536,7 +9617,7 @@ complete -F _envtooldyn_hook envtooldyn
                 let _ = render_left_of(&p);
             }
             assert!(render_left_of(&p).contains("main"));
-            let total = crate::git_prompt::read_status_call_count(&key);
+            let total = crate::git_prompt_cache::read_status_call_count(&key);
             eprintln!("issue592 probe cell2 (#685): passes={k} total_spawns={total}");
             assert_eq!(total, 1, "pass {k} must be a cache hit");
         }
@@ -9568,12 +9649,12 @@ complete -F _envtooldyn_hook envtooldyn
 
         // Settle the cache on the pre-hook value.
         let _ = shell.prompt_for_display();
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
         let before = shell.prompt_for_display();
         assert!(render_left_of(&before).contains("main"));
-        assert_eq!(crate::git_prompt::read_status_call_count(&key), 1);
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 1);
 
         // REPL order: hooks first, prompt second. Under the Wine shim
         // the "repository change" is the canned status flipping to the
@@ -9597,10 +9678,10 @@ complete -F _envtooldyn_hook envtooldyn
         // the hook's branch for the next pass.
         let prompt = shell.prompt_for_display();
         let left = render_left_of(&prompt);
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
-        let spawns = crate::git_prompt::read_status_call_count(&key);
+        let spawns = crate::git_prompt_cache::read_status_call_count(&key);
         eprintln!("issue592 probe cell5 (#685): total_spawns={spawns} pass_after_hook={left:?}");
         assert_eq!(
             spawns, 2,
@@ -9615,7 +9696,7 @@ complete -F _envtooldyn_hook envtooldyn
             render_left_of(&next).contains("hooked"),
             "the hook's branch is visible from the next pass"
         );
-        assert_eq!(crate::git_prompt::read_status_call_count(&key), 2);
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 2);
     }
 
     /// §5 rows "empty Enter" / "prompt Ctrl+C": both return to the
@@ -9645,10 +9726,10 @@ complete -F _envtooldyn_hook envtooldyn
         for m in 1..=3usize {
             let p = shell.prompt_for_display();
             let _ = render_left_of(&p);
-            assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
                 std::time::Duration::from_secs(30)
             ));
-            let total = crate::git_prompt::read_status_call_count(&key);
+            let total = crate::git_prompt_cache::read_status_call_count(&key);
             eprintln!("issue592 probe empty-enter shape (#685): passes={m} total_spawns={total}");
             assert_eq!(total, 1, "pass {m} must be served by the one landing");
         }
@@ -9670,7 +9751,7 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut shell = segments_shell_with_vcs();
-        assert!(crate::git_prompt::worktree_key_for(tmp.path()).is_none());
+        assert!(crate::git_prompt_cache::worktree_key_for(tmp.path()).is_none());
         for _ in 0..3 {
             let p = shell.prompt_for_display();
             for _ in 0..4 {
@@ -9711,7 +9792,7 @@ complete -F _envtooldyn_hook envtooldyn
         std::env::set_current_dir(repo_a.path()).unwrap();
         let key_a = crate::git_prompt::worktree_key_for(&std::env::current_dir().unwrap()).unwrap();
         let _ = shell.prompt_for_display();
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
         let at_root = render_left_of(&shell.prompt_for_display());
@@ -9737,7 +9818,7 @@ complete -F _envtooldyn_hook envtooldyn
             !cold_b.contains("other"),
             "the first pass in a new repository does not wait: {cold_b:?}"
         );
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
         let at_b = render_left_of(&shell.prompt_for_display());
