@@ -711,6 +711,28 @@ impl NiuSession {
         self.expect_prompt();
     }
 
+    /// Readiness for a session whose rc deliberately sets NO `PS1` —
+    /// the Windows gitbash factory floor (niubash#789 test-face fix).
+    /// That floor renders `user@localhost … ` over `$ ` instead of the
+    /// `P1> ` sentinel, so [`wait_ready`] deterministically times out
+    /// on it. Under the driver's cleared environment `USERNAME` and
+    /// `COMPUTERNAME` are unset, so the floor's `\u@\h` collapses to
+    /// the literal `user@localhost` — the banner plus that prompt row
+    /// is this session's actual startup sequence.
+    ///
+    /// Deliberately stops at row one and does NOT consume through the
+    /// `$ ` input row: `expect` consumes everything up to its match,
+    /// and on the factory floor the git segment `(branch)` rides on
+    /// row one *between* `user@localhost` and the `$` — waiting for
+    /// `$` would swallow a first-paint segment before the caller's
+    /// own assertion could see it (the shape observed live in the
+    /// #787 acceptance). Callers that want the full prompt consumed
+    /// can `expect("$")` themselves.
+    pub fn wait_ready_factory_floor(&mut self) {
+        self.expect("Niubash");
+        self.expect("user@localhost");
+    }
+
     /// Expect the next PS1 sentinel (start of a fresh command line).
     pub fn expect_prompt(&mut self) {
         self.expect(PROMPT1);

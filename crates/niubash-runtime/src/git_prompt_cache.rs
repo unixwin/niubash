@@ -765,12 +765,26 @@ mod tests {
             return;
         }
         let seen: LandedLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // niubash#789 test-face fix: the notice is published on the
+        // refresh thread AFTER the store, outside the cache lock (see
+        // launch_refresh — an observer may read the cache and must
+        // never run under its lock), so cache-idle, the store's
+        // visibility point, can be observed before the notice itself
+        // lands. On Windows the woken test thread won that race 6/7
+        // serial runs and the assert read an empty log. The recorder
+        // therefore also signals this condvar and the test waits for
+        // its own record (event-driven, never a poll) before pinning
+        // the exact contents.
+        let landed = std::sync::Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new()));
         let recorder = {
             let seen = seen.clone();
+            let landed = landed.clone();
             std::sync::Arc::new(move |worktree: &Path, value: &Option<String>| {
                 seen.lock()
                     .unwrap()
                     .push((worktree.to_path_buf(), value.clone()));
+                let _guard = landed.0.lock().unwrap();
+                landed.1.notify_all();
             }) as LandingObserver
         };
         add_landing_observer(recorder);
@@ -780,6 +794,29 @@ mod tests {
             "a cold cache serves no segment instead of waiting"
         );
         assert!(wait_for_segment_cache_idle(Duration::from_secs(30)));
+        {
+            let mut guard = landed.0.lock().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                if seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(worktree, _)| worktree == tmp.path())
+                {
+                    break;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break; // the exactness assert below reports the empty log
+                }
+                let (next, _) = landed
+                    .1
+                    .wait_timeout(guard, deadline - now)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard = next;
+            }
+        }
         let mine: Vec<Option<String>> = seen
             .lock()
             .unwrap()

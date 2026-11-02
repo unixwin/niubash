@@ -87,9 +87,52 @@ fn issue787_git_segment_appears_at_idle_without_a_keypress() {
     }
     // No PS1 claim: the factory floor renders, git segment included.
     let rc = "NIU_DISABLE_DEFAULT_PLUGINS=1\n";
-    let mut s =
-        NiuSession::spawn_shared_home(&root, rc, &[], &[], (120, 30), Duration::from_secs(20));
-    s.wait_ready();
+    // The segment is `git_prompt` spawning `git` through the session
+    // PATH, and the sandbox PATH (System32 + Windows only) has no git
+    // — without this override the refresh lands `None` and the pin can
+    // never see the segment (same gap interactive.rs's gitbash-floor
+    // test fixed for niubash#420). Discover the host git the fixture
+    // helper itself resolves and prepend its dir to the session PATH.
+    let git_where = Command::new("where.exe")
+        .arg("git")
+        .stdin(Stdio::null())
+        .output()
+        .expect("locate git for the session PATH");
+    let git_exe = String::from_utf8_lossy(&git_where.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .expect("git.exe path from where.exe")
+        .to_string();
+    let git_dir = std::path::Path::new(&git_exe)
+        .parent()
+        .expect("git.exe parent dir")
+        .to_string_lossy()
+        .to_string();
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let session_path = format!(
+        "{git_dir};{};{}",
+        system_root.join("System32").display(),
+        system_root.display()
+    );
+    let extra_env = vec![("PATH".to_string(), session_path)];
+    let mut s = NiuSession::spawn_shared_home(
+        &root,
+        rc,
+        &extra_env,
+        &[],
+        (120, 30),
+        Duration::from_secs(20),
+    );
+    // This rc sets no PS1, so the session paints the factory floor's
+    // `user@localhost … $ ` instead of the P1> sentinel — readiness is
+    // the floor's own startup sequence (banner + floor prompt), never
+    // `wait_ready`'s PS1 sentinel (niubash#789 test-face fix: the old
+    // wait self-deadlocked at the sentinel this session never prints).
+    s.wait_ready_factory_floor();
     // Zero input from here on. The cold-start refresh lands on its
     // own (bounded by the cache's 2s status timeout plus one editor
     // poll interval); the landing must repaint the idle line so a
