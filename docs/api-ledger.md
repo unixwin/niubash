@@ -452,7 +452,7 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::run` | 1 | the tracked script arm; the unclosed arm stays on the direct driver (§4 note) |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
 | `Session::prepare_line` | 1 | REPL history expansion |
-| `Session::complete` / `has_compspec` | 1 / 1 | completion bridge |
+| `Session::complete` / `complete_detailed` / `has_compspec` | 1 / 0 / 1 | completion bridge (complete_detailed + CompletionOutcome/CompletionPolicy: rubash#2573, consumed by niubash#837) |
 | `Session::aliases` / `functions` | 1 / 2 | snapshots for completion state |
 | `Session::close` | 1 | the one-shot finish funnel |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
@@ -517,7 +517,7 @@ to the split core crate without changing its shape.
 | env methods (`get_env`, `set_env`, `unset_env`, `export_env`, `env_vars_snapshot`) | A | `Session::variables()` view |
 | option methods (`set_shell_option`, `set_shopt_option`) | A | `Session::options()` view |
 | `last_exit_code` / `set_last_exit_code` | A | `Session::last_status` + `RunOutcome` |
-| `complete_line`, `has_compspec` | A | `Session::complete` + compspec view |
+| `complete_line` / `complete_line_detailed`, `has_compspec` | A | `Session::complete` / `complete_detailed` + compspec view (the detailed pair carries the CompletionPolicy of rubash#2573) |
 | `set_history_provider` + `HistoryProvider` | A | builder-injected capability (trait unchanged) |
 | `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` / `Session::call_function_with_env` + functions view (the env channel landed on the contract surface with rubash#2001; until then this row's env half was carried by the tier-C seam below) |
 | `inherit_process_stdin` | A | builder stream binding |
@@ -600,6 +600,8 @@ item rubash::DebugCliPreset
 item rubash::Executor
 item rubash::Token
 item rubash::TokenKind
+item rubash::api::CompletionOutcome
+item rubash::api::CompletionPolicy
 item rubash::api::Flow
 item rubash::api::InvocationShape
 item rubash::api::PreparedLine
@@ -620,6 +622,7 @@ item rubash::builtins::bind::parse_inputrc_with_env
 item rubash::builtins::bind::parse_positional_binding
 item rubash::builtins::bind::parse_unix_command_spec
 item rubash::builtins::bind::strip_set_keyword
+item rubash::builtins::complete::JobCandidate
 item rubash::decode_to_visible_text
 item rubash::executor::ExecuteError
 item rubash::executor::bytes_to_shell_text
@@ -708,6 +711,7 @@ method rubash::api::Session::builder
 method rubash::api::Session::call_function_with_env
 method rubash::api::Session::close
 method rubash::api::Session::complete
+method rubash::api::Session::complete_detailed
 method rubash::api::Session::executor
 method rubash::api::Session::executor_mut
 method rubash::api::Session::expand_prompt
