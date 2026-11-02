@@ -185,15 +185,19 @@ pub(crate) fn column_layout(
 /// candidate's display value), or one outlier so wide that even the
 /// narrowest second column no longer fits beside it. zsh's complist
 /// answers that shape by truncating overlong entries, not by giving up
-/// the grid, so when the uncapped search bottoms out at one column
-/// this layout retries with each width capped at the two-column bound
-/// `(terminal - gutter) / 2` (a lone candidate caps at the full
-/// terminal width instead): two capped columns plus the gutter always
-/// fit, so a collapsed set with at least two candidates provably
-/// comes back with at least two columns, and
-/// [`render_list_packed`] cuts the overlong cell text to match. Sets
-/// that already lay out multi-column never see the cap — their layout
-/// is byte-identical to the uncapped one.
+/// the grid. niubash#829 (owner ruling): a set with at least two
+/// candidates always caps every entry width at a quarter of the window,
+/// `max(20, terminal / 4)`, before the search — one overlong entry must
+/// not pin the column count (the owner's 169-entry home dir measured a
+/// 94-wide outlier flattening a 200-column window to two columns, one
+/// ~100 cells wide), and [`render_list_packed`] cuts the overlong cell
+/// text in the middle with `…` to match. When even the quarter-capped
+/// search bottoms out below two columns (a narrow window where
+/// quarter-width pairs cannot fit), the layout retries at the
+/// two-column bound `(terminal - gutter) / 2`, which provably fits two
+/// capped columns plus the gutter. A lone candidate skips both caps and
+/// is bounded by the full terminal width only; sets whose entries are
+/// all within the quarter cap lay out byte-identical to uncapped.
 ///
 /// niubash#829 — two refinements, both measured against zsh 5.9
 /// (`Src/Zle/compresult.c` `calclist`, the single-group no-zstyle
@@ -223,18 +227,30 @@ pub(crate) fn packed_column_layout(
     widths: &[usize],
     terminal_columns: usize,
 ) -> (usize, usize, Vec<usize>) {
-    let (columns, rows, col_widths) = packed_layout_uncapped(widths, terminal_columns);
-    let lone_overwide =
-        widths.len() == 1 && col_widths.first().copied().unwrap_or(0) > terminal_columns;
-    if columns >= 2 || (widths.len() <= 1 && !lone_overwide) {
+    if widths.len() >= 2 {
+        let quarter_cap = (terminal_columns / 4).max(20).min(terminal_columns.max(1));
+        let capped: Vec<usize> = widths
+            .iter()
+            .map(|width| (*width).min(quarter_cap))
+            .collect();
+        let (columns, rows, col_widths) = packed_layout_uncapped(&capped, terminal_columns);
+        if columns >= 2 {
+            return fill_available_width(columns, rows, col_widths, terminal_columns);
+        }
+        let cap = ((terminal_columns.saturating_sub(GNU_COLUMN_GUTTER)) / 2).max(1);
+        let capped: Vec<usize> = widths.iter().map(|width| (*width).min(cap)).collect();
+        let (columns, rows, col_widths) = packed_layout_uncapped(&capped, terminal_columns);
         return fill_available_width(columns, rows, col_widths, terminal_columns);
     }
-    let cap = if widths.len() <= 1 {
-        terminal_columns.max(1)
-    } else {
-        ((terminal_columns.saturating_sub(GNU_COLUMN_GUTTER)) / 2).max(1)
-    };
-    let capped: Vec<usize> = widths.iter().map(|width| (*width).min(cap)).collect();
+    let (columns, rows, col_widths) = packed_layout_uncapped(widths, terminal_columns);
+    let lone_overwide = col_widths.first().copied().unwrap_or(0) > terminal_columns;
+    if !lone_overwide {
+        return fill_available_width(columns, rows, col_widths, terminal_columns);
+    }
+    let capped: Vec<usize> = widths
+        .iter()
+        .map(|width| (*width).min(terminal_columns.max(1)))
+        .collect();
     let (columns, rows, col_widths) = packed_layout_uncapped(&capped, terminal_columns);
     fill_available_width(columns, rows, col_widths, terminal_columns)
 }
@@ -1339,12 +1355,13 @@ mod tests {
         let (columns, rows, col_widths) = packed_column_layout(&widths, 120);
         assert!(columns >= 3, "packed layout stays multi-column: {columns}");
         assert_eq!(col_widths.len(), columns);
-        // The outlier's column is at least its own width — never
-        // truncated below what it needs. (#829's width fill grows it
-        // further: the leftover window cells land in the gutters.)
+        // niubash#829's quarter cap: the 40-wide outlier is over a
+        // quarter of 120, so its column is capped at 30 and the cell is
+        // middle-truncated at render — an overlong entry must not pin
+        // the column count down.
         assert!(
-            *col_widths.iter().max().unwrap() >= 40,
-            "the outlier's column carries its own width: {col_widths:?}"
+            *col_widths.iter().max().unwrap() <= 30,
+            "the outlier's column is capped at a quarter of the window: {col_widths:?}"
         );
         assert_eq!(rows, 31_usize.div_ceil(columns));
 
@@ -1366,15 +1383,17 @@ mod tests {
     fn packed_layout_all_wide_set_truncates_instead_of_collapsing() {
         // Every candidate wider than half the terminal: the uncapped
         // packed geometry is one column, but niubash#741's zsh-parity
-        // ruling truncates instead of collapsing — the capped retry
-        // keeps two columns at the two-column bound (80 - 2) / 2 = 39.
+        // ruling truncates instead of collapsing. #829's quarter cap
+        // (20 at 80) seats all three truncated cells, and the width
+        // fill then grows the fields to the full window.
         // (This assertion replaces the #744-era "same floor as GNU"
         // pin, whose floor is the collapse the reopened issue
         // rejects.)
         let widths = [60usize, 62, 58];
         let (columns, _rows, col_widths) = packed_column_layout(&widths, 80);
-        assert_eq!(columns, 2);
-        assert!(col_widths.iter().all(|width| *width <= 39));
+        assert_eq!(columns, 3);
+        assert!(col_widths.iter().all(|width| *width <= 26));
+        assert_eq!(reserved_span(&col_widths), 80);
     }
 
     /// The reserved span of a layout: every column's width plus the
@@ -1477,6 +1496,73 @@ mod tests {
             );
             assert!(columns >= 2, "never collapses below two: {columns}");
         }
+    }
+
+    #[test]
+    fn issue829_overlong_outlier_is_capped_at_a_quarter_of_the_window() {
+        // The owner's home-dir shape (niubash#829, second ruling): 160
+        // ordinary names plus a cluster of registry-log outliers up to
+        // 94 cells wide. At 200 columns the cap is 50 — the layout must
+        // be the same set's layout with every width pre-capped at 50,
+        // and the outliers must not hold the grid at two columns.
+        let mut widths: Vec<usize> = (0..160).map(|i| 3 + (i * 7) % 18).collect();
+        widths.extend([94usize, 94, 68, 68, 68, 60, 58, 57]);
+        let (columns, rows, col_widths) = packed_column_layout(&widths, 200);
+        assert!(
+            columns >= 6,
+            "one 94-wide outlier cannot hold a 200-cell window at 2 columns: {columns}"
+        );
+        let capped50: Vec<usize> = widths.iter().map(|w| (*w).min(50)).collect();
+        assert_eq!(
+            packed_column_layout(&capped50, 200),
+            (columns, rows, col_widths),
+            "every width is capped at a quarter of the window (50 at 200)"
+        );
+
+        // At 120 the quarter cap is 30.
+        let (columns, rows, col_widths) = packed_column_layout(&widths, 120);
+        let capped30: Vec<usize> = widths.iter().map(|w| (*w).min(30)).collect();
+        assert_eq!(
+            packed_column_layout(&capped30, 120),
+            (columns, rows, col_widths),
+            "every width is capped at a quarter of the window (30 at 120)"
+        );
+
+        // Rendered: overlong cells are cut in the middle, and no
+        // painted line exceeds the window.
+        let values: Vec<String> = widths
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let mut s = format!("{i:03}");
+                while s.len() < *w {
+                    s.push('x');
+                }
+                s
+            })
+            .collect();
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let rendered = render_list_packed(&refs, &widths, 200, 50);
+        assert!(
+            rendered.contains('…'),
+            "overlong cells are marked truncated:\n{rendered}"
+        );
+        for line in rendered.split("\r\n") {
+            assert!(
+                visible_width(line) <= 200,
+                "rendered line fits 200 columns: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue829_narrow_window_still_fits_two_capped_columns() {
+        // W=30: the quarter cap (20) cannot seat two 25-wide entries
+        // (20 + 20 + gutter > 30), so the two-column fallback cap
+        // (30 - 2) / 2 = 14 takes over and both cells truncate.
+        let (columns, _rows, col_widths) = packed_column_layout(&[25, 25], 30);
+        assert_eq!(columns, 2);
+        assert!(col_widths.iter().all(|width| *width <= 14));
     }
 
     #[test]
@@ -1670,8 +1756,11 @@ mod tests {
         }
         // Middle truncation keeps the tail of each display value —
         // the file-name part after the shared prefix — on screen.
+        // (#829's quarter cap cuts deeper than the old two-column
+        // bound, so the pin uses a short-name cell whose suffix still
+        // survives; a mid-width marker like "n089" falls into the cut.)
         assert!(
-            rendered.contains("n089"),
+            rendered.contains("n088"),
             "a truncated cell still shows its distinguishing tail:\n{rendered}"
         );
     }
