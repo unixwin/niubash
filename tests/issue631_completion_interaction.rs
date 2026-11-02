@@ -1,15 +1,18 @@
 //! niubash#631 regression: the completion *interaction* axis on a real
 //! terminal — `completion.interaction = cycle` (opt-in since
 //! niubash#742 made `select` the default) cycles candidates into the
-//! line with TAB, Enter accepts the candidate in the line and runs it
-//! in the same press, Esc rolls the line back to its pre-completion
+//! line with TAB, Enter accepts the highlighted candidate WITHOUT
+//! running it (niubash#821 superseded the #631 one-press
+//! accept-and-run: the first Enter accepts and closes the menu, the
+//! second submits), Esc rolls the line back to its pre-completion
 //! snapshot, and a leftover pre-1.5.0 config.toml prints the one-time
 //! migration notice (it is never read).
 //!
 //! The candidate vehicle is `cd` into one of two same-prefix
 //! directories, asserted through `pwd`: builtins only (the driver
 //! sandbox PATH carries no externals), and the executed directory
-//! names exactly which candidate was in the line when Enter landed.
+//! names exactly which candidate was in the line when the second
+//! Enter landed.
 //!
 //! Driver: [`mod driver`] (portable-pty; see tests/interactive.rs for
 //! the harness contract). Run:
@@ -36,8 +39,10 @@ fn write_candidates(s: &NiuSession) {
 }
 
 /// One cycle round in a fresh session: type `cd cyc-`, press TAB
-/// `tabs` times, press Enter, and return the session so the caller
-/// can assert where the shell landed. The sessions pin the `cycle`
+/// `tabs` times, press Enter TWICE (the #821 contract: the first
+/// accepts the highlighted candidate and closes the menu, the second
+/// submits), and return the session so the caller can assert where
+/// the shell landed. The sessions pin the `cycle`
 /// interaction explicitly — since niubash#742 the built-in default is
 /// `select`, and this target pins *cycle's* contract.
 fn cycle_round(prefix: &str, tabs: usize) -> NiuSession {
@@ -65,17 +70,20 @@ fn cycle_round(prefix: &str, tabs: usize) -> NiuSession {
             std::thread::sleep(SETTLE);
         }
     }
+    // Enter #1 accepts the pick (menu closes, line stays editable);
+    // Enter #2 submits it.
+    s.send("\r");
+    std::thread::sleep(SETTLE);
     s.send("\r");
     s.expect_prompt();
     s
 }
 
 /// The cycle interaction end to end: TAB #1 puts the first candidate
-/// in the line and Enter runs it in the same press (no commit step —
-/// the insert interaction's two-Enter shape is the other contract,
-/// pinned by interactive.rs's #486 test under `insert`); TAB #2
-/// reaches the second candidate; TAB #3 wraps the full loop back to
-/// the first.
+/// in the line; Enter #1 accepts it and Enter #2 runs it (the #821
+/// two-Enter shape — the same contract as insert, pinned there by
+/// interactive.rs's #486 test); TAB #2 reaches the second candidate;
+/// TAB #3 wraps the full loop back to the first.
 #[test]
 fn issue631_pty_cycle_tab_loops_candidates_and_enter_runs_the_pick() {
     if !require_pty_or_skip("issue631_pty_cycle_tab_loops_candidates_and_enter_runs_the_pick") {

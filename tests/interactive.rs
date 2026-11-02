@@ -1104,10 +1104,11 @@ fn tab_completion_empty_set_enter_still_submits() {
 /// m486-` (a "No such file" error); pinned for all four interactive menu
 /// styles (`column` — the default, `list`, `ide`, `inline`).
 ///
-/// niubash#631: this is the *insert* interaction's contract, so the
-/// sessions pin `NIU_COMPLETION_INTERACTION=insert` — since 1.5.0 the
-/// default interaction is cycle, whose Enter accepts AND runs in one
-/// press (pinned in tests/issue631_completion_interaction.rs).
+/// niubash#631/#821: this is the *insert* interaction's contract, so the
+/// sessions pin `NIU_COMPLETION_INTERACTION=insert` — the default
+/// `select` interaction took the same two-Enter shape with niubash#821
+/// (pinned in tests/issue631_completion_interaction.rs,
+/// tests/issue742_completion_zsh.rs and tests/issue821_menu_enter_accepts.rs).
 #[test]
 fn completion_menu_enter_commits_highlighted_candidate() {
     if !require_pty_or_skip("completion_menu_enter_commits_highlighted_candidate") {

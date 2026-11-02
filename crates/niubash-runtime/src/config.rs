@@ -179,8 +179,9 @@ impl CompletionStyle {
 /// niubash#742, superseding the 2026-10-28 cycle pick): TAB #1 puts
 /// the first candidate into the line and opens the candidate grid
 /// with it highlighted (niubash#778); later TABs / Shift-TABs and
-/// Down / Up cycle the highlight; Enter accepts the candidate in the
-/// line and runs the command; Esc rolls the line back.
+/// Down / Up cycle the highlight; Enter accepts the highlighted
+/// candidate and closes the menu without running (niubash#821 — a
+/// second Enter submits); Esc rolls the line back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionInteraction {
     /// zsh menu-completion form: TAB cycles candidates into the line.

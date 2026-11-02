@@ -32,8 +32,9 @@ fn write_dirs(s: &NiuSession) {
 
 /// select is the built-in default: no NIU_COMPLETION_INTERACTION env.
 /// The execution-level proof of the #778 contract: TAB #1 splices the
-/// first candidate and shows it in the grid, so Enter right after it
-/// runs `cd sel-one/`.
+/// first candidate and shows it in the grid. Enter now takes the #821
+/// two-step shape: Enter #1 accepts the highlighted candidate and
+/// closes the menu (nothing runs), Enter #2 runs `cd sel-one/`.
 #[test]
 fn issue742_pty_select_first_tab_splices_first_candidate() {
     if !require_pty_or_skip("issue742_pty_select_first_tab_splices_first_candidate") {
@@ -46,6 +47,10 @@ fn issue742_pty_select_first_tab_splices_first_candidate() {
     s.send(TAB);
     // The grid is up AND the first candidate is already in the line.
     s.expect("sel-one");
+    // Enter #1: accept the pick (menu closes, line stays editable).
+    s.send("\r");
+    std::thread::sleep(SETTLE);
+    // Enter #2: submit the accepted line.
     s.send("\r");
     s.expect_prompt();
     s.send_line("pwd");
@@ -54,7 +59,8 @@ fn issue742_pty_select_first_tab_splices_first_candidate() {
 }
 
 /// TAB #1 selects the FIRST candidate; TAB #2 moves to the second and
-/// TAB #3 wraps back — verified end to end through `pwd`.
+/// TAB #3 wraps back — verified end to end through `pwd`, with the
+/// #821 two-Enter shape (accept, then submit).
 #[test]
 fn issue742_pty_select_tab_cycles_from_the_first_candidate() {
     if !require_pty_or_skip("issue742_pty_select_tab_cycles_from_the_first_candidate") {
@@ -73,6 +79,8 @@ fn issue742_pty_select_tab_cycles_from_the_first_candidate() {
                 std::thread::sleep(SETTLE);
             }
         }
+        s.send("\r");
+        std::thread::sleep(SETTLE);
         s.send("\r");
         s.expect_prompt();
         s.send_line("pwd");
