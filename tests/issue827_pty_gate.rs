@@ -155,6 +155,21 @@ fn await_screen(s: &NiuSession, needle: &str, budget: Duration) -> String {
     }
 }
 
+/// Let the editor finish its prompt reset before sending more
+/// keystrokes. Observed on master (captain probes, 2026-11-02):
+/// `expect_prompt()` returns the instant the prompt glyphs render,
+/// but keystrokes sent in that same instant — right after a command
+/// executed or a Ctrl-C reset — never reach the line (the transcript
+/// shows total silence, as if the bytes were flushed during the
+/// reset). The established suite absorbs the same window with an
+/// `expect_absent` settle (e.g. `ctrl_c_midtyped_discards_line`);
+/// a plain pause is the honest equivalent here. The identical
+/// keystroke sequences, paced by an idle-drain PTY harness, drive
+/// master correctly — this is harness pacing, not an expectation.
+fn settle() {
+    std::thread::sleep(Duration::from_millis(500));
+}
+
 // ---------------------------------------------------------------------------
 // S1 — boot: prompt renders, command executes, clean exit.
 // ---------------------------------------------------------------------------
@@ -199,6 +214,7 @@ fn pty_gate_s2_completion_unique_file_takes_trailing_space() {
     s.send("\r");
     s.expect("zebra.txt");
     s.expect_prompt();
+    settle();
     // Suffix leg: complete again, then type X. A file's trailing space
     // makes X a NEW argument (`ls zebra.txt X`); no space would glue
     // it onto the name (`ls zebra.txtX`). The rendered line decides.
@@ -246,6 +262,7 @@ fn pty_gate_s3_completion_unique_directory_takes_slash() {
     );
     s.send(CTRL_C);
     s.expect_prompt();
+    settle();
     // Drill-in leg: from the committed `ls tools/`, a second word
     // continues inside the directory and completes the inner file;
     // Enter then executes the full path.
@@ -408,20 +425,31 @@ fn pty_gate_s8_ctrl_z_stops_job_and_fg_completes_it() {
     }
     let mut s = spawn_gate("s8", "");
     s.wait_ready();
-    // One job: a short sleep followed by its completion marker.
-    s.send_line("sleep 3; echo DONE827");
+    // ONE job whose own output is the completion witness: the list
+    // lives inside the child `sh`, so the marker can only print when
+    // the job truly runs to completion after `fg`. (A bare
+    // `sleep 3; echo DONE` list at the prompt is NOT a valid witness:
+    // GNU bash 5.3.20, replayed under this same pty shape, runs the
+    // `echo` immediately after the stop — each `;` element is its own
+    // job — so the marker proves nothing there. niu matches GNU on
+    // that shape byte for byte; the single-job form is the one the
+    // captain verified live on 2026-11-02.)
+    s.send_line("sh -c 'sleep 3; echo DONE827'");
     // Let the job take the foreground before the stop key (a Ctrl-Z
     // that lands while the line is still being submitted belongs to
     // the editor, not the job — arrival timing, same as GNU).
     std::thread::sleep(Duration::from_millis(600));
     s.send("\u{1a}");
-    // The shell regains its prompt with the job stopped.
+    // The shell regains its prompt with the job stopped, and the
+    // witness must NOT have printed while it is stopped.
     s.expect_prompt();
+    s.expect_absent("DONE827", ABSENT_WINDOW);
     s.send_line("jobs");
     s.expect("Stopped");
     s.expect_prompt();
-    // fg resumes the job; the remaining sleep runs out and the
-    // marker prints.
+    settle();
+    // fg resumes the job; the remaining sleep runs out inside the
+    // child and only then does the marker print.
     s.send_line("fg");
     s.expect("DONE827");
     s.expect_prompt();
