@@ -185,53 +185,124 @@ pub(crate) fn column_layout(
 /// candidate's display value), or one outlier so wide that even the
 /// narrowest second column no longer fits beside it. zsh's complist
 /// answers that shape by truncating overlong entries, not by giving up
-/// the grid, so when the uncapped search bottoms out at one column
-/// this layout retries with each width capped at the two-column bound
-/// `(terminal - gutter) / 2` (a lone candidate caps at the full
-/// terminal width instead): two capped columns plus the gutter always
-/// fit, so a collapsed set with at least two candidates provably
-/// comes back with at least two columns, and
-/// [`render_list_packed`] cuts the overlong cell text to match. Sets
-/// that already lay out multi-column never see the cap — their layout
-/// is byte-identical to the uncapped one.
+/// the grid. niubash#829 (owner ruling): a set with at least two
+/// candidates always caps every entry width at a quarter of the window,
+/// `max(20, terminal / 4)`, before the search — one overlong entry must
+/// not pin the column count (the owner's 169-entry home dir measured a
+/// 94-wide outlier flattening a 200-column window to two columns, one
+/// ~100 cells wide), and [`render_list_packed`] cuts the overlong cell
+/// text in the middle with `…` to match. When even the quarter-capped
+/// search bottoms out below two columns (a narrow window where
+/// quarter-width pairs cannot fit), the layout retries at the
+/// two-column bound `(terminal - gutter) / 2`, which provably fits two
+/// capped columns plus the gutter. A lone candidate skips both caps and
+/// is bounded by the full terminal width only; sets whose entries are
+/// all within the quarter cap lay out byte-identical to uncapped.
+///
+/// niubash#829 — two refinements, both measured against zsh 5.9
+/// (`Src/Zle/compresult.c` `calclist`, the single-group no-zstyle
+/// default the owner's captures pin):
+///
+/// * **No degenerate empty columns.** The old column-count search
+///   could return more columns than the entry count fills at its row
+///   depth (21 entries at 2 rows internally laid out 18 columns, 7 of
+///   them empty), painting the same tokens as the filled layout while
+///   charging the search gutters for the phantoms. The search now
+///   walks row depths so every layout has `columns ==
+///   ceil(count / rows)` — zsh's `tlines = (dcount + tcols - 1) /
+///   tcols` normalization (`compresult.c:1724-1760`).
+/// * **The leftover width is filled.** zsh's uniform layout uses
+///   `cols * (longest + CM_SPACE) - CM_SPACE` cells (the measured
+///   4 x 23 = 92 of 100), and its packed variant explicitly grows
+///   column widths by the leftover `(max - g->totl + CM_SPACE) /
+///   g->cols` (`compresult.c:1880-1886`). niubash's single group has
+///   no second group to even out, so the growth target is the full
+///   window — the "宽度利用不足" half of #829: the packed search alone
+///   left up to a fifth of the terminal blank (measured 99 of 120 on
+///   the issue's 21-entry fixture) while a single long cluster held
+///   the column count down. A single-column layout keeps its width:
+///   growth there only pads past the last cell, which the renderer
+///   trims anyway.
 pub(crate) fn packed_column_layout(
     widths: &[usize],
     terminal_columns: usize,
 ) -> (usize, usize, Vec<usize>) {
-    let (columns, rows, col_widths) = packed_layout_uncapped(widths, terminal_columns);
-    let lone_overwide =
-        widths.len() == 1 && col_widths.first().copied().unwrap_or(0) > terminal_columns;
-    if columns >= 2 || (widths.len() <= 1 && !lone_overwide) {
-        return (columns, rows, col_widths);
+    if widths.len() >= 2 {
+        let quarter_cap = (terminal_columns / 4).max(20).min(terminal_columns.max(1));
+        let capped: Vec<usize> = widths
+            .iter()
+            .map(|width| (*width).min(quarter_cap))
+            .collect();
+        let (columns, rows, col_widths) = packed_layout_uncapped(&capped, terminal_columns);
+        if columns >= 2 {
+            return fill_available_width(columns, rows, col_widths, terminal_columns);
+        }
+        let cap = ((terminal_columns.saturating_sub(GNU_COLUMN_GUTTER)) / 2).max(1);
+        let capped: Vec<usize> = widths.iter().map(|width| (*width).min(cap)).collect();
+        let (columns, rows, col_widths) = packed_layout_uncapped(&capped, terminal_columns);
+        return fill_available_width(columns, rows, col_widths, terminal_columns);
     }
-    let cap = if widths.len() <= 1 {
-        terminal_columns.max(1)
-    } else {
-        ((terminal_columns.saturating_sub(GNU_COLUMN_GUTTER)) / 2).max(1)
-    };
-    let capped: Vec<usize> = widths.iter().map(|width| (*width).min(cap)).collect();
-    packed_layout_uncapped(&capped, terminal_columns)
+    let (columns, rows, col_widths) = packed_layout_uncapped(widths, terminal_columns);
+    let lone_overwide = col_widths.first().copied().unwrap_or(0) > terminal_columns;
+    if !lone_overwide {
+        return fill_available_width(columns, rows, col_widths, terminal_columns);
+    }
+    let capped: Vec<usize> = widths
+        .iter()
+        .map(|width| (*width).min(terminal_columns.max(1)))
+        .collect();
+    let (columns, rows, col_widths) = packed_layout_uncapped(&capped, terminal_columns);
+    fill_available_width(columns, rows, col_widths, terminal_columns)
 }
 
-/// The packed search over the widths exactly as given: the largest
-/// column count whose per-column maxima plus gutters fit the
-/// terminal, at least one column.
+/// Grow the packed column widths so the painted grid fills the
+/// terminal window (niubash#829; zsh's leftover-distribution step is
+/// `compresult.c:1880-1886`). The growth lands in the inter-column
+/// gutters — cells stay left-anchored in their fields, nothing new is
+/// truncated (widths only grow), and the sum plus gutters never
+/// exceeds the terminal.
+fn fill_available_width(
+    columns: usize,
+    rows: usize,
+    mut col_widths: Vec<usize>,
+    terminal_columns: usize,
+) -> (usize, usize, Vec<usize>) {
+    if columns <= 1 || col_widths.is_empty() {
+        return (columns, rows, col_widths);
+    }
+    let used = col_widths.iter().sum::<usize>() + GNU_COLUMN_GUTTER * columns.saturating_sub(1);
+    let slack = terminal_columns.saturating_sub(used);
+    if slack == 0 {
+        return (columns, rows, col_widths);
+    }
+    let even = slack / columns;
+    let remainder = slack % columns;
+    for (index, width) in col_widths.iter_mut().enumerate() {
+        *width += even + usize::from(index < remainder);
+    }
+    (columns, rows, col_widths)
+}
+
+/// The packed search over the widths exactly as given: the densest
+/// row depth whose per-column maxima plus gutters fit the terminal,
+/// at least one column. Searched by ROW depth (shallow first) rather
+/// than by column count so no layout ever carries an empty trailing
+/// column: at depth `rows` exactly `ceil(count / rows)` columns hold
+/// data, matching zsh's fill (`compresult.c:1724-1760` fills `tcols`
+/// columns `tlines` deep and shrinks `tcols` to the columns it used).
 fn packed_layout_uncapped(widths: &[usize], terminal_columns: usize) -> (usize, usize, Vec<usize>) {
     let count = widths.len().max(1);
-    // More columns than the terminal has cells could never fit; the
-    // gutter alone costs one cell per extra column.
-    let n_max = count.min(terminal_columns.max(1));
-    for n in (1..=n_max).rev() {
-        let rows = count.div_ceil(n);
-        let mut col_widths = vec![0usize; n];
+    for rows in 1..=count {
+        let columns = count.div_ceil(rows);
+        let mut col_widths = vec![0usize; columns];
         for (index, width) in widths.iter().enumerate() {
             let col = index / rows;
             col_widths[col] = col_widths[col].max(*width);
         }
         let total: usize =
-            col_widths.iter().sum::<usize>() + GNU_COLUMN_GUTTER * n.saturating_sub(1);
+            col_widths.iter().sum::<usize>() + GNU_COLUMN_GUTTER * columns.saturating_sub(1);
         if total <= terminal_columns {
-            return (n, rows, col_widths);
+            return (columns, rows, col_widths);
         }
     }
     // Even one column does not fit (a name wider than the terminal):
@@ -400,28 +471,54 @@ pub(crate) fn truncate_display(text: &str, plain_width: usize, cap: usize) -> St
 /// niubash#741: same column-major render as [`render_list`], on the
 /// packed layout — each column pads to ITS OWN widest entry. Cells
 /// wider than their painted column (the capped layout's overlong
-/// entries) are truncated to the column width; the truncation runs
-/// against the column the cell is actually painted in, which under
-/// [`render_grid`]'s clipped-row refill is not always its layout
-/// column.
+/// entries) are truncated to the column width. The unscrolled
+/// (`top_row = 0`) window of [`render_list_packed_scrolled`]; kept for
+/// the layout tests, which pin the full grid.
+#[cfg(test)]
 pub(crate) fn render_list_packed(
     values: &[&str],
     widths: &[usize],
     terminal_columns: usize,
     available_lines: u16,
 ) -> String {
+    render_list_packed_scrolled(values, widths, terminal_columns, available_lines, 0)
+}
+
+/// niubash#829: the packed grid rendered through a scroll window.
+///
+/// zsh complist never re-lays the grid out to the visible height — it
+/// keeps the full logical grid (`mlines` rows) and paints the window
+/// `[mlbeg, mlend)` of it (`complist.c:1048 dolist`,
+/// `complist.c:252 mlend = mlbeg + lines`), scrolling `mlbeg` so the
+/// selected line stays on screen. The pre-#829 renderer instead
+/// REFILLED the grid at `available_lines` rows when the layout was
+/// deeper than the screen, which both moved every entry's cell and
+/// silently dropped every entry past `columns * available_lines` —
+/// the measured "highlight vanishes past index ~290 on a 29-line
+/// window" of the 360-entry probe. Here `layout_rows` stays the full
+/// depth; rows `[top_row, top_row + available_lines)` of the full
+/// grid are painted, cells truncate against their layout column, and
+/// the caller (the menu) owns scrolling `top_row` after the zsh rule.
+pub(crate) fn render_list_packed_scrolled(
+    values: &[&str],
+    widths: &[usize],
+    terminal_columns: usize,
+    available_lines: u16,
+    top_row: usize,
+) -> String {
     if values.is_empty() {
         return String::new();
     }
-    let (columns, rows, col_widths) = packed_column_layout(widths, terminal_columns);
+    let (columns, layout_rows, col_widths) = packed_column_layout(widths, terminal_columns);
     let fields: Vec<usize> = col_widths
         .iter()
         .map(|w| (*w).max(1) + GNU_COLUMN_GUTTER)
         .collect();
     debug_assert_eq!(fields.len(), columns);
-    let painted_rows = rows.min(available_lines.max(1) as usize).max(1);
-    let last_column = columns - 1;
-    let column_of = |index: usize| (index / painted_rows).min(last_column);
+    let visible_rows = layout_rows.min(available_lines.max(1) as usize).max(1);
+    let top = top_row.min(layout_rows.saturating_sub(visible_rows));
+    let last_column = columns.saturating_sub(1);
+    let column_of = |index: usize| (index / layout_rows.max(1)).min(last_column);
     let truncated: Vec<String> = values
         .iter()
         .enumerate()
@@ -439,18 +536,82 @@ pub(crate) fn render_list_packed(
         .map(|(index, width)| (*width).min(col_widths[column_of(index)]))
         .collect();
     let truncated_refs: Vec<&str> = truncated.iter().map(String::as_str).collect();
-    render_grid(
+    render_grid_window(
         &truncated_refs,
         &effective_widths,
         &fields,
-        rows,
-        available_lines,
+        layout_rows,
+        top,
+        visible_rows,
     )
 }
 
-/// Shared grid renderer: `fields[col]` is column `col`'s field width
-/// (entry width + gutter). `rows` is the unclipped layout depth; the
-/// emitted grid is clipped to `available_lines` rows.
+/// Paint the slice `[top, top + visible)` of a `layout_rows`-deep
+/// column-major grid: the window renderer zsh's `dolist` describes —
+/// the index math keeps the FULL layout (`index = col * layout_rows +
+/// row`), so a scrolled cell paints exactly where it lives in the
+/// unscrolled grid.
+fn render_grid_window(
+    values: &[&str],
+    widths: &[usize],
+    fields: &[usize],
+    layout_rows: usize,
+    top: usize,
+    visible: usize,
+) -> String {
+    let layout_rows = layout_rows.max(1);
+    let end = (top + visible).min(layout_rows);
+    let mut out = String::new();
+    for row in top..end {
+        let line = paint_grid_row(values, widths, fields, layout_rows, row);
+        out.push_str(&line);
+        if row + 1 < end {
+            out.push_str("\r\n");
+        }
+    }
+    out
+}
+
+/// One grid row: cells pad to their field, the line-end trailing
+/// spaces are trimmed. Shared by [`render_grid`] (the GNU printed
+/// list) and [`render_grid_window`] (the interactive window).
+fn paint_grid_row(
+    values: &[&str],
+    widths: &[usize],
+    fields: &[usize],
+    layout_rows: usize,
+    row: usize,
+) -> String {
+    let mut line = String::new();
+    for (col, field) in fields.iter().enumerate() {
+        let index = col * layout_rows + row;
+        if index >= values.len() {
+            continue;
+        }
+        let cell_width = widths.get(index).copied().unwrap_or(0);
+        let pad = field.saturating_sub(cell_width).max(GNU_COLUMN_GUTTER);
+        line.push_str(values[index]);
+        let last_in_row = col + 1 == fields.len() || index + 1 >= values.len();
+        if !last_in_row {
+            for _ in 0..pad {
+                line.push(' ');
+            }
+        }
+    }
+    while line.ends_with(' ') {
+        line.pop();
+    }
+    line
+}
+
+/// Shared grid renderer for the GNU printed list: `fields[col]` is
+/// column `col`'s field width (entry width + gutter). `rows` is the
+/// unclipped layout depth; the emitted grid is clipped to
+/// `available_lines` rows and REFILLED at that depth (the printed
+/// list's pinned shape — a shallow re-fill shows the leading
+/// candidates in order). The interactive grid uses
+/// [`render_grid_window`] instead: it windows the full layout
+/// (niubash#829, zsh `dolist`).
 fn render_grid(
     values: &[&str],
     widths: &[usize],
@@ -461,25 +622,7 @@ fn render_grid(
     let rows = rows.min(available_lines.max(1) as usize).max(1);
     let mut out = String::new();
     for row in 0..rows {
-        let mut line = String::new();
-        for (col, field) in fields.iter().enumerate() {
-            let index = col * rows + row;
-            if index >= values.len() {
-                continue;
-            }
-            let cell_width = widths.get(index).copied().unwrap_or(0);
-            let pad = field.saturating_sub(cell_width).max(GNU_COLUMN_GUTTER);
-            line.push_str(values[index]);
-            let last_in_row = col + 1 == fields.len() || index + 1 >= values.len();
-            if !last_in_row {
-                for _ in 0..pad {
-                    line.push(' ');
-                }
-            }
-        }
-        while line.ends_with(' ') {
-            line.pop();
-        }
+        let line = paint_grid_row(values, widths, fields, rows, row);
         out.push_str(&line);
         if row + 1 < rows {
             // CRLF, not bare LF: reedline's painter prints `menu_string`
@@ -1212,10 +1355,13 @@ mod tests {
         let (columns, rows, col_widths) = packed_column_layout(&widths, 120);
         assert!(columns >= 3, "packed layout stays multi-column: {columns}");
         assert_eq!(col_widths.len(), columns);
-        assert_eq!(
-            *col_widths.iter().max().unwrap(),
-            40,
-            "the outlier's column carries its own width"
+        // niubash#829's quarter cap: the 40-wide outlier is over a
+        // quarter of 120, so its column is capped at 30 and the cell is
+        // middle-truncated at render — an overlong entry must not pin
+        // the column count down.
+        assert!(
+            *col_widths.iter().max().unwrap() <= 30,
+            "the outlier's column is capped at a quarter of the window: {col_widths:?}"
         );
         assert_eq!(rows, 31_usize.div_ceil(columns));
 
@@ -1237,15 +1383,219 @@ mod tests {
     fn packed_layout_all_wide_set_truncates_instead_of_collapsing() {
         // Every candidate wider than half the terminal: the uncapped
         // packed geometry is one column, but niubash#741's zsh-parity
-        // ruling truncates instead of collapsing — the capped retry
-        // keeps two columns at the two-column bound (80 - 2) / 2 = 39.
+        // ruling truncates instead of collapsing. #829's quarter cap
+        // (20 at 80) seats all three truncated cells, and the width
+        // fill then grows the fields to the full window.
         // (This assertion replaces the #744-era "same floor as GNU"
         // pin, whose floor is the collapse the reopened issue
         // rejects.)
         let widths = [60usize, 62, 58];
         let (columns, _rows, col_widths) = packed_column_layout(&widths, 80);
+        assert_eq!(columns, 3);
+        assert!(col_widths.iter().all(|width| *width <= 26));
+        assert_eq!(reserved_span(&col_widths), 80);
+    }
+
+    /// The reserved span of a layout: every column's width plus the
+    /// inter-column gutters — the cells the grid occupies before the
+    /// renderer trims the trailing padding.
+    fn reserved_span(col_widths: &[usize]) -> usize {
+        col_widths.iter().sum::<usize>() + GNU_COLUMN_GUTTER * col_widths.len().saturating_sub(1)
+    }
+
+    /// zsh's default complist geometry for the same widths
+    /// (`compresult.c:1635-1637`: `g->width = glong + CM_SPACE`,
+    /// `g->cols = zterm_columns / g->width` capped at the match count)
+    /// — what the owner's zsh 5.9 captures pin (4 columns, 23-wide
+    /// fields, 92 reserved cells at 100; 2 columns at 60).
+    fn zsh_uniform_span(widths: &[usize], terminal: usize) -> (usize, usize) {
+        let longest = widths.iter().copied().max().unwrap_or(0);
+        let field = longest.max(1) + GNU_COLUMN_GUTTER;
+        let columns = (terminal / field).max(1).min(widths.len().max(1));
+        (columns, columns * field - GNU_COLUMN_GUTTER)
+    }
+
+    /// The issue #829 fixture widths in the completer's painted order
+    /// (directories first, then files), as the PTY matrix measures
+    /// them: b-dir/ c1dir/ c2longdir/ then the `a*` files sorted.
+    fn issue829_mixed_widths() -> Vec<usize> {
+        [
+            6, 6, 9, 2, 3, 4, 5, 2, 2, 3, 4, 5, 6, 8, 9, 2, 14, 12, 21, 3, 7,
+        ]
+        .to_vec()
+    }
+
+    #[test]
+    fn issue829_no_degenerate_empty_columns() {
+        // The pre-fix column-count search returned layouts with empty
+        // trailing columns (21 entries at 2 rows internally laid out 18
+        // columns, 7 empty): the painted tokens were the dense layout's
+        // but the search charged gutters for phantoms. Now every column
+        // holds data: columns == ceil(count / rows) for the returned
+        // depth.
+        let widths = issue829_mixed_widths();
+        let (columns, rows, col_widths) = packed_column_layout(&widths, 120);
+        assert_eq!(columns, 21_usize.div_ceil(rows), "no empty columns");
+        assert!(columns >= 2);
+        assert!(col_widths.iter().all(|width| *width > 0));
+    }
+
+    #[test]
+    fn issue829_packed_layout_fills_the_available_width() {
+        // The width under-utilization half of #829: the packed search
+        // stopped at 99 of 120 cells on this fixture (zsh's uniform
+        // layout reserves 113). The leftover is now distributed into
+        // the column widths, zsh's own leftover step being
+        // compresult.c:1880-1886.
+        let widths = issue829_mixed_widths();
+        for terminal in [60usize, 100, 120] {
+            let (columns, _rows, col_widths) = packed_column_layout(&widths, terminal);
+            let (zsh_columns, zsh_span) = zsh_uniform_span(&widths, terminal);
+            assert!(
+                columns >= zsh_columns,
+                "columns >= zsh at {terminal}: {columns} < {zsh_columns}"
+            );
+            assert!(
+                reserved_span(&col_widths) >= zsh_span,
+                "reserved span >= zsh at {terminal}: {} < {zsh_span}",
+                reserved_span(&col_widths)
+            );
+        }
+        // A multi-column layout fills the window exactly.
+        let (columns, _rows, col_widths) = packed_column_layout(&widths, 120);
+        assert!(columns >= 2);
+        assert_eq!(reserved_span(&col_widths), 120);
+    }
+
+    #[test]
+    fn issue829_long_cluster_does_not_drag_the_grid_back_to_two_skinny_columns() {
+        // The owner's home-directory shape: a cluster of long
+        // registry-log names among short dotfiles/dirs. The pre-fix
+        // packed layout landed at 2 columns using 61 of 100 cells at
+        // 100 columns. zsh's uniform rule reserves
+        // cols*(longest+2)-2; the packed layout must keep at least
+        // zsh's column count AND fill the window.
+        let shorts: Vec<usize> = [
+            6, 6, 2, 2, 2, 2, 2, 2, 2, 2, 4, 5, 8, 8, 8, 3, 9, 10, 4, 8, 4,
+        ]
+        .to_vec();
+        let longs: Vec<usize> = [48usize, 48, 48, 34, 42, 14, 14, 39].to_vec();
+        let mut widths = shorts;
+        widths.extend(longs);
+        for terminal in [100usize, 120] {
+            let (columns, _rows, col_widths) = packed_column_layout(&widths, terminal);
+            let (zsh_columns, zsh_span) = zsh_uniform_span(&widths, terminal);
+            assert!(
+                columns >= zsh_columns,
+                "columns >= zsh at {terminal}: {columns} < {zsh_columns}"
+            );
+            assert!(
+                reserved_span(&col_widths) >= zsh_span,
+                "reserved span >= zsh at {terminal}: {} < {zsh_span}",
+                reserved_span(&col_widths)
+            );
+            assert!(columns >= 2, "never collapses below two: {columns}");
+        }
+    }
+
+    #[test]
+    fn issue829_overlong_outlier_is_capped_at_a_quarter_of_the_window() {
+        // The owner's home-dir shape (niubash#829, second ruling): 160
+        // ordinary names plus a cluster of registry-log outliers up to
+        // 94 cells wide. At 200 columns the cap is 50 — the layout must
+        // be the same set's layout with every width pre-capped at 50,
+        // and the outliers must not hold the grid at two columns.
+        let mut widths: Vec<usize> = (0..160).map(|i| 3 + (i * 7) % 18).collect();
+        widths.extend([94usize, 94, 68, 68, 68, 60, 58, 57]);
+        let (columns, rows, col_widths) = packed_column_layout(&widths, 200);
+        assert!(
+            columns >= 6,
+            "one 94-wide outlier cannot hold a 200-cell window at 2 columns: {columns}"
+        );
+        let capped50: Vec<usize> = widths.iter().map(|w| (*w).min(50)).collect();
+        assert_eq!(
+            packed_column_layout(&capped50, 200),
+            (columns, rows, col_widths),
+            "every width is capped at a quarter of the window (50 at 200)"
+        );
+
+        // At 120 the quarter cap is 30.
+        let (columns, rows, col_widths) = packed_column_layout(&widths, 120);
+        let capped30: Vec<usize> = widths.iter().map(|w| (*w).min(30)).collect();
+        assert_eq!(
+            packed_column_layout(&capped30, 120),
+            (columns, rows, col_widths),
+            "every width is capped at a quarter of the window (30 at 120)"
+        );
+
+        // Rendered: overlong cells are cut in the middle, and no
+        // painted line exceeds the window.
+        let values: Vec<String> = widths
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let mut s = format!("{i:03}");
+                while s.len() < *w {
+                    s.push('x');
+                }
+                s
+            })
+            .collect();
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let rendered = render_list_packed(&refs, &widths, 200, 50);
+        assert!(
+            rendered.contains('…'),
+            "overlong cells are marked truncated:\n{rendered}"
+        );
+        for line in rendered.split("\r\n") {
+            assert!(
+                visible_width(line) <= 200,
+                "rendered line fits 200 columns: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue829_narrow_window_still_fits_two_capped_columns() {
+        // W=30: the quarter cap (20) cannot seat two 25-wide entries
+        // (20 + 20 + gutter > 30), so the two-column fallback cap
+        // (30 - 2) / 2 = 14 takes over and both cells truncate.
+        let (columns, _rows, col_widths) = packed_column_layout(&[25, 25], 30);
         assert_eq!(columns, 2);
-        assert!(col_widths.iter().all(|width| *width <= 39));
+        assert!(col_widths.iter().all(|width| *width <= 14));
+    }
+
+    #[test]
+    fn issue829_scrolled_window_slices_the_full_layout() {
+        // The scroll window renders rows [top, top+visible) of the FULL
+        // layout — cells keep their unscrolled positions (zsh
+        // `dolist`: complist.c:1048), never a re-laid shallow grid.
+        let values: Vec<String> = (0..8).map(|i| format!("v{i}")).collect();
+        let widths = vec![2usize; 8];
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        // 4 columns x 2 rows at 14 cells (exact fit: no width fill).
+        let (columns, rows, _) = packed_column_layout(&widths, 14);
+        assert_eq!((columns, rows), (4, 2));
+        // Top of the layout, one visible row.
+        assert_eq!(
+            render_list_packed_scrolled(&refs, &widths, 14, 1, 0),
+            "v0  v2  v4  v6"
+        );
+        // Scrolled one row down: the SAME columns, second row.
+        assert_eq!(
+            render_list_packed_scrolled(&refs, &widths, 14, 1, 1),
+            "v1  v3  v5  v7"
+        );
+        // A top past the layout clamps to the last window.
+        assert_eq!(
+            render_list_packed_scrolled(&refs, &widths, 14, 1, 9),
+            "v1  v3  v5  v7"
+        );
+        // Two visible rows: the whole grid, unscrolled bytes.
+        assert_eq!(
+            render_list_packed_scrolled(&refs, &widths, 14, 2, 0),
+            "v0  v2  v4  v6\r\nv1  v3  v5  v7"
+        );
     }
 
     #[test]
@@ -1406,8 +1756,11 @@ mod tests {
         }
         // Middle truncation keeps the tail of each display value —
         // the file-name part after the shared prefix — on screen.
+        // (#829's quarter cap cuts deeper than the old two-column
+        // bound, so the pin uses a short-name cell whose suffix still
+        // survives; a mid-width marker like "n089" falls into the cut.)
         assert!(
-            rendered.contains("n089"),
+            rendered.contains("n088"),
             "a truncated cell still shows its distinguishing tail:\n{rendered}"
         );
     }
