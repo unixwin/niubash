@@ -52,8 +52,30 @@ const PASTE_CHUNK_GAP: Duration = Duration::from_millis(50);
 /// Paste-chunk detection is a Windows-console-path replacement for bracketed
 /// paste; on Unix the terminal wraps pastes in ESC[200~/ESC[201~ and
 /// crossterm delivers one `Event::Paste` per chunk (niubash#234), so no
-/// heuristic is wanted there.
-const PASTE_CHUNK_DETECTION: bool = cfg!(windows);
+/// heuristic is wanted there — EXCEPT on terminals that cannot do
+/// bracketed paste at all (niubash#852): with a dumb-class `TERM`
+/// (old `screen`, serial consoles, `TERM=dumb`) the markers never
+/// arrive, the paste lands as ordinary key events, and every pasted
+/// newline executes its line — the exact hazard the Windows
+/// heuristic exists to prevent. Those terminals get the same
+/// chunk heuristic as a fallback.
+fn paste_chunk_detection() -> bool {
+    cfg!(windows) || term_is_dumb_class(std::env::var("TERM").ok().as_deref())
+}
+
+/// The dumb terminal class for the paste fallback (niubash#852):
+/// `TERM` values whose terminfo carries no bracketed-paste support
+/// worth trusting. Deliberately narrow — `dumb` and `unknown` (and
+/// their `-` suffixed variants); an unset `TERM` does NOT qualify
+/// (a merely unconfigured modern terminal keeps the bracketed-paste
+/// path, unchanged from before).
+fn term_is_dumb_class(term: Option<&str>) -> bool {
+    let Some(term) = term else {
+        return false;
+    };
+    let term = term.trim().to_ascii_lowercase();
+    term == "dumb" || term == "unknown" || term.starts_with("dumb-") || term.starts_with("unknown-")
+}
 
 /// Budget for the paste-signature lookahead at a bare Enter (see
 /// [`PasteChunkEditMode`]). Two machine-fed shapes exist on this path:
@@ -1860,7 +1882,8 @@ fn build_edit_mode(
 /// Every other event is delegated unchanged to the wrapped
 /// [`EditMode`](Emacs)/[`EditMode`](Vi), so keybindings, widgets and the
 /// vi/emacs state machines behave identically. Only the Windows console
-/// path enables the rewrite ([`PASTE_CHUNK_DETECTION`]); Unix keeps the
+/// path (and dumb-class Unix terminals, niubash#852) enable the rewrite
+/// ([`paste_chunk_detection`]); capable Unix terminals keep the
 /// real bracketed paste of niubash#234, whose `Event::Paste` never emits a
 /// bare `Enter` and is untouched by this logic. The Ctrl+V
 /// (`EditCommand::PasteSystem`) path never produces Enter events either, so
@@ -2672,10 +2695,11 @@ impl EditMode for PasteChunkEditMode {
 impl PasteChunkEditMode {
     /// Translate one raw event through the paste-chunk state machine.
     fn translate_event(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
-        if !PASTE_CHUNK_DETECTION {
-            // Unix: bracketed paste (niubash#234) delivers `Event::Paste`
-            // chunks; the arrival heuristic is a Windows-console fallback
-            // only and must never rewrite Unix input.
+        if !paste_chunk_detection() {
+            // Capable Unix terminals: bracketed paste (niubash#234)
+            // delivers `Event::Paste` chunks; the arrival heuristic is
+            // a fallback (Windows console, dumb-class terminals) and
+            // must never rewrite their input.
             return self.delegate(raw);
         }
         // Key releases carry no text and no submit; everything else goes
@@ -8501,6 +8525,23 @@ mod tests {
         }
     }
 
+    /// niubash#852: the paste-chunk fallback arms on dumb-class
+    /// terminals (no bracketed paste: a pasted newline would execute
+    /// its line-by-line), and ONLY there — capable terminals and an
+    /// unset TERM keep the bracketed-paste path untouched.
+    #[test]
+    fn issue852_dumb_term_arms_the_paste_chunk_fallback() {
+        assert!(term_is_dumb_class(Some("dumb")));
+        assert!(term_is_dumb_class(Some("DUMB")));
+        assert!(term_is_dumb_class(Some("unknown")));
+        assert!(term_is_dumb_class(Some("dumb-color")));
+        assert!(!term_is_dumb_class(Some("xterm-256color")));
+        assert!(!term_is_dumb_class(Some("screen")));
+        assert!(!term_is_dumb_class(Some("linux")));
+        assert!(!term_is_dumb_class(Some("")));
+        assert!(!term_is_dumb_class(None));
+    }
+
     #[test]
     fn zero_keyseq_timeout_waits_forever() {
         let inner = Emacs::new(default_emacs_keybindings());
@@ -9283,11 +9324,13 @@ mod tests {
     // ---- PasteChunkEditMode (Windows paste-chunk detection, niubash#202/#284) ----
     //
     // The detection layer is compiled everywhere but armed only when
-    // `PASTE_CHUNK_DETECTION` is true (cfg!(windows)); on Unix the editor
-    // uses bracketed paste and `translate_event` delegates untouched. Tests
-    // that pin the rewrite state machine are therefore Windows-only
-    // (`#[cfg(windows)]`); the cross-platform wrapper/menu and console-record
-    // mapping tests below stay runnable on every host.
+    // `paste_chunk_detection()` is true (Windows, or a dumb-class
+    // `TERM` on Unix per niubash#852); on capable Unix terminals the
+    // editor uses bracketed paste and `translate_event` delegates
+    // untouched. Tests that pin the rewrite state machine are
+    // therefore Windows-only (`#[cfg(windows)]`); the cross-platform
+    // wrapper/menu and console-record mapping tests below stay
+    // runnable on every host.
 
     fn paste_key(
         code: crossterm29::event::KeyCode,

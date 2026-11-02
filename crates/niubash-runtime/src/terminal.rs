@@ -37,6 +37,50 @@ pub fn terminal_columns() -> u16 {
 pub fn terminal_size() -> Option<(u16, u16)> {
     crossterm::terminal::size().ok()
 }
+
+/// The fallback dimensions layout code uses when a terminal size is
+/// unavailable or reports a zero dimension.
+pub const FALLBACK_COLUMNS: u16 = 80;
+pub const FALLBACK_ROWS: u16 = 24;
+
+/// Resolve a raw terminal-size query into dimensions layout code can
+/// trust (niubash#852). A successful query can still report a real
+/// `0` (a console mid-reconfigure, a pty with no winsize set): the
+/// old `unwrap_or((80, 24))` at the TUI/menu call sites only replaced
+/// a FAILED query, so a zero dimension flowed into layout math that
+/// then painted past the edge. Like `refresh_winsize_variables`
+/// (which refuses non-positive dimensions outright), a zero here is
+/// not a size — each zero dimension falls back independently, and a
+/// failed query falls back as a pair.
+pub fn sane_terminal_size(size: Option<(u16, u16)>) -> (u16, u16) {
+    match size {
+        Some((columns, rows)) => (
+            if columns > 0 {
+                columns
+            } else {
+                FALLBACK_COLUMNS
+            },
+            if rows > 0 { rows } else { FALLBACK_ROWS },
+        ),
+        None => (FALLBACK_COLUMNS, FALLBACK_ROWS),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// niubash#852: zero dimensions must not reach layout math, and
+    /// a real dimension must survive untouched.
+    #[test]
+    fn issue852_sane_terminal_size_guards_zero_dimensions() {
+        assert_eq!(sane_terminal_size(Some((120, 40))), (120, 40));
+        assert_eq!(sane_terminal_size(Some((0, 40))), (80, 40));
+        assert_eq!(sane_terminal_size(Some((120, 0))), (120, 24));
+        assert_eq!(sane_terminal_size(Some((0, 0))), (80, 24));
+        assert_eq!(sane_terminal_size(None), (80, 24));
+    }
+}
 #[cfg(windows)]
 mod platform {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;

@@ -484,6 +484,25 @@ pub(crate) fn read_status_call_count(worktree: &Path) -> usize {
 /// One read-only `git status` for the prompt, with every isolation rule from
 /// the module docs applied. Returns the branch name (or detached short SHA)
 /// plus whether anything is dirty.
+/// niubash#852: the scratch-file failure diagnostic for
+/// [`read_status`] — emitted at most once per process, because the
+/// prompt refresh would otherwise repeat it on every prompt. A
+/// scratch that cannot be created or re-opened means the git
+/// segment is missing for an environmental reason; that must not be
+/// indistinguishable from a healthy empty segment.
+static SCRATCH_FAILURE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_scratch_failure_once(action: &str, scratch: &Path, err: &std::io::Error) {
+    if !SCRATCH_FAILURE_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log::warn!(
+            "git prompt segment: could not {action} the status scratch file {}: {err}; \
+             the segment will stay empty until the scratch directory is usable",
+            scratch.display()
+        );
+    }
+}
+
 fn read_status(worktree: &Path) -> Option<(String, bool)> {
     #[cfg(test)]
     {
@@ -533,7 +552,14 @@ fn read_status(worktree: &Path) -> Option<(String, bool)> {
     // no window, which would put the cost straight back on the default path.
     let sink = match std::fs::File::create(&scratch) {
         Ok(file) => file,
-        Err(_) => return None,
+        Err(err) => {
+            // niubash#852: an unusable scratch file is a broken
+            // environment, not a healthy empty segment — say so once
+            // instead of returning the same silent None a clean
+            // non-repository read produces.
+            warn_scratch_failure_once("create", &scratch, &err);
+            return None;
+        }
     };
     command.stdout(Stdio::from(sink));
     crate::console_guard::suppress_orphan_console(&mut command);
@@ -558,8 +584,20 @@ fn read_status(worktree: &Path) -> Option<(String, bool)> {
     let bytes = {
         use std::io::Read;
         let mut buffer = Vec::with_capacity(STATUS_READ_CAP);
-        if let Ok(file) = std::fs::File::open(&scratch) {
-            let _ = file.take(STATUS_READ_CAP as u64).read_to_end(&mut buffer);
+        match std::fs::File::open(&scratch) {
+            Ok(file) => {
+                let _ = file.take(STATUS_READ_CAP as u64).read_to_end(&mut buffer);
+            }
+            Err(err) => {
+                // niubash#852: unreadable scratch masqueraded as a
+                // healthy empty segment (empty buffer → parse →
+                // None). Warn once and answer "no segment" openly;
+                // an opened-but-empty scratch still parses quietly
+                // below, which IS the healthy-empty case.
+                warn_scratch_failure_once("open", &scratch, &err);
+                let _ = std::fs::remove_file(&scratch);
+                return None;
+            }
         }
         buffer
     };
@@ -1400,5 +1438,24 @@ mod tests {
         // A capped or unexpected stream answers nothing rather than guessing.
         assert_eq!(parse_status(b""), None);
         assert_eq!(parse_status(b"warning: something\n"), None);
+    }
+
+    /// niubash#852: the scratch-failure diagnostic fires at most
+    /// once per process — the first failure latches the flag, later
+    /// failures (every prompt would hit one) stay quiet. This is
+    /// what distinguishes an unreadable scratch from a healthy empty
+    /// segment in the logs.
+    #[test]
+    fn issue852_scratch_failure_warns_once() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        warn_scratch_failure_once("open", Path::new("scratch.out"), &err);
+        assert!(
+            SCRATCH_FAILURE_WARNED.load(std::sync::atomic::Ordering::SeqCst),
+            "the first scratch failure must latch the warn-once flag"
+        );
+        // A second call is a no-op by construction (the swap inside
+        // the helper already returned true); the flag stays latched.
+        warn_scratch_failure_once("create", Path::new("scratch.out"), &err);
+        assert!(SCRATCH_FAILURE_WARNED.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
