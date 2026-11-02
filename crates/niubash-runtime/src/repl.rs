@@ -3868,7 +3868,11 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             Some(edit_event(EditCommand::CutFromLineStart))
         }
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
-        "yank" => Some(edit_event(EditCommand::PasteCutBufferBefore)),
+        // niubash#850: `Yank`, not `PasteCutBufferBefore` — the
+        // editor's YankPop gates on the last edit being Yank/YankPop,
+        // so the paste-before variant made every later yank-pop
+        // inapplicable (a dead M-y after any niu yank).
+        "yank" => Some(edit_event(EditCommand::Yank)),
         "undo" => Some(edit_event(EditCommand::Undo)),
         "suspend" => Some(ReedlineEvent::Suspend),
         "redo" => Some(edit_event(EditCommand::Redo)),
@@ -3893,7 +3897,12 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "unix-filename-rubout" | "vi-filename-rubout" => {
             Some(edit_event(EditCommand::CutFilenameLeft))
         }
-        "exchange-point-and-mark" => Some(edit_event(EditCommand::SwapCursorAndAnchor)),
+        // niubash#850: the real `ExchangePointAndMark` (rl_mark
+        // semantics, the command the editor's own C-x C-x delivers),
+        // not `SwapCursorAndAnchor` — the selection-anchor flip
+        // no-ops without a live selection, so the two paths to the
+        // same GNU function used to do different things.
+        "exchange-point-and-mark" => Some(edit_event(EditCommand::ExchangePointAndMark)),
         // GNU `set-mark` (C-@ / M-SPC): drop the mark at point.
         "set-mark" => Some(edit_event(EditCommand::SetMark)),
         // Verbatim next-key insertion (`rl_quoted_insert`).
@@ -3946,13 +3955,14 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // explicit argument — the only shape reachable without
         // readline's prefix-argument machinery): move to the line
         // start, insert the comment-begin string (GNU's default is
-        // `#`, rlconf.h `RL_COMMENT_BEGIN_DEFAULT`), and accept the
+        // `# `, rlconf.h `RL_COMMENT_BEGIN_DEFAULT` — the same string
+        // the editor's own M-# inserts, niubash#850), and accept the
         // line. A customized comment-begin is not consulted, the same
         // static-arm limit as the rest of this table (niubash#731).
         "insert-comment" => Some(ReedlineEvent::Multiple(vec![
             ReedlineEvent::Edit(vec![
                 EditCommand::MoveToLineStart { select: false },
-                EditCommand::InsertString("#".to_string()),
+                EditCommand::InsertString("# ".to_string()),
             ]),
             ReedlineEvent::Enter,
         ])),
@@ -4129,7 +4139,9 @@ fn gnu_default_chord_bindings() -> Vec<ChordBinding> {
         (')', ReedlineEvent::EndKbdMacro),
         ('e', ReedlineEvent::CallLastKbdMacro),
         ('u', edit_event(EditCommand::Undo)),
-        ('x', edit_event(EditCommand::SwapCursorAndAnchor)),
+        // niubash#850: C-x C-x is exchange-point-and-mark — the real
+        // mark command, matching the native_widget_event arm.
+        ('x', edit_event(EditCommand::ExchangePointAndMark)),
     ] {
         chords.push(ChordBinding {
             keys: vec![
@@ -7661,7 +7673,7 @@ mod tests {
     /// `CharSearch`/the yank-arg pair/`OperateAndGetNext`/the kbd-macro
     /// trio/the numeric-argument events/`ClearScrollback`/`OpenEditor` and
     /// the `EditCommand` additions (`YankPop`, `SwapWords`,
-    /// `CapitalizeWord`, `SwapCursorAndAnchor`, `RevertLine`,
+    /// `CapitalizeWord`, `ExchangePointAndMark`, `RevertLine`,
     /// `CutFilenameLeft`, `DeleteHorizontalSpace`). Every arm below must
     /// produce the real event shape, not the unknown-widget sentinel.
     #[test]
@@ -7681,7 +7693,7 @@ mod tests {
         );
         assert_eq!(
             native_widget_event("exchange-point-and-mark"),
-            Some(edit_event(EditCommand::SwapCursorAndAnchor))
+            Some(edit_event(EditCommand::ExchangePointAndMark))
         );
         assert_eq!(
             native_widget_event("revert-line"),
@@ -7769,13 +7781,13 @@ mod tests {
         );
 
         // `insert-comment` is the composite: go to line start, insert
-        // `#`, accept the line.
+        // `# `, accept the line.
         assert_eq!(
             native_widget_event("insert-comment"),
             Some(ReedlineEvent::Multiple(vec![
                 ReedlineEvent::Edit(vec![
                     EditCommand::MoveToLineStart { select: false },
-                    EditCommand::InsertString("#".to_string()),
+                    EditCommand::InsertString("# ".to_string()),
                 ]),
                 ReedlineEvent::Enter,
             ]))
@@ -7806,6 +7818,50 @@ mod tests {
             ),
         }
         assert!(gnu_name_is_delivered("menu-complete-backward"));
+    }
+
+    /// niubash#850: three host arms named the wrong editor command
+    /// for their GNU function. `yank` must be `EditCommand::Yank`
+    /// (YankPop in the editor gates on the last edit being Yank /
+    /// YankPop — `PasteCutBufferBefore` made M-y permanently
+    /// inapplicable after a niu yank); `exchange-point-and-mark`
+    /// must be the mark command the editor's own C-x C-x delivers,
+    /// not the selection-anchor flip; the `insert-comment` composite
+    /// must insert `# `, the `RL_COMMENT_BEGIN_DEFAULT` string the
+    /// editor's M-# inserts.
+    #[test]
+    fn issue850_host_mappings_match_the_editors_own_commands() {
+        assert_eq!(
+            native_widget_event("yank"),
+            Some(edit_event(EditCommand::Yank))
+        );
+        assert_eq!(
+            native_widget_event("exchange-point-and-mark"),
+            Some(edit_event(EditCommand::ExchangePointAndMark))
+        );
+        // The C-x C-x chord entry delivers the same command as the
+        // named arm — one GNU function, one command, every path.
+        let chord = gnu_default_chord_bindings()
+            .into_iter()
+            .find(|chord| {
+                chord.keys
+                    == vec![
+                        (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                        (KeyModifiers::NONE, KeyCode::Char('x')),
+                    ]
+            })
+            .expect("the C-x C-x chord entry exists");
+        assert_eq!(chord.event, edit_event(EditCommand::ExchangePointAndMark));
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![
+                    EditCommand::MoveToLineStart { select: false },
+                    EditCommand::InsertString("# ".to_string()),
+                ]),
+                ReedlineEvent::Enter,
+            ]))
+        );
     }
 
     /// niubash#731 (K3 widening): GNU readline names the editor could
@@ -7844,7 +7900,7 @@ mod tests {
             Some(ReedlineEvent::Multiple(vec![
                 ReedlineEvent::Edit(vec![
                     EditCommand::MoveToLineStart { select: false },
-                    EditCommand::InsertString("#".to_string()),
+                    EditCommand::InsertString("# ".to_string()),
                 ]),
                 ReedlineEvent::Enter,
             ]))
