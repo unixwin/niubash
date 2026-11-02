@@ -73,6 +73,40 @@ thread_local! {
     /// completer field. Installed by `build_line_editor`, main thread only.
     static COMPLETION_BRIDGE: RefCell<Option<Rc<RefCell<Shell>>>> =
         const { RefCell::new(None) };
+    /// niubash#831: scoped bridge for shells that are not wrapped in an
+    /// `Rc<RefCell<Shell>>` — the library probe surface
+    /// ([`Shell::completion_probe`]) holds a plain `&mut Shell`, so for
+    /// the duration of one probe call it lends that borrow to the
+    /// completer through this raw pointer. The pointer is installed by
+    /// [`ScopedCompletionBridge`], is only dereferenced on the installing
+    /// thread while the guard lives, and the ACTIVE flag makes a nested
+    /// bridge call (a completion triggered from inside a bridge call)
+    /// observe "no bridge" instead of aliasing the live `&mut`.
+    static SCOPED_COMPLETION_BRIDGE: RefCell<Option<*mut Shell>> =
+        const { RefCell::new(None) };
+    static SCOPED_COMPLETION_BRIDGE_ACTIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard lending a plain `&mut Shell` to the completion bridge for
+/// one scoped call (niubash#831; see `SCOPED_COMPLETION_BRIDGE`).
+struct ScopedCompletionBridge {
+    previous: Option<*mut Shell>,
+}
+
+impl ScopedCompletionBridge {
+    fn install(shell: *mut Shell) -> Self {
+        let previous = SCOPED_COMPLETION_BRIDGE.with(|cell| cell.borrow_mut().replace(shell));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedCompletionBridge {
+    fn drop(&mut self) {
+        SCOPED_COMPLETION_BRIDGE.with(|cell| {
+            *cell.borrow_mut() = self.previous;
+        });
+    }
 }
 
 /// Install the interactive shell bridge for shell-function completions
@@ -100,10 +134,25 @@ pub(crate) fn uninstall_completion_bridge() {
 /// Run `f` with mutable access to the bridged shell, or `None` when no
 /// bridge is installed on this thread.
 pub(crate) fn with_completion_bridge<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
-    let rc = COMPLETION_BRIDGE.with(|cell| cell.borrow().as_ref().cloned())?;
-    let mut shell = rc.borrow_mut();
-    let result = f(&mut shell);
-    drop(shell);
+    if let Some(rc) = COMPLETION_BRIDGE.with(|cell| cell.borrow().as_ref().cloned()) {
+        let mut shell = rc.borrow_mut();
+        let result = f(&mut shell);
+        drop(shell);
+        return Some(result);
+    }
+    // niubash#831: the scoped bridge a `Shell::completion_probe` call
+    // installed for a shell that lives outside an `Rc`. Re-entrant use
+    // is refused (returns `None`) rather than aliasing the live borrow.
+    let ptr = SCOPED_COMPLETION_BRIDGE.with(|cell| *cell.borrow())?;
+    if SCOPED_COMPLETION_BRIDGE_ACTIVE.with(|active| active.replace(true)) {
+        return None;
+    }
+    // SAFETY: the guard that installed `ptr` is alive for the whole
+    // probe call this thread is inside, the pointee outlives the guard,
+    // and the ACTIVE flag above guarantees this is the only live
+    // `&mut Shell` derived from the pointer.
+    let result = unsafe { f(&mut *ptr) };
+    SCOPED_COMPLETION_BRIDGE_ACTIVE.with(|active| active.set(false));
     Some(result)
 }
 
@@ -3418,6 +3467,20 @@ impl Shell {
         if self.one_shot {
             return;
         }
+        self.sync_completion_state();
+    }
+
+    /// niubash#831: the state sync with the one-shot early return forced
+    /// past. Probes are a completion surface in their own right — a
+    /// one-shot shell asked for candidates must snapshot the same
+    /// env/alias/function/fd/tmp state the REPL completer reads, or
+    /// variable/alias/function candidates silently vanish from exactly
+    /// the surface agents diagnose completion through.
+    fn update_completion_state_for_probe(&self) {
+        self.sync_completion_state();
+    }
+
+    fn sync_completion_state(&self) {
         // niubash#594: this runs after every interactive line, and the
         // snapshot used to re-clone the whole env map, the alias name set
         // and the function name set unconditionally — a per-line tax that
@@ -3485,9 +3548,30 @@ impl Shell {
     ///
     /// This is primarily a deterministic probe surface for binary tests and
     /// agent diagnostics; it avoids trying to drive reedline through a TTY.
-    pub fn completion_probe(&self, input: &str, cursor_pos: usize) -> Vec<String> {
-        self.update_completion_state();
-        let mut completer = NiubashCompleter::new(self.completion_state.clone());
+    ///
+    /// niubash#831: the probe mirrors the REPL sequence exactly — the
+    /// rc-declared `NIU_COMPDEFS` are (re)loaded and the completion
+    /// bridge is installed before the completer runs, and the state
+    /// sync runs even on one-shot shells. Before this, the library
+    /// probe had neither: `with_completion_bridge` returned `None`, so
+    /// `has_compspec` collapsed to `false`, the path fallback was not
+    /// suppressed, and the probe returned candidates exactly where the
+    /// REPL showed zero (the surface mismatch that made a probe "work"
+    /// while the REPL was broken during the #828 diagnosis). The CLI
+    /// verb (`niu --completion-probe`) already mirrored the REPL by
+    /// hand; the library surface now carries the same contract itself.
+    pub fn completion_probe(&mut self, input: &str, cursor_pos: usize) -> Vec<String> {
+        self.load_user_compdefs();
+        self.update_completion_state_for_probe();
+        let state = self.completion_state.clone();
+        // Lend this shell to the completer through the scoped bridge
+        // for the duration of the call: candidate generation re-enters
+        // the engine through the bridge (compspec gate, `Session::
+        // complete`, compdef hooks), exactly as at a live Tab. When an
+        // Rc bridge is already installed on this thread it wins inside
+        // `with_completion_bridge` and the scoped lend is inert.
+        let _bridge = ScopedCompletionBridge::install(self as *mut Shell);
+        let mut completer = NiubashCompleter::new(state);
         let cursor_pos = cursor_pos.min(input.len());
         completer
             .complete(input, cursor_pos)
@@ -10385,6 +10469,139 @@ mod invocation_name_tests {
         // Net dirs complete nothing past the guide form.
         let net = shell.completion_probe("cat /dev/tcp/", "cat /dev/tcp/".len());
         assert!(net.is_empty(), "{net:?}");
+    }
+
+    /// niubash#831: the library probe surface and the REPL completer
+    /// surface agree over a compspec matrix — same bridge, same
+    /// compdefs, same state. The `-F` leg is the #828 shape: the hook
+    /// yields an empty COMPREPLY, so both surfaces must return zero
+    /// candidates even though a matching file sits in the cwd (the
+    /// pre-fix probe had no bridge, `has_compspec` collapsed to false,
+    /// and the path fallback served the file the REPL suppressed).
+    #[test]
+    fn issue831_completion_probe_matches_repl_completer() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use super::{install_completion_bridge, uninstall_completion_bridge, NiubashCompleter};
+
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "niubash-issue831-parity-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("alpine.txt"), "x").unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        let cd = format!("cd {}", temp.to_string_lossy().replace('\\', "/"));
+        shell.execute_interactive_line(&cd).unwrap();
+        shell
+            .execute_script(
+                r#"
+complete -W 'alpha beta gamma' t831word
+t831dyn() { COMPREPLY=(); }
+complete -F t831dyn t831dyn
+t831fn() { NIU_COMP_RESULT="compdef-one"; }
+NIU_COMPDEFS="t831def:t831fn"
+T831_PROBE_VAR=hello
+"#,
+            )
+            .unwrap();
+        // The REPL loads the rc-declared compdefs before the editor
+        // runs; mirror that for the REPL surface. The probe surface
+        // must load them itself (that is the #831 fix), so the probe
+        // calls below deliberately do NOT repeat this call first —
+        // they run after the shell is taken back out of the Rc, with
+        // `compdefs` reset to prove the probe reloads them.
+        shell.load_user_compdefs();
+
+        let shell = Rc::new(RefCell::new(shell));
+        install_completion_bridge(&shell);
+        shell.borrow().update_completion_state();
+        let repl_values = |input: &str| -> Vec<String> {
+            let mut completer = NiubashCompleter::new(shell.borrow().completion_state.clone());
+            completer
+                .complete(input, input.len())
+                .into_iter()
+                .map(|suggestion| suggestion.value)
+                .collect()
+        };
+        let matrix = [
+            "t831word a",
+            "t831dyn al",
+            "t831def ",
+            "echo $T831_PROBE_V",
+            "t831wo",
+        ];
+        let repl: Vec<Vec<String>> = matrix.iter().map(|input| repl_values(input)).collect();
+        uninstall_completion_bridge();
+        let mut shell = Rc::try_unwrap(shell)
+            .unwrap_or_else(|_| panic!("bridge uninstalled; shell Rc must be unique"))
+            .into_inner();
+        // Prove the probe (re)loads compdefs itself: without the fix
+        // this reset leaves the compdef leg with no function to run.
+        shell.compdefs = Vec::new();
+
+        for (input, expected) in matrix.iter().zip(repl.iter()) {
+            let probed = shell.completion_probe(input, input.len());
+            assert_eq!(
+                &probed, expected,
+                "probe and REPL completer diverge for {input:?}"
+            );
+        }
+        // The #828 shape, asserted directly: empty hook, matching file
+        // in cwd — zero candidates, no path fallback.
+        assert!(
+            shell
+                .completion_probe("t831dyn al", "t831dyn al".len())
+                .is_empty(),
+            "an empty -F compspec must suppress the path fallback in the probe too"
+        );
+        assert!(repl[1].is_empty(), "REPL surface agrees: {repl:?}");
+        // And the compdef leg really served through the probe's own
+        // compdef load.
+        assert!(
+            shell
+                .completion_probe("t831def ", "t831def ".len())
+                .contains(&"compdef-one".to_string()),
+            "probe must serve compdef candidates without a manual load_user_compdefs"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// niubash#831: on a one-shot shell the probe forces the state
+    /// sync past the `one_shot` early return — variable and function
+    /// candidates exist on the probe surface even though no REPL will
+    /// ever read the state.
+    #[test]
+    fn issue831_one_shot_probe_snapshots_state() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = crate::Shell::new_one_shot().unwrap();
+        assert!(shell.one_shot);
+        shell
+            .execute_script("T831_OS_VAR=hello\nt831osfn() { true; }\n")
+            .unwrap();
+        assert!(
+            shell
+                .completion_probe("echo $T831_OS_V", "echo $T831_OS_V".len())
+                .contains(&"$T831_OS_VAR".to_string()),
+            "one-shot probe must snapshot env vars"
+        );
+        assert!(
+            shell
+                .completion_probe("t831osf", "t831osf".len())
+                .contains(&"t831osfn".to_string()),
+            "one-shot probe must snapshot functions"
+        );
     }
 
     /// niubash#627 G2 end-to-end (Windows, where /tmp is the enclave
