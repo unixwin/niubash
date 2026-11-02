@@ -270,15 +270,16 @@ impl NiubashCompleter {
 
     /// Update state
     pub fn update_state(&self, current_dir: PathBuf, env_vars: HashMap<String, String>) {
-        if let Ok(mut state) = self.state.lock() {
-            state.current_dir = current_dir;
-            state.env_vars = env_vars;
-            // niubash#594: this write bypasses the fingerprint gate, so
-            // invalidate it — the next `update_completion_state` rebuilds
-            // the env snapshot from the engine instead of trusting a
-            // fingerprint that no longer describes `env_vars`.
-            state.snapshot_env_fingerprint = 0;
-        }
+        // niubash#833: recover a poisoned state lock instead of
+        // silently dropping the update.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current_dir = current_dir;
+        state.env_vars = env_vars;
+        // niubash#594: this write bypasses the fingerprint gate, so
+        // invalidate it — the next `update_completion_state` rebuilds
+        // the env snapshot from the engine instead of trusting a
+        // fingerprint that no longer describes `env_vars`.
+        state.snapshot_env_fingerprint = 0;
     }
 
     /// Return plain suggestions for internal probes and tests.
@@ -298,21 +299,21 @@ impl NiubashCompleter {
         input: &str,
         cursor_pos: usize,
     ) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, dir_cache) =
-            if let Ok(state) = self.state.lock() {
-                (
-                    state.current_dir.clone(),
-                    state.env_vars.clone(),
-                    state.aliases.clone(),
-                    state.functions.clone(),
-                    state.open_fds.clone(),
-                    state.tmp_base.clone(),
-                    state.behavior,
-                    state.dir_cache.clone(),
-                )
-            } else {
-                return Vec::new();
-            };
+        // niubash#833: a poisoned state lock must not zero out every
+        // candidate — recover the guard and read the snapshot.
+        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, dir_cache) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state.current_dir.clone(),
+                state.env_vars.clone(),
+                state.aliases.clone(),
+                state.functions.clone(),
+                state.open_fds.clone(),
+                state.tmp_base.clone(),
+                state.behavior,
+                state.dir_cache.clone(),
+            )
+        };
 
         let cursor_pos = cursor_pos.min(input.len());
         let mut context = CompletionContext::with_behavior(
@@ -408,7 +409,9 @@ impl NiubashCompleter {
             behavior,
             plugins,
             dir_cache,
-        ) = if let Ok(state) = self.state.lock() {
+        ) = {
+            // niubash#833: poison recovery, as in `complete_specific`.
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.current_dir.clone(),
                 state.env_vars.clone(),
@@ -420,8 +423,6 @@ impl NiubashCompleter {
                 state.plugins.clone(),
                 state.dir_cache.clone(),
             )
-        } else {
-            return Vec::new();
         };
 
         let mut context = CompletionContext::with_behavior(

@@ -3116,9 +3116,14 @@ impl Shell {
         if !compdef_dirs.is_empty() {
             let mut dirs = self.config_completion_dirs.clone();
             dirs.extend(compdef_dirs);
-            if let Ok(mut state) = self.completion_state.lock() {
-                state.load_completion_dirs(&dirs);
-            }
+            // niubash#833: recover from a poisoned completion_state
+            // lock instead of skipping the update — one panic while
+            // holding the lock must not freeze the snapshot forever.
+            let mut state = self
+                .completion_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.load_completion_dirs(&dirs);
         }
     }
 
@@ -3379,9 +3384,12 @@ impl Shell {
         if self.one_shot || !line_touches_command_resolution(&tokenize(text)) {
             return;
         }
-        if let Ok(mut state) = self.completion_state.lock() {
-            state.command_probe.clear();
-        }
+        // niubash#833: poison recovery, as in `update_completion_state`.
+        let mut state = self
+            .completion_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.command_probe.clear();
         // Audit item C1: the completion PATH caches share the probe's
         // blind spot — the filesystem changed while the env fingerprint
         // (PATH + PATHEXT) stayed byte-identical — so they retire on
@@ -3455,29 +3463,34 @@ impl Shell {
         let tmp_base = self.executor().resolve_shell_path("/tmp");
         let mut alias_names: Vec<String> = self.aliases.keys().cloned().collect();
         alias_names.sort_unstable();
-        if let Ok(mut state) = self.completion_state.lock() {
-            state.current_dir = self
-                .executor_pwd_host_path()
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| state.current_dir.clone());
-            if state.snapshot_env_fingerprint != env_fingerprint {
-                state.env_vars = self.executor().env_vars_snapshot();
-                state.snapshot_env_fingerprint = env_fingerprint;
-            }
-            if state.snapshot_function_names != function_names {
-                state.functions = function_names.iter().cloned().collect();
-                state.snapshot_function_names = function_names;
-            }
-            if state.snapshot_alias_names != alias_names {
-                state.aliases = alias_names.iter().cloned().collect();
-                state.snapshot_alias_names = alias_names;
-            }
-            if state.open_fds != open_fds {
-                state.open_fds = open_fds;
-            }
-            if state.tmp_base != tmp_base {
-                state.tmp_base = tmp_base;
-            }
+        // niubash#833: a poisoned lock (a panic while a writer held
+        // it) must not skip this update forever — recover the guard
+        // and refresh the snapshot as usual.
+        let mut state = self
+            .completion_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.current_dir = self
+            .executor_pwd_host_path()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| state.current_dir.clone());
+        if state.snapshot_env_fingerprint != env_fingerprint {
+            state.env_vars = self.executor().env_vars_snapshot();
+            state.snapshot_env_fingerprint = env_fingerprint;
+        }
+        if state.snapshot_function_names != function_names {
+            state.functions = function_names.iter().cloned().collect();
+            state.snapshot_function_names = function_names;
+        }
+        if state.snapshot_alias_names != alias_names {
+            state.aliases = alias_names.iter().cloned().collect();
+            state.snapshot_alias_names = alias_names;
+        }
+        if state.open_fds != open_fds {
+            state.open_fds = open_fds;
+        }
+        if state.tmp_base != tmp_base {
+            state.tmp_base = tmp_base;
         }
     }
 
@@ -8017,6 +8030,60 @@ complete -F _envtooldyn_hook envtooldyn
         assert!(!shell
             .completion_probe("issue594f", "issue594f".len())
             .contains(&"issue594fn".to_string()));
+    }
+
+    #[test]
+    fn issue833_poisoned_completion_state_lock_still_updates() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        shell
+            .execute_interactive_line("ISSUE833_VAR=before")
+            .unwrap();
+        assert_eq!(
+            shell
+                .completion_state
+                .lock()
+                .unwrap()
+                .env_vars
+                .get("ISSUE833_VAR")
+                .map(String::as_str),
+            Some("before")
+        );
+
+        // Poison the completion_state lock the way a panic in a
+        // writer would: the guard drops during unwind.
+        let state = shell.completion_state.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = state.lock().unwrap();
+            panic!("issue833: deliberate completion_state poison");
+        });
+        assert!(handle.join().is_err());
+        assert!(
+            shell.completion_state.lock().is_err(),
+            "the lock must actually be poisoned for this pin to mean anything"
+        );
+
+        // Before the fix, every later update_completion_state was
+        // skipped silently and the snapshot froze at "before".
+        shell
+            .execute_interactive_line("ISSUE833_VAR=after")
+            .unwrap();
+        shell.update_completion_state();
+        let state = shell
+            .completion_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            state.env_vars.get("ISSUE833_VAR").map(String::as_str),
+            Some("after")
+        );
+        drop(state);
+        // And the completer still reads the (poisoned) snapshot.
+        assert!(shell
+            .completion_probe("$ISSUE833_VA", "$ISSUE833_VA".len())
+            .contains(&"$ISSUE833_VAR".to_string()));
     }
 
     #[test]

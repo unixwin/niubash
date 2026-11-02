@@ -733,7 +733,11 @@ impl ExternalCompletionPlugin {
             .map(|d| d.as_secs());
 
         // ── 1. In-memory cache ────────────────────────────────────────────────
-        if let Ok(mem) = self.mem_cache.lock() {
+        // niubash#833: recover a poisoned mem-cache lock instead of
+        // treating every lookup as a miss (which respawned the
+        // values_from_command subprocess on every TAB).
+        {
+            let mem = self.mem_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = mem.get(&cache_key) {
                 // Stale only when tool mtime changed
                 let stale = tool_mtime_secs
@@ -756,16 +760,18 @@ impl ExternalCompletionPlugin {
                                 "ExternalCompletionPlugin: disk cache hit {:?}",
                                 cache_file
                             );
-                            // Warm in-memory cache
-                            if let Ok(mut mem) = self.mem_cache.lock() {
-                                mem.insert(
+                            // Warm in-memory cache (niubash#833:
+                            // poison recovery, as at the lookup above)
+                            self.mem_cache
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(
                                     cache_key.clone(),
                                     MemEntry {
                                         values: disk.values.clone(),
                                         tool_mtime_secs: disk.tool_mtime_secs,
                                     },
                                 );
-                            }
                             return self.filter_values(&disk.values, context);
                         }
                         log::debug!(
@@ -835,16 +841,17 @@ impl ExternalCompletionPlugin {
             }
         }
 
-        // Update in-memory cache
-        if let Ok(mut mem) = self.mem_cache.lock() {
-            mem.insert(
+        // Update in-memory cache (niubash#833: poison recovery)
+        self.mem_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
                 cache_key,
                 MemEntry {
                     values: values.clone(),
                     tool_mtime_secs,
                 },
             );
-        }
 
         self.filter_values(&values, context)
     }
@@ -991,5 +998,111 @@ fn is_executable_file(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completion::CompletionContext;
+
+    /// niubash#833: a poisoned mem-cache lock used to read as a
+    /// permanent cache miss, so `values_from_command` respawned its
+    /// subprocess on every TAB. The recovered guard must serve the
+    /// cached values instead.
+    #[cfg(unix)]
+    #[test]
+    fn issue833_poisoned_mem_cache_does_not_respawn_dynamic_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "niu-issue833-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("counter");
+        let script = dir.join("tool.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho run >> \"{}\"\necho alpha\necho beta\n",
+                counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut plugin = ExternalCompletionPlugin::new();
+        // No disk cache: the in-memory cache is the only warm tier,
+        // so a mem miss is directly observable as a subprocess respawn.
+        plugin.cache_dir = None;
+        plugin.definitions.insert(
+            "issue833tool".to_string(),
+            CommandDef {
+                command: "issue833tool".to_string(),
+                description: None,
+                flags: vec![FlagDef {
+                    short: None,
+                    long: Some("--opt".to_string()),
+                    description: None,
+                    takes_value: true,
+                    values_source: Some(ValuesSource::Dynamic {
+                        values_from_command: DynamicCommand {
+                            cmd: script.to_string_lossy().into_owned(),
+                            args: Vec::new(),
+                            cache_ttl_secs: None,
+                        },
+                    }),
+                }],
+                subcommands: Vec::new(),
+            },
+        );
+
+        let runs = || {
+            std::fs::read_to_string(&counter)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let input = "issue833tool --opt ";
+        let context = CompletionContext::new(PathBuf::from("."), input.to_string(), input.len());
+
+        let first = plugin
+            .complete(&context)
+            .expect("dynamic values on first completion");
+        assert!(first.completions.iter().any(|v| v == "alpha"));
+        assert!(first.completions.iter().any(|v| v == "beta"));
+        assert_eq!(runs(), 1, "first completion runs the subprocess once");
+
+        let _ = plugin.complete(&context);
+        assert_eq!(runs(), 1, "second completion is a warm mem-cache hit");
+
+        // Poison the mem-cache lock the way a panic in a writer would.
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = plugin.mem_cache.lock().unwrap();
+                panic!("issue833: deliberate mem_cache poison");
+            });
+            assert!(handle.join().is_err());
+        });
+        assert!(
+            plugin.mem_cache.lock().is_err(),
+            "the lock must actually be poisoned for this pin to mean anything"
+        );
+
+        let third = plugin
+            .complete(&context)
+            .expect("dynamic values must survive mem-cache poison");
+        assert_eq!(third.completions, first.completions);
+        assert_eq!(
+            runs(),
+            1,
+            "poisoned mem cache must not respawn the subprocess per TAB"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
