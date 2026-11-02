@@ -3473,44 +3473,50 @@ fn normalize_macro_escapes(text: &str) -> String {
     if !text.contains('\\') {
         return text.to_string();
     }
-    let mut out = String::with_capacity(text.len());
+    // niubash#844: accumulate BYTES, not chars. A `\xHH` escape names a
+    // raw byte; pushing it as `byte as char` widened 0x80..=0xFF to
+    // U+0080..U+00FF, whose UTF-8 re-encoding is two bytes — so
+    // `\xc3\xa9` (the UTF-8 spelling of `é`) came out as `Ã©`
+    // mojibake. Ordinary text is UTF-8-encoded into the same byte
+    // stream and the whole output is decoded once at the end.
+    let mut out: Vec<u8> = Vec::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
-            out.push(c);
+            push_macro_char(&mut out, c);
             continue;
         }
         match chars.next() {
-            None => out.push('\\'),
+            None => push_macro_char(&mut out, '\\'),
             Some(tag @ ('C' | 'M')) if chars.peek() == Some(&'-') => {
                 chars.next(); // consume '-'
                 match chars.next() {
                     Some(key) => {
                         if tag == 'M' {
-                            out.push('\u{1b}');
-                            out.push(key);
+                            push_macro_char(&mut out, '\u{1b}');
+                            push_macro_char(&mut out, key);
                         } else {
-                            out.push(control_byte_for_letter(key));
+                            push_macro_char(&mut out, control_byte_for_letter(key));
                         }
                     }
                     None => {
-                        out.push('\\');
-                        out.push(tag);
-                        out.push('-');
+                        push_macro_char(&mut out, '\\');
+                        push_macro_char(&mut out, tag);
+                        push_macro_char(&mut out, '-');
                     }
                 }
             }
-            Some('e') => out.push('\u{1b}'),
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('a') => out.push('\u{7}'),
-            Some('b') => out.push('\u{8}'),
-            Some('d') => out.push('\u{7f}'),
-            Some('f') => out.push('\u{c}'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('v') => out.push('\u{b}'),
+            Some('e') => push_macro_char(&mut out, '\u{1b}'),
+            Some('\\') => push_macro_char(&mut out, '\\'),
+            Some('"') => push_macro_char(&mut out, '"'),
+            Some('a') => push_macro_char(&mut out, '\u{7}'),
+            Some('b') => push_macro_char(&mut out, '\u{8}'),
+            Some('d') => push_macro_char(&mut out, '\u{7f}'),
+            Some('f') => push_macro_char(&mut out, '\u{c}'),
+            Some('n') => push_macro_char(&mut out, '\n'),
+            Some('r') => push_macro_char(&mut out, '\r'),
+            Some('t') => push_macro_char(&mut out, '\t'),
+            Some('v') => push_macro_char(&mut out, '\u{b}'),
             Some('x') => {
                 // \xHH: two hex digits; fewer keeps the escape literal.
                 let hi = chars.next();
@@ -3518,27 +3524,34 @@ fn normalize_macro_escapes(text: &str) -> String {
                 match (hi, lo) {
                     (Some(h), Some(l)) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
                         let byte = u8::from_str_radix(&format!("{h}{l}"), 16).unwrap_or(0);
-                        out.push(byte as char);
+                        out.push(byte);
                     }
                     _ => {
-                        out.push('\\');
-                        out.push('x');
+                        push_macro_char(&mut out, '\\');
+                        push_macro_char(&mut out, 'x');
                         if let Some(h) = hi {
-                            out.push(h);
+                            push_macro_char(&mut out, h);
                         }
                         if let Some(l) = lo {
-                            out.push(l);
+                            push_macro_char(&mut out, l);
                         }
                     }
                 }
             }
             Some(other) => {
-                out.push('\\');
-                out.push(other);
+                push_macro_char(&mut out, '\\');
+                push_macro_char(&mut out, other);
             }
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Append one char's UTF-8 bytes to a byte-accumulating macro output
+/// (niubash#844, see [`normalize_macro_escapes`]).
+fn push_macro_char(out: &mut Vec<u8>, c: char) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 }
 
 /// The control byte a `\C-` letter names (readline translate_keyseq):
@@ -7818,6 +7831,30 @@ mod tests {
             ),
         }
         assert!(gnu_name_is_delivered("menu-complete-backward"));
+    }
+
+    /// niubash#844: `\xHH` macro escapes name raw bytes. Decoding
+    /// them as `byte as char` widened every byte >= 0x80 into a
+    /// two-byte UTF-8 sequence — mojibake in the normalized text and
+    /// in any KeySequence/insert replay built from it.
+    #[test]
+    fn issue844_hex_escapes_decode_as_bytes_not_chars() {
+        // The UTF-8 spelling of `é` survives as `é` (one char, two
+        // bytes) — the byte-as-char decode produced `Ã©` (four bytes).
+        assert_eq!(normalize_macro_escapes(r"\xc3\xa9"), "é");
+        assert_eq!(normalize_macro_escapes(r"\xc3\xa9").len(), 2);
+        // Plain text around the escapes is untouched, and a lone
+        // non-UTF-8 byte degrades through from_utf8_lossy instead of
+        // widening into U+00E9.
+        assert_eq!(normalize_macro_escapes(r"a\xc3\xa9b"), "aéb");
+        assert_eq!(normalize_macro_escapes(r"\xe9"), "\u{fffd}");
+        // ASCII escapes and the other spellings keep their meaning.
+        assert_eq!(normalize_macro_escapes(r"\x41\x42"), "AB");
+        assert_eq!(normalize_macro_escapes(r"\e"), "\u{1b}");
+        assert_eq!(normalize_macro_escapes(r"\n"), "\n");
+        // Fewer than two hex digits keeps the escape literal.
+        assert_eq!(normalize_macro_escapes(r"\xg1"), r"\xg1");
+        assert_eq!(normalize_macro_escapes(r"\x"), r"\x");
     }
 
     /// niubash#850: three host arms named the wrong editor command
