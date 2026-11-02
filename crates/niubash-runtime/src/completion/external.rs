@@ -223,10 +223,14 @@ struct MemEntry {
 /// Resolve the directory used to store dynamic completion caches.
 ///
 /// Priority:
-///   1. `WINSH_COMPLETION_CACHE_DIR` environment variable
-///   2. `~/.winsh/completions/cache`
+///   1. `NIU_COMPLETION_CACHE_DIR` environment variable
+///   2. `~/.niubash/completions/cache`
+///
+/// niubash#841: the pre-rename location is never written anymore;
+/// it stays readable through [`legacy_cache_dir`] so caches written
+/// by older builds keep working.
 fn resolve_cache_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("WINSH_COMPLETION_CACHE_DIR") {
+    if let Ok(dir) = std::env::var("NIU_COMPLETION_CACHE_DIR") {
         let p = PathBuf::from(dir);
         if !p.exists() {
             let _ = std::fs::create_dir_all(&p);
@@ -234,13 +238,27 @@ fn resolve_cache_dir() -> Option<PathBuf> {
         return Some(p);
     }
     let base = shell_home_dir()?
-        .join(".winsh")
+        .join(".niubash")
         .join("completions")
         .join("cache");
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
     Some(base)
+}
+
+/// The pre-rename cache directory (niubash#841): read-only fallback
+/// for entries the primary directory does not have. Consulted on
+/// reads, never written to, and never created.
+///
+/// Priority:
+///   1. `WINSH_COMPLETION_CACHE_DIR` environment variable
+///   2. `~/.winsh/completions/cache`
+fn legacy_cache_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("WINSH_COMPLETION_CACHE_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    shell_home_dir().map(|home| home.join(".winsh").join("completions").join("cache"))
 }
 
 /// Turn a cache key like `fd::fd` into a safe filename `fd__fd.toml`.
@@ -272,6 +290,9 @@ pub struct ExternalCompletionPlugin {
     /// Directory where disk cache files are stored.
     /// Resolved once at construction time.
     cache_dir: Option<PathBuf>,
+    /// Pre-rename cache directory (niubash#841): read-only fallback,
+    /// resolved once at construction time. Never written to.
+    legacy_cache_dir: Option<PathBuf>,
 }
 
 /// The embedded WinuxCmd completion definitions, parsed once per
@@ -358,6 +379,7 @@ impl ExternalCompletionPlugin {
             definitions: HashMap::new(),
             mem_cache: Mutex::new(HashMap::new()),
             cache_dir: resolve_cache_dir(),
+            legacy_cache_dir: legacy_cache_dir(),
         };
         plugin.load_definitions(EMBEDDED_DEFS.iter().cloned());
         plugin
@@ -712,11 +734,50 @@ impl ExternalCompletionPlugin {
         }
     }
 
+    /// Read a fresh disk-cache entry for `cache_key` from `dir`,
+    /// warming the in-memory cache on a hit. Returns the cached
+    /// values, or None on any miss (no directory, absent file,
+    /// unparsable, stale).
+    fn read_disk_cache(
+        &self,
+        dir: Option<&Path>,
+        cache_key: &str,
+        tool_path: Option<&Path>,
+    ) -> Option<Vec<String>> {
+        let cache_file = dir?.join(cache_key_to_filename(cache_key));
+        if !cache_file.exists() {
+            return None;
+        }
+        let contents = std::fs::read_to_string(&cache_file).ok()?;
+        let disk: DiskCache = toml::from_str(&contents).ok()?;
+        if disk.is_stale(tool_path) {
+            log::debug!(
+                "ExternalCompletionPlugin: disk cache stale {:?}",
+                cache_file
+            );
+            return None;
+        }
+        log::debug!("ExternalCompletionPlugin: disk cache hit {:?}", cache_file);
+        // Warm in-memory cache (niubash#833: poison recovery)
+        self.mem_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                cache_key.to_string(),
+                MemEntry {
+                    values: disk.values.clone(),
+                    tool_mtime_secs: disk.tool_mtime_secs,
+                },
+            );
+        Some(disk.values)
+    }
+
     /// Run (or use cached) dynamic sub-process to obtain candidate values.
     ///
     /// Lookup order:
     ///   1. In-memory cache (same session, already verified)
     ///   2. Disk cache file (survives restarts; validated via mtime / TTL)
+    ///   2b. Pre-rename legacy disk cache, read-only (niubash#841)
     ///   3. Sub-process execution → write disk cache → populate memory cache
     fn resolve_dynamic(
         &self,
@@ -750,37 +811,21 @@ impl ExternalCompletionPlugin {
         }
 
         // ── 2. Disk cache ─────────────────────────────────────────────────────
-        if let Some(ref cache_dir) = self.cache_dir {
-            let cache_file = cache_dir.join(cache_key_to_filename(&cache_key));
-            if cache_file.exists() {
-                if let Ok(contents) = std::fs::read_to_string(&cache_file) {
-                    if let Ok(disk) = toml::from_str::<DiskCache>(&contents) {
-                        if !disk.is_stale(tool_path.as_deref()) {
-                            log::debug!(
-                                "ExternalCompletionPlugin: disk cache hit {:?}",
-                                cache_file
-                            );
-                            // Warm in-memory cache (niubash#833:
-                            // poison recovery, as at the lookup above)
-                            self.mem_cache
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(
-                                    cache_key.clone(),
-                                    MemEntry {
-                                        values: disk.values.clone(),
-                                        tool_mtime_secs: disk.tool_mtime_secs,
-                                    },
-                                );
-                            return self.filter_values(&disk.values, context);
-                        }
-                        log::debug!(
-                            "ExternalCompletionPlugin: disk cache stale {:?}",
-                            cache_file
-                        );
-                    }
-                }
-            }
+        if let Some(values) =
+            self.read_disk_cache(self.cache_dir.as_deref(), &cache_key, tool_path.as_deref())
+        {
+            return self.filter_values(&values, context);
+        }
+        // niubash#841: read-fallback to the pre-rename cache
+        // directory. Legacy entries are served (and warmed into
+        // memory) but the legacy directory is never written again —
+        // the next subprocess refresh lands in the primary directory.
+        if let Some(values) = self.read_disk_cache(
+            self.legacy_cache_dir.as_deref(),
+            &cache_key,
+            tool_path.as_deref(),
+        ) {
+            return self.filter_values(&values, context);
         }
 
         // ── 3. Sub-process ────────────────────────────────────────────────────
@@ -1104,5 +1149,159 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "niu-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// niubash#841: the primary cache dir uses the NIU_ name and
+    /// ~/.niubash; the pre-rename WINSH_ name and ~/.winsh feed only
+    /// the read-only legacy fallback.
+    #[test]
+    fn issue841_cache_dir_resolution_uses_niu_names() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_COMPLETION_CACHE_DIR",
+            "WINSH_COMPLETION_CACHE_DIR",
+            "HOME",
+            "USERPROFILE",
+        ]);
+        let home = unique_temp_dir("issue841-home");
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("NIU_COMPLETION_CACHE_DIR");
+        std::env::remove_var("WINSH_COMPLETION_CACHE_DIR");
+
+        assert_eq!(
+            resolve_cache_dir(),
+            Some(home.join(".niubash").join("completions").join("cache"))
+        );
+        assert_eq!(
+            legacy_cache_dir(),
+            Some(home.join(".winsh").join("completions").join("cache"))
+        );
+
+        // The NIU_ variable names the primary directory.
+        let custom = home.join("custom-cache");
+        std::env::set_var("NIU_COMPLETION_CACHE_DIR", &custom);
+        assert_eq!(resolve_cache_dir(), Some(custom.clone()));
+
+        // The WINSH_ variable feeds only the legacy fallback — it
+        // must not move the primary directory back.
+        let legacy_custom = home.join("legacy-cache");
+        std::env::set_var("WINSH_COMPLETION_CACHE_DIR", &legacy_custom);
+        assert_eq!(legacy_cache_dir(), Some(legacy_custom));
+        assert_eq!(resolve_cache_dir(), Some(custom));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// niubash#841: a cache entry written by an older build into the
+    /// legacy directory is still served (no subprocess respawn), and
+    /// the legacy directory is not written in the process.
+    #[cfg(unix)]
+    #[test]
+    fn issue841_legacy_disk_cache_is_served_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("issue841-fallback");
+        let primary = root.join("primary");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        let counter = root.join("counter");
+        let script = root.join("tool.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho run >> \"{}\"\necho freshvalue\n",
+                counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cmd = script.to_string_lossy().into_owned();
+
+        // Plant a legacy disk entry for this dynamic command. The
+        // recorded tool mtime must match the script's, or the entry
+        // is (correctly) judged stale.
+        let tool_mtime_secs = std::fs::metadata(&script)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cache_key = format!("issue841tool::{cmd}");
+        let disk = DiskCache {
+            source_cmd: cmd.clone(),
+            written_secs: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            ttl_secs: 0,
+            tool_mtime_secs: Some(tool_mtime_secs),
+            values: vec!["legacyvalue".to_string()],
+        };
+        std::fs::write(
+            legacy.join(cache_key_to_filename(&cache_key)),
+            toml::to_string_pretty(&disk).unwrap(),
+        )
+        .unwrap();
+
+        let mut plugin = ExternalCompletionPlugin::new();
+        plugin.cache_dir = Some(primary.clone());
+        plugin.legacy_cache_dir = Some(legacy.clone());
+        plugin.definitions.insert(
+            "issue841tool".to_string(),
+            CommandDef {
+                command: "issue841tool".to_string(),
+                description: None,
+                flags: vec![FlagDef {
+                    short: None,
+                    long: Some("--opt".to_string()),
+                    description: None,
+                    takes_value: true,
+                    values_source: Some(ValuesSource::Dynamic {
+                        values_from_command: DynamicCommand {
+                            cmd,
+                            args: Vec::new(),
+                            cache_ttl_secs: None,
+                        },
+                    }),
+                }],
+                subcommands: Vec::new(),
+            },
+        );
+
+        let input = "issue841tool --opt ";
+        let context = CompletionContext::new(PathBuf::from("."), input.to_string(), input.len());
+        let result = plugin
+            .complete(&context)
+            .expect("the legacy disk entry must be served");
+        assert_eq!(result.completions, vec!["legacyvalue".to_string()]);
+        assert!(
+            !counter.exists(),
+            "a legacy hit must not respawn the subprocess"
+        );
+        assert!(
+            std::fs::read_dir(&primary).unwrap().next().is_none(),
+            "nothing is written anywhere on a legacy read hit"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
