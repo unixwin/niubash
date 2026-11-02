@@ -5236,15 +5236,19 @@ fn relink_bundled_shims(rest: &[String]) -> anyhow::Result<()> {
 
     if !quiet {
         println!(
-            "niu: bundled shims under {}: {} created, {} already current, {} skipped, {} failed",
+            "niu: bundled shims under {}: {} created, {} already current, {} backed up, {} skipped, {} failed",
             root.join("usr").join("bin").display(),
             report.created.len(),
             report.already_current.len(),
+            report.backed_up.len(),
             report.skipped.len(),
             report.failed.len()
         );
         for (path, reason) in &report.skipped {
             println!("  skipped {}: {reason}", path.display());
+        }
+        for backup in &report.backed_up {
+            println!("  backed up {}", backup.display());
         }
     }
     if !report.failed.is_empty() {

@@ -56,6 +56,12 @@ pub struct ShellLinkReport {
     /// a hardlink could not be created (niubash#464). Working faces, at the
     /// shim's one-extra-process cost.
     pub shimmed: Vec<PathBuf>,
+    /// Bytes displaced by a replace and kept under a durable
+    /// `<name>.bak-<yyyymmdd>` sibling instead of the transient
+    /// `.niu-old-<pid>` park (niubash#810: a standalone binary at a
+    /// bundled-shim name is user-visible state, not garbage). Filled by
+    /// the bundled-shim reconcile, never by the shell-face relink.
+    pub backed_up: Vec<PathBuf>,
     /// Names left alone, with the reason.
     pub skipped: Vec<(PathBuf, String)>,
     /// Names that could not be handled, with the error.

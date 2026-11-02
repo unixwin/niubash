@@ -158,6 +158,28 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
         writeln!(out, "  {info} command links       {WINDOWS_COMPONENT_NA}")?;
     }
 
+    // ── Advisory: bundled shim shape (niubash#810) ────────────────────────
+    // `usr\bin\awk.exe` can sit as a standalone binary where the bundled
+    // gawk component ships a winuxcmd shim — an old bundle's direct
+    // payload, or a flat `wpm install` receipt claiming the same path. The
+    // name then bypasses the forwarder's `-v BINMODE=3` argv adapter and
+    // `awk` keeps emitting CRLF while `gawk` works. Startup activation
+    // reconciles it on the next start; this row names the file and the
+    // repair for machines where the heal could not land yet (a locked
+    // file, a not-yet-restarted session).
+    if platform.checks_windows_command_layer() {
+        if let Some(exe) = crate::winuxcmd::find_winuxcmd() {
+            let root = crate::winuxcmd::installation_root(&exe);
+            for (path, why) in crate::winuxcmd::bundled_shim_shape_violations(&root) {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                writeln!(out, "  {warn}{}", bundled_shim_violation_row(&name, &why))?;
+            }
+        }
+    }
+
     // ── Critical: interactive startup rc ───────────────────────────────────
     critical_total += 1;
     let home = crate::path_utils::shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -688,6 +710,18 @@ fn display(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// One `niu doctor` advisory row for a bundled-shim shape violation
+/// (niubash#810): `usr\bin\<name>` is a standalone binary where the
+/// bundled component ships a winuxcmd shim, so the name misses the
+/// forwarder's argv adapters (`awk` keeps emitting CRLF while `gawk`
+/// works). Shared with the tests so the printed repair hint stays pinned.
+fn bundled_shim_violation_row(name: &str, why: &str) -> String {
+    format!(
+        "bundled shim {name:<12} {why} — run `niu --relink-bundled-shims --force` \
+         (old bytes kept as {name}.bak-<date>)"
+    )
+}
+
 /// The `bundled tools` advisory row (without the leading two-space indent;
 /// the caller prepends the info marker). Honest either way: the names of
 /// what the release actually ships, or an explicit "none". On non-Windows
@@ -889,6 +923,21 @@ fn same_packaged_origin(path_niu: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// niubash#810: the violation row names the file, the shape, and the
+    /// repair command with the backup promise.
+    #[test]
+    fn bundled_shim_violation_row_names_the_repair() {
+        let row = bundled_shim_violation_row(
+            "awk.exe",
+            "standalone binary where the bundled gawk component ships a winuxcmd shim",
+        );
+        assert!(row.contains("bundled shim awk.exe"), "{row}");
+        assert!(row.contains("standalone binary"), "{row}");
+        assert!(row.contains("gawk"), "{row}");
+        assert!(row.contains("--relink-bundled-shims --force"), "{row}");
+        assert!(row.contains("awk.exe.bak-"), "{row}");
+    }
 
     /// niubash#230 follow-up: the bundled-tools row names exactly what the
     /// release ships and labels it as bundled, never as a system install.
