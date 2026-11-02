@@ -75,7 +75,12 @@ const PASTE_CHUNK_DETECTION: bool = cfg!(windows);
 /// magnitude above observed ConPTY handoff latency and an order of
 /// magnitude below a perceptible submit delay. It decides the chunk-open
 /// Enter (niubash#284) and, identically, a bare CR that arrives while a
-/// chunk is pending (niubash#308). Tuning knob: a larger budget trades
+/// chunk is pending (niubash#308). An LF partner found at chunk-open then
+/// takes a SECOND lookahead at the burst-body budget
+/// ([`PASTE_CHUNK_GAP`], niubash#806 — see
+/// [`PasteChunkEditMode::paste_body_behind`]): the pair with body behind
+/// it is a paste's first line; the pair and silence is one machine-fed
+/// line and the CR submits. Tuning knob: a larger budget trades
 /// submit latency for slow-driver paste robustness; lower it only with
 /// driver traces showing the pair split wider than the budget.
 const PASTE_LF_PROBE: Duration = Duration::from_millis(10);
@@ -1780,7 +1785,14 @@ fn build_edit_mode(
 ///   chunk is dispatched, the wrapper looks ahead into the input queue
 ///   ([`PASTE_LF_PROBE`] budget): an `Enter + CONTROL` or a bare CR queued
 ///   behind the CR proves paste data — the break(s) fold into the pending
-///   chunk and the Enter never reaches reedline. Any other queued key
+///   chunk and the Enter never reaches reedline. The LF-proven pair then
+///   takes a SECOND look (niubash#806, [`paste_body_behind`]): the pair
+///   plus burst body behind it (more text
+///   or breaks within [`PASTE_CHUNK_GAP`]) is a paste's first line, while
+///   the pair and silence — `write("cmd\r\n")` as one write — is a single
+///   machine-fed line, and GNU typeahead semantics win the
+///   indistinguishable bytes exactly as niubash#420 ruled for `\r\r` (the
+///   CR submits; the consumed LF is dropped). Any other queued key
 ///   (typeahead text, a chord) or silence proves a typed submit: the Enter
 ///   passes through and the lookahead's read parks in-process, so reedline
 ///   sees it, in order, on the next dispatch — and at the submit itself the
@@ -2338,14 +2350,88 @@ impl PasteChunkEditMode {
         // and submit.
         match self.cr_paste_partner() {
             PastePartner::LfPartner => {
-                self.pending = Some(String::from("\n"));
-                true
+                // niubash#806 (R2): the pair alone does not prove a paste —
+                // a real paste's first break is followed by MORE BURST BODY
+                // (the next line's text or break, already queued or arriving
+                // within the burst gap), while a single machine-fed line
+                // (`send_line` writing "cmd\r\n" as ONE write, an expect
+                // script, pywinpty's write) is the pair and then silence.
+                // The two are indistinguishable at the queue level until
+                // the body check looks behind the pair, so GNU typeahead
+                // semantics win the tie exactly as niubash#420 ruled for
+                // `\r\r`: body behind opens the chunk; anything else is a
+                // typed submit (the consumed LF is dropped — line-ending
+                // noise; GNU gives it a second, empty accept whose extra
+                // prompt cycle has no face here, and requeueing it would
+                // open a phantom paste chunk at the next prompt).
+                if self.paste_body_behind() {
+                    self.pending = Some(String::from("\n"));
+                    true
+                } else {
+                    false
+                }
             }
             PastePartner::CrPartner(partner) => {
                 (self.unread)(&[partner]);
                 false
             }
             PastePartner::None => false,
+        }
+    }
+
+    /// niubash#806 (R2): the second, body half of the chunk-open paste
+    /// test. [`cr_paste_partner`] proved a CRLF pair — but a paste's first
+    /// line break is only the START of the burst: the body of its second
+    /// line (text or another break) is already queued behind the pair, or
+    /// arrives within the slice gap the burst clock itself absorbs
+    /// ([`PASTE_CHUNK_GAP`] — the same budget `translate_event` trusts to
+    /// keep a sliced paste one burst). A single machine-fed line is the
+    /// pair and silence: nothing a paste is made of follows the break.
+    ///
+    /// * A queued Press key that is paste body (plain text, a bare CR/LF
+    ///   break) proves the paste. The found key is REQUEUED to the input
+    ///   stream's head ([`Unread`], the #417/#420 face) instead of being
+    ///   folded here: its own dispatch takes the established mid-chunk
+    ///   fold/absorb arms, so every break-accounting invariant (the #341
+    ///   `\r\r` empty line, the interior-pair fold, the lone-LF fold)
+    ///   keeps its single owner.
+    /// * Any other queued Press key (a chord, navigation) is not paste
+    ///   body either way — GNU typeahead semantics (#420): requeue it the
+    ///   same way and report no paste, so the CR submits and the key
+    ///   dispatches on its own after the submit.
+    /// * Silence — nothing queued within the budget — is the single-line
+    ///   machine feed: no paste.
+    ///
+    /// Inert events (key releases, ConPTY's focus flicker, mouse) are
+    /// skipped and dropped while hunting, `cr_paste_partner`'s own skip
+    /// rule: they dispatch to nothing upstream.
+    ///
+    /// Tuning knob: the budget is [`PASTE_CHUNK_GAP`] on purpose — a feed
+    /// whose next slice lands later than the burst gap is already two
+    /// bursts to `translate_event`'s flush-on-gap, so the paste loss
+    /// boundary here equals the design's existing burst boundary. A
+    /// smaller budget would submit the first line of any sliced paste
+    /// whose second slice rides the gap.
+    fn paste_body_behind(&mut self) -> bool {
+        let deadline = Instant::now() + PASTE_CHUNK_GAP;
+        loop {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            let Some(event) = self.next_queued(budget) else {
+                return false;
+            };
+            if let crossterm29::event::Event::Key(key) = event {
+                if key.kind == crossterm29::event::KeyEventKind::Press {
+                    let is_body = is_plain_text_key(&key) || is_bare_enter(&key);
+                    (self.unread)(&[crossterm29::event::Event::Key(key)]);
+                    return is_body;
+                }
+                // Key releases are inert upstream: skip (dropped,
+                // observably identical to dispatching them).
+            }
+            // Non-key events (focus flicker, mouse) are inert: skip, drop.
+            if Instant::now() >= deadline {
+                return false;
+            }
         }
     }
 
@@ -9443,6 +9529,22 @@ mod tests {
         detector.last_event = Some(Instant::now() - PASTE_CHUNK_GAP - Duration::from_millis(1));
     }
 
+    /// Dispatch the next event the scripted queue holds — what reedline's
+    /// read loop does after a probe requeued to the stream's head
+    /// (niubash#806: the body-evidence key rides the same queue the
+    /// probes read, so the driver pops it exactly as the live loop would).
+    fn dispatch_queued(
+        detector: &mut PasteChunkEditMode,
+        queue: &std::sync::Arc<std::sync::Mutex<VecDeque<crossterm29::event::Event>>>,
+    ) -> ReedlineEvent {
+        let event = queue
+            .lock()
+            .expect("test queue")
+            .pop_front()
+            .expect("queue holds the next event");
+        detector.parse_event(ReedlineRawEvent::try_from(event).expect("queued key converts"))
+    }
+
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_absorbs_crlf_paste_and_flushes_on_gap() {
@@ -9462,28 +9564,35 @@ mod tests {
 
         // The paste's first line break arrives as the CRLF pair: the CR is
         // dispatched while its LF partner is still queued (reedline's batch
-        // stops at the bare CR, so the LF is always behind it). The CR with
-        // its partner queued is paste data: the chunk opens with the pair's
-        // one line break, the LF is consumed with it, and reedline never
+        // stops at the bare CR, so the LF is always behind it) — and with
+        // the burst BODY queued behind the pair (one write, the paste's
+        // second line "de" riding the queue — the niubash#806 body
+        // evidence). The pair plus body is paste data: the chunk opens
+        // with the pair's one line break, the LF is consumed with it, the
+        // body evidence requeues to the stream's head, and reedline never
         // sees the Enter.
-        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('d'),
+            char_key_event('e'),
+        ]);
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
         assert_eq!(detector.pending.as_deref(), Some("\n"));
         assert!(
             detector.pushback.is_empty(),
-            "the LF partner is consumed, not pushed back"
+            "the LF partner is consumed and the evidence requeued, not parked"
         );
 
-        // Further burst text is absorbed quietly.
-        for ch in "de".chars() {
-            assert!(matches!(
-                detector.parse_event(paste_key(
-                    crossterm29::event::KeyCode::Char(ch),
-                    crossterm29::event::KeyModifiers::NONE
-                )),
-                ReedlineEvent::None
-            ));
-        }
+        // Further burst text is absorbed quietly — the requeued evidence
+        // key first (reedline reads the stream next), then the rest.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
         assert_eq!(detector.pending.as_deref(), Some("\nde"));
 
         // The next pasted CRLF: the feed queues its LF partner behind its
@@ -9536,20 +9645,35 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_enter_in_paste_burst_submits_the_chunk() {
-        let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event()]);
-        // The paste body: CRLF pair opens the chunk (partner consumed),
-        // then its text is absorbed.
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('e'),
+            char_key_event('c'),
+            char_key_event('h'),
+            char_key_event('o'),
+            char_key_event(' '),
+            char_key_event('h'),
+            char_key_event('i'),
+        ]);
+        // The paste body: the CRLF pair plus the body behind it (one
+        // write) opens the chunk (partner consumed, body evidence
+        // requeued), then the requeued text is absorbed as it dispatches.
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
-        for ch in "echo hi".chars() {
+        for expected in [
+            "\ne",
+            "\nec",
+            "\nech",
+            "\necho",
+            "\necho ",
+            "\necho h",
+            "\necho hi",
+        ] {
             assert!(matches!(
-                detector.parse_event(paste_key(
-                    crossterm29::event::KeyCode::Char(ch),
-                    crossterm29::event::KeyModifiers::NONE
-                )),
+                dispatch_queued(&mut detector, &queue),
                 ReedlineEvent::None
             ));
+            assert_eq!(detector.pending.as_deref(), Some(expected));
         }
-        assert_eq!(detector.pending.as_deref(), Some("\necho hi"));
 
         // The user's Enter, microseconds after the last paste key (one
         // burst, empty queue behind it — the scripted queue is drained).
@@ -9584,13 +9708,18 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_interior_crlf_pair_stays_data_mid_burst() {
-        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('a'),
+            char_key_event('b'),
+        ]);
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
-        for ch in "ab".chars() {
-            detector.parse_event(paste_key(
-                crossterm29::event::KeyCode::Char(ch),
-                crossterm29::event::KeyModifiers::NONE,
+        for expected in ["\na", "\nab"] {
+            assert!(matches!(
+                dispatch_queued(&mut detector, &queue),
+                ReedlineEvent::None
             ));
+            assert_eq!(detector.pending.as_deref(), Some(expected));
         }
         // Interior break: the feed queues the LF partner behind its CR.
         queue.lock().expect("test queue").push_back(lf_key_event());
@@ -9609,10 +9738,14 @@ mod tests {
     /// The text that reaches reedline when the pasted block `input` is fed
     /// through the detector, reassembled from the translated events (typed
     /// edits + flushed chunk inserts). Models the console queue the way one
-    /// WriteConsoleInput burst delivers it: every `\n` directly after a
-    /// `\r` is that CR's LF partner, queued behind it in the same write and
+    /// WriteConsoleInput burst delivers it: the WHOLE block sits in the
+    /// queue before the first dispatch, every `\n` directly after a `\r`
+    /// is that CR's LF partner, queued behind it in the same write and
     /// consumed by the CR's probe (niubash#308) — it never dispatches as
-    /// its own event; a `\n` after a `\n` is a lone Ctrl+J.
+    /// its own event; a `\n` after a `\n` is a lone Ctrl+J. The driver
+    /// loop pops the queue front and dispatches it, exactly what reedline's
+    /// read loop does against the live console queue (and what it does
+    /// with a key a probe requeued to the stream's head, niubash#806).
     fn feed_paste_burst(input: &str) -> String {
         let (mut detector, queue) = paste_detector_and_queue(Vec::new());
         let mut reassembled = String::new();
@@ -9643,29 +9776,32 @@ mod tests {
                 other => panic!("unexpected event in paste reassembly: {other:?}"),
             }
         }
-        let mut skip_next_lf = false;
-        for ch in input.chars() {
-            let event = match ch {
+        // The one-write queue: chars as text keys, `\r\n` pairs as a CR
+        // with its LF partner queued behind it, a lone `\n` as Ctrl+J.
+        // Order is feed order — the CR comes first, its LF partner rides
+        // behind it, so the CR's probe claims the pair.
+        let mut chars = input.chars().peekable();
+        while let Some(ch) = chars.next() {
+            let events: Vec<crossterm29::event::Event> = match ch {
                 '\r' => {
-                    queue.lock().expect("test queue").push_back(lf_key_event());
-                    skip_next_lf = true;
-                    detector.parse_event(cr())
-                }
-                '\n' => {
-                    if skip_next_lf {
-                        skip_next_lf = false;
-                        continue;
+                    let mut events = vec![cr_key_event()];
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                        events.push(lf_key_event());
                     }
-                    detector.parse_event(lf())
+                    events
                 }
-                _ => {
-                    skip_next_lf = false;
-                    detector.parse_event(paste_key(
-                        crossterm29::event::KeyCode::Char(ch),
-                        crossterm29::event::KeyModifiers::NONE,
-                    ))
-                }
+                '\n' => vec![lf_key_event()],
+                c => vec![char_key_event(c)],
             };
+            queue.lock().expect("test queue").extend(events);
+        }
+        // Dispatch everything the queue holds, in order.
+        loop {
+            let next = queue.lock().expect("test queue").pop_front();
+            let Some(raw) = next else { break };
+            let event =
+                detector.parse_event(ReedlineRawEvent::try_from(raw).expect("queued key converts"));
             append_event_text(&event, &mut reassembled);
         }
         // The burst settles; the user's Enter flushes the chunk and submits
@@ -9754,11 +9890,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_pending_enter_with_typeahead_behind_submits_in_order() {
-        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        let (mut detector, queue) =
+            paste_detector_and_queue(vec![lf_key_event(), char_key_event('v')]);
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
-        detector.parse_event(paste_key(
-            crossterm29::event::KeyCode::Char('v'),
-            crossterm29::event::KeyModifiers::NONE,
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
         ));
         // The next command's first key is already queued when the user's
         // Enter dispatches (back-to-back writes).
@@ -9999,17 +10136,16 @@ mod tests {
     }
 
     /// ConPTY focus flicker between pasted lines must not hide the LF
-    /// partner from the lookahead: the CR still identifies as paste.
+    /// partner from the lookahead — nor the burst body behind it
+    /// (niubash#806): the CR still identifies as paste.
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_skips_flicker_to_find_lf_partner() {
-        let mut detector = paste_detector_with_queue(vec![
+        let (mut detector, queue) = paste_detector_and_queue(vec![
             crossterm29::event::Event::FocusGained,
             crossterm29::event::Event::FocusLost,
-            crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
-                crossterm29::event::KeyCode::Enter,
-                crossterm29::event::KeyModifiers::CONTROL,
-            )),
+            lf_key_event(),
+            char_key_event('x'),
         ]);
         for ch in "abc".chars() {
             detector.parse_event(paste_key(
@@ -10020,6 +10156,13 @@ mod tests {
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
         assert_eq!(detector.pending.as_deref(), Some("\n"));
         assert!(detector.pushback.is_empty(), "flicker is inert");
+        // The body evidence behind the flicker keeps the chunk a paste;
+        // its requeued key absorbs on its own dispatch.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\nx"));
     }
 
     /// niubash#420: at chunk-OPEN a CR behind a CR is TWO TYPEAHEAD SUBMITS
@@ -10064,16 +10207,22 @@ mod tests {
     }
 
     /// The #341 fold survives where paste evidence exists: a chunk opened
-    /// by an LF partner (the ConPTY CRLF shape), then a bare CR with a CR
-    /// behind it MID-CHUNK — the WT empty line inside a live paste — still
-    /// folds as two line breaks of data.
+    /// by an LF partner plus body (the ConPTY CRLF shape, niubash#806),
+    /// then a bare CR with a CR behind it MID-CHUNK — the WT empty line
+    /// inside a live paste — still folds as two line breaks of data.
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_midchunk_cr_pair_still_folds_341() {
-        let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event(), cr_key_event()]);
-        // LF partner opens the chunk.
+        let (mut detector, queue) =
+            paste_detector_and_queue(vec![lf_key_event(), char_key_event('a'), cr_key_event()]);
+        // LF partner plus body opens the chunk; the evidence requeues.
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
         assert_eq!(detector.pending.as_deref(), Some("\n"));
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\na"));
         // Mid-chunk: the bare CR's partner CR folds the empty line as data —
         // the incoming CR's break plus the partner's, after the LF.
         assert!(
@@ -10082,10 +10231,132 @@ mod tests {
         );
         assert_eq!(
             detector.pending.as_deref(),
-            Some("\n\n\n"),
+            Some("\na\n\n"),
             "all three breaks fold inside the live paste"
         );
         assert!(detector.pushback.is_empty());
+    }
+
+    /// niubash#806 (R2): the CRLF pair ALONE at chunk-open — one write of
+    /// "cmd\r\n" and silence behind it — is a single machine-fed line, not
+    /// a paste's first line. The t4 evidence: pywinpty `write("echo
+    /// ok\r\n")` executed 0/5 (the line parked in the edit buffer until a
+    /// LATER Enter flushed it), while WSL GNU Bash 5.3 executes the same
+    /// write (the CR accepts the line; the LF gives a second, empty
+    /// accept). The pair and silence are indistinguishable from a
+    /// one-line paste's trailing break, and GNU typeahead semantics win
+    /// that tie — the #420 precedent, now for the LF partner: the CR
+    /// submits, and the consumed LF is dropped with it (requeueing it
+    /// would open a phantom paste chunk at the next prompt).
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_alone_at_chunk_open_submits_806() {
+        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        for ch in "echo ok".chars() {
+            detector.parse_event(paste_key(
+                crossterm29::event::KeyCode::Char(ch),
+                crossterm29::event::KeyModifiers::NONE,
+            ));
+        }
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "the pair and silence is one machine-fed line: the CR submits ({event:?})"
+        );
+        assert!(
+            detector.pending.is_none(),
+            "no chunk opens without burst body behind the pair"
+        );
+        assert!(detector.pushback.is_empty());
+        assert!(
+            queue.lock().expect("test queue").is_empty(),
+            "the consumed LF is dropped, not requeued"
+        );
+    }
+
+    /// The paste half of niubash#806: the pair WITH burst body behind it —
+    /// the next line's text queued behind the LF partner, the one-write
+    /// paste shape — still opens the chunk. The body evidence requeues to
+    /// the stream's head and dispatches on its own, so every fold arm
+    /// keeps its single owner.
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_with_body_opens_chunk_806() {
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('d'),
+            char_key_event('e'),
+        ]);
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\n"));
+        // The requeued evidence rides the stream head; reedline reads it
+        // next and the chunk absorbs it.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\nd"));
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\nde"));
+        assert!(detector.pushback.is_empty());
+    }
+
+    /// A BREAK behind the pair is burst body too — the paste whose second
+    /// line is empty ("x\r\n\r\n…"): the found CR requeues and its own
+    /// dispatch folds it mid-chunk (the #341 accounting keeps one owner).
+    /// The paste's own LF partner behind that CR is queued with it, the
+    /// one-write shape.
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_with_break_behind_opens_chunk_806() {
+        let (mut detector, queue) =
+            paste_detector_and_queue(vec![lf_key_event(), cr_key_event(), lf_key_event()]);
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\n"));
+        // The requeued empty-line CR dispatches; its own probe claims its
+        // LF partner and the pair folds as one break.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(
+            detector.pending.as_deref(),
+            Some("\n\n"),
+            "the empty line folds as one more break of the live paste"
+        );
+        assert!(detector.pushback.is_empty());
+    }
+
+    /// A chord behind the pair is not paste body (a paste is text and
+    /// breaks): GNU typeahead semantics (#420) — the CR submits and the
+    /// chord requeues to the stream's head for its own dispatch.
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_with_chord_behind_submits_806() {
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
+                crossterm29::event::KeyCode::Up,
+                crossterm29::event::KeyModifiers::NONE,
+            )),
+        ]);
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "a chord behind the pair is typeahead, not paste body: the CR submits"
+        );
+        assert!(detector.pending.is_none());
+        assert!(detector.pushback.is_empty());
+        let requeued = queue.lock().expect("test queue");
+        assert_eq!(requeued.len(), 1, "the chord is requeued verbatim");
+        assert!(matches!(
+            requeued.front(),
+            Some(crossterm29::event::Event::Key(key))
+                if matches!(key.code, crossterm29::event::KeyCode::Up)
+        ));
     }
 
     /// The pushback invariant behind #341, stated directly: whatever the
