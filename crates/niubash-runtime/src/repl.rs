@@ -2300,7 +2300,15 @@ impl PasteChunkEditMode {
     ) -> Option<Vec<EditCommand>> {
         use crate::completion::cycle_menu::{grid_move, CycleMove};
         let session = self.cycle_session.as_ref()?;
-        let mut state = session.lock().ok()?;
+        // niubash#833 (carry-over, flagged by the T2 cluster): the
+        // same poison recovery as the completion_state sites — a
+        // poisoned cycle-session lock must not silently yield None
+        // (the key would fall through to its plain translation and
+        // the live menu would desync); the state behind a poisoned
+        // lock is still the session's state.
+        let mut state = session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.is_open() || state.candidates.len() < 2 {
             return None;
         }
@@ -11549,6 +11557,36 @@ mod tests {
         let state = session.lock().unwrap();
         assert_eq!(state.index, 1);
         assert_eq!(state.nav_seq, 3);
+    }
+
+    // niubash#833 carry-over: a poisoned cycle-session lock recovers
+    // the state (unwrap_or_else(into_inner)) instead of
+    // cycle_navigation_edits silently yielding None — TAB still
+    // navigates the live session.
+    #[test]
+    fn issue833_poisoned_cycle_session_still_navigates() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_candidates(&session);
+        // Poison the session mutex: a panicking holder, the shape
+        // the #833 recovery idiom exists for.
+        let poisoner = session.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the cycle session for the #833 pin");
+        });
+        assert!(handle.join().is_err());
+        assert!(session.lock().is_err(), "the mutex must be poisoned");
+
+        let event = detector.parse_event(tab());
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        let state = session.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.index, 1);
     }
 
     /// The menu-select session the CycleMenu publishes after TAB #1
