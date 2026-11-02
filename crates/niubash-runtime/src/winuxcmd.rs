@@ -1913,9 +1913,8 @@ mod tests {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .to_string()
                 .split('-')
-                .last()
+                .next_back()
                 .unwrap(),
             "2",
             "{second:?}"
