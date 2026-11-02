@@ -3234,7 +3234,10 @@ fn run_help_command(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         Some(topic) if topic == keymap_registry::KEYMAP_HELP_TOPIC => {
-            let state = keymap_registry::load_state_from(&keymap_registry::state_path());
+            // niubash#843: no home directory → no state path → the
+            // "no snapshot yet" rendering.
+            let state = keymap_registry::state_path()
+                .and_then(|path| keymap_registry::load_state_from(&path));
             print!("{}", keymap_registry::render_keymap_help(state.as_ref()));
             Ok(())
         }
