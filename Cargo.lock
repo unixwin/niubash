@@ -631,7 +631,7 @@ dependencies = [
  "log",
  "niubash-runtime",
  "portable-pty",
- "readline-abi",
+ "readline-abi 0.1.0 (git+https://github.com/unixwin/ruline?rev=c0db73bc713dfda1eea6f6ab1e711d6f6b43b339)",
  "rubash",
  "serde",
  "serde_json",
@@ -657,8 +657,8 @@ dependencies = [
  "log",
  "nu-ansi-term",
  "png",
- "readline-abi",
- "reedline",
+ "readline-abi 0.1.0 (git+https://github.com/unixwin/ruline?rev=835193289943da6d7f0a275700f49b7391f0da53)",
+ "reedline 0.1.0 (git+https://github.com/unixwin/ruline?rev=c0db73bc713dfda1eea6f6ab1e711d6f6b43b339)",
  "rubash",
  "serde",
  "serde_json",
@@ -933,7 +933,16 @@ version = "0.1.0"
 source = "git+https://github.com/unixwin/ruline?rev=835193289943da6d7f0a275700f49b7391f0da53#835193289943da6d7f0a275700f49b7391f0da53"
 dependencies = [
  "libc",
- "reedline",
+ "reedline 0.1.0 (git+https://github.com/unixwin/ruline?rev=835193289943da6d7f0a275700f49b7391f0da53)",
+]
+
+[[package]]
+name = "readline-abi"
+version = "0.1.0"
+source = "git+https://github.com/unixwin/ruline?rev=c0db73bc713dfda1eea6f6ab1e711d6f6b43b339#c0db73bc713dfda1eea6f6ab1e711d6f6b43b339"
+dependencies = [
+ "libc",
+ "reedline 0.1.0 (git+https://github.com/unixwin/ruline?rev=c0db73bc713dfda1eea6f6ab1e711d6f6b43b339)",
 ]
 
 [[package]]
@@ -960,6 +969,23 @@ dependencies = [
 name = "reedline"
 version = "0.1.0"
 source = "git+https://github.com/unixwin/ruline?rev=835193289943da6d7f0a275700f49b7391f0da53#835193289943da6d7f0a275700f49b7391f0da53"
+dependencies = [
+ "crossterm 0.29.0",
+ "crossterm_winapi",
+ "fd-lock",
+ "nu-ansi-term",
+ "rustix",
+ "serde",
+ "strip-ansi-escapes",
+ "strum",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "reedline"
+version = "0.1.0"
+source = "git+https://github.com/unixwin/ruline?rev=c0db73bc713dfda1eea6f6ab1e711d6f6b43b339#c0db73bc713dfda1eea6f6ab1e711d6f6b43b339"
 dependencies = [
  "arboard",
  "crossterm 0.29.0",

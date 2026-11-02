@@ -784,7 +784,9 @@ impl NiubashCompleter {
 
             let mut value = completion.clone();
             let mut append_whitespace = should_append_completion_whitespace(&value);
-            if append_whitespace {
+            // Option/flag spellings can't be directories — skip the stat
+            // for them (and avoid the lookup on long -o flag lists).
+            if append_whitespace && !value.starts_with('-') {
                 if let Some(dir) = current_dir.as_ref() {
                     let unescaped = crate::completion::path::unescape_shell_path(&value);
                     if !unescaped.is_empty() && dir.join(&unescaped).is_dir() {
