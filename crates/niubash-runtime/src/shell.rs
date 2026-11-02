@@ -1080,6 +1080,33 @@ impl Shell {
         {
             self.session_mut().options().set("monitor", true);
         }
+        // niubash#804: GNU's `set -o emacs` view is get_edit_mode
+        // (set.def:448-452 `no_line_editing == 0 && rl_editing_mode ==
+        // 1`); only init_noninteractive sets no_line_editing
+        // (shell.c:1854), so an interactive shell keeps readline's
+        // emacs default and reports emacs ON (probed on WSL GNU bash
+        // 5.3: `bash -i -c 'set -o | grep emacs'` -> on, `bash -c` ->
+        // off). ble.sh hard-gates its loader on `! -o emacs && ! -o
+        // vi` (out/ble.sh:729), so an off default rejects the whole
+        // framework. Same gate discipline as monitor above: an explicit
+        // startup transport value (`-o vi`, `+o emacs`) is the user's
+        // word and stands, and a later `set -o vi` still flips the pair
+        // (the shared setter keeps the mutual exclusion, set.def:421-
+        // 446). The editor itself is ruline either way — this is only
+        // the option's default state and report.
+        if self
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SETOPT_emacs")
+            .is_none()
+            && self
+                .session_mut()
+                .variables()
+                .resolved_value("__RUBASH_SETOPT_vi")
+                .is_none()
+        {
+            self.session_mut().options().set("emacs", true);
+        }
         // GNU init_interactive (shell.c): interactive shells default
         // expand_aliases on so ~/.niubashrc aliases expand without a
         // user shopt line. Non-interactive entry points never call
