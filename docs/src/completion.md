@@ -17,8 +17,8 @@ line and paints the grid with that candidate highlighted:
 * **TAB / Shift-TAB** cycle through the frozen set (wrap-around).
 * **Down / Up** move one row.
 * **Right / Left** move one column; both edge directions wrap, as in zsh.
-* **Enter** accepts the highlighted candidate and runs the command in the
-  same press.
+* **Enter** accepts the highlighted candidate and closes the menu — the
+  candidate stays in the line, editable; a second Enter runs it.
 * **Esc** rolls the line back to its pre-completion snapshot.
 * A **lone candidate** completes outright and closes the menu.
 * **Bare TAB** on a blank line inserts a four-space indent instead of
@@ -51,8 +51,8 @@ already inserted.
 
 TAB #1 puts the first candidate into the line and opens the grid; further
 TAB / Shift-TAB steps through the frozen set with wrap-around. **Enter**
-accepts the candidate in the line and runs it; **Esc** restores the
-pre-completion line.
+accepts the candidate in the line and closes the menu — a second Enter
+runs it; **Esc** restores the pre-completion line.
 
 Choose it with `export NIU_COMPLETION_INTERACTION=insert|cycle|select` in
 `~/.niubashrc` or the environment.
@@ -123,16 +123,21 @@ the ghost stands down; it returns as soon as the menu closes.
 
 ## Enter with the menu open
 
-The interaction decides what Enter means while candidates are visible:
+Every menu interaction answers Enter the same way — the zsh complist / fish
+shape (niubash#821): the first Enter accepts the highlighted candidate into
+the line and closes the menu without running anything; the second Enter
+submits.
 
-* `select` / `cycle`: Enter accepts the highlighted candidate and runs the
-  completed line in the same press.
+* `select` / `cycle`: Enter accepts the highlighted candidate; press Enter
+  again to run the completed line.
 * `insert`: Enter commits the highlighted candidate into the line without
   running it; press Enter again to submit.
 * `gnu`: the list is printed output, not a menu, so Enter always submits the
   current line.
 
-With no menu open, Enter always submits what you see.
+With no menu open, Enter always submits what you see. A menu with nothing
+to accept (an empty or still-loading candidate set) does not claim Enter
+either — the key submits as usual.
 
 ## Key bindings from other tools
 
