@@ -165,11 +165,25 @@ pub struct CommandDef {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// On-disk representation of a single cached dynamic query.
-/// File path: `<cache_dir>/<sanitised_cache_key>.toml`
+/// File path: `<cache_dir>/<hashed_cache_key>.toml` (see [`CacheKey`]).
 #[derive(Debug, Serialize, Deserialize)]
 struct DiskCache {
     /// The sub-process command + args that produced these values (for reference).
     source_cmd: String,
+    /// niubash#845: the full [`CacheKey`] identity that produced this
+    /// entry. A read whose identity differs is a miss, never a serve:
+    /// before this field existed the file name was the only key, and
+    /// it omitted the args, so colliding specs shared one entry.
+    /// Entries written before #845 carry the empty string and are
+    /// regenerated once.
+    #[serde(default)]
+    cache_identity: String,
+    /// niubash#845: the resolved tool path that produced this entry.
+    /// A different resolved path (the session PATH moved, a shadowing
+    /// install appeared) is a different tool identity — stale, even
+    /// when the mtimes happen to agree.
+    #[serde(default)]
+    tool_path: Option<String>,
     /// Seconds since Unix epoch when this file was written.
     written_secs: u64,
     /// Optional TTL in seconds; 0 means "use mtime only".
@@ -186,6 +200,15 @@ struct DiskCache {
 impl DiskCache {
     /// Returns true when the on-disk entry is stale and should be regenerated.
     fn is_stale(&self, tool_path: Option<&Path>) -> bool {
+        // niubash#845: tool identity first — the entry answers for
+        // exactly the resolved path recorded at write time.
+        if self.tool_path.as_deref()
+            != tool_path
+                .map(|path| path.to_string_lossy().into_owned())
+                .as_deref()
+        {
+            return true;
+        }
         // TTL check (only when ttl_secs > 0)
         if self.ttl_secs > 0 {
             let now = SystemTime::now()
@@ -212,6 +235,69 @@ impl DiskCache {
     }
 }
 
+/// niubash#845: the ONE key every dynamic-completion cache layer
+/// (memory, disk file name, disk entry validation) keys on. Before
+/// this type existed the key was `format!("{command}::{cmd}")` — it
+/// omitted the args (two `takes_value` flags sharing a tool with
+/// different args collided for the whole session), the TTL, and the
+/// tool identity (a ttl-less entry survived binary upgrades forever
+/// whenever `which_tool` missed). Every input that can change the
+/// answer is in this struct; nothing else is consulted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheKey {
+    /// The command whose definition declared the dynamic source.
+    owner_command: String,
+    /// The tool to run.
+    cmd: String,
+    /// The tool's args, verbatim and in order.
+    args: Vec<String>,
+    /// The declared TTL (`None` = mtime-only freshness).
+    ttl_secs: Option<u64>,
+    /// The resolved tool path under the session PATH (identity, not
+    /// just fingerprint: the same name resolved elsewhere is a
+    /// different tool).
+    tool_path: Option<PathBuf>,
+}
+
+impl CacheKey {
+    fn new(owner_command: &str, spec: &DynamicCommand, tool_path: Option<PathBuf>) -> Self {
+        Self {
+            owner_command: owner_command.to_string(),
+            cmd: spec.cmd.clone(),
+            args: spec.args.clone(),
+            ttl_secs: spec.cache_ttl_secs,
+            tool_path,
+        }
+    }
+
+    /// Canonical identity string: the mem-cache key and the value
+    /// stored in (and required of) every disk entry.
+    fn identity(&self) -> String {
+        format!(
+            "{}::{}::{}::{}::{}",
+            self.owner_command,
+            self.cmd,
+            self.args.join("\u{1f}"),
+            self.ttl_secs
+                .map(|ttl| ttl.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            self.tool_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Disk file name for this key: a hash of the identity, so two
+    /// identities can never collide through filename sanitisation.
+    fn filename(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.identity().hash(&mut hasher);
+        format!("dyn-{:016x}.toml", hasher.finish())
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory cache (warm after first hit per session)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +306,28 @@ struct MemEntry {
     values: Vec<String>,
     /// mtime secs of tool binary when loaded (mirrors DiskCache)
     tool_mtime_secs: Option<u64>,
+    /// niubash#845: absolute expiry (epoch secs) from the declared
+    /// TTL, `None` for mtime-only entries. Before this field existed
+    /// the mem cache ignored `cache_ttl_secs` entirely — the disk
+    /// layer honored it, the warm layer served the values for the
+    /// whole session.
+    expires_at_secs: Option<u64>,
+}
+
+impl MemEntry {
+    /// Fresh at `now_secs` against the tool's current mtime: the TTL
+    /// must not have run out AND the tool must not have changed.
+    fn is_fresh(&self, now_secs: u64, current_tool_mtime_secs: Option<u64>) -> bool {
+        if let Some(expires_at) = self.expires_at_secs {
+            if now_secs >= expires_at {
+                return false;
+            }
+        }
+        match (current_tool_mtime_secs, self.tool_mtime_secs) {
+            (Some(current), Some(cached)) => current == cached,
+            _ => true,
+        }
+    }
 }
 
 /// Resolve the directory used to store dynamic completion caches.
@@ -245,19 +353,49 @@ fn resolve_cache_dir() -> Option<PathBuf> {
     Some(base)
 }
 
-/// Turn a cache key like `fd::fd` into a safe filename `fd__fd.toml`.
-fn cache_key_to_filename(key: &str) -> String {
-    let safe: String = key
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("{}.toml", safe)
+/// niubash#845: the `.parsed.toml` cache file for a bash completion
+/// source, keyed on the FULL source path (hashed), not the stem:
+/// `_foo.bash` in directory A and directory B used to share one
+/// `<stem>.parsed.toml`, so whichever directory parsed first served
+/// its definition for both.
+fn parsed_cache_file(cache_dir: &Path, bash_path: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let stem = bash_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .trim_start_matches('_');
+    let canonical = std::fs::canonicalize(bash_path).unwrap_or_else(|_| bash_path.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.to_string_lossy().hash(&mut hasher);
+    cache_dir.join(format!("{}-{:016x}.parsed.toml", stem, hasher.finish()))
+}
+
+/// The source-mtime header a parsed cache file carries (a TOML
+/// comment, so the file still parses as a bare `CommandDef`).
+fn parsed_cache_mtime_header(bash_mtime_secs: u64) -> String {
+    format!("# niu-bash-source-mtime: {}", bash_mtime_secs)
+}
+
+/// The stored source mtime a parsed cache file records, if any.
+fn parsed_cache_stored_mtime(contents: &str) -> Option<u64> {
+    contents
+        .lines()
+        .next()?
+        .strip_prefix("# niu-bash-source-mtime: ")?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// niubash#845: a parsed cache is fresh only when the stored source
+/// mtime EQUALS the source's current mtime. The pre-fix comparison
+/// was `cache_file_mtime >= bash_mtime` — a source re-materialized
+/// with an OLDER mtime (git checkout of an older revision, `cp -p`)
+/// kept the stale parse trusted indefinitely, because the cache file
+/// (written later) always compared newer.
+fn parsed_cache_fresh(stored_mtime: Option<u64>, bash_mtime: Option<u64>) -> bool {
+    matches!((stored_mtime, bash_mtime), (Some(stored), Some(current)) if stored == current)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -475,31 +613,14 @@ impl ExternalCompletionPlugin {
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
 
-        // Try the on-disk parsed cache
+        // Try the on-disk parsed cache: keyed on the full source
+        // path, fresh only when the source mtime recorded inside the
+        // cache EQUALS the source's current mtime (niubash#845).
         if let Some(ref cache_dir) = self.cache_dir {
-            let stem = bash_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .trim_start_matches('_');
-            let cache_file = cache_dir.join(format!("{}.parsed.toml", stem));
-
+            let cache_file = parsed_cache_file(cache_dir, bash_path);
             if cache_file.exists() {
-                // Compare bash mtime against cache file mtime
-                let cache_mtime = std::fs::metadata(&cache_file)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs());
-
-                let cache_fresh = match (bash_mtime, cache_mtime) {
-                    (Some(bm), Some(cm)) => cm >= bm,
-                    // If we can't read either mtime, assume stale
-                    _ => false,
-                };
-
-                if cache_fresh {
-                    if let Ok(contents) = std::fs::read_to_string(&cache_file) {
+                if let Ok(contents) = std::fs::read_to_string(&cache_file) {
+                    if parsed_cache_fresh(parsed_cache_stored_mtime(&contents), bash_mtime) {
                         if let Ok(def) = toml::from_str::<CommandDef>(&contents) {
                             log::debug!(
                                 "ExternalCompletionPlugin: bash cache hit {:?}",
@@ -507,12 +628,12 @@ impl ExternalCompletionPlugin {
                             );
                             return Ok(def);
                         }
+                    } else {
+                        log::debug!(
+                            "ExternalCompletionPlugin: bash cache stale {:?}",
+                            cache_file
+                        );
                     }
-                } else {
-                    log::debug!(
-                        "ExternalCompletionPlugin: bash cache stale {:?}",
-                        cache_file
-                    );
                 }
             }
         }
@@ -520,17 +641,18 @@ impl ExternalCompletionPlugin {
         // Parse the bash script
         let def = crate::completion::bash_import::parse_bash_completion(bash_path)?;
 
-        // Write to cache
+        // Write to cache, recording the source mtime it answers for.
         if let Some(ref cache_dir) = self.cache_dir {
-            let stem = bash_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .trim_start_matches('_');
-            let cache_file = cache_dir.join(format!("{}.parsed.toml", stem));
+            let cache_file = parsed_cache_file(cache_dir, bash_path);
             match toml::to_string_pretty(&def) {
                 Ok(serialised) => {
-                    if let Err(e) = std::fs::write(&cache_file, serialised) {
+                    let body = match bash_mtime {
+                        Some(secs) => {
+                            format!("{}\n{}", parsed_cache_mtime_header(secs), serialised)
+                        }
+                        None => serialised,
+                    };
+                    if let Err(e) = std::fs::write(&cache_file, body) {
                         log::warn!(
                             "ExternalCompletionPlugin: failed to write bash cache {:?}: {}",
                             cache_file,
@@ -700,10 +822,7 @@ impl ExternalCompletionPlugin {
             }
             Some(ValuesSource::Dynamic {
                 values_from_command,
-            }) => {
-                let cache_key = format!("{}::{}", def.command, values_from_command.cmd);
-                self.resolve_dynamic(cache_key, values_from_command, context)
-            }
+            }) => self.resolve_dynamic(&def.command, values_from_command, context),
             Some(ValuesSource::Path { .. }) => {
                 // Delegate to PathCompleter by returning None here; the built-in
                 // path completer further up the chain will handle it because
@@ -722,26 +841,35 @@ impl ExternalCompletionPlugin {
     ///   3. Sub-process execution → write disk cache → populate memory cache
     fn resolve_dynamic(
         &self,
-        cache_key: String,
+        owner_command: &str,
         spec: &DynamicCommand,
         context: &CompletionContext,
     ) -> Option<CompletionResult> {
-        let tool_path = which_tool(&spec.cmd, context.session_path.as_deref());
+        let tool_path = which_tool(
+            &spec.cmd,
+            context.session_path.as_deref(),
+            context.session_pathext.as_deref(),
+        );
         let tool_mtime_secs = tool_path
             .as_deref()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
+        // niubash#845: ONE key over every input (owner, cmd, args,
+        // TTL, tool identity) drives the mem cache, the disk file
+        // name, and the disk entry validation below.
+        let cache_key = CacheKey::new(owner_command, spec, tool_path.clone());
+        let mem_key = cache_key.identity();
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         // ── 1. In-memory cache ────────────────────────────────────────────────
         if let Ok(mem) = self.mem_cache.lock() {
-            if let Some(entry) = mem.get(&cache_key) {
-                // Stale only when tool mtime changed
-                let stale = tool_mtime_secs
-                    .zip(entry.tool_mtime_secs)
-                    .is_some_and(|(current, cached)| current != cached);
-                if !stale {
+            if let Some(entry) = mem.get(&mem_key) {
+                if entry.is_fresh(now_secs, tool_mtime_secs) {
                     return self.filter_values(&entry.values, context);
                 }
             }
@@ -749,11 +877,11 @@ impl ExternalCompletionPlugin {
 
         // ── 2. Disk cache ─────────────────────────────────────────────────────
         if let Some(ref cache_dir) = self.cache_dir {
-            let cache_file = cache_dir.join(cache_key_to_filename(&cache_key));
+            let cache_file = cache_dir.join(cache_key.filename());
             if cache_file.exists() {
                 if let Ok(contents) = std::fs::read_to_string(&cache_file) {
                     if let Ok(disk) = toml::from_str::<DiskCache>(&contents) {
-                        if !disk.is_stale(tool_path.as_deref()) {
+                        if disk.cache_identity == mem_key && !disk.is_stale(tool_path.as_deref()) {
                             log::debug!(
                                 "ExternalCompletionPlugin: disk cache hit {:?}",
                                 cache_file
@@ -761,10 +889,12 @@ impl ExternalCompletionPlugin {
                             // Warm in-memory cache
                             if let Ok(mut mem) = self.mem_cache.lock() {
                                 mem.insert(
-                                    cache_key.clone(),
+                                    mem_key.clone(),
                                     MemEntry {
                                         values: disk.values.clone(),
                                         tool_mtime_secs: disk.tool_mtime_secs,
+                                        expires_at_secs: (disk.ttl_secs > 0)
+                                            .then(|| disk.written_secs + disk.ttl_secs),
                                     },
                                 );
                             }
@@ -801,6 +931,10 @@ impl ExternalCompletionPlugin {
         if let Some(ref cache_dir) = self.cache_dir {
             let disk = DiskCache {
                 source_cmd: format!("{} {}", spec.cmd, spec.args.join(" ")),
+                cache_identity: mem_key.clone(),
+                tool_path: tool_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
                 written_secs,
                 ttl_secs: spec.cache_ttl_secs.unwrap_or(0),
                 tool_mtime_secs,
@@ -808,7 +942,7 @@ impl ExternalCompletionPlugin {
             };
             match toml::to_string_pretty(&disk) {
                 Ok(serialised) => {
-                    let cache_file = cache_dir.join(cache_key_to_filename(&cache_key));
+                    let cache_file = cache_dir.join(cache_key.filename());
                     if let Err(e) = std::fs::write(&cache_file, serialised) {
                         log::warn!(
                             "ExternalCompletionPlugin: failed to write cache {:?}: {}",
@@ -831,10 +965,13 @@ impl ExternalCompletionPlugin {
         // Update in-memory cache
         if let Ok(mut mem) = self.mem_cache.lock() {
             mem.insert(
-                cache_key,
+                mem_key,
                 MemEntry {
                     values: values.clone(),
                     tool_mtime_secs,
+                    expires_at_secs: spec
+                        .cache_ttl_secs
+                        .map(|ttl| written_secs.saturating_add(ttl)),
                 },
             );
         }
@@ -1088,16 +1225,52 @@ fn same_flag(left: &FlagDef, right: &FlagDef) -> bool {
 /// mtime fingerprint even though the spawn below resolves it, so its
 /// cache entry could never go stale. `None` keeps the stateless
 /// fallback: the process PATH, for contexts built outside a session.
-fn which_tool(name: &str, session_path: Option<&str>) -> Option<PathBuf> {
+/// The candidate suffixes for a Windows tool probe: the bare name
+/// first, then the PATHEXT entries (niubash#845). PATHEXT comes from
+/// the session env when the completer snapshot carries it, else the
+/// process env; the historical `.exe .bat .cmd` list is only the
+/// fallback when neither env sets PATHEXT at all. Before #845 the
+/// list was hardcoded, so a tool whose extension lived only in a
+/// session PATHEXT (`.py`, a custom `.ps1` shim, …) was missed →
+/// `tool_path = None` → the mtime leg of staleness was skipped and a
+/// ttl-less disk entry survived binary upgrades forever.
+#[cfg_attr(not(windows), allow(dead_code))] // pinned cross-platform; consumed on Windows
+fn pathext_extensions(session_pathext: Option<&str>) -> Vec<String> {
+    let raw = session_pathext
+        .map(str::to_string)
+        .or_else(|| std::env::var("PATHEXT").ok());
+    let mut extensions = vec![String::new()];
+    match raw {
+        Some(raw) => {
+            for entry in raw.split(';') {
+                let entry = entry.trim();
+                if entry.starts_with('.') && !extensions.iter().any(|e| e == entry) {
+                    extensions.push(entry.to_string());
+                }
+            }
+            if extensions.len() == 1 {
+                extensions.extend([".exe", ".bat", ".cmd"].iter().map(|s| s.to_string()));
+            }
+        }
+        None => extensions.extend([".exe", ".bat", ".cmd"].iter().map(|s| s.to_string())),
+    }
+    extensions
+}
+
+fn which_tool(
+    name: &str,
+    session_path: Option<&str>,
+    session_pathext: Option<&str>,
+) -> Option<PathBuf> {
     // Probe PATHEXT-style suffixes on Windows only, mirroring
     // `resolve_command_path` in runtime.rs. On Unix the bare name is the
     // only candidate — a literal `name.exe` in an earlier PATH directory
     // must not shadow the real extensionless `name` — and it must carry an
     // executable bit.
-    let extensions: &[&str] = if cfg!(windows) {
-        &["", ".exe", ".bat", ".cmd"]
+    let extensions: Vec<String> = if cfg!(windows) {
+        pathext_extensions(session_pathext)
     } else {
-        &[""]
+        vec![String::new()]
     };
 
     let path_env = match session_path {
@@ -1105,7 +1278,7 @@ fn which_tool(name: &str, session_path: Option<&str>) -> Option<PathBuf> {
         None => std::env::var("PATH").ok()?,
     };
     for dir in std::env::split_paths(&path_env) {
-        for ext in extensions {
+        for ext in &extensions {
             let candidate = dir.join(format!("{}{}", name, ext));
             if is_executable_file(&candidate) {
                 return Some(candidate);
@@ -1174,13 +1347,13 @@ mod tests {
         }
         let session_path = dir.to_string_lossy().into_owned();
         assert_eq!(
-            which_tool("t839tool", Some(&session_path)),
+            which_tool("t839tool", Some(&session_path), None),
             Some(tool.clone()),
             "a session-PATH-only tool must be fingerprint-visible"
         );
         let elsewhere = dir.join("elsewhere");
         assert_eq!(
-            which_tool("t839tool", Some(&elsewhere.to_string_lossy())),
+            which_tool("t839tool", Some(&elsewhere.to_string_lossy()), None),
             None,
             "a PATH that lacks the tool must not find it"
         );
@@ -1202,6 +1375,222 @@ mod tests {
             ),
             None
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// niubash#845: the CacheKey covers every input — two specs that
+    /// differ only in args, TTL, or resolved tool path are different
+    /// keys (different identity AND different disk file); identical
+    /// inputs are the same key.
+    #[test]
+    fn issue845_cache_key_covers_args_ttl_and_tool_identity() {
+        let base = spec("tool", &["list", "--type", "a"]);
+        let other_args = spec("tool", &["list", "--type", "b"]);
+        let mut other_ttl = spec("tool", &["list", "--type", "a"]);
+        other_ttl.cache_ttl_secs = Some(300);
+        let tool_a = PathBuf::from("/bin/tool");
+        let tool_b = PathBuf::from("/opt/tool");
+
+        let key = CacheKey::new("owner", &base, Some(tool_a.clone()));
+        assert_eq!(key, CacheKey::new("owner", &base, Some(tool_a.clone())));
+        for (label, other) in [
+            (
+                "args",
+                CacheKey::new("owner", &other_args, Some(tool_a.clone())),
+            ),
+            (
+                "ttl",
+                CacheKey::new("owner", &other_ttl, Some(tool_a.clone())),
+            ),
+            ("tool path", CacheKey::new("owner", &base, Some(tool_b))),
+            ("owner", CacheKey::new("other", &base, Some(tool_a.clone()))),
+            ("missing tool", CacheKey::new("owner", &base, None)),
+        ] {
+            assert_ne!(
+                key.identity(),
+                other.identity(),
+                "{label} must change the identity"
+            );
+            assert_ne!(
+                key.filename(),
+                other.filename(),
+                "{label} must change the disk file"
+            );
+        }
+    }
+
+    /// niubash#845: the mem cache honors the TTL it was written with.
+    #[test]
+    fn issue845_mem_entry_honors_ttl_and_tool_mtime() {
+        let entry = MemEntry {
+            values: vec!["v".to_string()],
+            tool_mtime_secs: Some(100),
+            expires_at_secs: Some(1_000),
+        };
+        assert!(entry.is_fresh(999, Some(100)), "inside the TTL, same tool");
+        assert!(!entry.is_fresh(1_000, Some(100)), "the TTL ran out");
+        assert!(!entry.is_fresh(999, Some(101)), "the tool binary changed");
+        let no_ttl = MemEntry {
+            values: vec!["v".to_string()],
+            tool_mtime_secs: Some(100),
+            expires_at_secs: None,
+        };
+        assert!(
+            no_ttl.is_fresh(u64::MAX - 1, Some(100)),
+            "mtime-only entries do not expire"
+        );
+    }
+
+    /// niubash#845: `.parsed.toml` files are keyed on the full source
+    /// path — same stem, different directories, different cache files.
+    #[test]
+    fn issue845_parsed_cache_keyed_on_full_source_path() {
+        let dir = unique_temp_dir("niubash-issue845-parsed");
+        let a = dir.join("a").join("_foo.bash");
+        let b = dir.join("b").join("_foo.bash");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::write(&a, "# a").unwrap();
+        std::fs::write(&b, "# b").unwrap();
+        assert_ne!(parsed_cache_file(&dir, &a), parsed_cache_file(&dir, &b));
+        assert_eq!(parsed_cache_file(&dir, &a), parsed_cache_file(&dir, &a));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// niubash#845: parsed-cache freshness is mtime EQUALITY — a
+    /// source re-materialized with an older mtime (the `>=` bug shape)
+    /// is stale, and so are both directions of disagreement.
+    #[test]
+    fn issue845_parsed_freshness_requires_mtime_equality() {
+        assert!(parsed_cache_fresh(Some(500), Some(500)));
+        assert!(
+            !parsed_cache_fresh(Some(900), Some(500)),
+            "cache newer than an older-mtime source must NOT be trusted"
+        );
+        assert!(
+            !parsed_cache_fresh(Some(500), Some(900)),
+            "source rewritten newer"
+        );
+        assert!(!parsed_cache_fresh(None, Some(500)), "no recorded mtime");
+        assert!(
+            !parsed_cache_fresh(Some(500), None),
+            "no readable source mtime"
+        );
+        // The stored-mtime header round-trips through a real TOML doc.
+        let body = format!("{}\ncommand = \"x\"\n", parsed_cache_mtime_header(500));
+        assert_eq!(parsed_cache_stored_mtime(&body), Some(500));
+        assert!(
+            toml::from_str::<CommandDef>(&body).is_ok(),
+            "the header is a TOML comment"
+        );
+    }
+
+    /// niubash#845: a disk entry answers only for the tool identity
+    /// recorded in it — a different resolved path is stale even when
+    /// the TTL has not run out.
+    #[test]
+    fn issue845_disk_cache_stale_on_tool_identity_change() {
+        let dir = unique_temp_dir("niubash-issue845-disk");
+        let tool = dir.join("tool");
+        std::fs::write(&tool, b"x").unwrap();
+        let mtime_secs = std::fs::metadata(&tool)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let entry = DiskCache {
+            source_cmd: "tool".to_string(),
+            cache_identity: "id".to_string(),
+            tool_path: Some(tool.to_string_lossy().into_owned()),
+            written_secs: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            ttl_secs: 0,
+            tool_mtime_secs: Some(mtime_secs),
+            values: vec!["v".to_string()],
+        };
+        assert!(!entry.is_stale(Some(&tool)), "same tool, same mtime: fresh");
+        let other = dir.join("other-tool");
+        assert!(
+            entry.is_stale(Some(&other)),
+            "a different resolved path is a different tool"
+        );
+        assert!(entry.is_stale(None), "the recorded tool vanished");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// niubash#845: PATHEXT comes from the session value, not a
+    /// hardcoded list (the defaults only fill an unset/empty one).
+    #[test]
+    fn issue845_pathext_extensions_come_from_the_session_value() {
+        assert_eq!(
+            pathext_extensions(Some(".COM;.EXE;.PY")),
+            vec![
+                "".to_string(),
+                ".COM".to_string(),
+                ".EXE".to_string(),
+                ".PY".to_string()
+            ]
+        );
+        let defaults = pathext_extensions(None);
+        assert!(defaults.contains(&".exe".to_string()) && defaults.contains(&".bat".to_string()));
+    }
+
+    /// niubash#845 end-to-end (unix): two `takes_value` flags sharing
+    /// one tool with different args must NOT share a cache entry —
+    /// the second flag's values are its own, not the first flag's.
+    #[cfg(unix)]
+    #[test]
+    fn issue845_flags_sharing_a_tool_with_different_args_do_not_collide() {
+        let dir = unique_temp_dir("niubash-issue845-e2e");
+        let mut flag_a = FlagDef {
+            short: None,
+            long: Some("--aa".to_string()),
+            description: None,
+            takes_value: true,
+            values_source: None,
+        };
+        flag_a.values_source = Some(ValuesSource::Dynamic {
+            values_from_command: spec("sh", &["-c", "printf 'from-a\\n'"]),
+        });
+        let mut flag_b = FlagDef {
+            long: Some("--bb".to_string()),
+            ..flag_a.clone()
+        };
+        flag_b.values_source = Some(ValuesSource::Dynamic {
+            values_from_command: spec("sh", &["-c", "printf 'from-b\\n'"]),
+        });
+        let def = CommandDef {
+            command: "t845".to_string(),
+            description: None,
+            flags: vec![flag_a, flag_b],
+            subcommands: Vec::new(),
+        };
+        let mut definitions = HashMap::new();
+        definitions.insert("t845".to_string(), def);
+        let plugin = ExternalCompletionPlugin {
+            definitions,
+            mem_cache: Mutex::new(HashMap::new()),
+            cache_dir: Some(dir.clone()),
+        };
+        let values_for = |input: &str| -> Vec<String> {
+            let context = CompletionContext::new(dir.clone(), input.to_string(), input.len());
+            plugin
+                .complete(&context)
+                .map(|result| result.completions)
+                .unwrap_or_default()
+        };
+        assert_eq!(values_for("t845 --aa "), vec!["from-a".to_string()]);
+        assert_eq!(
+            values_for("t845 --bb "),
+            vec!["from-b".to_string()],
+            "the second flag must not be served the first flag's cached values"
+        );
+        // And the first flag still serves its own afterwards.
+        assert_eq!(values_for("t845 --aa "), vec!["from-a".to_string()]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
