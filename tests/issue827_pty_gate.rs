@@ -258,3 +258,171 @@ fn pty_gate_s3_completion_unique_directory_takes_slash() {
     s.expect_prompt();
     s.expect_absent("cannot access", ABSENT_WINDOW);
 }
+
+// ---------------------------------------------------------------------------
+// S4 — completion menu: two candidates sharing a prefix open the menu;
+// navigation + Enter accepts the highlighted candidate WITH the
+// suffix for its kind (a directory's slash).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pty_gate_s4_completion_menu_navigates_and_accepts_with_slash() {
+    if !require_pty_or_skip("pty_gate_s4_completion_menu_navigates_and_accepts_with_slash") {
+        return;
+    }
+    let mut s = spawn_gate("s4", "");
+    std::fs::create_dir(s.start().join("alpha")).unwrap();
+    std::fs::write(s.start().join("alpha").join("aaa.txt"), "A827\n").unwrap();
+    std::fs::create_dir(s.start().join("alpine")).unwrap();
+    std::fs::write(s.start().join("alpine").join("bbb.txt"), "B827\n").unwrap();
+    s.wait_ready();
+    s.send("ls al");
+    s.send(TAB);
+    // The menu/list must render BOTH candidates.
+    let screen = await_screen(&s, "alpine", Duration::from_secs(5));
+    assert!(
+        screen.contains("alpha") && screen.contains("alpine"),
+        "completion menu must list both candidates\nscreen:\n{screen}"
+    );
+    // Navigate once, then Enter accepts the highlighted candidate
+    // (niubash#821: with a menu up, Enter accepts, it does not submit).
+    s.send(DOWN);
+    s.send("\r");
+    // Whichever directory was accepted, it must carry its slash:
+    // typing X continues inside it.
+    s.send("X");
+    let screen = await_screen(&s, "/X", Duration::from_secs(3));
+    assert!(
+        screen.contains("alpha/X") || screen.contains("alpine/X"),
+        "menu accept must commit the directory with its slash \
+         (`ls alpha/` or `ls alpine/`)\nscreen:\n{screen}"
+    );
+    s.send(CTRL_C);
+    s.expect_prompt();
+}
+
+// ---------------------------------------------------------------------------
+// S5 — Ctrl-R: reverse history search finds a prior command; the
+// accept Enter loads it and the submit Enter executes it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pty_gate_s5_ctrl_r_reverse_search_accepts_and_runs() {
+    if !require_pty_or_skip("pty_gate_s5_ctrl_r_reverse_search_accepts_and_runs") {
+        return;
+    }
+    let mut s = spawn_gate("s5", "S827=CR827-OUT\n");
+    s.wait_ready();
+    // Seed history with a command whose OUTPUT differs from its text
+    // (echo-proof, the #420 rule): only a real re-execution prints
+    // the value a second time.
+    s.send_line("echo $S827");
+    s.expect("CR827-OUT");
+    s.expect_prompt();
+    s.send(CTRL_R);
+    std::thread::sleep(Duration::from_millis(120));
+    s.send("S827");
+    std::thread::sleep(Duration::from_millis(120));
+    // First Enter accepts the match into the buffer, second submits.
+    s.send("\r");
+    s.send("\r");
+    s.expect("CR827-OUT");
+    s.expect_prompt();
+}
+
+// ---------------------------------------------------------------------------
+// S6 — resize: geometry change mid-session; the prompt keeps working
+// and $COLUMNS follows the new width (the niubash#822 chain: the
+// shell's own COLUMNS is the single source, refreshed on resize).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pty_gate_s6_resize_prompt_survives_and_columns_follows() {
+    if !require_pty_or_skip("pty_gate_s6_resize_prompt_survives_and_columns_follows") {
+        return;
+    }
+    // spawn_gate geometry is (100, 30).
+    let mut s = spawn_gate("s6", "");
+    s.wait_ready();
+    s.send_line("echo COL827=$COLUMNS");
+    s.expect("COL827=100");
+    s.expect_prompt();
+    s.resize(80, 24);
+    s.send_line("echo COL827=$COLUMNS");
+    s.expect("COL827=80");
+    s.expect_prompt();
+}
+
+// ---------------------------------------------------------------------------
+// S7 — bracketed paste: the pasted line lands in the edit buffer and
+// nothing executes until Enter.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pty_gate_s7_bracketed_paste_buffers_until_enter() {
+    if cfg!(windows) {
+        // Platform limitation, not a regression: ConPTY consumes the
+        // ESC[200~/ESC[201~ markers before they reach the shell
+        // (crossterm has no ANSI input parser on Windows), so a
+        // terminal paste is carried by its CRLF signature there —
+        // that shape is pinned in tests/interactive.rs. Same
+        // treatment as the niubash#202 case.
+        return;
+    }
+    if !require_pty_or_skip("pty_gate_s7_bracketed_paste_buffers_until_enter") {
+        return;
+    }
+    let mut s = spawn_gate("s7", "P827=PASTE827-OUT\n");
+    s.wait_ready();
+    // One bracketed paste: a multi-word line, no Enter inside. The
+    // buffer shows the literal `$P827`; only execution prints the
+    // value, so the value is the execution witness.
+    s.send("\u{1b}[200~echo $P827 alpha beta gamma\u{1b}[201~");
+    s.expect_absent("PASTE827-OUT", ABSENT_WINDOW);
+    s.send("\r");
+    s.expect("PASTE827-OUT");
+    s.expect_prompt();
+}
+
+// ---------------------------------------------------------------------------
+// S8 — Ctrl-Z / fg (unix): a foreground job stops on Ctrl-Z, `jobs`
+// reports it Stopped, and `fg` resumes it to completion.
+//
+// Harness shape, stated plainly (the niubash#769 lesson): the DRIVEN
+// shell is a session leader alone in its process group — an orphaned
+// group — so the kernel discards SIGTSTP for the LEADER itself and
+// no conclusion about the shell's own suspension may be drawn from
+// this shape. The FOREGROUND JOB is different: the shell places it
+// in its own process group inside the same session, with the shell
+// in another group, so the job's group is NOT orphaned and SIGTSTP
+// applies to it normally (the shape the captain verified live on
+// 2026-11-02 with /proc state as ground truth). Every assertion
+// below targets the job, never the leader.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn pty_gate_s8_ctrl_z_stops_job_and_fg_completes_it() {
+    if !require_pty_or_skip("pty_gate_s8_ctrl_z_stops_job_and_fg_completes_it") {
+        return;
+    }
+    let mut s = spawn_gate("s8", "");
+    s.wait_ready();
+    // One job: a short sleep followed by its completion marker.
+    s.send_line("sleep 3; echo DONE827");
+    // Let the job take the foreground before the stop key (a Ctrl-Z
+    // that lands while the line is still being submitted belongs to
+    // the editor, not the job — arrival timing, same as GNU).
+    std::thread::sleep(Duration::from_millis(600));
+    s.send("\u{1a}");
+    // The shell regains its prompt with the job stopped.
+    s.expect_prompt();
+    s.send_line("jobs");
+    s.expect("Stopped");
+    s.expect_prompt();
+    // fg resumes the job; the remaining sleep runs out and the
+    // marker prints.
+    s.send_line("fg");
+    s.expect("DONE827");
+    s.expect_prompt();
+}
