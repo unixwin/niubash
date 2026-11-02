@@ -158,14 +158,20 @@ fn await_screen(s: &NiuSession, needle: &str, budget: Duration) -> String {
 /// Let the editor finish its prompt reset before sending more
 /// keystrokes. Observed on master (captain probes, 2026-11-02):
 /// `expect_prompt()` returns the instant the prompt glyphs render,
-/// but keystrokes sent in that same instant — right after a command
-/// executed or a Ctrl-C reset — never reach the line (the transcript
-/// shows total silence, as if the bytes were flushed during the
-/// reset). The established suite absorbs the same window with an
-/// `expect_absent` settle (e.g. `ctrl_c_midtyped_discards_line`);
-/// a plain pause is the honest equivalent here. The identical
-/// keystroke sequences, paced by an idle-drain PTY harness, drive
-/// master correctly — this is harness pacing, not an expectation.
+/// but the editor is still re-initializing — keystrokes sent in
+/// that window are echoed by the line discipline and then
+/// discarded when the editor takes the terminal over (the
+/// transcript shows the raw echo and no repaint, or total
+/// silence). The window is widest right after an external command
+/// executes (0.05 s loses the bytes; 0.3 s keeps them, unloaded)
+/// and load-dependent, so no pause is sized for it: S2 orders its
+/// legs so no keystroke ever follows an external execution, and
+/// this pause covers only the narrower post-Ctrl-C reset, the
+/// same window the established suite absorbs with an
+/// `expect_absent` settle (e.g. `ctrl_c_midtyped_discards_line`).
+/// The identical keystroke sequences, paced by an idle-drain PTY
+/// harness, drive master correctly — this is harness pacing, not
+/// an expectation.
 fn settle() {
     std::thread::sleep(Duration::from_millis(500));
 }
@@ -208,16 +214,12 @@ fn pty_gate_s2_completion_unique_file_takes_trailing_space() {
     let mut s = spawn_gate("s2", "");
     std::fs::write(s.start().join("zebra.txt"), "ZBODY827\n").unwrap();
     s.wait_ready();
-    // Commit leg: TAB + Enter must run the completed operand.
-    s.send("ls z");
-    s.send(TAB);
-    s.send("\r");
-    s.expect("zebra.txt");
-    s.expect_prompt();
-    settle();
-    // Suffix leg: complete again, then type X. A file's trailing space
-    // makes X a NEW argument (`ls zebra.txt X`); no space would glue
-    // it onto the name (`ls zebra.txtX`). The rendered line decides.
+    // Suffix leg FIRST (it needs post-completion keystrokes; the
+    // commit leg runs last because no keystroke may follow an
+    // external execution — see settle()). Complete, then type X:
+    // a file's trailing space makes X a NEW argument
+    // (`ls zebra.txt X`); no space would glue it onto the name
+    // (`ls zebra.txtX`). The rendered line decides.
     s.send("ls z");
     s.send(TAB);
     s.send("X");
@@ -228,6 +230,13 @@ fn pty_gate_s2_completion_unique_file_takes_trailing_space() {
          rendered line does not show it\nscreen:\n{screen}"
     );
     s.send(CTRL_C);
+    s.expect_prompt();
+    settle();
+    // Commit leg: TAB + Enter must run the completed operand.
+    s.send("ls z");
+    s.send(TAB);
+    s.send("\r");
+    s.expect("zebra.txt");
     s.expect_prompt();
 }
 
@@ -434,7 +443,11 @@ fn pty_gate_s8_ctrl_z_stops_job_and_fg_completes_it() {
     // job — so the marker proves nothing there. niu matches GNU on
     // that shape byte for byte; the single-job form is the one the
     // captain verified live on 2026-11-02.)
-    s.send_line("sh -c 'sleep 3; echo DONE827'");
+    // The witness is the OUTPUT form `DONE82742END`: the typed line
+    // shows `DONE827$((6*7))END`, so neither the absent check nor
+    // the final expect can be satisfied by the echo of the command
+    // itself (the #367 echo-proof rule).
+    s.send_line("sh -c 'sleep 3; echo DONE827$((6*7))END'");
     // Let the job take the foreground before the stop key (a Ctrl-Z
     // that lands while the line is still being submitted belongs to
     // the editor, not the job — arrival timing, same as GNU).
@@ -443,7 +456,7 @@ fn pty_gate_s8_ctrl_z_stops_job_and_fg_completes_it() {
     // The shell regains its prompt with the job stopped, and the
     // witness must NOT have printed while it is stopped.
     s.expect_prompt();
-    s.expect_absent("DONE827", ABSENT_WINDOW);
+    s.expect_absent("DONE82742END", ABSENT_WINDOW);
     s.send_line("jobs");
     s.expect("Stopped");
     s.expect_prompt();
@@ -451,6 +464,6 @@ fn pty_gate_s8_ctrl_z_stops_job_and_fg_completes_it() {
     // fg resumes the job; the remaining sleep runs out inside the
     // child and only then does the marker print.
     s.send_line("fg");
-    s.expect("DONE827");
+    s.expect("DONE82742END");
     s.expect_prompt();
 }
