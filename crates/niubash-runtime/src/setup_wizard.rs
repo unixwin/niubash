@@ -4028,6 +4028,12 @@ mod tests {
         let temp = unique_temp_dir("wizard-gallery");
         let root = temp.join("sources");
         let _sources = EnvGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root.to_string_lossy());
+        // niubash#809 F4: the trailing remove_source republishes the
+        // generated loader — keep it off the real ~/.niubash.
+        let _loader = EnvGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu").to_string_lossy(),
+        );
         install_omb_fixture_at(&root);
 
         let gallery = theme_gallery();
@@ -4398,6 +4404,12 @@ mod tests {
         let temp = unique_temp_dir("wizard-omb-theme");
         let root = temp.join("sources");
         let _sources = EnvGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root.to_string_lossy());
+        // niubash#809 F4: the trailing remove_source republishes the
+        // generated loader — keep it off the real ~/.niubash.
+        let _loader = EnvGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu").to_string_lossy(),
+        );
         install_omb_fixture_at(&root);
 
         let cfg = WizardConfig {
@@ -4701,6 +4713,12 @@ mod tests {
         let temp = unique_temp_dir("wizard-post-minimal");
         let root = temp.join("sources");
         let _sources = EnvGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root.to_string_lossy());
+        // niubash#809 F4: the trailing remove_source republishes the
+        // generated loader — keep it off the real ~/.niubash.
+        let _loader = EnvGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu").to_string_lossy(),
+        );
 
         assert!(
             post_install_theme_candidates(None).is_empty(),
