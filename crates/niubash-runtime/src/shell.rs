@@ -1470,6 +1470,23 @@ impl Shell {
         invocation: &rubash::invocation::ShellInvocation,
     ) -> Result<(), String> {
         invocation.apply_to_executor_before_startup(self.executor_mut())?;
+        // niubash#806 (R4): GNU's `-i` sets forced_interactive during option
+        // parsing (shell.c parse_shell_options' 'i' arm), and an interactive
+        // shell then runs change_flag ('i', FLAG_ON) (shell.c:672) — the
+        // letter `$-` prints between `h` and `k` reads that very global
+        // (flags.c:174 { 'i', &forced_interactive }). The engine's own argv
+        // walk writes the interactive shape at its `-i` arm (rubash main.rs:
+        // OWN_INTERACTIVE_SHELL + `__RUBASH_INTERACTIVE`); a Session-
+        // contract host declares the same shape through the published
+        // funnel (`Executor::set_invocation_shape`), so `niu -ic 'echo $-'`
+        // reports `i` in `$-` exactly like GNU (WSL GNU 5.3.20 oracle:
+        // `bash --noprofile --norc -i -c 'echo $-'` -> himBHc; plain `-c`
+        // stays hBc). The login half passes the invocation's own value,
+        // which the mark_login_shell arm above already applied.
+        if invocation.interactive {
+            self.executor_mut()
+                .set_invocation_shape(true, invocation.login);
+        }
         // rubash#2129 (niu companion): the parse is this process's own
         // word on its shape. An earned `--login`/`-l` joins the
         // construction-time argv[0] seed in the host classification
@@ -2593,6 +2610,37 @@ impl Shell {
         let title = self.resolve_title_value();
         self.run_title_hooks(&title);
         false
+    }
+
+    /// Fold the live terminal size into `$COLUMNS`/`$LINES` (niubash#799).
+    ///
+    /// GNU port notes. The SIGWINCH handler itself only latches a flag
+    /// (sig.c:745 `sigwinch_sighandler` -> `sigwinch_received`); the bind
+    /// runs `get_new_window_size` (lib/sh/winsize.c:87), which reads the
+    /// tty winsize and writes both variables through
+    /// `sh_set_lines_and_columns` (variables.c:1040), from two sites:
+    /// `shell_getc`'s `CHECK_WINCH` before the next command line is
+    /// parsed (parse.y:2484), and `wait_for` after every foreground job
+    /// while `checkwinsize` is on (jobs.c:3285/3297/3365/3372; default
+    /// on, config-top.h:148). niubash's equivalent points are the REPL
+    /// loop top (before the prompt — the post-job face) and the moment a
+    /// read returns (before the line executes — the `shell_getc` face);
+    /// both funnel through here. The `checkwinsize` gate mirrors
+    /// jobs.c's guard exactly, and the bind goes through the Session
+    /// contract's `notify_terminal_size`, which writes `LINES` then
+    /// `COLUMNS` as plain (non-exported) shell variables the same way
+    /// `bind_variable` does in the C.
+    pub(crate) fn refresh_winsize_variables(&mut self) {
+        if self.session_mut().options().get("checkwinsize") == Some(false) {
+            return;
+        }
+        let Some((columns, rows)) = crate::terminal::terminal_size() else {
+            return;
+        };
+        if columns > 0 && rows > 0 {
+            self.session_mut()
+                .notify_terminal_size(i32::from(columns), i32::from(rows));
+        }
     }
 
     /// Compute the current title for `run_title_hooks`.
