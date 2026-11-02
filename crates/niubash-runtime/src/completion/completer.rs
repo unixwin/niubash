@@ -769,12 +769,33 @@ impl NiubashCompleter {
             .current_word_span()
             .unwrap_or((cursor_pos, cursor_pos));
 
+        // GNU rl_complete_internal marks a spliced match with `/` and no
+        // space when it resolves to a directory — engine compspec
+        // candidates arrive as bare names (COMPREPLY carries no dir
+        // flag), so the check runs host-side here.
+        let current_dir = self
+            .state
+            .lock()
+            .ok()
+            .map(|state| state.current_dir.clone());
         for (i, completion) in result.completions.iter().enumerate() {
             let description = result.descriptions.get(i).and_then(|d| d.as_deref());
             let style = result.styles.get(i).copied().flatten();
 
+            let mut value = completion.clone();
+            let mut append_whitespace = should_append_completion_whitespace(&value);
+            if append_whitespace {
+                if let Some(dir) = current_dir.as_ref() {
+                    let unescaped = crate::completion::path::unescape_shell_path(&value);
+                    if !unescaped.is_empty() && dir.join(&unescaped).is_dir() {
+                        value.push('/');
+                        append_whitespace = false;
+                    }
+                }
+            }
+
             suggestions.push(Suggestion {
-                value: completion.clone(),
+                value,
                 display_override: None,
                 description: description.map(|s| s.to_string()),
                 style,
@@ -783,7 +804,7 @@ impl NiubashCompleter {
                     start: span_start,
                     end: span_end,
                 },
-                append_whitespace: should_append_completion_whitespace(completion),
+                append_whitespace,
                 match_indices: None,
             });
         }
