@@ -1892,11 +1892,14 @@ struct PasteChunkEditMode {
     /// non-GNU style. The CycleMenu publishes its session (snapshot +
     /// spliced flag) there; this wrapper consumes it in
     /// [`Self::delegate`] for the keys a menu cannot finish itself:
-    /// Esc rolls the line back to the snapshot, an Enter inside a live
-    /// session accepts the candidate in the line and submits in the
-    /// same press, and any other edit key ends the session as
-    /// accepted-in-place. `None` under `insert` and for the GNU style
-    /// — every #631 path is inert then.
+    /// Esc rolls the line back to the snapshot, and any other edit key
+    /// ends the session as accepted-in-place. An Enter inside a live
+    /// session is NOT wrapped here (niubash#821 superseded the #631
+    /// one-press accept-and-run): it reaches the engine bare, whose
+    /// submit first refusal (`MenuAccept`) accepts the spliced
+    /// candidate, closes the menu, and leaves the line editable — a
+    /// second Enter submits. `None` under `insert` and for the GNU
+    /// style — every #631 path is inert then.
     cycle_session: Option<SharedCycleSession>,
     /// niubash#420: put probe-consumed events BACK into the input stream.
     /// The live console cannot unread, so the events are written back into
@@ -2163,14 +2166,6 @@ impl PasteChunkEditMode {
     fn with_cycle_session(mut self, cycle_session: Option<SharedCycleSession>) -> Self {
         self.cycle_session = cycle_session;
         self
-    }
-
-    /// Whether the attached cycle session is live right now.
-    fn cycle_session_open(&self) -> bool {
-        self.cycle_session
-            .as_ref()
-            .and_then(|session| session.lock().ok())
-            .is_some_and(|state| state.is_open())
     }
 
     /// niubash#631: the navigation splice for a TAB (`delta` +1) or
@@ -2869,7 +2864,9 @@ impl PasteChunkEditMode {
         // let an Esc in the same key burst be translated before the
         // menu knew the session had been edited or rolled back.
         // Navigation keys (TAB / Shift-TAB) leave the session to the
-        // menu; Enter is decided with the submit shape below; a bare
+        // menu; Enter flows on bare (niubash#821: the engine's submit
+        // first refusal accepts the highlighted candidate; only a
+        // second Enter submits); a bare
         // Esc consumes the session and (when a candidate was spliced)
         // arms the rollback edits; every other editing key ends the
         // session as accepted-in-place. Only key presses and pastes
@@ -2977,6 +2974,25 @@ impl PasteChunkEditMode {
         // dismisses it so the very same Enter submits — one Enter, GNU's
         // shape, with the committed text from the prefix completion.
         //
+        // niubash#821: the cycle/select interactions take the SAME bare
+        // shape now. Their Enter used to be wrapped as
+        // `Multiple[MenuAccept, Enter]` (the #631 one-press accept-and-run,
+        // DESIGN §7.2 as then ruled), which skipped the accept step the
+        // user sees in zsh complist / fish: Enter ran the line while the
+        // grid was still up. Under #821 the Enter inside a live cycle
+        // session reaches the engine bare, where the submit first refusal
+        // decides with the exact menu state — the zsh/fish contract, one
+        // mechanism for every interaction:
+        //
+        // * a live CycleMenu with a frozen, non-provisional candidate set
+        //   TAKES the key (`MenuAccept`: the spliced candidate stays in
+        //   the line — `replace_in_buffer` is a no-op for it — the menu
+        //   closes, editing continues, cursor at the splice end); a SECOND
+        //   Enter submits.
+        // * a menu that has nothing to accept (empty set, provisional
+        //   answer, the GNU info list, or no menu at all) DECLINES, and
+        //   the Enter runs the line as typed — never a dead key.
+        //
         // The gate is load-bearing beyond the menu: reedline 0.52 routes a
         // WHOLE `Multiple` batch to the history-search handler while a
         // Ctrl+R search is active, and that handler drops `Multiple(_)` as
@@ -2999,31 +3015,6 @@ impl PasteChunkEditMode {
         if submit_carries_enter && enter_press && self.menu_possible && self.enter_dismisses_menu {
             self.menu_possible = false;
             let mut events = vec![ReedlineEvent::Esc];
-            match translated {
-                ReedlineEvent::Enter => events.push(ReedlineEvent::Enter),
-                ReedlineEvent::Multiple(rest) => events.extend(rest),
-                _ => unreachable!("checked above"),
-            }
-            return ReedlineEvent::Multiple(events);
-        }
-        // niubash#631: under the cycle interaction, an Enter inside a
-        // live session accepts the candidate already in the line AND
-        // runs the command in the same press (DESIGN §7.2) — a
-        // `MenuAccept` rides ahead of the submit: the engine's accept
-        // closes the menu over the spliced candidate (the CycleMenu's
-        // `replace_in_buffer` is a no-op; the text is already there)
-        // and the Enter then submits the accepted line. A bare Enter
-        // would die in the engine's first-refusal instead (the #486
-        // two-Enter shape, which is the *insert* interaction's
-        // contract, not cycle's). The gates mirror the GNU wrap above:
-        // `submit_carries_enter` + `enter_press` + the TAB window keep
-        // the `Multiple` out of Ctrl+R search, and the live-session
-        // check keeps every non-completion submit byte-identical
-        // (`MenuAccept` is inapplicable without an open menu, but the
-        // wrap itself must not exist outside a session).
-        if submit_carries_enter && enter_press && self.menu_possible && self.cycle_session_open() {
-            self.menu_possible = false;
-            let mut events = vec![ReedlineEvent::MenuAccept];
             match translated {
                 ReedlineEvent::Enter => events.push(ReedlineEvent::Enter),
                 ReedlineEvent::Multiple(rest) => events.extend(rest),
@@ -10872,23 +10863,26 @@ mod tests {
         assert!(!session.lock().unwrap().is_open());
     }
 
+    /// niubash#821: the Enter inside a live cycle session stays BARE —
+    /// the #631 wrap (`Multiple[MenuAccept, Enter]`, the one-press
+    /// accept-and-run) is gone. The engine's submit first refusal
+    /// (`menu_took_the_key` → `MenuAccept`) now decides with the exact
+    /// menu state: a live session takes the key (accept, menu closes,
+    /// editing continues) and only a SECOND Enter submits.
     #[test]
-    fn issue631_wrapper_enter_accepts_and_submits_inside_a_live_cycle_session() {
+    fn issue821_wrapper_enter_stays_bare_inside_a_live_cycle_session() {
         let (mut detector, session) = cycle_detector();
         arm_cycle_session(&session, true);
         detector.parse_event(tab());
         let event = detector.parse_event(cr());
-        match &event {
-            ReedlineEvent::Multiple(events) => {
-                assert_eq!(events.len(), 2, "{event:?}");
-                assert!(matches!(&events[0], ReedlineEvent::MenuAccept));
-                assert!(matches!(&events[1], ReedlineEvent::Enter));
-            }
-            other => panic!("expected accept + submit, got {other:?}"),
-        }
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "inside a live session the Enter must reach the engine bare so \
+             its open-menu first refusal can accept: {event:?}"
+        );
 
         // No live session (cell attached but closed): the Enter stays
-        // bare — the #486 first-refusal shape decides, not a wrap.
+        // bare too — the #486 first-refusal shape decides, not a wrap.
         let (mut detector, session) = cycle_detector();
         assert!(!session.lock().unwrap().is_open());
         detector.parse_event(tab());

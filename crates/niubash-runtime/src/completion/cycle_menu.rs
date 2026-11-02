@@ -35,9 +35,17 @@
 //!   fallback splice for a navigation event delivered straight to it.
 //! * **Any other edit key** ends the session as *accepted in place*:
 //!   the candidate in the line stays and the key applies on top of it.
-//! * **Enter** accepts the candidate in the line and runs the command;
-//!   **Esc** rolls the line back to its pre-completion snapshot. Those
-//!   two are completed by the edit-mode wrapper
+//! * **Enter** accepts the highlighted candidate WITHOUT running the
+//!   line (niubash#821, the zsh complist / fish shape — superseding the
+//!   #631 one-press accept-and-run): the key reaches the engine bare,
+//!   whose submit first refusal dispatches `MenuAccept` — this menu's
+//!   accept is a no-op splice (the highlighted candidate is already in
+//!   the line) followed by `Deactivate`, which ends the session and
+//!   leaves the line editable; a SECOND Enter submits. A menu with
+//!   nothing to accept (empty set, provisional answer) declines the
+//!   refusal and the Enter runs the line as typed.
+//! * **Esc** rolls the line back to its pre-completion snapshot. That
+//!   one is completed by the edit-mode wrapper
 //!   (`PasteChunkEditMode`), not here: a reedline `Menu` never sees raw
 //!   keys, and at `Deactivate` time it is handed no `Editor`, so the
 //!   rollback edit cannot be issued from the menu. The menu publishes
@@ -472,8 +480,10 @@ fn step_up_with(
 /// translation time — a menu-side splice lands in
 /// `update_working_details`, whose frame the painter has already
 /// composed the input line for, so the line would lag the highlight
-/// by a full paint), Esc rollback, Enter accept-and-run, and
-/// edit-key accept-in-place.
+/// by a full paint), Esc rollback, and
+/// edit-key accept-in-place. (Enter needs no wrapper help since
+/// niubash#821: the engine's submit first refusal accepts through the
+/// menu itself.)
 #[derive(Debug, Default)]
 pub struct CycleSession {
     /// A cycle session is live: the menu is open over a frozen set.

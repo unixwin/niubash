@@ -1949,7 +1949,7 @@ fn ask_completion_interaction(
         (
             CompletionInteraction::Cycle,
             "cycle",
-            t.tr("TAB cycles candidates into the line, Enter accepts and runs, Esc rolls back"),
+            t.tr("TAB cycles candidates into the line, Enter accepts the pick, Esc rolls back"),
         ),
         (
             CompletionInteraction::Insert,
