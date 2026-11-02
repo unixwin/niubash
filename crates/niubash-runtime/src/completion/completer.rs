@@ -286,6 +286,19 @@ impl NiubashCompleter {
         self.complete_input(input, cursor_pos)
     }
 
+    /// Look up `name` in a session env snapshot, case-insensitively:
+    /// Windows session envs carry `Path`/`PATHEXT` under varying
+    /// casings, and the snapshot preserves the stored spelling.
+    fn session_env_value(
+        env_vars: &std::collections::HashMap<String, String>,
+        name: &str,
+    ) -> Option<String> {
+        env_vars
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    }
+
     /// Complete INPUT at CURSOR_POS with one pinned GNU completion
     /// source (see [`SpecificCompletion`]). This bypasses
     /// `complete_input`'s position-driven source choice only; every
@@ -324,6 +337,11 @@ impl NiubashCompleter {
         context.open_fds = open_fds;
         context.tmp_base = tmp_base;
         context.file_colors = Some(crate::completion::FileColors::from_env_vars(&env_vars));
+        // niubash#839/#845: producers resolving tools must see the
+        // session's PATH/PATHEXT (the snapshot this context was built
+        // from), not the process env.
+        context.session_path = Self::session_env_value(&env_vars, "PATH");
+        context.session_pathext = Self::session_env_value(&env_vars, "PATHEXT");
         context.dir_cache = Some(DirCacheHandle::with_shared(
             dir_cache,
             SessionKey::new(current_dir, String::new()),
@@ -450,6 +468,11 @@ impl NiubashCompleter {
         // completion call so a fresh `export LS_COLORS=…` takes effect
         // on the next TAB without an editor rebuild.
         context.file_colors = Some(crate::completion::FileColors::from_env_vars(&env_vars));
+        // niubash#839/#845: producers resolving tools must see the
+        // session's PATH/PATHEXT (the snapshot this context was built
+        // from), not the process env.
+        context.session_path = Self::session_env_value(&env_vars, "PATH");
+        context.session_pathext = Self::session_env_value(&env_vars, "PATHEXT");
         let mut all_suggestions = Vec::new();
 
         // GNU programmable completion owns a command's arguments whenever a

@@ -91,6 +91,21 @@ pub struct CompletionContext {
     /// session's re-queries. Contexts built outside the completer
     /// keep `None` and enumerate uncached, exactly as before.
     pub dir_cache: Option<crate::completion::path::DirCacheHandle>,
+    /// The session's `PATH` at snapshot time, from
+    /// `CompletionState::env_vars` (niubash#839). Producers that must
+    /// resolve a tool the way the SESSION would — the dynamic
+    /// completion fingerprint in `external.rs` — probe this value,
+    /// not the process `PATH`: a tool that exists only on the session
+    /// PATH (an interactive `export PATH=...` the process never saw)
+    /// is otherwise invisible to the fingerprint while `Command::new`
+    /// still resolves it at spawn. Contexts built without session
+    /// state keep `None` and fall back to the process env.
+    pub session_path: Option<String>,
+    /// The session's `PATHEXT` at snapshot time (niubash#845), the
+    /// companion of `session_path` for Windows tool resolution.
+    /// `None` outside a session snapshot, with the same process-env
+    /// fallback discipline.
+    pub session_pathext: Option<String>,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -128,6 +143,8 @@ impl CompletionContext {
             tmp_base: std::env::temp_dir(),
             file_colors: None,
             dir_cache: None,
+            session_path: None,
+            session_pathext: None,
         }
     }
 

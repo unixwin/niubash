@@ -40,8 +40,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -724,7 +726,7 @@ impl ExternalCompletionPlugin {
         spec: &DynamicCommand,
         context: &CompletionContext,
     ) -> Option<CompletionResult> {
-        let tool_path = which_tool(&spec.cmd);
+        let tool_path = which_tool(&spec.cmd, context.session_path.as_deref());
         let tool_mtime_secs = tool_path
             .as_deref()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -783,21 +785,12 @@ impl ExternalCompletionPlugin {
             spec.cmd,
             spec.args
         );
-        let output = crate::console_guard::suppressed_command(&spec.cmd)
-            .args(&spec.args)
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let values: Vec<String> = stdout
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
+        let values = run_dynamic_command(
+            spec,
+            context.session_path.as_deref(),
+            self.cache_dir.as_deref(),
+            DYNAMIC_COMMAND_TIMEOUT,
+        )?;
 
         let written_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -900,6 +893,141 @@ impl CompletionPlugin for ExternalCompletionPlugin {
 // Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// niubash#839: hard bound for one dynamic completion tool run. The
+/// TAB path is interactive: a tool that hangs must not freeze it, so
+/// past this bound the child is killed and the completion degrades to
+/// no candidates (with the once-per-session warning below).
+const DYNAMIC_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// niubash#839: failure warnings are once-per-session per shape. A
+/// broken tool would otherwise warn on every Tab press; silence after
+/// the first warning keeps the failure discoverable (it is in the
+/// log) without spamming it, and — the point of the change — a
+/// failure is never again indistinguishable from a legitimately
+/// empty result in the log.
+static DYNAMIC_WARNED_SPAWN: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_WARNED_NONZERO: AtomicBool = AtomicBool::new(false);
+static DYNAMIC_WARNED_TIMEOUT: AtomicBool = AtomicBool::new(false);
+
+fn warn_dynamic_once(flag: &AtomicBool, message: String) {
+    if !flag.swap(true, Ordering::SeqCst) {
+        log::warn!("ExternalCompletionPlugin: {}", message);
+    }
+}
+
+/// Run one dynamic completion tool with a bounded wait, returning its
+/// stdout lines on success (niubash#839).
+///
+/// Failure shapes are DISTINCT in the log and all return `None`
+/// (no candidates — the same user-visible degradation as a
+/// legitimately empty result, which logs nothing): spawn failure,
+/// non-zero exit, and timeout each warn once per session. Stdout
+/// goes to a scratch file, not a pipe, so a tool that out-writes the
+/// pipe buffer cannot wedge the bounded wait (the same isolation
+/// shape as the git prompt's spawn). The session PATH, when the
+/// completer snapshot carries one, is handed to the child so the
+/// spawn resolves the same tool `which_tool` fingerprinted.
+fn run_dynamic_command(
+    spec: &DynamicCommand,
+    session_path: Option<&str>,
+    scratch_dir: Option<&Path>,
+    timeout: Duration,
+) -> Option<Vec<String>> {
+    static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    let scratch = scratch_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!(
+            "niu-dynamic-completion-{}-{}.out",
+            std::process::id(),
+            seq
+        ));
+    let sink = match std::fs::File::create(&scratch) {
+        Ok(file) => file,
+        Err(err) => {
+            warn_dynamic_once(
+                &DYNAMIC_WARNED_SPAWN,
+                format!(
+                    "dynamic completion tool '{}' could not start (scratch file): {}",
+                    spec.cmd, err
+                ),
+            );
+            return None;
+        }
+    };
+    let mut command = crate::console_guard::suppressed_command(&spec.cmd);
+    command
+        .args(&spec.args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::from(sink));
+    if let Some(path) = session_path {
+        command.env("PATH", path);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            warn_dynamic_once(
+                &DYNAMIC_WARNED_SPAWN,
+                format!(
+                    "dynamic completion tool '{}' failed to spawn: {}",
+                    spec.cmd, err
+                ),
+            );
+            let _ = std::fs::remove_file(&scratch);
+            return None;
+        }
+    };
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => break None,
+        }
+    };
+    let Some(status) = status else {
+        warn_dynamic_once(
+            &DYNAMIC_WARNED_TIMEOUT,
+            format!(
+                "dynamic completion tool '{}' exceeded the {}s completion bound and was killed",
+                spec.cmd,
+                timeout.as_secs()
+            ),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&scratch);
+        return None;
+    };
+    if !status.success() {
+        warn_dynamic_once(
+            &DYNAMIC_WARNED_NONZERO,
+            format!(
+                "dynamic completion tool '{}' exited with {} (no candidates served)",
+                spec.cmd, status
+            ),
+        );
+        let _ = std::fs::remove_file(&scratch);
+        return None;
+    }
+    let stdout = std::fs::read_to_string(&scratch).unwrap_or_default();
+    let _ = std::fs::remove_file(&scratch);
+    Some(
+        stdout
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect(),
+    )
+}
+
 fn merge_command_def(existing: &mut CommandDef, incoming: CommandDef) {
     if existing.description.is_none() {
         existing.description = incoming.description;
@@ -952,7 +1080,15 @@ fn same_flag(left: &FlagDef, right: &FlagDef) -> bool {
 }
 
 /// Locate a tool binary in PATH, returning its full path (for mtime checks).
-fn which_tool(name: &str) -> Option<PathBuf> {
+///
+/// niubash#839: the probe runs against the SESSION env PATH the
+/// completer snapshots (`session_path`), not the process PATH. A tool
+/// that exists only on the session PATH — an interactive
+/// `export PATH=...` the process env never saw — was invisible to the
+/// mtime fingerprint even though the spawn below resolves it, so its
+/// cache entry could never go stale. `None` keeps the stateless
+/// fallback: the process PATH, for contexts built outside a session.
+fn which_tool(name: &str, session_path: Option<&str>) -> Option<PathBuf> {
     // Probe PATHEXT-style suffixes on Windows only, mirroring
     // `resolve_command_path` in runtime.rs. On Unix the bare name is the
     // only candidate — a literal `name.exe` in an earlier PATH directory
@@ -964,13 +1100,15 @@ fn which_tool(name: &str) -> Option<PathBuf> {
         &[""]
     };
 
-    if let Ok(path_env) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_env) {
-            for ext in extensions {
-                let candidate = dir.join(format!("{}{}", name, ext));
-                if is_executable_file(&candidate) {
-                    return Some(candidate);
-                }
+    let path_env = match session_path {
+        Some(path) => path.to_string(),
+        None => std::env::var("PATH").ok()?,
+    };
+    for dir in std::env::split_paths(&path_env) {
+        for ext in extensions {
+            let candidate = dir.join(format!("{}{}", name, ext));
+            if is_executable_file(&candidate) {
+                return Some(candidate);
             }
         }
     }
@@ -991,5 +1129,123 @@ fn is_executable_file(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn spec(cmd: &str, args: &[&str]) -> DynamicCommand {
+        DynamicCommand {
+            cmd: cmd.to_string(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            cache_ttl_secs: None,
+        }
+    }
+
+    /// niubash#839: the fingerprint probe reads the SESSION PATH the
+    /// completer snapshots — a tool living only in a session-only
+    /// directory is found through it and invisible without it.
+    #[test]
+    fn issue839_which_tool_probes_the_session_path() {
+        let dir = unique_temp_dir("niubash-issue839-which");
+        let file_name = if cfg!(windows) {
+            "t839tool.exe"
+        } else {
+            "t839tool"
+        };
+        let tool = dir.join(file_name);
+        std::fs::write(&tool, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let session_path = dir.to_string_lossy().into_owned();
+        assert_eq!(
+            which_tool("t839tool", Some(&session_path)),
+            Some(tool.clone()),
+            "a session-PATH-only tool must be fingerprint-visible"
+        );
+        let elsewhere = dir.join("elsewhere");
+        assert_eq!(
+            which_tool("t839tool", Some(&elsewhere.to_string_lossy())),
+            None,
+            "a PATH that lacks the tool must not find it"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// niubash#839: a missing tool is a spawn failure → `None`, the
+    /// same degradation as legit-empty but (via the once-per-session
+    /// warning in the implementation) no longer silent.
+    #[test]
+    fn issue839_missing_tool_yields_no_candidates() {
+        let dir = unique_temp_dir("niubash-issue839-missing");
+        assert_eq!(
+            run_dynamic_command(
+                &spec("niu-no-such-tool-839", &[]),
+                None,
+                Some(&dir),
+                Duration::from_secs(2),
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue839_dynamic_run_success_failure_and_timeout_shapes() {
+        let dir = unique_temp_dir("niubash-issue839-run");
+        // Success: stdout lines are the candidates.
+        assert_eq!(
+            run_dynamic_command(
+                &spec("sh", &["-c", "printf 'alpha\\nbeta\\n'"]),
+                None,
+                Some(&dir),
+                Duration::from_secs(5),
+            ),
+            Some(vec!["alpha".to_string(), "beta".to_string()])
+        );
+        // Non-zero exit: no candidates (and distinct in the log).
+        assert_eq!(
+            run_dynamic_command(
+                &spec("sh", &["-c", "exit 3"]),
+                None,
+                Some(&dir),
+                Duration::from_secs(5),
+            ),
+            None
+        );
+        // A hanging tool is bounded: killed at the timeout instead of
+        // freezing the TAB path.
+        let started = Instant::now();
+        assert_eq!(
+            run_dynamic_command(
+                &spec("sh", &["-c", "sleep 5"]),
+                None,
+                Some(&dir),
+                Duration::from_millis(300),
+            ),
+            None
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the bounded wait must return promptly, took {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
