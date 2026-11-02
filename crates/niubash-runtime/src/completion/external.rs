@@ -630,11 +630,15 @@ impl ExternalCompletionPlugin {
     /// Return the flags applicable to the current sub-command (if any),
     /// falling back to top-level flags.
     fn effective_flags<'a>(def: &'a CommandDef, context: &CompletionContext) -> Vec<&'a FlagDef> {
-        // Simple heuristic: second token in the line might be a sub-command name
-        let tokens: Vec<&str> = context.input.split_whitespace().collect();
-        if tokens.len() >= 2 {
-            let sub_name = tokens[1];
-            if let Some(sub) = def.subcommands.iter().find(|s| s.name == sub_name) {
+        // niubash#851: the sub-command is the second word of the
+        // CURRENT segment, resolved by the segment/quote-aware word
+        // machinery — the old `split_whitespace` over the whole line
+        // served the top-level command's flags for
+        // `true; git checkout -<TAB>` (tokens[1] was `git`) and for
+        // quoted command words.
+        let words = context.current_segment_words();
+        if let Some(sub_name) = words.get(1) {
+            if let Some(sub) = def.subcommands.iter().find(|s| &s.name == sub_name) {
                 return sub.flags.iter().collect();
             }
         }
@@ -991,5 +995,69 @@ fn is_executable_file(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn flag(long: &str) -> FlagDef {
+        FlagDef {
+            short: None,
+            long: Some(long.to_string()),
+            description: None,
+            takes_value: false,
+            values_source: None,
+        }
+    }
+
+    fn git_def() -> CommandDef {
+        CommandDef {
+            command: "git".to_string(),
+            description: None,
+            flags: vec![flag("--version")],
+            subcommands: vec![SubcommandDef {
+                name: "checkout".to_string(),
+                description: None,
+                flags: vec![flag("--detach")],
+            }],
+        }
+    }
+
+    fn context(input: &str) -> CompletionContext {
+        CompletionContext::new(PathBuf::new(), input.to_string(), input.len())
+    }
+
+    /// niubash#851: `effective_flags` must resolve the sub-command
+    /// from the current segment, not from whole-line token [1] —
+    /// `true; git checkout -<TAB>` serves checkout's flags, and a
+    /// quoted command word still resolves.
+    #[test]
+    fn issue851_effective_flags_uses_the_current_segment() {
+        let def = git_def();
+
+        let flags = ExternalCompletionPlugin::effective_flags(&def, &context("git checkout -"));
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].long.as_deref(), Some("--detach"));
+
+        let flags =
+            ExternalCompletionPlugin::effective_flags(&def, &context("true; git checkout -"));
+        assert_eq!(
+            flags.len(),
+            1,
+            "the segment after `;` owns the completion, not the line's first command"
+        );
+        assert_eq!(flags[0].long.as_deref(), Some("--detach"));
+
+        let flags = ExternalCompletionPlugin::effective_flags(&def, &context("'git' checkout -"));
+        assert_eq!(flags[0].long.as_deref(), Some("--detach"));
+
+        // No sub-command in the segment: top-level flags.
+        let flags = ExternalCompletionPlugin::effective_flags(&def, &context("git -"));
+        assert_eq!(flags[0].long.as_deref(), Some("--version"));
+        let flags = ExternalCompletionPlugin::effective_flags(&def, &context("true; git -"));
+        assert_eq!(flags[0].long.as_deref(), Some("--version"));
     }
 }

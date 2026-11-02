@@ -1737,10 +1737,15 @@ fn build_edit_mode(
                 ChordLayerParts {
                     chords: {
                         // niubash#848: same DESIGN §5.3 last-write-wins
-                        // order as the emacs arm — engine chords first,
-                        // plugin chords after them, so a plugin claim
-                        // wins an exact-match collision in `ChordIndex`.
-                        let mut chords = Vec::new();
+                        // order as the emacs arm — lowest layer first,
+                        // plugin chords last, so a plugin claim wins an
+                        // exact-match collision in `ChordIndex`.
+                        // niubash#851: the GNU defaults layer comes
+                        // first here too — it used to be emacs-only, so
+                        // under `set -o vi` the C-x C-r / C-x C-e /
+                        // kbd-macro chords did not exist at all, while
+                        // GNU's vi maps carry the C-x family.
+                        let mut chords = gnu_default_chord_bindings();
                         for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
                             chords.extend(collect_chord_bindings(engine_bindings, target, 0));
                             chords.extend(
@@ -8457,6 +8462,43 @@ mod tests {
                 .any(|binding| binding.keys == cx_macro_e),
             "GNU defaults claim C-x e (call-last-kbd-macro)"
         );
+    }
+
+    /// niubash#851: the vi chord layer must carry the GNU C-x chords
+    /// too — `gnu_default_chord_bindings` used to be fed only into
+    /// the emacs arm, so under `set -o vi` C-x C-r / C-x C-e and the
+    /// kbd-macro chords did not exist, while GNU's vi maps carry
+    /// them.
+    #[test]
+    fn issue851_vi_chords_carry_the_gnu_cx_family() {
+        let config = NativeWidgetConfig::default();
+        let (_, _, parts) = build_edit_mode(
+            EditorMode::Vi,
+            &config,
+            &[],
+            &[],
+            &[],
+            0,
+            CompletionInteraction::Insert,
+        );
+        let cx_macro_e = [
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::NONE, KeyCode::Char('e')),
+        ];
+        assert!(
+            parts.chords.iter().any(|chord| chord.keys == cx_macro_e),
+            "vi chords must include the GNU C-x e kbd-macro chord, got {} chords",
+            parts.chords.len()
+        );
+        // And the vi set is a superset of the GNU defaults layer,
+        // exactly like the emacs arm's.
+        for gnu in gnu_default_chord_bindings() {
+            assert!(
+                parts.chords.iter().any(|chord| chord.keys == gnu.keys),
+                "vi chords missing GNU default {:?}",
+                gnu.keys
+            );
+        }
     }
 
     #[test]

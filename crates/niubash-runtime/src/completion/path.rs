@@ -31,9 +31,12 @@ use anyhow::Result;
 // the LS_COLORS `ex` kind) is deferred until the candidate list is
 // built and sorted, and runs for at most [`EXEC_REFINE_LIMIT`]
 // regular-file candidates from the head of the list — the window a
-// completion grid can show first. Verdicts are memoized on the cache,
-// so one session pays an entry's stat at most once, and only for
-// entries near the head of the list.
+// completion grid can show first. Verdicts are memoized on the cache
+// with their metadata fingerprint (niubash#851): a re-query pays the
+// one stat to revalidate the fingerprint, and the verdict is only
+// recomputed when the fingerprint moved — so the stat stays bounded
+// by the refinement window while a mid-session `chmod` is no longer
+// invisible to the memo.
 
 /// How many head-of-list regular-file candidates get their exec bit
 /// refined (one stat each) per directory listing. A completion grid
@@ -171,9 +174,30 @@ pub(crate) fn uncached_listing(dir: &Path) -> Option<Arc<DirListing>> {
 pub struct DirListingCache {
     session: Option<SessionKey>,
     listings: Vec<(PathBuf, Arc<DirListing>)>,
-    exec_verdicts: HashMap<(PathBuf, String), bool>,
+    /// Memoized exec verdicts with the file fingerprint they were
+    /// computed from (niubash#851): a verdict is reused only while
+    /// the entry's metadata still matches the fingerprint, so a
+    /// `chmod +x` mid-session — which changes the mode but neither
+    /// the directory mtime nor the file's mtime/length — is picked
+    /// up on the next query instead of serving the stale verdict
+    /// until a new word retires the session.
+    exec_verdicts: HashMap<(PathBuf, String), (bool, ExecFingerprint)>,
     enumerations: usize,
     metadata_calls: usize,
+}
+
+/// The metadata fingerprint one exec verdict was computed from
+/// (niubash#851). On Unix it is the entry's (mtime, length, mode):
+/// any of the three moving invalidates the verdict. On Windows the
+/// verdict is a pure function of the entry NAME (PATHEXT), so the
+/// fingerprint is constant and the verdict can never go stale for a
+/// fixed key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecFingerprint {
+    modified: Option<SystemTime>,
+    len: u64,
+    #[cfg(unix)]
+    mode: u32,
 }
 
 /// One query's borrow of the shared listing cache, stamped with the
@@ -230,10 +254,14 @@ impl DirCacheHandle {
         Some(listing)
     }
 
-    /// The exec verdict for one entry, memoized for the session.
-    /// Computing a verdict is the ONLY per-entry metadata call left
-    /// in completion, and it happens at most once per (directory,
-    /// name) per session.
+    /// The exec verdict for one entry, memoized for the session with
+    /// fingerprint revalidation (niubash#851). Computing a verdict is
+    /// the ONLY per-entry metadata call left in completion: one stat
+    /// per query for entries in the refinement window, with the
+    /// verdict itself recomputed only when the entry's (mtime,
+    /// length, mode) fingerprint has moved — a directory-mtime check
+    /// alone can never see a `chmod`, which is exactly the staleness
+    /// this memo used to serve until the session retired.
     pub fn exec_verdict(&self, dir: &Path, name: &str) -> bool {
         let Ok(mut cache) = self.shared.lock() else {
             return entry_is_executable(dir, name);
@@ -244,15 +272,17 @@ impl DirCacheHandle {
             return entry_is_executable(dir, name);
         }
         let key = (dir.to_path_buf(), name.to_string());
-        if let Some(verdict) = cache.exec_verdicts.get(&key) {
-            return *verdict;
-        }
         #[cfg(unix)]
         {
             cache.metadata_calls += 1;
         }
-        let verdict = entry_is_executable(dir, name);
-        cache.exec_verdicts.insert(key, verdict);
+        let (verdict, fingerprint) = entry_exec_snapshot(dir, name);
+        if let Some((memoized, memoized_fingerprint)) = cache.exec_verdicts.get(&key) {
+            if *memoized_fingerprint == fingerprint {
+                return *memoized;
+            }
+        }
+        cache.exec_verdicts.insert(key, (verdict, fingerprint));
         verdict
     }
 
@@ -271,22 +301,59 @@ impl DirCacheHandle {
 /// any execute bit (one stat, symlinks followed); on Windows, a
 /// PATHEXT suffix — a pure name check.
 pub(crate) fn entry_is_executable(dir: &Path, name: &str) -> bool {
+    entry_exec_snapshot(dir, name).0
+}
+
+/// One stat of the entry at `dir`/`name`, yielding its exec verdict
+/// (the [`entry_is_executable`] rule) together with the
+/// [`ExecFingerprint`] the verdict was computed from (niubash#851).
+fn entry_exec_snapshot(dir: &Path, name: &str) -> (bool, ExecFingerprint) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(dir.join(name))
-            .map(|md| md.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+        match fs::metadata(dir.join(name)) {
+            Ok(md) => {
+                let mode = md.permissions().mode();
+                (
+                    mode & 0o111 != 0,
+                    ExecFingerprint {
+                        modified: md.modified().ok(),
+                        len: md.len(),
+                        mode,
+                    },
+                )
+            }
+            Err(_) => (
+                false,
+                ExecFingerprint {
+                    modified: None,
+                    len: 0,
+                    mode: 0,
+                },
+            ),
+        }
     }
     #[cfg(windows)]
     {
         let _ = dir;
-        is_pathext_executable(name)
+        (
+            is_pathext_executable(name),
+            ExecFingerprint {
+                modified: None,
+                len: 0,
+            },
+        )
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (dir, name);
-        false
+        (
+            false,
+            ExecFingerprint {
+                modified: None,
+                len: 0,
+            },
+        )
     }
 }
 
@@ -1720,9 +1787,52 @@ mod issue747_tests {
             "unix refinement must actually run inside the window"
         );
 
-        // Same session, same query: verdicts are memoized, no new stats.
+        // Same session, same query: verdicts are memoized, and the
+        // re-query pays at most one more refinement window of stats
+        // to revalidate their fingerprints (niubash#851 — a memoized
+        // verdict that is never revalidated serves stale exec bits
+        // after a mid-session `chmod`; the per-pass bound, not a
+        // once-per-session bound, is the structural guarantee now).
         let _ = PathCompleter::complete(&ctx(&dir, "ls ", Some(handle.clone()), true)).unwrap();
-        assert_eq!(handle.stats().1, metadata_calls);
+        assert!(
+            handle.stats().1 <= 2 * EXEC_REFINE_LIMIT,
+            "revalidation must stay bounded by one window per pass, got {}",
+            handle.stats().1
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// niubash#851: a `chmod +x` mid-session must flip the memoized
+    /// exec verdict on the next query. chmod changes the file's mode
+    /// but neither the directory mtime nor the file's mtime/length,
+    /// so the old never-revalidated memo served the stale verdict
+    /// until a new word retired the session.
+    #[cfg(unix)]
+    #[test]
+    fn issue851_exec_verdict_revalidates_against_file_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp_dir("niubash-issue851-chmod");
+        let path = dir.join("tool");
+        std::fs::write(&path, "x").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let handle = handle_for(&dir, "ls ");
+
+        assert!(
+            !handle.exec_verdict(&dir, "tool"),
+            "0o644 must not read as executable"
+        );
+        // Same content, same mtime class — only the mode moves.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            handle.exec_verdict(&dir, "tool"),
+            "chmod +x must flip the memoized verdict without a new session"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !handle.exec_verdict(&dir, "tool"),
+            "chmod -x must flip it back"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

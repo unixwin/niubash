@@ -839,7 +839,15 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
     let mut completions = Vec::new();
     let mut descriptions = Vec::new();
     for (value, description) in entries {
-        if !current_word.is_empty() && !appending && !value.starts_with(current_word.as_str()) {
+        // niubash#851: honor the configured matcher (case sensitivity
+        // and Prefix/Substring mode) like every other candidate
+        // source — the hardcoded case-sensitive `starts_with` here
+        // silently under-delivered compdef candidates under an
+        // insensitive/substring configuration.
+        if !current_word.is_empty()
+            && !appending
+            && !context.behavior.matches(&value, current_word.as_str())
+        {
             continue;
         }
         completions.push(value);
@@ -1011,6 +1019,46 @@ niu_git_comp() {
         // Drop the Shell inside this test, while _env_restore is still
         // armed (the thread-local bridge would otherwise defer the drop
         // to thread teardown).
+        crate::shell::uninstall_completion_bridge();
+    }
+
+    /// niubash#851: the compdef candidate filter must honor the
+    /// configured matcher like every other source. The compdef below
+    /// returns `Alpha`; completing `git AL` under the default
+    /// (case-insensitive) behavior must offer it — the old hardcoded
+    /// case-sensitive `starts_with` filter silently dropped it.
+    #[test]
+    fn issue851_compdef_filter_honors_the_configured_matcher() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(
+                r#"
+niu_git_comp() {
+    NIU_COMP_RESULT="Alpha"$'\n'"beta"
+}
+"#
+            )
+            .is_ok());
+        shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let context = CompletionContext::new(PathBuf::from("."), "git AL".to_string(), 6);
+        let result = compdef_suggestions(&context)
+            .unwrap_or_else(|| panic!("compdef must produce candidates for `git AL`"));
+        assert!(
+            result.completions.iter().any(|value| value == "Alpha"),
+            "case-insensitive matching must keep `Alpha` for query `AL`, got {:?}",
+            result.completions
+        );
+        assert!(
+            !result.completions.iter().any(|value| value == "beta"),
+            "`beta` does not match `AL` in any mode"
+        );
         crate::shell::uninstall_completion_bridge();
     }
 
