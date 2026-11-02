@@ -28,6 +28,15 @@ pub fn stdout_is_terminal() -> bool {
 pub fn terminal_columns() -> u16 {
     crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80)
 }
+
+/// Live terminal size as `(columns, rows)`, or `None` when the console
+/// query fails (no console attached, redirected output). The same
+/// CONOUT$ query `terminal_columns` folds to a width — kept as a pair
+/// so the winsize bind (niubash#799) can write both `$COLUMNS` and
+/// `$LINES` from one read.
+pub fn terminal_size() -> Option<(u16, u16)> {
+    crossterm::terminal::size().ok()
+}
 #[cfg(windows)]
 mod platform {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
