@@ -912,7 +912,15 @@ thread_local! {
 /// dynamic-complete-history's tokenization read (niubash#767). The
 /// engine-side history list is empty on the REPL path, so the
 /// editor is the only honest source.
-fn editor_history_entries(line_editor: &Reedline) -> Vec<String> {
+///
+/// The backend error travels with the result (niubash#843): the
+/// old `unwrap_or_default` collapse made a failing history backend
+/// indistinguishable from an empty history, so an expansion ran
+/// against a silently truncated past. Callers decide what the
+/// failure means for their command — GNU leaves the line untouched
+/// on a history-expansion error — but none of them may mistake it
+/// for "no history".
+fn editor_history_entries(line_editor: &Reedline) -> Result<Vec<String>, String> {
     line_editor
         .history()
         .search(reedline::SearchQuery::everything(
@@ -920,7 +928,7 @@ fn editor_history_entries(line_editor: &Reedline) -> Vec<String> {
             None,
         ))
         .map(|items| items.into_iter().map(|item| item.command_line).collect())
-        .unwrap_or_default()
+        .map_err(|err| err.to_string())
 }
 
 /// `rl_forward_word` (lib/readline/text.c:482) from POSITION:
@@ -1096,9 +1104,20 @@ fn run_readline_command(
         "shell-expand-line" => {
             let buffer = line_editor.current_buffer_contents().to_string();
             let cursor = line_editor.current_insertion_point();
-            let entries = editor_history_entries(line_editor);
-            if let Some(expanded) = shell.borrow_mut().shell_expand_line(&buffer, &entries) {
-                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            // niubash#843: a history-backend failure is not an empty
+            // history — expanding against a truncated past could
+            // rewrite the line wrongly, so the line stays untouched
+            // (GNU's expansion-error shape) and the failure is said.
+            match editor_history_entries(line_editor) {
+                Ok(entries) => {
+                    if let Some(expanded) = shell.borrow_mut().shell_expand_line(&buffer, &entries)
+                    {
+                        replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("niubash: shell-expand-line: history unavailable: {err}");
+                }
             }
         }
         // bashline.c:2902 history_expand_line: only the history
@@ -1108,9 +1127,18 @@ fn run_readline_command(
         "history-expand-line" => {
             let buffer = line_editor.current_buffer_contents().to_string();
             let cursor = line_editor.current_insertion_point();
-            let entries = editor_history_entries(line_editor);
-            if let Some(expanded) = shell.borrow_mut().history_expand_line(&buffer, &entries) {
-                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            // niubash#843: same failure honesty as shell-expand-line.
+            match editor_history_entries(line_editor) {
+                Ok(entries) => {
+                    if let Some(expanded) =
+                        shell.borrow_mut().history_expand_line(&buffer, &entries)
+                    {
+                        replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("niubash: history-expand-line: history unavailable: {err}");
+                }
             }
         }
         // util.c:99 _rl_abort_internal / util.c:122 rl_abort: clear
@@ -1154,7 +1182,16 @@ fn run_readline_command(
             let cursor = line_editor.current_insertion_point();
             let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
             let word = &buffer[start..end];
-            let entries = editor_history_entries(line_editor);
+            // niubash#843: a history-backend failure dings like an
+            // empty match set but says why — it is not "no history".
+            let entries = match editor_history_entries(line_editor) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    eprintln!("niubash: dynamic-complete-history: history unavailable: {err}");
+                    readline_ding();
+                    return SentinelOutcome::Resumed;
+                }
+            };
             let matches = crate::readline_commands::history_completion_matches(&entries, word);
             if matches.is_empty() {
                 readline_ding();
@@ -1537,6 +1574,27 @@ impl LayeredKeymap {
                     .push((source.clone(), event.clone()));
             }
         }
+        // niubash#843(e): a layer can also REMOVE a slot (the plugin
+        // layer's `rl_unbind_key` removals run inside the script
+        // layer). A removal leaves no trace in the loop above — the
+        // combo is simply absent afterwards — so without this sweep
+        // the registry kept listing the key as bound by its earlier
+        // layer while the editor had it unbound. A removed slot
+        // loses its whole stack; a later layer re-binding it starts
+        // a fresh one.
+        for combo in before.keys() {
+            if !self.keybindings.bindings.contains_key(combo) {
+                self.stacks.remove(&(combo.modifier, combo.key_code));
+            }
+        }
+        // Residual (niubash#843(g), cosmetic): a layer that rebinds
+        // a slot to the IDENTICAL event leaves no observable trace
+        // in this before/after diff, so the stack keeps the earlier
+        // writer as the slot's attribution even though the later
+        // layer wrote last. reedline's Keybindings exposes no write
+        // counter to diff against, and the misattribution only shows
+        // in `niu help keys`' source column for exact-duplicate
+        // rebinds — documented here rather than papered over.
         out
     }
 
@@ -1688,6 +1746,13 @@ fn build_edit_mode(
                     .into_iter()
                     .map(|(keys, event)| ChordBinding { keys, event }),
             );
+            // niubash#843(e): plugin unbinds reach the quote layer.
+            let mut quote_sequences =
+                collect_quote_sequences(engine_bindings, NativeKeymapTarget::Emacs);
+            retain_unbound_quote_sequences(
+                &mut quote_sequences,
+                &plugin_unbind_keysets(NativeKeymapTarget::Emacs),
+            );
             (
                 Box::new(Emacs::new(keybindings)),
                 KeymapRegistry {
@@ -1699,10 +1764,7 @@ fn build_edit_mode(
                 ChordLayerParts {
                     chords,
                     alt_keys,
-                    quote_sequences: collect_quote_sequences(
-                        engine_bindings,
-                        NativeKeymapTarget::Emacs,
-                    ),
+                    quote_sequences,
                 },
             )
         }
@@ -1761,7 +1823,10 @@ fn build_edit_mode(
             chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
             let mut quote_sequences = Vec::new();
             for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
-                quote_sequences.extend(collect_quote_sequences(engine_bindings, target));
+                // niubash#843(e): plugin unbinds reach the quote layer.
+                let mut target_quotes = collect_quote_sequences(engine_bindings, target);
+                retain_unbound_quote_sequences(&mut target_quotes, &plugin_unbind_keysets(target));
+                quote_sequences.extend(target_quotes);
             }
             (
                 Box::new(Vi::new(
@@ -3830,10 +3895,35 @@ fn apply_bundle_widget_binding(
     None
 }
 
+/// The preset names [`add_native_widget_preset_keybindings`]
+/// knows (niubash#843): exactly one exists today.
+fn native_widget_preset_known(preset: &str) -> bool {
+    preset.eq_ignore_ascii_case("autosuggestions")
+}
+
+/// The preset names in PRESETS the host does not know, in order
+/// (niubash#843).
+fn unknown_native_widget_presets(presets: &[String]) -> Vec<&str> {
+    presets
+        .iter()
+        .map(String::as_str)
+        .filter(|preset| !native_widget_preset_known(preset))
+        .collect()
+}
+
 fn add_native_widget_preset_keybindings(keybindings: &mut Keybindings, presets: &[String]) {
+    // niubash#843: an unknown preset name (a typo in
+    // NIU_NATIVE_WIDGETS) used to disable the pack silently — warn
+    // per name, the way other binding diagnostics do.
+    for preset in unknown_native_widget_presets(presets) {
+        eprintln!(
+            "niubash: unknown native-widget preset '{preset}' — ignored \
+             (known presets: autosuggestions)"
+        );
+    }
     if presets
         .iter()
-        .any(|preset| preset.eq_ignore_ascii_case("autosuggestions"))
+        .any(|preset| native_widget_preset_known(preset))
     {
         keybindings.add_binding(
             KeyModifiers::CONTROL,
@@ -4440,6 +4530,30 @@ fn collect_chord_bindings(
 /// 401393f), so the delivery is the host layer's: completing one of
 /// these sequences arms the quote, and the next key inserts its own
 /// character literally.
+/// Every key sequence a plugin unbound for TARGET, flat (single
+/// key) and chord spellings alike (niubash#843(e)).
+fn plugin_unbind_keysets(target: NativeKeymapTarget) -> Vec<Vec<(KeyModifiers, KeyCode)>> {
+    let mut sets = crate::readline_live::plugin_chord_unbinds(target);
+    sets.extend(
+        crate::readline_live::plugin_flat_unbinds(target)
+            .into_iter()
+            .map(|unbind| unbind.keys),
+    );
+    sets
+}
+
+/// Drop the quote sequences a plugin unbound (niubash#843(e)): the
+/// quote layer is a layer like any other, so an `rl_unbind_key`
+/// against the quoted-insert key must disarm it — it used to reach
+/// only the flat and chord layers, leaving the quote armed on a
+/// key the plugin had explicitly unbound.
+fn retain_unbound_quote_sequences(
+    sequences: &mut Vec<Vec<(KeyModifiers, KeyCode)>>,
+    unbinds: &[Vec<(KeyModifiers, KeyCode)>],
+) {
+    sequences.retain(|sequence| !unbinds.contains(sequence));
+}
+
 fn collect_quote_sequences(
     entries: &[crate::bind_surface::EngineBindEntry],
     target: NativeKeymapTarget,
@@ -9378,6 +9492,80 @@ mod tests {
         // through untouched.
         let outcome = run_host_sentinel(&shell, &mut editor, "echo hello");
         assert!(matches!(outcome, SentinelOutcome::NotSentinel));
+    }
+
+    // niubash#843(a): the history read no longer collapses a
+    // backend error into an empty vec — the Result IS the pin: a
+    // healthy editor answers Ok, and the type forces every caller
+    // to distinguish failure from "no history".
+    #[test]
+    fn issue843_editor_history_entries_distinguishes_error_from_empty() {
+        let editor = Reedline::create();
+        let entries = editor_history_entries(&editor)
+            .expect("a healthy history backend answers Ok, not a collapsed empty vec");
+        assert!(entries.is_empty());
+    }
+
+    // niubash#843(d): unknown native-widget preset names are named,
+    // not silently ignored; the one known preset still binds.
+    #[test]
+    fn issue843_unknown_native_widget_presets_are_named() {
+        let presets = vec![
+            "autosuggestions".to_string(),
+            "autosugestions".to_string(),
+            "fuzzy".to_string(),
+        ];
+        assert_eq!(
+            unknown_native_widget_presets(&presets),
+            vec!["autosugestions", "fuzzy"]
+        );
+        let mut keybindings = default_emacs_keybindings();
+        add_native_widget_preset_keybindings(&mut keybindings, &presets);
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char(' ')),
+            Some(ReedlineEvent::HistoryHintComplete)
+        );
+    }
+
+    // niubash#843(e): a layer that REMOVES a slot (the plugin
+    // layer's rl_unbind_key path) clears the slot's registry stack,
+    // so `niu help keys` stops listing the key as bound.
+    #[test]
+    fn issue843_layer_removal_clears_registry_stack() {
+        let mut builder = LayeredKeymap::new(default_emacs_keybindings());
+        // Ctrl-R is a reedline default (history search).
+        builder.layer(
+            crate::keymap_registry::KeymapSource::Script,
+            |keybindings| {
+                keybindings.remove_binding(KeyModifiers::CONTROL, KeyCode::Char('r'));
+            },
+        );
+        let (keybindings, stacks) = builder.finish();
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            None
+        );
+        assert!(
+            !stacks
+                .iter()
+                .any(|((modifiers, code), _)| *modifiers == KeyModifiers::CONTROL
+                    && *code == KeyCode::Char('r')),
+            "a removed slot must not keep a registry stack: {stacks:?}"
+        );
+    }
+
+    // niubash#843(e): plugin unbinds reach the quote layer — an
+    // unbound quoted-insert sequence no longer arms the quote.
+    #[test]
+    fn issue843_quote_sequences_respect_plugin_unbinds() {
+        let ctrl_v = vec![(KeyModifiers::CONTROL, KeyCode::Char('v'))];
+        let chord = vec![
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::CONTROL, KeyCode::Char('v')),
+        ];
+        let mut sequences = vec![ctrl_v.clone(), chord.clone()];
+        retain_unbound_quote_sequences(&mut sequences, &[ctrl_v]);
+        assert_eq!(sequences, vec![chord]);
     }
 
     #[test]

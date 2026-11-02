@@ -3459,7 +3459,7 @@ impl Shell {
             state.current_dir = self
                 .executor_pwd_host_path()
                 .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| state.current_dir.clone());
+                .unwrap_or_else(|| fallback_recorded_dir(&state.current_dir));
             if state.snapshot_env_fingerprint != env_fingerprint {
                 state.env_vars = self.executor().env_vars_snapshot();
                 state.snapshot_env_fingerprint = env_fingerprint;
@@ -4311,6 +4311,36 @@ impl Shell {
         stage.heredoc_delimiter = Some("NIU_PROCESS_STDIN".to_string());
         Ok(())
     }
+}
+
+/// The last-resort completion directory when both the engine PWD
+/// and the process cwd are gone (niubash#843): the recorded
+/// directory was deleted under the session, and keeping it would
+/// complete against a ghost directory that no longer exists. Walk
+/// to the recorded path's nearest living ancestor instead — the
+/// filesystem root at worst — and say so once per process.
+fn fallback_recorded_dir(recorded: &Path) -> PathBuf {
+    if recorded.is_dir() {
+        return recorded.to_path_buf();
+    }
+    let mut ancestor = recorded.parent().map(Path::to_path_buf);
+    while let Some(dir) = &ancestor {
+        if dir.is_dir() {
+            break;
+        }
+        ancestor = dir.parent().map(Path::to_path_buf);
+    }
+    let fallback = ancestor.unwrap_or_else(|| PathBuf::from("/"));
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "niubash: recorded working directory {} no longer exists; \
+             completion falls back to {}",
+            recorded.display(),
+            fallback.display()
+        );
+    }
+    fallback
 }
 
 fn restore_executor_env(executor: &mut Executor, name: &str, value: Option<String>) {
@@ -5956,6 +5986,20 @@ mod tests {
     use reedline::Prompt;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // niubash#843(b): the completion directory fallback never
+    // keeps a deleted (ghost) recorded directory — it walks to the
+    // nearest living ancestor; a living recorded dir is kept as-is.
+    #[test]
+    fn issue843_fallback_recorded_dir_walks_to_living_ancestor() {
+        let temp = tempfile::tempdir().unwrap();
+        let living = temp.path().join("living");
+        std::fs::create_dir_all(&living).unwrap();
+        assert_eq!(fallback_recorded_dir(&living), living);
+
+        let ghost = living.join("deleted").join("deeper");
+        assert_eq!(fallback_recorded_dir(&ghost), living);
+    }
 
     #[test]
     fn host_history_provider_is_installed_only_on_interactive_entry() {

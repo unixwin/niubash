@@ -462,7 +462,12 @@ pub fn run_doctor(skill_files: &[crate::skill::SkillFile]) -> anyhow::Result<()>
     // a bind that never landed is discoverable without waiting for a
     // startup reminder. The snapshot is the last interactive build's;
     // doctor never sources rc files to rebuild it.
-    match crate::keymap_registry::load_state_from(&crate::keymap_registry::state_path()) {
+    // niubash#843: no home directory → no state path → the None arm
+    // ("no interactive session has built a keymap yet" wording is
+    // the closest honest face; doctor never fabricates a cwd path).
+    match crate::keymap_registry::state_path()
+        .and_then(|path| crate::keymap_registry::load_state_from(&path))
+    {
         Some(state) => {
             writeln!(
                 out,
