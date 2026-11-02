@@ -1044,10 +1044,33 @@ fn run_git_bounded(
         match child.try_wait()? {
             Some(status) => {
                 if !status.success() {
-                    anyhow::bail!(
-                        "git {subcommand} of '{origin}' exited with status {}",
-                        status.code().unwrap_or(1)
-                    );
+                    // niubash#809 F1: a git child that died ABNORMALLY (a
+                    // fatal NTSTATUS — the real-network mid-clone disconnect
+                    // observed in the T8 D5 evidence) must fail through this
+                    // same unified path with a diagnostic that says what
+                    // happened. On Windows every termination surfaces as
+                    // `code(): Some(_)`; the fatal range (>= 0x8000_0000,
+                    // i.e. negative as i32) is an abnormal termination, not
+                    // a small exit status — report it as such instead of
+                    // printing a misleading "status -1". Normal non-zero
+                    // exits (git's 128 family) keep the pinned wording the
+                    // D1-D4 evidence and tests rely on.
+                    match status.code() {
+                        Some(code) if (code as u32) >= 0x8000_0000 => {
+                            anyhow::bail!(
+                                "git {subcommand} of '{origin}' was terminated abnormally \
+                                 (exit status {code:#010x}); the fetch was interrupted — \
+                                 retry the command, or raise the budget with --timeout"
+                            );
+                        }
+                        Some(code) => anyhow::bail!(
+                            "git {subcommand} of '{origin}' exited with status {code}"
+                        ),
+                        None => anyhow::bail!(
+                            "git {subcommand} of '{origin}' was terminated without an exit \
+                             status (killed); the fetch was interrupted — retry the command"
+                        ),
+                    }
                 }
                 return Ok(());
             }
@@ -1269,10 +1292,46 @@ fn fetch_source_to_staging(request: &SourceInstallRequest) -> anyhow::Result<Fet
             commit_sha,
         })
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging_for_cleanup);
+    if let Err(fetch_error) = result {
+        // niubash#809 F1: a failed fetch must not strand its staging tree.
+        // On Windows a freshly killed git process tree can still hold
+        // handles on the staging files for a few milliseconds after
+        // `wait()` returns (job termination is asynchronous), so the
+        // removal gets a short bounded retry; if the tree STILL cannot be
+        // removed, the error names the leftover and its remedy instead of
+        // silently leaving a `.staging-*` directory behind.
+        if let Err(clean_error) = remove_staging_with_retry(&staging_for_cleanup) {
+            return Err(fetch_error.context(format!(
+                "staging {} could not be removed after the failed fetch ({clean_error}); \
+                 `niu plugin clean` removes it",
+                staging_for_cleanup.display()
+            )));
+        }
+        return Err(fetch_error);
     }
     result
+}
+
+/// Remove a staging tree, tolerating an already-missing directory and the
+/// Windows handle-release lag of a freshly killed git process tree (the
+/// kill-on-close job initiates termination, but a `git-remote-https` that
+/// still has a pack file open makes the first removal fail with a sharing
+/// violation). Bounded: a few hundred milliseconds of retry, then the
+/// error is the caller's to report.
+fn remove_staging_with_retry(staging: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 10;
+    let mut delay = Duration::from_millis(25);
+    for attempt in 0..ATTEMPTS {
+        match fs::remove_dir_all(staging) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if attempt + 1 == ATTEMPTS => return Err(err),
+            Err(_) => {}
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_millis(200));
+    }
+    unreachable!("the loop returns on its final attempt")
 }
 
 fn unique_staging_path() -> PathBuf {
@@ -1603,6 +1662,28 @@ pub fn remove_source(id: &str) -> anyhow::Result<PathBuf> {
         fs::remove_dir_all(&record.path)
             .with_context(|| format!("failed to remove {}", record.path.display()))?;
     }
+    // niubash#809 F4: the removal is not done until the generated loader
+    // stops sourcing the tree — dropping only the registry/spec/tree left
+    // the source's active loader section in place until the NEXT sync
+    // dropped it. Republish the generation now with exactly this id gone
+    // (every other current section carried over; a full regeneration is
+    // wrong here — it would also drop the sections of imperative,
+    // spec-less installs).
+    let current = crate::plugins::loader::read_loader_text().unwrap_or_default();
+    let mut keep_current: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for section in super::loader::parse_sections(&current) {
+        if section.id != record.id {
+            keep_current.insert(section.id);
+        }
+    }
+    let drop_silent = std::collections::BTreeSet::from([record.id.clone()]);
+    if let Err(err) = super::assets::publish_loader_generation(&[], &keep_current, &drop_silent) {
+        return Err(err.context(format!(
+            "removed '{}' and its tree, but the generated loader could not be updated — \
+             `niu plugin sync` finishes the job",
+            record.id
+        )));
+    }
     Ok(record.path)
 }
 
@@ -1711,7 +1792,11 @@ pub fn restore_source(id: &str) -> anyhow::Result<SourceSyncOutcome> {
 /// `niu plugin sync` (vim-plug `:PlugUpdate` semantics): update every
 /// git-origin source to its recorded ref's current tip. Local snapshots are
 /// reported as skipped. Returns one row per source.
-pub fn sync_sources() -> Vec<SourceSyncOutcome> {
+/// Update every registered source to its ref's tip (the pre-14.6 meaning
+/// of bare `niu plugin sync`; `niu plugin update` with no id).
+/// `fetch_budget` is the caller's `--timeout` override (niubash#809 F5):
+/// absent, each update gets the verb default.
+pub fn sync_sources(fetch_budget: Option<Duration>) -> Vec<SourceSyncOutcome> {
     let mut out = Vec::new();
     for record in read_source_registry() {
         if record.ref_name == LOCAL_ORIGIN_REF && record.commit_sha.is_none() {
@@ -1733,6 +1818,7 @@ pub fn sync_sources() -> Vec<SourceSyncOutcome> {
                 adapter: Some(record.adapter.clone()),
                 origin: record.url.clone(),
                 ref_name: Some(ref_name),
+                fetch_budget,
                 ..SourceInstallRequest::default()
             },
         ) {
@@ -2012,6 +2098,215 @@ mod tests {
         assert!(err.to_string().contains("exit-code.example"), "{err}");
     }
 
+    /// niubash#809 F1 matrix, leg 1 — a child TERMINATED with a fatal
+    /// NTSTATUS (the deterministic stand-in for the real-network mid-clone
+    /// disconnect that killed git hard mid-transfer) must fail through the
+    /// same unified path as a normal non-zero exit: an Err naming the
+    /// origin that says the child was terminated abnormally, with the raw
+    /// status in hex — never a silent pass, never a misleading
+    /// "status -1".
+    #[test]
+    #[cfg(windows)]
+    fn run_git_bounded_names_an_abnormally_terminated_child() {
+        for code in [0xFFFF_FFFFu32, 0xC000_0005] {
+            let holder = unique_temp_dir("f1-abnormal");
+            let marker = holder.join("child-pid");
+            // The child publishes its own PID, then sleeps well past the
+            // test: the killer (this test) polls the marker and
+            // TerminateProcess'es the child with the matrix code while
+            // run_git_bounded is still polling it.
+            let script = format!(
+                "$PID | Set-Content -Path '{}' -NoNewline; Start-Sleep -Seconds 30",
+                marker.display()
+            );
+            let mut command = Command::new("powershell");
+            command
+                .args(["-NoProfile", "-Command", &script])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let runner = std::thread::spawn(move || {
+                run_git_bounded(
+                    command,
+                    FetchLimits::default(),
+                    "clone",
+                    "https://midstream-cut.example/repo.git",
+                )
+            });
+            let pid = loop {
+                if let Ok(text) = fs::read_to_string(&marker) {
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                assert!(
+                    !runner.is_finished(),
+                    "child exited before the killer ran; marker={:?}",
+                    fs::read_to_string(&marker)
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            terminate_process(pid, code);
+            let err = runner
+                .join()
+                .unwrap()
+                .expect_err("a terminated child must fail");
+            let message = err.to_string();
+            assert!(
+                message.contains("terminated abnormally"),
+                "must name the abnormal termination: {message}"
+            );
+            assert!(
+                message.contains(&format!("{code:#010x}")),
+                "must carry the raw status {code:#010x}: {message}"
+            );
+            assert!(
+                message.contains("midstream-cut.example"),
+                "must name the origin: {message}"
+            );
+            let _ = fs::remove_dir_all(&holder);
+        }
+    }
+
+    /// niubash#809 F1 matrix, leg 2 — a TerminateProcess kill with a
+    /// NORMAL small code is indistinguishable from an ordinary non-zero
+    /// exit and keeps the pinned "exited with status N" wording (the D1-D4
+    /// evidence text).
+    #[test]
+    #[cfg(windows)]
+    fn run_git_bounded_reports_a_small_code_kill_as_a_status() {
+        let holder = unique_temp_dir("f1-smallcode");
+        let marker = holder.join("child-pid");
+        let script = format!(
+            "$PID | Set-Content -Path '{}' -NoNewline; Start-Sleep -Seconds 30",
+            marker.display()
+        );
+        let mut command = Command::new("powershell");
+        command
+            .args(["-NoProfile", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let runner = std::thread::spawn(move || {
+            run_git_bounded(
+                command,
+                FetchLimits::default(),
+                "clone",
+                "https://smallcode-cut.example/repo.git",
+            )
+        });
+        let pid = loop {
+            if let Ok(text) = fs::read_to_string(&marker) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(!runner.is_finished(), "child exited before the killer ran");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        terminate_process(pid, 128);
+        let err = runner
+            .join()
+            .unwrap()
+            .expect_err("a killed child must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("exited with status 128"),
+            "a small-code kill keeps the pinned wording: {message}"
+        );
+        assert!(!message.contains("abnormally"), "{message}");
+        let _ = fs::remove_dir_all(&holder);
+    }
+
+    /// TerminateProcess a pid with a chosen exit code (the F1 matrix's
+    /// killer). Test-only.
+    #[cfg(windows)]
+    fn terminate_process(pid: u32, code: u32) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE};
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            assert!(!handle.is_null(), "OpenProcess({pid}) failed");
+            let _ = windows_sys::Win32::System::Threading::TerminateProcess(handle, code);
+            let _ = CloseHandle(handle);
+        }
+    }
+
+    /// niubash#809 F1 matrix, leg 3 — the shared fetch pipeline itself: a
+    /// failed clone (connection refused — the D1 shape) must return an
+    /// Err through the unified path AND leave no `.staging-*` directory
+    /// behind, exactly like the D1-D4 evidence.
+    #[test]
+    fn failed_fetch_cleans_its_staging_tree() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("f1-refused");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let err = match fetch_source_to_staging(&SourceInstallRequest {
+            origin: "https://127.0.0.1:1/nope.git".to_string(),
+            ..SourceInstallRequest::default()
+        }) {
+            Err(err) => err,
+            Ok(fetched) => panic!(
+                "a refused origin must fail the fetch, got {:?}",
+                fetched.staging
+            ),
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("127.0.0.1:1") || message.contains("nope.git"),
+            "the failure must name the origin: {message}"
+        );
+        let strays: Vec<String> = fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with(".staging-"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(strays.is_empty(), "staging trees left behind: {strays:?}");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#809 F1 matrix, leg 4 — the cleanup retry: a freshly killed
+    /// git tree can hold staging handles for a few milliseconds; the
+    /// removal must wait them out instead of silently giving up (the
+    /// historical `.staging-*` residue).
+    #[test]
+    #[cfg(windows)]
+    fn staging_cleanup_retries_past_a_lagging_handle() {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        let holder = unique_temp_dir("f1-lag");
+        let staging = holder.join(".staging-test");
+        fs::create_dir_all(&staging).unwrap();
+        let mut file = fs::File::create(staging.join("pack.txt")).unwrap();
+        file.write_all(b"data").unwrap();
+        drop(file);
+        // Hold the file with NO sharing: remove_dir_all fails until the
+        // handle closes (~300ms), which the retry loop must outlast.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(staging.join("pack.txt"))
+            .unwrap();
+        let release_at = holder.join("release");
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+            let _ = release_at;
+        });
+        remove_staging_with_retry(&staging).expect("the retry must outlast the handle lag");
+        assert!(!staging.exists(), "the staging tree must be gone");
+        closer.join().unwrap();
+        // An already-missing tree is success (idempotent re-clean).
+        remove_staging_with_retry(&staging).expect("a missing tree is Ok");
+        let _ = fs::remove_dir_all(&holder);
+    }
+
     /// The guards are plain env overrides on the spawned command —
     /// assert them on the Command itself (no process needed).
     #[test]
@@ -2099,6 +2394,12 @@ mod tests {
         let root = temp.join("sources");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
         let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        // niubash#809 F4: remove republishes the generated loader — keep
+        // it off the real ~/.niubash.
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
         let _budget =
             EnvVarGuard::set_os("NIU_PLUGIN_FETCH_TIMEOUT_MS", std::ffi::OsStr::new("300"));
 
@@ -2320,8 +2621,14 @@ mod tests {
         write_omb_fixture(&origin, "v1");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
         // Removal is spec-aware since 1.3.1 (an uninstall drops the
-        // declaration); keep the test off the real ~/.niubash spec.
+        // declaration); keep the test off the real ~/.niubash spec. The
+        // removal also republishes the generated loader (niubash#809 F4)
+        // — keep that off the real ~/.niubash too.
         let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
 
         let record = add_source(local_request(&origin)).expect("add must succeed");
         assert_eq!(record.id, "oh-my-bash");
@@ -2730,6 +3037,12 @@ mod tests {
         write_omb_fixture(&origin, "v1");
         let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
         let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        // niubash#809 F4: remove republishes the generated loader — keep
+        // it off the real ~/.niubash.
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
         add_source(local_request(&origin)).unwrap();
         use crate::plugins::spec;
         spec::save_spec(&spec::PluginSpec {
@@ -2749,6 +3062,110 @@ mod tests {
         let spec = spec::load_spec().unwrap().expect("spec present");
         assert!(spec.sources.is_empty(), "{:?}", spec.sources);
         assert!(read_source_registry().is_empty());
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#809 F4: `remove` is complete only when the generated loader
+    /// stops sourcing the tree — the active section must drop in the SAME
+    /// verb, not survive until the next `sync` (T8 A5/A6: the section
+    /// lingered behind its `-f` guard). A neighbor source's section and a
+    /// hand-niubash-managed section of an unrelated id survive untouched.
+    #[test]
+    fn remove_source_drops_the_loader_section_immediately() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("remove-loader");
+        let origin = temp.join("origin");
+        let root = temp.join("sources");
+        let loader = temp.join("generated/plugins.niu");
+        write_omb_fixture(&origin, "v1");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let _loader = EnvVarGuard::set("NIU_PLUGIN_LOADER_PATH", &loader);
+        add_source(local_request(&origin)).unwrap();
+
+        // A generation carrying this source plus an unrelated neighbor
+        // section (the imperative/legacy shape: sections niu did not
+        // compute this pass).
+        let mut sections = vec![crate::plugins::loader::LoaderSection {
+            id: "oh-my-bash".to_string(),
+            body: "OSH_THEME='agnoster'".to_string(),
+        }];
+        sections.push(crate::plugins::loader::LoaderSection {
+            id: "other-framework".to_string(),
+            body: "export OTHER=1".to_string(),
+        });
+        let rendered =
+            crate::plugins::loader::render_document(&sections, &std::collections::BTreeSet::new());
+        crate::plugins::loader::publish(&rendered).unwrap();
+        assert!(
+            crate::plugins::loader::read_loader_text()
+                .unwrap()
+                .contains("niu plugin source: oh-my-bash"),
+            "fixture must carry the section before the remove"
+        );
+
+        remove_source("oh-my-bash").expect("remove");
+        let text = crate::plugins::loader::read_loader_text().unwrap_or_default();
+        assert!(
+            !text.contains("niu plugin source: oh-my-bash"),
+            "the removed source's section must drop in the same verb: {text}"
+        );
+        assert!(!text.contains("OSH_THEME"), "{text}");
+        assert!(
+            text.contains("niu plugin source: other-framework"),
+            "the neighbor section must survive: {text}"
+        );
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#809 F5: the no-id update (`niu plugin update --timeout N`)
+    /// must honor the caller's budget — the override flows through
+    /// [`sync_sources`] into each update's fetch. A blackholed origin with
+    /// a 300ms budget fails at that budget instead of the 120s default.
+    #[test]
+    fn sync_sources_honors_the_caller_fetch_budget() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("f5-budget");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let _loader = EnvVarGuard::set(
+            "NIU_PLUGIN_LOADER_PATH",
+            &temp.join("generated/plugins.niu"),
+        );
+        // A git-origin record whose origin is never routable (RFC 5737
+        // TEST-NET-3): the update hangs in the connect phase, so the ONLY
+        // way it fails fast is the passed budget.
+        write_source_registry(&[SourceRecord {
+            id: "blackholed".to_string(),
+            adapter: "file".to_string(),
+            url: "https://203.0.113.1/repo.git".to_string(),
+            ref_name: "HEAD".to_string(),
+            version: "unknown".to_string(),
+            path: root.join("blackholed"),
+            license: "MIT".to_string(),
+            installed_at: String::new(),
+            commit_sha: None,
+            previous: None,
+            spec_enabled: None,
+            spec_theme: None,
+        }])
+        .unwrap();
+
+        let start = Instant::now();
+        let outcomes = sync_sources(Some(Duration::from_millis(300)));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the caller budget must bound the update, took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+        assert_eq!(outcomes[0].outcome, "failed", "{outcomes:?}");
+        assert!(
+            outcomes[0].detail.contains("timed out"),
+            "the failure must be the budget kill: {}",
+            outcomes[0].detail
+        );
         let _ = fs::remove_dir_all(&temp);
     }
 

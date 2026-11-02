@@ -2362,18 +2362,36 @@ fn run_plugin_source_update_command(args: &[String]) -> anyhow::Result<()> {
     let Some(id) = parsed.target.clone() else {
         // No id: update every git-origin source to its ref's tip (the
         // pre-14.6 meaning of bare `niu plugin sync`).
-        let outcomes = niubash_runtime::plugins::sync::update_all_to_ref_tip();
+        let outcomes = niubash_runtime::plugins::sync::update_all_to_ref_tip(parsed.timeout);
         if outcomes.is_empty() {
             println!("(no sources installed)");
             return Ok(());
         }
+        let mut failed = Vec::new();
         for outcome in outcomes {
             let marker = match outcome.outcome.as_str() {
                 "updated" => niubash_runtime::text_style::green("updated"),
                 "skipped" => niubash_runtime::text_style::yellow("skipped"),
-                _ => niubash_runtime::text_style::red("failed"),
+                _ => {
+                    failed.push(outcome.id.clone());
+                    niubash_runtime::text_style::red("failed")
+                }
             };
             println!("  {marker} {:<15} {}", outcome.id, outcome.detail);
+        }
+        // niubash#809 F6: a failed source must fail the verb — printing a
+        // red row and exiting 0 swallows the error for scripted callers.
+        if !failed.is_empty() {
+            anyhow::bail!(
+                "update failed for {} ({}); the sources above that did not \
+                 fail are up to date",
+                failed.join(", "),
+                if failed.len() == 1 {
+                    "1 source"
+                } else {
+                    "N sources"
+                }
+            );
         }
         return Ok(());
     };
@@ -3985,6 +4003,32 @@ fn run_plugin_sync_command(args: &[String]) -> anyhow::Result<()> {
     }
     print_sync_rows(&report.rows);
     print_undeclared_hints(&report);
+    // niubash#809 F6: a sync whose rows carry failures must exit non-zero —
+    // `add` already bailed on its failed row (wt83 #174); a silent rc 0
+    // swallows the failure for scripted callers. One exception, the
+    // pre-existing prune contract: a `--prune` pass that REMOVED the
+    // failing source's declaration remediated the failure in the same
+    // verb (the stranded-declaration cleanup), so the end state is clean
+    // and the exit is success.
+    let remediated: Vec<&str> = report
+        .rows
+        .iter()
+        .filter(|row| row.action == "removed")
+        .map(|row| row.id.as_str())
+        .collect();
+    let failed: Vec<&str> = report
+        .rows
+        .iter()
+        .filter(|row| row.action == "failed" && !remediated.contains(&row.id.as_str()))
+        .map(|row| row.id.as_str())
+        .collect();
+    if !failed.is_empty() {
+        anyhow::bail!(
+            "sync failed for {} — see the failed rows above; nothing else was \
+             changed by those sources",
+            failed.join(", ")
+        );
+    }
     if report.clean {
         println!(
             "{}",

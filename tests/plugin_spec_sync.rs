@@ -896,3 +896,103 @@ fn add_completion_line_names_the_added_source_not_a_bystander() {
 
     let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
 }
+
+/// niubash#809 F6: a sync whose sources fail must exit non-zero — the old
+/// verb printed the red `failed` row and exited 0, so scripted callers
+/// (the setup wizard's own chained verbs, CI) swallowed the failure.
+/// The spec declares one healthy local source and one dead git origin:
+/// the healthy one still installs, and the verb still fails.
+#[test]
+fn sync_failure_exits_nonzero_and_reports_the_failed_source() {
+    let sandbox = Sandbox::new("f6-sync-rc");
+    let origin = fixture("oh-my-bash").to_string_lossy().replace('\\', "/");
+    fs::write(
+        sandbox.spec_path(),
+        format!(
+            "{{\n  \"schema\": \"niubash:plugin-spec@0.1.0\",\n  \"sources\": [\n    \
+             {{ \"target\": \"{origin}\", \"id\": \"oh-my-bash\", \"theme\": \"agnoster\", \"enable\": [\"git\"] }},\n    \
+             {{ \"target\": \"https://127.0.0.1:1/dead.git\", \"id\": \"dead-source\" }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let sync = run_niu_with_env(&["plugin", "sync"], &sandbox.envs);
+    let out = format!("{}{}", stdout_text(&sync), stderr_text(&sync));
+    assert!(
+        out.contains("failed"),
+        "the failed source must be reported: {out}"
+    );
+    assert!(
+        out.contains("127.0.0.1:1") || out.contains("dead-source"),
+        "the failure must name the dead origin: {out}"
+    );
+    assert!(
+        !sync.status.success(),
+        "a sync with failed rows must exit non-zero: {out}"
+    );
+    assert!(
+        out.contains("activated oh-my-bash") || out.contains("oh-my-bash"),
+        "the healthy source still installed: {out}"
+    );
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
+}
+
+/// niubash#809 F6 (update leg): the no-id `niu plugin update` prints its
+/// red `failed` outcome row and — like sync — must exit non-zero when any
+/// source failed (T8 C2: the verb exited 0 over three failure forms).
+#[test]
+fn update_all_failure_exits_nonzero() {
+    let sandbox = Sandbox::new("f6-update-rc");
+    // A registry whose only record points at a dead origin (the spec is
+    // empty — update_all drives the registry, not the spec).
+    fs::create_dir_all(&sandbox.sources_root).unwrap();
+    fs::write(
+        sandbox.sources_root.join("registry.json"),
+        "{\n  \"schema\": \"niubash:plugin-registry@0\",\n  \"sources\": [\n    {\n \
+         \"id\": \"dead-source\",\n      \"adapter\": \"file\",\n      \"url\": \
+         \"https://127.0.0.1:1/dead.git\",\n      \"ref\": \"HEAD\",\n      \"version\": \
+         \"unknown\",\n      \"path\": \"dead-path\",\n      \"license\": \"MIT\",\n      \
+         \"installed_at\": \"\"\n    }\n  ]\n}\n",
+    )
+    .unwrap();
+
+    let update = run_niu_with_env(&["plugin", "update"], &sandbox.envs);
+    let out = format!("{}{}", stdout_text(&update), stderr_text(&update));
+    assert!(
+        out.contains("failed") && out.contains("dead-source"),
+        "the failed outcome row must be printed: {out}"
+    );
+    assert!(
+        !update.status.success(),
+        "a failed no-id update must exit non-zero: {out}"
+    );
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
+}
+
+/// niubash#809 F4 (CLI leg): `niu plugin source remove` drops the loader
+/// section in the same verb — no follow-up sync needed (T8 A5/A6: the
+/// oh-my-bash block lingered behind its `-f` guard until the next sync).
+#[test]
+fn source_remove_drops_the_loader_section_without_a_sync() {
+    let sandbox = Sandbox::new("f4-remove-loader");
+    let origin = fixture("oh-my-bash").to_string_lossy().into_owned();
+    let add = run_niu_with_env(
+        &["plugin", "add", "oh-my-bash", "--path", &origin],
+        &sandbox.envs,
+    );
+    assert_success(&add, "add the framework source");
+    assert!(
+        sandbox.loader().contains("niu plugin source: oh-my-bash"),
+        "the loader must carry the section before the remove: {}",
+        sandbox.loader()
+    );
+
+    let remove = run_niu_with_env(&["plugin", "source", "remove", "oh-my-bash"], &sandbox.envs);
+    assert_success(&remove, "remove the framework source");
+    let loader = sandbox.loader();
+    assert!(
+        !loader.contains("niu plugin source: oh-my-bash"),
+        "the active section must drop in the remove verb, not the next sync: {loader}"
+    );
+    let _ = fs::remove_dir_all(sandbox.home.parent().unwrap());
+}

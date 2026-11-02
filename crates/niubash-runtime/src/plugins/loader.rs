@@ -764,11 +764,38 @@ mod tests {
     }
 
     /// Sandbox the generated root through the loader path override.
-    fn sandbox(label: &str) -> (PathBuf, Vec<EnvGuard>) {
+    ///
+    /// niubash#798: the override is a PROCESS-GLOBAL environment variable,
+    /// and every reader in the product (`loader_path`, `generated_root`,
+    /// the sync pass, the wizard's theme pick) resolves it lazily at read
+    /// time. These tests therefore hold [`PROCESS_STATE_LOCK`] for their
+    /// whole body — without it a loader test can strand its
+    /// `NIU_PLUGIN_LOADER_PATH` (two concurrent guards save/restore past
+    /// each other) and redirect a locked test's loader reads/writes into
+    /// this sandbox (observed live: `sync_installs...idempotently` saw a
+    /// foreign `prelib` section; `current_theme_pick...` read this
+    /// module's `agnoster` fixture through `generated_root`).
+    fn sandbox(label: &str) -> (PathBuf, SandboxGuards) {
+        let _state_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = temp_dir(label);
         let path = temp.join("generated/plugins.niu");
-        let guards = vec![EnvGuard::set("NIU_PLUGIN_LOADER_PATH", &path)];
-        (temp, guards)
+        let env = vec![EnvGuard::set("NIU_PLUGIN_LOADER_PATH", &path)];
+        (
+            temp,
+            SandboxGuards {
+                _state_lock,
+                _env: env,
+            },
+        )
+    }
+
+    /// The lock + env guards [`sandbox`] hands out; dropping releases both
+    /// (env first, then the lock, matching acquire order).
+    struct SandboxGuards {
+        _state_lock: std::sync::MutexGuard<'static, ()>,
+        _env: Vec<EnvGuard>,
     }
 
     fn sample_sections() -> Vec<LoaderSection> {
@@ -1043,6 +1070,11 @@ mod tests {
 
     #[test]
     fn rollback_switch_parses_strictly() {
+        // niubash#798: NIU_PLUGIN_LOADER is process-global — hold the state
+        // lock for the body like every other env-mutating test.
+        let _state_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _previous = std::env::var_os("NIU_PLUGIN_LOADER");
         for value in ["off", "OFF", "false", "0", "no", " off "] {
             std::env::set_var("NIU_PLUGIN_LOADER", value);

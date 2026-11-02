@@ -822,9 +822,12 @@ fn write_record(registry: &mut Vec<SourceRecord>, updated: SourceRecord) {
 
 /// `niu plugin update` (no id): the vim-plug `:PlugUpdate` move — refetch
 /// every git-origin source at its recorded ref's tip (the pre-14.6
-/// meaning of bare `niu plugin sync`).
-pub fn update_all_to_ref_tip() -> Vec<sources::SourceSyncOutcome> {
-    sources::sync_sources()
+/// meaning of bare `niu plugin sync`). `fetch_budget` carries the verb's
+/// `--timeout` (niubash#809 F5); `None` = the verb default.
+pub fn update_all_to_ref_tip(
+    fetch_budget: Option<std::time::Duration>,
+) -> Vec<sources::SourceSyncOutcome> {
+    sources::sync_sources(fetch_budget)
 }
 
 // ── Legacy startup install-failure memo (1.3.1; writer retired) ─────────────
