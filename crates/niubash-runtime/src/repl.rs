@@ -10,6 +10,7 @@ use std::{borrow::Cow, io::Write};
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::cycle_menu::SharedCycleSession;
 use crate::completion::insert_menu::InsertStopMenu;
+use crate::completion::menu_open::MenuOpenFlagMenu;
 use crate::completion::NiubashCompleter;
 use crate::config::{
     CompletionInteraction, CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding,
@@ -372,6 +373,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // too instead of leaving M-* without a candidate source.
     let engine_completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     let menu_open = Arc::new(AtomicBool::new(false));
+    // niubash#832: every editor build starts with the flag DOWN. The
+    // Arc is fresh per build today, but the guarantee is stated, not
+    // incidental: a flag stuck true silences the hinter for the whole
+    // session, so no build may inherit one.
+    menu_open.store(false, std::sync::atomic::Ordering::Relaxed);
     let completion_menu = ReedlineMenu::WithCompleter {
         menu: configured_completion_menu(
             COMPLETION_MENU,
@@ -382,10 +388,16 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         ),
         completer: Box::new(completer),
     };
-    let history_menu = ReedlineMenu::HistoryMenu(Box::new(configured_list_menu(
-        HISTORY_MENU,
-        menu_config.history_page_size,
-        menu_config,
+    // niubash#832: the history menu is a ListMenu too — it carries the
+    // flag through the same wrapper as the completion list faces, so
+    // the hinter stands down while history is being browsed as well.
+    let history_menu = ReedlineMenu::HistoryMenu(Box::new(MenuOpenFlagMenu::new(
+        Box::new(configured_list_menu(
+            HISTORY_MENU,
+            menu_config.history_page_size,
+            menu_config,
+        )),
+        menu_open.clone(),
     )));
 
     let build_args = (
@@ -620,7 +632,9 @@ fn configured_completion_menu(
             let menu = crate::completion::gnu_menu::GnuMenu::default()
                 .with_name(name)
                 .with_marker(gnu_indicator);
-            Box::new(menu)
+            // niubash#832: the GNU menu carries the hinter stand-down
+            // flag through the wrapper, like every other style.
+            Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
         }
         CompletionStyle::Ide => {
             // Multi-column popup with descriptions (VS Code style). Column
@@ -635,10 +649,15 @@ fn configured_completion_menu(
                 .with_description_mode(reedline::DescriptionMode::PreferRight);
             // insert interaction: first TAB splices the common prefix and
             // stops; TAB #2 opens the popup (niubash#778 follow-up).
+            // niubash#832: the flag wrapper sits OUTSIDE the insert-stop
+            // wrapper so a splice-and-stop deactivation lowers the flag.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
         CompletionStyle::Column => {
@@ -665,10 +684,14 @@ fn configured_completion_menu(
         }
         CompletionStyle::List => {
             let menu = configured_list_menu(name, config.completion_page_size, config);
+            // niubash#832: flag wrapper, same composition as the Ide arm.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
         CompletionStyle::Inline => {
@@ -678,10 +701,14 @@ fn configured_completion_menu(
                 .with_page_size(1)
                 .with_max_entry_lines(config.max_entry_lines)
                 .with_only_buffer_difference(false);
+            // niubash#832: flag wrapper, same composition as the Ide arm.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
     }
@@ -6347,6 +6374,54 @@ mod tests {
         );
 
         assert_eq!(menu.name(), "custom_menu");
+    }
+
+    /// niubash#832: every completion style's menu raises the shared
+    /// menu_open flag while it is active — the hinter stand-down used
+    /// to reach only the cycle and column menus, so the GNU / Ide /
+    /// List / Inline menus painted under the ghost text (and Right
+    /// accepted the ghost instead of navigating the grid).
+    #[test]
+    fn issue832_every_completion_style_raises_the_menu_open_flag() {
+        use std::sync::atomic::Ordering;
+        for style in [
+            CompletionStyle::Gnu,
+            CompletionStyle::Ide,
+            CompletionStyle::Column,
+            CompletionStyle::List,
+            CompletionStyle::Inline,
+        ] {
+            for interaction in [CompletionInteraction::Insert, CompletionInteraction::Select] {
+                let flag = Arc::new(AtomicBool::new(false));
+                let config = MenuConfig {
+                    completion_page_size: 10,
+                    history_page_size: 7,
+                    max_entry_lines: 3,
+                    completion_style: style,
+                    completion_interaction: interaction,
+                };
+                let mut menu =
+                    configured_completion_menu(COMPLETION_MENU, config, "", flag.clone(), None);
+                assert!(
+                    !flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: the flag must start down"
+                );
+                menu.menu_event(reedline::MenuEvent::Activate(false));
+                assert!(
+                    menu.is_active(),
+                    "{style:?}/{interaction:?}: the menu must be active"
+                );
+                assert!(
+                    flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: an open menu must raise the flag"
+                );
+                menu.menu_event(reedline::MenuEvent::Deactivate);
+                assert!(
+                    !flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: the flag must fall with the menu"
+                );
+            }
+        }
     }
 
     #[test]
