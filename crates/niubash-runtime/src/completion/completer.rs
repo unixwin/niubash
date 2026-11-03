@@ -838,6 +838,14 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
     })??;
 
     // COMP_WORDS includes the word being completed, matching bash.
+    // `command_words_before_cursor` splits the segment up to the cursor,
+    // so its last element already IS the in-progress word when the cursor
+    // sits inside one — pushing `current_word` again handed compdef
+    // functions a duplicated final word (B5: `mycmd c` produced
+    // NIU_COMP_WORDS "mycmd c c"). When the cursor follows whitespace,
+    // the word being completed is the empty word after the last complete
+    // word; it still occupies the COMP_CWORD slot, so append it as an
+    // empty element (bash COMP_WORDS=(mycmd "") with COMP_CWORD=1).
     let mut words = command_words_before_cursor(context)?;
     let current_word = context.get_current_word().unwrap_or_default();
     let appending = context
@@ -845,8 +853,8 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
         .get(..context.cursor_pos.min(context.input.len()))
         .and_then(|input| input.chars().last())
         .is_some_and(char::is_whitespace);
-    if !appending {
-        words.push(current_word.clone());
+    if appending {
+        words.push(String::new());
     }
 
     let entries = crate::shell::with_completion_bridge(|shell| {
@@ -1036,6 +1044,62 @@ niu_git_comp() {
         // armed (the thread-local bridge would otherwise defer the drop
         // to thread teardown).
         crate::shell::uninstall_completion_bridge();
+    }
+
+    /// B5 compdef word fidelity: NIU_COMP_WORDS must equal bash's
+    /// COMP_WORDS for the segment — the in-progress word appears exactly
+    /// once, and after trailing whitespace the current word is the empty
+    /// word at COMP_CWORD (previously the in-progress word was appended
+    /// a second time, and the trailing-space shape dropped the empty
+    /// word while COMP_CWORD still pointed at its slot).
+    #[test]
+    fn b5_compdef_words_match_bash_comp_words() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp = unique_temp_dir("niubash-b5-compdef-words");
+        std::fs::create_dir_all(&temp).unwrap();
+        let dump = temp.join("dump.txt");
+        let dump_native = dump.to_string_lossy().replace('\\', "/");
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(&format!(
+                r#"
+niu_git_comp() {{
+    echo "W=[$NIU_COMP_WORDS] C=$NIU_COMP_CWORD" > "{dump_native}"
+    NIU_COMP_RESULT="cand"
+}}
+"#
+            ))
+            .is_ok());
+        shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+
+        // Cursor inside the partial word: it is COMP_WORDS[COMP_CWORD],
+        // present exactly once.
+        let _ = completer.complete("git co", 6);
+        assert_eq!(
+            std::fs::read_to_string(&dump).unwrap().trim_end(),
+            "W=[git co] C=1",
+            "the in-progress word must not be duplicated in NIU_COMP_WORDS"
+        );
+
+        // Cursor after trailing whitespace: the current word is empty
+        // but still occupies the COMP_CWORD slot.
+        let _ = completer.complete("git ", 4);
+        assert_eq!(
+            std::fs::read_to_string(&dump).unwrap().trim_end(),
+            "W=[git ] C=1",
+            "the empty current word must occupy the COMP_CWORD slot"
+        );
+
+        crate::shell::uninstall_completion_bridge();
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     /// niubash#836: a command with BOTH a GNU compspec and a
