@@ -14,7 +14,7 @@ Docs & downloads: [unixwin.dev](https://unixwin.dev)
 
 [![niubash CI](https://github.com/unixwin/niubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/niubash/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/unixwin/niubash)](https://github.com/unixwin/niubash/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)](https://github.com/unixwin/niubash)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue)](https://github.com/unixwin/niubash)
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-orange)](https://github.com/unixwin/niubash)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/unixwin/niubash)](https://github.com/unixwin/niubash/stargazers)
@@ -26,16 +26,16 @@ Docs & downloads: [unixwin.dev](https://unixwin.dev)
 niu is not MSYS2, Cygwin, Git Bash, or WSL — there is no POSIX emulation layer and no path-conversion heuristics. It is a from-scratch replacement for Git Bash: a native Windows binary with no POSIX emulation. The full per-platform contract, including the honest status of every target, lives in [platform-support.md](docs/src/platform-support.md).
 
 <p align="center">
-  <img src="assets/demo-gitbash.gif" alt="The same commands under Git Bash and under niubash" width="880" />
+  <a href="assets/demo-gitbash.gif"><img src="assets/demo-gitbash-poster.png" alt="The same commands under Git Bash and under niubash" width="880" /></a>
 </p>
 
-*The same commands, two outcomes — Git Bash's MSYS layer vs niu, side by side (`assets/demo-gitbash.gif`).*
+*The same commands, two outcomes — Git Bash's MSYS layer vs niu, side by side. Tap the image for the animated version (`assets/demo-gitbash.gif`).*
 
 ## Quick start
 
-All downloads start at [unixwin.dev](https://unixwin.dev). Latest release: **v1.4.4** (as of 2026-10-30; the [releases page](https://github.com/unixwin/niubash/releases) always carries the newest build).
+All downloads start at [unixwin.dev](https://unixwin.dev). Latest release: **v1.5.0** (2026-11-03; the [releases page](https://github.com/unixwin/niubash/releases) always carries the newest build).
 
-Windows via winget (installs **1.4.3** today; 1.4.4 is in Microsoft's review queue):
+Windows via winget (installs **1.4.3** today; the 1.5.0 winget update has not been submitted yet — for 1.5.0 use the installer or portable assets below):
 
 ```powershell
 winget install --id Unixwin.Niubash
@@ -87,7 +87,7 @@ The bundled commands are **WinuxCmd**: 178 applets (176 commands, excluding the 
 
 The new Rust shells sell lightness. Of the peers, hush is a Lua-based language that never claimed to replace bash, and Oils/OSH calls itself an "upgrade path from bash", not a drop-in. **brush** claims the drop-in: "Run it as your everyday shell", "Production-ready for most use cases". Measured with a 306-case differential corpus (byte-compared against GNU Bash 5.3.20): its shipped v0.4.0 scores 181/306, and a source build of its latest master commit re-measures at 183/306 — the same failure profile — against rubash's 304/306 on the same ruler. The misses are foundation mechanisms, not edge cases: an alias timing model reversed from GNU's (6 substantive divergences in 20 probes), `printf x y` looping forever and hanging the script in the release (fixed on master), `wait $!` unimplemented in scripts, globstar that does not recurse while listed as "Fully Supported", and nameref `unset` reporting "not yet implemented" — which a real oh-my-bash load trips over. Its Windows support is self-described "Preview", and v0.4.0 ships no Windows binary at all.
 
-Lightweight is no excuse for missing limbs. Complete bash semantics re-implemented path by path without fork, plus cross-platform itself, is what 474,985 lines (rubash 385,618 + niubash 89,367; static-audit caliber, 2026-10-25) buys. An implementation that misses these mechanisms can be neither a bash replacement nor a reliable login shell.
+Lightweight is no excuse for missing limbs. Complete bash semantics re-implemented path by path without fork, plus cross-platform itself, is what 373,267 net lines (rubash 312,965 + niubash 60,302; tests excluded, the code-size caliber of the rubash README, measured 2026-11-03) buys. An implementation that misses these mechanisms can be neither a bash replacement nor a reliable login shell.
 
 ## Built for AI agents
 
@@ -111,7 +111,7 @@ niu's language semantics are the rubash engine's, and they are gated mechanicall
 - **Every fixed issue lands with a regression test** named for the issue, asserting the GNU behavior — on both the engine and the host side (`tests/compat.rs`, `tests/host_contract.rs`, and the per-capability fixtures in the [compatibility matrix](docs/src/rubash-bash-compat-matrix.md)).
 - **Releases are smoke-gated and budget-gated**: no artifact ships unless it runs on its own OS and stays inside the per-asset timing budgets (see [Receipts](#receipts)).
 
-As of 2026-10-30 the trackers carry the receipts: rubash 1,440 issues filed / 1,408 closed; niubash 373 filed / 354 closed.
+As of 2026-11-03 the trackers carry the receipts: rubash 1,680 issues filed / 1,654 closed; niubash 449 filed / 425 closed.
 
 ## Receipts
 
@@ -127,7 +127,7 @@ Each claim below links to the artifact that produced it: a committed log, a base
 
 Every number below comes from one published protocol — the 2026-10-25 baseline (PERF-BASELINE-2026-10-25, in the public [shellbench](https://github.com/unixwin/shellbench) repo): release builds, Linux, against a self-built GNU Bash 5.3.20.
 
-**The honest headline.** The embedded rubash engine pays a roughly uniform **~3× floor tax** on interpreter-bound micro-work (arithmetic, function calls, assignment, read loops at 2.8–3.2× per-op). Beating GNU across the full table is the stated goal and the flagship release's hard gate; the current status is published, not hidden. Where the cost is process creation, the model inverts: pipeline stages and command substitution run in-process, at **0.05×** (pipe) and **0.11×** (command-substitution loop) of GNU's time.
+**The honest headline.** The embedded rubash engine pays a roughly uniform **~3× floor tax** on interpreter-bound micro-work (arithmetic, function calls, assignment, read loops at 2.8–3.2× per-op). Beating GNU across the full table is the stated goal — the standing hard target of the post-1.5.0 programme; the current status is published, not hidden. Where the cost is process creation, the model inverts: pipeline stages and command substitution run in-process, at **0.05×** (pipe) and **0.11×** (command-substitution loop) of GNU's time.
 
 **Startup — the one quotable set.** `-c 'true'`, p50 of 50 interleaved samples, release builds, Linux: **niu 3.96 ms, rubash 3.43 ms, GNU Bash 5.3.20 2.59 ms**. No Windows startup figures are quoted until re-measured on real Windows hardware under the same protocol.
 
@@ -160,7 +160,7 @@ Every number below comes from one published protocol — the 2026-10-25 baseline
 ## Known limitations, stated plainly
 
 - **The installer is not code-signed yet.** Windows SmartScreen will warn on first run ([#511](https://github.com/unixwin/niubash/issues/511) — a SignPath signing route is set up; its production release-signing approval is still pending). Verify downloads against the published SHA-256 sums in the meantime.
-- **Interpreter speed is a measured, published gap** (see [Performance](#performance)) — not a hidden one. Process-bound workloads already lead; interpreter-bound micro-work is the flagship release's hard gate.
+- **Interpreter speed is a measured, published gap** (see [Performance](#performance)) — not a hidden one. Process-bound workloads already lead; interpreter-bound micro-work is the post-1.5.0 programme's hard target.
 
 ## Documentation
 
