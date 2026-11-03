@@ -478,7 +478,7 @@ jobs:
           # usr\bin\awk.exe/gawk.exe as 1.4.0-era copies of an older
           # winuxcmd.exe. x64 is the user-facing leg, so any failure here
           # must stop the release; other legs keep the loud-warning
-          # fail-open contract (arm64 has no gawk/niugit artifacts by
+          # fail-open contract (arm64 historically had no gawk artifacts; niugit ships an arm64 artifact since the 2.56.0.3 pin, by
           # design).
           if ("${{ matrix.arch }}" -eq "x64") {
             if ($failed.Count -gt 0) {
@@ -2198,7 +2198,7 @@ jobs:
   # free-options.md §3/§7; the systemic fix behind niubash#511).
   #
   # PENDING SIGNPATH CREDENTIALS — this job pair is INERT until the four
-  # SignPath secrets exist (SIGNPATH_ORG_ID, SIGNPATH_PROJECT_ID,
+  # SignPath secrets exist (SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_ID,
   # SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_API_TOKEN): signpath-gate then
   # reports enabled=false, signpath-sign is skipped entirely, and the
   # release job publishes unsigned artifacts exactly as before this
@@ -2229,12 +2229,12 @@ jobs:
       - name: Check SignPath secrets
         id: check
         env:
-          SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
           SIGNPATH_PROJECT_ID: ${{ secrets.SIGNPATH_PROJECT_ID }}
           SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         run: |
-          if [ -n "$SIGNPATH_ORG_ID" ] && [ -n "$SIGNPATH_PROJECT_ID" ] && \
+          if [ -n "$SIGNPATH_ORGANIZATION_ID" ] && [ -n "$SIGNPATH_PROJECT_ID" ] && \
              [ -n "$SIGNPATH_SIGNING_POLICY_SLUG" ] && [ -n "$SIGNPATH_API_TOKEN" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
             echo "SignPath secrets present: signing ENABLED"
@@ -2336,7 +2336,7 @@ jobs:
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '${{ secrets.SIGNPATH_ORG_ID }}'
+          organization-id: '${{ secrets.SIGNPATH_ORGANIZATION_ID }}'
           project-slug: '${{ secrets.SIGNPATH_PROJECT_ID }}'
           signing-policy-slug: '${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}'
           github-artifact-id: '${{ steps.upload-input.outputs.artifact-id }}'
@@ -2453,7 +2453,14 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: [build-windows, build-linux, build-macos, build-msix, journey, perfbudget, skill-bundle, signpath-sign]
+    # TEMPORARY (1.5.0 release): build-msix is not in this needs list. The
+    # job still runs and uploads its artifact, and the Create step below
+    # picks it up when it lands in time — but build-msix has never run
+    # before, and a first-run hiccup must not block the whole release
+    # late in the run. If the MSIX misses the release, attach it manually
+    # afterwards. Restore build-msix to needs once it has a proven run
+    # (1.5.1).
+    needs: [build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle, signpath-sign]
     # signpath-sign is SKIPPED while the SignPath credentials are absent
     # (the skeleton is inert) and a skipped need must not skip the
     # release. A FAILED signing leg must, though — fail-closed: a release
