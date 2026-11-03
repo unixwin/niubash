@@ -1584,6 +1584,16 @@ jobs:
           # suffix in its triple, so its line is already the real name.
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
+          # cc-rs (build scripts, e.g. signal-hook) does not read the
+          # linker vars: it resolves CC_<target> and otherwise falls back
+          # to the bare <triple>-clang, which the NDK does not ship (only
+          # the API-suffixed drivers exist) — that fallback is what red
+          # both Android legs of the first 1.5.0 run. Name the real
+          # drivers for C and C++ alike.
+          CC_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          CC_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
+          CXX_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang++
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
 
       # The runner cannot execute bionic binaries, so the four-check smoke
@@ -1794,6 +1804,23 @@ jobs:
           }
           Write-Host "staged: $stage"
           "stage=$stage" >> $env:GITHUB_OUTPUT
+
+      - name: Locate makeappx (Windows SDK)
+        shell: pwsh
+        run: |
+          # make_msix.py invokes makeappx.exe from PATH; current runner
+          # images no longer put the Windows SDK bin directory on PATH
+          # (the first 1.5.0 run died here with "makeappx.exe not
+          # found"). Find the newest SDK's x64 bin and add it.
+          $kits = "C:\Program Files (x86)\Windows Kits\10\bin"
+          $hit = Get-ChildItem $kits -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "x64\makeappx.exe" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+          if (-not $hit) { throw "makeappx.exe not found under $kits" }
+          Split-Path $hit | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          Write-Host "makeappx: $hit"
 
       - name: Pack the Store MSIX (unsigned; the Store re-signs)
         shell: pwsh
@@ -2460,14 +2487,25 @@ jobs:
     # late in the run. If the MSIX misses the release, attach it manually
     # afterwards. Restore build-msix to needs once it has a proven run
     # (1.5.1).
-    needs: [build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle, signpath-sign]
-    # signpath-sign is SKIPPED while the SignPath credentials are absent
-    # (the skeleton is inert) and a skipped need must not skip the
-    # release. A FAILED signing leg must, though — fail-closed: a release
-    # never publishes with only some legs signed. This condition
-    # reproduces the implicit success() outcome for every pre-existing
-    # need (none of them can ever be skipped) and additionally tolerates
-    # 'skipped'.
+    needs: [build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
+    # TEMPORARY (1.5.0 release): signpath-sign is not in this needs list.
+    # The original design covered two states — credentials absent (the
+    # job skips; a skipped need must not skip the release) and signing
+    # healthy (fail-closed: a release never publishes with only some
+    # legs signed). The state that actually occurred on the first 1.5.0
+    # run is a third one nobody designed for: credentials present, the
+    # test-signing policy healthy, but the formal certificate still
+    # unapproved, so every release-signing request fails on SignPath's
+    # side within seconds — and a failed need would veto a release that
+    # is ruled to ship unsigned (formal approval is not a 1.5.0 release
+    # condition). The pair still runs and uploads whatever it produces;
+    # this release publishes the unsigned Windows packages. Restore
+    # signpath-sign to needs (and the fail-closed reading) once the
+    # certificate is approved (1.5.1), together with an audit of how
+    # the Create step assembles signed vs unsigned packages.
+    # The condition below reproduces the implicit success() outcome for
+    # every need (none of them can ever be skipped) and additionally
+    # tolerates 'skipped' for safety.
     if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     steps:
       - uses: actions/checkout@v4.2.2

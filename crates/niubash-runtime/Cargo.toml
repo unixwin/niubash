@@ -22,7 +22,7 @@ rubash = { version = "1.5.0", git = "https://github.com/unixwin/rubash.git", bra
 # registrations to the process-wide GNU readline ABI (`rl_line_buffer`,
 # `rl_point`, the exported keymaps). Same pinned rev as the `niu` binary's
 # dependency, so both name one linked crate instance.
-readline-abi = { git = "https://github.com/unixwin/ruline", rev = "30e22d231a17114e212cb3e16ebdb771cb0f7c83" }
+readline-abi = { git = "https://github.com/unixwin/ruline", rev = "a0a2ae8b817a4956cc10142af4861033f1600bf4" }
 # niubash#373: the 0.52-era prompt anchors without turning a missing
 # cursor-position reply into a read_line abort — a DSR-silent terminal
 # (dumb terminals, script(1) recordings, some serial/tmux links) gets its
