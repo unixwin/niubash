@@ -17,7 +17,7 @@ default = ["internals"]
 internals = []
 
 [dependencies]
-rubash = { version = "1.4.3", git = "https://github.com/unixwin/rubash.git", branch = "master" }
+rubash = { version = "1.5.0", git = "https://github.com/unixwin/rubash.git", branch = "master" }
 # niubash#775: the REPL bridges its live Reedline buffer/point and plugin key
 # registrations to the process-wide GNU readline ABI (`rl_line_buffer`,
 # `rl_point`, the exported keymaps). Same pinned rev as the `niu` binary's

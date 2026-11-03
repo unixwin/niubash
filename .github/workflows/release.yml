@@ -478,7 +478,7 @@ jobs:
           # usr\bin\awk.exe/gawk.exe as 1.4.0-era copies of an older
           # winuxcmd.exe. x64 is the user-facing leg, so any failure here
           # must stop the release; other legs keep the loud-warning
-          # fail-open contract (arm64 has no gawk/niugit artifacts by
+          # fail-open contract (arm64 historically had no gawk artifacts; niugit ships an arm64 artifact since the 2.56.0.3 pin, by
           # design).
           if ("${{ matrix.arch }}" -eq "x64") {
             if ($failed.Count -gt 0) {
