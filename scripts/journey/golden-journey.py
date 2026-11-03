@@ -1702,9 +1702,9 @@ def p3_s2_rc_stability(exe, home, env, verdict, seed, state):
         # present exactly once, with no activated/deactivated flip of the
         # theme source. The WHOLE-rc equality the pre-wt78 gate asserted
         # is informational only: another managed block may legally
-        # materialize between snapshots once its spec declaration goes
-        # trusted/declared (release run 37218948432: the bash-completion
-        # block J6 trusted landed here and was mislabeled a stability
+        # materialize between snapshots once its spec declaration lands
+        # (release run 37218948432: the bash-completion block J6
+        # activated landed here and was mislabeled a stability
         # break) — materializing it is sync's job (wt87 recalibration).
         for milestone in ("after-reopen", "after-source", "after-term1",
                           "after-term2"):
@@ -1759,7 +1759,8 @@ def p3_s2_rc_stability(exe, home, env, verdict, seed, state):
 
         # (a2) no activated/deactivated flip of the THEME source in any
         # P3 session stream: the enable/disable life cycle would print
-        # `niu plugin sync: activated|deactivated oh-my-bash`.
+        # `activated|deactivated oh-my-bash` sync rows (the
+        # print_sync_rows form — src/main.rs).
         for label in sorted(raws):
             if not label.startswith(("P3-S1", "P3-S2")):
                 continue
@@ -1885,9 +1886,9 @@ def p3_s3_first_key(exe, home, env, verdict, seed, state):
 
 
 def p3_s4_aged_state(exe, home, env, verdict, seed, state):
-    """P3-S4: aged state — a damaged trusted tree plus a seeded F5
-    bootstrap-failures ledger. Bounded startup, documented one-line
-    notices, guarded-loader silence, explicit-verb repair, silent after."""
+    """P3-S4: aged state — a damaged installed tree plus a seeded F5
+    bootstrap-failures ledger. Bounded startup, guarded-loader
+    silence, explicit-verb repair, silent after."""
     step = verdict.step(
         "P3-S4", "aged state: damaged tree + bootstrap-failures ledger "
         "(changelog 1.3.1 F5)")
@@ -1895,20 +1896,16 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
         # ── seed between sessions (the `seed` capability) ──
         missing = seed.home / ".journey-missing-origin"
         target = missing.as_posix()
-        seed.add_spec_source(f'target = "{target}"\n'
-                             'id = "journey-missing-origin"')
-        seed.seed_bootstrap_failure(
-            target=target,
-            error="seeded by the journey (the previous session's install "
-                  "failed)")
-        step.check("bootstrap-failures.toml ledger seeded for the "
+        seed.add_spec_source(target, source_id="journey-missing-origin")
+        seed.seed_bootstrap_failure(target=target)
+        step.check("bootstrap-failures.json ledger seeded for the "
                    "declared-but-missing origin",
                    seed.ledger_path.is_file()
                    and target in seed.ledger_path.read_text(encoding="utf-8"),
                    f"ledger: {seed.ledger_path}")
         old, new = seed.damage_source_file("oh-my-bash", "oh-my-bash.sh")
-        step.check("trusted tree damaged (the guarded loader's entry file "
-                   "renamed)",
+        step.check("installed tree damaged (the guarded loader's entry "
+                   "file renamed)",
                    new.is_file() and not old.exists(),
                    f"{old.name} -> {new.name}")
 
@@ -1920,8 +1917,8 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
             label="P3-S4-damaged", delivery_log=verdict.delivery_events)
         try:
             secs = time_to_first_prompt(term, timeout=30.0, started=started)
-            step.check("prompt within the 30s wedge bound (the failed "
-                       "install is deferred, not retried at startup)",
+            step.check("prompt within the 30s wedge bound (nothing is "
+                       "retried at startup — the boot runs no sync)",
                        secs is not None,
                        "no prompt within 30s"
                        if secs is None else f"{secs:.1f}s to first prompt")
@@ -1938,39 +1935,34 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
             degraded = sync_row_keys(body, "degraded") | {
                 line.strip()[:60] for line in body.splitlines()
                 if "tree missing" in line}
-            nags = sync_row_keys(body, "awaiting-trust")
-            # The documented bound is "at most" the one-line deferred memo
-            # (journey-steps.json P3-S4). Post-#359 the boot runs NO startup
-            # sync at all — the rc bootstrap line is a compatibility no-op
-            # (src/main.rs run_plugin_sync_command) and the generated loader
-            # is the boot plane — so the silent boot is the new steady state
-            # and 0 deferred rows is legal; failed/degraded rows remain
-            # forbidden (the wedge/retry-storm class must never print).
+            # Post-#359 the boot runs NO startup sync at all — the rc
+            # bootstrap line is a compatibility no-op (src/main.rs
+            # run_plugin_sync_command) and the generated loader is the
+            # boot plane — so the silent boot is the steady state: no
+            # sync rows of any action may appear. 'deferred' is not a
+            # current action at all (plugins/sync.rs SyncRow actions:
+            # installed/activated/unchanged/deactivated/missing/
+            # failed/removed/unsupported/merged), and failed/degraded
+            # rows remain the forbidden wedge/retry-storm class.
             first = next(iter(sorted(deferred | failed | degraded)),
                          "(none)")
-            step.check("at most the documented one-line notices (post-#359 "
-                       "the boot runs no startup sync, so zero deferred "
-                       "rows is the silent-boot steady state; never "
-                       "failed/degraded rows)",
-                       len(deferred) <= 1 and not failed and not degraded,
+            step.check("no sync rows at startup (post-#359 the boot "
+                       "runs no startup sync — the generated loader is "
+                       "the boot plane; never failed/degraded rows)",
+                       not deferred and not failed and not degraded,
                        f"deferred={sorted(deferred)} failed={sorted(failed)} "
                        f"degraded={sorted(degraded)}; first: "
                        f"{first.strip()[:140]}")
-            # The documented nag: one line per still-untrusted declared
-            # source. The bound derives from the sandbox registry (the
-            # J4 derivation): since wt78 expanded `full` to nine entries
-            # the literal "<=2" went stale — five untrusted remain after
-            # J6 trusted bash-completion, and every one of them must be
-            # allowed to name itself.
-            untrusted = untrusted_registry_ids(home)
-            unexpected = nags - untrusted
-            step.check("awaiting-trust notices stay documented (one per "
-                       "untrusted source)",
-                       not unexpected and len(nags) <= len(untrusted),
-                       f"{len(nags)} source(s) vs {len(untrusted)} "
-                       f"untrusted in the registry: {sorted(nags)}"
-                       + (f"; unexpected: {sorted(unexpected)}"
-                          if unexpected else ""))
+            # No awaiting-trust notices can exist: the trust state was
+            # removed with niubash#647 — the registry carries no
+            # trusted flag and an installed source contributes
+            # immediately (plugins/sources.rs), so the documented nag
+            # this block used to bound (one line per untrusted source,
+            # the bound derived from the registry) has no current
+            # form. Hard absence.
+            step.check("no awaiting-trust notices (trust state "
+                       "retired — niubash#647)",
+                       "awaiting-trust" not in body)
             storm = {line.strip()[:120] for line in body.splitlines()
                      if "command not found" in line}
             step.check("guarded loader no-ops silently (no error storm)",
@@ -2021,7 +2013,9 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
                        f"{guarded}")
             # Heal the spec the documented way (hand-edit the declaration
             # away); the ledger entry — already cleared by the explicit
-            # retry's clear-before-install — is inert either way.
+            # retry (sync.rs: a declared-but-not-installed entry clears
+            # its failure memo on the way in; the explicit pass IS the
+            # retry) — is inert either way.
             dropped = seed.drop_spec_source(".journey-missing-origin")
             step.check("healed: the missing origin's declaration dropped "
                        "from the spec", dropped)
@@ -2052,22 +2046,15 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
             prompt_alive(healed, "P3S4B_ALIVE")
             drain_notices(healed)
             body = healed.transcript() + "\n" + healed.raw_stripped()
-            bad = [line for line in body.splitlines()
-                   if re.search(r"niu plugin sync: (deferred|failed|"
-                                "degraded)\b", line)]
+            bad = (sync_row_keys(body, "deferred")
+                   | sync_row_keys(body, "failed")
+                   | sync_row_keys(body, "degraded"))
             step.check("terminal after repair is silent (no deferred/"
                        "failed/degraded rows)", not bad,
-                       f"{len(bad)} line(s), first: "
-                       f"{bad[0].strip()[:140] if bad else ''}")
-            nags = sync_row_keys(body, "awaiting-trust")
-            untrusted = untrusted_registry_ids(home)
-            unexpected = nags - untrusted
-            step.check("only the documented awaiting-trust lines remain",
-                       not unexpected and len(nags) <= len(untrusted),
-                       f"{len(nags)} source(s) vs {len(untrusted)} "
-                       f"untrusted in the registry: {sorted(nags)}"
-                       + (f"; unexpected: {sorted(unexpected)}"
-                          if unexpected else ""))
+                       f"row ids: {sorted(bad)}")
+            step.check("no awaiting-trust lines remain (trust state "
+                       "retired — niubash#647)",
+                       "awaiting-trust" not in body)
             verdict_for_syntax_errors(
                 step, "zero syntax errors after repair",
                 all_syntax_errors(healed))
