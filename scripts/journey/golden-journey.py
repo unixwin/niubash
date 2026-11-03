@@ -33,15 +33,17 @@ this product, a known pitfall, so both point at the sandbox):
      source ~/.niubashrc in a live session -> ZERO syntax errors anywhere.
   J4 new-terminal x3
      each fresh `niu` session: no "Cloning into" (no re-downloads), no
-     "not declared" nags, at most the documented per-source awaiting-trust
-     notices, prompt renders.
+     "not declared" nags, no plugin notices of any kind (no sync runs
+     at startup; the trust state is retired), prompt renders.
   J5 daily battery (in the live session left open by J4)
      `ls | wc -l`, `echo hi | cat -n`, `cd ~ && pwd`,
      `[[ a != b ]] && echo ok` — each must produce output, not errors,
      with the prompt still alive after each command.
-  J6 trust + activate bash-completion (the owner's exact flow)
-     `niu plugin trust bash-completion` -> `source ~/.niubashrc` -> a
-     fresh terminal -> ZERO syntax errors (bash_completion included).
+  J6 activate bash-completion (the owner's exact flow)
+     `niu plugin trust` refuses as an unknown subcommand (no trust
+     state) -> `niu plugin enable bash-completion` ->
+     `source ~/.niubashrc` -> a fresh terminal -> ZERO syntax errors
+     (bash_completion included).
   J7 gallery live preview (niubash#170)
      re-run `niu setup` -> the pane below the gallery highlight renders
      that theme's real PS1 (header follows the highlight; a hung theme
@@ -52,12 +54,12 @@ Wave-1 persistence lane (wt79/jw1-persistence, journey-spec P3 + P8-S4 —
 the two live P0s #168/#167 plus F4/F5 aged state). Registered as phases
 P3 and P8 in PHASE_RUNNERS; like every phase they compose AFTER the base
 gate on the same sandbox, walking on the installed state J1–J7 leave
-(the theme-bearing source is still installed — J6 only trusts
+(the theme-bearing source is still installed — J6 only enables
 bash-completion — and P8-S4 restores what it removes):
 
   P3-S1 reopen sandbox session (aged state)
      a fresh terminal after J5: prompt renders; the picked theme still
-     owns the rc (`OSH_THEME`/`BASH_IT_THEME` line intact); the spec
+     owns the loader (`OSH_THEME`/`BASH_IT_THEME` line intact); the spec
      still declares the wizard's sources; the session reads back a
      marker file a PREVIOUS session wrote (the wake-flag capability:
      a session detects "a previous session mutated state"), proving the
@@ -71,8 +73,8 @@ bash-completion — and P8-S4 restores what it removes):
      with no activated/deactivated flip of the theme source; the
      WHOLE-rc comparison stays as an informational note only, because
      other managed blocks may legally materialize between snapshots once
-     their spec declaration goes trusted/declared (release run
-     37218948432: the bash-completion block J6 trusted) — materializing
+     their spec declaration lands (release run 37218948432: the
+     bash-completion block J6 activated) — materializing
      it is sync's job, not a stability break; (b) the picked theme's
      variable still present, unchanged, on the same framework; (c) the
      string `selection materialized` (the #168 rewrite tell) never
@@ -90,11 +92,11 @@ bash-completion — and P8-S4 restores what it removes):
      send runs wake-free, so the gate stops masking #167.
   P3-S4 aged state: damaged tree + bootstrap-failures ledger (F5)
      seed between sessions (the `seed` capability): rename a file
-     inside the trusted oh-my-bash tree (the guarded loader must no-op
+     inside the installed oh-my-bash tree (the guarded loader must no-op
      silently) and hand-write a spec entry for a declared-but-missing
-     origin plus its `bootstrap-failures.toml` memo. The next terminal
-     reaches a prompt within 10s with at most the documented one-line
-     notices (deferred / awaiting-trust); the explicit verbs repair
+     origin plus its `bootstrap-failures.json` memo. The next terminal
+     reaches a prompt within 10s in silence (no sync rows, no notices —
+     the boot runs no sync); the explicit verbs repair
      (`niu plugin sync` retries the missing origin readably, `niu
      plugin restore` rebuilds the tree); after healing the spec, the
      final terminal is silent again.
@@ -102,7 +104,7 @@ bash-completion — and P8-S4 restores what it removes):
      `niu plugin source remove oh-my-bash` while its theme is applied:
      spec declaration drops, registry record and tree drop, fresh
      terminal(s) fall back to the floor prompt with no resurrection and
-     no syntax-error storm; then re-add + trust + re-enable restores the
+     no syntax-error storm; then re-add + re-enable restores the
      theme, and the rc carries exactly one oh-my-bash block (no orphan
      blocks) at steady state. The theme under test is DERIVED from the
      live state at step start (whatever P4 left active — see the
@@ -121,8 +123,8 @@ Driver capabilities landed with this lane (journey-steps.json
              back — a session detects "a previous session mutated
              state" without any driver-internal channel.
   seed       the `SandboxSeed` helper: byte snapshots of the rc,
-             spec `[[sources]]` stanza add/drop, a product-format
-             `bootstrap-failures.toml` memo write, and tree-file
+             spec entry add/drop (JSON), a product-format
+             `bootstrap-failures.json` memo write, and tree-file
              damage — all under the sandbox home, between sessions.
 
 `--phases` selects what runs (comma-separated): the base J1–J7 gate
@@ -257,7 +259,7 @@ WAKE_GAP_SECONDS = 0.15
 # last row that is neither the typed input line nor any row carrying the
 # command text (anchor condition in await_output_anchor). Bounded like
 # everything here; the known-long journey commands carry their own bound
-# (trust 90s, source 60s) and an expiry is ledgered, never silent.
+# (enable 90s, source 60s) and an expiry is ledgered, never silent.
 ANCHOR_POLL_SECONDS = 0.1
 ANCHOR_TIMEOUT_SECONDS = 30.0
 
@@ -649,8 +651,9 @@ class Session:
         codes INSIDE the word (`\\x1b[36mecho\\x1b[0m DUM...`) and a raw
         substring test can never match; pyte's rendered row holds the
         glyphs contiguously. `before` is the pre-send viewport — a match
-        that was already on screen is not an echo (the awaiting-trust
-        nag spells `niu plugin trust bash-completion`; drv-run1's
+        that was already on screen is not an echo (a startup notice can
+        spell a command line verbatim — the retired awaiting-trust nag
+        spelled `niu plugin trust bash-completion`; drv-run1's
         raw-stream false confirm hid the eaten first byte)."""
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -779,7 +782,7 @@ class Session:
         sits below the typed line — so the NEXT send in this session can
         never land while this command is still executing (the gluing).
         `anchor_timeout` carries the known-long commands' own bounds
-        (trust 90s, source 60s); the default covers everything else.
+        (enable 90s, source 60s); the default covers everything else.
 
         `anchor=False` skips that post-execution anchor for commands
         whose completion is INTERACTIVE, not a returning prompt — the
@@ -3116,7 +3119,8 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                 f"header: {header}\npane:\n" + body, encoding="utf-8")
             # A pane that shows a theme header line (`<name> · <source>`)
             # proves the preview follows THIS highlight. The real gallery
-            # mixes sources (J2 trusted oh-my-bash AND bash-it), so the
+            # mixes sources (J2's collection installed oh-my-bash AND
+            # bash-it), so the
             # source name varies per row — assert the header anatomy, not
             # one source.
             step.check(f"preview follows highlight {position + 1}",
@@ -3938,7 +3942,7 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
 @register_phase("P7")
 def phase_p7(exe, home, env, verdict, seed=None, state=None):
     """journey-spec P7 — the documented power-user workflow: hand-edit
-    `~/.niubash/plugins.toml` + `niu plugin sync` (plugins-guide 'Merge
+    `~/.niubash/plugins.json` + `niu plugin sync` (plugins-guide 'Merge
     semantics: spec vs your hand edits', design §14.6), its corruption
     behavior (a wedged startup bricks every terminal — the hang class),
     and #168's inverse invariant (sync claims only what the spec declares).
@@ -3946,7 +3950,7 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
     base gate) left, snapshotting bytes before each mutation.
     (seed/state are the shared runner protocol; P7 writes the live files.)"""
     rc_path = home / ".niubashrc"
-    spec_path = home / ".niubash" / "plugins.toml"
+    spec_path = home / ".niubash" / "plugins.json"
     fixture_root = home / "plugin-fixtures" / "tinysh"
     fixture_root.mkdir(parents=True, exist_ok=True)
     (fixture_root / "tiny.sh").write_text(
@@ -3954,10 +3958,13 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
         "tiny_hello() { echo tiny-hello; }\n",
         encoding="utf-8", newline="\n")
 
-    # ── P7-S1 — hand-add a source entry: sync installs it (untrusted) and
-    # declares it; the second sync is a byte-identical no-op.
-    step = verdict.step("P7-S1", "hand-add a source entry: sync installs it "
-                                 "(untrusted) + declares it; second sync is a "
+    # ── P7-S1 — hand-add a source entry: sync installs it and declares
+    # it (the derived id is bound back into the spec); the second sync
+    # is a byte-identical no-op. No trust state exists anywhere in the
+    # flow (niubash#647): the hand-declared source activates as soon as
+    # it is installed.
+    step = verdict.step("P7-S1", "hand-add a source entry: sync installs "
+                                 "it + declares it; second sync is a "
                                  "byte-identical no-op")
     session = None
     rc_stable = None
@@ -3968,29 +3975,35 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
         verdict.capture("P7-session-open", session)
         rc_stable = read_bytes(rc_path)
         spec_before = read_bytes(spec_path)
-        hand_entry = (f"\n[[sources]]\n"
-                      f"target = '{fixture_root.as_posix()}'\n"
-                      f"enable = ['tiny.sh']\n").encode("utf-8")
-        spec_path.write_bytes(spec_before + hand_entry)
+        # The hand edit itself, in the spec's current format: append
+        # one entry object to the JSON sources list (the documented
+        # hand-edit workflow — plugins-guide 'The spec').
+        spec_doc = json.loads(spec_before.decode("utf-8"))
+        spec_doc.setdefault("sources", []).append(
+            {"target": fixture_root.as_posix(), "enable": ["tiny.sh"]})
+        spec_path.write_bytes(
+            (json.dumps(spec_doc, indent=2) + "\n").encode("utf-8"))
         session.send_line("niu plugin sync", anchor_timeout=120)
         try:
-            session.wait_for("awaiting-trust", timeout=90)
-            step.check("sync installed the hand-declared source untrusted "
-                       "(awaiting-trust row)", True)
+            session.wait_for("tinysh", timeout=90)
+            # The verb's row for a declared-but-not-installed entry
+            # names the derived id with the 'activated' action (the
+            # sync pass installs + materializes it — sync.rs's own
+            # tests pin that action for exactly this shape).
+            rows = (sync_row_keys(session.raw_stripped(), "activated")
+                    | sync_row_keys(session.raw_stripped(), "installed"))
+            step.check("sync installed the hand-declared source "
+                       "(activated row, no trust step)",
+                       "tinysh" in rows,
+                       f"sync rows naming tinysh: {sorted(rows)}")
         except TimeoutError as err:
-            step.check("sync installed the hand-declared source untrusted "
-                       "(awaiting-trust row)", False, str(err))
-        try:
-            session.wait_for("niu plugin trust tinysh", timeout=30)
-            step.check("sync printed the exact trust verb for the new source",
-                       True)
-        except TimeoutError as err:
-            step.check("sync printed the exact trust verb for the new source",
-                       False, str(err))
+            step.check("sync installed the hand-declared source "
+                       "(activated row, no trust step)", False, str(err))
         spec_after = read_bytes(spec_path)
         step.check("sync declared the entry (derived id bound into the spec)",
-                   b"id = 'tinysh'" in spec_after)
-        step.check("the untrusted install left the rc byte-identical",
+                   b'"id": "tinysh"' in spec_after)
+        step.check("the install left the rc byte-identical (sync never "
+                   "writes the rc — #359)",
                    read_bytes(rc_path) == rc_stable)
         session.send_line("niu plugin sync", anchor_timeout=120)
         step.check("second sync: rc byte-identical (no-op)",
@@ -4083,11 +4096,11 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
                    read_bytes(loader_file) == loader_after_bytes)
         step.check("second sync: spec byte-identical",
                    read_bytes(spec_path) == spec_before)
-        omb_entry = spec_entry(read_text(spec_path), "oh-my-bash") or ""
+        omb_entry = spec_entry(read_text(spec_path), "oh-my-bash")
+        omb_enable = entry_field(omb_entry, "enable") if omb_entry else None
         step.check("the hand-added item was not absorbed into the spec's own "
-                   "set", "enable = ['git']" not in omb_entry,
-                   (["line matches enable = ['git']"] if
-                    "enable = ['git']" in omb_entry else []))
+                   "set", "git" not in (omb_enable or []),
+                   f"the spec's oh-my-bash enable list: {omb_enable!r}")
     except AssertionError as err:
         step.check("P7-S2 completed", False, str(err))
     step.finish()
@@ -4095,7 +4108,7 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
     # ── P7-S3 — corrupt the spec (truncated file): sync fails SOFT with a
     # readable error, the default floor session still boots bounded, the rc
     # is never destroyed. A wedged startup here would brick every terminal.
-    step = verdict.step("P7-S3", "corrupt spec (truncated TOML): sync fails "
+    step = verdict.step("P7-S3", "corrupt spec (truncated JSON): sync fails "
                                  "soft, floor session still boots, no panic, "
                                  "rc not destroyed")
     try:
@@ -4105,7 +4118,8 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
         session.send_line("niu plugin sync", anchor_timeout=30)
         raw = session.raw_stripped()
         step.check("the failed sync printed a readable error",
-                   "niu:" in raw or "TOML" in raw or "toml" in raw)
+                   "niu:" in raw or "JSON" in raw or "json" in raw
+                   or "expected" in raw)
         step.check("no panic anywhere in the session",
                    "panicked" not in raw)
         step.check("the failed sync did not touch the rc",
@@ -4171,15 +4185,13 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
             # silently wrong one, and the readable error belongs to the
             # explicit sync (asserted above). What must never happen is
             # the wedge-class fallout: a panic or a failed/degraded storm.
-            storm = [line for line in boot_raw.splitlines()
-                     if re.search(r"niu plugin sync: (failed|degraded)\b",
-                                  line)]
+            storm = (sync_row_keys(boot_raw, "failed")
+                     | sync_row_keys(boot_raw, "degraded"))
             step.check("the corrupt-spec boot stays quiet and clean (the "
                        "loader is the boot plane; no panic, no failed/"
                        "degraded storm)",
                        "panicked" not in boot_raw and not storm,
-                       f"{len(storm)} storm line(s), first: "
-                       f"{storm[0].strip()[:140] if storm else ''}")
+                       f"{len(storm)} storm row(s): {sorted(storm)}")
             verdict.capture("P7-S3-corrupt-boot", terminal)
         finally:
             terminal.close()
@@ -4208,8 +4220,13 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
     try:
         rc_stable = read_bytes(rc_path)
         spec_before = read_bytes(spec_path)
-        hand_key = b"\nnote_field = 'hand-added by the journey'\n"
-        spec_path.write_bytes(spec_before + hand_key)
+        # An unknown TOP-LEVEL key, added as JSON data (the spec is a
+        # JSON document now — appending foreign syntax would corrupt
+        # it, which is P7-S3's case, not this one).
+        spec_doc = json.loads(spec_before.decode("utf-8"))
+        spec_doc["note_field"] = "hand-added by the journey"
+        hand_bytes = (json.dumps(spec_doc, indent=2) + "\n").encode("utf-8")
+        spec_path.write_bytes(hand_bytes)
         session.send_line("niu plugin sync && echo P7S4_SYNC_OK",
                           anchor_timeout=120)
         try:
@@ -4222,7 +4239,7 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
                   "(the spec parser ignores unrecognized fields; the known "
                   "fields are documented in plugins-guide.md 'The spec')")
         step.check("the unknown key survives the sync (spec not rewritten)",
-                   read_bytes(spec_path) == spec_before + hand_key)
+                   read_bytes(spec_path) == hand_bytes)
         step.check("rc byte-identical across the sync",
                    read_bytes(rc_path) == rc_stable)
     except AssertionError as err:
