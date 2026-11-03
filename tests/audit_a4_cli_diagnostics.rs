@@ -74,7 +74,9 @@ fn a4_04_corrupt_spec_error_names_the_file_and_the_cause() {
     let canonical_spec = std::fs::canonicalize(&spec)
         .map(|path| {
             let text = path.display().to_string();
-            text.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(text)
+            text.strip_prefix(r"\\?\")
+                .map(str::to_string)
+                .unwrap_or(text)
         })
         .unwrap_or_else(|_| spec.display().to_string());
     let canonical_spec = canonical_spec.replace('\\', "/");
