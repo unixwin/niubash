@@ -580,7 +580,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> bool
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
         let handle = child.as_raw_handle() as HANDLE;
         // SAFETY: `handle` is the live process handle owned by `child`.
