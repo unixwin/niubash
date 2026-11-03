@@ -2489,6 +2489,13 @@ jobs:
       # page carry SIGNED bytes. The *-signpath-input artifacts (unsigned,
       # submission-only) are dropped so their zips never reach the release
       # page. Both halves are no-ops while signing is disabled.
+      # The unsigned-installer-* artifacts are likewise submission-only
+      # transport (the pristine installer handed to SignPath by the inline
+      # build-windows steps): their payload file name is identical to the
+      # packaged installer's, so if they survived to the Create step's
+      # artifacts/**/*.exe glob (overwrite_files: true) the unsigned bytes
+      # could win the release-page asset name over the signed ones. Drop
+      # them here, with the other transport artifacts.
       - name: Merge SignPath-signed artifacts (inert without credentials)
         run: |
           set -euo pipefail
@@ -2510,7 +2517,7 @@ jobs:
               cp "$dir/$rel" "$target/$rel"
             done
           done
-          rm -rf artifacts/*-signpath-signed artifacts/*-signpath-input
+          rm -rf artifacts/*-signpath-signed artifacts/*-signpath-input artifacts/unsigned-installer-*
           if [ "${#signed[@]}" -eq 0 ]; then
             echo "no SignPath-signed artifacts (signing disabled or skipped); publishing as before"
           fi

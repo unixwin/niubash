@@ -289,6 +289,12 @@ pub struct CompletionResult {
     pub styles: Vec<Option<nu_ansi_term::Style>>,
     /// Common prefix (for partial completion)
     pub common_prefix: Option<String>,
+    /// The governing compspec asked for no trailing space after an
+    /// accepted match (`-o nospace` → rl_completion_suppress_append,
+    /// carried on rubash's CompletionPolicy since rubash#2573). Only
+    /// the rubash-engine producer sets this (niubash#837); every
+    /// other producer leaves it false and keeps the text-shape rule.
+    pub suppress_append: bool,
 }
 
 impl CompletionResult {
@@ -300,6 +306,7 @@ impl CompletionResult {
             descriptions: vec![None; len],
             styles: vec![None; len],
             common_prefix,
+            suppress_append: false,
         }
     }
 
@@ -311,6 +318,7 @@ impl CompletionResult {
             descriptions,
             styles: vec![None; len],
             common_prefix,
+            suppress_append: false,
         }
     }
 
@@ -324,6 +332,7 @@ impl CompletionResult {
             descriptions: vec![None; len],
             styles,
             common_prefix,
+            suppress_append: false,
         }
     }
 

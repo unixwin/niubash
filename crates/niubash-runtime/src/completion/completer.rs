@@ -552,7 +552,7 @@ impl NiubashCompleter {
 
         // GNU programmable completion (rubash engine): when the command has a
         // compspec registered via the `complete` builtin, argument candidates
-        // come from `Session::complete` through the shell bridge. The
+        // come from `Session::complete_detailed` through the shell bridge. The
         // completion *engine* lives in rubash while niubash keeps its
         // cwd-priority, common-command, and file overlays for everything else.
         // The `has_compspec` gate keeps this free for commands without a
@@ -560,16 +560,25 @@ impl NiubashCompleter {
         // raw-unquoted file names that duplicate the path completer above).
         {
             if has_compspec {
-                if let Some(cands) = crate::shell::with_completion_bridge(|shell| {
-                    shell
-                        .session_mut()
-                        .complete(input, cursor_pos)
-                        .into_iter()
-                        .map(|candidate| candidate.text)
-                        .collect::<Vec<String>>()
+                if let Some(outcome) = crate::shell::with_completion_bridge(|shell| {
+                    shell.session_mut().complete_detailed(input, cursor_pos)
                 }) {
-                    if !cands.is_empty() {
-                        let result = CompletionResult::new(cands);
+                    if !outcome.candidates.is_empty() {
+                        // niubash#837: carry the engine's per-candidate
+                        // descriptions and the attempt's insert policy
+                        // through instead of dropping them at the
+                        // bridge — Candidate.description used to be
+                        // discarded here (`.map(|c| c.text)`), and the
+                        // policy (rubash#2573's CompletionPolicy) never
+                        // reached the renderer's append-whitespace
+                        // decision at all.
+                        let (texts, descriptions): (Vec<String>, Vec<Option<String>>) = outcome
+                            .candidates
+                            .into_iter()
+                            .map(|candidate| (candidate.text, candidate.description))
+                            .unzip();
+                        let mut result = CompletionResult::with_descriptions(texts, descriptions);
+                        result.suppress_append = outcome.policy.suppress_append;
                         all_suggestions.extend(self.format_completions(result, input, cursor_pos));
                     }
                 }
@@ -806,7 +815,12 @@ impl NiubashCompleter {
                     start: span_start,
                     end: span_end,
                 },
-                append_whitespace: should_append_completion_whitespace(completion),
+                // A producer carrying an engine insert policy
+                // (niubash#837: -o nospace via rubash's
+                // CompletionPolicy) overrides the text-shape rule;
+                // every other producer keeps it.
+                append_whitespace: !result.suppress_append
+                    && should_append_completion_whitespace(completion),
                 match_indices: None,
             });
         }
@@ -1068,6 +1082,65 @@ niu_git_comp() {
         // armed (the thread-local bridge would otherwise defer the drop
         // to thread teardown).
         crate::shell::uninstall_completion_bridge();
+    }
+
+    #[test]
+    fn issue837_engine_nospace_policy_reaches_suggestions() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        // A compspec carrying -o nospace: the engine's insert policy
+        // (rubash#2573 CompletionPolicy.suppress_append) must reach
+        // the Suggestion's append_whitespace through the bridge —
+        // before niubash#837 the bridge used Session::complete and
+        // the policy never crossed.
+        assert!(shell
+            .execute_script("complete -o nospace -W 'zzone zztwo' mycmd837")
+            .is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("mycmd837 zz", 11);
+        let zzone = suggestions
+            .iter()
+            .find(|s| s.value == "zzone")
+            .unwrap_or_else(|| panic!("missing engine candidate, got {suggestions:?}"));
+        assert!(
+            !zzone.append_whitespace,
+            "-o nospace must suppress the appended space: {zzone:?}"
+        );
+        crate::shell::uninstall_completion_bridge();
+    }
+
+    #[test]
+    fn issue837_format_completions_carries_descriptions_and_suppress_append() {
+        // The shaping half of the bridge contract: a CompletionResult
+        // built the way the engine bridge now builds it (descriptions
+        // unzipped from Candidate.description, suppress_append from
+        // the attempt's policy) must surface both on the Suggestion.
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let completer = NiubashCompleter::new(state);
+        let mut result = CompletionResult::with_descriptions(
+            vec!["alpha".to_string()],
+            vec![Some("First".to_string())],
+        );
+        result.suppress_append = true;
+        let suggestions = completer.format_completions(result, "cmd al", 6);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].description.as_deref(), Some("First"));
+        assert!(!suggestions[0].append_whitespace);
+
+        // Control: without the policy the text-shape rule appends.
+        let result = CompletionResult::with_descriptions(
+            vec!["alpha".to_string()],
+            vec![Some("First".to_string())],
+        );
+        let suggestions = completer.format_completions(result, "cmd al", 6);
+        assert!(suggestions[0].append_whitespace);
     }
 
     #[test]
