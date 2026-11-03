@@ -2080,13 +2080,13 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
     after J2 (release runs 37218948432 / 37224044818 red a hardcoded
     `powerline-multiline` precondition here while the product was correct
     at every hop). No active theme is a legal state too: the
-    removal-then-restore contract then runs themeless (re-add + trust
-    only; nothing may resurrect)."""
+    removal-then-restore contract then runs themeless (re-add only;
+    nothing may resurrect)."""
     step = verdict.step(
         "P8-S4", "remove the source providing the ACTIVE theme "
         "(changelog 1.3.1 F4)")
     tree = seed.sources_root / "oh-my-bash"
-    registry_path = seed.sources_root / "registry.toml"
+    registry_path = seed.sources_root / "registry.json"
     try:
         rc_text = seed.rc_bytes().decode("utf-8", errors="replace")
         loader_text = loader_text_for(home)
@@ -2119,8 +2119,8 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
                    f"oh-my-bash block: {block_vars}; tree: {tree.is_dir()}")
         if not themed:
             step.note("no theme active at step start — the removal-then-"
-                      "restore contract runs themeless (re-add + trust "
-                      "only; nothing may resurrect)")
+                      "restore contract runs themeless (re-add only; "
+                      "nothing may resurrect)")
 
         remover = Session(
             [str(exe)], home, env,
@@ -2174,12 +2174,12 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
         # F4's resurrection guard, on disk, immediately.
         step.check("F4: the spec declaration dropped",
                    "oh-my-bash" not in seed.spec_text(),
-                   "plugins.toml still names oh-my-bash")
+                   "plugins.json still names oh-my-bash")
         registry_text = (registry_path.read_text(encoding="utf-8")
                          if registry_path.is_file() else "")
         step.check("F4: the registry record dropped",
                    "oh-my-bash" not in registry_text,
-                   "registry.toml still records oh-my-bash")
+                   "registry.json still records oh-my-bash")
         step.check("F4: the tree is gone", not tree.exists(),
                    f"{tree} still present")
 
@@ -2247,7 +2247,10 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
             finally:
                 floor.close()
 
-        # Re-add + trust + re-enable (the manifest's restore path).
+        # Re-add + re-enable (the manifest's restore path). There is
+        # no trust leg: the verb was removed with niubash#647 — an
+        # installed source contributes immediately, so the re-add
+        # below is the whole restore precondition.
         restorer = Session(
             [str(exe)], home, env,
             raw_log=verdict.transcripts / "P8-S4-restore.raw.ansi",
@@ -2283,15 +2286,6 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
                     break
             step.check("`niu plugin add oh-my-bash` re-installed the "
                        "source", installed is True, add_detail)
-            restorer.send_line("niu plugin trust oh-my-bash",
-                               anchor_timeout=90)
-            try:
-                restorer.wait_for("is now trusted", timeout=90)
-                step.check("`niu plugin trust oh-my-bash` reported trusted",
-                           True)
-            except TimeoutError as err:
-                step.check("`niu plugin trust oh-my-bash` reported trusted",
-                           False, str(err))
             if themed:
                 # Re-enable the theme that was ACTIVE at step start (the
                 # live state's own pick — restoring the state P8-S4 found,
@@ -2307,8 +2301,8 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
                                f"{active_theme}` re-applied the theme",
                                False, str(err))
             else:
-                step.note("themeless state — the restore leg is re-add + "
-                          "trust only; nothing may resurrect")
+                step.note("themeless state — the restore leg is re-add "
+                          "only; nothing may resurrect")
         finally:
             restorer.close()
 
