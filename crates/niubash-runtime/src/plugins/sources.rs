@@ -543,6 +543,18 @@ pub fn read_source_registry() -> Vec<SourceRecord> {
     sources
 }
 
+/// The first id carried by more than one record, if any (niubash#889).
+/// Ids are the registry's primary key — `registered_by_id`, update,
+/// rollback, restore and removal all address a record by id — so a
+/// list with a duplicate id has records no verb can reach.
+fn duplicate_source_id(sources: &[SourceRecord]) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+    sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .find(|id| !seen.insert(*id))
+}
+
 pub(crate) fn write_source_registry(sources: &[SourceRecord]) -> anyhow::Result<()> {
     let path = registry_path();
     // niubash#178 consent gate: an unparsable registry carries persisted
@@ -559,6 +571,20 @@ pub(crate) fn write_source_registry(sources: &[SourceRecord]) -> anyhow::Result<
             path.display(),
             corruption.error,
             corrupt_registry_backup_path().display()
+        );
+    }
+    // niubash#889 uniqueness gate: every registry write flows through
+    // here, and ids are the primary key (see duplicate_source_id), so a
+    // list carrying an id twice is refused at this choke point instead
+    // of being persisted into a registry whose later records are
+    // unreachable phantoms — `remove` deleted the first match and left
+    // the rest behind, still installed on disk.
+    if let Some(duplicate) = duplicate_source_id(sources) {
+        anyhow::bail!(
+            "refusing to write {}: duplicate source id '{duplicate}' — ids are \
+             unique keys in the registry; resolve the duplicate (remove the \
+             source and reinstall it) and retry",
+            path.display()
         );
     }
     if let Some(parent) = path.parent() {
@@ -1432,6 +1458,20 @@ pub fn install_or_adopt(request: SourceInstallRequest) -> anyhow::Result<(Source
             corrupt_registry_backup_path().display()
         );
     }
+    // niubash#889: same refuse-before-fetch shape — a registry already
+    // carrying a duplicate id cannot be written back (the uniqueness
+    // gate in write_source_registry), so an install into it would
+    // promote a tree it can never register. `remove` is the resolution
+    // path: it drops every record carrying the id.
+    if let Some(duplicate) = duplicate_source_id(&read_source_registry()) {
+        anyhow::bail!(
+            "cannot install: plugin source registry {} carries duplicate \
+             source id '{duplicate}' and the install would not be registrable; \
+             remove the duplicate with niu plugin source remove {duplicate} \
+             and retry",
+            registry_path().display()
+        );
+    }
     // Cheap pre-checks (no fetch): derived id, then recorded origin.
     if let Some(kind) = request.adapter.as_deref() {
         if let Some(adapter) = super::descriptors::adapter_for(kind) {
@@ -1633,19 +1673,36 @@ pub fn primary_theme_source_rank(source_id: &str) -> u8 {
 /// next sync resurrect the source (the wizard's undo receipts name this
 /// verb).
 pub fn remove_source(id: &str) -> anyhow::Result<PathBuf> {
-    let mut registry = read_source_registry();
-    let index = registry
+    let registry = read_source_registry();
+    // niubash#889: remove EVERY record carrying the id, not just the
+    // first match. A registry file that already carries duplicates
+    // (written before the uniqueness gate, or edited by hand) must be
+    // cleanable by this verb — deleting one record and writing the
+    // rest back left a phantom record whose tree stayed installed and
+    // whose id every lookup kept finding. Removal is also what makes
+    // the filtered list writable again under the gate.
+    let removed: Vec<SourceRecord> = registry
         .iter()
-        .position(|record| record.id == id)
-        .ok_or_else(|| anyhow!("unknown source '{id}'"))?;
-    let record = registry.remove(index);
+        .filter(|record| record.id == id)
+        .cloned()
+        .collect();
+    if removed.is_empty() {
+        anyhow::bail!("unknown source '{id}'");
+    }
+    let record = removed[0].clone();
+    let registry: Vec<SourceRecord> = registry
+        .into_iter()
+        .filter(|record| record.id != id)
+        .collect();
     write_source_registry(&registry)?;
     if let Some(mut spec) = super::spec::load_spec()? {
         let before = spec.sources.len();
         spec.sources.retain(|entry| {
             super::spec::resolve_entry_id(entry).as_deref() != Some(id)
                 && entry.id.as_deref() != Some(id)
-                && entry.target.trim() != record.url.trim()
+                && !removed
+                    .iter()
+                    .any(|record| entry.target.trim() == record.url.trim())
         });
         if spec.sources.len() != before {
             super::spec::save_spec(&spec)?;
@@ -1653,14 +1710,16 @@ pub fn remove_source(id: &str) -> anyhow::Result<PathBuf> {
     }
 
     let root = sources_root();
-    if record.path.starts_with(&root)
-        && record.path != root
-        && record.path.is_dir()
-        // Only remove directories that still match the registered layout.
-        && adapter_for(&record.adapter).is_some_and(|a| a.detect(&record.path))
-    {
-        fs::remove_dir_all(&record.path)
-            .with_context(|| format!("failed to remove {}", record.path.display()))?;
+    for record in &removed {
+        if record.path.starts_with(&root)
+            && record.path != root
+            && record.path.is_dir()
+            // Only remove directories that still match the registered layout.
+            && adapter_for(&record.adapter).is_some_and(|a| a.detect(&record.path))
+        {
+            fs::remove_dir_all(&record.path)
+                .with_context(|| format!("failed to remove {}", record.path.display()))?;
+        }
     }
     // niubash#809 F4: the removal is not done until the generated loader
     // stops sourcing the tree — dropping only the registry/spec/tree left
@@ -2987,6 +3046,120 @@ mod tests {
         add_source(local_request(&origin)).unwrap();
         let err = add_source(local_request(&origin)).expect_err("duplicate must fail");
         assert!(err.to_string().contains("already registered"), "{err}");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    fn record_with_path(id: &str, path: PathBuf, url: &str) -> SourceRecord {
+        SourceRecord {
+            id: id.to_string(),
+            adapter: "oh-my-bash".to_string(),
+            url: url.to_string(),
+            ref_name: "HEAD".to_string(),
+            version: "git-abc123".to_string(),
+            path,
+            license: "MIT".to_string(),
+            installed_at: "1700000000".to_string(),
+            commit_sha: None,
+            previous: None,
+            spec_enabled: None,
+            spec_theme: None,
+        }
+    }
+
+    /// niubash#889: the registry write choke point refuses a list
+    /// carrying the same id twice. Ids are the primary key — every
+    /// lookup, update and removal addresses a record by id — so a
+    /// persisted duplicate strands every later record as an
+    /// unreachable phantom.
+    #[test]
+    fn write_source_registry_refuses_duplicate_ids() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("dup-id-gate");
+        let root = temp.join("sources");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let dup = vec![
+            record_with_path(
+                "oh-my-bash",
+                root.join("oh-my-bash"),
+                "https://example.invalid/a.git",
+            ),
+            record_with_path(
+                "oh-my-bash",
+                root.join("oh-my-bash-again"),
+                "https://example.invalid/b.git",
+            ),
+        ];
+        let err = write_source_registry(&dup).expect_err("duplicate ids must be refused");
+        assert!(
+            err.to_string().contains("duplicate source id 'oh-my-bash'"),
+            "{err}"
+        );
+        assert!(
+            !root.join("registry.json").exists(),
+            "a refused write must not persist anything"
+        );
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    /// niubash#889: `remove` on a registry file that already carries
+    /// duplicate records for one id (written before the gate, or
+    /// hand-edited) drops EVERY record with the id and every tree they
+    /// name. Deleting only the first match — the old shape — left a
+    /// phantom record pointing at a still-installed tree.
+    #[test]
+    fn remove_source_drops_every_duplicate_record() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = unique_temp_dir("remove-dup");
+        let root = temp.join("sources");
+        let loader = temp.join("generated/plugins.niu");
+        let _guard = EnvVarGuard::set("NIU_PLUGIN_SOURCES_ROOT", &root);
+        let _spec = EnvVarGuard::set("NIU_PLUGIN_SPEC", &temp.join("plugins.json"));
+        let _loader = EnvVarGuard::set("NIU_PLUGIN_LOADER_PATH", &loader);
+
+        // Two records, one id, two real trees — staged by writing the
+        // registry file directly, since the write gate (correctly)
+        // refuses to persist this shape.
+        let tree_a = root.join("oh-my-bash");
+        let tree_b = root.join("oh-my-bash-copy");
+        write_omb_fixture(&tree_a, "v1");
+        write_omb_fixture(&tree_b, "v1");
+        let registry = SourceRegistry {
+            schema: Some(SOURCE_REGISTRY_SCHEMA.to_string()),
+            sources: vec![
+                record_with_path(
+                    "oh-my-bash",
+                    tree_a.clone(),
+                    "https://example.invalid/a.git",
+                ),
+                record_with_path(
+                    "oh-my-bash",
+                    tree_b.clone(),
+                    "https://example.invalid/b.git",
+                ),
+            ],
+        };
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("registry.json"),
+            serde_json::to_string_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_source_registry().len(),
+            2,
+            "the fixture must carry the duplicate"
+        );
+
+        let removed_path = remove_source("oh-my-bash").expect("remove cleans the duplicate");
+        assert_eq!(removed_path, tree_a);
+        assert!(
+            read_source_registry().is_empty(),
+            "no phantom record may remain"
+        );
+        assert!(!tree_a.exists(), "the first record's tree is removed");
+        assert!(!tree_b.exists(), "the duplicate record's tree is removed");
+        let err = remove_source("oh-my-bash").expect_err("a second remove finds nothing");
+        assert!(err.to_string().contains("unknown source"), "{err}");
         let _ = fs::remove_dir_all(&temp);
     }
 
