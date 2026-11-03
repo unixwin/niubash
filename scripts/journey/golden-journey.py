@@ -2856,34 +2856,19 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                        "not declared" not in body)
             nag_lines = [line for line in body.splitlines()
                          if "awaiting-trust" in line]
-            # The documented nag: one line per still-untrusted declared
-            # source. Since niubash#171 the `full` collection lands EIGHT
-            # sources and only oh-my-bash is trusted by the theme pick, so
-            # the bound derives from the sandbox registry (the same state
-            # sync --bootstrap reads) instead of a literal that every
-            # entry-set change would stale: every notice must name a real
-            # still-untrusted source, and the unique set may not exceed it
-            # (the screen render and the raw stream can each hold a copy).
-            untrusted_ids = set()
-            registry_path = home / ".niubash" / "sources" / "registry.toml"
-            if registry_path.is_file():
-                registry = tomllib.loads(
-                    registry_path.read_text(encoding="utf-8"))
-                for record in registry.get("sources", []):
-                    if not record.get("trusted", False):
-                        untrusted_ids.add(record.get("id", ""))
-                untrusted_ids.discard("")
-            noticed = {m.group(1) for line in nag_lines
-                       for m in [re.search(r"awaiting-trust\s+(\S+)", line)]
-                       if m}
-            unexpected = noticed - untrusted_ids
-            step.check(f"terminal #{i}: awaiting-trust notices stay "
-                       "documented (one per untrusted source)",
-                       not unexpected and len(noticed) <= len(untrusted_ids),
-                       f"{len(nag_lines)} line(s), {len(noticed)} unique vs "
-                       f"{len(untrusted_ids)} untrusted sources"
-                       + (f"; unexpected: {sorted(unexpected)}"
-                          if unexpected else "")
+            # No trust notices can exist anymore: the trust mechanism
+            # was removed 2026-10-28 (niubash#647) — an installed source
+            # contributes immediately (plugins/sources.rs), the
+            # registry carries no trusted flag, and startup runs no
+            # sync at all (plugins/sync.rs), so a fresh terminal prints
+            # no plugin notices of any kind. The old allowance (one
+            # awaiting-trust line per still-untrusted declared source,
+            # its bound derived from the registry) is a hard absence
+            # now.
+            step.check(f"terminal #{i}: no 'awaiting-trust' notices "
+                       "(trust state retired — niubash#647)",
+                       not nag_lines,
+                       f"{len(nag_lines)} line(s)"
                        + (f", first: {nag_lines[0].strip()[:100]}"
                           if nag_lines else ""))
             verdict.capture(f"J4-terminal-{i}", s)
@@ -2984,14 +2969,23 @@ def journey(exe: Path, root: Path, verdict: Verdict,
             live.close()
         step.finish()
 
-    # ── J6: the owner's exact flow — trust + activate bash-completion.
+    # ── J6: the owner's exact flow — activate bash-completion. The step
+    # was born as "trust + activate" around `niu plugin trust`; the
+    # trust verb (and the whole trust state) was removed 2026-10-28
+    # (niubash#647), so the flow's intent — a J2-installed source
+    # contributing its completion with no further gate — is now
+    # exercised by asserting the refusal of the retired verb and then
+    # the current activation verb (`niu plugin enable`, the WholeSource
+    # arm of plugins/assets.rs enable(): declared in the spec and
+    # activated through its own loader, no trust state anywhere).
     step = verdict.step(
-        "J6", "trust + activate bash-completion, zero syntax errors")
+        "J6", "activate bash-completion (no trust state), zero syntax "
+              "errors")
     s6 = Session([str(exe)], home, env,
                  raw_log=verdict.transcripts / "J6.raw.ansi", label="J6",
                  delivery_log=verdict.delivery_events)
     try:
-        # The aliveness probe and the trust verb travel as ONE anchored
+        # The aliveness probe and the retired verb travel as ONE anchored
         # line: two back-to-back sends after session open were the release
         # glue twice (37153503706 / 37157587488) — prompt_alive's
         # wait_for + 0.3s sleep is not an output anchor, and on slow
@@ -3005,29 +2999,47 @@ def journey(exe: Path, root: Path, verdict: Verdict,
         except TimeoutError:
             step.check("live session prompt renders", False,
                        "echo J6_ALIVE did not come back")
-        # The trust step's own expected-output wait is 90s; the anchor
-        # bound matches it so a slow trust run expires the anchor, not
-        # the sequencing (run 37153503706's 90s timeout was the glue).
-        s6.send_line("niu plugin trust bash-completion", anchor_timeout=90)
+        # The retired verb must refuse readably: run_plugin_command
+        # (src/main.rs) bails `unknown plugin subcommand 'trust'` for
+        # any verb outside the current set — there is no trust state a
+        # source could be waiting on. The wait's 90s bound matches the
+        # anchor bound so a slow run expires the anchor, not the
+        # sequencing (run 37153503706's 90s timeout was the glue).
         try:
-            s6.wait_for("is now trusted", timeout=90)
-            step.check("`niu plugin trust bash-completion` reported trusted",
-                       True)
+            s6.wait_for("unknown plugin subcommand 'trust'", timeout=90)
+            step.check("`niu plugin trust` no longer exists (refused as "
+                       "an unknown subcommand — no trust state gates "
+                       "activation, niubash#647)", True)
         except TimeoutError as err:
-            step.check("`niu plugin trust bash-completion` reported trusted",
+            step.check("`niu plugin trust` no longer exists (refused as "
+                       "an unknown subcommand — no trust state gates "
+                       "activation, niubash#647)", False, str(err))
+        # The activation itself: bash-completion is a WholeSource
+        # catalog source (plugins/sources.rs adapter tests), so enable
+        # declares it in the spec and activates it through its own
+        # loader — idempotent over the collection's declaration.
+        s6.send_line("niu plugin enable bash-completion",
+                     anchor_timeout=90)
+        try:
+            s6.wait_for("declared in the spec and activated", timeout=90)
+            step.check("`niu plugin enable bash-completion` activated "
+                       "the source through its own loader", True)
+        except TimeoutError as err:
+            step.check("`niu plugin enable bash-completion` activated "
+                       "the source through its own loader",
                        False, str(err))
         s6.send_line("source ~/.niubashrc", anchor_timeout=60)
         s6.send_line("echo J6_SRC_DONE")
         try:
             s6.wait_for("J6_SRC_DONE", timeout=60)
-            step.check("source ~/.niubashrc completed after trust", True)
+            step.check("source ~/.niubashrc completed after enable", True)
         except TimeoutError as err:
-            step.check("source ~/.niubashrc completed after trust", False,
+            step.check("source ~/.niubashrc completed after enable", False,
                        str(err))
         drain_notices(s6)
-        verdict.capture("J6-after-trust-source", s6)
+        verdict.capture("J6-after-enable-source", s6)
         verdict_for_syntax_errors(
-            step, "zero syntax errors after trust + source",
+            step, "zero syntax errors after enable + source",
             all_syntax_errors(s6))
     finally:
         s6.close()
@@ -3039,7 +3051,7 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                   raw_log=verdict.transcripts / "J6-fresh.raw.ansi",
                   label="J6-fresh", delivery_log=verdict.delivery_events)
     try:
-        step.check("fresh terminal after trust: prompt renders",
+        step.check("fresh terminal after enable: prompt renders",
                    prompt_alive(s6b, "J6B_ALIVE"))
         drain_notices(s6b)
         verdict.capture("J6-fresh-terminal", s6b)
