@@ -23,7 +23,7 @@ use rubash::{
     TokenKind,
 };
 
-use crate::completion::{CompletionState, NiubashCompleter};
+use crate::completion::{CompletionBehavior, CompletionState, NiubashCompleter};
 use crate::config::{
     load as load_config, AutosuggestConfig, CommandNotFoundHint, EditorMode, HookConfig,
     MenuConfig, NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
@@ -129,6 +129,14 @@ pub struct Shell {
     /// over here. `None` until that funnel runs.
     finish_cwd: Option<PathBuf>,
     pub completion_state: Arc<Mutex<CompletionState>>,
+    /// niubash#840: the completion behavior this shell currently
+    /// resolves — the config layer's value at construction, re-resolved
+    /// by [`Shell::sync_niu_environment_from_engine`] alongside the menu
+    /// / autosuggest / highlighting settings. [`Shell::update_completion_state`]
+    /// copies it into the shared state on every sync; the state used to
+    /// be seeded once at construction and never re-synced, so a
+    /// mid-session change never reached the completer.
+    completion_behavior: CompletionBehavior,
     pub prompt: PromptBackend,
     /// Product floor prompt (defaults-as-floor, design §14.5): the
     /// config-derived native prompt that renders only while the prompt slot
@@ -796,6 +804,7 @@ impl Shell {
             session: Some(session),
             finish_cwd: None,
             completion_state,
+            completion_behavior: config.completion_behavior,
             prompt: prompt.clone(),
             gitbash_prompt_active,
             vcs_pass_seq: 0,
@@ -1622,6 +1631,10 @@ impl Shell {
         self.command_not_found_hint = crate::config::resolve_command_not_found_hint();
         self.autosuggest = self.autosuggest.clone().with_env_overrides();
         self.syntax_highlighting = self.syntax_highlighting.clone().with_env_overrides();
+        // niubash#840: the completion behavior re-resolves with its
+        // sibling settings; `update_completion_state` carries it into
+        // the shared state from here.
+        self.completion_behavior = load_config().completion_behavior;
     }
 
     /// niubash#180 session side: a finished `niu setup` run (a child
@@ -3456,6 +3469,11 @@ impl Shell {
         let mut alias_names: Vec<String> = self.aliases.keys().cloned().collect();
         alias_names.sort_unstable();
         if let Ok(mut state) = self.completion_state.lock() {
+            // niubash#840: re-sync the behavior on every update — it is
+            // a small `Copy` struct, so no fingerprint gate is needed.
+            // Seeding it only at construction made the completer blind
+            // to any behavior resolved after startup.
+            state.behavior = self.completion_behavior;
             state.current_dir = self
                 .executor_pwd_host_path()
                 .or_else(|| std::env::current_dir().ok())
@@ -7998,6 +8016,55 @@ complete -F _envtooldyn_hook envtooldyn
         );
     }
 
+    /// niubash#840: the completion behavior was write-once — seeded
+    /// into the shared state at construction and never re-synced, so a
+    /// behavior resolved mid-session (the setup re-apply path
+    /// re-resolves it with the menu/autosuggest/highlighting settings)
+    /// never reached the completer. `update_completion_state` now
+    /// copies the shell's current behavior on every sync.
+    #[test]
+    fn issue840_completion_behavior_resyncs_on_every_update() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        assert_eq!(
+            shell.completion_state.lock().unwrap().behavior,
+            CompletionBehavior::default()
+        );
+
+        let changed = CompletionBehavior {
+            case_sensitive: true,
+            match_mode: crate::completion::CompletionMatchMode::Substring,
+            max_command_results: Some(3),
+        };
+        shell.completion_behavior = changed;
+        shell.update_completion_state();
+        assert_eq!(shell.completion_state.lock().unwrap().behavior, changed);
+
+        // Not write-once in either direction: resolving back to the
+        // default reaches the state on the next sync too.
+        shell.completion_behavior = CompletionBehavior::default();
+        shell.update_completion_state();
+        assert_eq!(
+            shell.completion_state.lock().unwrap().behavior,
+            CompletionBehavior::default()
+        );
+
+        // The completer observes the re-synced behavior: a
+        // case-sensitive shell no longer completes a function name
+        // from a differently-cased prefix.
+        shell
+            .execute_interactive_line("Issue840Fn() { true; }")
+            .unwrap();
+        assert!(shell
+            .completion_probe("issue840f", "issue840f".len())
+            .contains(&"Issue840Fn".to_string()));
+        shell.completion_behavior = changed;
+        assert!(!shell
+            .completion_probe("issue840f", "issue840f".len())
+            .contains(&"Issue840Fn".to_string()));
+    }
+
     #[test]
     fn issue594_completion_state_tracks_function_define_and_unset() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -10126,6 +10193,7 @@ complete -F _envtooldyn_hook envtooldyn
             session: Some(session),
             finish_cwd: None,
             completion_state: Arc::new(Mutex::new(CompletionState::new(PathBuf::from(".")))),
+            completion_behavior: CompletionBehavior::default(),
             prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             gitbash_prompt_active: false,
             vcs_pass_seq: 0,
