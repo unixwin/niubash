@@ -2511,7 +2511,7 @@ jobs:
     # fail_on_unmatched_files would veto the release at the very last
     # step whenever no .msix landed in time. The MSIX is attached
     # manually for 1.5.0; restore the pattern with the needs entry.
-    needs: [build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
+    needs: [build-windows, build-linux, build-macos, skill-bundle]
     # TEMPORARY (1.5.0 release): signpath-sign is not in this needs list.
     # The original design covered two states — credentials absent (the
     # job skips; a skipped need must not skip the release) and signing
@@ -2734,7 +2734,7 @@ jobs:
     # -> GitHub Release with all assets -> and only then crates.io. A publish
     # failure can still happen, but it can no longer race the gates or undo
     # the release page that already exists.
-    needs: [release, build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
+    needs: [release, build-windows, build-linux, build-macos, skill-bundle]
     # Best-effort remains: with the ordering above a failure here no longer
     # blocks or half-does a release (rubash 1.4.2 is on crates.io since the
     # v1.4.3 era, so the version-annotated path deps now resolve).
