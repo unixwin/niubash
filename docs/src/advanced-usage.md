@@ -206,14 +206,16 @@ the line) and **presentation** (how candidates are painted). The defaults are
 
 - `select` (default) — zsh menu-select. TAB #1 splices the first candidate
   into the line and highlights it; TAB/Shift-TAB cycle; Up/Down move one row;
-  Left/Right move one column with zsh edge wrap; Enter accepts and runs; Esc
+  Left/Right move one column with zsh edge wrap; Enter accepts the pick and
+  closes the menu (a second Enter runs it); Esc
   rolls back. A lone candidate completes outright, and bare TAB on a blank
   line inserts a four-space indent.
 - `insert` — the two-step common-prefix contract: TAB #1 completes the common
   prefix and stops, TAB #2 opens the menu. Enter commits the highlighted
   candidate without running it; Esc keeps the inserted text.
 - `cycle` — TAB #1 inserts the first candidate and opens the grid; further
-  TAB/Shift-TAB cycle. Enter runs the candidate; Esc restores the line.
+  TAB/Shift-TAB cycle. Enter accepts the pick and closes the menu (a second
+  Enter runs it); Esc restores the line.
 
 See [TAB Completion & Ghost Text](completion.md) for the key-by-key contract.
 

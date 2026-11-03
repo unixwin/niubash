@@ -90,13 +90,32 @@ fn plain(chunk: &str) -> String {
 }
 
 /// Whether `candidate`'s last painted occurrence in this frame
-/// chunk wears the selection (SGR reverse video). The grid is
-/// painted after the input line, so a candidate's last occurrence
-/// is its grid cell; the SGR state is tracked cumulatively across
-/// the chunk exactly as a terminal would apply it.
+/// chunk wears the selection (the selected style is bold + reverse
+/// video, `ESC[1;7;32m` on a real terminal). The grid is painted
+/// after the input line, so a candidate's last occurrence is its
+/// grid cell; the SGR state is tracked cumulatively across the chunk
+/// exactly as a terminal would apply it.
+///
+/// Reverse video has two legal materializations in the stream, and
+/// the pin credits both (niubash#786 Windows red, not a product
+/// regression): a passthrough pty (Unix, pywinpty) carries the
+/// attribute as SGR `7`, while a Windows ConPTY harness re-emits the
+/// screen with reverse *materialized* — the selected cell arrives as
+/// explicit colors, observed as `ESC[1m ESC[30m ESC[102m` (bold,
+/// explicit foreground, explicit background carrying the selection's
+/// green). The equivalent class is therefore "SGR reverse, or a cell
+/// painted with an explicit background color": the ambient frame
+/// never sets one elsewhere (unselected grid cells are plain text;
+/// the echoed line wears foreground/underline only), so an explicit
+/// background at the cell is the materialized inverse form. Forcing
+/// one materialization instead (a ConPTY VT-mode pin) is not
+/// available: portable-pty 0.9 exposes no passthrough flag, and
+/// Windows 10 19045's conhost materializes reverse video regardless
+/// (passthrough arrived with later builds).
 fn painted_selected(chunk: &str, candidate: &str) -> bool {
     let bytes = chunk.as_bytes();
     let mut reverse = false;
+    let mut background = false;
     let mut selected = false;
     let mut i = 0;
     while i < bytes.len() {
@@ -112,13 +131,29 @@ fn painted_selected(chunk: &str, candidate: &str) -> bool {
                 let params = &chunk[i + 2..j];
                 if params.is_empty() {
                     reverse = false;
+                    background = false;
                 }
                 for part in params.split(';') {
                     match part {
-                        "" | "0" => reverse = false,
+                        "" | "0" => {
+                            reverse = false;
+                            background = false;
+                        }
                         "7" => reverse = true,
                         "27" => reverse = false,
-                        _ => {}
+                        // Explicit background (SGR 40-47 / 100-107, and
+                        // 48, the 256/truecolor background introducer):
+                        // the ConPTY-materialized inverse form. Default
+                        // background (49) leaves the class.
+                        "48" => background = true,
+                        "49" => background = false,
+                        _ => {
+                            if let Ok(code) = part.parse::<u16>() {
+                                if (40..=47).contains(&code) || (100..=107).contains(&code) {
+                                    background = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -126,7 +161,7 @@ fn painted_selected(chunk: &str, candidate: &str) -> bool {
             continue;
         }
         if chunk[i..].starts_with(candidate) {
-            selected = reverse;
+            selected = reverse || background;
             i += candidate.len();
             continue;
         }

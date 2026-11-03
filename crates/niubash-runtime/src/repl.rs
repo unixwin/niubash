@@ -75,7 +75,12 @@ const PASTE_CHUNK_DETECTION: bool = cfg!(windows);
 /// magnitude above observed ConPTY handoff latency and an order of
 /// magnitude below a perceptible submit delay. It decides the chunk-open
 /// Enter (niubash#284) and, identically, a bare CR that arrives while a
-/// chunk is pending (niubash#308). Tuning knob: a larger budget trades
+/// chunk is pending (niubash#308). An LF partner found at chunk-open then
+/// takes a SECOND lookahead at the burst-body budget
+/// ([`PASTE_CHUNK_GAP`], niubash#806 — see
+/// [`PasteChunkEditMode::paste_body_behind`]): the pair with body behind
+/// it is a paste's first line; the pair and silence is one machine-fed
+/// line and the CR submits. Tuning knob: a larger budget trades
 /// submit latency for slow-driver paste robustness; lower it only with
 /// driver traces showing the pair split wider than the budget.
 const PASTE_LF_PROBE: Duration = Duration::from_millis(10);
@@ -1780,7 +1785,14 @@ fn build_edit_mode(
 ///   chunk is dispatched, the wrapper looks ahead into the input queue
 ///   ([`PASTE_LF_PROBE`] budget): an `Enter + CONTROL` or a bare CR queued
 ///   behind the CR proves paste data — the break(s) fold into the pending
-///   chunk and the Enter never reaches reedline. Any other queued key
+///   chunk and the Enter never reaches reedline. The LF-proven pair then
+///   takes a SECOND look (niubash#806, [`paste_body_behind`]): the pair
+///   plus burst body behind it (more text
+///   or breaks within [`PASTE_CHUNK_GAP`]) is a paste's first line, while
+///   the pair and silence — `write("cmd\r\n")` as one write — is a single
+///   machine-fed line, and GNU typeahead semantics win the
+///   indistinguishable bytes exactly as niubash#420 ruled for `\r\r` (the
+///   CR submits; the consumed LF is dropped). Any other queued key
 ///   (typeahead text, a chord) or silence proves a typed submit: the Enter
 ///   passes through and the lookahead's read parks in-process, so reedline
 ///   sees it, in order, on the next dispatch — and at the submit itself the
@@ -1880,11 +1892,14 @@ struct PasteChunkEditMode {
     /// non-GNU style. The CycleMenu publishes its session (snapshot +
     /// spliced flag) there; this wrapper consumes it in
     /// [`Self::delegate`] for the keys a menu cannot finish itself:
-    /// Esc rolls the line back to the snapshot, an Enter inside a live
-    /// session accepts the candidate in the line and submits in the
-    /// same press, and any other edit key ends the session as
-    /// accepted-in-place. `None` under `insert` and for the GNU style
-    /// — every #631 path is inert then.
+    /// Esc rolls the line back to the snapshot, and any other edit key
+    /// ends the session as accepted-in-place. An Enter inside a live
+    /// session is NOT wrapped here (niubash#821 superseded the #631
+    /// one-press accept-and-run): it reaches the engine bare, whose
+    /// submit first refusal (`MenuAccept`) accepts the spliced
+    /// candidate, closes the menu, and leaves the line editable — a
+    /// second Enter submits. `None` under `insert` and for the GNU
+    /// style — every #631 path is inert then.
     cycle_session: Option<SharedCycleSession>,
     /// niubash#420: put probe-consumed events BACK into the input stream.
     /// The live console cannot unread, so the events are written back into
@@ -2153,14 +2168,6 @@ impl PasteChunkEditMode {
         self
     }
 
-    /// Whether the attached cycle session is live right now.
-    fn cycle_session_open(&self) -> bool {
-        self.cycle_session
-            .as_ref()
-            .and_then(|session| session.lock().ok())
-            .is_some_and(|state| state.is_open())
-    }
-
     /// niubash#631: the navigation splice for a TAB (`delta` +1) or
     /// Shift-TAB (-1), and (niubash#778, menu-select) the arrow keys,
     /// inside a live cycle session, as the edit batch. `horizontal`
@@ -2338,14 +2345,88 @@ impl PasteChunkEditMode {
         // and submit.
         match self.cr_paste_partner() {
             PastePartner::LfPartner => {
-                self.pending = Some(String::from("\n"));
-                true
+                // niubash#806 (R2): the pair alone does not prove a paste —
+                // a real paste's first break is followed by MORE BURST BODY
+                // (the next line's text or break, already queued or arriving
+                // within the burst gap), while a single machine-fed line
+                // (`send_line` writing "cmd\r\n" as ONE write, an expect
+                // script, pywinpty's write) is the pair and then silence.
+                // The two are indistinguishable at the queue level until
+                // the body check looks behind the pair, so GNU typeahead
+                // semantics win the tie exactly as niubash#420 ruled for
+                // `\r\r`: body behind opens the chunk; anything else is a
+                // typed submit (the consumed LF is dropped — line-ending
+                // noise; GNU gives it a second, empty accept whose extra
+                // prompt cycle has no face here, and requeueing it would
+                // open a phantom paste chunk at the next prompt).
+                if self.paste_body_behind() {
+                    self.pending = Some(String::from("\n"));
+                    true
+                } else {
+                    false
+                }
             }
             PastePartner::CrPartner(partner) => {
                 (self.unread)(&[partner]);
                 false
             }
             PastePartner::None => false,
+        }
+    }
+
+    /// niubash#806 (R2): the second, body half of the chunk-open paste
+    /// test. [`cr_paste_partner`] proved a CRLF pair — but a paste's first
+    /// line break is only the START of the burst: the body of its second
+    /// line (text or another break) is already queued behind the pair, or
+    /// arrives within the slice gap the burst clock itself absorbs
+    /// ([`PASTE_CHUNK_GAP`] — the same budget `translate_event` trusts to
+    /// keep a sliced paste one burst). A single machine-fed line is the
+    /// pair and silence: nothing a paste is made of follows the break.
+    ///
+    /// * A queued Press key that is paste body (plain text, a bare CR/LF
+    ///   break) proves the paste. The found key is REQUEUED to the input
+    ///   stream's head ([`Unread`], the #417/#420 face) instead of being
+    ///   folded here: its own dispatch takes the established mid-chunk
+    ///   fold/absorb arms, so every break-accounting invariant (the #341
+    ///   `\r\r` empty line, the interior-pair fold, the lone-LF fold)
+    ///   keeps its single owner.
+    /// * Any other queued Press key (a chord, navigation) is not paste
+    ///   body either way — GNU typeahead semantics (#420): requeue it the
+    ///   same way and report no paste, so the CR submits and the key
+    ///   dispatches on its own after the submit.
+    /// * Silence — nothing queued within the budget — is the single-line
+    ///   machine feed: no paste.
+    ///
+    /// Inert events (key releases, ConPTY's focus flicker, mouse) are
+    /// skipped and dropped while hunting, `cr_paste_partner`'s own skip
+    /// rule: they dispatch to nothing upstream.
+    ///
+    /// Tuning knob: the budget is [`PASTE_CHUNK_GAP`] on purpose — a feed
+    /// whose next slice lands later than the burst gap is already two
+    /// bursts to `translate_event`'s flush-on-gap, so the paste loss
+    /// boundary here equals the design's existing burst boundary. A
+    /// smaller budget would submit the first line of any sliced paste
+    /// whose second slice rides the gap.
+    fn paste_body_behind(&mut self) -> bool {
+        let deadline = Instant::now() + PASTE_CHUNK_GAP;
+        loop {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            let Some(event) = self.next_queued(budget) else {
+                return false;
+            };
+            if let crossterm29::event::Event::Key(key) = event {
+                if key.kind == crossterm29::event::KeyEventKind::Press {
+                    let is_body = is_plain_text_key(&key) || is_bare_enter(&key);
+                    (self.unread)(&[crossterm29::event::Event::Key(key)]);
+                    return is_body;
+                }
+                // Key releases are inert upstream: skip (dropped,
+                // observably identical to dispatching them).
+            }
+            // Non-key events (focus flicker, mouse) are inert: skip, drop.
+            if Instant::now() >= deadline {
+                return false;
+            }
         }
     }
 
@@ -2783,7 +2864,9 @@ impl PasteChunkEditMode {
         // let an Esc in the same key burst be translated before the
         // menu knew the session had been edited or rolled back.
         // Navigation keys (TAB / Shift-TAB) leave the session to the
-        // menu; Enter is decided with the submit shape below; a bare
+        // menu; Enter flows on bare (niubash#821: the engine's submit
+        // first refusal accepts the highlighted candidate; only a
+        // second Enter submits); a bare
         // Esc consumes the session and (when a candidate was spliced)
         // arms the rollback edits; every other editing key ends the
         // session as accepted-in-place. Only key presses and pastes
@@ -2891,6 +2974,25 @@ impl PasteChunkEditMode {
         // dismisses it so the very same Enter submits — one Enter, GNU's
         // shape, with the committed text from the prefix completion.
         //
+        // niubash#821: the cycle/select interactions take the SAME bare
+        // shape now. Their Enter used to be wrapped as
+        // `Multiple[MenuAccept, Enter]` (the #631 one-press accept-and-run,
+        // DESIGN §7.2 as then ruled), which skipped the accept step the
+        // user sees in zsh complist / fish: Enter ran the line while the
+        // grid was still up. Under #821 the Enter inside a live cycle
+        // session reaches the engine bare, where the submit first refusal
+        // decides with the exact menu state — the zsh/fish contract, one
+        // mechanism for every interaction:
+        //
+        // * a live CycleMenu with a frozen, non-provisional candidate set
+        //   TAKES the key (`MenuAccept`: the spliced candidate stays in
+        //   the line — `replace_in_buffer` is a no-op for it — the menu
+        //   closes, editing continues, cursor at the splice end); a SECOND
+        //   Enter submits.
+        // * a menu that has nothing to accept (empty set, provisional
+        //   answer, the GNU info list, or no menu at all) DECLINES, and
+        //   the Enter runs the line as typed — never a dead key.
+        //
         // The gate is load-bearing beyond the menu: reedline 0.52 routes a
         // WHOLE `Multiple` batch to the history-search handler while a
         // Ctrl+R search is active, and that handler drops `Multiple(_)` as
@@ -2913,31 +3015,6 @@ impl PasteChunkEditMode {
         if submit_carries_enter && enter_press && self.menu_possible && self.enter_dismisses_menu {
             self.menu_possible = false;
             let mut events = vec![ReedlineEvent::Esc];
-            match translated {
-                ReedlineEvent::Enter => events.push(ReedlineEvent::Enter),
-                ReedlineEvent::Multiple(rest) => events.extend(rest),
-                _ => unreachable!("checked above"),
-            }
-            return ReedlineEvent::Multiple(events);
-        }
-        // niubash#631: under the cycle interaction, an Enter inside a
-        // live session accepts the candidate already in the line AND
-        // runs the command in the same press (DESIGN §7.2) — a
-        // `MenuAccept` rides ahead of the submit: the engine's accept
-        // closes the menu over the spliced candidate (the CycleMenu's
-        // `replace_in_buffer` is a no-op; the text is already there)
-        // and the Enter then submits the accepted line. A bare Enter
-        // would die in the engine's first-refusal instead (the #486
-        // two-Enter shape, which is the *insert* interaction's
-        // contract, not cycle's). The gates mirror the GNU wrap above:
-        // `submit_carries_enter` + `enter_press` + the TAB window keep
-        // the `Multiple` out of Ctrl+R search, and the live-session
-        // check keeps every non-completion submit byte-identical
-        // (`MenuAccept` is inapplicable without an open menu, but the
-        // wrap itself must not exist outside a session).
-        if submit_carries_enter && enter_press && self.menu_possible && self.cycle_session_open() {
-            self.menu_possible = false;
-            let mut events = vec![ReedlineEvent::MenuAccept];
             match translated {
                 ReedlineEvent::Enter => events.push(ReedlineEvent::Enter),
                 ReedlineEvent::Multiple(rest) => events.extend(rest),
@@ -3123,7 +3200,40 @@ fn add_engine_bind_keybindings_recorded(
             // reported. Anything else that fails to parse is malformed
             // and stays actionable (niubash#612).
             if parse_chord_sequence(&entry.keyseq).is_some() {
+                // The chord layer delivers chains — except a function
+                // name neither layer carries (the widget-sentinel
+                // fallthrough in `native_widget_event`, which
+                // `collect_chord_bindings` also skips): such a chain
+                // used to vanish without a trace here. Record it
+                // (niubash#805). `self-insert` chains are carried by
+                // the chord layer's own arm, and `quoted-insert`
+                // reads as delivered, so neither is recorded.
+                if let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind {
+                    if name != "self-insert" && !gnu_name_is_delivered(name) {
+                        dropped.push(crate::keymap_registry::dropped_bind_for(
+                            entry,
+                            crate::keymap_registry::DroppedReason::UnknownFunction,
+                        ));
+                    }
+                }
                 continue;
+            }
+            // A decoded byte ≥ 0x80 that no unit accepted is a lone
+            // high byte: the input layer decodes terminal text into
+            // characters before keys, so the byte names no key event
+            // and never will (GNU's byte map binds `\200`–`\377` to
+            // self-insert; the characters those bytes belong to
+            // self-insert natively here, and ble.sh's byte-at-a-time
+            // decode hooks are this same class). Structural drop with
+            // a record — not an actionable bind failure (niubash#805).
+            if let Some(bytes) = decode_keyseq_bytes(&entry.keyseq) {
+                if bytes.iter().any(|byte| *byte >= 0x80) {
+                    dropped.push(crate::keymap_registry::dropped_bind_for(
+                        entry,
+                        crate::keymap_registry::DroppedReason::UnparseableKeyseq,
+                    ));
+                    continue;
+                }
             }
             note_unusable_bind(
                 &mut unusable,
@@ -3217,9 +3327,26 @@ fn add_engine_bind_keybindings_recorded(
                         // native_widget_event's sentinel fallthrough means
                         // "unknown readline function": skipped, like GNU's
                         // silent rl_parse_and_bind drop (wt100 probe).
+                        // On a chain-shaped keyseq the bridge has always
+                        // ledgered that outcome without a warning (the
+                        // chord-parse branch above used to swallow it
+                        // whole): GNU's `\e\C-b` family (shell-backward-
+                        // word and siblings) names host functions niu
+                        // does not implement, and neither layer carries
+                        // the widget sentinel for them. Keep the trace —
+                        // a dropped record, not a silent vanish — but
+                        // stay out of the actionable warning list
+                        // (niubash#805).
                         Some(ReedlineEvent::ExecuteHostCommand(payload))
                             if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
                         {
+                            if parse_chord_sequence(&entry.keyseq).is_some() {
+                                dropped.push(crate::keymap_registry::dropped_bind_for(
+                                    entry,
+                                    crate::keymap_registry::DroppedReason::UnknownFunction,
+                                ));
+                                continue;
+                            }
                             note_unusable_bind(
                                 &mut unusable,
                                 &mut dropped,
@@ -4345,8 +4472,8 @@ impl EditMode for ChordEditMode {
 }
 
 impl ChordEditMode {
-    fn dispatch(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
-        let Some(key) = chord_key(&raw) else {
+    fn dispatch(&mut self, mut raw: crossterm29::event::Event) -> ReedlineEvent {
+        let Some(mut key) = chord_key(&raw) else {
             // Non-key traffic (key releases, focus flicker, resize): the
             // lookahead can pull one in as an Esc partner and hand it
             // straight here — an unconvertible event must be inert, not
@@ -4356,6 +4483,34 @@ impl ChordEditMode {
                 Err(_) => ReedlineEvent::None,
             };
         };
+        // GNU `do-lowercase-version` (text.c rl_do_lowercase_version),
+        // one-event form: a terminal sends ESC + `X` for Meta-X, and
+        // the input layer folds that into one Alt+Shift+Char('X')
+        // event. Bindings live at the lowercase Meta slot (the bridge
+        // lowercases every Meta partner it installs), and the inner
+        // machine's lookup keeps SHIFT, so the folded event could
+        // never match — ble.sh's ESC-prefixed macros for uppercase
+        // partners were dead on arrival (niubash#805). The dispatch
+        // layer owns this fallback (see the bridge's do-lowercase
+        // note): rewrite to the lowercase Meta key before anything
+        // else claims it. Emacs only, like the meta fold below; no
+        // binding can exist at the shifted slot (the bridge cannot
+        // install one), so nothing is shadowed.
+        if self.inner.edit_mode() == PromptEditMode::Emacs
+            && key.0.contains(KeyModifiers::ALT)
+            && key.0.contains(KeyModifiers::SHIFT)
+        {
+            if let KeyCode::Char(c) = key.1 {
+                if c.is_ascii_uppercase() {
+                    let modifiers = key.0 - KeyModifiers::SHIFT;
+                    let code = KeyCode::Char(c.to_ascii_lowercase());
+                    raw = crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
+                        code, modifiers,
+                    ));
+                    key = (modifiers, code);
+                }
+            }
+        }
         // An armed quote consumes the key as data before anything
         // else can claim it — including the meta fold below, so a
         // quoted ESC inserts the ESC byte itself (niubash#731). A
@@ -4667,163 +4822,502 @@ pub(crate) fn parse_keymap_unbind_key(spec: &str) -> Result<(KeyModifiers, KeyCo
     })
 }
 
+/// Parse a written keyseq (GNU bind/inputrc spelling) into the key
+/// units it names, by way of the bytes GNU would bind.
+///
+/// GNU readline is byte-oriented: `rl_translate_keyseq`
+/// (lib/readline/bind.c) turns the written spelling into a byte
+/// string, and the keymap slot IS that byte string. The host's input
+/// layer is key-event-oriented, so the translation runs in two
+/// steps: decode the spelling to bytes ([`decode_keyseq_bytes`]),
+/// then read the bytes as the key events the terminal layer will
+/// actually deliver ([`key_units_from_bytes`]). Keeping the byte
+/// step explicit is what makes the spellings agree: `\C-m`, `^M` and
+/// a raw CR byte in the string are the same GNU key (byte 0x0D),
+/// and the input layer delivers that key as `KeyCode::Enter` — a
+/// bind on any of the three spellings must land on Enter, or it can
+/// never fire (niubash#805: ble.sh binds its decode hooks by byte,
+/// `\C-m` and `\C-i` among them; spelled `\C-` they used to land on
+/// `Char('m')`/`Char('i')` + CONTROL, keys no terminal ever sends,
+/// so Enter and Tab were dead under ble.sh while `^M` worked).
+///
+/// `fold_meta` selects the ESC reading: the flat keymap folds an
+/// ESC-prefixed byte into the one meta key event the input layer
+/// delivers for it, while the chord layer must see the ESC as its
+/// own keystroke — a terminal sends ESC and the partner as separate
+/// presses, and sequences like `\e\C-b` (GNU's shell-backward-word)
+/// are two units in the dispatch trie, not one modified key.
+fn keyseq_key_units_folded(value: &str, fold_meta: bool) -> Option<Vec<(KeyModifiers, KeyCode)>> {
+    // The caret spelling of ESC (`^[[A`) is the same byte stream.
+    let normalized;
+    let value = if let Some(rest) = value.strip_prefix("^[") {
+        normalized = format!("\\e{rest}");
+        normalized.as_str()
+    } else {
+        value
+    };
+    let bytes = decode_keyseq_bytes(value)?;
+    key_units_from_bytes(&bytes, fold_meta)
+}
+
 pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     if let Some(key) = parse_named_key_sequence(value) {
         return Some(key);
     }
-    match value {
-        "^[[A" | "\\e[A" | "\\eOA" => Some((KeyModifiers::NONE, KeyCode::Up)),
-        "^[[B" | "\\e[B" | "\\eOB" => Some((KeyModifiers::NONE, KeyCode::Down)),
-        "^[[C" | "\\e[C" | "\\eOC" => Some((KeyModifiers::NONE, KeyCode::Right)),
-        "^[[D" | "\\e[D" | "\\eOD" => Some((KeyModifiers::NONE, KeyCode::Left)),
-        // The VT100/xterm keypad and editing-key spellings real terminals
-        // send, which GNU's own default map binds (`bind -p` on bash 5.3:
-        // `"\e[1~": beginning-of-line`, `"\e[4~": end-of-line`,
-        // `"\e[3~": delete-char`, ...). Both the `~`-numbered and the
-        // `O`/`[` letter forms are accepted; `\e[7~`/`\e[8~` are the rxvt
-        // spellings of Home/End.
-        "\\e[1~" | "^[[1~" | "\\e[7~" | "^[[7~" | "\\e[H" | "^[[H" | "\\eOH" => {
-            Some((KeyModifiers::NONE, KeyCode::Home))
-        }
-        "\\e[4~" | "^[[4~" | "\\e[8~" | "^[[8~" | "\\e[F" | "^[[F" | "\\eOF" => {
-            Some((KeyModifiers::NONE, KeyCode::End))
-        }
-        "\\e[2~" | "^[[2~" => Some((KeyModifiers::NONE, KeyCode::Insert)),
-        "\\e[3~" | "^[[3~" => Some((KeyModifiers::NONE, KeyCode::Delete)),
-        "\\e[5~" | "^[[5~" | "\\e[I" | "^[[I" => Some((KeyModifiers::NONE, KeyCode::PageUp)),
-        "\\e[6~" | "^[[6~" | "\\e[G" | "^[[G" => Some((KeyModifiers::NONE, KeyCode::PageDown)),
-        // CSI modifier spellings in GNU's terminal table (xterm/rxvt
-        // send these for modified arrows and Delete). The terminal
-        // layer delivers the same chord as KeyCode+modifier, so map
-        // both spellings to one key.
-        "\\e[1;3C" => Some((KeyModifiers::ALT, KeyCode::Right)),
-        "\\e[1;3D" => Some((KeyModifiers::ALT, KeyCode::Left)),
-        "\\e[1;5C" | "\\e[5C" => Some((KeyModifiers::CONTROL, KeyCode::Right)),
-        "\\e[1;5D" | "\\e[5D" => Some((KeyModifiers::CONTROL, KeyCode::Left)),
-        "\\e[3;5~" => Some((KeyModifiers::CONTROL, KeyCode::Delete)),
-        // A bare ESC is one of GNU's default binds (`"\e": emacs-editing-mode`).
-        // It arrives here only when it is the whole keyseq; `\e[...` forms
-        // were matched above.
-        "\\e" | "^[" => Some((KeyModifiers::NONE, KeyCode::Esc)),
-        "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
-        _ => parse_meta_control_combined(value)
-            .or_else(|| parse_alt_key_sequence(value))
-            .or_else(|| parse_meta_key_sequence(value))
-            .or_else(|| parse_control_key_sequence(value))
-            .or_else(|| parse_plain_key_sequence(value)),
+    // Legacy caret singles keep their established reading (`^M` for
+    // Enter, `^H` for Backspace): those spellings are display forms
+    // a user may paste from another shell's listing, and the byte
+    // path below reads byte 0x08 as C-h, the event the input layer
+    // actually delivers for it. Only the two-character form takes
+    // this branch; caret chains decode as bytes like everything else.
+    let bytes = value.as_bytes();
+    if bytes.len() == 2 && bytes[0] == b'^' {
+        return parse_control_key_sequence(value);
+    }
+    let units = keyseq_key_units_folded(value, true)?;
+    if units.len() == 1 {
+        Some(units[0])
+    } else {
+        None
     }
 }
 
-/// Split a readline keyseq into per-key units and parse each unit.
-///
-/// The flat keymap owns single-key sequences; this returns `Some` only for
-/// a clean chain of two or more units (niubash#630: bash's
-/// `\C-x\C-e`-style chords, fzf's `\C-\e(`). A token that does not parse
-/// makes the whole sequence unparseable — the caller keeps reporting those
-/// (they are typos, not chords).
+/// Split a readline keyseq into its key units: `Some` only for a
+/// clean chain of two or more units (niubash#630: bash's
+/// `\C-x\C-e`-style chords, fzf's `\C-\e(`). A unit that does not
+/// resolve makes the whole sequence unparseable — the caller keeps
+/// reporting those (they are typos or undeliverable shapes, not
+/// chords).
 fn parse_chord_sequence(value: &str) -> Option<Vec<(KeyModifiers, KeyCode)>> {
-    let units = split_key_units(value)?;
+    let units = keyseq_key_units_folded(value, false)?;
     if units.len() < 2 {
         return None;
-    }
-    units
-        .into_iter()
-        .map(parse_key_sequence)
-        .collect::<Option<Vec<_>>>()
-}
-
-/// Split a readline keyseq into its written units without interpreting
-/// them: `\C-x`, `\M-x`, `\e` (ESC), `\e[...]` terminal sequences, `^X`,
-/// and single literal characters.
-fn split_key_units(value: &str) -> Option<Vec<&str>> {
-    let mut rest = value;
-    let mut units = Vec::new();
-    while !rest.is_empty() {
-        let (unit, tail) = if let Some(tail) = rest
-            .strip_prefix("\\C-")
-            .or_else(|| rest.strip_prefix("\\M-"))
-        {
-            // The unit is the prefix plus one (possibly escaped)
-            // character — or, for the combined `\M-\C-x` spelling,
-            // the second prefix plus its character.
-            let tail = tail
-                .strip_prefix("\\C-")
-                .or_else(|| tail.strip_prefix("\\M-"))
-                .unwrap_or(tail);
-            let ch = tail.chars().next()?;
-            let end = rest.len() - tail.len() + ch.len_utf8();
-            (&rest[..end], &rest[end..])
-        } else if rest.starts_with("\\e[") {
-            let end = rest
-                .char_indices()
-                .skip(2)
-                .find(|(_, c)| c.is_ascii_alphabetic() || *c == '~')
-                .map(|(i, c)| i + c.len_utf8())?;
-            (&rest[..end], &rest[end..])
-        } else if let Some(tail) = rest.strip_prefix("\\e") {
-            // `\e` alone is ESC; `\eX` is the meta form one key (the same
-            // shape `parse_key_sequence` accepts as ALT+X), so it is not a
-            // chord unit boundary.
-            let mut chars = tail.chars();
-            let end = match (chars.next(), chars.next()) {
-                (Some('['), _) => unreachable!("handled above"),
-                (Some(ch), None) => rest.len() - tail.len() + ch.len_utf8(),
-                _ => rest.len() - tail.len(),
-            };
-            (&rest[..end], &rest[end..])
-        } else if let Some(tail) = rest.strip_prefix('^') {
-            let ch = tail.chars().next()?;
-            let end = 1 + ch.len_utf8();
-            (&rest[..end], &rest[end..])
-        } else {
-            let ch = rest.chars().next()?;
-            (&rest[..ch.len_utf8()], &rest[ch.len_utf8()..])
-        };
-        units.push(unit);
-        rest = tail;
     }
     Some(units)
 }
 
-/// GNU bind/inputrc `\C-x` / `\M-x` forms (readline rl_translate_keyseq).
-/// Multi-key tails (`\C-x\C-f`) are not representable as a single
-/// reedline binding and return None (the bridge warns once).
-fn parse_meta_control_sequence(
-    value: &str,
-    prefix: &str,
-    base: KeyModifiers,
-) -> Option<(KeyModifiers, KeyCode)> {
-    let rest = value.strip_prefix(prefix)?;
-    let mut chars = rest.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
-        return None;
+/// Decode one written unit at `chars[pos..]` into (byte, meta):
+/// the byte the unit names, and whether a `\M-` transform prefixes
+/// it with ESC. `\C-` and `\M-` recurse into their base unit, so the
+/// combined forms work in either order (`\M-\C-e`, `\C-\M-e`); a
+/// transform with no base after it is malformed (`None`).
+fn read_translated_byte(chars: &[char], pos: &mut usize) -> Option<(u8, bool)> {
+    let c = *chars.get(*pos)?;
+    match c {
+        '\\' => {
+            let Some(&esc) = chars.get(*pos + 1) else {
+                // A trailing backslash stands for itself.
+                *pos += 1;
+                return Some((0x5c, false));
+            };
+            match esc {
+                'C' if chars.get(*pos + 2) == Some(&'-') => {
+                    *pos += 3;
+                    let (base, meta) = read_translated_byte(chars, pos)?;
+                    Some((control_byte(base), meta))
+                }
+                'M' if chars.get(*pos + 2) == Some(&'-') => {
+                    *pos += 3;
+                    let (base, _) = read_translated_byte(chars, pos)?;
+                    Some((base, true))
+                }
+                'e' => {
+                    *pos += 2;
+                    Some((0x1b, false))
+                }
+                'a' => {
+                    *pos += 2;
+                    Some((0x07, false))
+                }
+                'b' => {
+                    *pos += 2;
+                    Some((0x08, false))
+                }
+                'd' => {
+                    *pos += 2;
+                    Some((0x7f, false))
+                }
+                'f' => {
+                    *pos += 2;
+                    Some((0x0c, false))
+                }
+                'n' => {
+                    *pos += 2;
+                    Some((0x0a, false))
+                }
+                'r' => {
+                    *pos += 2;
+                    Some((0x0d, false))
+                }
+                't' => {
+                    *pos += 2;
+                    Some((0x09, false))
+                }
+                'v' => {
+                    *pos += 2;
+                    Some((0x0b, false))
+                }
+                'x' => {
+                    let hex: String = chars[*pos + 2..]
+                        .iter()
+                        .take(2)
+                        .take_while(|d| d.is_ascii_hexdigit())
+                        .collect();
+                    if hex.is_empty() {
+                        *pos += 2;
+                        Some((b'x', false))
+                    } else {
+                        let byte = u8::from_str_radix(&hex, 16).ok()?;
+                        *pos += 2 + hex.len();
+                        Some((byte, false))
+                    }
+                }
+                '0'..='7' => {
+                    let digits: String = chars[*pos + 1..]
+                        .iter()
+                        .take(3)
+                        .take_while(|d| matches!(d, '0'..='7'))
+                        .collect();
+                    let byte = u32::from_str_radix(&digits, 8).ok()? as u8;
+                    *pos += 1 + digits.len();
+                    Some((byte, false))
+                }
+                _ => {
+                    // `\\`, `\"`, and any other escaped char stand for
+                    // the char itself (rl_translate_keyseq keeps it).
+                    *pos += 2;
+                    Some((first_byte(esc), false))
+                }
+            }
+        }
+        // A caret is a literal character here: rl_translate_keyseq
+        // does not translate `^X` forms (the caret is readline's
+        // *display* spelling). niu's two-character caret singles are
+        // read by `parse_control_key_sequence` before this decoder
+        // runs, and `^[` is normalized in `keyseq_key_units_folded`.
+        _ => {
+            *pos += 1;
+            Some((first_byte(c), false))
+        }
     }
-    Some((base, KeyCode::Char(ch.to_ascii_lowercase())))
 }
 
-fn parse_meta_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    parse_meta_control_sequence(value, "\\C-", KeyModifiers::CONTROL)
-        .or_else(|| parse_meta_control_sequence(value, "\\M-", KeyModifiers::ALT))
+/// The byte a `\C-` transform makes of a base byte: `?` is DEL,
+/// everything else keeps its low five bits (so `@`..`_` and letters
+/// in either case land on 0x00..0x1F).
+fn control_byte(base: u8) -> u8 {
+    if base == b'?' {
+        0x7f
+    } else {
+        base & 0x1f
+    }
 }
 
-/// The combined meta-control spelling `\M-\C-x` (either prefix
-/// order), one key carrying both modifiers — GNU's
-/// rl_translate_keyseq accepts it (e.g. `\M-\C-e` for
-/// shell-expand-line, `\M-\C-i` for dynamic-complete-history).
-fn parse_meta_control_combined(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    let rest = value
-        .strip_prefix("\\M-\\C-")
-        .or_else(|| value.strip_prefix("\\C-\\M-"))?;
-    let mut chars = rest.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
+/// The first byte of a character's UTF-8 form: what a byte-oriented
+/// keymap sees of it. Plain characters reach the byte stream whole
+/// (see [`decode_keyseq_bytes`]); this is only for transform bases
+/// and escape tails, where GNU also works one byte at a time.
+fn first_byte(c: char) -> u8 {
+    let mut buf = [0u8; 4];
+    c.encode_utf8(&mut buf).as_bytes()[0]
+}
+
+/// Decode a written keyseq into the byte string GNU binds
+/// (rl_translate_keyseq, lib/readline/bind.c). Literal characters
+/// contribute their whole UTF-8 form; everything else contributes
+/// exactly one byte per written unit, ESC-prefixed when a `\M-`
+/// transform asks for it. `None` on a malformed tail (a dangling
+/// `\C-`/`\M-` with no base).
+fn decode_keyseq_bytes(value: &str) -> Option<Vec<u8>> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = Vec::with_capacity(chars.len());
+    let mut pos = 0usize;
+    while pos < chars.len() {
+        let c = chars[pos];
+        if c != '\\' && c != '^' {
+            // A literal character: its bytes enter the stream whole
+            // (a raw control character is one byte: itself).
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            pos += 1;
+            continue;
+        }
+        let (byte, meta) = read_translated_byte(&chars, &mut pos)?;
+        if meta {
+            out.push(0x1b);
+        }
+        out.push(byte);
+    }
+    Some(out)
+}
+
+/// Read a byte string (a decoded keyseq) as the key units the input
+/// layer delivers for those bytes: CSI and SS3 terminal sequences
+/// collapse to their single key event, an ESC prefix makes the next
+/// byte a Meta unit, and bare bytes map one-to-one — with the three
+/// bytes the terminal layer reports as named keys folded onto them
+/// (CR → Enter, HT → Tab, DEL → Backspace). A byte with no key
+/// event (a lone byte ≥ 0x80, an incomplete or unmapped terminal
+/// sequence, the bracketed-paste markers the input layer consumes
+/// itself) makes the whole sequence undeliverable: `None`.
+fn key_units_from_bytes(bytes: &[u8], fold_meta: bool) -> Option<Vec<(KeyModifiers, KeyCode)>> {
+    let mut units = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != 0x1b {
+            let (unit, len) = plain_byte_unit(&bytes[i..])?;
+            units.push(unit);
+            i += len;
+            continue;
+        }
+        // ESC: alone it is the Esc key; before `[`/`O` it opens a
+        // terminal sequence; before anything else it is a Meta
+        // prefix on that byte's unit.
+        match bytes.get(i + 1) {
+            None => {
+                units.push((KeyModifiers::NONE, KeyCode::Esc));
+                i += 1;
+            }
+            Some(b'[') => {
+                let (unit, len) = csi_unit(&bytes[i + 2..])?;
+                units.push(unit);
+                i += 2 + len;
+            }
+            Some(b'O') => {
+                let final_byte = *bytes.get(i + 2)?;
+                units.push(ss3_unit(final_byte)?);
+                i += 3;
+            }
+            Some(0x1b) => {
+                units.push((KeyModifiers::NONE, KeyCode::Esc));
+                i += 1;
+            }
+            Some(_) => {
+                if fold_meta {
+                    let (unit, len) = meta_byte_unit(&bytes[i + 1..])?;
+                    units.push(unit);
+                    i += 1 + len;
+                } else {
+                    // The chord reading: ESC is its own keystroke and
+                    // the partner byte keeps its own unit (ESC C-b is
+                    // two presses in the dispatch trie, not one
+                    // Ctrl-Alt event).
+                    units.push((KeyModifiers::NONE, KeyCode::Esc));
+                    i += 1;
+                }
+            }
+        }
+    }
+    Some(units)
+}
+
+/// One bare byte (and its UTF-8 continuation, for a literal
+/// character) as a key unit, with the number of bytes it spans.
+fn plain_byte_unit(bytes: &[u8]) -> Option<((KeyModifiers, KeyCode), usize)> {
+    let b = bytes[0];
+    match b {
+        0x0d => Some(((KeyModifiers::NONE, KeyCode::Enter), 1)),
+        0x09 => Some(((KeyModifiers::NONE, KeyCode::Tab), 1)),
+        0x7f => Some(((KeyModifiers::NONE, KeyCode::Backspace), 1)),
+        0x00 => Some(((KeyModifiers::CONTROL, KeyCode::Char(' ')), 1)),
+        0x01..=0x1a => Some((
+            (KeyModifiers::CONTROL, KeyCode::Char((b | 0x60) as char)),
+            1,
+        )),
+        0x1c => Some(((KeyModifiers::CONTROL, KeyCode::Char('\\')), 1)),
+        0x1d => Some(((KeyModifiers::CONTROL, KeyCode::Char(']')), 1)),
+        0x1e => Some(((KeyModifiers::CONTROL, KeyCode::Char('^')), 1)),
+        0x1f => Some(((KeyModifiers::CONTROL, KeyCode::Char('_')), 1)),
+        0x20..=0x7e => Some(((KeyModifiers::NONE, KeyCode::Char(b as char)), 1)),
+        _ => {
+            // A byte ≥ 0x80 only names a key as a whole UTF-8
+            // character; on its own it is a byte no key event
+            // carries (the input layer decodes text before keys).
+            let text = std::str::from_utf8(bytes).ok()?;
+            let ch = text.chars().next()?;
+            if ch.len_utf8() == 1 {
+                return None;
+            }
+            Some(((KeyModifiers::NONE, KeyCode::Char(ch)), ch.len_utf8()))
+        }
+    }
+}
+
+/// The unit an ESC prefix makes of the following byte(s): the
+/// byte's own control reading with ALT added (ESC + C-u is
+/// Ctrl-Alt-u, ESC + CR is Ctrl-Alt-m — the meta forms keep the
+/// letter, they do not fold onto Enter/Tab the way the bare bytes
+/// do), DEL becomes Alt-Backspace, and a printable byte becomes
+/// Alt+char (letters lowercased, matching the editor's own
+/// modified-char folding).
+fn meta_byte_unit(bytes: &[u8]) -> Option<((KeyModifiers, KeyCode), usize)> {
+    let b = bytes[0];
+    match b {
+        0x7f => Some(((KeyModifiers::ALT, KeyCode::Backspace), 1)),
+        0x00 => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char(' '),
+            ),
+            1,
+        )),
+        0x01..=0x1a => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char((b | 0x60) as char),
+            ),
+            1,
+        )),
+        0x1c => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('\\'),
+            ),
+            1,
+        )),
+        0x1d => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char(']'),
+            ),
+            1,
+        )),
+        0x1e => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('^'),
+            ),
+            1,
+        )),
+        0x1f => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('_'),
+            ),
+            1,
+        )),
+        0x20..=0x7e => {
+            let ch = (b as char).to_ascii_lowercase();
+            Some(((KeyModifiers::ALT, KeyCode::Char(ch)), 1))
+        }
+        _ => {
+            let text = std::str::from_utf8(bytes).ok()?;
+            let ch = text.chars().next()?;
+            if ch.len_utf8() == 1 {
+                return None;
+            }
+            Some(((KeyModifiers::ALT, KeyCode::Char(ch)), ch.len_utf8()))
+        }
+    }
+}
+
+/// The xterm modifier parameter as key modifiers: the parameter is
+/// 1 + (shift=1, alt=2, ctrl=4) bit flags.
+fn csi_modifiers(value: u32) -> KeyModifiers {
+    let bits = value.saturating_sub(1);
+    let mut modifiers = KeyModifiers::NONE;
+    if bits & 1 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if bits & 2 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if bits & 4 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    modifiers
+}
+
+/// One CSI sequence (the bytes after `ESC [`) as a key unit, with
+/// the number of bytes it spans including the final byte. `None`
+/// for shapes the input layer does not deliver as a key: the
+/// bracketed-paste markers (200~/201~, consumed by the paste
+/// machinery), kitty `u`-encoded keys, unknown finals.
+fn csi_unit(bytes: &[u8]) -> Option<((KeyModifiers, KeyCode), usize)> {
+    let mut end = 0usize;
+    while end < bytes.len() && (0x20..=0x3f).contains(&bytes[end]) {
+        end += 1;
+    }
+    let final_byte = *bytes.get(end)?;
+    if !(0x40..=0x7e).contains(&final_byte) {
         return None;
     }
-    Some((
-        KeyModifiers::CONTROL | KeyModifiers::ALT,
-        KeyCode::Char(ch.to_ascii_lowercase()),
-    ))
+    let params: Vec<&str> = std::str::from_utf8(&bytes[..end])
+        .ok()?
+        .trim_start_matches('?')
+        .split(';')
+        .collect();
+    let param = |idx: usize| -> Option<u32> {
+        params
+            .get(idx)
+            .and_then(|p| if p.is_empty() { None } else { p.parse().ok() })
+    };
+    let modifiers = if params.len() >= 2 {
+        csi_modifiers(param(1).unwrap_or(1))
+    } else if param(0) == Some(5) && final_byte.is_ascii_alphabetic() {
+        // The rxvt one-parameter form the fixed table already
+        // carried (`\e[5C` = Ctrl-Right).
+        KeyModifiers::CONTROL
+    } else {
+        KeyModifiers::NONE
+    };
+    let code = match final_byte {
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'F' => KeyCode::End,
+        b'H' => KeyCode::Home,
+        b'G' => KeyCode::PageDown,
+        b'I' => KeyCode::PageUp,
+        b'Z' => return Some(((KeyModifiers::SHIFT | modifiers, KeyCode::BackTab), end + 1)),
+        b'P' => KeyCode::F(1),
+        b'Q' => KeyCode::F(2),
+        b'R' => KeyCode::F(3),
+        b'S' => KeyCode::F(4),
+        b'~' => match param(0)? {
+            1 | 7 => KeyCode::Home,
+            2 => KeyCode::Insert,
+            3 => KeyCode::Delete,
+            4 | 8 => KeyCode::End,
+            5 => KeyCode::PageUp,
+            6 => KeyCode::PageDown,
+            11 => KeyCode::F(1),
+            12 => KeyCode::F(2),
+            13 => KeyCode::F(3),
+            14 => KeyCode::F(4),
+            15 => KeyCode::F(5),
+            17 => KeyCode::F(6),
+            18 => KeyCode::F(7),
+            19 => KeyCode::F(8),
+            20 => KeyCode::F(9),
+            21 => KeyCode::F(10),
+            23 => KeyCode::F(11),
+            24 => KeyCode::F(12),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(((modifiers, code), end + 1))
+}
+
+/// One SS3 final byte (after `ESC O`) as a key unit.
+fn ss3_unit(final_byte: u8) -> Option<(KeyModifiers, KeyCode)> {
+    let code = match final_byte {
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'F' => KeyCode::End,
+        b'H' => KeyCode::Home,
+        b'P' => KeyCode::F(1),
+        b'Q' => KeyCode::F(2),
+        b'R' => KeyCode::F(3),
+        b'S' => KeyCode::F(4),
+        _ => return None,
+    };
+    Some((KeyModifiers::NONE, code))
 }
 
 fn parse_named_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
@@ -4867,18 +5361,6 @@ fn parse_modified_named_key(
     Some((modifiers, KeyCode::Char(ch)))
 }
 
-fn parse_alt_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    let rest = value
-        .strip_prefix("^[")
-        .or_else(|| value.strip_prefix("\\e"))?;
-    let mut chars = rest.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
-        return None;
-    }
-    Some((KeyModifiers::ALT, KeyCode::Char(ch.to_ascii_lowercase())))
-}
-
 fn parse_control_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     let rest = value.strip_prefix('^')?;
     let mut chars = rest.chars();
@@ -4898,15 +5380,6 @@ fn parse_control_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
         )),
         ch => Some((KeyModifiers::CONTROL, KeyCode::Char(ch))),
     }
-}
-
-fn parse_plain_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    let mut chars = value.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
-        return None;
-    }
-    Some((KeyModifiers::NONE, KeyCode::Char(ch)))
 }
 
 /// Lets Enter grow an unfinished command into a multi-line buffer instead of
@@ -8074,6 +8547,174 @@ mod tests {
     }
 
     #[test]
+    fn parse_key_sequence_805_byte_spellings_agree() {
+        // niubash#805: the keyseq is a byte string in GNU. Every
+        // spelling of the same byte lands on the same key — in
+        // particular the bytes the input layer reports as named
+        // keys. ble.sh binds its decode hooks by byte (`\C-m` is its
+        // Enter hook); spelled `\C-` these used to land on
+        // Char('m')/Char('i') + CONTROL, keys no terminal sends.
+        assert_eq!(
+            parse_key_sequence(r"\C-m"),
+            Some((KeyModifiers::NONE, KeyCode::Enter))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\C-i"),
+            Some((KeyModifiers::NONE, KeyCode::Tab))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\C-?"),
+            Some((KeyModifiers::NONE, KeyCode::Backspace))
+        );
+        assert_eq!(
+            parse_key_sequence("\r"),
+            Some((KeyModifiers::NONE, KeyCode::Enter))
+        );
+        // The raw-byte and octal/hex spellings of C-u (ble.sh binds
+        // its uvw hooks with $'\025'-style raw bytes).
+        assert_eq!(
+            parse_key_sequence("\u{15}"),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('u')))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\025"),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('u')))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\x15"),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('u')))
+        );
+        // Generalized CSI: the full modifier matrix, not a fixed
+        // table of popular sequences.
+        assert_eq!(
+            parse_key_sequence(r"\e[1;5A"),
+            Some((KeyModifiers::CONTROL, KeyCode::Up))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[1;2B"),
+            Some((KeyModifiers::SHIFT, KeyCode::Down))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[1;3D"),
+            Some((KeyModifiers::ALT, KeyCode::Left))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[3;5~"),
+            Some((KeyModifiers::CONTROL, KeyCode::Delete))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[Z"),
+            Some((KeyModifiers::SHIFT, KeyCode::BackTab))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[15~"),
+            Some((KeyModifiers::NONE, KeyCode::F(5)))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\eOP"),
+            Some((KeyModifiers::NONE, KeyCode::F(1)))
+        );
+        // The caret spelling of ESC (zsh bindkeys form, which the
+        // bundle widget path feeds through here).
+        assert_eq!(
+            parse_key_sequence("^[[A"),
+            Some((KeyModifiers::NONE, KeyCode::Up))
+        );
+        // Undeliverable shapes stay unparseable (recorded, not bound):
+        // the paste markers are the input layer's own, and a lone
+        // high byte names no key event.
+        assert_eq!(parse_key_sequence(r"\e[200~"), None);
+        assert_eq!(parse_key_sequence(r"\200"), None);
+        assert_eq!(parse_key_sequence(r"\e\200"), None);
+        // Meta forms keep the letter: no Enter/Tab fold under ESC.
+        assert_eq!(
+            parse_key_sequence(r"\e\C-m"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('m')
+            ))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\M-\C-i"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('i')
+            ))
+        );
+    }
+
+    #[test]
+    fn engine_bind_805_blesh_shapes_land_or_leave_a_record() {
+        // niubash#805: the bind shapes ble.sh actually registers —
+        // byte-spelled bind -x hooks and ESC-prefixed macros — must
+        // either land on the key the terminal delivers or leave a
+        // dropped record; nothing vanishes silently.
+        let mut keybindings = default_emacs_keybindings();
+        let entries = vec![
+            // ble's Enter hook, spelled the way its binder writes it.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: r"\C-m".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Execute {
+                    command: "ble-decode-enter".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            // ble's C-u hook in the raw-byte spelling.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: "\u{15}".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Execute {
+                    command: "ble-decode-ctrl-u".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            // A lone high byte: undeliverable, recorded as dropped.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: r"\201".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Execute {
+                    command: "ble-decode-high-byte".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            // GNU's shell-backward-word default: a host function niu
+            // does not implement, on a chain-shaped keyseq — dropped
+            // with a record, not reported as an actionable failure.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: r"\e\C-b".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Function {
+                    name: "shell-backward-word".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+        ];
+        let (unusable, dropped) = add_engine_bind_keybindings_recorded(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &entries,
+            0,
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Enter),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 0".to_string()
+            )),
+            "the \\C-m bind -x hook must land on Enter"
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('u')),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 1".to_string()
+            )),
+            "the raw-byte C-u bind -x hook must land on C-u"
+        );
+        assert!(
+            unusable.is_empty(),
+            "no ble-shaped bind may be reported unusable: {unusable:?}"
+        );
+        let dropped_keyseqs: Vec<&str> = dropped.iter().map(|bind| bind.keyseq.as_str()).collect();
+        assert_eq!(dropped_keyseqs, vec![r"\201", r"\e\C-b"]);
+    }
+
+    #[test]
     fn parse_chord_sequence_splits_readline_chains() {
         // bash's `\C-x\C-e` and fzf's `\C-\e(` are chords; single units are
         // the flat keymap's business.
@@ -8084,14 +8725,23 @@ mod tests {
                 (KeyModifiers::CONTROL, KeyCode::Char('e')),
             ])
         );
+        // `\C-\e(` is NOT Ctrl-\ + `e` + `(`: rl_translate_keyseq
+        // (lib/readline/bind.c) treats `\C-` as a flag on the next
+        // translated character, and `\e` translates to ESC, whose
+        // control form is ESC itself — the byte string is ESC + `(`,
+        // one Meta key. Verified against GNU bash 5.3.20: after
+        // `bind '"\C-\e(": redraw-current-line'`, `bind -q` reports
+        // the binding as `"\e("`. The old pin codified the previous
+        // splitter's unit-wise reading, not GNU's (corrected
+        // 2026-11-02, niubash#805 work).
+        assert_eq!(
+            parse_key_sequence(r"\C-\e("),
+            Some((KeyModifiers::ALT, KeyCode::Char('(')))
+        );
         assert_eq!(
             parse_chord_sequence(r"\C-\e("),
-            // Readline semantics: `\\C-\\` consumes the escape, so this is
-            // Ctrl-\\ then the *literal* `e` and `(` — the "impossible to
-            // type" marker fzf picked.
             Some(vec![
-                (KeyModifiers::CONTROL, KeyCode::Char('\\')),
-                (KeyModifiers::NONE, KeyCode::Char('e')),
+                (KeyModifiers::NONE, KeyCode::Esc),
                 (KeyModifiers::NONE, KeyCode::Char('(')),
             ])
         );
@@ -8141,6 +8791,36 @@ mod tests {
             ),
             other => panic!("expected ESC + Down as one batch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn folded_meta_uppercase_event_reaches_the_lowercase_binding() {
+        // niubash#805: the input layer folds ESC + `X` into one
+        // Alt+Shift+Char('X') event; GNU resolves it through
+        // do-lowercase-version to the Meta-x binding. ble.sh's
+        // ESC-prefixed macros for uppercase partners ride on this.
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::ALT,
+            KeyCode::Char('x'),
+            edit_event(EditCommand::InsertString("META-X".to_string())),
+        );
+        let inner = Emacs::new(keybindings);
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            Vec::new(),
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        let event = mode.parse_event(chord_test_key(
+            KeyCode::Char('X'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(
+            event,
+            edit_event(EditCommand::InsertString("META-X".to_string()))
+        );
     }
 
     #[test]
@@ -9443,6 +10123,22 @@ mod tests {
         detector.last_event = Some(Instant::now() - PASTE_CHUNK_GAP - Duration::from_millis(1));
     }
 
+    /// Dispatch the next event the scripted queue holds — what reedline's
+    /// read loop does after a probe requeued to the stream's head
+    /// (niubash#806: the body-evidence key rides the same queue the
+    /// probes read, so the driver pops it exactly as the live loop would).
+    fn dispatch_queued(
+        detector: &mut PasteChunkEditMode,
+        queue: &std::sync::Arc<std::sync::Mutex<VecDeque<crossterm29::event::Event>>>,
+    ) -> ReedlineEvent {
+        let event = queue
+            .lock()
+            .expect("test queue")
+            .pop_front()
+            .expect("queue holds the next event");
+        detector.parse_event(ReedlineRawEvent::try_from(event).expect("queued key converts"))
+    }
+
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_absorbs_crlf_paste_and_flushes_on_gap() {
@@ -9462,28 +10158,35 @@ mod tests {
 
         // The paste's first line break arrives as the CRLF pair: the CR is
         // dispatched while its LF partner is still queued (reedline's batch
-        // stops at the bare CR, so the LF is always behind it). The CR with
-        // its partner queued is paste data: the chunk opens with the pair's
-        // one line break, the LF is consumed with it, and reedline never
+        // stops at the bare CR, so the LF is always behind it) — and with
+        // the burst BODY queued behind the pair (one write, the paste's
+        // second line "de" riding the queue — the niubash#806 body
+        // evidence). The pair plus body is paste data: the chunk opens
+        // with the pair's one line break, the LF is consumed with it, the
+        // body evidence requeues to the stream's head, and reedline never
         // sees the Enter.
-        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('d'),
+            char_key_event('e'),
+        ]);
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
         assert_eq!(detector.pending.as_deref(), Some("\n"));
         assert!(
             detector.pushback.is_empty(),
-            "the LF partner is consumed, not pushed back"
+            "the LF partner is consumed and the evidence requeued, not parked"
         );
 
-        // Further burst text is absorbed quietly.
-        for ch in "de".chars() {
-            assert!(matches!(
-                detector.parse_event(paste_key(
-                    crossterm29::event::KeyCode::Char(ch),
-                    crossterm29::event::KeyModifiers::NONE
-                )),
-                ReedlineEvent::None
-            ));
-        }
+        // Further burst text is absorbed quietly — the requeued evidence
+        // key first (reedline reads the stream next), then the rest.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
         assert_eq!(detector.pending.as_deref(), Some("\nde"));
 
         // The next pasted CRLF: the feed queues its LF partner behind its
@@ -9536,20 +10239,35 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_enter_in_paste_burst_submits_the_chunk() {
-        let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event()]);
-        // The paste body: CRLF pair opens the chunk (partner consumed),
-        // then its text is absorbed.
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('e'),
+            char_key_event('c'),
+            char_key_event('h'),
+            char_key_event('o'),
+            char_key_event(' '),
+            char_key_event('h'),
+            char_key_event('i'),
+        ]);
+        // The paste body: the CRLF pair plus the body behind it (one
+        // write) opens the chunk (partner consumed, body evidence
+        // requeued), then the requeued text is absorbed as it dispatches.
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
-        for ch in "echo hi".chars() {
+        for expected in [
+            "\ne",
+            "\nec",
+            "\nech",
+            "\necho",
+            "\necho ",
+            "\necho h",
+            "\necho hi",
+        ] {
             assert!(matches!(
-                detector.parse_event(paste_key(
-                    crossterm29::event::KeyCode::Char(ch),
-                    crossterm29::event::KeyModifiers::NONE
-                )),
+                dispatch_queued(&mut detector, &queue),
                 ReedlineEvent::None
             ));
+            assert_eq!(detector.pending.as_deref(), Some(expected));
         }
-        assert_eq!(detector.pending.as_deref(), Some("\necho hi"));
 
         // The user's Enter, microseconds after the last paste key (one
         // burst, empty queue behind it — the scripted queue is drained).
@@ -9584,13 +10302,18 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_interior_crlf_pair_stays_data_mid_burst() {
-        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('a'),
+            char_key_event('b'),
+        ]);
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
-        for ch in "ab".chars() {
-            detector.parse_event(paste_key(
-                crossterm29::event::KeyCode::Char(ch),
-                crossterm29::event::KeyModifiers::NONE,
+        for expected in ["\na", "\nab"] {
+            assert!(matches!(
+                dispatch_queued(&mut detector, &queue),
+                ReedlineEvent::None
             ));
+            assert_eq!(detector.pending.as_deref(), Some(expected));
         }
         // Interior break: the feed queues the LF partner behind its CR.
         queue.lock().expect("test queue").push_back(lf_key_event());
@@ -9609,10 +10332,14 @@ mod tests {
     /// The text that reaches reedline when the pasted block `input` is fed
     /// through the detector, reassembled from the translated events (typed
     /// edits + flushed chunk inserts). Models the console queue the way one
-    /// WriteConsoleInput burst delivers it: every `\n` directly after a
-    /// `\r` is that CR's LF partner, queued behind it in the same write and
+    /// WriteConsoleInput burst delivers it: the WHOLE block sits in the
+    /// queue before the first dispatch, every `\n` directly after a `\r`
+    /// is that CR's LF partner, queued behind it in the same write and
     /// consumed by the CR's probe (niubash#308) — it never dispatches as
-    /// its own event; a `\n` after a `\n` is a lone Ctrl+J.
+    /// its own event; a `\n` after a `\n` is a lone Ctrl+J. The driver
+    /// loop pops the queue front and dispatches it, exactly what reedline's
+    /// read loop does against the live console queue (and what it does
+    /// with a key a probe requeued to the stream's head, niubash#806).
     fn feed_paste_burst(input: &str) -> String {
         let (mut detector, queue) = paste_detector_and_queue(Vec::new());
         let mut reassembled = String::new();
@@ -9643,29 +10370,32 @@ mod tests {
                 other => panic!("unexpected event in paste reassembly: {other:?}"),
             }
         }
-        let mut skip_next_lf = false;
-        for ch in input.chars() {
-            let event = match ch {
+        // The one-write queue: chars as text keys, `\r\n` pairs as a CR
+        // with its LF partner queued behind it, a lone `\n` as Ctrl+J.
+        // Order is feed order — the CR comes first, its LF partner rides
+        // behind it, so the CR's probe claims the pair.
+        let mut chars = input.chars().peekable();
+        while let Some(ch) = chars.next() {
+            let events: Vec<crossterm29::event::Event> = match ch {
                 '\r' => {
-                    queue.lock().expect("test queue").push_back(lf_key_event());
-                    skip_next_lf = true;
-                    detector.parse_event(cr())
-                }
-                '\n' => {
-                    if skip_next_lf {
-                        skip_next_lf = false;
-                        continue;
+                    let mut events = vec![cr_key_event()];
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                        events.push(lf_key_event());
                     }
-                    detector.parse_event(lf())
+                    events
                 }
-                _ => {
-                    skip_next_lf = false;
-                    detector.parse_event(paste_key(
-                        crossterm29::event::KeyCode::Char(ch),
-                        crossterm29::event::KeyModifiers::NONE,
-                    ))
-                }
+                '\n' => vec![lf_key_event()],
+                c => vec![char_key_event(c)],
             };
+            queue.lock().expect("test queue").extend(events);
+        }
+        // Dispatch everything the queue holds, in order.
+        loop {
+            let next = queue.lock().expect("test queue").pop_front();
+            let Some(raw) = next else { break };
+            let event =
+                detector.parse_event(ReedlineRawEvent::try_from(raw).expect("queued key converts"));
             append_event_text(&event, &mut reassembled);
         }
         // The burst settles; the user's Enter flushes the chunk and submits
@@ -9754,11 +10484,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_pending_enter_with_typeahead_behind_submits_in_order() {
-        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        let (mut detector, queue) =
+            paste_detector_and_queue(vec![lf_key_event(), char_key_event('v')]);
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
-        detector.parse_event(paste_key(
-            crossterm29::event::KeyCode::Char('v'),
-            crossterm29::event::KeyModifiers::NONE,
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
         ));
         // The next command's first key is already queued when the user's
         // Enter dispatches (back-to-back writes).
@@ -9999,17 +10730,16 @@ mod tests {
     }
 
     /// ConPTY focus flicker between pasted lines must not hide the LF
-    /// partner from the lookahead: the CR still identifies as paste.
+    /// partner from the lookahead — nor the burst body behind it
+    /// (niubash#806): the CR still identifies as paste.
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_skips_flicker_to_find_lf_partner() {
-        let mut detector = paste_detector_with_queue(vec![
+        let (mut detector, queue) = paste_detector_and_queue(vec![
             crossterm29::event::Event::FocusGained,
             crossterm29::event::Event::FocusLost,
-            crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
-                crossterm29::event::KeyCode::Enter,
-                crossterm29::event::KeyModifiers::CONTROL,
-            )),
+            lf_key_event(),
+            char_key_event('x'),
         ]);
         for ch in "abc".chars() {
             detector.parse_event(paste_key(
@@ -10020,6 +10750,13 @@ mod tests {
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
         assert_eq!(detector.pending.as_deref(), Some("\n"));
         assert!(detector.pushback.is_empty(), "flicker is inert");
+        // The body evidence behind the flicker keeps the chunk a paste;
+        // its requeued key absorbs on its own dispatch.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\nx"));
     }
 
     /// niubash#420: at chunk-OPEN a CR behind a CR is TWO TYPEAHEAD SUBMITS
@@ -10064,16 +10801,22 @@ mod tests {
     }
 
     /// The #341 fold survives where paste evidence exists: a chunk opened
-    /// by an LF partner (the ConPTY CRLF shape), then a bare CR with a CR
-    /// behind it MID-CHUNK — the WT empty line inside a live paste — still
-    /// folds as two line breaks of data.
+    /// by an LF partner plus body (the ConPTY CRLF shape, niubash#806),
+    /// then a bare CR with a CR behind it MID-CHUNK — the WT empty line
+    /// inside a live paste — still folds as two line breaks of data.
     #[cfg(windows)]
     #[test]
     fn paste_chunk_detector_midchunk_cr_pair_still_folds_341() {
-        let (mut detector, _queue) = paste_detector_and_queue(vec![lf_key_event(), cr_key_event()]);
-        // LF partner opens the chunk.
+        let (mut detector, queue) =
+            paste_detector_and_queue(vec![lf_key_event(), char_key_event('a'), cr_key_event()]);
+        // LF partner plus body opens the chunk; the evidence requeues.
         assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
         assert_eq!(detector.pending.as_deref(), Some("\n"));
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\na"));
         // Mid-chunk: the bare CR's partner CR folds the empty line as data —
         // the incoming CR's break plus the partner's, after the LF.
         assert!(
@@ -10082,10 +10825,132 @@ mod tests {
         );
         assert_eq!(
             detector.pending.as_deref(),
-            Some("\n\n\n"),
+            Some("\na\n\n"),
             "all three breaks fold inside the live paste"
         );
         assert!(detector.pushback.is_empty());
+    }
+
+    /// niubash#806 (R2): the CRLF pair ALONE at chunk-open — one write of
+    /// "cmd\r\n" and silence behind it — is a single machine-fed line, not
+    /// a paste's first line. The t4 evidence: pywinpty `write("echo
+    /// ok\r\n")` executed 0/5 (the line parked in the edit buffer until a
+    /// LATER Enter flushed it), while WSL GNU Bash 5.3 executes the same
+    /// write (the CR accepts the line; the LF gives a second, empty
+    /// accept). The pair and silence are indistinguishable from a
+    /// one-line paste's trailing break, and GNU typeahead semantics win
+    /// that tie — the #420 precedent, now for the LF partner: the CR
+    /// submits, and the consumed LF is dropped with it (requeueing it
+    /// would open a phantom paste chunk at the next prompt).
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_alone_at_chunk_open_submits_806() {
+        let (mut detector, queue) = paste_detector_and_queue(vec![lf_key_event()]);
+        for ch in "echo ok".chars() {
+            detector.parse_event(paste_key(
+                crossterm29::event::KeyCode::Char(ch),
+                crossterm29::event::KeyModifiers::NONE,
+            ));
+        }
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "the pair and silence is one machine-fed line: the CR submits ({event:?})"
+        );
+        assert!(
+            detector.pending.is_none(),
+            "no chunk opens without burst body behind the pair"
+        );
+        assert!(detector.pushback.is_empty());
+        assert!(
+            queue.lock().expect("test queue").is_empty(),
+            "the consumed LF is dropped, not requeued"
+        );
+    }
+
+    /// The paste half of niubash#806: the pair WITH burst body behind it —
+    /// the next line's text queued behind the LF partner, the one-write
+    /// paste shape — still opens the chunk. The body evidence requeues to
+    /// the stream's head and dispatches on its own, so every fold arm
+    /// keeps its single owner.
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_with_body_opens_chunk_806() {
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            char_key_event('d'),
+            char_key_event('e'),
+        ]);
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\n"));
+        // The requeued evidence rides the stream head; reedline reads it
+        // next and the chunk absorbs it.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\nd"));
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(detector.pending.as_deref(), Some("\nde"));
+        assert!(detector.pushback.is_empty());
+    }
+
+    /// A BREAK behind the pair is burst body too — the paste whose second
+    /// line is empty ("x\r\n\r\n…"): the found CR requeues and its own
+    /// dispatch folds it mid-chunk (the #341 accounting keeps one owner).
+    /// The paste's own LF partner behind that CR is queued with it, the
+    /// one-write shape.
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_with_break_behind_opens_chunk_806() {
+        let (mut detector, queue) =
+            paste_detector_and_queue(vec![lf_key_event(), cr_key_event(), lf_key_event()]);
+        assert!(matches!(detector.parse_event(cr()), ReedlineEvent::None));
+        assert_eq!(detector.pending.as_deref(), Some("\n"));
+        // The requeued empty-line CR dispatches; its own probe claims its
+        // LF partner and the pair folds as one break.
+        assert!(matches!(
+            dispatch_queued(&mut detector, &queue),
+            ReedlineEvent::None
+        ));
+        assert_eq!(
+            detector.pending.as_deref(),
+            Some("\n\n"),
+            "the empty line folds as one more break of the live paste"
+        );
+        assert!(detector.pushback.is_empty());
+    }
+
+    /// A chord behind the pair is not paste body (a paste is text and
+    /// breaks): GNU typeahead semantics (#420) — the CR submits and the
+    /// chord requeues to the stream's head for its own dispatch.
+    #[cfg(windows)]
+    #[test]
+    fn paste_chunk_detector_pair_with_chord_behind_submits_806() {
+        let (mut detector, queue) = paste_detector_and_queue(vec![
+            lf_key_event(),
+            crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
+                crossterm29::event::KeyCode::Up,
+                crossterm29::event::KeyModifiers::NONE,
+            )),
+        ]);
+        let event = detector.parse_event(cr());
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "a chord behind the pair is typeahead, not paste body: the CR submits"
+        );
+        assert!(detector.pending.is_none());
+        assert!(detector.pushback.is_empty());
+        let requeued = queue.lock().expect("test queue");
+        assert_eq!(requeued.len(), 1, "the chord is requeued verbatim");
+        assert!(matches!(
+            requeued.front(),
+            Some(crossterm29::event::Event::Key(key))
+                if matches!(key.code, crossterm29::event::KeyCode::Up)
+        ));
     }
 
     /// The pushback invariant behind #341, stated directly: whatever the
@@ -10601,23 +11466,26 @@ mod tests {
         assert!(!session.lock().unwrap().is_open());
     }
 
+    /// niubash#821: the Enter inside a live cycle session stays BARE —
+    /// the #631 wrap (`Multiple[MenuAccept, Enter]`, the one-press
+    /// accept-and-run) is gone. The engine's submit first refusal
+    /// (`menu_took_the_key` → `MenuAccept`) now decides with the exact
+    /// menu state: a live session takes the key (accept, menu closes,
+    /// editing continues) and only a SECOND Enter submits.
     #[test]
-    fn issue631_wrapper_enter_accepts_and_submits_inside_a_live_cycle_session() {
+    fn issue821_wrapper_enter_stays_bare_inside_a_live_cycle_session() {
         let (mut detector, session) = cycle_detector();
         arm_cycle_session(&session, true);
         detector.parse_event(tab());
         let event = detector.parse_event(cr());
-        match &event {
-            ReedlineEvent::Multiple(events) => {
-                assert_eq!(events.len(), 2, "{event:?}");
-                assert!(matches!(&events[0], ReedlineEvent::MenuAccept));
-                assert!(matches!(&events[1], ReedlineEvent::Enter));
-            }
-            other => panic!("expected accept + submit, got {other:?}"),
-        }
+        assert!(
+            matches!(event, ReedlineEvent::Enter),
+            "inside a live session the Enter must reach the engine bare so \
+             its open-menu first refusal can accept: {event:?}"
+        );
 
         // No live session (cell attached but closed): the Enter stays
-        // bare — the #486 first-refusal shape decides, not a wrap.
+        // bare too — the #486 first-refusal shape decides, not a wrap.
         let (mut detector, session) = cycle_detector();
         assert!(!session.lock().unwrap().is_open());
         detector.parse_event(tab());
