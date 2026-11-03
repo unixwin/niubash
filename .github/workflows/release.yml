@@ -1848,12 +1848,9 @@ jobs:
 
   journey:
     name: golden user journey (release gate)
-    # TEMPORARY (1.5.0 release day, captain order): the journey harness
-    # still carries pre-JSON/pre-trust-removal expectations (J6/P4/P7
-    # fossils); the fully aligned harness lands in 1.5.1. The job still
-    # runs and uploads its verdict for the record; it does not veto
-    # the 1.5.0 publication. Restore the hard gate in 1.5.1.
-    continue-on-error: true
+    # Hard gate: the aligned harness (PR #876) reads the product's actual
+    # JSON state and current receipts, so this job's verdict vetoes the
+    # release again (it is in the `release` and `publish-crates` needs).
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -2000,10 +1997,11 @@ jobs:
   # committed baseline (scripts/perf/baselines/asset-timing-baseline.json).
   perfbudget:
     name: per-asset timing budget (release gate)
-    # TEMPORARY (1.5.0 release day, captain order): same bypass as the
-    # journey job above — the gate has never produced a verdict in a
-    # release run; it still runs and reports for the record. Restore
-    # the hard gate in 1.5.1.
+    # TEMPORARY: the gate produced its first verdict on the 1.5.0
+    # dispatch run — 405/437 assets ok, but 5 bash-it themes hard-fail
+    # by timeout with zero completed reps (#879, unadjudicated:
+    # harness drive vs product hang). Its veto stays off until #879
+    # adjudicates; it still runs and reports for the record.
     continue-on-error: true
     runs-on: windows-2025
     timeout-minutes: 75
@@ -2500,18 +2498,12 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    # TEMPORARY (1.5.0 release): build-msix is not in this needs list. The
-    # job still runs and uploads its artifact, and the Create step below
-    # picks it up when it lands in time — but build-msix has never run
-    # before, and a first-run hiccup must not block the whole release
-    # late in the run. If the MSIX misses the release, attach it manually
-    # afterwards. Restore build-msix to needs once it has a proven run
-    # (1.5.1). For the same reason the Create step's file list carries no
-    # artifacts/**/*.msix pattern while build-msix is out of needs:
-    # fail_on_unmatched_files would veto the release at the very last
-    # step whenever no .msix landed in time. The MSIX is attached
-    # manually for 1.5.0; restore the pattern with the needs entry.
-    needs: [build-windows, build-linux, build-macos, skill-bundle]
+    # build-msix and journey are hard needs again (both proved on the
+    # 1.5.0 run: the msix built green, the journey harness is aligned);
+    # the Create step's artifacts/**/*.msix pattern is restored with
+    # them, so fail_on_unmatched_files guards the msix like every other
+    # asset class.
+    needs: [build-windows, build-linux, build-macos, build-msix, journey, skill-bundle]
     # TEMPORARY (1.5.0 release): signpath-sign is not in this needs list.
     # The original design covered two states — credentials absent (the
     # job skips; a skipped need must not skip the release) and signing
@@ -2715,6 +2707,7 @@ jobs:
             artifacts/**/*.exe
             artifacts/**/*.tar.gz
             artifacts/**/*.7z
+            artifacts/**/*.msix
             artifacts/**/*.sha256
             SHA256SUMS
           fail_on_unmatched_files: true
@@ -2729,12 +2722,13 @@ jobs:
     # jobs. A red gate then left the exact half-released state this repo hit:
     # crates.io already carried niubash 1.4.3 while the GitHub Release page
     # (the `release` job) had never run. The release job aggregates every
-    # platform build and both release gates, so listing it first pins this
-    # job behind the whole chain — build all platforms -> timing/journey gates
-    # -> GitHub Release with all assets -> and only then crates.io. A publish
+    # platform build and the journey gate, so listing it first pins this
+    # job behind the whole chain — build all platforms -> journey gate
+    # -> GitHub Release with all assets -> and only then crates.io. (The
+    # perfbudget gate joins this list when #879 adjudicates its timeouts.) A publish
     # failure can still happen, but it can no longer race the gates or undo
     # the release page that already exists.
-    needs: [release, build-windows, build-linux, build-macos, skill-bundle]
+    needs: [release, journey, build-windows, build-linux, build-macos, skill-bundle]
     # Best-effort remains: with the ordering above a failure here no longer
     # blocks or half-does a release (rubash 1.4.2 is on crates.io since the
     # v1.4.3 era, so the version-annotated path deps now resolve).
