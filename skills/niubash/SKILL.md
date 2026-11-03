@@ -65,7 +65,7 @@ Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it 
 - **Verbatim handoff** — `--encoded-command`/`-EncodedCommand`/`--ec <b64>` runs a base64 payload with zero quoting; optional `v1:` prefix guards MSYS-family rewriting in transit.
 - **Plugin system** — git-clone-only external sources (oh-my-bash, bash-it, bpkg), driven by a declarative spec (`~/.niubash/plugins.json`) with lockfile verbs (`add/list/enable/disable/sync/update/restore/rollback/clean/migrate-rc/source/recipe/distro/mirror/ui`). An installed source contributes once it is enabled — there is no trust state.
 - **TUI surfaces** — `niu setup` wizard (theme/prompt/tools), `niu plugin ui` menu, theme gallery, `niu font` picker; all non-interactive-friendly and safe to skip (`-c` loads none of them).
-- **Bundle version**: niubash 1.4.4 (generated; see `scripts/generate-skill.py`).
+- **Bundle version**: niubash 1.5.0 (generated; see `scripts/generate-skill.py`).
 <!-- END GENERATED:capability-snapshot -->
 
 Shell built-ins (the generated list below is the engine's own GNU bash 5.3
