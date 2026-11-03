@@ -20,9 +20,12 @@ this product, a known pitfall, so both point at the sandbox):
   J2 wizard full run, entered through the explicit `niu setup` verb
      at the J1 prompt: `niu setup` -> the wizard welcome block (the
      v-banner, environment panel, "No external themes installed yet")
-     -> collection "full" -> Apply -> the real `git clone`s progress on
-     the terminal -> trust-now question -> "Trust now" (现在信任) -> theme
-     gallery lists >60 themes -> pick `powerline-multiline` -> rc written
+     -> collection "full" -> Q2.6 completion style -> Q2.7 completion
+     interaction -> Apply -> the real `git clone`s progress on the
+     terminal -> the post-install theme gallery lists >60 themes
+     (no trust question — the trust mechanism was removed from the
+     product on 2026-10-28, niubash#647) -> pick `powerline-multiline`
+     -> rc written
      (the pick's ownership note; the activation itself lives in the #359
      generated loader), spec written, undo receipts listed on the finish
      screen -> the live REPL prompt again.
@@ -2430,7 +2433,7 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     # stage 1 (the wizard never auto-starts), so the fresh REPL J1 left
     # open is asked for it.
     step = verdict.step(
-        "J2", "wizard full run via `niu setup`: full -> trust now -> "
+        "J2", "wizard full run via `niu setup`: full -> "
               "powerline-multiline")
     try:
         # Entering the verb draws the full wizard welcome block (the
@@ -2481,6 +2484,25 @@ def journey(exe: Path, root: Path, verdict: Verdict,
             raise AssertionError(
                 f"TAB completion style question never appeared: {err}")
 
+        # Q2.7 (niubash#631, new in 1.5.0): the TAB completion
+        # *interaction* question runs immediately after Q2.6, on first
+        # runs AND re-runs. The current effective interaction is
+        # pre-highlighted, so Enter is a no-op pick — no rc line is
+        # written when the pick equals the effective interaction, the
+        # same rule as Q2.6. (Release run 41591846072 died without this
+        # step: the wizard stayed parked on the Q2.7 menu while the
+        # harness waited downstream for the providers question.)
+        try:
+            session.wait_for("TAB completion interaction?", timeout=60)
+            session.wait_quiescent()
+            session.answer(ENTER)
+            step.check("completion-interaction question answered with "
+                       "the pre-highlighted default", True)
+        except TimeoutError as err:
+            raise AssertionError(
+                f"TAB completion interaction question never appeared: "
+                f"{err}")
+
         # Q3 is CONDITIONAL (niubash#230 follow-up): an installation whose
         # bundle already carries niu-git (opt/niugit) skips the question
         # silently — it records the "installed" answer and moves straight
@@ -2525,12 +2547,22 @@ def journey(exe: Path, root: Path, verdict: Verdict,
         except TimeoutError as err:
             raise AssertionError(f"no clone ever started: {err}")
 
-        # Singular (one theme-bearing source) or plural (several); the
-        # 'full' collection installs two theme-bearing frameworks. Abort
-        # on the tour/REPL: an install that failed outright never asks
-        # this question, and the wait must fail fast with the real reason.
+        # Post-install theme pick (owner ruling 2026-10-03): once the
+        # collection apply lands, the wizard lists the fresh sources'
+        # themes DIRECTLY in the gallery — there is no trust question
+        # in front of it. The trust mechanism was removed from the
+        # product on 2026-10-28 (niubash#647), so the old
+        # "to list its themes?" wait was a fossil: that text exists
+        # nowhere in the product, and the "Trust now" answer that
+        # followed it would have landed in the gallery as a stray
+        # row-jump + confirm. The 'full' collection installs two
+        # theme-bearing frameworks, and the gallery only draws after
+        # the apply finishes, so its title is the completion signal
+        # for the clones. Abort on the tour/REPL: an install that
+        # failed outright never reaches the gallery, and the wait must
+        # fail fast with the real reason.
         try:
-            session.wait_for("to list its themes?", "to list their themes?",
+            session.wait_for("Pick a theme",
                              timeout=CLONE_TIMEOUT,
                              abort_on=("press any key to continue",
                                        "Type `about` for a quick tour"))
@@ -2538,9 +2570,10 @@ def journey(exe: Path, root: Path, verdict: Verdict,
             step.check("multiple sources cloned (>=2 clone progress lines)",
                        clones >= 2, f"counted {clones} 'Cloning into' lines")
             verdict.capture("J2-after-clones", session)
+            verdict.capture("J2-gallery", session)
             # Every collection entry must have landed (a failed entry is a
             # real gap — the user sees the failure line in their terminal).
-            # Settle first: the question draws while git stderr is still
+            # Settle first: the gallery draws while git stderr is still
             # draining, then read the RAW stream only — it is append-only
             # and byte-ordered, immune to menu redraws and screen clears.
             time.sleep(1.0)
@@ -2556,21 +2589,14 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                 check_with_known_fail(
                     step, "every collection entry installed (no 'failed' "
                     "lines)", "\n".join(failed_lines))
-            session.answer("2\r")  # 2 = Trust now (现在信任)
-            step.check("trust-now chosen (现在信任)", True)
-        except TimeoutError as err:
-            raise AssertionError(f"trust question never appeared: {err}")
-
-        # Theme gallery: >60 themes, then navigate to powerline-multiline.
-        # The size proof is deterministic, not a screen scrape: after
-        # navigating, powerline-multiline's own row number (it sorts deep
-        # in the list) proves the gallery size; a mid-redraw scroll marker
-        # can read "0 more" and must never gate on its own.
-        try:
-            session.wait_for("Pick a theme", timeout=120)
-            verdict.capture("J2-gallery", session)
         except TimeoutError as err:
             raise AssertionError(f"theme gallery never appeared: {err}")
+
+        # Gallery navigation: walk to powerline-multiline. The size
+        # proof is deterministic, not a screen scrape: after navigating,
+        # powerline-multiline's own row number (it sorts deep in the
+        # list) proves the gallery size; a mid-redraw scroll marker
+        # can read "0 more" and must never gate on its own.
 
         def highlight_row(target: str):
             for line in session.text().splitlines():
@@ -3310,8 +3336,9 @@ def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
     rc will be backed up.'). pick=None answers the gallery's
     'Skip - keep my current theme' (the highlighted default); a name or
     candidate list is DOWN-walked in the gallery. Every question after the
-    gallery (Q2.6 TAB completion style, Q3 niu-git, Q4 external completion
-    providers) takes its highlighted default via Enter. Returns the theme
+    gallery (Q2.6 TAB completion style, Q2.7 TAB completion interaction,
+    Q3 niu-git, Q4 external completion providers) takes its highlighted
+    default via Enter. Returns the theme
     name the run picked (None = Skip). Every key is gated on the wizard's
     own screens; delivery hardening comes from send_line/answer."""
     session.send_line("niu setup", anchor=False)
@@ -3348,6 +3375,12 @@ def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
     # step, same as the J2 and d3 fixes). Quiesce before every menu
     # answer: an Enter landing inside the menu's own draw can be
     # swallowed (the local stall of 2026-10-19).
+    session.wait_quiescent()
+    session.answer(ENTER)
+    session.wait_for("TAB completion interaction?", timeout=60)
+    # Q2.7 (niubash#631) runs immediately after Q2.6 on re-runs too;
+    # the current effective interaction is pre-highlighted, so Enter
+    # is a no-op pick, exactly like Q2.6.
     session.wait_quiescent()
     session.answer(ENTER)
     # Q3 is conditional (niubash#230): a bundle that already carries
