@@ -1203,6 +1203,27 @@ impl Shell {
 
     /// Read alias-bearing interactive input through the engine's grouped reader.
     /// Each submission is a fresh read boundary, even when its line number is one.
+    ///
+    /// #863 slice 2 migration note: this site stays on the tracked
+    /// driver call instead of moving to `Session::run`. The driver's
+    /// stop bool is `(exit_jump && !parse_error) || errexit_stop`
+    /// (rubash script_driver's grouped reader), and the REPL consumes
+    /// exactly one signal from it — `session_exit_jump`; the loop has
+    /// no second stop predicate of its own (repl.rs's consumption
+    /// sites). `run()`'s grouped route folds every `errexit_stop`
+    /// outcome into `Flow::Completed` — the errexit break itself, a
+    /// real `exit` with a nonzero status while errexit is enabled,
+    /// and a parse error whose status trips errexit — so mapping the
+    /// jump from `Flow` alone would keep the session alive on
+    /// submissions that end it today. Reconstructing the bool
+    /// host-side needs `last_command_inverted`, which has no contract
+    /// face (GAP-1, run classification surfacing). The non-interactive
+    /// tracked arm in `execute_script_inner` could migrate because
+    /// the batch feeder re-derives the errexit stop through its own
+    /// predicate; the REPL has no equivalent. Revisit when the
+    /// contract surfaces the run classification; the
+    /// `issue863_reader_batch_*` pins below lock the stop semantics
+    /// the eventual mapping must reproduce.
     fn execute_interactive_reader_batch(
         &mut self,
         script: &str,
@@ -10119,6 +10140,125 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(shell.take_session_exit_jump(), None);
     }
 
+    /// niubash#863 (slice 2): the reader batch's stop semantics, pinned
+    /// per outcome class. `execute_interactive_reader_batch` stays on
+    /// the engine's tracked grouped driver because `Session::run`'s
+    /// `Flow` cannot express the driver's stop bool (see the migration
+    /// note on that fn): these pins lock the values a future
+    /// contract-based mapping must reproduce, and they fail if the
+    /// submissions below stop taking the grouped route or the route's
+    /// classification drifts. The parse-error pins double as the
+    /// route proof: the host's plain parse route drops the stray `)`
+    /// and would run the line with status 0 instead of discarding the
+    /// group at status 2.
+    #[test]
+    fn issue863_reader_batch_parse_error_discards_group_and_keeps_session() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        // Errexit off: a syntax error in a `;` batch discards the
+        // failing group and ends the submission at 2; the session
+        // keeps running (the driver's parse-abort arm: stop bool
+        // false).
+        let code = shell
+            .execute_interactive_line("echo ok; echo )bad")
+            .unwrap();
+        assert_eq!(code, 2);
+        assert_eq!(shell.take_session_exit_jump(), None);
+        assert_eq!(shell.execute_interactive_line("echo alive").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+    }
+
+    #[test]
+    fn issue863_reader_batch_errexit_break_ends_the_session() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        // Control: the same batch with errexit off runs to completion.
+        assert_eq!(
+            shell.execute_interactive_line("false; echo ran").unwrap(),
+            0
+        );
+        assert_eq!(shell.take_session_exit_jump(), None);
+
+        assert_eq!(shell.execute_interactive_line("set -e").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+        // The failing first command now breaks the batch (ERREXIT):
+        // the grouped driver reports the unwind and the REPL must end
+        // the session with the failing status instead of prompting
+        // again. `Session::run` reports this outcome as
+        // Flow::Completed — the fold that blocks the migration.
+        assert_eq!(
+            shell
+                .execute_interactive_line("false; echo unreachable")
+                .unwrap(),
+            1
+        );
+        assert_eq!(shell.take_session_exit_jump(), Some(1));
+    }
+
+    #[test]
+    fn issue863_reader_batch_exit_under_errexit_keeps_jump_and_status() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        assert_eq!(shell.execute_interactive_line("set -e").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+        // A real `exit` with a nonzero status resolves to the
+        // errexit arm inside `Session::run` (its documented known
+        // boundary), but the session still ends, with the exit's own
+        // status (rubash#2535: the jump payload, not the crossed
+        // traps' restored `$?`).
+        assert_eq!(shell.execute_interactive_line("true; exit 3").unwrap(), 3);
+        assert_eq!(shell.take_session_exit_jump(), Some(3));
+    }
+
+    #[test]
+    fn issue863_reader_batch_inverted_last_command_is_errexit_exempt() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        assert_eq!(shell.execute_interactive_line("set -e").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+        // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN
+        // under errexit — the batch ends with the inverted status 1
+        // and the session lives. The exemption's witness
+        // (`last_command_inverted`) has no contract face (GAP-1), so
+        // a host-side reconstruction of the stop bool from status +
+        // errexit alone would end the session here.
+        let code = shell.execute_interactive_line("echo ok; ! true").unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(shell.take_session_exit_jump(), None);
+    }
+
+    #[test]
+    fn issue863_reader_batch_parse_error_under_errexit_ends_the_session() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+
+        assert_eq!(shell.execute_interactive_line("set -e").unwrap(), 0);
+        assert_eq!(shell.take_session_exit_jump(), None);
+        // The parse error's own arm is a discard, but its status
+        // trips the errexit break, which propagates (the grouped
+        // driver's documented split, verified against GNU's
+        // PROMPT_COMMAND behavior): the session ends at 2.
+        let code = shell
+            .execute_interactive_line("echo ok; echo )bad")
+            .unwrap();
+        assert_eq!(code, 2);
+        assert_eq!(shell.take_session_exit_jump(), Some(2));
+    }
+
     #[test]
     fn interactive_submission_drops_a_stale_session_jump() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -10270,6 +10410,51 @@ complete -F _envtooldyn_hook envtooldyn
             shell.take_script_exit_jump(),
             "a non-interactive untrapped INT unwinds as a shell exit"
         );
+    }
+
+    /// niubash#863 (slice 2): the reader-batch route's signal-discard
+    /// arm. An untrapped Ctrl+C during a foreground command inside a
+    /// `;` batch is a DISCARD (rubash#1662): the batch's group
+    /// machinery consumes the classification without arming the exit
+    /// jump, so the session prompts again — the stop-semantics class
+    /// a future `Session::run` mapping must keep jump-free. The
+    /// returned code is deliberately not asserted: whether the
+    /// gatherer hands the reader one group or two decides if the
+    /// trailing `echo` still runs after the discard (an engine-side
+    /// grouping nuance, recorded in the slice-2 report), while the
+    /// session-end signal this pin locks is the same either way.
+    /// Windows-only, like the issue698 pins: the delivery is the
+    /// console-handler mailbox note.
+    #[cfg(windows)]
+    #[test]
+    fn issue863_reader_batch_ctrl_c_during_foreground_command_keeps_the_session() {
+        use std::time::{Duration, Instant};
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell.enter_interactive();
+        let _sleep_link = issue698_make_sleep_resolvable(&mut shell);
+
+        let injector = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            rubash::script_driver::inject_console_ctrl_c();
+        });
+        let started = Instant::now();
+        let _code = shell
+            .execute_interactive_line("sleep 10; echo after")
+            .unwrap();
+        injector.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the foreground sleep must abort on the delivery, not run to completion"
+        );
+        assert_eq!(
+            shell.take_session_exit_jump(),
+            None,
+            "an untrapped interactive Ctrl+C is a discard, not a session exit"
+        );
+        // The session survives: the next submission runs normally.
+        assert_eq!(shell.execute_interactive_line("true").unwrap(), 0);
     }
 
     pub(super) fn test_shell(hooks: HookConfig) -> Shell {
