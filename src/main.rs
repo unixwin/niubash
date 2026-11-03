@@ -1425,7 +1425,11 @@ fn run_stdin_script() -> anyhow::Result<()> {
             || engine_jumped
             || parse_error
             || (code != 0
-                && rubash::script_driver::stdin_script_errexit_enabled(shell.executor())
+                && shell
+                    .session_mut()
+                    .variables()
+                    .resolved_value("SHELLOPTS")
+                    .is_some_and(|options| options.split(':').any(|option| option == "errexit"))
                 && !shell.executor_mut().last_command_inverted())
         {
             break;

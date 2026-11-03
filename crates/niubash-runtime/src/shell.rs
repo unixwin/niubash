@@ -682,7 +682,7 @@ impl Shell {
         // script-file, and stdin runs keep the engine default (off).
         // enter_interactive() enables it for the REPL entry points.
         session.options().set("expand_aliases", false);
-        sync_executor_path_from_process_path(session.executor_mut());
+        sync_executor_path_from_process_path(&mut session);
 
         crate::startup_trace::tick("executor env ready");
 
@@ -773,9 +773,9 @@ impl Shell {
         crate::startup_trace::tick("prompt backend");
 
         // 7. User-local state files.
-        normalize_executor_home_env(session.executor_mut(), &home_dir);
-        ensure_windows_profile_env(session.executor_mut(), &home_dir);
-        ensure_prompt_terminal_env(session.executor_mut());
+        normalize_executor_home_env(&mut session, &home_dir);
+        ensure_windows_profile_env(&mut session, &home_dir);
+        ensure_prompt_terminal_env(&mut session);
         let history_path = config
             .history
             .path
@@ -956,18 +956,18 @@ impl Shell {
         let code = self.execute_script(&script)?;
 
         restore_executor_env(
-            self.executor_mut(),
+            self.session_mut(),
             "__RUBASH_SCRIPT_NAME",
             saved_script_name,
         );
-        restore_executor_env(self.executor_mut(), "BASH_ARGV0", saved_bash_argv0);
+        restore_executor_env(self.session_mut(), "BASH_ARGV0", saved_bash_argv0);
         restore_executor_env(
-            self.executor_mut(),
+            self.session_mut(),
             "__RUBASH_FUNCTION_STDIN",
             saved_function_stdin,
         );
         restore_executor_env(
-            self.executor_mut(),
+            self.session_mut(),
             "__RUBASH_FUNCTION_STDIN_OFFSET",
             saved_function_stdin_offset,
         );
@@ -1049,8 +1049,13 @@ impl Shell {
         // still lands on top. The seed is a plain variable (never
         // exported, matching GNU) and `ps1_seeded_default` keeps it
         // from claiming the prompt slot away from the product floor.
-        if self.executor().get_env("PS1").is_none() {
-            self.executor_mut().set_env("PS1", GNU_DEFAULT_PS1);
+        if self
+            .session_mut()
+            .variables()
+            .resolved_value("PS1")
+            .is_none()
+        {
+            self.session_mut().variables().set("PS1", GNU_DEFAULT_PS1);
             self.ps1_seeded_default = true;
         }
         // `$-` must contain `i` while startup files run: GNU sets
@@ -1204,7 +1209,7 @@ impl Shell {
         tokens: &[Token],
         line_offset: usize,
     ) -> Option<i32> {
-        if !self.interactive || !self.executor_mut().alias_expansion_enabled() {
+        if !self.interactive || self.session_mut().options().get("expand_aliases") != Some(true) {
             return None;
         }
         let needs_reader = tokens.iter().any(|token| {
@@ -1565,18 +1570,18 @@ impl Shell {
         // form and GNU load them fine. `set_shell_option` is idempotent, so
         // the extra `finish_startup` passes on the REPL paths are harmless.
         if self.invoked_as_rbash {
-            // NOT through the session options view: `restricted` is
-            // a flag-only option in the engine (GNU: `set -r`, never
-            // a `set -o` enumeration entry), so the view's family
-            // check does not know the name and its set() reports
-            // false with no state change — the migration's rewrite
-            // of this line to the view silently disarmed the rbash
-            // persona (tests/rc_readonly_loader.rs
-            // rbash_named_session_loads_the_generated_loader_then_restricts).
-            // The executor's set_shell_option resolves the name in
-            // the set machinery itself, including the
-            // maybe_make_restricted readonly marks.
-            self.executor_mut().set_shell_option("restricted", true);
+            // Through the session options view: `restricted` is a
+            // flag-only option in the engine (GNU: `set -r`, never
+            // a `set -o` enumeration entry), and since rubash#2040
+            // the view routes flag-only names to the same
+            // `set_shell_option` machinery the `set -r` branch
+            // resolves in the set machinery itself, including the
+            // maybe_make_restricted readonly marks. (The pre-#2040
+            // view fell through both families as unknown and
+            // reported false with no state change.) Guarded by
+            // tests/rc_readonly_loader.rs
+            // rbash_named_session_loads_the_generated_loader_then_restricts.
+            self.session_mut().options().set("restricted", true);
         }
     }
 
@@ -1621,7 +1626,7 @@ impl Shell {
             "NIU_HIGHLIGHT_STYLES",
         ];
         for name in NAMES {
-            if let Some(value) = self.executor().get_env(name) {
+            if let Some(value) = self.session_mut().variables().resolved_value(name) {
                 if !value.is_empty() {
                     std::env::set_var(name, value);
                 }
@@ -1663,7 +1668,7 @@ impl Shell {
             failed();
             return;
         }
-        ensure_prompt_terminal_env(self.executor_mut());
+        ensure_prompt_terminal_env(self.session_mut());
         // niubash#359: a finished `niu setup` may have published a new
         // generated-loader generation; re-source it with the same decision
         // logic before the rc re-apply (the wizard's rc carries no managed
@@ -1830,9 +1835,9 @@ impl Shell {
         // re-apply (apply_setup_config_if_pending).
         crate::setup_wizard::clear_stale_apply_pending_marker(&self.home_dir);
         let home_dir = self.home_dir.clone();
-        normalize_executor_home_env(self.executor_mut(), &home_dir);
-        ensure_windows_profile_env(self.executor_mut(), &home_dir);
-        ensure_prompt_terminal_env(self.executor_mut());
+        normalize_executor_home_env(self.session_mut(), &home_dir);
+        ensure_windows_profile_env(self.session_mut(), &home_dir);
+        ensure_prompt_terminal_env(self.session_mut());
         // GNU shell.c:1833 run_startup_files: the login profile chain is
         // checked first and replaces the interactive-RC alternative — a
         // login shell sources /etc/profile and the first user profile
@@ -2148,7 +2153,7 @@ impl Shell {
         let raw = raw?;
 
         let home_dir = self.home_dir.clone();
-        normalize_executor_home_env(self.executor_mut(), &home_dir);
+        normalize_executor_home_env(self.session_mut(), &home_dir);
         let path = self.resolve_non_interactive_env_path(&raw);
         if !path.exists() {
             // GNU evalfile.c:120: ENOENT with FEVAL_ENOENTOK is silent.
@@ -2254,7 +2259,7 @@ impl Shell {
         let raw = niu_raw.or(bash_raw)?;
 
         let home_dir = self.home_dir.clone();
-        normalize_executor_home_env(self.executor_mut(), &home_dir);
+        normalize_executor_home_env(self.session_mut(), &home_dir);
         let path = self.resolve_non_interactive_env_path(&raw);
         if !path.exists() {
             // GNU maybe_execute_file passes FEVAL_ENOENTOK (evalfile.c:345):
@@ -2422,7 +2427,7 @@ impl Shell {
         }
 
         self.bash_prompt_command_running = true;
-        ensure_prompt_terminal_env(self.executor_mut());
+        ensure_prompt_terminal_env(self.session_mut());
         self.session_mut().set_last_status(last_exit_code);
         // The engine owns the GNU semantics (eval.c:305
         // execute_prompt_command): indexed-array elements in order,
@@ -2640,8 +2645,9 @@ impl Shell {
         // hook-less shell stay spawn-free.
         if !hooks.is_empty()
             || self
-                .executor()
-                .get_env("PROMPT_COMMAND")
+                .session_mut()
+                .variables()
+                .resolved_value("PROMPT_COMMAND")
                 .is_some_and(|value| !value.is_empty())
         {
             self.invalidate_git_prompt_after_line();
@@ -2972,9 +2978,9 @@ impl Shell {
         // leg goes through the engine's own `bind -f`, so its parser
         // and diagnostics stay the single source of truth.
         let inputrc = self
-            .executor()
-            .get_env("INPUTRC")
-            .map(str::to_string)
+            .session_mut()
+            .variables()
+            .resolved_value("INPUTRC")
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| self.home_dir.join(".inputrc"));
@@ -3035,12 +3041,12 @@ impl Shell {
             .get("histexpand")
             .unwrap_or(true)
         {
-            let histchars = self.executor().get_env("histchars").map(str::to_owned);
+            let histchars = self.session_mut().variables().resolved_value("histchars");
             let posix = self
-                .executor()
-                .get_env("__RUBASH_POSIX_MODE")
-                .map(|value| value == "1")
-                .unwrap_or(false);
+                .session_mut()
+                .variables()
+                .resolved_value("__RUBASH_POSIX_MODE")
+                .is_some_and(|value| value == "1");
             text = crate::readline_commands::history_expand_line(
                 &text,
                 history_entries,
@@ -3076,12 +3082,12 @@ impl Shell {
         {
             return Some(line.to_string());
         }
-        let histchars = self.executor().get_env("histchars").map(str::to_owned);
+        let histchars = self.session_mut().variables().resolved_value("histchars");
         let posix = self
-            .executor()
-            .get_env("__RUBASH_POSIX_MODE")
-            .map(|value| value == "1")
-            .unwrap_or(false);
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_POSIX_MODE")
+            .is_some_and(|value| value == "1");
         crate::readline_commands::history_expand_line(
             line,
             history_entries,
@@ -3151,7 +3157,7 @@ impl Shell {
         cword: usize,
     ) -> Vec<(String, Option<String>)> {
         let joined = words.join(" ");
-        if let Err(err) = self.executor_mut().call_function_with_env(
+        if let Err(err) = self.session_mut().call_function_with_env(
             function,
             std::iter::empty::<String>(),
             [
@@ -3199,7 +3205,7 @@ impl Shell {
         buffer: &str,
         cursor: usize,
     ) -> WidgetOutcome {
-        if let Err(err) = self.executor_mut().call_function_with_env(
+        if let Err(err) = self.session_mut().call_function_with_env(
             function,
             std::iter::empty::<String>(),
             [
@@ -4062,10 +4068,11 @@ impl Shell {
                     &script,
                     // rubash#414: parse-time alias state established before
                     // the reader starts (CLI -O expand_aliases / posix mode)
-                    // must route through the line-group driver; the executor's
-                    // own live flag is the truth source (same argument rubash
-                    // main.rs passes at its script site).
-                    self.executor_mut().alias_expansion_enabled(),
+                    // must route through the line-group driver; the session's
+                    // own live flag, read through the options view, is the
+                    // truth source (same argument rubash main.rs passes at
+                    // its script site).
+                    self.session_mut().options().get("expand_aliases") == Some(true),
                 ))
         {
             // niubash#576: take the TRACKED grouped run and record an
@@ -4331,10 +4338,16 @@ impl Shell {
     }
 }
 
-fn restore_executor_env(executor: &mut Executor, name: &str, value: Option<String>) {
+fn restore_executor_env(session: &mut Session, name: &str, value: Option<String>) {
     match value {
-        Some(value) => executor.set_env(name, &value),
-        None => executor.unset_env(name),
+        Some(value) => session.variables().set(name, &value),
+        // No faithful contract twin for the removal arm:
+        // `VariablesView::unset` is the unset *builtin's* leaf
+        // (readonly refusal, typed-cell drop), while
+        // `Executor::unset_env` is the host restore-grade removal
+        // (invocation-carrier clearing, env journal, typed cell
+        // left as-is). #863 slice 1 keeps this one seam call.
+        None => session.executor_mut().unset_env(name),
     }
 }
 
@@ -5554,9 +5567,12 @@ fn expand_env_file_params(value: &str, lookup: impl Fn(&str) -> String) -> Strin
     out
 }
 
-fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
+fn normalize_executor_home_env(session: &mut Session, home_dir: &Path) {
     let home = host_path_to_shell_path(&home_dir.to_string_lossy());
-    let current = executor.get_env("HOME").unwrap_or_default();
+    let current = session
+        .variables()
+        .resolved_value("HOME")
+        .unwrap_or_default();
     // GNU shell.c/variables.c: HOME comes from the caller's environment.
     // Normalize only when it is missing or Windows-shaped (backslashes,
     // slash-drive); an explicitly exported POSIX HOME is the caller's
@@ -5573,13 +5589,13 @@ fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
         .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
     let should_update = (current.trim().is_empty() && (cfg!(windows) || caller_provided_home))
         || current.contains('\\')
-        || (cfg!(windows) && is_slash_drive_path(current));
+        || (cfg!(windows) && is_slash_drive_path(&current));
     if should_update && !home.is_empty() {
-        executor.set_env("HOME", &home);
+        session.variables().set("HOME", &home);
     }
 }
 
-fn ensure_windows_profile_env(executor: &mut Executor, home_dir: &Path) {
+fn ensure_windows_profile_env(session: &mut Session, home_dir: &Path) {
     if !cfg!(windows) {
         return;
     }
@@ -5589,24 +5605,24 @@ fn ensure_windows_profile_env(executor: &mut Executor, home_dir: &Path) {
         return;
     }
 
-    executor.set_env("USERPROFILE", &home);
+    session.variables().set("USERPROFILE", &home);
     if let Some((drive, path)) = windows_drive_and_home_path(&home) {
-        set_executor_env_if_missing_or_empty(executor, "HOMEDRIVE", &drive);
-        set_executor_env_if_missing_or_empty(executor, "HOMEPATH", &path);
+        set_executor_env_if_missing_or_empty(session, "HOMEDRIVE", &drive);
+        set_executor_env_if_missing_or_empty(session, "HOMEPATH", &path);
     }
     set_executor_env_if_missing_or_empty(
-        executor,
+        session,
         "APPDATA",
         &format!("{}\\AppData\\Roaming", home.trim_end_matches('\\')),
     );
     set_executor_env_if_missing_or_empty(
-        executor,
+        session,
         "LOCALAPPDATA",
         &format!("{}\\AppData\\Local", home.trim_end_matches('\\')),
     );
 }
 
-fn ensure_prompt_terminal_env(executor: &mut Executor) {
+fn ensure_prompt_terminal_env(session: &mut Session) {
     // niubash#667: COLUMNS is a plain shell variable in GNU bash — the
     // shell maintains it for its own line discipline and prompt math,
     // and it reaches a child's environment only when the user exports
@@ -5616,20 +5632,23 @@ fn ensure_prompt_terminal_env(executor: &mut Executor) {
     // citizens.) Same-family check: LINES is never seeded by the host —
     // the engine's own winsize face owns it — so COLUMNS is the only
     // terminal-size variable on this path.
-    if executor
-        .get_env("COLUMNS")
+    if session
+        .variables()
+        .resolved_value("COLUMNS")
         .is_none_or(|current| current.trim().is_empty())
     {
-        executor.set_env("COLUMNS", "80");
+        session.variables().set("COLUMNS", "80");
     }
 }
 
-fn set_executor_env_if_missing_or_empty(executor: &mut Executor, name: &str, value: &str) {
-    if executor
-        .get_env(name)
+fn set_executor_env_if_missing_or_empty(session: &mut Session, name: &str, value: &str) {
+    if session
+        .variables()
+        .resolved_value(name)
         .is_none_or(|current| current.trim().is_empty())
     {
-        executor.export_env(name, value);
+        session.variables().set(name, value);
+        session.variables().set_exported(name, true);
     }
 }
 
@@ -5830,9 +5849,9 @@ fn resolve_native_command_path_with_path(
     None
 }
 
-fn sync_executor_path_from_process_path(executor: &mut Executor) {
+fn sync_executor_path_from_process_path(session: &mut Session) {
     if let Ok(path) = std::env::var("PATH") {
-        executor.set_env("PATH", &path);
+        session.variables().set("PATH", &path);
     }
 }
 
@@ -6021,10 +6040,7 @@ mod tests {
 
         shell.enter_interactive();
         assert_eq!(
-            shell
-                .executor_mut()
-                .get_env("HISTFILE")
-                .map(|v| v.to_string()),
+            shell.session_mut().variables().resolved_value("HISTFILE"),
             Some(path.to_string_lossy().into_owned()),
             "HISTFILE must name the provider's backing file, not be unset"
         );
@@ -6384,8 +6400,9 @@ mod tests {
         // SHELLOPTS never carries emacs/vi (rubash mirrors GNU's exclusion,
         // shellopts_includes_option), so the write-back must not add them.
         let shelopts = shell
-            .executor_mut()
-            .get_env("SHELLOPTS")
+            .session_mut()
+            .variables()
+            .resolved_value("SHELLOPTS")
             .unwrap_or_default();
         assert!(!shelopts
             .split(':')
@@ -6521,8 +6538,9 @@ mod tests {
         shell.run_precmd_hooks();
 
         let observed = shell
-            .executor_mut()
-            .get_env("HOOK_TITLE")
+            .session_mut()
+            .variables()
+            .resolved_value("HOOK_TITLE")
             .unwrap_or_default();
         assert!(
             observed.contains("niubash-title-pwd-fallback"),
@@ -7009,9 +7027,7 @@ alias hello='echo from-alias'
         // test_shell defaults it on for REPL-shaped tests, which would
         // route this script to the engine's grouped reader instead of the
         // host tokenize+parse route under test.
-        shell
-            .executor_mut()
-            .set_shopt_option("expand_aliases", false);
+        shell.session_mut().options().set("expand_aliases", false);
         let code = shell
             .execute_script(
                 "R=none; case abc in +([a-z])) R=m1;; *) R=no;; esac; \
@@ -7044,9 +7060,7 @@ alias hello='echo from-alias'
         let _cwd_guard = CwdGuard::capture();
 
         let mut shell = test_shell(HookConfig::default());
-        shell
-            .executor_mut()
-            .set_shopt_option("expand_aliases", false);
+        shell.session_mut().options().set("expand_aliases", false);
         let code = shell
             .execute_script(
                 "shopt -s extglob\n\
@@ -7525,8 +7539,8 @@ complete -F _envtooldyn_hook envtooldyn
         // turning the -F hook into Tab candidates is the rubash engine
         // follow-up, so candidate flow is covered by the -W compspec and the
         // binary probe tests.
-        assert!(shell.executor_mut().has_compspec("envtool"));
-        assert!(shell.executor_mut().has_compspec("envtooldyn"));
+        assert!(shell.session().has_compspec("envtool"));
+        assert!(shell.session().has_compspec("envtooldyn"));
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -7865,7 +7879,7 @@ complete -F _envtooldyn_hook envtooldyn
         .unwrap();
         shell.apply_invocation_before_startup(&invocation).unwrap();
         shell.enter_interactive();
-        assert!(!shell.executor_mut().alias_expansion_enabled());
+        assert!(shell.session_mut().options().get("expand_aliases") != Some(true));
         drop(shell);
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -7890,8 +7904,9 @@ complete -F _envtooldyn_hook envtooldyn
             127
         );
         assert!(shell
-            .executor_mut()
-            .get_env("NIU_ALIAS_BOUNDARY_RESULT")
+            .session_mut()
+            .variables()
+            .resolved_value("NIU_ALIAS_BOUNDARY_RESULT")
             .is_none());
         assert_eq!(shell.execute_interactive_line("nextprompt").unwrap(), 0);
         assert_eq!(
@@ -7923,10 +7938,11 @@ complete -F _envtooldyn_hook envtooldyn
                 .unwrap(),
             0
         );
-        assert!(shell.executor_mut().alias_expansion_enabled());
+        assert!(shell.session_mut().options().get("expand_aliases") == Some(true));
         assert!(shell
-            .executor_mut()
-            .get_env("__RUBASH_ALIAS_STREAMED")
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_ALIAS_STREAMED")
             .is_none());
         assert_eq!(
             shell.aliases.get("ll").map(String::as_str),
@@ -7944,6 +7960,45 @@ complete -F _envtooldyn_hook envtooldyn
         );
         drop(shell);
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// #863 slice 1 parity pin: the two production probes that used to
+    /// read `Executor::alias_expansion_enabled` (the interactive
+    /// reader-batch admission and the script driver's alias routing)
+    /// now read `options().get("expand_aliases")` through the session
+    /// contract. The executor predicate hand-parses the serialized
+    /// shopt state while the view reads the same state through the
+    /// shopt machinery; this pin holds the two reads equal across
+    /// every flip shape the seams can take — plain shopt flips both
+    /// ways and the POSIX-mode fold, where the engine folds
+    /// posixly_correct into the shopt state itself.
+    #[test]
+    fn expand_aliases_options_view_matches_executor_predicate() {
+        let _env_lock = PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        let assert_parity = |shell: &mut Shell, stage: &str| {
+            assert_eq!(
+                shell.session_mut().options().get("expand_aliases") == Some(true),
+                shell.executor_mut().alias_expansion_enabled(),
+                "options view and executor predicate disagree at {stage}"
+            );
+        };
+
+        assert_parity(&mut shell, "test_shell default");
+        shell.session_mut().options().set("expand_aliases", false);
+        assert_parity(&mut shell, "shopt off");
+        shell.session_mut().options().set("expand_aliases", true);
+        assert_parity(&mut shell, "shopt on");
+        shell.session_mut().options().set("posix", true);
+        assert_parity(&mut shell, "posix fold on");
+        shell.session_mut().options().set("expand_aliases", false);
+        assert_parity(&mut shell, "shopt off under posix");
+        shell.session_mut().options().set("posix", false);
+        assert_parity(&mut shell, "posix fold off");
     }
 
     #[test]
@@ -8307,9 +8362,10 @@ complete -F _envtooldyn_hook envtooldyn
         if cfg!(windows) {
             assert!(
                 shell
-                    .executor_mut()
-                    .get_env("HOME")
-                    .is_some_and(is_windows_drive_path),
+                    .session_mut()
+                    .variables()
+                    .resolved_value("HOME")
+                    .is_some_and(|value| is_windows_drive_path(&value)),
                 "HOME should be Windows-native for external tools, got {:?}",
                 shell
                     .session_mut()
@@ -9156,7 +9212,8 @@ complete -F _envtooldyn_hook envtooldyn
     #[test]
     fn issue562_stdin_fast_shell_skips_repl_only_init() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let shell = Shell::new_for_stdin_script_fast().expect("stdin fast shell should initialize");
+        let mut shell =
+            Shell::new_for_stdin_script_fast().expect("stdin fast shell should initialize");
 
         // The #562 fast path carries the same REPL-free construction as a
         // one-shot shell: placeholder prompt backend, no completion scan.
@@ -9165,18 +9222,26 @@ complete -F _envtooldyn_hook envtooldyn
         // …but the stdin naming contract is the stdin one, not the -c one:
         // no script name is pre-bound, so the caller binds argv[0] itself
         // (see run_stdin_script's __RUBASH_SCRIPT_NAME binding).
-        assert!(shell.executor().get_env("__RUBASH_SCRIPT_NAME").is_none());
+        assert!(shell
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SCRIPT_NAME")
+            .is_none());
     }
 
     #[test]
     fn issue562_stdin_full_shell_keeps_repl_capable_init() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let shell = Shell::new_for_stdin_script().expect("stdin shell should initialize");
+        let mut shell = Shell::new_for_stdin_script().expect("stdin shell should initialize");
 
         // The full stdin constructor stays promotable to the REPL (-i or a
         // terminal stdio set), so it must NOT take the fast path.
         assert!(!shell.one_shot);
-        assert!(shell.executor().get_env("__RUBASH_SCRIPT_NAME").is_none());
+        assert!(shell
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SCRIPT_NAME")
+            .is_none());
     }
 
     #[test]
@@ -9185,8 +9250,9 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
         shell
-            .executor_mut()
-            .set_env("PS1", "user:\\u host:\\h dir:\\w \\\\$ ");
+            .session_mut()
+            .variables()
+            .set("PS1", "user:\\u host:\\h dir:\\w \\\\$ ");
         shell.session_mut().variables().set("PS2", "more> ");
 
         shell.run_precmd_hooks();
@@ -9216,16 +9282,24 @@ complete -F _envtooldyn_hook envtooldyn
         let mut shell = test_shell(HookConfig::default());
         shell.history_path = history_dir.path().join("first-history");
         shell
-            .executor_mut()
-            .set_env("PS1", r"\[\033]0;x\007\]`__git_ps1` $ ");
+            .session_mut()
+            .variables()
+            .set("PS1", r"\[\033]0;x\007\]`__git_ps1` $ ");
 
         shell.enter_interactive();
 
         // The foreign value is gone from the environment, so no prompt path
         // (REPL sync or engine interactive stdin) can expand `__git_ps1`.
         // Entry then seeds the GNU compiled-in default (niubash#672),
-        // read back through the same executor face the seed wrote.
-        assert_eq!(shell.executor().get_env("PS1"), Some(GNU_DEFAULT_PS1));
+        // read back through the same variables face the seed wrote.
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("PS1")
+                .as_deref(),
+            Some(GNU_DEFAULT_PS1)
+        );
         // The shell's own theme backend is untouched by the discard.
         assert!(matches!(shell.prompt, PromptBackend::Template(_)));
 
@@ -9259,11 +9333,18 @@ complete -F _envtooldyn_hook envtooldyn
         let history_dir = tempfile::tempdir().unwrap();
         let mut shell = test_shell(HookConfig::default());
         shell.history_path = history_dir.path().join("history");
-        shell.executor_mut().unset_env("PS1");
+        shell.session_mut().variables().unset("PS1");
 
         shell.enter_interactive();
 
-        assert_eq!(shell.executor().get_env("PS1"), Some(GNU_DEFAULT_PS1));
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("PS1")
+                .as_deref(),
+            Some(GNU_DEFAULT_PS1)
+        );
         assert!(!shell.prompt_slot_claimed());
         shell.run_precmd_hooks();
         assert!(
@@ -9271,7 +9352,7 @@ complete -F _envtooldyn_hook envtooldyn
             "the floor keeps rendering under the seeded default"
         );
 
-        shell.executor_mut().set_env("PS1", "mine> ");
+        shell.session_mut().variables().set("PS1", "mine> ");
         assert!(shell.prompt_slot_claimed());
         shell.run_precmd_hooks();
         assert!(matches!(shell.prompt, PromptBackend::Bash(_)));
@@ -9296,8 +9377,9 @@ complete -F _envtooldyn_hook envtooldyn
         // deliberately reuses #117's marker shapes to prove ordering, not
         // content, is the guard.
         shell
-            .executor_mut()
-            .set_env("PS1", r"\u@\h $MSYSTEM \w `__git_ps1` $ ");
+            .session_mut()
+            .variables()
+            .set("PS1", r"\u@\h $MSYSTEM \w `__git_ps1` $ ");
         shell.run_precmd_hooks();
         assert_eq!(
             shell
@@ -9362,8 +9444,9 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
         shell
-            .executor_mut()
-            .set_env("PROMPT_COMMAND", "NIU_HOOK_RAN=1");
+            .session_mut()
+            .variables()
+            .set("PROMPT_COMMAND", "NIU_HOOK_RAN=1");
 
         shell.run_precmd_hooks();
 
@@ -9888,8 +9971,9 @@ complete -F _envtooldyn_hook envtooldyn
             .set("__RUBASH_POSIX_MODE", "1");
         shell.own_login_shell = true;
         shell
-            .executor_mut()
-            .set_env("ENV", &env_file.to_string_lossy());
+            .session_mut()
+            .variables()
+            .set("ENV", &env_file.to_string_lossy());
         let exit = shell.run_startup_files(true);
         assert_eq!(
             exit,
@@ -9945,8 +10029,9 @@ complete -F _envtooldyn_hook envtooldyn
         // rubash#2129: host login classification, not the env carrier.
         shell.own_login_shell = true;
         shell
-            .executor_mut()
-            .set_env("ENV", &env_file.to_string_lossy());
+            .session_mut()
+            .variables()
+            .set("ENV", &env_file.to_string_lossy());
         let exit = shell.run_startup_files(true);
         assert_eq!(exit, None);
         assert_eq!(
@@ -10068,13 +10153,14 @@ complete -F _envtooldyn_hook envtooldyn
         std::fs::create_dir_all(&dir).expect("create sleep link dir");
         std::fs::write(dir.join("sleep.exe"), b"placeholder").expect("write sleep placeholder");
         let old_path = shell
-            .executor()
-            .get_env("PATH")
-            .map(ToString::to_string)
+            .session_mut()
+            .variables()
+            .resolved_value("PATH")
             .unwrap_or_default();
         shell
-            .executor_mut()
-            .set_env("PATH", &format!("{};{}", dir.display(), old_path));
+            .session_mut()
+            .variables()
+            .set("PATH", &format!("{};{}", dir.display(), old_path));
         dir
     }
 
