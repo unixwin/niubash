@@ -65,8 +65,21 @@ fn a4_04_corrupt_spec_error_names_the_file_and_the_cause() {
     let output = run_niu(&home, &["plugin", "sync"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The host canonicalizes its home dir before composing the spec path
+    // (path_utils::normalize_existing_host_path), so on Windows the error
+    // spells the file with the canonicalized prefix (junctions resolved,
+    // no \\?\ verbatim marker) rather than the raw temp-dir spelling.
+    // Compare canonical forms on both sides; the requirement is that the
+    // error names THIS file, not one exact path spelling.
+    let canonical_spec = std::fs::canonicalize(&spec)
+        .map(|path| {
+            let text = path.display().to_string();
+            text.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(text)
+        })
+        .unwrap_or_else(|_| spec.display().to_string());
+    let canonical_spec = canonical_spec.replace('\\', "/");
     assert!(
-        stderr.contains(&spec.display().to_string()),
+        stderr.replace('\\', "/").contains(&canonical_spec),
         "error must name the spec file: {stderr}"
     );
     assert!(
