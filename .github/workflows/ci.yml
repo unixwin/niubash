@@ -116,6 +116,21 @@ jobs:
       - name: cargo check (unix acceptance line)
         run: cargo check --workspace --locked
 
+      # niubash#827: the interactive PTY gate RUNS here, as a hard
+      # step — until this existed, the unix legs only ever proved the
+      # tree compiles, so unix-only interactive regressions
+      # (niubash#826/#828: TAB completion dead on Linux/Termux while
+      # Windows stayed green) were invisible to CI by construction.
+      # The target (tests/issue827_pty_gate.rs) drives the real niu
+      # binary over a pty: boot, completion (file space / directory
+      # slash / menu accept), Ctrl-R, resize+COLUMNS, bracketed
+      # paste, Ctrl-Z/fg. NIU_INTERACTIVE_TESTS=1 turns a missing
+      # pty into a hard failure instead of the driver's desktop skip.
+      - name: cargo test --test issue827_pty_gate (interactive PTY gate)
+        env:
+          NIU_INTERACTIVE_TESTS: "1"
+        run: cargo test --test issue827_pty_gate --locked
+
       # TODO(wave-2): unix lib tests are expected to have failures until the
       # unix runtime work (spawn delegation, signal handling, terminal glue)
       # lands. Track the first green run here, then drop continue-on-error.
@@ -133,6 +148,12 @@ jobs:
   #
   # `aarch64-unknown-linux-ohos` is Tier 2 with host tools, so no external
   # OpenHarmony SDK / clang wrapper is needed for a check-only build.
+  #
+  # niubash#827: these targets are compile-only, and there is no Android
+  # device/emulator lane in CI, so the interactive PTY gate cannot
+  # execute for Android here. The interim Android gate is the Termux
+  # real-machine acceptance run before release, replaying the
+  # tests/issue827_pty_gate.rs scenario list by hand.
   cross-target-check:
     name: cross-target-check (${{ matrix.target }})
     runs-on: ubuntu-latest
