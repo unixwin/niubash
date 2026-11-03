@@ -466,9 +466,15 @@ impl NiubashCompleter {
             .unwrap_or(false);
 
         // Shell-function completions (`NIU_COMPDEFS`): only available while
-        // the interactive REPL has installed the shell bridge.
-        if let Some(result) = compdef_suggestions(&context) {
-            all_suggestions.extend(self.format_completions(result, input, cursor_pos));
+        // the interactive REPL has installed the shell bridge. Skipped
+        // when a compspec owns the command (niubash#836): GNU precedence
+        // gives the compspec the command's arguments outright, and
+        // merging the compdef's candidates into its set produced
+        // silently wrong candidate lists.
+        if !has_compspec {
+            if let Some(result) = compdef_suggestions(&context) {
+                all_suggestions.extend(self.format_completions(result, input, cursor_pos));
+            }
         }
 
         // At command position, also surface matching entries from the current
@@ -875,9 +881,13 @@ fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String
     let pos = context.cursor_pos.min(context.input.len());
     let pos = floor_char_boundary(&context.input, pos);
     let before_cursor = &context.input[..pos];
-    let start = before_cursor
-        .rfind([';', '|', '&', '\n'])
-        .map(|idx| idx + 1)
+    // niubash#836: find the segment start with the completion module's
+    // quote/extglob-aware separator scan — a raw `rfind` over
+    // `[';', '|', '&', '\n']` treats a quoted `|`/`;` as a command
+    // boundary, so `mycmd "a|b" <TAB>` looked the compdef up under the
+    // fragment `b"` instead of `mycmd`.
+    let start = crate::completion::last_command_separator(before_cursor)
+        .map(|idx| crate::completion::ceil_char_boundary(before_cursor, idx + 1))
         .unwrap_or(0);
     let segment = before_cursor[start..].trim_start();
     let words = split_shell_words(segment);
@@ -1026,6 +1036,117 @@ niu_git_comp() {
         // armed (the thread-local bridge would otherwise defer the drop
         // to thread teardown).
         crate::shell::uninstall_completion_bridge();
+    }
+
+    /// niubash#836: a command with BOTH a GNU compspec and a
+    /// `NIU_COMPDEFS` compdef is owned by the compspec — the compdef's
+    /// candidates must not merge into its set. The control half (no
+    /// compspec registered) proves the compdef still fires there.
+    #[test]
+    fn issue836_compdef_skipped_when_compspec_owns_the_command() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(
+                r#"
+niu_git_comp() {
+    NIU_COMP_RESULT="compdefonly"
+}
+complete -W 'speconly' git
+"#
+            )
+            .is_ok());
+        shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("git ", 4);
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["speconly"],
+            "the compspec owns git: the compdef candidate must not merge in"
+        );
+        crate::shell::uninstall_completion_bridge();
+
+        // Control: the same compdef without a compspec still produces
+        // its candidate.
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(
+                r#"
+niu_git_comp() {
+    NIU_COMP_RESULT="compdefonly"
+}
+"#
+            )
+            .is_ok());
+        shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+        let suggestions = completer.complete("git ", 4);
+        assert!(
+            suggestions.iter().any(|s| s.value == "compdefonly"),
+            "without a compspec the compdef must still fire, got {suggestions:?}"
+        );
+        crate::shell::uninstall_completion_bridge();
+    }
+
+    /// niubash#836: `command_words_before_cursor` must split on the
+    /// cursor segment's real separators only — a `|`/`;` inside quotes
+    /// is word text, not a command boundary.
+    #[test]
+    fn issue836_command_words_before_cursor_uses_the_quoted_segment() {
+        let words = |input: &str| {
+            let context =
+                CompletionContext::new(PathBuf::from("."), input.to_string(), input.len());
+            command_words_before_cursor(&context)
+        };
+        // The quoted `|` after the last real separator used to become
+        // the boundary, leaving the fragment `b"` as the command word.
+        assert_eq!(
+            words("mycmd \"a|b\" ar"),
+            Some(vec![
+                "mycmd".to_string(),
+                "a|b".to_string(),
+                "ar".to_string()
+            ])
+        );
+        assert_eq!(
+            words("true; mycmd \"a|b\" ar"),
+            Some(vec![
+                "mycmd".to_string(),
+                "a|b".to_string(),
+                "ar".to_string()
+            ])
+        );
+        assert_eq!(
+            words("mycmd 'a;b' ar"),
+            Some(vec![
+                "mycmd".to_string(),
+                "a;b".to_string(),
+                "ar".to_string()
+            ])
+        );
+        // Real separators still split.
+        assert_eq!(
+            words("echo \"a|b\"; mycmd ar"),
+            Some(vec!["mycmd".to_string(), "ar".to_string()])
+        );
+        assert_eq!(
+            words("ls | mycmd ar"),
+            Some(vec!["mycmd".to_string(), "ar".to_string()])
+        );
     }
 
     #[test]

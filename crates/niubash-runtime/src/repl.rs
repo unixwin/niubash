@@ -10,6 +10,7 @@ use std::{borrow::Cow, io::Write};
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::cycle_menu::SharedCycleSession;
 use crate::completion::insert_menu::InsertStopMenu;
+use crate::completion::menu_open::MenuOpenFlagMenu;
 use crate::completion::NiubashCompleter;
 use crate::config::{
     CompletionInteraction, CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding,
@@ -372,6 +373,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // too instead of leaving M-* without a candidate source.
     let engine_completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     let menu_open = Arc::new(AtomicBool::new(false));
+    // niubash#832: every editor build starts with the flag DOWN. The
+    // Arc is fresh per build today, but the guarantee is stated, not
+    // incidental: a flag stuck true silences the hinter for the whole
+    // session, so no build may inherit one.
+    menu_open.store(false, std::sync::atomic::Ordering::Relaxed);
     let completion_menu = ReedlineMenu::WithCompleter {
         menu: configured_completion_menu(
             COMPLETION_MENU,
@@ -382,10 +388,16 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         ),
         completer: Box::new(completer),
     };
-    let history_menu = ReedlineMenu::HistoryMenu(Box::new(configured_list_menu(
-        HISTORY_MENU,
-        menu_config.history_page_size,
-        menu_config,
+    // niubash#832: the history menu is a ListMenu too — it carries the
+    // flag through the same wrapper as the completion list faces, so
+    // the hinter stands down while history is being browsed as well.
+    let history_menu = ReedlineMenu::HistoryMenu(Box::new(MenuOpenFlagMenu::new(
+        Box::new(configured_list_menu(
+            HISTORY_MENU,
+            menu_config.history_page_size,
+            menu_config,
+        )),
+        menu_open.clone(),
     )));
 
     let build_args = (
@@ -620,7 +632,9 @@ fn configured_completion_menu(
             let menu = crate::completion::gnu_menu::GnuMenu::default()
                 .with_name(name)
                 .with_marker(gnu_indicator);
-            Box::new(menu)
+            // niubash#832: the GNU menu carries the hinter stand-down
+            // flag through the wrapper, like every other style.
+            Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
         }
         CompletionStyle::Ide => {
             // Multi-column popup with descriptions (VS Code style). Column
@@ -635,10 +649,15 @@ fn configured_completion_menu(
                 .with_description_mode(reedline::DescriptionMode::PreferRight);
             // insert interaction: first TAB splices the common prefix and
             // stops; TAB #2 opens the popup (niubash#778 follow-up).
+            // niubash#832: the flag wrapper sits OUTSIDE the insert-stop
+            // wrapper so a splice-and-stop deactivation lowers the flag.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
         CompletionStyle::Column => {
@@ -665,10 +684,14 @@ fn configured_completion_menu(
         }
         CompletionStyle::List => {
             let menu = configured_list_menu(name, config.completion_page_size, config);
+            // niubash#832: flag wrapper, same composition as the Ide arm.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
         CompletionStyle::Inline => {
@@ -678,10 +701,14 @@ fn configured_completion_menu(
                 .with_page_size(1)
                 .with_max_entry_lines(config.max_entry_lines)
                 .with_only_buffer_difference(false);
+            // niubash#832: flag wrapper, same composition as the Ide arm.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
     }
@@ -1184,7 +1211,12 @@ fn run_readline_command(
                 });
             }
         }
-        _ => {}
+        _ => {
+            // niubash#835: a name that lands here rode the readline
+            // host channel but has no host implementation — name it
+            // in the log instead of swallowing it silently.
+            log::warn!("readline command {name:?} has no host implementation; ignoring");
+        }
     }
     SentinelOutcome::Resumed
 }
@@ -3491,44 +3523,50 @@ fn normalize_macro_escapes(text: &str) -> String {
     if !text.contains('\\') {
         return text.to_string();
     }
-    let mut out = String::with_capacity(text.len());
+    // niubash#844: accumulate BYTES, not chars. A `\xHH` escape names a
+    // raw byte; pushing it as `byte as char` widened 0x80..=0xFF to
+    // U+0080..U+00FF, whose UTF-8 re-encoding is two bytes — so
+    // `\xc3\xa9` (the UTF-8 spelling of `é`) came out as `Ã©`
+    // mojibake. Ordinary text is UTF-8-encoded into the same byte
+    // stream and the whole output is decoded once at the end.
+    let mut out: Vec<u8> = Vec::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
-            out.push(c);
+            push_macro_char(&mut out, c);
             continue;
         }
         match chars.next() {
-            None => out.push('\\'),
+            None => push_macro_char(&mut out, '\\'),
             Some(tag @ ('C' | 'M')) if chars.peek() == Some(&'-') => {
                 chars.next(); // consume '-'
                 match chars.next() {
                     Some(key) => {
                         if tag == 'M' {
-                            out.push('\u{1b}');
-                            out.push(key);
+                            push_macro_char(&mut out, '\u{1b}');
+                            push_macro_char(&mut out, key);
                         } else {
-                            out.push(control_byte_for_letter(key));
+                            push_macro_char(&mut out, control_byte_for_letter(key));
                         }
                     }
                     None => {
-                        out.push('\\');
-                        out.push(tag);
-                        out.push('-');
+                        push_macro_char(&mut out, '\\');
+                        push_macro_char(&mut out, tag);
+                        push_macro_char(&mut out, '-');
                     }
                 }
             }
-            Some('e') => out.push('\u{1b}'),
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('a') => out.push('\u{7}'),
-            Some('b') => out.push('\u{8}'),
-            Some('d') => out.push('\u{7f}'),
-            Some('f') => out.push('\u{c}'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('v') => out.push('\u{b}'),
+            Some('e') => push_macro_char(&mut out, '\u{1b}'),
+            Some('\\') => push_macro_char(&mut out, '\\'),
+            Some('"') => push_macro_char(&mut out, '"'),
+            Some('a') => push_macro_char(&mut out, '\u{7}'),
+            Some('b') => push_macro_char(&mut out, '\u{8}'),
+            Some('d') => push_macro_char(&mut out, '\u{7f}'),
+            Some('f') => push_macro_char(&mut out, '\u{c}'),
+            Some('n') => push_macro_char(&mut out, '\n'),
+            Some('r') => push_macro_char(&mut out, '\r'),
+            Some('t') => push_macro_char(&mut out, '\t'),
+            Some('v') => push_macro_char(&mut out, '\u{b}'),
             Some('x') => {
                 // \xHH: two hex digits; fewer keeps the escape literal.
                 let hi = chars.next();
@@ -3536,27 +3574,34 @@ fn normalize_macro_escapes(text: &str) -> String {
                 match (hi, lo) {
                     (Some(h), Some(l)) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
                         let byte = u8::from_str_radix(&format!("{h}{l}"), 16).unwrap_or(0);
-                        out.push(byte as char);
+                        out.push(byte);
                     }
                     _ => {
-                        out.push('\\');
-                        out.push('x');
+                        push_macro_char(&mut out, '\\');
+                        push_macro_char(&mut out, 'x');
                         if let Some(h) = hi {
-                            out.push(h);
+                            push_macro_char(&mut out, h);
                         }
                         if let Some(l) = lo {
-                            out.push(l);
+                            push_macro_char(&mut out, l);
                         }
                     }
                 }
             }
             Some(other) => {
-                out.push('\\');
-                out.push(other);
+                push_macro_char(&mut out, '\\');
+                push_macro_char(&mut out, other);
             }
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Append one char's UTF-8 bytes to a byte-accumulating macro output
+/// (niubash#844, see [`normalize_macro_escapes`]).
+fn push_macro_char(out: &mut Vec<u8>, c: char) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 }
 
 /// The control byte a `\C-` letter names (readline translate_keyseq):
@@ -3861,9 +3906,21 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "complete" => Some(completion_event()),
         // `menu-complete` is GNU's cycling completion: the same event
         // (the menu cycles under the host's interaction rules,
-        // niubash#731). The backward/old variants stay undelivered —
-        // the editor has no open-the-menu-backward event.
+        // niubash#731).
         "menu-complete" => Some(completion_event()),
+        // GNU `menu-complete-backward` (complete.c
+        // `rl_menu_complete_backward`, niubash#835): step the open
+        // menu backwards, opening it when closed — the mirror of the
+        // cycle interaction's TAB composition in
+        // `add_menu_keybindings`. `MenuPrevious` is Handled only
+        // while a menu is active and `Menu(name)` is Inapplicable
+        // while one is, so the UntilFound order delivers exactly one
+        // of them per press. (The `old-menu-complete` spelling stays
+        // undelivered.)
+        "menu-complete-backward" => Some(ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::MenuPrevious,
+            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+        ])),
         // GNU's listing / bulk-insert completion functions (complete.c
         // `rl_possible_completions`, `rl_insert_completions`).
         "possible-completions" => Some(ReedlineEvent::PossibleCompletions),
@@ -3874,7 +3931,11 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             Some(edit_event(EditCommand::CutFromLineStart))
         }
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
-        "yank" => Some(edit_event(EditCommand::PasteCutBufferBefore)),
+        // niubash#850: `Yank`, not `PasteCutBufferBefore` — the
+        // editor's YankPop gates on the last edit being Yank/YankPop,
+        // so the paste-before variant made every later yank-pop
+        // inapplicable (a dead M-y after any niu yank).
+        "yank" => Some(edit_event(EditCommand::Yank)),
         "undo" => Some(edit_event(EditCommand::Undo)),
         "suspend" => Some(ReedlineEvent::Suspend),
         "redo" => Some(edit_event(EditCommand::Redo)),
@@ -3899,7 +3960,12 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "unix-filename-rubout" | "vi-filename-rubout" => {
             Some(edit_event(EditCommand::CutFilenameLeft))
         }
-        "exchange-point-and-mark" => Some(edit_event(EditCommand::SwapCursorAndAnchor)),
+        // niubash#850: the real `ExchangePointAndMark` (rl_mark
+        // semantics, the command the editor's own C-x C-x delivers),
+        // not `SwapCursorAndAnchor` — the selection-anchor flip
+        // no-ops without a live selection, so the two paths to the
+        // same GNU function used to do different things.
+        "exchange-point-and-mark" => Some(edit_event(EditCommand::ExchangePointAndMark)),
         // GNU `set-mark` (C-@ / M-SPC): drop the mark at point.
         "set-mark" => Some(edit_event(EditCommand::SetMark)),
         // Verbatim next-key insertion (`rl_quoted_insert`).
@@ -3952,13 +4018,14 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // explicit argument — the only shape reachable without
         // readline's prefix-argument machinery): move to the line
         // start, insert the comment-begin string (GNU's default is
-        // `#`, rlconf.h `RL_COMMENT_BEGIN_DEFAULT`), and accept the
+        // `# `, rlconf.h `RL_COMMENT_BEGIN_DEFAULT` — the same string
+        // the editor's own M-# inserts, niubash#850), and accept the
         // line. A customized comment-begin is not consulted, the same
         // static-arm limit as the rest of this table (niubash#731).
         "insert-comment" => Some(ReedlineEvent::Multiple(vec![
             ReedlineEvent::Edit(vec![
                 EditCommand::MoveToLineStart { select: false },
-                EditCommand::InsertString("#".to_string()),
+                EditCommand::InsertString("# ".to_string()),
             ]),
             ReedlineEvent::Enter,
         ])),
@@ -4135,7 +4202,9 @@ fn gnu_default_chord_bindings() -> Vec<ChordBinding> {
         (')', ReedlineEvent::EndKbdMacro),
         ('e', ReedlineEvent::CallLastKbdMacro),
         ('u', edit_event(EditCommand::Undo)),
-        ('x', edit_event(EditCommand::SwapCursorAndAnchor)),
+        // niubash#850: C-x C-x is exchange-point-and-mark — the real
+        // mark command, matching the native_widget_event arm.
+        ('x', edit_event(EditCommand::ExchangePointAndMark)),
     ] {
         chords.push(ChordBinding {
             keys: vec![
@@ -4280,11 +4349,16 @@ fn collect_chord_bindings(
 /// chord layer's quote state (niubash#731): any parseable sequence
 /// counts — a single key (`"\C-v"`) or a chain — filtered by the
 /// same keymap targeting as every other engine-bind consumer. The
-/// pinned reedline fork has no quoted-insert event of its own (no
-/// such variant in its `ReedlineEvent`/`EditCommand` at rev
-/// 401393f), so the delivery is the host layer's: completing one of
-/// these sequences arms the quote, and the next key inserts its own
-/// character literally.
+/// pinned ruline fork DOES carry a quoted-insert event of its own
+/// (`ReedlineEvent::QuotedInsert` at rev 8351932, dispatched in its
+/// engine — the `native_widget_event` arm returns it), but sequences
+/// arriving through the engine-bind/chord layer are intercepted by
+/// this layer's quote state before the engine sees them, so the host
+/// delivery still stands for that path: completing one of these
+/// sequences arms the quote, and the next key inserts its own
+/// character literally. (niubash#835: this comment previously claimed
+/// the fork had no such variant, citing the superseded rev 401393f —
+/// that claim was stale.)
 fn collect_quote_sequences(
     entries: &[crate::bind_surface::EngineBindEntry],
     target: NativeKeymapTarget,
@@ -6745,6 +6819,54 @@ mod tests {
         assert_eq!(menu.name(), "custom_menu");
     }
 
+    /// niubash#832: every completion style's menu raises the shared
+    /// menu_open flag while it is active — the hinter stand-down used
+    /// to reach only the cycle and column menus, so the GNU / Ide /
+    /// List / Inline menus painted under the ghost text (and Right
+    /// accepted the ghost instead of navigating the grid).
+    #[test]
+    fn issue832_every_completion_style_raises_the_menu_open_flag() {
+        use std::sync::atomic::Ordering;
+        for style in [
+            CompletionStyle::Gnu,
+            CompletionStyle::Ide,
+            CompletionStyle::Column,
+            CompletionStyle::List,
+            CompletionStyle::Inline,
+        ] {
+            for interaction in [CompletionInteraction::Insert, CompletionInteraction::Select] {
+                let flag = Arc::new(AtomicBool::new(false));
+                let config = MenuConfig {
+                    completion_page_size: 10,
+                    history_page_size: 7,
+                    max_entry_lines: 3,
+                    completion_style: style,
+                    completion_interaction: interaction,
+                };
+                let mut menu =
+                    configured_completion_menu(COMPLETION_MENU, config, "", flag.clone(), None);
+                assert!(
+                    !flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: the flag must start down"
+                );
+                menu.menu_event(reedline::MenuEvent::Activate(false));
+                assert!(
+                    menu.is_active(),
+                    "{style:?}/{interaction:?}: the menu must be active"
+                );
+                assert!(
+                    flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: an open menu must raise the flag"
+                );
+                menu.menu_event(reedline::MenuEvent::Deactivate);
+                assert!(
+                    !flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: the flag must fall with the menu"
+                );
+            }
+        }
+    }
+
     #[test]
     fn completion_menu_passes_full_buffer_not_only_difference() {
         // When FromStr calls configure the completion-list menu, only_buffer_difference
@@ -7960,7 +8082,7 @@ mod tests {
     /// `CharSearch`/the yank-arg pair/`OperateAndGetNext`/the kbd-macro
     /// trio/the numeric-argument events/`ClearScrollback`/`OpenEditor` and
     /// the `EditCommand` additions (`YankPop`, `SwapWords`,
-    /// `CapitalizeWord`, `SwapCursorAndAnchor`, `RevertLine`,
+    /// `CapitalizeWord`, `ExchangePointAndMark`, `RevertLine`,
     /// `CutFilenameLeft`, `DeleteHorizontalSpace`). Every arm below must
     /// produce the real event shape, not the unknown-widget sentinel.
     #[test]
@@ -7980,7 +8102,7 @@ mod tests {
         );
         assert_eq!(
             native_widget_event("exchange-point-and-mark"),
-            Some(edit_event(EditCommand::SwapCursorAndAnchor))
+            Some(edit_event(EditCommand::ExchangePointAndMark))
         );
         assert_eq!(
             native_widget_event("revert-line"),
@@ -8068,13 +8190,107 @@ mod tests {
         );
 
         // `insert-comment` is the composite: go to line start, insert
-        // `#`, accept the line.
+        // `# `, accept the line.
         assert_eq!(
             native_widget_event("insert-comment"),
             Some(ReedlineEvent::Multiple(vec![
                 ReedlineEvent::Edit(vec![
                     EditCommand::MoveToLineStart { select: false },
-                    EditCommand::InsertString("#".to_string()),
+                    EditCommand::InsertString("# ".to_string()),
+                ]),
+                ReedlineEvent::Enter,
+            ]))
+        );
+    }
+
+    /// niubash#835: `menu-complete-backward` used to fall through to
+    /// the shell-function widget sentinel and be swallowed — a dead
+    /// key via NIU_BINDKEYS/bundle binds. It now dispatches the
+    /// backward-cycling composition: step the open menu backwards,
+    /// opening it when closed (and it counts as delivered, so GNU
+    /// default bindings for it can land).
+    #[test]
+    fn issue835_menu_complete_backward_dispatches_backward_cycling() {
+        match native_widget_event("menu-complete-backward") {
+            Some(ReedlineEvent::UntilFound(events)) => {
+                assert_eq!(
+                    events,
+                    vec![
+                        ReedlineEvent::MenuPrevious,
+                        ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+                    ]
+                );
+            }
+            other => panic!(
+                "menu-complete-backward must dispatch the backward-cycling \
+                 composition, got {other:?}"
+            ),
+        }
+        assert!(gnu_name_is_delivered("menu-complete-backward"));
+    }
+
+    /// niubash#844: `\xHH` macro escapes name raw bytes. Decoding
+    /// them as `byte as char` widened every byte >= 0x80 into a
+    /// two-byte UTF-8 sequence — mojibake in the normalized text and
+    /// in any KeySequence/insert replay built from it.
+    #[test]
+    fn issue844_hex_escapes_decode_as_bytes_not_chars() {
+        // The UTF-8 spelling of `é` survives as `é` (one char, two
+        // bytes) — the byte-as-char decode produced `Ã©` (four bytes).
+        assert_eq!(normalize_macro_escapes(r"\xc3\xa9"), "é");
+        assert_eq!(normalize_macro_escapes(r"\xc3\xa9").len(), 2);
+        // Plain text around the escapes is untouched, and a lone
+        // non-UTF-8 byte degrades through from_utf8_lossy instead of
+        // widening into U+00E9.
+        assert_eq!(normalize_macro_escapes(r"a\xc3\xa9b"), "aéb");
+        assert_eq!(normalize_macro_escapes(r"\xe9"), "\u{fffd}");
+        // ASCII escapes and the other spellings keep their meaning.
+        assert_eq!(normalize_macro_escapes(r"\x41\x42"), "AB");
+        assert_eq!(normalize_macro_escapes(r"\e"), "\u{1b}");
+        assert_eq!(normalize_macro_escapes(r"\n"), "\n");
+        // Fewer than two hex digits keeps the escape literal.
+        assert_eq!(normalize_macro_escapes(r"\xg1"), r"\xg1");
+        assert_eq!(normalize_macro_escapes(r"\x"), r"\x");
+    }
+
+    /// niubash#850: three host arms named the wrong editor command
+    /// for their GNU function. `yank` must be `EditCommand::Yank`
+    /// (YankPop in the editor gates on the last edit being Yank /
+    /// YankPop — `PasteCutBufferBefore` made M-y permanently
+    /// inapplicable after a niu yank); `exchange-point-and-mark`
+    /// must be the mark command the editor's own C-x C-x delivers,
+    /// not the selection-anchor flip; the `insert-comment` composite
+    /// must insert `# `, the `RL_COMMENT_BEGIN_DEFAULT` string the
+    /// editor's M-# inserts.
+    #[test]
+    fn issue850_host_mappings_match_the_editors_own_commands() {
+        assert_eq!(
+            native_widget_event("yank"),
+            Some(edit_event(EditCommand::Yank))
+        );
+        assert_eq!(
+            native_widget_event("exchange-point-and-mark"),
+            Some(edit_event(EditCommand::ExchangePointAndMark))
+        );
+        // The C-x C-x chord entry delivers the same command as the
+        // named arm — one GNU function, one command, every path.
+        let chord = gnu_default_chord_bindings()
+            .into_iter()
+            .find(|chord| {
+                chord.keys
+                    == vec![
+                        (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                        (KeyModifiers::NONE, KeyCode::Char('x')),
+                    ]
+            })
+            .expect("the C-x C-x chord entry exists");
+        assert_eq!(chord.event, edit_event(EditCommand::ExchangePointAndMark));
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![
+                    EditCommand::MoveToLineStart { select: false },
+                    EditCommand::InsertString("# ".to_string()),
                 ]),
                 ReedlineEvent::Enter,
             ]))
@@ -8117,7 +8333,7 @@ mod tests {
             Some(ReedlineEvent::Multiple(vec![
                 ReedlineEvent::Edit(vec![
                     EditCommand::MoveToLineStart { select: false },
-                    EditCommand::InsertString("#".to_string()),
+                    EditCommand::InsertString("# ".to_string()),
                 ]),
                 ReedlineEvent::Enter,
             ]))
