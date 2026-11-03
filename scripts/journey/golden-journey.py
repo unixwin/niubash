@@ -2665,8 +2665,12 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     # Durable receipts (screen tails can drop at process exit — the files
     # are the truth, the smoke-journey discipline).
     rc_path = home / ".niubashrc"
-    spec_path = home / ".niubash" / "plugins.toml"
-    journal_path = home / ".niubash" / "setup-journal.toml"
+    # The spec and the setup journal are JSON since the 1.5.0
+    # product-TOML deletion (plugins.json, setup-journal.json); the
+    # .toml paths here named files the product no longer writes, so
+    # every read below silently saw "".
+    spec_path = home / ".niubash" / "plugins.json"
+    journal_path = home / ".niubash" / "setup-journal.json"
     rc = rc_path.read_text(encoding="utf-8") if rc_path.is_file() else ""
     spec = spec_path.read_text(encoding="utf-8") if spec_path.is_file() else ""
     journal = (journal_path.read_text(encoding="utf-8")
@@ -2675,21 +2679,28 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     finish_file = verdict.transcripts / "J2-finish.txt"
     if finish_file.is_file():
         finish_text = finish_file.read_text(encoding="utf-8")
-    # The #359 contract: the rc carries the pick as a human-facing note
-    # and NEVER as a theme line — the activation lives in the generated
-    # loader (probe evidence, 2026-10-19: "# Prompt owned by the oh-my-bash
-    # theme 'powerline-multiline'; PS1 renders via the bash-compatible
-    # channel." + ~/.niubash/generated/plugins.niu holding the OSH_THEME
-    # line).
+    # The #359 contract: the pick lands as a human-facing ownership note
+    # and NEVER as a theme line in the user's rc — the wizard's themed rc
+    # is create-only and parks at ~/.niubash/candidates/
+    # setup-proposed.niubashrc (setup_wizard.rs:2736); the user's own
+    # ~/.niubashrc is never rewritten with it. Activation lives in the
+    # generated loader (~/.niubash/generated/plugins.niu holding the
+    # OSH_THEME line). (The 2026-10-19 probe this check was written
+    # against predates the create-only parking; release run 41597035448
+    # confirmed the note is in the candidates file, not the rc.)
     loader_path = home / ".niubash" / "generated" / "plugins.niu"
     loader = (loader_path.read_text(encoding="utf-8")
               if loader_path.is_file() else "")
-    step.check("~/.niubashrc written with the pick's ownership note "
-               "(theme lines retired from the rc — #359)",
-               rc_path.is_file()
-               and ("# Prompt owned by the oh-my-bash theme "
-                    "'powerline-multiline'") in rc,
-               f"rc exists: {rc_path.is_file()}")
+    proposed_path = (home / ".niubash" / "candidates"
+                     / "setup-proposed.niubashrc")
+    proposed = (proposed_path.read_text(encoding="utf-8")
+                if proposed_path.is_file() else "")
+    step.check("the pick's ownership note lands in the proposed rc "
+               "(candidates/setup-proposed.niubashrc — the wizard "
+               "never rewrites the user's rc, #359)",
+               ("# Prompt owned by the oh-my-bash theme "
+                "'powerline-multiline'") in proposed,
+               f"proposed exists: {proposed_path.is_file()}")
     step.check("generated loader carries the picked theme (the #359 "
                "activation plane)",
                "OSH_THEME='powerline-multiline'" in loader
@@ -2701,9 +2712,8 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                "bash-completion" in spec)
     step.check("spec carries the picked theme",
                "powerline-multiline" in spec)
-    step.check("setup journal records collection = 'full'",
-               "collection = 'full'" in journal
-               or 'collection = "full"' in journal)
+    step.check("setup journal records collection 'full'",
+               '"collection": "full"' in journal)
     step.check("finish screen undo receipts captured",
                "Undo this run" in finish_text
                or "Undo this run" in session.raw_text())
