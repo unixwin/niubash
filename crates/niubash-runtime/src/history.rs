@@ -1196,9 +1196,15 @@ impl HistoryStore {
     /// parallel `stamps` vector. Unset, the byte stream is exactly
     /// the plain one.
     fn flush(&mut self, path: &Path, write_timestamps: bool) -> io::Result<()> {
-        if let Some(base_dir) = path.parent() {
-            fs::create_dir_all(base_dir)?;
-        }
+        // niubash#890: no directory creation here. GNU's history write
+        // faces (lib/readline/histfile.c write_history / the append
+        // face behind history -a) open the file and create nothing
+        // else: when the parent directory does not exist the open
+        // fails and the caller degrades silently. The default HISTFILE
+        // is $HOME/.niubash_history, so the recursive create_dir_all
+        // this replaces manufactured an entire nonexistent HOME tree
+        // as a side effect of a flush. The file itself is still
+        // created by the open below whenever its parent exists.
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1257,10 +1263,8 @@ impl HistoryStore {
             .map(|(stamp, _)| stamp.clone())
             .collect();
 
-        if let Some(base_dir) = path.parent() {
-            fs::create_dir_all(base_dir)?;
-        }
-
+        // niubash#890: same rule as flush — the merge's write legs
+        // create the file, never its parent directories.
         let file = fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -3406,6 +3410,55 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(commands, vec!["echo fallback"]);
         assert_eq!(std::fs::read_to_string(parent).unwrap(), "not a directory");
+    }
+
+    /// niubash#890: a history flush must never manufacture directories.
+    /// GNU's write faces (lib/readline/histfile.c write_history and the
+    /// append face behind `history -a`) open $HISTFILE and create
+    /// nothing else; the default HISTFILE is $HOME/.niubash_history,
+    /// so the recursive create_dir_all the write faces used to run
+    /// materialized an entire nonexistent HOME tree as a flush side
+    /// effect. A missing parent now fails the open (NotFound) and the
+    /// callers' existing silent-degrade paths take it from there.
+    #[test]
+    fn flush_creates_no_directories_for_a_missing_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_home = temp.path().join("no-such-home");
+        let path = missing_home.join(".niubash_history");
+
+        let mut store = HistoryStore::new(100);
+        store.save(HistoryItem::from_command_line("echo one"));
+        let err = store
+            .flush(&path, false)
+            .expect_err("flush into a missing parent must fail, not create it");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        assert!(
+            !missing_home.exists(),
+            "the flush must not create the parent tree"
+        );
+
+        // The merge face (construction / explicit reloads) follows the
+        // same rule, and construction from such a path fails the same
+        // way — that failure is what the provider's degrade-to-memory
+        // fallback keys on.
+        let mut store = HistoryStore::new(100);
+        assert!(store.merge_from_disk(&path, false).is_err());
+        assert!(!missing_home.exists());
+        assert!(HistoryStore::load_from_file(100, &path).is_err());
+        assert!(!missing_home.exists());
+    }
+
+    /// The flip side of niubash#890: only directory creation went
+    /// away — with the parent present, the flush still creates the
+    /// history FILE itself.
+    #[test]
+    fn flush_still_creates_the_file_when_the_parent_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".niubash_history");
+        let mut store = HistoryStore::new(100);
+        store.save(HistoryItem::from_command_line("echo one"));
+        store.flush(&path, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo one\n");
     }
 
     #[test]
