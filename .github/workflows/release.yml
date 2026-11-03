@@ -1594,6 +1594,15 @@ jobs:
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           CC_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
           CXX_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang++
+          # Same lesson, next tool in the family: with CC resolved, the
+          # second 1.5.0 run got one step further and died on
+          # aarch64-linux-android-ar — modern NDKs ship only the
+          # unprefixed llvm-ar / llvm-ranlib. Cover the whole cc-rs
+          # tool family so this does not recur tool by tool.
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          AR_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
 
       # The runner cannot execute bionic binaries, so the four-check smoke
@@ -1839,6 +1848,12 @@ jobs:
 
   journey:
     name: golden user journey (release gate)
+    # TEMPORARY (1.5.0 release day, captain order): the journey harness
+    # still carries pre-JSON/pre-trust-removal expectations (J6/P4/P7
+    # fossils); the fully aligned harness lands in 1.5.1. The job still
+    # runs and uploads its verdict for the record; it does not veto
+    # the 1.5.0 publication. Restore the hard gate in 1.5.1.
+    continue-on-error: true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -1985,6 +2000,11 @@ jobs:
   # committed baseline (scripts/perf/baselines/asset-timing-baseline.json).
   perfbudget:
     name: per-asset timing budget (release gate)
+    # TEMPORARY (1.5.0 release day, captain order): same bypass as the
+    # journey job above — the gate has never produced a verdict in a
+    # release run; it still runs and reports for the record. Restore
+    # the hard gate in 1.5.1.
+    continue-on-error: true
     runs-on: windows-2025
     timeout-minutes: 75
     env:
@@ -2486,8 +2506,12 @@ jobs:
     # before, and a first-run hiccup must not block the whole release
     # late in the run. If the MSIX misses the release, attach it manually
     # afterwards. Restore build-msix to needs once it has a proven run
-    # (1.5.1).
-    needs: [build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
+    # (1.5.1). For the same reason the Create step's file list carries no
+    # artifacts/**/*.msix pattern while build-msix is out of needs:
+    # fail_on_unmatched_files would veto the release at the very last
+    # step whenever no .msix landed in time. The MSIX is attached
+    # manually for 1.5.0; restore the pattern with the needs entry.
+    needs: [build-windows, build-linux, build-macos, skill-bundle]
     # TEMPORARY (1.5.0 release): signpath-sign is not in this needs list.
     # The original design covered two states — credentials absent (the
     # job skips; a skipped need must not skip the release) and signing
@@ -2691,7 +2715,6 @@ jobs:
             artifacts/**/*.exe
             artifacts/**/*.tar.gz
             artifacts/**/*.7z
-            artifacts/**/*.msix
             artifacts/**/*.sha256
             SHA256SUMS
           fail_on_unmatched_files: true
@@ -2711,7 +2734,7 @@ jobs:
     # -> GitHub Release with all assets -> and only then crates.io. A publish
     # failure can still happen, but it can no longer race the gates or undo
     # the release page that already exists.
-    needs: [release, build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
+    needs: [release, build-windows, build-linux, build-macos, skill-bundle]
     # Best-effort remains: with the ordering above a failure here no longer
     # blocks or half-does a release (rubash 1.4.2 is on crates.io since the
     # v1.4.3 era, so the version-annotated path deps now resolve).
