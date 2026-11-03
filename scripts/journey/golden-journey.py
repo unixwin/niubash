@@ -3418,8 +3418,8 @@ def gallery_walk_to(session: Session, candidates):
 def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
                  pick, expect_current: str = None):
     """One `niu setup` re-run inside a live REPL session (setup_wizard.rs
-    rerun_wizard — 'Reconfigure your interactive prompt/plugins. Existing
-    rc will be backed up.'). pick=None answers the gallery's
+    rerun_wizard — 'Reconfigure your interactive prompt/plugins. Your
+    existing rc stays untouched.'). pick=None answers the gallery's
     'Skip - keep my current theme' (the highlighted default); a name or
     candidate list is DOWN-walked in the gallery. Every question after the
     gallery (Q2.6 TAB completion style, Q2.7 TAB completion interaction,
@@ -3487,12 +3487,23 @@ def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
     session.wait_for("Apply this configuration?", timeout=60)
     session.wait_quiescent()
     session.answer(ENTER)  # Apply — the highlighted default
-    session.wait_for("Shell rc written", timeout=120)
+    # The rc outcome line names the branch the run took
+    # (setup_wizard.rs write_rc_and_mark_done): a created rc prints
+    # "Shell rc written to ..."; a re-run's occupied slot prints the
+    # proposal line instead (create-only — the existing rc is never
+    # written). Wait for either.
+    session.wait_for("Shell rc written", "proposed configuration was "
+                     "written", timeout=120)
     try:
         session.wait_for("Undo this run", timeout=60)
         step.check("finish screen printed the undo receipts", True)
-        session.wait_for("restore the previous rc", timeout=30)
-        step.check("undo receipt names the rc restore (cp line)", True)
+        # The re-run's rc receipt is the proposal sample's removal —
+        # there is no cp-restore line anymore: create-only setup never
+        # backs an rc up, so there is nothing to restore FROM
+        # (setup_wizard.rs setup_undo_lines, niubash#359).
+        session.wait_for("remove the unused proposal sample", timeout=30)
+        step.check("undo receipt names the proposal-sample removal "
+                   "(the rc was never touched)", True)
         if picked is not None:
             session.wait_for("niu plugin disable", timeout=30)
             step.check("undo receipt names `niu plugin disable` for the pick",
@@ -3508,12 +3519,13 @@ def hop_terminal_asserts(step, verdict: Verdict, exe, home, env, tag: str,
                          spec_path: Path, journal_path: Path):
     """The user-visible state one wizard theme hop must leave, plus the
     fresh-terminal leg: the generated loader's managed block rewritten to
-    the pick (the #359 activation plane; the rc carries only the ownership
-    note), exactly one framework's theme variable, journal + backup
-    receipts, and — the niu#168 gate — the pick STICKING across the
-    terminal (loader + spec agree). Green expected since wt72/themeback
-    landed (1.3.4); a red is a plain #168 regression — the wt73 label
-    retired with the fix."""
+    the pick (the #359 activation plane; the generated rc text carries
+    the ownership note — parked as the journal's rc_sample on a re-run,
+    since the existing rc is never touched), exactly one framework's
+    theme variable, journal + sample receipts, and — the niu#168
+    gate — the pick STICKING across the terminal (loader + spec
+    agree). Green expected since wt72/themeback landed (1.3.4); a red
+    is a plain #168 regression — the wt73 label retired with the fix."""
     rc = read_text(rc_path)
     loader = loader_text_for(Path(home))
     # The #359 activation plane: the pick lives in the generated loader's
@@ -3532,19 +3544,30 @@ def hop_terminal_asserts(step, verdict: Verdict, exe, home, env, tag: str,
     step.check(f"{tag}: exactly one oh-my-bash managed block in the loader "
                f"(no orphans)",
                count == 1, f"count = {count}")
-    note = f"# Prompt owned by the oh-my-bash theme '{picked}'"
-    step.check(f"{tag}: the rc carries the pick's ownership note and no "
-               f"theme line (the #359 rc contract)",
-               note in rc and not rc_theme_vars(rc),
-               f"note present: {note in rc}; rc theme variables: "
-               f"{sorted(rc_theme_vars(rc).items())}")
     journal = read_text(journal_path)
     step.check(f"{tag}: journal records the pick",
                journal_value(journal, "theme") == picked,
                f"journal theme = {journal_value(journal, 'theme')!r}")
-    backup = journal_value(journal, "rc_backup")
-    step.check(f"{tag}: journal names an existing rc backup",
-               bool(backup) and Path(backup).is_file(), f"rc_backup = {backup!r}")
+    # The hop's generated rc text (carrying the pick's ownership note)
+    # parks as the journal's rc_sample — a re-run never touches the
+    # existing rc (create-only, niubash#359) — so the note is asserted
+    # in the sample; when no sample is journaled the run created the
+    # rc and the note is in the rc itself. The rc must carry no theme
+    # line either way.
+    sample = journal_value(journal, "rc_sample")
+    note = f"# Prompt owned by the oh-my-bash theme '{picked}'"
+    carrier = read_text(Path(sample)) if sample else rc
+    step.check(f"{tag}: the generated rc carries the pick's ownership "
+               f"note and the rc holds no theme line (the #359 rc "
+               f"contract)",
+               note in carrier and not rc_theme_vars(rc),
+               f"note present in {'rc_sample' if sample else 'rc'}: "
+               f"{note in carrier}; rc theme variables: "
+               f"{sorted(rc_theme_vars(rc).items())}")
+    step.check(f"{tag}: journal names the parked proposal sample "
+               f"(create-only: no rc backup exists)",
+               bool(sample) and Path(sample).is_file(),
+               f"rc_sample = {sample!r}")
 
     terminal = fresh_terminal(exe, home, env, verdict, f"{tag}-terminal")
     try:
@@ -3605,8 +3628,8 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
     theme A ('powerline-multiline') active in rc + spec from J2's pick.
     (seed/state are the shared runner protocol; P4 walks the live files.)"""
     rc_path = home / ".niubashrc"
-    spec_path = home / ".niubash" / "plugins.toml"
-    journal_path = home / ".niubash" / "setup-journal.toml"
+    spec_path = home / ".niubash" / "plugins.json"
+    journal_path = home / ".niubash" / "setup-journal.json"
     theme_a = "powerline-multiline"   # the base gate's J2 pick
     hop_b_candidates = ["edsonarios", "agnoster", "brainy", "hawaii50",
                         "iterate"]  # any second gallery theme (spec names one)
@@ -3674,7 +3697,8 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
         return
 
     # ── P4-S2 — theme switch A→B→A through the wizard gallery; each hop
-    # rewrites the rc block, journals the pick + receipts, and must stick.
+    # re-materializes the loader block and journals the pick + receipts
+    # (the rc itself is never rewritten — #359), and must stick.
     step = verdict.step("P4-S2", "theme switch A→B→A through the wizard gallery")
     try:
         wizard = fresh_terminal(exe, home, env, verdict, "P4-S2-wizard-B")
@@ -3717,27 +3741,35 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
         step.check("P4-S2 completed", False, str(err))
     step.finish()
 
-    # ── P4-S3 — execute the undo receipts the finish screen printed: the
-    # exact `cp` restore line + the `niu plugin disable` line, then verify
-    # the state and that nothing resurrects at the next sync (F4).
-    step = verdict.step("P4-S3", "execute the undo receipts (cp restore + "
-                                 "`niu plugin disable`)")
+    # ── P4-S3 — execute the undo receipts the finish screen printed for
+    # the last hop: the proposal-sample removal (`rm <rc_sample>` — the
+    # only rc-shaped receipt a re-run can print, since create-only
+    # setup never backs an rc up, niubash#359) + the `niu plugin
+    # disable` line, then verify the state and that nothing resurrects
+    # at the next sync (F4). setup_wizard.rs setup_undo_lines is the
+    # receipt composer.
+    step = verdict.step("P4-S3", "execute the undo receipts (rm the "
+                                 "proposal sample + `niu plugin disable`)")
     disable_error = ""
     try:
         journal = read_text(journal_path)
-        backup = journal_value(journal, "rc_backup")
+        sample = journal_value(journal, "rc_sample")
         theme_pick = journal_value(journal, "theme")
         step.check("the journal carries the receipts to execute",
-                   bool(backup) and bool(theme_pick),
-                   f"rc_backup = {backup!r}, theme = {theme_pick!r}")
-        backup_bytes = read_bytes(Path(backup)) if backup else b""
+                   bool(sample) and bool(theme_pick),
+                   f"rc_sample = {sample!r}, theme = {theme_pick!r}")
+        rc_bytes_before = read_bytes(rc_path)
         undo = fresh_terminal(exe, home, env, verdict, "P4-S3-undo")
         try:
             step.check("live session ready", prompt_alive(undo, "P4S3_READY"))
-            # Receipt 1: the exact `cp <backup> <rc>` line the journal named.
-            undo.send_line(f"cp {backup} {rc_path}", anchor_timeout=30)
-            step.check("the cp receipt restored the previous rc byte-for-byte",
-                       read_bytes(rc_path) == backup_bytes)
+            # Receipt 1: the exact `rm <sample>` line the finish screen
+            # printed. Its contract: the sample goes away and the rc —
+            # which the wizard never touched — stays byte-identical.
+            undo.send_line(f"rm {sample}", anchor_timeout=30)
+            step.check("the rm receipt removed the proposal sample and "
+                       "left the rc byte-identical (it was never touched)",
+                       bool(sample) and not Path(sample).is_file()
+                       and read_bytes(rc_path) == rc_bytes_before)
             # Receipt 2: the exact `niu plugin disable <theme>` line.
             undo.send_line(f"niu plugin disable {theme_pick}",
                            anchor_timeout=90)
@@ -3780,8 +3812,9 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
                            if "THEME" in line)[:160])
         omb_entry = spec_entry(read_text(spec_path), "oh-my-bash")
         declared = entry_field(omb_entry, "theme") if omb_entry else None
-        s3_check("the spec's theme pick is explicitly cleared (theme = '')",
-                 declared == "", f"declared = {declared!r}")
+        s3_check("the spec's theme pick is cleared (no theme declared — "
+                 "the field is omitted from the JSON, not emptied)",
+                 declared in (None, ""), f"declared = {declared!r}")
         verify = fresh_terminal(exe, home, env, verdict, "P4-S3-verify")
         try:
             step.check("session after the undo boots",
@@ -3803,7 +3836,7 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
     step.finish()
 
     # ── P4-S4 — dual-framework same-name theme routing: with BOTH frameworks
-    # trusted, pick the name both ship; the gallery priority must route it
+    # installed, pick the name both ship; the gallery priority must route it
     # through oh-my-bash, exactly one guard block may activate it, and the
     # attribution must stick across a second terminal. Green expected since
     # wt72/themeback landed (1.3.4); a red is a plain #168 regression.
@@ -3813,16 +3846,19 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
         wizard = fresh_terminal(exe, home, env, verdict, "P4-S4-wizard")
         try:
             step.check("live session ready", prompt_alive(wizard, "P4S4_READY"))
-            # The dual-framework precondition: a gallery lists trusted
-            # sources only, so bash-it's themes join only after its trust.
-            wizard.send_line("niu plugin trust bash-it", anchor_timeout=90)
-            try:
-                wizard.wait_for("is now trusted", timeout=90)
-                step.check("bash-it trusted (both frameworks' themes are in "
-                           "the gallery)", True)
-            except TimeoutError as err:
-                step.check("bash-it trusted (both frameworks' themes are in "
-                           "the gallery)", False, str(err))
+            # The dual-framework precondition: a gallery lists the
+            # themes of INSTALLED sources — there is no trust gate (an
+            # installed source contributes its theme entries
+            # immediately, plugins/sources.rs, niubash#647). bash-it
+            # landed with the J2 collection; assert its tree and spec
+            # declaration are on disk before the walk.
+            bash_it_tree = home / ".niubash" / "sources" / "bash-it"
+            step.check("both frameworks installed (their themes are in "
+                       "the gallery — no trust gate)",
+                       bash_it_tree.is_dir()
+                       and spec_entry(read_text(spec_path), "bash-it")
+                       is not None,
+                       f"bash-it tree present: {bash_it_tree.is_dir()}")
             picked = wizard_rerun(wizard, verdict, step, "P4-S4",
                                   pick=dual_theme)
         finally:
