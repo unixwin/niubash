@@ -14,7 +14,7 @@
 
 [![niubash CI](https://github.com/unixwin/niubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/niubash/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/unixwin/niubash)](https://github.com/unixwin/niubash/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)](https://github.com/unixwin/niubash)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-blue)](https://github.com/unixwin/niubash)
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-orange)](https://github.com/unixwin/niubash)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/unixwin/niubash)](https://github.com/unixwin/niubash/stargazers)
@@ -26,16 +26,16 @@
 niu 不是 MSYS2、Cygwin、Git Bash，也不是 WSL——没有 POSIX 模拟层，也没有启发式的路径转换。它是 Git Bash 的 from-scratch replacement：原生 Windows 二进制，无 POSIX 模拟层。每个平台的完整契约（包括每个目标的诚实状态）见 [platform-support.md](docs/src/platform-support.md)。
 
 <p align="center">
-  <img src="assets/demo-gitbash.gif" alt="同一组命令，在 Git Bash 与 niubash 下的两种下场" width="880" />
+  <a href="assets/demo-gitbash.gif"><img src="assets/demo-gitbash-poster.png" alt="同一组命令，在 Git Bash 与 niubash 下的两种下场" width="880" /></a>
 </p>
 
-*同一组命令，两种下场——Git Bash 的 MSYS 层对比 niu，并排实录（`assets/demo-gitbash.gif`）。*
+*同一组命令，两种下场——Git Bash 的 MSYS 层对比 niu，并排实录。点图片看动图版（`assets/demo-gitbash.gif`）。*
 
 ## 快速开始
 
-下载统一从 [unixwin.dev](https://unixwin.dev) 进入。最新版本：**v1.4.4**（截至 2026-10-30；最新构建始终在 [Releases](https://github.com/unixwin/niubash/releases) 页）。
+下载统一从 [unixwin.dev](https://unixwin.dev) 进入。最新版本：**v1.5.0**（2026-11-03；最新构建始终在 [Releases](https://github.com/unixwin/niubash/releases) 页）。
 
-Windows（winget，今天装到的是 **1.4.3**；1.4.4 已提交、正在微软审核队列中）：
+Windows（winget，今天装到的是 **1.4.3**；1.5.0 的 winget 更新尚未提交——1.5.0 请用下方安装器或便携包）：
 
 ```powershell
 winget install --id Unixwin.Niubash
@@ -87,7 +87,7 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
 
 新一代 Rust shell 卖的是轻量。同行里：hush 是一门基于 Lua 的语言，从没自称要替代 bash；Oils/OSH 自称「从 bash 升级出去的路径」，不是无感 drop-in。**brush** 宣称的正是 drop-in：「Run it as your everyday shell」「Production-ready for most use cases」。我们用 306 例差分语料（对 GNU Bash 5.3.20 逐字节比对）实测：其发行版 v0.4.0 是 181/306，其 master 最新提交源码构建复测 183/306——同一失败剖面——对照 rubash 在同一把尺子上的 304/306。它丢的全是基础机制，不是边角：alias 时机模型与 GNU 相反（20 探针 6 条实质分歧）；`printf x y` 在发行版上无限循环挂死脚本（master 已修复）；脚本里 `wait $!` 未实现；globstar 被列为「Fully Supported」却不递归；nameref 的 `unset` 报「not yet implemented」——真实的 oh-my-bash 加载正好撞上这一条。它的 Windows 支持自述为「Preview」，v0.4.0 根本没有 Windows 发行二进制。
 
-轻量不是残疾的遮羞布。完整 bash 语义不用 fork 逐路径复刻，加上跨平台本身，是 474,985 行（rubash 385,618 + niubash 89,367，静态审计口径 2026-10-25）的完工价。过不了这些基础机制的实现，既无法成为 bash 的替代产物，也无法成为可靠的登录态 shell。
+轻量不是残疾的遮羞布。完整 bash 语义不用 fork 逐路径复刻，加上跨平台本身，是 373,267 净行（rubash 312,965 + niubash 60,302，不含测试，与 rubash README 同一代码规模口径，2026-11-03 实测）的完工价。过不了这些基础机制的实现，既无法成为 bash 的替代产物，也无法成为可靠的登录态 shell。
 
 ## 为 AI agent 而建
 
@@ -111,7 +111,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 - **每个已修 issue 都带一条以它命名的回归测试**，断言 GNU 行为——引擎侧与宿主侧皆然（`tests/compat.rs`、`tests/host_contract.rs`，及[兼容性矩阵](docs/src/rubash-bash-compat-matrix.md)里的逐能力夹具）。
 - **发布过烟测门与预算门**：产物在自己的 OS 上跑不通、或超出逐资产计时预算，就发不出去（见[实证](#实证)）。
 
-截至 2026-10-30，账都在 tracker 上：rubash 累计 1,440 个 issue、已关 1,408；niubash 累计 373 个、已关 354。
+截至 2026-11-03，账都在 tracker 上：rubash 累计 1,680 个 issue、已关 1,654；niubash 累计 449 个、已关 425。
 
 ## 实证
 
