@@ -1594,6 +1594,15 @@ jobs:
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           CC_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
           CXX_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang++
+          # Same lesson, next tool in the family: with CC resolved, the
+          # second 1.5.0 run got one step further and died on
+          # aarch64-linux-android-ar — modern NDKs ship only the
+          # unprefixed llvm-ar / llvm-ranlib. Cover the whole cc-rs
+          # tool family so this does not recur tool by tool.
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          AR_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
 
       # The runner cannot execute bionic binaries, so the four-check smoke
