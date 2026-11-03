@@ -2495,7 +2495,11 @@ jobs:
     # before, and a first-run hiccup must not block the whole release
     # late in the run. If the MSIX misses the release, attach it manually
     # afterwards. Restore build-msix to needs once it has a proven run
-    # (1.5.1).
+    # (1.5.1). For the same reason the Create step's file list carries no
+    # artifacts/**/*.msix pattern while build-msix is out of needs:
+    # fail_on_unmatched_files would veto the release at the very last
+    # step whenever no .msix landed in time. The MSIX is attached
+    # manually for 1.5.0; restore the pattern with the needs entry.
     needs: [build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
     # TEMPORARY (1.5.0 release): signpath-sign is not in this needs list.
     # The original design covered two states — credentials absent (the
@@ -2700,7 +2704,6 @@ jobs:
             artifacts/**/*.exe
             artifacts/**/*.tar.gz
             artifacts/**/*.7z
-            artifacts/**/*.msix
             artifacts/**/*.sha256
             SHA256SUMS
           fail_on_unmatched_files: true
