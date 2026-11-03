@@ -122,8 +122,14 @@ pub fn load_spec() -> anyhow::Result<Option<PluginSpec>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&path)?;
-    Ok(Some(parse_spec_json(&text)?))
+    // deep-audit A4-04: name the file — a bare serde error ("key must
+    // be a string at line 1 column 2") left the user guessing WHICH of
+    // the plugin system's JSON files was corrupt.
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("could not read plugin spec {}", path.display()))?;
+    let spec = parse_spec_json(&text)
+        .with_context(|| format!("could not parse plugin spec {}", path.display()))?;
+    Ok(Some(spec))
 }
 
 /// Render the spec document: pretty JSON with the schema marker stamped
@@ -366,6 +372,22 @@ mod tests {
         // Reload parses back to the same spec.
         let loaded = load_spec().unwrap().expect("spec present");
         assert_eq!(loaded, spec);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a4_04_unparseable_spec_error_names_the_file() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (path, _guard) = temp_spec("a4-bad-json");
+        fs::write(&path, "{not json").unwrap();
+        let err = load_spec().expect_err("malformed spec must fail");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&path.display().to_string()),
+            "the error must name the spec file: {message}"
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -297,7 +297,9 @@ fn run_main() -> ExitCode {
     let mut args = match extract_cwd_state_options(&args) {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("niu: {error}");
+            // deep-audit A4-10: render the anyhow chain ({:#}), not
+            // just the outermost context — see the run() site below.
+            eprintln!("niu: {error:#}");
             return ExitCode::from(1);
         }
     };
@@ -314,7 +316,13 @@ fn run_main() -> ExitCode {
         if is_broken_pipe_error(&e) {
             return ExitCode::from(1);
         }
-        eprintln!("niu: {}", e);
+        // deep-audit A4-10: `{}` prints only the outermost anyhow
+        // context, silently discarding every cause the runtime
+        // attached (the serde detail under "could not parse …", the
+        // io error under a context string) — several CLI failures
+        // surfaced as a bare context line with no actionable content.
+        // `{:#}` renders the whole chain on one line.
+        eprintln!("niu: {:#}", e);
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
@@ -486,7 +494,10 @@ fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Re
     // (rubash#132). Merging them refused every Latin-1 script with
     // rc 126 while rubash and GNU ran it fine.
     if rubash::script_driver::check_binary_file(&bytes) {
-        eprintln!("cannot execute binary file");
+        // deep-audit A4-06: name the operand like every sibling arm
+        // (and GNU's shell_execve diagnostic) — the bare string left
+        // the user guessing which file was refused.
+        eprintln!("niu: {name}: cannot execute binary file");
         piped_stdout::finish_and_exit(126);
     }
     Ok(rubash::script_driver::bytes_to_script_text(&bytes))
@@ -899,6 +910,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // `exit` in any of these startup files ends the invocation with its
         // status before the command string runs.
         if invocation.interactive {
+            // GNU defaults HISTFILE at shell_initialize, before the
+            // startup files (deep-audit A4-01): the REPL route asserts
+            // it in enter_interactive, this route must assert it here.
+            shell.default_histfile_if_unset();
             if let Some(status) = shell.run_interactive_startup_rc() {
                 finish_startup_exit(&mut shell, status);
             }
@@ -962,6 +977,8 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // the sourced file ends the invocation with its status before the
         // script body runs.
         if invocation.interactive {
+            // Same HISTFILE default as the -c route (deep-audit A4-01).
+            shell.default_histfile_if_unset();
             if let Some(status) = shell.run_interactive_startup_rc() {
                 finish_startup_exit(&mut shell, status);
             }
@@ -997,6 +1014,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // inherited PS1 must be discarded here too, before run_startup_rc
         // (unixwin/niubash#117; same rule as enter_interactive).
         shell.discard_foreign_inherited_prompt();
+        // GNU defaults HISTFILE at shell_initialize, before the
+        // startup files; the engine stdin driver's load reads whatever
+        // HISTFILE holds after them (deep-audit A4-01).
+        shell.default_histfile_if_unset();
         // GNU decides "interactive" from the -i flag, never from the shape
         // of stdin (shell.c:672 forced_interactive is set in option parsing,
         // before run_startup_files at shell.c:722 sources ~/.bashrc for an
@@ -3519,6 +3540,19 @@ fn run_plugin_list_command(args: &[String]) -> anyhow::Result<()> {
 /// `niu plugin enable|disable <target>` — source id, asset name, or
 /// `<source>/<asset>` qualified name.
 fn run_plugin_enable_command(args: &[String], enable: bool) -> anyhow::Result<()> {
+    // deep-audit A4-05: `-h`/`--help` is a help request, not an operand —
+    // without this guard the verb answered "no source or asset named
+    // '-h'", while `add -h` prints usage (the niubash#176 pattern).
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        println!(
+            "Usage:  niu plugin {} <source>[/<asset>]\n\n{} all of a source's assets, or one asset with \
+             <source>/<asset> (e.g. oh-my-bash/git.plugin.sh). The change lands in \
+             ~/.niubash/plugins.json and the generated loader on the next `niu plugin sync`.",
+            if enable { "enable" } else { "disable" },
+            if enable { "Enable" } else { "Disable" }
+        );
+        return Ok(());
+    }
     let Some(target) = args.first() else {
         anyhow::bail!(
             "plugin {} requires a source id, asset name, or <source>/<asset>",

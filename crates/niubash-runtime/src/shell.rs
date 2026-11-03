@@ -984,6 +984,32 @@ impl Shell {
     /// The name goes to __RUBASH_SHELL_NAME — NOT __RUBASH_SCRIPT_NAME,
     /// which owns the script-path/$0 slot; polluting it here used to make
     /// interactive diagnostics read "niu: line 1: ..." like a -c run.
+    /// Assert GNU's shell_initialize HISTFILE default (variables.c:
+    /// `set_if_not`) for an interactive route that does not pass through
+    /// [`Shell::enter_interactive`]. The engine's interactive stdin
+    /// driver deliberately leaves the default to the host (its load
+    /// site reads whatever $HISTFILE holds after the startup files);
+    /// without it the piped `-i`, `-i -c` and `-i script` routes ran
+    /// with HISTFILE unset — no history file was loaded or written and
+    /// the bare `history -a/-w/-r/-n` forms failed with "HISTFILE:
+    /// parameter null or not set" (deep-audit A4-01). Only an UNSET
+    /// variable is defaulted: an inherited value (including an empty
+    /// one) is the user's word, and the startup files may still change
+    /// or unset it before the driver's load runs.
+    pub fn default_histfile_if_unset(&mut self) {
+        if self
+            .session_mut()
+            .variables()
+            .resolved_value("HISTFILE")
+            .is_none()
+        {
+            let history_file = self.history_path.to_string_lossy().into_owned();
+            self.session_mut()
+                .variables()
+                .set("HISTFILE", &history_file);
+        }
+    }
+
     pub fn enter_interactive(&mut self) {
         self.interactive = true;
         if self.history_provider.is_none() {
