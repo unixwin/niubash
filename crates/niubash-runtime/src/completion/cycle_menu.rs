@@ -65,6 +65,7 @@
 //! style is exempt from the interaction axis entirely (its printed list
 //! is the literal readline shape).
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -77,7 +78,7 @@ use reedline::{
 use unicode_width::UnicodeWidthStr;
 
 use super::gnu_menu::{
-    packed_column_layout, render_list_packed, truncate_display, GNU_COLUMN_GUTTER,
+    packed_column_layout, render_list_packed_scrolled, truncate_display, GNU_COLUMN_GUTTER,
 };
 use crate::config::CompletionStyle;
 
@@ -645,6 +646,25 @@ pub fn rollback_edits(snapshot: &CycleSnapshot) -> Vec<EditCommand> {
     whole_line_edits(&snapshot.buffer, snapshot.cursor)
 }
 
+/// niubash#829: the first painted row of the grid's full layout — zsh
+/// complist's `mlbeg`. zsh scrolls it so the selected line stays in
+/// the visible window (`complist.c:2497-2502` pulls it back above the
+/// selection, `complist.c:2519-2523` pushes it forward, step 1;
+/// `complist.c:1048 dolist` paints `[mlbeg, mlend)`). `sticky` is the
+/// previously painted window: a selection that already fits must not
+/// jog the view, only a selection off either edge moves it.
+fn scrolled_top(sticky: usize, layout_rows: usize, visible: usize, row: usize) -> usize {
+    let max_top = layout_rows.saturating_sub(visible);
+    let mut top = sticky.min(max_top);
+    if row < top {
+        top = row;
+    }
+    if row >= top + visible {
+        top = row + 1 - visible;
+    }
+    top.min(max_top)
+}
+
 /// The cycle-interaction completion menu. See the [module docs](self).
 ///
 /// Like [`super::gnu_menu::GnuMenu`], it carries a [`MenuSettings`]
@@ -717,6 +737,11 @@ pub struct CycleMenu {
     /// Whether a candidate is currently spliced into the line. TAB #1
     /// sets it (niubash#778); it only goes false when a session ends.
     has_selection: bool,
+    /// zsh `mlbeg` (niubash#829): the first painted row of the grid's
+    /// full layout, scrolled so the highlighted row stays inside the
+    /// visible window. A `Cell` because the clamp needs the frame's
+    /// `available_lines`, which only exists at paint time.
+    scroll_top: Cell<usize>,
 }
 
 impl CycleMenu {
@@ -742,6 +767,7 @@ impl CycleMenu {
             select_mode: false,
             has_selection: false,
             style: CompletionStyle::Column,
+            scroll_top: Cell::new(0),
         }
     }
 
@@ -891,6 +917,7 @@ impl CycleMenu {
         self.mcol = 0;
         self.wish_col = 0;
         self.echoes_seen = 0;
+        self.scroll_top.set(0);
         self.session_begun = true;
         self.activation_pending = false;
         let candidates: Vec<CycleCandidate> = self
@@ -979,6 +1006,7 @@ impl CycleMenu {
         self.wish_col = 0;
         self.provisional = false;
         self.has_selection = false;
+        self.scroll_top.set(0);
         // The grid is gone — stand the autosuggest hinter back up.
         // Sessions that end without a Deactivate event (empty answers,
         // the bare-TAB indent) would otherwise leave the ghost
@@ -1216,40 +1244,74 @@ impl CycleMenu {
 
         let vertical = self.style == CompletionStyle::List
             || (self.style == CompletionStyle::Column && has_descriptions);
+        // The scroll window only advances on a real paint. The
+        // `menu_required_lines` probe re-renders with `u16::MAX`
+        // available lines (everything fits, `scrolled_top` collapses to
+        // 0); letting it write back would reset the window between
+        // every pair of paints and jog the view (niubash#829).
+        let probe = available_lines == u16::MAX;
         if vertical {
-            let rows = cells.len().min(available_lines.max(1) as usize).max(1);
+            // niubash#829: the vertical list windows the same way the
+            // grid does — rows [top, top + available) of the full list,
+            // scrolled to keep the highlighted row on screen (zsh's
+            // `mlbeg` rule is list-shaped, not grid-shaped).
+            let layout_rows = cells.len().max(1);
+            let visible = layout_rows.min(available_lines.max(1) as usize).max(1);
+            let top = scrolled_top(self.scroll_top.get(), layout_rows, visible, self.index);
+            if !probe {
+                self.scroll_top.set(top);
+            }
             (
-                render_vertical_cells(&cells, &widths, terminal_columns, rows),
-                rows as u16,
+                render_vertical_cells(&cells, &widths, terminal_columns, top, visible),
+                visible as u16,
             )
         } else {
             let (_, rows, _) = packed_column_layout(&widths, terminal_columns.max(1));
+            // niubash#829: scroll the visible window after the zsh rule
+            // so the highlighted entry's row is always painted — the
+            // pre-fix renderer froze the window at rows 0..available and
+            // the highlight vanished past `columns * available` entries.
+            let visible = rows.min(available_lines.max(1) as usize).max(1);
+            let (highlight_row, _) = self.grid_position(self.index);
+            let top = scrolled_top(self.scroll_top.get(), rows, visible, highlight_row);
+            if !probe {
+                self.scroll_top.set(top);
+            }
             let values: Vec<&str> = cells.iter().map(String::as_str).collect();
             (
-                render_list_packed(&values, &widths, terminal_columns, available_lines),
+                render_list_packed_scrolled(
+                    &values,
+                    &widths,
+                    terminal_columns,
+                    available_lines,
+                    top,
+                ),
                 rows.min(u16::MAX as usize) as u16,
             )
         }
     }
 }
 
-/// Paint a one-candidate-per-row list, clipping to `available_lines` and
-/// truncating over-wide cells (the same middle cut the packed grid uses).
+/// Paint a one-candidate-per-row list, clipping to `visible` rows from
+/// `top` (niubash#829's scroll window) and truncating over-wide cells
+/// (the same middle cut the packed grid uses).
 fn render_vertical_cells(
     cells: &[String],
     widths: &[usize],
     terminal_columns: usize,
-    rows: usize,
+    top: usize,
+    visible: usize,
 ) -> String {
+    let end = (top + visible).min(cells.len());
     let mut out = String::new();
-    for (index, cell) in cells.iter().take(rows).enumerate() {
+    for (painted, index) in (top..end).enumerate() {
         let text = truncate_display(
-            cell,
+            cells.get(index).map(String::as_str).unwrap_or(""),
             widths.get(index).copied().unwrap_or(0),
             terminal_columns,
         );
         out.push_str(text.trim_end());
-        if index + 1 < rows {
+        if painted + 1 < end - top {
             out.push_str("\r\n");
         }
     }
@@ -1349,6 +1411,9 @@ impl Menu for CycleMenu {
 
     fn reset_position(&mut self) {
         self.index = 0;
+        // A reset position is a fresh selection: the window rides back
+        // to the top of the list with it (zsh resets `mlbeg` per list).
+        self.scroll_top.set(0);
     }
 
     fn update_working_details(
@@ -2159,5 +2224,141 @@ mod tests {
         menu.values[1].style = Some(nu_ansi_term::Style::new().fg(nu_ansi_term::Color::Blue));
         let menu_string = menu.menu_string(20, false);
         assert!(!menu_string.contains('\u{1b}'));
+    }
+
+    // ─── niubash#829: the highlight page-follows ────────────────────
+
+    #[test]
+    fn issue829_scrolled_top_clamps_like_zsh_mlbeg() {
+        // zsh complist.c:2497-2502 (pull `mlbeg` back above the
+        // selection) and :2519-2523 (push it forward, clamped to
+        // `mlines - space`), step 1. Sticky: a selection inside the
+        // current window never moves it.
+        let visible = 3;
+        assert_eq!(scrolled_top(0, 10, visible, 0), 0, "in-page: sticky");
+        assert_eq!(scrolled_top(4, 10, visible, 5), 4, "in-page: sticky");
+        assert_eq!(scrolled_top(4, 10, visible, 9), 7, "past the end: push");
+        assert_eq!(scrolled_top(4, 10, visible, 2), 2, "above the top: pull");
+        assert_eq!(scrolled_top(9, 10, visible, 0), 0, "clamped at 0");
+        assert_eq!(scrolled_top(0, 2, visible, 1), 0, "whole list fits");
+    }
+
+    #[test]
+    fn issue829_highlight_scrolls_into_view_and_back() {
+        // 24 candidates ("cNN", three cells) at a 24-cell terminal: the
+        // packed layout is 5 columns x 5 rows. A 2-line window shows
+        // rows {0,1}; highlighting row 2 must scroll it in, and walking
+        // back up must return the window to the top.
+        let names: Vec<String> = (0..24).map(|i| format!("c{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut completer = PrefixCompleter::new(&refs);
+        let (mut menu, _session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        menu.terminal_columns = 24;
+        let mut editor = editor_with("c");
+        activate(&mut menu, &mut editor, &mut completer);
+
+        // TAB #1 paints candidate 0 at the top of the window.
+        let frame = menu.menu_string(2, false);
+        let lines: Vec<&str> = frame.split("\r\n").collect();
+        assert_eq!(lines.len(), 2, "window is two rows:\n{frame}");
+        assert!(lines[0].contains("c00"), "row 0 painted:\n{frame}");
+        assert!(lines[1].contains("c01"), "row 1 painted:\n{frame}");
+        assert!(!frame.contains("c02"), "row 2 is off-window:\n{frame}");
+
+        // Walk DOWN to candidate 2 (layout row 2): the window must
+        // scroll so the highlight stays on screen.
+        for _ in 0..2 {
+            navigate(
+                &mut menu,
+                &mut editor,
+                &mut completer,
+                MenuEvent::NextElement,
+            );
+        }
+        assert_eq!(editor.get_buffer(), "c02");
+        let frame = menu.menu_string(2, false);
+        let lines: Vec<&str> = frame.split("\r\n").collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("c01"), "scrolled one row down:\n{frame}");
+        assert!(
+            lines[1].contains("c02"),
+            "the highlight's row is painted:\n{frame}"
+        );
+        assert!(!frame.contains("c00"), "row 0 scrolled out:\n{frame}");
+
+        // Walk back up: the window returns to the top of the list.
+        for _ in 0..2 {
+            navigate(
+                &mut menu,
+                &mut editor,
+                &mut completer,
+                MenuEvent::PreviousElement,
+            );
+        }
+        let frame = menu.menu_string(2, false);
+        assert!(
+            frame.split("\r\n").next().unwrap().contains("c00"),
+            "window back at the top:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn issue829_deep_selection_stays_visible_past_the_first_page() {
+        // The PTY-measured #829 shape: a set deeper than the screen
+        // froze its first page (the pre-fix clipped render dropped
+        // every entry past `columns * available_lines`). Selecting
+        // deep into the list must paint the highlighted entry's row.
+        let names: Vec<String> = (0..60).map(|i| format!("d{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut completer = PrefixCompleter::new(&refs);
+        let (mut menu, session) = menu_with_session();
+        menu = menu.with_select_mode(true);
+        menu.terminal_columns = 24;
+        let mut editor = editor_with("d");
+        activate(&mut menu, &mut editor, &mut completer);
+        {
+            let state = session.lock().unwrap();
+            // 60 three-cell candidates at 24 cells: 5 columns x 12 rows.
+            assert_eq!((state.grid.columns(), state.grid.rows), (5, 12));
+        }
+
+        // Linear TAB walk to candidate 40 (layout row 0 of column 5 —
+        // every column's row 0 is the FIRST painted row, so index 40
+        // sits in the top painted row of the scrolled-to column...
+        // deliberately far past the 3-line window's initial page).
+        for _ in 0..40 {
+            navigate(
+                &mut menu,
+                &mut editor,
+                &mut completer,
+                MenuEvent::NextElement,
+            );
+        }
+        assert_eq!(editor.get_buffer(), "d40");
+        let frame = menu.menu_string(3, false);
+        assert!(
+            frame.contains("d40"),
+            "the deep selection is painted after scrolling:\n{frame}"
+        );
+        // And the window really moved: the list's first row is gone.
+        assert!(
+            !frame.split("\r\n").any(|line| line.contains("d00")),
+            "the top row scrolled away:\n{frame}"
+        );
+
+        // A row-based walk down a column scrolls too: from candidate
+        // 40 (row 0), Down lands on 41 (row 1) — still in-window; six
+        // more Downs sit at row 7, past a 3-line window.
+        for _ in 0..7 {
+            navigate(&mut menu, &mut editor, &mut completer, MenuEvent::MoveDown);
+        }
+        let highlighted = session.lock().unwrap().index;
+        let frame = menu.menu_string(3, false);
+        assert!(
+            frame.contains(names[highlighted].as_str()),
+            "row-walked highlight {} stays painted:\n{frame}",
+            names[highlighted]
+        );
     }
 }
