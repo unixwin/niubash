@@ -2726,21 +2726,40 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     finish_file = verdict.transcripts / "J2-finish.txt"
     if finish_file.is_file():
         finish_text = finish_file.read_text(encoding="utf-8")
-    # The #359 contract: the rc carries the pick as a human-facing note
-    # and NEVER as a theme line — the activation lives in the generated
-    # loader (probe evidence, 2026-10-19: "# Prompt owned by the oh-my-bash
-    # theme 'powerline-multiline'; PS1 renders via the bash-compatible
-    # channel." + ~/.niubash/generated/plugins.niu holding the OSH_THEME
-    # line).
+    # The #359 contract: the GENERATED rc text carries the pick as a
+    # human-facing note and NEVER as a theme line — the activation
+    # lives in the generated loader (probe evidence, 2026-10-19:
+    # "# Prompt owned by the oh-my-bash theme 'powerline-multiline';
+    # PS1 renders via the bash-compatible channel." +
+    # ~/.niubash/generated/plugins.niu holding the OSH_THEME line).
+    # Which file holds that generated text is the create-only question
+    # answered by the note check below.
     loader_path = home / ".niubash" / "generated" / "plugins.niu"
     loader = (loader_path.read_text(encoding="utf-8")
               if loader_path.is_file() else "")
-    step.check("~/.niubashrc written with the pick's ownership note "
-               "(theme lines retired from the rc — #359)",
-               rc_path.is_file()
-               and ("# Prompt owned by the oh-my-bash theme "
-                    "'powerline-multiline'") in rc,
-               f"rc exists: {rc_path.is_file()}")
+    # Where the note lands depends on the rc slot (niubash#359
+    # create-only, setup_wizard.rs write_primary_rc): a fresh slot is
+    # created WITH the note; an occupied slot is never touched and the
+    # generated text — note included — parks as the candidates sample
+    # the journal's rc_sample names. In this sandbox the slot is
+    # occupied by the time the wizard applies (the J1 session precedes
+    # it), so the note verifiably lands in the sample (first J2
+    # alignment pass, driven end-to-end). Assert the note in the file
+    # the journal says received the generated rc — and that the user's
+    # rc itself carries no theme line either way.
+    sample_rel = journal_value(journal, "rc_sample")
+    note_carrier = Path(sample_rel) if sample_rel else rc_path
+    note_text = (note_carrier.read_text(encoding="utf-8")
+                 if note_carrier.is_file() else "")
+    step.check("the generated rc carries the pick's ownership note "
+               "(in the journal's rc_sample proposal when the rc slot "
+               "was occupied; theme lines retired from the rc — #359)",
+               ("# Prompt owned by the oh-my-bash theme "
+                "'powerline-multiline'") in note_text
+               and not rc_theme_vars(rc),
+               f"carrier: {note_carrier} (exists: "
+               f"{note_carrier.is_file()}); rc exists: "
+               f"{rc_path.is_file()}")
     step.check("generated loader carries the picked theme (the #359 "
                "activation plane)",
                "OSH_THEME='powerline-multiline'" in loader
