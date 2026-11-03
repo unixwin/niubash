@@ -885,6 +885,18 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     shell.no_profile = invocation.no_profile;
     shell.rc_file = invocation.rc_file.clone().map(PathBuf::from);
     shell.no_editing = invocation.no_editing;
+    // B5-06: GNU seeds $0 from $BASH_ARGV0 at shell startup (variables.c:
+    // shell_name / argv0 handling in shell.c runs before any startup file),
+    // so BASH_ENV and the rc files already observe the caller's value.
+    // The constructors above seed the name from argv[0] instead, which
+    // CLOBBERS the inherited BASH_ARGV0 variable in the table. Seed the
+    // inherited value here, before every route's startup sourcing; the
+    // route-specific rebinds that GNU also performs later still win over
+    // it (the `-c` name argument via apply_invocation_before_startup and
+    // this function's -c arm, the script operand's name in the script arm).
+    if let Some(argv0) = &inherited_argv0 {
+        shell.set_script_name(argv0);
+    }
     shell
         .apply_invocation_before_startup(&invocation)
         .map_err(|error| {
@@ -921,11 +933,14 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             finish_startup_exit(&mut shell, status);
         }
         niubash_runtime::startup_trace::tick("invocation: setup done");
-        // GNU shell.c: $0 for -c is the word after the command string, or
-        // $BASH_ARGV0 from the environment when exported by the caller.
-        if let Some(argv0) = inherited_argv0.clone() {
-            shell.set_script_name(&argv0);
-        } else if let Some(name) = invocation.command_name.clone() {
+        // GNU shell.c: $0 for -c is the word after the command string when
+        // one is given — it outranks $BASH_ARGV0 for the command body —
+        // and the $BASH_ARGV0 seed otherwise. Both were seeded before the
+        // startup files ran (the BASH_ARGV0 seed at Shell construction
+        // above, the name via apply_invocation_before_startup); re-assert
+        // the name here so the precedence survives any startup-file
+        // reassignment of the carrier variables (B5-06).
+        if let Some(name) = invocation.command_name.clone() {
             shell.set_script_name(&name);
         }
         shell
@@ -1325,6 +1340,14 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // and skip the REPL-only initialization (prompt backend, completion
     // directory scan, completion snapshot) the full constructor pays.
     let mut shell = niubash_runtime::Shell::new_for_stdin_script_fast()?;
+    // B5-06: GNU seeds $0 from $BASH_ARGV0 at startup on the stdin route
+    // too (nothing rebinds $0 for a stdin script), and BASH_ENV observes
+    // the seeded value. The fast constructor seeds the name from argv[0],
+    // clobbering the inherited variable; re-seed before the #431 bind
+    // below (which only fills an absent name) and before startup sourcing.
+    if let Some(argv0) = std::env::var("BASH_ARGV0").ok().filter(|v| !v.is_empty()) {
+        shell.set_script_name(&argv0);
+    }
     shell.session_mut().inherit_process_stdin();
     // niubash#548: this reader is niu's own stdin driver, so it owes the
     // marker the engine's driver arms in its run_stdin_script
