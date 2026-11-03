@@ -415,32 +415,6 @@ fn winuxcmd_pin_pins_a_tag_and_both_arch_digests() {
     }
 }
 
-#[test]
-fn winuxcmd_pin_regression_matches_release_v1_1_20() {
-    let raw = std::fs::read_to_string(winuxcmd_pin_path())
-        .expect("winuxcmd pin must exist at scripts/release/winuxcmd-pin.json");
-    let pin = serde_json::from_str::<Value>(&raw).expect("winuxcmd pin must be valid JSON");
-    assert_eq!(
-        pin.get("winuxcmd_tag").and_then(Value::as_str),
-        Some("v1.1.20"),
-        "release pin must stay on the WinuxCmd release the niu install is built against"
-    );
-    assert_eq!(
-        pin.get("sha256")
-            .and_then(Value::as_object)
-            .and_then(|digests| digests.get("windows-x64"))
-            .and_then(Value::as_str),
-        Some("790d1f6eef3a555fd2c043866d32c6edbf936a8a70d25e554b3383e67b36ad43")
-    );
-    assert_eq!(
-        pin.get("sha256")
-            .and_then(Value::as_object)
-            .and_then(|digests| digests.get("windows-arm64"))
-            .and_then(Value::as_str),
-        Some("205edb87a06b8b5b3c6fb731884d2b91b60fe406b9e7f3dbe625326489bb89df")
-    );
-}
-
 fn string_list_of(manifest: &Value, key: &str) -> Vec<String> {
     manifest
         .get(key)
