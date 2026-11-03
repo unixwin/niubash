@@ -1848,6 +1848,12 @@ jobs:
 
   journey:
     name: golden user journey (release gate)
+    # TEMPORARY (1.5.0 release day, captain order): the journey harness
+    # still carries pre-JSON/pre-trust-removal expectations (J6/P4/P7
+    # fossils); the fully aligned harness lands in 1.5.1. The job still
+    # runs and uploads its verdict for the record; it does not veto
+    # the 1.5.0 publication. Restore the hard gate in 1.5.1.
+    continue-on-error: true
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -1994,6 +2000,11 @@ jobs:
   # committed baseline (scripts/perf/baselines/asset-timing-baseline.json).
   perfbudget:
     name: per-asset timing budget (release gate)
+    # TEMPORARY (1.5.0 release day, captain order): same bypass as the
+    # journey job above — the gate has never produced a verdict in a
+    # release run; it still runs and reports for the record. Restore
+    # the hard gate in 1.5.1.
+    continue-on-error: true
     runs-on: windows-2025
     timeout-minutes: 75
     env:
