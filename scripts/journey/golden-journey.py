@@ -185,7 +185,6 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1319,32 +1318,44 @@ def await_bare_line(session: Session, text, timeout=30):
 
 
 def sync_row_keys(body: str, action: str):
-    """Distinct source ids of `niu plugin sync: <action> <id> ...` rows in
-    a mixed transcript+raw body. The same row appears twice (the pyte
-    transcript AND the raw stream both carry it) and stray console noise
-    can glue onto a physical line, so row identity is (action, id) —
-    never the physical line count."""
+    """Distinct source ids of `<action> <id> ...` sync rows in a mixed
+    transcript+raw body. The current row form is the one
+    `print_sync_rows` prints (src/main.rs run_plugin_sync_command): the
+    action, the id, the detail — no prefix. (The retired startup form
+    spelled rows `niu plugin sync: <action> <id>`; that prefix is still
+    tolerated so a regression reviving it is parsed, not missed.) The
+    same row appears twice (the pyte transcript AND the raw stream both
+    carry it) and stray console noise can glue onto a physical line, so
+    row identity is (action, id) — never the physical line count."""
     return {
         match.group(1)
         for match in re.finditer(
-            rf"niu plugin sync: {re.escape(action)}\s+(\S+)", body)
+            rf"(?:niu plugin sync:\s*|^\s*){re.escape(action)}\s+(\S+)",
+            body, re.M)
     }
 
 
-def untrusted_registry_ids(home: Path):
-    """The source ids the sandbox registry still marks untrusted — the
-    documented awaiting-trust bound. Since wt78 expanded the `full`
-    collection to nine entries, a literal cap goes stale on every
-    entry-set change (six-plus untrusted at J4 is the documented new
-    normal), so the bound derives from the registry — the same state
-    sync --bootstrap reads (the J4 derivation, shared with P3-S4)."""
-    registry_path = home / ".niubash" / "sources" / "registry.toml"
+def registry_source_ids(home: Path):
+    """The source ids the sandbox registry records, read from the
+    current registry format (`~/.niubash/sources/registry.json` —
+    plugins/sources.rs SourceRegistry, schema
+    `niubash:plugin-source-registry@0.4.0`). The registry carries no
+    trust field (the trust state was removed with niubash#647; a
+    record's state is only ever ready/missing), so there is no
+    untrusted subset to derive a notice bound from anymore — the
+    helper this replaces (`untrusted_registry_ids`, a registry.toml
+    `trusted`-flag read) could only ever return the empty set against
+    the current product."""
+    registry_path = home / ".niubash" / "sources" / "registry.json"
     if not registry_path.is_file():
         return set()
-    registry = tomllib.loads(registry_path.read_text(encoding="utf-8"))
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
     ids = {record.get("id", "")
            for record in registry.get("sources", [])
-           if not record.get("trusted", False)}
+           if isinstance(record, dict)}
     ids.discard("")
     return ids
 
@@ -1412,7 +1423,7 @@ class SandboxSeed:
 
     @property
     def spec_path(self) -> Path:
-        return self.home / ".niubash" / "plugins.toml"
+        return self.home / ".niubash" / "plugins.json"
 
     @property
     def sources_root(self) -> Path:
@@ -1420,10 +1431,12 @@ class SandboxSeed:
 
     @property
     def ledger_path(self) -> Path:
-        """The startup install-failure memo (`bootstrap-failures.toml`,
+        """The legacy install-failure memo (`bootstrap-failures.json`,
         changelog 1.3.1 F5) — under the sources root, the product's own
-        `bootstrap_failure_path()` location."""
-        return self.sources_root / "bootstrap-failures.toml"
+        `bootstrap_failure_path()` location (plugins/sync.rs). JSON
+        since the 1.5.0 product-TOML deletion; the TOML sibling is
+        migrate-only and no runtime path reads it."""
+        return self.sources_root / "bootstrap-failures.json"
 
     def marker_path(self) -> Path:
         return self.home / ".journey-wake.flag"
@@ -1452,57 +1465,91 @@ class SandboxSeed:
             return ""
 
     # ── spec hand-editing (the documented workflow: edit + sync) ──
-    def add_spec_source(self, stanza_body: str):
-        """Append one `[[sources]]` stanza (body lines without the
-        header) to the spec — the same shape `niu plugin add` writes."""
+    def _read_spec(self) -> dict:
+        """The spec document as data (plugins.json — plugins/spec.rs
+        PluginSpec: `{schema, sources: [...]}`); an absent or blank
+        file is the empty spec, the same tolerance parse_spec_json
+        applies."""
         text = self.spec_text()
-        if text and not text.endswith("\n"):
-            text += "\n"
-        text += "\n[[sources]]\n" + stanza_body.rstrip("\n") + "\n"
+        if not text.strip():
+            return {"schema": "niubash:plugin-spec@0.1.0", "sources": []}
+        spec = json.loads(text)
+        spec.setdefault("sources", [])
+        return spec
+
+    def _write_spec(self, spec: dict):
         self.spec_path.parent.mkdir(parents=True, exist_ok=True)
-        self.spec_path.write_text(text, encoding="utf-8", newline="\n")
+        self.spec_path.write_text(
+            json.dumps(spec, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8", newline="\n")
+
+    def add_spec_source(self, target: str, source_id: str = None,
+                        enable=None, theme: str = None,
+                        kind: str = None, ref_name: str = None):
+        """Append one source entry to the spec — the same shape the
+        product's own spec writes produce (spec.rs SpecSource field
+        order: target, id, kind, ref, theme, enable; unset Option
+        fields omitted)."""
+        entry = {"target": target}
+        if source_id is not None:
+            entry["id"] = source_id
+        if kind is not None:
+            entry["kind"] = kind
+        if ref_name is not None:
+            entry["ref"] = ref_name
+        if theme is not None:
+            entry["theme"] = theme
+        if enable:
+            entry["enable"] = list(enable)
+        spec = self._read_spec()
+        spec["sources"].append(entry)
+        self._write_spec(spec)
 
     def drop_spec_source(self, id_or_target: str) -> bool:
-        """Remove every `[[sources]]` stanza whose text names
-        `id_or_target` (its `id =` or `target =` line). Returns True when
-        a stanza was dropped."""
-        text = self.spec_text()
-        stanzas = text.split("[[sources]]")
-        kept = [stanzas[0]]
-        dropped = False
-        for stanza in stanzas[1:]:
-            if id_or_target in stanza:
-                dropped = True
-                continue
-            kept.append("[[sources]]" + stanza)
+        """Remove every spec entry whose id or target names
+        `id_or_target` (substring match, the old stanza-text rule).
+        Returns True when an entry was dropped."""
+        spec = self._read_spec()
+        kept = [entry for entry in spec["sources"]
+                if id_or_target not in str(entry.get("id", ""))
+                and id_or_target not in str(entry.get("target", ""))]
+        dropped = len(kept) != len(spec["sources"])
         if dropped:
-            self.spec_path.write_text("".join(kept), encoding="utf-8",
-                                      newline="\n")
+            spec["sources"] = kept
+            self._write_spec(spec)
         return dropped
 
     # ── the F5 ledger, in the product's exact format ──
-    def seed_bootstrap_failure(self, target: str, error: str,
-                               ref_name=None):
-        """Write (or merge into) `bootstrap-failures.toml` exactly the way
-        `sync.rs write_bootstrap_failures` formats a startup failure for
-        (target, ref) — the shape `bootstrap_failure_recorded` matches
-        against the resolved origin of a spec entry."""
-        entry = f"\n[[failure]]\ntarget = \"{target}\"\n"
-        if ref_name:
-            entry += f"ref = \"{ref_name}\"\n"
-        entry += (f"error = \"{error}\"\n"
-                  f"at = \"{datetime.now(timezone.utc).isoformat(timespec='seconds')}\"\n")
+    def seed_bootstrap_failure(self, target: str, ref_name=None):
+        """Write (or merge into) `bootstrap-failures.json` in the shape
+        `sync.rs` reads back (`BootstrapFailureLedger`:
+        `{schema, failure: [{target, ref?}]}` — the record carries no
+        error/timestamp fields; the shape did not change in the TOML
+        deletion, only the syntax). This is the memo
+        `bootstrap_failure_recorded` matches against the resolved
+        origin of a spec entry. Nothing in the current product writes
+        the ledger (the writer retired with the startup sync form);
+        it is seeded here precisely because the product still READS
+        it — an explicit sync retry or `--prune` clears the entry it
+        resolves (sync.rs clear_bootstrap_failure)."""
         path = self.ledger_path
         path.parent.mkdir(parents=True, exist_ok=True)
+        ledger = {"schema": "niubash:plugin-bootstrap-failures@1",
+                  "failure": []}
         if path.is_file():
-            path.write_text(path.read_text(encoding="utf-8") + entry,
-                            encoding="utf-8", newline="\n")
-        else:
-            path.write_text(
-                "# Startup install-failure memo (niu plugin sync --bootstrap).\n"
-                "# Cleared by an explicit `niu plugin sync` / `niu plugin add` retry.\n"
-                "schema = \"niubash:plugin-bootstrap-failures@1\"\n" + entry,
-                encoding="utf-8", newline="\n")
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(existing.get("failure"), list):
+                    ledger = existing
+            except (OSError, ValueError, AttributeError):
+                pass  # a corrupt seed target is rewritten whole
+        entry = {"target": target}
+        if ref_name:
+            entry["ref"] = ref_name
+        ledger["failure"].append(entry)
+        path.write_text(
+            json.dumps(ledger, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8", newline="\n")
 
     # ── tree damage (the `tree missing` / guarded-loader contract) ──
     def damage_source_file(self, source_id: str, relative: str,
@@ -3242,26 +3289,39 @@ def rc_theme_vars(rc_text: str) -> dict:
 
 
 def spec_source_blocks(spec_text: str) -> list:
-    """The [[sources]] entry bodies of the plugin spec (minimal split for
-    user-visible file assertions only)."""
-    blocks, current = [], None
-    for line in spec_text.splitlines():
-        if line.strip() == "[[sources]]":
-            current = []
-            blocks.append(current)
-        elif current is not None:
-            current.append(line)
-    return ["\n".join(block) for block in blocks]
+    """One compact JSON string per entry of the plugin spec's `sources`
+    list (plugins.json since the 1.5.0 TOML deletion — plugins/spec.rs
+    PluginSpec). The block strings exist for user-visible file
+    assertions only: substring checks and entry_field reads run over
+    them exactly the way they ran over the retired TOML stanzas."""
+    if not spec_text.strip():
+        return []
+    try:
+        spec = json.loads(spec_text)
+    except ValueError:
+        return []
+    return [json.dumps(entry, ensure_ascii=False)
+            for entry in spec.get("sources", [])
+            if isinstance(entry, dict)]
 
 
 def entry_field(block: str, field: str):
-    match = (re.search(rf"^{field}\s*=\s*'([^']*)'", block, re.M)
-             or re.search(rf'^{field}\s*=\s*"([^"]*)"', block, re.M))
-    return match.group(1) if match else None
+    """One field of a spec entry block. Fields the product leaves unset
+    are OMITTED from the JSON (spec.rs SpecSource serializes its
+    Option fields with skip_serializing_if), so an absent field reads
+    as None — a cleared theme pick is the absence of `theme`, never an
+    empty string."""
+    try:
+        entry = json.loads(block)
+    except ValueError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+    return entry.get(field)
 
 
 def spec_entry(spec_text: str, source_id: str):
-    """The [[sources]] block whose id or target names `source_id`."""
+    """The spec entry block whose id or target names `source_id`."""
     for block in spec_source_blocks(spec_text):
         if (entry_field(block, "id") == source_id
                 or entry_field(block, "target") == source_id):
@@ -3270,11 +3330,22 @@ def spec_entry(spec_text: str, source_id: str):
 
 
 def journal_value(journal_text: str, key: str):
-    match = (re.search(rf"^{re.escape(key)}\s*=\s*'(.*)'\s*$", journal_text,
-                       re.M)
-             or re.search(rf'^{re.escape(key)}\s*=\s*"(.*)"\s*$',
-                          journal_text, re.M))
-    return match.group(1) if match else None
+    """One top-level field of the setup journal (setup-journal.json
+    since the 1.5.0 TOML deletion — setup_wizard.rs
+    SetupJournalRecord: flat fields, unset Options omitted). `theme`
+    is the pick's name, `theme_source` its source id, `rc_sample` the
+    parked proposal path when the run could not create the rc. There
+    is no `rc_backup` field: create-only setup never backs an rc up
+    (niubash#359)."""
+    if not journal_text.strip():
+        return None
+    try:
+        journal = json.loads(journal_text)
+    except ValueError:
+        return None
+    if not isinstance(journal, dict):
+        return None
+    return journal.get(key)
 
 
 def fresh_terminal(exe, home, env, verdict, label: str) -> Session:
