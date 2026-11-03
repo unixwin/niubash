@@ -580,12 +580,16 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> bool
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
         let handle = child.as_raw_handle() as HANDLE;
         // SAFETY: `handle` is the live process handle owned by `child`.
         let status = unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) };
-        status == WAIT_OBJECT_0 || status != WAIT_TIMEOUT
+        // deep-audit A4-07: only WAIT_OBJECT_0 means "exited". The old
+        // `|| status != WAIT_TIMEOUT` also read WAIT_FAILED (and any
+        // abandoned-mutex face) as finished, sending the caller down
+        // the parse-the-scratch path for a child that may still run.
+        status == WAIT_OBJECT_0
     }
     #[cfg(not(windows))]
     {
