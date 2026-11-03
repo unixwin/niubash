@@ -7806,7 +7806,10 @@ mod tests {
             Some(ReedlineEvent::Multiple(_))
         ));
 
-        let mut keybindings = Keybindings::default();
+        // Seeded from the editor defaults, mirroring production
+        // (`build_keymap_for_target` layers over the reedline defaults):
+        // the C-g expectation below follows the editor's own table.
+        let mut keybindings = reedline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let tilde_event = ReedlineEvent::ExecuteHostCommand(format!(
             "{}tilde-expand",
@@ -7831,10 +7834,24 @@ mod tests {
         let host = |name: &str| {
             ReedlineEvent::ExecuteHostCommand(format!("{}{}", READLINE_HOST_COMMAND_PREFIX, name))
         };
-        assert_eq!(
-            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(host("abort"))
-        );
+        // C-g follows the editor default (#811): with a native abort
+        // default (ruline#15 shape, C-g bound to the editor's abort
+        // event) the native binding survives; under older pins the
+        // host-command override is the abort surface.
+        if reedline::default_emacs_keybindings()
+            .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
+            .is_some_and(|event| event == ReedlineEvent::Esc)
+        {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+                Some(ReedlineEvent::Esc)
+            );
+        } else {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+                Some(host("abort"))
+            );
+        }
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('^')),
             Some(host("history-expand-line"))
@@ -7927,14 +7944,19 @@ mod tests {
     /// active search. Under older pins (C-g natively `Edit(Redo)`) the
     /// host override is the only GNU abort surface those pins can
     /// deliver, so it stays. The test reads the pinned editor's actual
-    /// default table and asserts the layer followed it — under the
-    /// current pin (8351932) that is the override arm.
+    /// default table and asserts the layer followed it. Under pin
+    /// 8351932 that was the override arm; since the ruline pin rose to
+    /// 92bbb10f (ruline#26 keymap parity, the ruline#15 shape) the
+    /// native arm is the live one. The composition mirrors production
+    /// (`build_keymap_for_target` layers the GNU defaults over the
+    /// editor's own default table), so the table is seeded from the
+    /// editor defaults rather than empty.
     #[test]
     fn issue811_c_g_abort_binding_follows_the_editor_default() {
         let native_abort = reedline::default_emacs_keybindings()
             .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
             .is_some_and(|event| event == ReedlineEvent::Esc);
-        let mut keybindings = Keybindings::default();
+        let mut keybindings = reedline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let bound = keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'));
         if native_abort {
