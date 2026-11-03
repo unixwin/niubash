@@ -46,7 +46,12 @@ fn base_command(home: &PathBuf) -> Command {
     command
 }
 
-fn run_with_stdin(home: &PathBuf, args: &[&str], stdin_text: &str, extra_env: &[(&str, &str)]) -> Output {
+fn run_with_stdin(
+    home: &PathBuf,
+    args: &[&str],
+    stdin_text: &str,
+    extra_env: &[(&str, &str)],
+) -> Output {
     let mut command = base_command(home);
     command
         .args(args)
@@ -92,7 +97,11 @@ fn b5_06_stdin_route_honors_bash_argv0() {
         "echo zero=$0 var=${BASH_ARGV0}\n",
         &[("BASH_ARGV0", "customname")],
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(stdout(&output).trim_end(), "zero=customname var=customname");
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -106,7 +115,11 @@ fn b5_06_dash_s_route_honors_bash_argv0() {
         "echo zero=$0 var=${BASH_ARGV0}\n",
         &[("BASH_ARGV0", "customname")],
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(stdout(&output).trim_end(), "zero=customname var=customname");
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -125,7 +138,11 @@ fn b5_06_bash_env_observes_seeded_argv0_on_stdin_route() {
             ("BASH_ENV", env_file.to_str().unwrap()),
         ],
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         stdout(&output).trim_end(),
         "in_env zero=customname var=customname\nbody zero=customname"
@@ -146,7 +163,11 @@ fn b5_06_bash_env_observes_seeded_argv0_on_c_route() {
             ("BASH_ENV", env_file.to_str().unwrap()),
         ],
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         stdout(&output).trim_end(),
         "in_env zero=customname var=customname\nbody zero=customname"
@@ -162,7 +183,11 @@ fn b5_06_c_name_argument_outranks_bash_argv0() {
         &["-c", "echo zero=$0", "myname"],
         &[("BASH_ARGV0", "customname")],
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(stdout(&output).trim_end(), "zero=myname");
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -177,7 +202,11 @@ fn b5_06_piped_interactive_route_honors_bash_argv0() {
         "echo zero=$0 var=${BASH_ARGV0}\nexit\n",
         &[("BASH_ARGV0", "customname")],
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         stdout(&output).contains("zero=customname var=customname"),
         "stdout was: {}",
@@ -196,7 +225,11 @@ fn b5_06_script_route_still_rebinds_to_script_name() {
         &[script.to_str().unwrap()],
         &[("BASH_ARGV0", "customname")],
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let text = stdout(&output);
     assert!(
         text.trim_end().ends_with("s.sh"),
