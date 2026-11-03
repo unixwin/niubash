@@ -2665,8 +2665,12 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     # Durable receipts (screen tails can drop at process exit — the files
     # are the truth, the smoke-journey discipline).
     rc_path = home / ".niubashrc"
-    spec_path = home / ".niubash" / "plugins.toml"
-    journal_path = home / ".niubash" / "setup-journal.toml"
+    # The spec and the setup journal are JSON since the 1.5.0
+    # product-TOML deletion (plugins.json, setup-journal.json); the
+    # .toml paths here named files the product no longer writes, so
+    # every read below silently saw "".
+    spec_path = home / ".niubash" / "plugins.json"
+    journal_path = home / ".niubash" / "setup-journal.json"
     rc = rc_path.read_text(encoding="utf-8") if rc_path.is_file() else ""
     spec = spec_path.read_text(encoding="utf-8") if spec_path.is_file() else ""
     journal = (journal_path.read_text(encoding="utf-8")
@@ -2701,9 +2705,8 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                "bash-completion" in spec)
     step.check("spec carries the picked theme",
                "powerline-multiline" in spec)
-    step.check("setup journal records collection = 'full'",
-               "collection = 'full'" in journal
-               or 'collection = "full"' in journal)
+    step.check("setup journal records collection 'full'",
+               '"collection": "full"' in journal)
     step.check("finish screen undo receipts captured",
                "Undo this run" in finish_text
                or "Undo this run" in session.raw_text())
