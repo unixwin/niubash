@@ -2518,7 +2518,13 @@ impl Shell {
         // array under bash >= 5.1 (oh-my-bash installs one), which the
         // engine dispatches without the host re-implementing it.
         self.session_mut().run_prompt_command();
-        let exit_jump = self.executor_mut().take_exit_jump_pending();
+        // GAP-2 (rubash#2800): the jump is read as a contract
+        // value, not polled off the executor — take_classification
+        // drains the pendings and reports the jump exactly as
+        // armed (`exit_jump_raw`: either unwind class re-raises,
+        // the #191 semantics above), with the parse-error and
+        // signal-discard facts riding the same drain as values.
+        let exit_jump = self.session_mut().take_classification().exit_jump_raw;
         if !exit_jump {
             // Normal return: the pre-PC `$?` is restored (the engine already
             // rolled its own snapshot back; this keeps the host view in
@@ -4119,29 +4125,38 @@ impl Shell {
             // unclosed quote sat on physical line 3 reported line 1
             // (the tracked history arm below passes it correctly).
             //
-            // 1.5.0 migration note: this arm stays on the direct
-            // driver call instead of following the tracked arm into
-            // Session::run. The contract's line-offset route consumes
-            // the executor's parse-error pending into its Flow, and
-            // Flow has no parse-error variant in this publication
-            // step (run() diagnostics are the contract's recorded
-            // out-of-scope remainder) — the host batch feeder's stop
-            // rule reads that pending itself, so routing this arm
-            // through run() would silently keep feeding a stream
-            // after a mid-stream syntax error. Revisit when the
-            // contract surfaces run diagnostics.
-            let code = rubash::script_driver::run_source_with_line_offset(
-                self.executor_mut(),
-                &script,
-                false,
-                line_offset,
-                None,
-                None,
-            );
+            // 1.5.0 migration, completed by GAP-2 (rubash#2800):
+            // this arm now follows the tracked arm into Session::run;
+            // the contract's line route is this same driver, so the
+            // rendered diagnostics and the status are the driver's
+            // own. The stop facts the earlier migration note was
+            // protecting — the run's parse error and its raw exit
+            // jump — no longer live only in the executor's pendings:
+            // run() drains them into the outcome's classification,
+            // and the run's parse diagnostics ride along as values
+            // on `outcome.diagnostics` (the GAP-2 surface the note
+            // was gated on). The two stop facts are folded into the
+            // host jump record the batch feeder takes first, the
+            // same fold the tracked arm makes with its unwind
+            // verdict: on the line route every non-discard unwind
+            // arms the raw pending (the errexit break included), so
+            // `exit_jump_raw || parse_error` is this arm's whole
+            // feeder stop set — a stream still stops after a
+            // mid-stream syntax error, and an ordinary nonzero
+            // status still reads past.
+            let mut options = RunOptions::default();
+            options.line_offset = line_offset;
+            let outcome = self
+                .session_mut()
+                .run(&script, &options)
+                .map_err(|error| anyhow::anyhow!("session run failed: {error:?}"))?;
+            if outcome.classification.exit_jump_raw || outcome.classification.parse_error {
+                self.script_exit_jump = true;
+            }
             self.sync_process_cwd_from_executor_pwd();
             self.sync_process_path_from_executor_path();
             self.sync_alias_mirror_from_executor();
-            return Ok(code);
+            return Ok(outcome.status);
         }
         if allow_grouped_readers
             && !self.interactive

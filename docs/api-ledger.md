@@ -377,7 +377,7 @@ the 1.5.0 tiers exist to fix.
 | `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today; plus the `SessionHistory::size_limit` associated helper (recorded in v3) |
 | `history_expand` | `HistChars::default` (1), `HistCtx` (1), `HistEngineState::default` (1), `HistLookup` (1), `history_expand` (1) — the history-expansion engine niubash's host readline layer drives directly for its `history-expand-line` face and the first stage of `shell_expand_line`: niubash-runtime's readline_commands module implements `HistLookup` over the session entries, builds the `HistChars` / `HistCtx` context from the session's `histchars` value and posix mode, and calls `history_expand` over a fresh `HistEngineState` (recorded in the 2026-11-01 backfill; see §0 — the `::default` tokens are recorded under their types in §6) |
 | `expand::tilde` | `tilde::expand_word_prefix` (1) — the tilde-prefix expander niubash's host `tilde-expand` readline command applies to the word at point over the session environment; consumed in niubash-runtime's repl module under the defining-module spelling `expand::tilde::tilde::expand_word_prefix`, which is the spelling §6 records (recorded in the 2026-11-01 backfill; see §0) |
-| `script_driver` | `run_source_with_line_offset` (2), `run_script_with_history_at_line_offset_classified`, `run_script_with_history_at_line_offset_tracked`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `bytes_to_script_text`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER` (1 each unless noted). (Ledger v4: `run_stdin_script`, `run_interactive_stdin`, `prepare_interactive_history`, `pre_process_interactive_line` + `InteractiveExpansion`, and `finish_shell` have exited the consumed surface — `Session::run_stdin` / `run_interactive_stdin` / `prepare_line` / `close` carry that traffic now; the symbols stay `pub` in the engine.) |
+| `script_driver` | `run_source_with_line_offset` (1; the unclosed-arm call left the consumed surface with GAP-2, niubash#898 — the stray-close arm's call remains), `run_script_with_history_at_line_offset_classified`, `run_script_with_history_at_line_offset_tracked`, `script_uses_history`, `script_uses_aliases`, `check_binary_file`, `bytes_to_script_text`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER` (1 each unless noted). (Ledger v4: `run_stdin_script`, `run_interactive_stdin`, `prepare_interactive_history`, `pre_process_interactive_line` + `InteractiveExpansion`, and `finish_shell` have exited the consumed surface — `Session::run_stdin` / `run_interactive_stdin` / `prepare_line` / `close` carry that traffic now; the symbols stay `pub` in the engine.) |
 | `parser` | `CommandNode` (14), `parse` (1), `parse_with_options` (1), `ParseLoopOptions` (1), `WordMetadata` (+ `literal`, §2.2), `ast_print::pretty_print_command` (1), `ast_print::pretty_print_input` (1); `Ast` is also consumed under this defining-module spelling (the root re-export above is the other spelling; both recorded in §6) |
 | `lexer` | `tokenize` (2), `tokenize_with_initial_posix` (1), `has_unclosed_input_syntax` (1), `has_unclosed_input_syntax_posix` (1) |
 | `locale` | `collect_locale_strings` (1), `render_locale_string_dump` (1) — the -D dump face (rubash#1977); `decode_to_visible_text` is recorded under root re-exports above |
@@ -449,7 +449,8 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::set_positional` | 4 | |
 | `Session::inherit_process_stdin` | 5 | the contract method, not the builder stream binding §4 anticipated |
 | `Session::expand_prompt` / `run_prompt_command` | 4 / 1 | |
-| `Session::run` | 1 | the tracked script arm; the unclosed arm stays on the direct driver (§4 note) |
+| `Session::run` | 2 | the tracked script arm and, since GAP-2 (rubash#2800 / niubash#898), the unclosed arm — both fold their stop facts from the outcome classification |
+| `Session::take_classification` | 2 | GAP-2 drain: the stdin feeder stop rule and the PROMPT_COMMAND tail read; returns the classification values (`exit_jump_raw` / `parse_error` / signal discard) drained from the executor pendings |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
 | `Session::prepare_line` | 1 | REPL history expansion |
 | `Session::complete` / `complete_detailed` / `has_compspec` | 1 / 0 / 1 | completion bridge (complete_detailed + CompletionOutcome/CompletionPolicy: rubash#2573, consumed by niubash#837) |
@@ -729,6 +730,7 @@ method rubash::api::Session::run_prompt_command
 method rubash::api::Session::run_stdin
 method rubash::api::Session::set_last_status
 method rubash::api::Session::set_positional
+method rubash::api::Session::take_classification
 method rubash::api::Session::variables
 method rubash::api::SessionBuilder::argv0
 method rubash::api::SessionBuilder::build

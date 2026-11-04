@@ -1457,28 +1457,41 @@ fn run_stdin_script() -> anyhow::Result<()> {
         // same stop rule as the engine's own stdin driver (rubash
         // script_driver::run_stdin_script): a recorded top-level jump
         // (Shell::take_script_exit_jump for the batches this shell
-        // flattened itself), the engine's exit-jump pending for the
-        // driver-routed batches (run_source_impl arms it for every
-        // non-discard unwind, the errexit break included), or a
-        // read-time parse error. The errexit stop is never re-derived
-        // here: since GAP-1 (rubash#2795) every route reports its own
-        // unwind from the engine's verdict — the flattened fast path
-        // records the ExitCode unwind (the `exit` jump and the
-        // errexit break share that classification, niubash#402), the
-        // Session-contract arm records the classification's
-        // adjudicated unwind, and the driver routes arm the pending
-        // above — so a nonzero status with no unwind recorded is a
-        // failure in an errexit-exempt position (a non-final `&&`/`||`
-        // member, a tested or `!`-inverted command:
+        // flattened itself), the engine's raw exit jump for the
+        // driver-routed batches (run_source_impl arms the pending
+        // for every non-discard unwind, the errexit break included),
+        // or a read-time parse error. The errexit stop is never
+        // re-derived here: since GAP-1 (rubash#2795) every route
+        // reports its own unwind from the engine's verdict — the
+        // flattened fast path records the ExitCode unwind (the
+        // `exit` jump and the errexit break share that
+        // classification, niubash#402), the Session-contract arms
+        // (tracked history/alias, and the unclosed arm since GAP-2)
+        // fold their classification's stop facts into that same
+        // record, and the remaining driver/fast-path batches leave
+        // their facts in the executor's pendings — so a nonzero
+        // status with no unwind recorded is a failure in an
+        // errexit-exempt position (a non-final `&&`/`||` member, a
+        // tested or `!`-inverted command:
         // execute_cmd.c:652-656's family), which GNU reads past. The
         // previous host-side clause (status + SHELLOPTS errexit +
         // last_command_inverted) stopped the stream there; it existed
         // only because the Session arm's old Flow fold reported no
         // errexit stop to record. An ordinary nonzero status just
         // becomes the new last status and reading continues.
+        //
+        // GAP-2 (rubash#2800): the two pending reads are contract
+        // values now — Session::take_classification drains the same
+        // flags this loop used to take off the executor by hand and
+        // returns them on the classification (the raw jump exactly
+        // as armed, either unwind class; the parse-error fact
+        // alongside). For the Session-routed batches the drain
+        // reports empty by construction: their facts were folded
+        // into the jump record above at the arm.
         let jumped = shell.take_script_exit_jump();
-        let engine_jumped = shell.executor_mut().take_exit_jump_pending();
-        let parse_error = shell.executor_mut().take_parse_error();
+        let classification = shell.session_mut().take_classification();
+        let engine_jumped = classification.exit_jump_raw;
+        let parse_error = classification.parse_error;
         if jumped || engine_jumped || parse_error {
             break;
         }
