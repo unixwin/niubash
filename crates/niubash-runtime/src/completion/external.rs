@@ -1838,14 +1838,35 @@ mod tests {
         std::env::remove_var("NIU_COMPLETION_CACHE_DIR");
         std::env::remove_var("WINSH_COMPLETION_CACHE_DIR");
 
-        assert_eq!(
-            resolve_cache_dir(),
-            Some(home.join(".niubash").join("completions").join("cache"))
-        );
-        assert_eq!(
-            legacy_cache_dir(),
-            Some(home.join(".winsh").join("completions").join("cache"))
-        );
+        // On Windows the resolver's home spelling is the long form
+        // (runneradmin) while temp_dir hands out the 8.3 short form
+        // (RUNNER~1) for the same directory; compare the home-based
+        // expectations through the canonical long spelling there.
+        // Elsewhere the comparison stays byte-exact.
+        if cfg!(windows) {
+            let spelled = |suffix: &str| -> Option<PathBuf> {
+                std::fs::canonicalize(&home).ok().map(|base| {
+                    let base = base
+                        .to_string_lossy()
+                        .trim_start_matches(r"\\?\")
+                        .to_string();
+                    suffix
+                        .split('/')
+                        .fold(PathBuf::from(base), |acc, part| acc.join(part))
+                })
+            };
+            assert_eq!(resolve_cache_dir(), spelled(".niubash/completions/cache"));
+            assert_eq!(legacy_cache_dir(), spelled(".winsh/completions/cache"));
+        } else {
+            assert_eq!(
+                resolve_cache_dir(),
+                Some(home.join(".niubash").join("completions").join("cache"))
+            );
+            assert_eq!(
+                legacy_cache_dir(),
+                Some(home.join(".winsh").join("completions").join("cache"))
+            );
+        }
 
         // The NIU_ variable names the primary directory.
         let custom = home.join("custom-cache");
