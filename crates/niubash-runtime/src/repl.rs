@@ -7962,7 +7962,7 @@ mod tests {
                 .iter()
                 .map(|(keyseq, name)| rubash::api::BindEntryView {
                     keyseq: (*keyseq).to_string(),
-                    bytes: decode_keyseq_bytes(*keyseq).unwrap_or_default(),
+                    bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
                     kind: rubash::api::BindKindView::Function {
                         name: (*name).to_string(),
                     },
