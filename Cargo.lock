@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "niubash"
-version = "1.4.4"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "niubash-runtime"
-version = "1.4.4"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "colored",
@@ -930,7 +930,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "readline-abi"
 version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=835193289943da6d7f0a275700f49b7391f0da53#835193289943da6d7f0a275700f49b7391f0da53"
+source = "git+https://github.com/unixwin/ruline?rev=a0a2ae8b817a4956cc10142af4861033f1600bf4#a0a2ae8b817a4956cc10142af4861033f1600bf4"
 dependencies = [
  "libc",
  "reedline",
@@ -959,7 +959,7 @@ dependencies = [
 [[package]]
 name = "reedline"
 version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=835193289943da6d7f0a275700f49b7391f0da53#835193289943da6d7f0a275700f49b7391f0da53"
+source = "git+https://github.com/unixwin/ruline?rev=a0a2ae8b817a4956cc10142af4861033f1600bf4#a0a2ae8b817a4956cc10142af4861033f1600bf4"
 dependencies = [
  "arboard",
  "crossterm 0.29.0",
@@ -1005,7 +1005,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rubash"
-version = "1.4.3"
+version = "1.5.0"
 dependencies = [
  "libc",
  "os_pipe",

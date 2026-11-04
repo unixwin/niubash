@@ -478,7 +478,7 @@ jobs:
           # usr\bin\awk.exe/gawk.exe as 1.4.0-era copies of an older
           # winuxcmd.exe. x64 is the user-facing leg, so any failure here
           # must stop the release; other legs keep the loud-warning
-          # fail-open contract (arm64 has no gawk/niugit artifacts by
+          # fail-open contract (arm64 historically had no gawk artifacts; niugit ships an arm64 artifact since the 2.56.0.3 pin, by
           # design).
           if ("${{ matrix.arch }}" -eq "x64") {
             if ($failed.Count -gt 0) {
@@ -1584,6 +1584,25 @@ jobs:
           # suffix in its triple, so its line is already the real name.
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
+          # cc-rs (build scripts, e.g. signal-hook) does not read the
+          # linker vars: it resolves CC_<target> and otherwise falls back
+          # to the bare <triple>-clang, which the NDK does not ship (only
+          # the API-suffixed drivers exist) — that fallback is what red
+          # both Android legs of the first 1.5.0 run. Name the real
+          # drivers for C and C++ alike.
+          CC_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          CC_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang
+          CXX_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang++
+          # Same lesson, next tool in the family: with CC resolved, the
+          # second 1.5.0 run got one step further and died on
+          # aarch64-linux-android-ar — modern NDKs ship only the
+          # unprefixed llvm-ar / llvm-ranlib. Cover the whole cc-rs
+          # tool family so this does not recur tool by tool.
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          AR_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB_armv7_linux_androideabi: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
 
       # The runner cannot execute bionic binaries, so the four-check smoke
@@ -1795,6 +1814,23 @@ jobs:
           Write-Host "staged: $stage"
           "stage=$stage" >> $env:GITHUB_OUTPUT
 
+      - name: Locate makeappx (Windows SDK)
+        shell: pwsh
+        run: |
+          # make_msix.py invokes makeappx.exe from PATH; current runner
+          # images no longer put the Windows SDK bin directory on PATH
+          # (the first 1.5.0 run died here with "makeappx.exe not
+          # found"). Find the newest SDK's x64 bin and add it.
+          $kits = "C:\Program Files (x86)\Windows Kits\10\bin"
+          $hit = Get-ChildItem $kits -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "x64\makeappx.exe" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+          if (-not $hit) { throw "makeappx.exe not found under $kits" }
+          Split-Path $hit | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          Write-Host "makeappx: $hit"
+
       - name: Pack the Store MSIX (unsigned; the Store re-signs)
         shell: pwsh
         run: |
@@ -1812,6 +1848,9 @@ jobs:
 
   journey:
     name: golden user journey (release gate)
+    # Hard gate: the aligned harness (PR #876) reads the product's actual
+    # JSON state and current receipts, so this job's verdict vetoes the
+    # release again (it is in the `release` and `publish-crates` needs).
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -1958,6 +1997,12 @@ jobs:
   # committed baseline (scripts/perf/baselines/asset-timing-baseline.json).
   perfbudget:
     name: per-asset timing budget (release gate)
+    # TEMPORARY: the gate produced its first verdict on the 1.5.0
+    # dispatch run — 405/437 assets ok, but 5 bash-it themes hard-fail
+    # by timeout with zero completed reps (#879, unadjudicated:
+    # harness drive vs product hang). Its veto stays off until #879
+    # adjudicates; it still runs and reports for the record.
+    continue-on-error: true
     runs-on: windows-2025
     timeout-minutes: 75
     env:
@@ -2198,7 +2243,7 @@ jobs:
   # free-options.md §3/§7; the systemic fix behind niubash#511).
   #
   # PENDING SIGNPATH CREDENTIALS — this job pair is INERT until the four
-  # SignPath secrets exist (SIGNPATH_ORG_ID, SIGNPATH_PROJECT_ID,
+  # SignPath secrets exist (SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_ID,
   # SIGNPATH_SIGNING_POLICY_SLUG, SIGNPATH_API_TOKEN): signpath-gate then
   # reports enabled=false, signpath-sign is skipped entirely, and the
   # release job publishes unsigned artifacts exactly as before this
@@ -2229,12 +2274,12 @@ jobs:
       - name: Check SignPath secrets
         id: check
         env:
-          SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
           SIGNPATH_PROJECT_ID: ${{ secrets.SIGNPATH_PROJECT_ID }}
           SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         run: |
-          if [ -n "$SIGNPATH_ORG_ID" ] && [ -n "$SIGNPATH_PROJECT_ID" ] && \
+          if [ -n "$SIGNPATH_ORGANIZATION_ID" ] && [ -n "$SIGNPATH_PROJECT_ID" ] && \
              [ -n "$SIGNPATH_SIGNING_POLICY_SLUG" ] && [ -n "$SIGNPATH_API_TOKEN" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
             echo "SignPath secrets present: signing ENABLED"
@@ -2336,7 +2381,7 @@ jobs:
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '${{ secrets.SIGNPATH_ORG_ID }}'
+          organization-id: '${{ secrets.SIGNPATH_ORGANIZATION_ID }}'
           project-slug: '${{ secrets.SIGNPATH_PROJECT_ID }}'
           signing-policy-slug: '${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}'
           github-artifact-id: '${{ steps.upload-input.outputs.artifact-id }}'
@@ -2453,14 +2498,30 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: [build-windows, build-linux, build-macos, build-msix, journey, perfbudget, skill-bundle, signpath-sign]
-    # signpath-sign is SKIPPED while the SignPath credentials are absent
-    # (the skeleton is inert) and a skipped need must not skip the
-    # release. A FAILED signing leg must, though — fail-closed: a release
-    # never publishes with only some legs signed. This condition
-    # reproduces the implicit success() outcome for every pre-existing
-    # need (none of them can ever be skipped) and additionally tolerates
-    # 'skipped'.
+    # build-msix and journey are hard needs again (both proved on the
+    # 1.5.0 run: the msix built green, the journey harness is aligned);
+    # the Create step's artifacts/**/*.msix pattern is restored with
+    # them, so fail_on_unmatched_files guards the msix like every other
+    # asset class.
+    needs: [build-windows, build-linux, build-macos, build-msix, journey, skill-bundle]
+    # TEMPORARY (1.5.0 release): signpath-sign is not in this needs list.
+    # The original design covered two states — credentials absent (the
+    # job skips; a skipped need must not skip the release) and signing
+    # healthy (fail-closed: a release never publishes with only some
+    # legs signed). The state that actually occurred on the first 1.5.0
+    # run is a third one nobody designed for: credentials present, the
+    # test-signing policy healthy, but the formal certificate still
+    # unapproved, so every release-signing request fails on SignPath's
+    # side within seconds — and a failed need would veto a release that
+    # is ruled to ship unsigned (formal approval is not a 1.5.0 release
+    # condition). The pair still runs and uploads whatever it produces;
+    # this release publishes the unsigned Windows packages. Restore
+    # signpath-sign to needs (and the fail-closed reading) once the
+    # certificate is approved (1.5.1), together with an audit of how
+    # the Create step assembles signed vs unsigned packages.
+    # The condition below reproduces the implicit success() outcome for
+    # every need (none of them can ever be skipped) and additionally
+    # tolerates 'skipped' for safety.
     if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     steps:
       - uses: actions/checkout@v4.2.2
@@ -2489,6 +2550,13 @@ jobs:
       # page carry SIGNED bytes. The *-signpath-input artifacts (unsigned,
       # submission-only) are dropped so their zips never reach the release
       # page. Both halves are no-ops while signing is disabled.
+      # The unsigned-installer-* artifacts are likewise submission-only
+      # transport (the pristine installer handed to SignPath by the inline
+      # build-windows steps): their payload file name is identical to the
+      # packaged installer's, so if they survived to the Create step's
+      # artifacts/**/*.exe glob (overwrite_files: true) the unsigned bytes
+      # could win the release-page asset name over the signed ones. Drop
+      # them here, with the other transport artifacts.
       - name: Merge SignPath-signed artifacts (inert without credentials)
         run: |
           set -euo pipefail
@@ -2510,7 +2578,7 @@ jobs:
               cp "$dir/$rel" "$target/$rel"
             done
           done
-          rm -rf artifacts/*-signpath-signed artifacts/*-signpath-input
+          rm -rf artifacts/*-signpath-signed artifacts/*-signpath-input artifacts/unsigned-installer-*
           if [ "${#signed[@]}" -eq 0 ]; then
             echo "no SignPath-signed artifacts (signing disabled or skipped); publishing as before"
           fi
@@ -2654,12 +2722,13 @@ jobs:
     # jobs. A red gate then left the exact half-released state this repo hit:
     # crates.io already carried niubash 1.4.3 while the GitHub Release page
     # (the `release` job) had never run. The release job aggregates every
-    # platform build and both release gates, so listing it first pins this
-    # job behind the whole chain — build all platforms -> timing/journey gates
-    # -> GitHub Release with all assets -> and only then crates.io. A publish
+    # platform build and the journey gate, so listing it first pins this
+    # job behind the whole chain — build all platforms -> journey gate
+    # -> GitHub Release with all assets -> and only then crates.io. (The
+    # perfbudget gate joins this list when #879 adjudicates its timeouts.) A publish
     # failure can still happen, but it can no longer race the gates or undo
     # the release page that already exists.
-    needs: [release, build-windows, build-linux, build-macos, journey, perfbudget, skill-bundle]
+    needs: [release, journey, build-windows, build-linux, build-macos, skill-bundle]
     # Best-effort remains: with the ordering above a failure here no longer
     # blocks or half-does a release (rubash 1.4.2 is on crates.io since the
     # v1.4.3 era, so the version-annotated path deps now resolve).

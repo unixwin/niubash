@@ -258,6 +258,46 @@ NIU_COMPDEFS="providercmd:_carapace_provider_hook"
     assert_not_contains(&suggestions, "clean");
 }
 
+/// B5: the compdef hook's NIU_COMP_WORDS must match bash's COMP_WORDS —
+/// the in-progress word appears exactly once (it used to be appended a
+/// second time: `providercmd ch` produced "providercmd ch ch").
+#[test]
+fn compdef_words_include_current_word_exactly_once() {
+    let env = ProbeEnv::new("niubash-completion-compdef-words");
+    env.write_primary_rc(
+        r#"b5_words_hook() {
+    echo "W=[$NIU_COMP_WORDS] C=$NIU_COMP_CWORD" > "$HOME/dump.txt"
+    NIU_COMP_RESULT="cand"
+}
+NIU_COMPDEFS="providercmd:b5_words_hook"
+"#,
+    );
+
+    let _ = run_probe("providercmd ch", &env, &[]);
+    let dump = std::fs::read_to_string(env.home.join("dump.txt")).unwrap();
+    assert_eq!(dump.trim_end(), "W=[providercmd ch] C=1");
+}
+
+/// B5: after trailing whitespace the current word is empty but still
+/// occupies the COMP_CWORD slot of NIU_COMP_WORDS (bash COMP_WORDS
+/// holds the empty string there).
+#[test]
+fn compdef_words_trailing_space_keeps_empty_current_word() {
+    let env = ProbeEnv::new("niubash-completion-compdef-words-empty");
+    env.write_primary_rc(
+        r#"b5_words_hook() {
+    echo "W=[$NIU_COMP_WORDS] C=$NIU_COMP_CWORD" > "$HOME/dump.txt"
+    NIU_COMP_RESULT="cand"
+}
+NIU_COMPDEFS="providercmd:b5_words_hook"
+"#,
+    );
+
+    let _ = run_probe("providercmd ", &env, &[]);
+    let dump = std::fs::read_to_string(env.home.join("dump.txt")).unwrap();
+    assert_eq!(dump.trim_end(), "W=[providercmd ] C=1");
+}
+
 // ── Issue #307: the probe sources NIU_ENV / BASH_ENV like `-c` ───────────────
 
 /// An agent init file (NIU_ENV) registering `complete` compspecs must reach

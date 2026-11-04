@@ -162,12 +162,6 @@ pub fn branch_segment(cwd: &Path) -> Option<String> {
     crate::git_prompt_cache::branch_segment(cwd)
 }
 
-/// Mark the cached segment for the repository containing `cwd` dirty:
-/// the host's command-cycle invalidation, delegated to the cache core.
-pub(crate) fn invalidate_segment_for_cwd(cwd: &Path) {
-    crate::git_prompt_cache::invalidate_segment_for_cwd(cwd);
-}
-
 // Test-build hooks of the cache core, re-exported so the prompt-face
 // probes (this module's tests, `prompt_segments`' budget gate and
 // `shell`'s #592 cells) keep keying their counts through this module
