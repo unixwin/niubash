@@ -10307,13 +10307,27 @@ mod tests {
         assert_eq!(drop.reason, DroppedReason::UnparseableKeyseq);
         assert_eq!(drop.target_name.as_deref(), Some("autosuggest-accept"));
 
-        let drop = apply_bundle_widget_binding(
+        // An unknown bundle widget name is NOT a drop: on current
+        // master semantics any unknown name is a shell-function
+        // widget (native_widget_event's default arm), so the bundle
+        // path binds it as one. (The tranche's original pin expected
+        // an UnknownFunction drop here; that arm of
+        // apply_bundle_widget_binding is unreachable since the
+        // function-widget default landed. A function widget whose
+        // function is missing is recorded by the dead-widget path —
+        // see issue834_missing_widget_function_is_a_dead_widget_drop.)
+        let bound = apply_bundle_widget_binding(
             &mut keybindings,
             NativeKeymapTarget::Emacs,
             &binding(r"\C-t", "no-such-widget"),
-        )
-        .expect("an unknown bundle widget is recorded");
-        assert_eq!(drop.reason, DroppedReason::UnknownFunction);
+        );
+        assert!(bound.is_none());
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{WIDGET_HOST_COMMAND_PREFIX}no-such-widget"
+            )))
+        );
 
         // A deliverable binding records nothing and binds.
         let ok = apply_bundle_widget_binding(
