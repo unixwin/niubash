@@ -100,7 +100,7 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
   # 你想跑的命令：
   #   git log -1 --format="commit %h on %cd" --date="format:%Y-%m-%d"
   # base64 一下（任何语言一行搞定），然后把这一个字符串交给 niu：
-  $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQ=
+  $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQi
   commit a08e7afd on 2026-11-02
   ```
 

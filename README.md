@@ -100,7 +100,7 @@ Models are trained on Bash; on a Windows machine their commands deserve a shell 
   # the command you want to run:
   #   git log -1 --format="commit %h on %cd" --date="format:%Y-%m-%d"
   # base64 it — one line in any language — and hand niu the string:
-  $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQ=
+  $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQi
   commit a08e7afd on 2026-11-02
   ```
 
