@@ -189,13 +189,14 @@ pub struct Shell {
     /// history.
     history_provider: Option<Rc<RefCell<crate::history::RubashHistoryProvider>>>,
     /// niubash#661: armed at the end of `enter_interactive`, once the
-    /// host has pointed `HISTFILE` at the configured history path.
-    /// While armed, `refresh_history_settings` treats a live `HISTFILE`
-    /// naming a different file as a redirect of the session stream.
-    /// Before arming, an inherited `HISTFILE` must NOT redirect
-    /// anything: the configured path is the file of record at startup
-    /// (niubash#571), and only an assignment made inside the session
-    /// counts as a redirect.
+    /// host has pointed `HISTFILE` at the history path chosen at
+    /// construction. While armed, `refresh_history_settings` treats a
+    /// live `HISTFILE` naming a different file as a redirect of the
+    /// session stream. Before arming, an inherited `HISTFILE` must NOT
+    /// redirect anything through this watch: it already had its one
+    /// say at construction, where a non-empty value seeded the file of
+    /// record when no configured path exists (niubash#888); only an
+    /// assignment made inside the session counts as a redirect.
     history_redirect_armed: bool,
     /// niubash#661: a redirect was applied to the provider and
     /// `history_path` by the last refresh; the REPL loop consumes this
@@ -369,6 +370,37 @@ fn default_script_name_from(raw: Option<String>) -> String {
     } else {
         "niu".to_string()
     }
+}
+
+/// niubash#888: choose the session's history backing file, once, at
+/// construction — the one place a backing file is chosen. Precedence:
+/// an explicitly configured path wins; else a non-empty inherited
+/// `HISTFILE` seeds the file of record (owner decision D6, 2026-11-04:
+/// the exported variable is a legitimate startup seed); else the
+/// product default under the home directory. The seed is consumed
+/// here and never re-read: what the file holds afterwards is governed
+/// by the provider's load-once session semantics (niubash#773), and
+/// later in-session `HISTFILE` assignments redirect through the #661
+/// watch, not through this choice. An empty inherited value does not
+/// seed: like the #661 watch it names no file, and the host's
+/// single-stream doctrine needs a backing file. Seeding here keeps
+/// `enter_interactive`'s `HISTFILE := history_path` assignment a
+/// value no-op for the seeded case, so the watch arms on exactly the
+/// file the user named.
+fn resolve_history_path(
+    configured: Option<PathBuf>,
+    inherited_histfile: Option<String>,
+    home_dir: &Path,
+) -> PathBuf {
+    if let Some(path) = configured {
+        return path;
+    }
+    if let Some(value) = inherited_histfile {
+        if !value.is_empty() {
+            return PathBuf::from(value);
+        }
+    }
+    home_dir.join(".niubash_history")
 }
 
 impl Shell {
@@ -776,11 +808,11 @@ impl Shell {
         normalize_executor_home_env(&mut session, &home_dir);
         ensure_windows_profile_env(&mut session, &home_dir);
         ensure_prompt_terminal_env(&mut session);
-        let history_path = config
-            .history
-            .path
-            .clone()
-            .unwrap_or_else(|| home_dir.join(".niubash_history"));
+        let history_path = resolve_history_path(
+            config.history.path.clone(),
+            std::env::var("HISTFILE").ok(),
+            &home_dir,
+        );
         // 8. Completion state.
         let mut initial_completion_state = CompletionState::new(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -1179,9 +1211,13 @@ impl Shell {
         // -r`) broke at the first leg. Pointing HISTFILE at the provider's
         // own backing file keeps exactly one stream: the builtins resolve
         // to the file the provider already owns, and the provider's
-        // backing-file fast paths serve them. A HISTFILE the user exports
-        // before launch is still not the file of record — the configured
-        // history path (not an inherited HISTFILE) remains it; an
+        // backing-file fast paths serve them. The file of record was
+        // chosen at construction (see `resolve_history_path`): a
+        // configured path when one exists, else the HISTFILE the user
+        // exported before launch as the startup seed (niubash#888,
+        // owner decision D6), else the default under the home
+        // directory — so for the seeded case the assignment below
+        // writes back the very value the user launched with. An
         // assignment made inside the session is a different matter and
         // does redirect the stream (niubash#661, armed below).
         let history_file = self.history_path.to_string_lossy().into_owned();
@@ -3936,8 +3972,8 @@ impl Shell {
     /// part of this change; the host's single-stream doctrine needs a
     /// backing file), and while the watch is unarmed (before
     /// `enter_interactive` completes) an inherited value never
-    /// redirects — the configured path is the startup file of record
-    /// (niubash#571).
+    /// redirects — the path chosen at construction is the startup
+    /// file of record (niubash#571, seeded per niubash#888).
     fn apply_history_redirect(&mut self) {
         if !self.history_redirect_armed {
             return;
@@ -6091,6 +6127,108 @@ mod tests {
             Some(path.to_string_lossy().into_owned()),
             "HISTFILE must name the provider's backing file, not be unset"
         );
+    }
+
+    #[test]
+    fn issue888_exported_histfile_seeds_the_backing_file() {
+        // niubash#888 (owner decision D6, 2026-11-04): an exported
+        // HISTFILE is a legitimate startup seed. With no configured
+        // path, the resolution the constructor runs names the exported
+        // file as the session's backing file, the provider loads it at
+        // interactive entry, and HISTFILE still names it afterwards
+        // (enter_interactive's assignment is a value no-op).
+        use rubash::history::HistoryProvider;
+
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom_hist");
+        std::fs::write(&custom, "seeded-one\nseeded-two\n").unwrap();
+
+        let seeded = resolve_history_path(
+            None,
+            Some(custom.to_string_lossy().into_owned()),
+            temp.path(),
+        );
+        assert_eq!(seeded, custom);
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = seeded;
+        shell.enter_interactive();
+        let provider = shell.history_provider.as_ref().unwrap().clone();
+        assert_eq!(provider.borrow().backing_file(), Some(custom.clone()));
+        assert_eq!(
+            provider.borrow_mut().entries().unwrap(),
+            ["seeded-one", "seeded-two"]
+        );
+        assert_eq!(
+            shell.session_mut().variables().resolved_value("HISTFILE"),
+            Some(custom.to_string_lossy().into_owned())
+        );
+    }
+
+    #[test]
+    fn issue888_unset_or_empty_histfile_keeps_the_default() {
+        // niubash#888: no exported value — or an empty one, which
+        // names no file — leaves today's default untouched.
+        let home = PathBuf::from("/home/tester");
+        let default = home.join(".niubash_history");
+        assert_eq!(resolve_history_path(None, None, &home), default);
+        assert_eq!(
+            resolve_history_path(None, Some(String::new()), &home),
+            default
+        );
+    }
+
+    #[test]
+    fn issue888_configured_path_outranks_the_exported_histfile() {
+        // niubash#888: the seed applies only when no path is
+        // configured; a configured path remains the file of record.
+        let home = PathBuf::from("/home/tester");
+        let configured = home.join("configured_hist");
+        assert_eq!(
+            resolve_history_path(
+                Some(configured.clone()),
+                Some("/elsewhere/exported_hist".to_string()),
+                &home,
+            ),
+            configured
+        );
+    }
+
+    #[test]
+    fn issue888_seeded_file_is_read_once_at_startup() {
+        // niubash#888, on the standing GNU-semantics ruling
+        // (niubash#773/#774): the backing file is read once at
+        // startup, with session isolation afterwards. The seeded file
+        // gets exactly that treatment — lines another process appends
+        // mid-session do not leak into this session's list (explicit
+        // `history -n`/`-r` aside).
+        use rubash::history::HistoryProvider;
+
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom_hist");
+        std::fs::write(&custom, "at-startup\n").unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.history_path = resolve_history_path(
+            None,
+            Some(custom.to_string_lossy().into_owned()),
+            temp.path(),
+        );
+        shell.enter_interactive();
+        let provider = shell.history_provider.as_ref().unwrap().clone();
+        assert_eq!(provider.borrow_mut().entries().unwrap(), ["at-startup"]);
+
+        // An external writer appends after startup; the session's
+        // list must not change.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&custom)
+            .unwrap();
+        writeln!(file, "external-later").unwrap();
+        drop(file);
+        assert_eq!(provider.borrow_mut().entries().unwrap(), ["at-startup"]);
     }
 
     #[test]
