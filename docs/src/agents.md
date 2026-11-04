@@ -13,7 +13,7 @@ a WSL2 distro installed; opencode, codex (forked), ZCode). Entries added in
 the 2026-10-21 expansion are marked **source-verified** when the claim comes
 from reading shipped code rather than a live run; entries from upstream issue
 threads are marked as reported. Behaviour statements track the current
-release, v1.4.3.
+release, v1.5.0.
 
 ## `--ec` — the verbatim handoff cookbook
 
@@ -31,7 +31,7 @@ parameters, and the exit code and GNU error surface are the unencoded ones.
 | PowerShell | `niu -EncodedCommand [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cmd))` |
 | Python | `subprocess.run(["niu", "--ec", base64.b64encode(cmd.encode()).decode()], ...)` |
 | Node | `child_process.execFile("niu", ["--ec", Buffer.from(cmd).toString("base64")], ...)` |
-| Rust | `Command::new("niu").arg("--ec").arg(BASE64_STANDARD.encode(cmd.as_bytes()))` — the `base64` crate's `general_purpose::STANDARD` engine |
+| Rust | `Command::new("niu").arg("--ec").arg(B64.encode(cmd.as_bytes()))` — the `base64` crate, `B64` being its `general_purpose::STANDARD` engine (imports in the snippet below) |
 
 ### The spawn-site change: `-c` → `--ec`
 
