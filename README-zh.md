@@ -21,9 +21,16 @@
 
 </div>
 
-**niubash** 是用 Rust 原生实现的 Bash 兼容 shell（Git Bash alternative）。在旗舰平台 Windows 上，一个 `niu.exe` 打包全部：[rubash](https://github.com/unixwin/rubash) 语言引擎、来自 [WinuxCmd](https://github.com/unixwin/winuxcmd) 的真 Unix 命令、带 git 状态的 prompt，以及带权限模型的插件系统。git 来自 [niu-git](https://github.com/unixwin/niu-git)：用 MSVC 构建的 git-for-windows 真 C 源码，PATH 上的 `git` 就是 git 本体——没有 MSYS 运行时，没有启动器跳板，不带 perl；git 的 shell 脚本部分（hooks、`git bisect`、`git mergetool`）跑在 niubash 自己的 `sh` 上。从 niu 会话启动的 agent 会经 `SHELL` 继承它作为 shell；哪些 agent 跑什么 shell、怎么把其余的指过来，见 [Coding agents on Windows](docs/src/agents.md)。Linux 与 macOS 构建是便携 `niu` 二进制，直接用系统自带的工具。
+**niubash** 是用 Rust 原生实现的 Bash 兼容 shell（Git Bash alternative）。在旗舰平台 Windows 上，一个 `niu.exe` 装下整个栈：
 
-niu 不是 MSYS2、Cygwin、Git Bash，也不是 WSL——没有 POSIX 模拟层，也没有启发式的路径转换。它是 Git Bash 的 from-scratch replacement：原生 Windows 二进制，无 POSIX 模拟层。每个平台的完整契约（包括每个目标的诚实状态）见 [platform-support.md](docs/src/platform-support.md)。
+- [rubash](https://github.com/unixwin/rubash) 语言引擎——GNU Bash 5.3 语义，无模拟层；
+- 来自 [WinuxCmd](https://github.com/unixwin/winuxcmd) 的真 Unix 命令，为 shell 使用设计的原生构建；
+- 带 git 状态的 prompt，与带权限模型的插件系统；
+- 还有 git 本体：[niu-git](https://github.com/unixwin/niu-git) 是用 MSVC 构建的 git-for-windows 真 C 源码，PATH 上的 `git` 就是 git 本身——没有 MSYS 运行时，没有启动器跳板，不带 perl。git 的 shell 脚本部分（hooks、`git bisect`、`git mergetool`）跑在 niubash 自己的 `sh` 上。
+
+从 niu 会话启动的 agent 会经 `SHELL` 继承它作为 shell；哪些 agent 跑什么 shell、怎么把其余的指过来，[Coding agents on Windows](docs/src/agents.md) 逐个写明。Linux 与 macOS 构建是便携 `niu` 二进制，直接用系统自带的工具。
+
+niu 不是 MSYS2、Cygwin、Git Bash，也不是 WSL——没有 POSIX 模拟层，也没有启发式的路径转换。它是 Git Bash 的 from-scratch replacement：原生 Windows 二进制。每个平台的完整契约（包括每个目标的诚实状态）见 [platform-support.md](docs/src/platform-support.md)。
 
 <p align="center">
   <a href="assets/demo-gitbash.gif"><img src="assets/demo-gitbash-poster.png" alt="同一组命令，在 Git Bash 与 niubash 下的两种下场" width="880" /></a>
@@ -54,7 +61,21 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
 源码构建（Rust 1.95+）：
 `git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
 
-配置只有一个文件：`~/.niubashrc`，纯 Bash 语法——它是 niu 唯一读取的启动文件（`~/.bashrc` 永不被 source；`niu plugin migrate-rc --diff` 会告诉你哪些东西值得搬过来）——从[快速上手](docs/src/getting-started.md)开始。
+配置只有一个文件：`~/.niubashrc`，纯 Bash 语法——它是 niu 在 Windows 上唯一读取的启动文件。Linux/macOS 的登录 shell 额外读 GNU profile 链（`/etc/profile`，然后 `~/.bash_profile` → `~/.bash_login` → `~/.profile` 取第一个存在的），与 GNU bash 完全一致；`~/.bashrc` 永不被直接 source（`niu plugin migrate-rc --diff` 会告诉你哪些东西值得搬过来）——从[快速上手](docs/src/getting-started.md)开始。
+
+### 首跑实测
+
+```console
+$ niu --version
+Niubash 1.5.0 — bash-compatible shell for Windows, Linux, macOS, and Android
+  rubash   git 29bbf52481c3
+  winuxcmd WinuxCmd 1.2.1
+
+$ niu -c 'echo $BASH_VERSION'
+5.3.20(1)-release
+```
+
+`--version` 直接报出这个二进制携带的引擎与命令层的确切构建——"我在跟哪个构建说话"永远有案可查，这正是 agent 日志依赖的性质（[rubash#488](https://github.com/unixwin/rubash/issues/488)）。
 
 ## 为什么不用 Git Bash / MSYS2 / Cygwin
 
@@ -81,7 +102,7 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
 
 ## 命令层：为 shell 而造
 
-捆绑的命令是 **WinuxCmd**：176 个命令 / 1,924 个选项，原生 Windows 构建，为 shell 使用设计、与这个 shell 同节奏演进——路径形态、参数传递、与 shell 的配合面都按 shell 语义设计。显而易见的替代品——微软自家的 coreutils 包——是把上游 uutils *打包* 给 PowerShell/CMD 用的（其仓库自述为「Installer & Packaging」，包还在 preview）。它自己的 README 写明了边界：**没有 `/dev/null`**、**没有 POSIX 信号**、`kill` 与 `timeout` 不发货，`chmod`、`chown`、`id`、`tty`、`mkfifo`、`nohup`、`stty` 等二十多个命令以「POSIX-only concepts」为由整批丢弃。给 shell 用的命令层，不能从丢掉 shell 赖以生存的概念开始。
+捆绑的命令是 **WinuxCmd**：176 个命令外加 `wpm`、`[` 两个内部辅助——共 178 个 applet、1,924 个选项——原生 Windows 构建，与这个 shell 同节奏演进（[仓库](https://github.com/unixwin/winuxcmd)）；路径形态、参数传递、与 shell 的配合面都按 shell 语义设计。显而易见的替代品——微软自家的 coreutils 包——是把上游 uutils *打包* 给 PowerShell/CMD 用的（其仓库自述为「Installer & Packaging」，包还在 preview）。它自己的 README 写明了边界：**没有 `/dev/null`**、**没有 POSIX 信号**、`kill` 与 `timeout` 不发货，`chmod`、`chown`、`id`、`tty`、`mkfifo`、`nohup`、`stty` 等二十多个命令以「POSIX-only concepts」为由整批丢弃。给 shell 用的命令层，不能从丢掉 shell 赖以生存的概念开始。
 
 ## 还有「轻量替代」shell 们
 
@@ -101,11 +122,11 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
   #   git log -1 --format="commit %h on %cd" --date="format:%Y-%m-%d"
   # base64 一下（任何语言一行搞定），然后把这一个字符串交给 niu：
   $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQi
-  commit a08e7afd on 2026-11-02
+  commit 58e10d1 on 2026-11-02
   ```
 
-  输出和你手敲一模一样——但 agent 全程没写过一个引号。熟悉 PowerShell 的直接用 `-EncodedCommand`（同样的形状，大小写不敏感），`--ec` 是短写。解码器认换行包装、缺 padding、可选 `v1:` 前缀（防 Git-Bash 系层改写路径）。Python / Node / Rust / PowerShell 的完整 cookbook——编码端写法、它消灭的失败模式、载荷上限——见 [Coding agents on Windows](docs/src/agents.md)。
-- **真实的 agent 使用在先。** OpenCode 用户把 `niu.exe` 设为 agent 的 shell，并直接推动了环境变量驱动的 init 工作（[#82](https://github.com/unixwin/niubash/issues/82)）；一处 Hermes 集成故障——字面引号漏进外部命令参数——被立案并修复（[#124](https://github.com/unixwin/niubash/issues/124)）；一天之内三起假基线事故之后，`--version` 现在带构建元数据，agent 永远能确切知道自己在跟哪个构建说话（[rubash#488](https://github.com/unixwin/rubash/issues/488)）。
+  输出和你手敲一模一样——但 agent 全程没写过一个引号。（2026-11-04 在 niubash 检出下实测。）熟悉 PowerShell 的直接用 `-EncodedCommand`（同样的形状，大小写不敏感），`--ec` 是短写。解码器认换行包装、缺 padding、可选 `v1:` 前缀（防 Git-Bash 系层改写路径）。Python / Node / Rust / PowerShell 的完整 cookbook——编码端写法、它消灭的失败模式、载荷上限——见 [Coding agents on Windows](docs/src/agents.md)。
+- **真实的 agent 使用在先。** OpenCode 用户把 `niu.exe` 设为 agent 的 shell，并直接推动了环境变量驱动的 init 工作（[#82](https://github.com/unixwin/niubash/issues/82)）；一处 Hermes 集成故障——字面引号漏进外部命令参数——被立案并修复（[#124](https://github.com/unixwin/niubash/issues/124)）；一天之内三起假基线事故之后，`--version` 现在带构建元数据，agent 永远能确切知道自己在跟哪个构建说话（[rubash#488](https://github.com/unixwin/rubash/issues/488)——实测样例见上文[首跑实测](#首跑实测)）。
 - **非交互行为是确定性的。** `niu -c` 与脚本运行安静而稳定：无横幅，stdout/stderr 稳定，退出码精确传播——agent 的工具循环靠的正是这些性质。
 - **没有路径轮盘赌。** 没有需要记的 `MSYS_NO_PATHCONV`，没有在子进程背后偷偷改写参数的启发式——`/flags` 还是 `/flags`，路径形操作数按一份成文契约翻译（[windows-path-contract.md](docs/src/windows-path-contract.md)）。
 - **agent 技能包随每个 release 发行**：[Releases](https://github.com/unixwin/niubash/releases) 页上的 `niubash-skill-v*.zip` 把这个 shell 的成文行为打包给 agent 消费（[#188](https://github.com/unixwin/niubash/issues/188)）；引擎仓在根目录 `SKILL.md` 里自带披露（含平台身份语义）。
@@ -128,9 +149,9 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 下面每条 claim 都链到产出它的工件：入仓日志、基线文件、CI 门禁。
 
-**6,336 个真实生态资产，逐个收割、逐个回放。** 管线从 GitHub 抓取 shell 脚本、框架、主题、dotfiles，逐个在 niu 下 source 并记录裁决：4,891 个 OK，350 个慢，224 个 GNU Bash 也过不了，101 个挂起，698 个拉取失败。全量日志入仓（[eco-harvest.py](scripts/harvest/eco-harvest.py)、[eco-test.py](scripts/harvest/eco-test.py)、快照 [wt92-local-20261005](scripts/harvest/snapshots/wt92-local-20261005/))。
+**6,336 个真实生态资产，逐个收割、逐个回放。** 管线从 GitHub 抓取 shell 脚本、框架、主题、dotfiles，逐个在 niu 下 source 并记录裁决：4,891 个 OK，350 个慢，224 个 GNU Bash 也过不了，101 个挂起，698 个拉取失败。全量日志入仓（[eco-harvest.py](scripts/harvest/eco-harvest.py)、[eco-test.py](scripts/harvest/eco-test.py)、快照 [wt92-local-20261005](scripts/harvest/snapshots/wt92-local-20261005/)）。
 
-**生态框架是被 source、被计时的。** 逐资产计时基线加载 437 个真实 oh-my-bash / bash-it 资产（166 款主题加上 plugins、completions、aliases），每资产测三个阶段（source、首帧 prompt、重渲染），取三次运行的中位数。两个框架自带的 nvm 资产就在这份基线里；真实用户 dotfiles 里加载 nvm.sh 的链路也走同一套 harness，分相计时在案（[基线](scripts/perf/baselines/asset-timing-baseline.json)、[快照](scripts/harvest/snapshots/wt92-local-20261005/))。
+**生态框架是被 source、被计时的。** 逐资产计时基线加载 437 个真实 oh-my-bash / bash-it 资产（166 款主题加上 plugins、completions、aliases），每资产测三个阶段（source、首帧 prompt、重渲染），取三次运行的中位数。两个框架自带的 nvm 资产就在这份基线里；真实用户 dotfiles 里加载 nvm.sh 的链路也走同一套 harness，分相计时在案（[基线](scripts/perf/baselines/asset-timing-baseline.json)、[快照](scripts/harvest/snapshots/wt92-local-20261005/)）。
 
 **慢的发布发不出去。** [budgets.json](scripts/perf/budgets.json) 里每个资产都带实测预算（Windows 参考基线口径下，健康主题重渲染 11–35 ms、预算线 120 ms；超预算 5 倍硬失败）。[发布流水线](.github/workflows/release.yml)跑 `perfbudget` 门禁，超限即 fail 本次发布；另有每夜趋势跑盯漂移。
 
@@ -138,7 +159,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 下面每个数字都来自同一份已发布规程——2026-10-25 基线（PERF-BASELINE-2026-10-25，存于公开的 [shellbench](https://github.com/unixwin/shellbench) 仓）：release 构建、Linux、对自编译 GNU Bash 5.3.20。
 
-**先说诚实结论。** 内嵌的 rubash 引擎在解释器受限的微观负载上付一层近似均匀的 **~3× 地板税**（算术、函数调用、赋值、read 循环的单操作成本 2.8–3.2×）。「全表超越 GNU」是公开目标、是旗舰版的硬门，现状如实发布、不藏。成本在进程创建上的负载则反过来：管道段与命令替换在进程内执行，耗时是 GNU 的 **0.05×**（管道）与 **0.11×**（命令替换循环）。
+**先说诚实结论。** 内嵌的 rubash 引擎在解释器受限的微观负载上付一层近似均匀的 **~3× 地板税**（算术、函数调用、赋值、read 循环的单操作成本 2.8–3.2×）。「全表超越 GNU」是公开目标、是 1.5.0 之后计划的硬门，现状如实发布、不藏。成本在进程创建上的负载则反过来：管道段与命令替换在进程内执行，耗时是 GNU 的 **0.05×**（管道）与 **0.11×**（命令替换循环）。
 
 **启动——唯一可引用的口径。** `-c 'true'`，50 样本交错采样取 p50，release 构建，Linux：**niu 3.96 ms，rubash 3.43 ms，GNU Bash 5.3.20 2.59 ms**。Windows 面的启动数字在真机按同一规程复测之前，一律不引用。
 
@@ -171,7 +192,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 ## 已知限制，明说
 
 - **安装器尚未代码签名。** 首次运行时 Windows SmartScreen 会警告（[#511](https://github.com/unixwin/niubash/issues/511)——SignPath 签名通道已就绪，其正式发布签名的批准仍在等待中）。在此之前，请对照发布的 SHA-256 校验和验证下载。
-- **解释器速度是一份实测在案、公开发布的差距**（见[性能](#性能)）——不是藏着的。进程受限负载已经领先；解释器受限的微观负载是旗舰版的硬门。
+- **解释器速度是一份实测在案、公开发布的差距**（见[性能](#性能)）——不是藏着的。进程受限负载已经领先；解释器受限的微观负载是 1.5.0 之后计划的硬门。
 
 ## 文档
 

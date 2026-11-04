@@ -21,9 +21,16 @@ Docs & downloads: [unixwin.dev](https://unixwin.dev)
 
 </div>
 
-**niubash** is a Bash-compatible shell implemented natively in Rust — a Git Bash alternative. On Windows, the flagship platform, one `niu.exe` bundles everything: the [rubash](https://github.com/unixwin/rubash) language engine, real Unix commands from [WinuxCmd](https://github.com/unixwin/winuxcmd), a git-aware prompt, and a permission-modeled plugin system. Git comes from [niu-git](https://github.com/unixwin/niu-git): the real git-for-windows C source built with MSVC, so the `git` on PATH *is* the git binary — no MSYS runtime, no launcher hop, no bundled perl — and git's shell-script parts (hooks, `git bisect`, `git mergetool`) run on niubash's own `sh`. Agents launched from a niu session inherit it as their shell through `SHELL`; see [Coding agents on Windows](docs/src/agents.md) for which shell each agent runs and how to point the rest at niu. The Linux and macOS builds are portable `niu` binaries that use your system's own tools.
+**niubash** is a Bash-compatible shell implemented natively in Rust — a Git Bash alternative. On Windows, the flagship platform, one `niu.exe` carries the whole stack:
 
-niu is not MSYS2, Cygwin, Git Bash, or WSL — there is no POSIX emulation layer and no path-conversion heuristics. It is a from-scratch replacement for Git Bash: a native Windows binary with no POSIX emulation. The full per-platform contract, including the honest status of every target, lives in [platform-support.md](docs/src/platform-support.md).
+- the [rubash](https://github.com/unixwin/rubash) language engine — GNU Bash 5.3 semantics with no emulation layer;
+- real Unix commands from [WinuxCmd](https://github.com/unixwin/winuxcmd), native builds designed for shell use;
+- a git-aware prompt and a permission-modeled plugin system;
+- git itself: [niu-git](https://github.com/unixwin/niu-git) is the real git-for-windows C source built with MSVC, so the `git` on PATH *is* the git binary — no MSYS runtime, no launcher hop, no bundled perl. Git's shell-script parts (hooks, `git bisect`, `git mergetool`) run on niubash's own `sh`.
+
+Agents launched from a niu session inherit it as their shell through `SHELL`; [Coding agents on Windows](docs/src/agents.md) documents, agent by agent, which shell each one runs and how to point the rest at niu. The Linux and macOS builds are portable `niu` binaries that use your system's own tools.
+
+niu is not MSYS2, Cygwin, Git Bash, or WSL — there is no POSIX emulation layer and no path-conversion heuristics. It is a from-scratch replacement for Git Bash: a native Windows binary. The full per-platform contract, including the honest status of every target, lives in [platform-support.md](docs/src/platform-support.md).
 
 <p align="center">
   <a href="assets/demo-gitbash.gif"><img src="assets/demo-gitbash-poster.png" alt="The same commands under Git Bash and under niubash" width="880" /></a>
@@ -54,11 +61,25 @@ Android (aarch64, armv7): release `.zip` assets ship since v1.4.3 and run on rea
 From source (Rust 1.95+):
 `git clone https://github.com/unixwin/niubash.git && cd niubash && cargo build --release`
 
-On Windows, configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — the only startup file niu reads there. Login shells on Linux/macOS additionally read the GNU profile chain (`/etc/profile`, then the first of `~/.bash_profile` → `~/.bash_login` → `~/.profile`), exactly as GNU bash does; `~/.bashrc` is never sourced directly (run `niu plugin migrate-rc --diff` to see exactly what is worth carrying over) — start with [Getting started](docs/src/getting-started.md).
+On Windows, configuration is ONE file, `~/.niubashrc`, in plain Bash syntax — the only startup file niu reads there. Login shells on Linux/macOS also read the GNU profile chain (`/etc/profile`, then the first of `~/.bash_profile` → `~/.bash_login` → `~/.profile`), exactly as GNU bash does; `~/.bashrc` is never sourced directly (run `niu plugin migrate-rc --diff` to see exactly what is worth carrying over) — start with [Getting started](docs/src/getting-started.md).
+
+### First run, verified
+
+```console
+$ niu --version
+Niubash 1.5.0 — bash-compatible shell for Windows, Linux, macOS, and Android
+  rubash   git 29bbf52481c3
+  winuxcmd WinuxCmd 1.2.1
+
+$ niu -c 'echo $BASH_VERSION'
+5.3.20(1)-release
+```
+
+`--version` names the exact engine and command-layer builds the binary carries, so "which build am I talking to" always has an answer on record — the property an agent's logs depend on ([rubash#488](https://github.com/unixwin/rubash/issues/488)).
 
 ## Why not Git Bash / MSYS2 / Cygwin
 
-**Git Bash** calls itself, verbatim, "a BASH emulation used to run Git from the command line" — an emulation built to run Git. The costs are structural. Console device redirects such as `echo >/dev/tty` fail outright with `Invalid argument` in its MSYS layer, where niubash matches GNU. Its bundled bash is on the 5.2 line, so bash 5.3's `${ cmd; }` nofork substitution does not exist. Its prompt runs `__git_ps1` — a git process — on every draw; niu's git segment asks your own git at most once per prompt pass — one bounded `status --porcelain=v2 --branch` query (2 s timeout) — and repaints within the pass reuse that result instead of spawning again (measured steady state inside a repository: 1.0 spawn per pass, p50 26 ms per pass; Windows, same machine). And a real Git for Windows install is ≈440 MB plus a 20 MB simulation DLL, versus niu at ≈16 MB with zero DLLs (project-measured, as of 2026-10-25).
+**Git Bash** calls itself, verbatim, "a BASH emulation used to run Git from the command line" — an emulation built to run Git. The costs are structural. Console device redirects such as `echo >/dev/tty` fail outright with `Invalid argument` in its MSYS layer, where niubash matches GNU. Its bundled bash is on the 5.2 line, so bash 5.3's `${ cmd; }` nofork substitution does not exist. Its prompt runs `__git_ps1` — a git process — on every draw. niu's git segment asks your own git at most once per prompt pass (one bounded `status --porcelain=v2 --branch` query, 2 s timeout), and repaints within the pass reuse that result instead of spawning again (measured steady state inside a repository: 1.0 spawn per pass, p50 26 ms per pass; Windows, same machine). And a real Git for Windows install is ≈440 MB plus a 20 MB simulation DLL, versus niu at ≈16 MB with zero DLLs (project-measured, as of 2026-10-25).
 
 **MSYS2**'s own documentation concedes that arguments resembling Unix paths are automatically rewritten before being passed to native programs — and that the rewriting "isn't perfect," hitting arguments that aren't paths, or path lists that aren't. niubash keeps translation deliberately narrow: quoted arguments are never rewritten, and the only device translation is the exact token `/dev/null` → `nul`; every overreach ever found became a public issue and a pinned regression test.
 
@@ -81,7 +102,7 @@ The long version — including same-command-line side-by-sides of what actually 
 
 ## The command layer: built for a shell
 
-The bundled commands are **WinuxCmd**: 178 applets (176 commands, excluding the internal `wpm` and `[`) / 1,924 options, native Windows builds designed for shell use and evolved in lockstep with this shell — path forms, argument passing, and shell interplay are designed against shell semantics. The obvious alternative, Microsoft's own coreutils package, is an upstream uutils build *packaged* for PowerShell/CMD (its repo describes itself as "Installer & Packaging", and the package is in preview). Its README states its own limits: **no `/dev/null`**, **no POSIX signals**, `kill` and `timeout` not shipped, and twenty-plus commands — `chmod`, `chown`, `id`, `tty`, `mkfifo`, `nohup`, `stty`, … — dropped wholesale as "POSIX-only concepts". A command layer for a shell cannot start by discarding the concepts a shell lives on.
+The bundled commands are **WinuxCmd**: 176 commands plus the 2 internal helpers `wpm` and `[` — 178 applets, 1,924 options — native Windows builds, evolved in lockstep with this shell ([repo](https://github.com/unixwin/winuxcmd)); path forms, argument passing, and shell interplay are designed against shell semantics. The obvious alternative, Microsoft's own coreutils package, is an upstream uutils build *packaged* for PowerShell/CMD (its repo describes itself as "Installer & Packaging", and the package is in preview). Its README states its own limits: **no `/dev/null`**, **no POSIX signals**, `kill` and `timeout` not shipped, and twenty-plus commands — `chmod`, `chown`, `id`, `tty`, `mkfifo`, `nohup`, `stty`, … — dropped wholesale as "POSIX-only concepts". A command layer for a shell cannot start by discarding the concepts a shell lives on.
 
 ## And the "lightweight replacement" shells
 
@@ -101,11 +122,11 @@ Models are trained on Bash; on a Windows machine their commands deserve a shell 
   #   git log -1 --format="commit %h on %cd" --date="format:%Y-%m-%d"
   # base64 it — one line in any language — and hand niu the string:
   $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQi
-  commit a08e7afd on 2026-11-02
+  commit 58e10d1 on 2026-11-02
   ```
 
-  Same output as typing the command by hand — but the agent never wrote a single quote. PowerShell users already know this shape: `-EncodedCommand`, spelled the same way and case-insensitive (`--ec` is the short alias). The decoder accepts wrapped lines, missing padding, and an optional `v1:` prefix that guards the payload through Git-Bash-style layers. Full cookbook for Python / Node / Rust / PowerShell — encoders, the failure modes this removes, payload limits — in [Coding agents on Windows](docs/src/agents.md).
-- **Real agent usage came first.** OpenCode users run `niu.exe` as their agent's shell and drove the environment-driven init work ([#82](https://github.com/unixwin/niubash/issues/82)); a Hermes integration failure — literal quotes leaking into external-command arguments — was filed and fixed ([#124](https://github.com/unixwin/niubash/issues/124)); and after three false-baseline incidents in a single day, `--version` now carries build metadata, so an agent can always tell exactly which build it is talking to ([rubash#488](https://github.com/unixwin/rubash/issues/488)).
+  Same output as typing the command by hand — but the agent never wrote a single quote. (Captured in the niubash checkout, 2026-11-04.) PowerShell users already know this shape: `-EncodedCommand`, spelled the same way and case-insensitive (`--ec` is the short alias). The decoder accepts wrapped lines, missing padding, and an optional `v1:` prefix that guards the payload through Git-Bash-style layers. Full cookbook for Python / Node / Rust / PowerShell — encoders, the failure modes this removes, payload limits — in [Coding agents on Windows](docs/src/agents.md).
+- **Real agent usage came first.** OpenCode users run `niu.exe` as their agent's shell and drove the environment-driven init work ([#82](https://github.com/unixwin/niubash/issues/82)); a Hermes integration failure — literal quotes leaking into external-command arguments — was filed and fixed ([#124](https://github.com/unixwin/niubash/issues/124)); and after three false-baseline incidents in a single day, `--version` now carries build metadata, so an agent can always tell exactly which build it is talking to ([rubash#488](https://github.com/unixwin/rubash/issues/488) — shown under [First run, verified](#first-run-verified) above).
 - **Deterministic non-interactive behavior.** `niu -c` and script runs are quiet and stable: no banners, stable stdout/stderr, exact exit-code propagation — the properties an agent's tool loop depends on.
 - **No path roulette.** There is no `MSYS_NO_PATHCONV` to remember and no heuristic rewriting arguments behind the child's back — `/flags` stay `/flags`, and path-shaped operands are translated by one documented contract ([windows-path-contract.md](docs/src/windows-path-contract.md)).
 - **An agent skill ships with every release**: the `niubash-skill-v*.zip` asset on the [Releases](https://github.com/unixwin/niubash/releases) page packages the shell's documented behavior for agent consumption ([#188](https://github.com/unixwin/niubash/issues/188)), and the engine repo carries its own disclosure in `SKILL.md` (including the platform identity semantics).
@@ -158,7 +179,7 @@ Every number below comes from one published protocol — the 2026-10-25 baseline
 | Android aarch64 / armv7 | Shipped since v1.4.3; runs on real devices (Termux), release smoke gate not yet wired in CI | NDK-linked `.zip` release asset |
 | OpenHarmony (`aarch64-unknown-linux-ohos`) | CI check only, no release | kept compiling by CI, never run on a device |
 
-"Smoke-gated" means the artifact is built, then run on its own OS against four checks (`--version`, `-c` execution, a pipeline through native coreutils, the offline plugin stack) before upload — the gate lives in `release.yml` ("no smoke, no artifact": Linux legs run it natively on `ubuntu-22.04`/`ubuntu-22.04-arm`, the macOS x86_64 leg under Rosetta 2), and the release as a whole additionally blocks on the golden user journey and the per-asset timing budget gates. OpenHarmony has not passed that gate (compile-checked only, never run on a device). Android ships release `.zip` assets since v1.4.3 and runs on real devices (Termux aarch64/armv7, daily-driven with on-device benchmark baselines); what it lacks is the automated per-release smoke leg in CI, which is wired for Windows/Linux/macOS only. The per-platform contract and the full status matrix live in [platform-support.md](docs/src/platform-support.md).
+"Smoke-gated" means the artifact is built, then run on its own OS against four checks (`--version`, `-c` execution, a pipeline through native coreutils, the offline plugin stack) before upload — the gate lives in `release.yml` ("no smoke, no artifact": Linux legs run it natively on `ubuntu-22.04`/`ubuntu-22.04-arm`, the macOS x86_64 leg under Rosetta 2), and the release as a whole also blocks on the golden user journey and the per-asset timing budget gates. OpenHarmony has not passed that gate (compile-checked only, never run on a device). Android ships release `.zip` assets since v1.4.3 and runs on real devices (Termux aarch64/armv7, daily-driven with on-device benchmark baselines); what it lacks is the automated per-release smoke leg in CI, which is wired for Windows/Linux/macOS only. The per-platform contract and the full status matrix live in [platform-support.md](docs/src/platform-support.md).
 
 ## Quick answers
 
