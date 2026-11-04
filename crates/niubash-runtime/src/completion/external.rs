@@ -904,7 +904,7 @@ impl ExternalCompletionPlugin {
     /// Lookup order:
     ///   1. In-memory cache (same session, already verified)
     ///   2. Disk cache file (survives restarts; validated via mtime / TTL)
-    ///   2b. Pre-rename legacy disk cache, read-only (niubash#841)
+    ///      2b. Pre-rename legacy disk cache, read-only (niubash#841)
     ///   3. Sub-process execution → write disk cache → populate memory cache
     fn resolve_dynamic(
         &self,
@@ -1368,7 +1368,6 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::completion::CompletionContext;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
