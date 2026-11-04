@@ -15,6 +15,38 @@ from reading shipped code rather than a live run; entries from upstream issue
 threads are marked as reported. Behaviour statements track the current
 release, v1.4.3.
 
+## `--ec` — the verbatim handoff cookbook
+
+When a host cannot guarantee byte-exact quoting — or the command travels
+through several shells on its way to this one — stop quoting altogether:
+encode the command as base64 and hand niu the payload. It arrives as one
+argv word no transport layer can rewrite; niu decodes it and runs it through
+the regular `-c` route. Leading shell flags (`-e -u -o pipefail --norc`)
+apply exactly as with `-c`, words after the payload are `$0` plus positional
+parameters, and the exit code and GNU error surface are the unencoded ones.
+
+| Host | Encode + invoke |
+| --- | --- |
+| bash / WSL | `niu --ec "$(printf '%s' "$cmd" \| base64 -w0)"` |
+| PowerShell | `niu -EncodedCommand [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cmd))` |
+| Python | `subprocess.run(["niu", "--ec", base64.b64encode(cmd.encode()).decode()], ...)` |
+| Node | `child_process.execFile("niu", ["--ec", Buffer.from(cmd).toString("base64")], ...)` |
+| Rust | `Command::new("niu").arg("--ec").arg(BASE64_STANDARD.encode(cmd.as_bytes()))` — the `base64` crate's `general_purpose::STANDARD` engine |
+
+Decoder tolerance is built for LLM-shaped payloads: an optional `v1:` prefix
+(guards against MSYS-family path rewriting in transit), ASCII whitespace and
+wrapped lines ignored, missing `=` padding accepted. The payload encoding is
+**UTF-8**. PowerShell's own `-EncodedCommand` uses UTF-16LE, so a payload
+produced for PowerShell must be re-encoded for niu — a UTF-16 payload fails
+loudly (`payload is not valid UTF-8`), never silently. Windows caps one
+command line at ~32 K chars (~24 K of script after base64 inflation); for
+larger payloads write a temp script file and execute it.
+
+Failure modes this removes at the transport level: nested-quote re-escaping
+per host layer, `$`/backtick expansion by the calling shell, heredoc
+corruption, `\\` collapse across cmd→wsl→ssh, and CRLF translation of
+inline scripts.
+
 ## The one thing that usually just works
 
 Launch the agent **from a niu session**:

@@ -94,6 +94,17 @@ Android（aarch64、armv7）：v1.4.3 起 release 自带 `.zip`，真机（Termu
 模型是按 Bash 训练的；在 Windows 机器上，它们的命令理应由一个「照原文执行」的 shell 来跑。
 
 - **agent 继承 niu 作为 shell。** 从 niu 会话启动的一切都经 `SHELL` 拿到它；[Coding agents on Windows](docs/src/agents.md) 逐个 agent 写明了各自跑什么 shell、怎么把其余的指过来。
+- **`--ec`：别跟引号搏斗了，base64 一下。** agent 的命令到达 shell 之前要穿过好几层宿主——每一层都可能弄坏嵌套引号、展开 `$`、吃掉反斜杠。niu 允许你把整条命令编码成一个 base64 字符串再调用——**没有引号，就没有可被弄坏的东西**：
+
+  ```console
+  # 你想跑的命令：
+  #   git log -1 --format="commit %h on %cd" --date="format:%Y-%m-%d"
+  # base64 一下（任何语言一行搞定），然后把这一个字符串交给 niu：
+  $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQ=
+  commit a08e7afd on 2026-11-02
+  ```
+
+  输出和你手敲一模一样——但 agent 全程没写过一个引号。熟悉 PowerShell 的直接用 `-EncodedCommand`（同样的形状，大小写不敏感），`--ec` 是短写。解码器认换行包装、缺 padding、可选 `v1:` 前缀（防 Git-Bash 系层改写路径）。Python / Node / Rust / PowerShell 的完整 cookbook——编码端写法、它消灭的失败模式、载荷上限——见 [Coding agents on Windows](docs/src/agents.md)。
 - **真实的 agent 使用在先。** OpenCode 用户把 `niu.exe` 设为 agent 的 shell，并直接推动了环境变量驱动的 init 工作（[#82](https://github.com/unixwin/niubash/issues/82)）；一处 Hermes 集成故障——字面引号漏进外部命令参数——被立案并修复（[#124](https://github.com/unixwin/niubash/issues/124)）；一天之内三起假基线事故之后，`--version` 现在带构建元数据，agent 永远能确切知道自己在跟哪个构建说话（[rubash#488](https://github.com/unixwin/rubash/issues/488)）。
 - **非交互行为是确定性的。** `niu -c` 与脚本运行安静而稳定：无横幅，stdout/stderr 稳定，退出码精确传播——agent 的工具循环靠的正是这些性质。
 - **没有路径轮盘赌。** 没有需要记的 `MSYS_NO_PATHCONV`，没有在子进程背后偷偷改写参数的启发式——`/flags` 还是 `/flags`，路径形操作数按一份成文契约翻译（[windows-path-contract.md](docs/src/windows-path-contract.md)）。

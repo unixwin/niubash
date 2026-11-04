@@ -94,6 +94,17 @@ Lightweight is no excuse for missing limbs. Complete bash semantics re-implement
 Models are trained on Bash; on a Windows machine their commands deserve a shell that executes them the way they were written.
 
 - **Agents inherit niu as their shell.** Anything launched from a niu session gets it through `SHELL`, and [Coding agents on Windows](docs/src/agents.md) documents, agent by agent, which shell each one runs and how to point the rest at niu.
+- **`--ec`: stop quoting commands, base64 them instead.** An agent's command passes through several hosts before it reaches the shell — and every one of them can break nested quotes, expand `$`, or eat backslashes. niu accepts the whole command as one base64 string, so there is simply nothing left to escape:
+
+  ```console
+  # the command you want to run:
+  #   git log -1 --format="commit %h on %cd" --date="format:%Y-%m-%d"
+  # base64 it — one line in any language — and hand niu the string:
+  $ niu --ec Z2l0IGxvZyAtMSAtLWZvcm1hdD0iY29tbWl0ICVoIG9uICVjZCIgLS1kYXRlPSJmb3JtYXQ6JVktJW0tJWQ=
+  commit a08e7afd on 2026-11-02
+  ```
+
+  Same output as typing the command by hand — but the agent never wrote a single quote. PowerShell users already know this shape: `-EncodedCommand`, spelled the same way and case-insensitive (`--ec` is the short alias). The decoder accepts wrapped lines, missing padding, and an optional `v1:` prefix that guards the payload through Git-Bash-style layers. Full cookbook for Python / Node / Rust / PowerShell — encoders, the failure modes this removes, payload limits — in [Coding agents on Windows](docs/src/agents.md).
 - **Real agent usage came first.** OpenCode users run `niu.exe` as their agent's shell and drove the environment-driven init work ([#82](https://github.com/unixwin/niubash/issues/82)); a Hermes integration failure — literal quotes leaking into external-command arguments — was filed and fixed ([#124](https://github.com/unixwin/niubash/issues/124)); and after three false-baseline incidents in a single day, `--version` now carries build metadata, so an agent can always tell exactly which build it is talking to ([rubash#488](https://github.com/unixwin/rubash/issues/488)).
 - **Deterministic non-interactive behavior.** `niu -c` and script runs are quiet and stable: no banners, stable stdout/stderr, exact exit-code propagation — the properties an agent's tool loop depends on.
 - **No path roulette.** There is no `MSYS_NO_PATHCONV` to remember and no heuristic rewriting arguments behind the child's back — `/flags` stay `/flags`, and path-shaped operands are translated by one documented contract ([windows-path-contract.md](docs/src/windows-path-contract.md)).
