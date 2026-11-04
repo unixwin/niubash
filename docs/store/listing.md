@@ -85,7 +85,7 @@ Windows.
 - **IDE-style completion**: a completion menu with descriptions
 - **Built for humans and AI agents**: quiet, deterministic non-interactive
   mode with exact exit codes
-- **Lightweight**: ~4 MB core binary, fast startup
+- **Lightweight**: single ~14 MB binary, millisecond startup, no background services
 
 Open a terminal and type `niu` to start.
 
@@ -103,6 +103,10 @@ bash, shell, terminal, command line, wsl alternative, unix tools, developer tool
 
 ### What's new in this version
 
-v1.1.0: IDE-style completion menu, colorized plugin CLI, NIU_ENV/BASH_ENV
-one-shot env files, reduced startup overhead, smaller release binary, and the
-upstream rubash v1.1.0 CTLESC leak fix.
+v1.5.0: **native script debugger** (`niu --debug` interactive on the terminal,
+`niu --dap` speaks the Debug Adapter Protocol for VS Code — a zero-dependency
+extension ships in the package), GNU `possible-completions` (`M-?`/`M-=`), the
+readline ABI opened in both directions (`enable -f` plugins can now drive the
+live editor), GNU-style configuration (TOML removed, `niu config migrate`
+translates old setups), and the MSIX-layout `NIU_ROOT` fix this Store package
+depends on.
