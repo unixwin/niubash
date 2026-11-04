@@ -270,15 +270,16 @@ impl NiubashCompleter {
 
     /// Update state
     pub fn update_state(&self, current_dir: PathBuf, env_vars: HashMap<String, String>) {
-        if let Ok(mut state) = self.state.lock() {
-            state.current_dir = current_dir;
-            state.env_vars = env_vars;
-            // niubash#594: this write bypasses the fingerprint gate, so
-            // invalidate it — the next `update_completion_state` rebuilds
-            // the env snapshot from the engine instead of trusting a
-            // fingerprint that no longer describes `env_vars`.
-            state.snapshot_env_fingerprint = 0;
-        }
+        // niubash#833: recover a poisoned state lock instead of
+        // silently dropping the update.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current_dir = current_dir;
+        state.env_vars = env_vars;
+        // niubash#594: this write bypasses the fingerprint gate, so
+        // invalidate it — the next `update_completion_state` rebuilds
+        // the env snapshot from the engine instead of trusting a
+        // fingerprint that no longer describes `env_vars`.
+        state.snapshot_env_fingerprint = 0;
     }
 
     /// Return plain suggestions for internal probes and tests.
@@ -311,21 +312,21 @@ impl NiubashCompleter {
         input: &str,
         cursor_pos: usize,
     ) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, dir_cache) =
-            if let Ok(state) = self.state.lock() {
-                (
-                    state.current_dir.clone(),
-                    state.env_vars.clone(),
-                    state.aliases.clone(),
-                    state.functions.clone(),
-                    state.open_fds.clone(),
-                    state.tmp_base.clone(),
-                    state.behavior,
-                    state.dir_cache.clone(),
-                )
-            } else {
-                return Vec::new();
-            };
+        // niubash#833: a poisoned state lock must not zero out every
+        // candidate — recover the guard and read the snapshot.
+        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, dir_cache) = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state.current_dir.clone(),
+                state.env_vars.clone(),
+                state.aliases.clone(),
+                state.functions.clone(),
+                state.open_fds.clone(),
+                state.tmp_base.clone(),
+                state.behavior,
+                state.dir_cache.clone(),
+            )
+        };
 
         let cursor_pos = cursor_pos.min(input.len());
         let mut context = CompletionContext::with_behavior(
@@ -426,7 +427,9 @@ impl NiubashCompleter {
             behavior,
             plugins,
             dir_cache,
-        ) = if let Ok(state) = self.state.lock() {
+        ) = {
+            // niubash#833: poison recovery, as in `complete_specific`.
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.current_dir.clone(),
                 state.env_vars.clone(),
@@ -438,8 +441,6 @@ impl NiubashCompleter {
                 state.plugins.clone(),
                 state.dir_cache.clone(),
             )
-        } else {
-            return Vec::new();
         };
 
         let mut context = CompletionContext::with_behavior(
@@ -480,11 +481,18 @@ impl NiubashCompleter {
         // rule). Decide that once, up front: the static definition tables
         // and the path fallback are overlays for commands WITHOUT a
         // compspec, and must not be merged into its candidates.
-        let first_word = input.split_whitespace().next().unwrap_or_default();
+        // niubash#830: probe the compspec for the command word of the
+        // cursor's segment, not the first whitespace token of the
+        // whole line — on 'true; git <TAB>' the old probe asked about
+        // "true;", missed git's compspec, and let the static tables
+        // answer with the wrong candidates. `get_command_name` is
+        // quote/extglob-aware and skips grouping openers and
+        // assignment prefixes ('( git ', 'VAR=1 git ').
+        let command_word = context.get_command_name().unwrap_or_default();
         let has_compspec = !context.is_command_position()
-            && !first_word.is_empty()
+            && !command_word.is_empty()
             && crate::shell::with_completion_bridge(|shell| {
-                shell.session().has_compspec(first_word)
+                shell.session().has_compspec(&command_word)
             })
             .unwrap_or(false);
 
@@ -1353,6 +1361,70 @@ niu_git_comp() {
             vec!["zzz"],
             "a compspec must suppress the static table and the path fallback"
         );
+    }
+
+    #[test]
+    fn issue830_compspec_probe_uses_cursor_segment_command_word() {
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell.execute_script("complete -W 'zzz' git").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
+        let mut completer = NiubashCompleter::new(state);
+
+        // niubash#830: the probe used to take the first whitespace
+        // token of the WHOLE line, so on each of these lines it asked
+        // has_compspec about the wrong word ("true;", "VAR=1", "(",
+        // "sudo"), missed git's compspec, and let the static table
+        // answer. The compspec must own git's arguments on all of
+        // them: its candidate arrives and no static-table candidate
+        // (e.g. the `checkout` subcommand) leaks in.
+        for line in ["true; git ", "VAR=1 git ", "sudo x; git "] {
+            let suggestions = completer.complete(line, line.len());
+            let values: Vec<&str> = suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect();
+            assert!(
+                values.contains(&"zzz"),
+                "{line:?}: compspec candidate must flow, got {values:?}"
+            );
+            assert!(
+                !values.contains(&"checkout"),
+                "{line:?}: static git table must stay suppressed, got {values:?}"
+            );
+        }
+
+        // '( git ': the host-side contract is that the probe names
+        // git, the compspec gate engages, and the static table stays
+        // suppressed. Whether the engine then yields candidates
+        // inside an unclosed subshell is the engine's own segment
+        // handling, so this shape pins only the no-leak half.
+        let suggestions = completer.complete("( git ", "( git ".len());
+        assert!(
+            !suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "checkout"),
+            "'( git ': static git table must stay suppressed, got {suggestions:?}"
+        );
+
+        // The issue's headline regression shape, exact: the compspec
+        // is the ONLY source for git's arguments after a separator.
+        let suggestions = completer.complete("true; git ", "true; git ".len());
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zzz"]
+        );
+
+        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]

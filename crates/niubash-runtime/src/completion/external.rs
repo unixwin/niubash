@@ -333,10 +333,14 @@ impl MemEntry {
 /// Resolve the directory used to store dynamic completion caches.
 ///
 /// Priority:
-///   1. `WINSH_COMPLETION_CACHE_DIR` environment variable
-///   2. `~/.winsh/completions/cache`
+///   1. `NIU_COMPLETION_CACHE_DIR` environment variable
+///   2. `~/.niubash/completions/cache`
+///
+/// niubash#841: the pre-rename location is never written anymore;
+/// it stays readable through [`legacy_cache_dir`] so caches written
+/// by older builds keep working.
 fn resolve_cache_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("WINSH_COMPLETION_CACHE_DIR") {
+    if let Ok(dir) = std::env::var("NIU_COMPLETION_CACHE_DIR") {
         let p = PathBuf::from(dir);
         if !p.exists() {
             let _ = std::fs::create_dir_all(&p);
@@ -344,13 +348,27 @@ fn resolve_cache_dir() -> Option<PathBuf> {
         return Some(p);
     }
     let base = shell_home_dir()?
-        .join(".winsh")
+        .join(".niubash")
         .join("completions")
         .join("cache");
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
     Some(base)
+}
+
+/// The pre-rename cache directory (niubash#841): read-only fallback
+/// for entries the primary directory does not have. Consulted on
+/// reads, never written to, and never created.
+///
+/// Priority:
+///   1. `WINSH_COMPLETION_CACHE_DIR` environment variable
+///   2. `~/.winsh/completions/cache`
+fn legacy_cache_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("WINSH_COMPLETION_CACHE_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    shell_home_dir().map(|home| home.join(".winsh").join("completions").join("cache"))
 }
 
 /// niubash#845: the `.parsed.toml` cache file for a bash completion
@@ -412,6 +430,9 @@ pub struct ExternalCompletionPlugin {
     /// Directory where disk cache files are stored.
     /// Resolved once at construction time.
     cache_dir: Option<PathBuf>,
+    /// Pre-rename cache directory (niubash#841): read-only fallback,
+    /// resolved once at construction time. Never written to.
+    legacy_cache_dir: Option<PathBuf>,
 }
 
 /// The embedded WinuxCmd completion definitions, parsed once per
@@ -498,6 +519,7 @@ impl ExternalCompletionPlugin {
             definitions: HashMap::new(),
             mem_cache: Mutex::new(HashMap::new()),
             cache_dir: resolve_cache_dir(),
+            legacy_cache_dir: legacy_cache_dir(),
         };
         plugin.load_definitions(EMBEDDED_DEFS.iter().cloned());
         plugin
@@ -833,11 +855,56 @@ impl ExternalCompletionPlugin {
         }
     }
 
+    /// Read a fresh disk-cache entry for `cache_key` from `dir`,
+    /// warming the in-memory cache on a hit. Returns the cached
+    /// values, or None on any miss (no directory, absent file,
+    /// unparsable, identity mismatch, stale). The identity check is
+    /// niubash#845's: an entry written for a different key (owner,
+    /// args, TTL, or tool) is not this call's entry, whichever
+    /// directory it is read from — the primary directory and the
+    /// niubash#841 legacy fallback are held to the same rule.
+    fn read_disk_cache(
+        &self,
+        dir: Option<&Path>,
+        cache_key: &CacheKey,
+        mem_key: &str,
+        tool_path: Option<&Path>,
+    ) -> Option<Vec<String>> {
+        let cache_file = dir?.join(cache_key.filename());
+        if !cache_file.exists() {
+            return None;
+        }
+        let contents = std::fs::read_to_string(&cache_file).ok()?;
+        let disk: DiskCache = toml::from_str(&contents).ok()?;
+        if disk.cache_identity != mem_key || disk.is_stale(tool_path) {
+            log::debug!(
+                "ExternalCompletionPlugin: disk cache stale {:?}",
+                cache_file
+            );
+            return None;
+        }
+        log::debug!("ExternalCompletionPlugin: disk cache hit {:?}", cache_file);
+        // Warm in-memory cache (niubash#833: poison recovery)
+        self.mem_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                mem_key.to_string(),
+                MemEntry {
+                    values: disk.values.clone(),
+                    tool_mtime_secs: disk.tool_mtime_secs,
+                    expires_at_secs: (disk.ttl_secs > 0).then(|| disk.written_secs + disk.ttl_secs),
+                },
+            );
+        Some(disk.values)
+    }
+
     /// Run (or use cached) dynamic sub-process to obtain candidate values.
     ///
     /// Lookup order:
     ///   1. In-memory cache (same session, already verified)
     ///   2. Disk cache file (survives restarts; validated via mtime / TTL)
+    ///      2b. Pre-rename legacy disk cache, read-only (niubash#841)
     ///   3. Sub-process execution → write disk cache → populate memory cache
     fn resolve_dynamic(
         &self,
@@ -867,7 +934,11 @@ impl ExternalCompletionPlugin {
             .unwrap_or(0);
 
         // ── 1. In-memory cache ────────────────────────────────────────────────
-        if let Ok(mem) = self.mem_cache.lock() {
+        // niubash#833: recover a poisoned mem-cache lock instead of
+        // treating every lookup as a miss (which respawned the
+        // values_from_command subprocess on every TAB).
+        {
+            let mem = self.mem_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = mem.get(&mem_key) {
                 if entry.is_fresh(now_secs, tool_mtime_secs) {
                     return self.filter_values(&entry.values, context);
@@ -876,37 +947,25 @@ impl ExternalCompletionPlugin {
         }
 
         // ── 2. Disk cache ─────────────────────────────────────────────────────
-        if let Some(ref cache_dir) = self.cache_dir {
-            let cache_file = cache_dir.join(cache_key.filename());
-            if cache_file.exists() {
-                if let Ok(contents) = std::fs::read_to_string(&cache_file) {
-                    if let Ok(disk) = toml::from_str::<DiskCache>(&contents) {
-                        if disk.cache_identity == mem_key && !disk.is_stale(tool_path.as_deref()) {
-                            log::debug!(
-                                "ExternalCompletionPlugin: disk cache hit {:?}",
-                                cache_file
-                            );
-                            // Warm in-memory cache
-                            if let Ok(mut mem) = self.mem_cache.lock() {
-                                mem.insert(
-                                    mem_key.clone(),
-                                    MemEntry {
-                                        values: disk.values.clone(),
-                                        tool_mtime_secs: disk.tool_mtime_secs,
-                                        expires_at_secs: (disk.ttl_secs > 0)
-                                            .then(|| disk.written_secs + disk.ttl_secs),
-                                    },
-                                );
-                            }
-                            return self.filter_values(&disk.values, context);
-                        }
-                        log::debug!(
-                            "ExternalCompletionPlugin: disk cache stale {:?}",
-                            cache_file
-                        );
-                    }
-                }
-            }
+        if let Some(values) = self.read_disk_cache(
+            self.cache_dir.as_deref(),
+            &cache_key,
+            &mem_key,
+            tool_path.as_deref(),
+        ) {
+            return self.filter_values(&values, context);
+        }
+        // niubash#841: read-fallback to the pre-rename cache
+        // directory. Legacy entries are served (and warmed into
+        // memory) but the legacy directory is never written again —
+        // the next subprocess refresh lands in the primary directory.
+        if let Some(values) = self.read_disk_cache(
+            self.legacy_cache_dir.as_deref(),
+            &cache_key,
+            &mem_key,
+            tool_path.as_deref(),
+        ) {
+            return self.filter_values(&values, context);
         }
 
         // ── 3. Sub-process ────────────────────────────────────────────────────
@@ -962,9 +1021,11 @@ impl ExternalCompletionPlugin {
             }
         }
 
-        // Update in-memory cache
-        if let Ok(mut mem) = self.mem_cache.lock() {
-            mem.insert(
+        // Update in-memory cache (niubash#833: poison recovery)
+        self.mem_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
                 mem_key,
                 MemEntry {
                     values: values.clone(),
@@ -974,7 +1035,6 @@ impl ExternalCompletionPlugin {
                         .map(|ttl| written_secs.saturating_add(ttl)),
                 },
             );
-        }
 
         self.filter_values(&values, context)
     }
@@ -1594,6 +1654,7 @@ mod tests {
             definitions,
             mem_cache: Mutex::new(HashMap::new()),
             cache_dir: Some(dir.clone()),
+            legacy_cache_dir: None,
         };
         let values_for = |input: &str| -> Vec<String> {
             let context = CompletionContext::new(dir.clone(), input.to_string(), input.len());
@@ -1655,5 +1716,274 @@ mod tests {
             started.elapsed()
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// niubash#833: a poisoned mem-cache lock used to read as a
+    /// permanent cache miss, so `values_from_command` respawned its
+    /// subprocess on every TAB. The recovered guard must serve the
+    /// cached values instead.
+    #[cfg(unix)]
+    #[test]
+    fn issue833_poisoned_mem_cache_does_not_respawn_dynamic_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "niu-issue833-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("counter");
+        let script = dir.join("tool.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho run >> \"{}\"\necho alpha\necho beta\n",
+                counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut plugin = ExternalCompletionPlugin::new();
+        // No disk cache: the in-memory cache is the only warm tier,
+        // so a mem miss is directly observable as a subprocess respawn.
+        plugin.cache_dir = None;
+        plugin.definitions.insert(
+            "issue833tool".to_string(),
+            CommandDef {
+                command: "issue833tool".to_string(),
+                description: None,
+                flags: vec![FlagDef {
+                    short: None,
+                    long: Some("--opt".to_string()),
+                    description: None,
+                    takes_value: true,
+                    values_source: Some(ValuesSource::Dynamic {
+                        values_from_command: DynamicCommand {
+                            cmd: script.to_string_lossy().into_owned(),
+                            args: Vec::new(),
+                            cache_ttl_secs: None,
+                        },
+                    }),
+                }],
+                subcommands: Vec::new(),
+            },
+        );
+
+        let runs = || {
+            std::fs::read_to_string(&counter)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let input = "issue833tool --opt ";
+        let context = CompletionContext::new(PathBuf::from("."), input.to_string(), input.len());
+
+        let first = plugin
+            .complete(&context)
+            .expect("dynamic values on first completion");
+        assert!(first.completions.iter().any(|v| v == "alpha"));
+        assert!(first.completions.iter().any(|v| v == "beta"));
+        assert_eq!(runs(), 1, "first completion runs the subprocess once");
+
+        let _ = plugin.complete(&context);
+        assert_eq!(runs(), 1, "second completion is a warm mem-cache hit");
+
+        // Poison the mem-cache lock the way a panic in a writer would.
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = plugin.mem_cache.lock().unwrap();
+                panic!("issue833: deliberate mem_cache poison");
+            });
+            assert!(handle.join().is_err());
+        });
+        assert!(
+            plugin.mem_cache.lock().is_err(),
+            "the lock must actually be poisoned for this pin to mean anything"
+        );
+
+        let third = plugin
+            .complete(&context)
+            .expect("dynamic values must survive mem-cache poison");
+        assert_eq!(third.completions, first.completions);
+        assert_eq!(
+            runs(),
+            1,
+            "poisoned mem cache must not respawn the subprocess per TAB"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// niubash#841: the primary cache dir uses the NIU_ name and
+    /// ~/.niubash; the pre-rename WINSH_ name and ~/.winsh feed only
+    /// the read-only legacy fallback.
+    #[test]
+    fn issue841_cache_dir_resolution_uses_niu_names() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_COMPLETION_CACHE_DIR",
+            "WINSH_COMPLETION_CACHE_DIR",
+            "HOME",
+            "USERPROFILE",
+        ]);
+        let home = unique_temp_dir("issue841-home");
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("NIU_COMPLETION_CACHE_DIR");
+        std::env::remove_var("WINSH_COMPLETION_CACHE_DIR");
+
+        // On Windows the resolver's home spelling is the long form
+        // (runneradmin) while temp_dir hands out the 8.3 short form
+        // (RUNNER~1) for the same directory; compare the home-based
+        // expectations through the canonical long spelling there.
+        // Elsewhere the comparison stays byte-exact.
+        if cfg!(windows) {
+            let spelled = |suffix: &str| -> Option<PathBuf> {
+                std::fs::canonicalize(&home).ok().map(|base| {
+                    let base = base
+                        .to_string_lossy()
+                        .trim_start_matches(r"\\?\")
+                        .to_string();
+                    suffix
+                        .split('/')
+                        .fold(PathBuf::from(base), |acc, part| acc.join(part))
+                })
+            };
+            assert_eq!(resolve_cache_dir(), spelled(".niubash/completions/cache"));
+            assert_eq!(legacy_cache_dir(), spelled(".winsh/completions/cache"));
+        } else {
+            assert_eq!(
+                resolve_cache_dir(),
+                Some(home.join(".niubash").join("completions").join("cache"))
+            );
+            assert_eq!(
+                legacy_cache_dir(),
+                Some(home.join(".winsh").join("completions").join("cache"))
+            );
+        }
+
+        // The NIU_ variable names the primary directory.
+        let custom = home.join("custom-cache");
+        std::env::set_var("NIU_COMPLETION_CACHE_DIR", &custom);
+        assert_eq!(resolve_cache_dir(), Some(custom.clone()));
+
+        // The WINSH_ variable feeds only the legacy fallback — it
+        // must not move the primary directory back.
+        let legacy_custom = home.join("legacy-cache");
+        std::env::set_var("WINSH_COMPLETION_CACHE_DIR", &legacy_custom);
+        assert_eq!(legacy_cache_dir(), Some(legacy_custom));
+        assert_eq!(resolve_cache_dir(), Some(custom));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// niubash#841: a cache entry written by an older build into the
+    /// legacy directory is still served (no subprocess respawn), and
+    /// the legacy directory is not written in the process.
+    #[cfg(unix)]
+    #[test]
+    fn issue841_legacy_disk_cache_is_served_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("issue841-fallback");
+        let primary = root.join("primary");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        let counter = root.join("counter");
+        let script = root.join("tool.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho run >> \"{}\"\necho freshvalue\n",
+                counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cmd = script.to_string_lossy().into_owned();
+
+        // Plant a legacy disk entry for this dynamic command. The
+        // recorded tool mtime must match the script's, or the entry
+        // is (correctly) judged stale.
+        let tool_mtime_secs = std::fs::metadata(&script)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Planted under the CURRENT key discipline (niubash#845):
+        // the entry must carry the identity the resolver computes
+        // for this exact dynamic command and resolved tool, and
+        // live under that key's hashed filename, or the read is
+        // (correctly) a miss.
+        let spec = DynamicCommand {
+            cmd: cmd.clone(),
+            args: Vec::new(),
+            cache_ttl_secs: None,
+        };
+        let cache_key = CacheKey::new("issue841tool", &spec, Some(script.clone()));
+        let disk = DiskCache {
+            source_cmd: cmd.clone(),
+            cache_identity: cache_key.identity(),
+            tool_path: Some(cmd.clone()),
+            written_secs: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            ttl_secs: 0,
+            tool_mtime_secs: Some(tool_mtime_secs),
+            values: vec!["legacyvalue".to_string()],
+        };
+        std::fs::write(
+            legacy.join(cache_key.filename()),
+            toml::to_string_pretty(&disk).unwrap(),
+        )
+        .unwrap();
+
+        let mut plugin = ExternalCompletionPlugin::new();
+        plugin.cache_dir = Some(primary.clone());
+        plugin.legacy_cache_dir = Some(legacy.clone());
+        plugin.definitions.insert(
+            "issue841tool".to_string(),
+            CommandDef {
+                command: "issue841tool".to_string(),
+                description: None,
+                flags: vec![FlagDef {
+                    short: None,
+                    long: Some("--opt".to_string()),
+                    description: None,
+                    takes_value: true,
+                    values_source: Some(ValuesSource::Dynamic {
+                        values_from_command: spec,
+                    }),
+                }],
+                subcommands: Vec::new(),
+            },
+        );
+
+        let input = "issue841tool --opt ";
+        let context = CompletionContext::new(PathBuf::from("."), input.to_string(), input.len());
+        let result = plugin
+            .complete(&context)
+            .expect("the legacy disk entry must be served");
+        assert_eq!(result.completions, vec!["legacyvalue".to_string()]);
+        assert!(
+            !counter.exists(),
+            "a legacy hit must not respawn the subprocess"
+        );
+        assert!(
+            std::fs::read_dir(&primary).unwrap().next().is_none(),
+            "nothing is written anywhere on a legacy read hit"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
