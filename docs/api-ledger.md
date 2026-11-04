@@ -211,6 +211,36 @@
 > invocation-shape record before it; the tier-C bind rows
 > retire when the host lane lands.
 >
+> Addendum (GAP-4 completion view record, 2026-11-05,
+> niubash#863 GAP-4 + GAP-4b): the tier-A completion-state
+> view — the `rubash::api` type `CompletionView` and the
+> read faces `Session::completion_view` /
+> `Session::has_function` — is recorded (§2.1 row, §2.3
+> rows, §4 row, §6 entries). The family is new on the
+> engine side in the same change: `Session::completion_view`
+> captures, through `&self` and in one owned snapshot, the
+> session cwd (`Executor::session_cwd`), the whole variable
+> table in `Executor::env_vars_snapshot`'s own rendering —
+> attribute pseudo-entries included — presented sorted by
+> name, with a content fingerprint over that rendering, the
+> function names (`Executor::functions_snapshot`) and the
+> open fd numbers (`Executor::open_fds`); `Session::has_function`
+> is the `&self` form of the executor's function probe, the
+> only other contract form (`StateViews::has_function`)
+> sitting behind `views()`'s `&mut self`. Together they
+> supersede the host's tier-C completion reads (the
+> `env_vars_snapshot` / `env_vars` / `functions_snapshot` /
+> `open_fds` / `session_cwd` / `has_function` reads through
+> the §2.2 seam) and the host-side snapshot struct it
+> re-synchronized after every line. niubash consumes none
+> of it yet, so the record is staged ahead of the host's
+> adoption, like the GAP-3 record before it; the seam's
+> snapshot/probe consumer set shrinks when the host lane
+> lands. The host's `/tmp` answer
+> (`executor().resolve_shell_path("/tmp")`) is deliberately
+> NOT part of the view — the path resolver's face is
+> GAP-5's object.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -393,7 +423,7 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum) |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
@@ -476,6 +506,8 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::run` | 2 | the tracked script arm and, since GAP-2 (rubash#2800 / niubash#898), the unclosed arm — both fold their stop facts from the outcome classification |
 | `Session::take_classification` | 2 | GAP-2 drain: the stdin feeder stop rule and the PROMPT_COMMAND tail read; returns the classification values (`exit_jump_raw` / `parse_error` / signal discard) drained from the executor pendings |
 | `Session::bind_view` | 7 | GAP-3 bind view: the registry snapshot (`BindView` — generation / editing mode / readline variables / removal tombstones / entries with canonical bytes, kind, resolved keymap and GNU dump line); adopted by the GAP-3 host migration — shell binding load/staleness/edit-mode, bind -x lookup, repl dump handlers and keyseq-timeout read the view, and the host's tier-C registry reads plus the `bind_surface.rs` conversion layer are deleted |
+| `Session::completion_view` | 0 | GAP-4 completion view: the completer's live state as one `&self` capture (`CompletionView` — session cwd / the whole variable table in `env_vars_snapshot`'s rendering, attribute pseudo-entries included, sorted by name, with its content fingerprint / function names / open fd numbers); recorded staged ahead of host adoption (see the header addendum) — the host's `CompletionState` mirror and its per-line re-synchronization retire when the host lane lands |
+| `Session::has_function` | 0 | GAP-4b: the `&self` function probe (the executor's own lookup; `StateViews::has_function` is the `&mut`-shaped form); recorded staged ahead of host adoption — the widget-availability probe's tier-C `executor().has_function(name)` read retires when the host lane lands |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
 | `Session::prepare_line` | 1 | REPL history expansion |
 | `Session::complete` / `complete_detailed` / `has_compspec` | 1 / 0 / 1 | completion bridge (complete_detailed + CompletionOutcome/CompletionPolicy: rubash#2573, consumed by niubash#837) |
@@ -562,6 +594,7 @@ to the split core crate without changing its shape.
 | session configuration (`set_winuxcmd_path`, `set_shell_root`, `set_compatible_shell_path`, `set_builtin_disabled`, `mark_login_shell`) | A (row-11 ruling) | builder-time session initialization — M-2's own language ("the 55 set_env sites collapse into builder initialization"); these five are the same shape: host facts installed before the first run |
 | invocation shape (`InvocationShape`, `RespawnSource`, `SessionBuilder::invocation_shape`, `Session::invocation_shape`; the Executor accessors `invocation_interactive` / `invocation_login` / `set_invocation_shape`) | A | construction-time session state in `rubash::api`, beside the session-configuration row: the builder applies the declared shape to the executor's typed invocation state at build — the structured declaration is authoritative for the fields it names, over the environment seeds — and `Session::invocation_shape` reads it back; the Executor accessors are the state's engine-side face, behind which the migrated carrier reads of rubash#2130 sit (recorded staged ahead of host adoption; see the header addendum) |
 | bind view (`BindView`, `BindEntryView`, `BindKindView`, `BindRemovalView`, `Session::bind_view`) | A | the key-binding registry as one owned snapshot in `rubash::api`, beside the §5.3 state views: the capture reads the registry's own stores (generation, editing mode, the readline variable table, entries, removal tombstones) and renders each entry's canonical bytes with the engine's one `keyseq_bytes` decoder and its dump line with the `bind` builtin's own format helpers, so the contract and the shell cannot disagree; it supersedes the host's tier-C registry reads and handwritten re-decoders when the host lane lands (niubash#863 GAP-3; recorded staged ahead of host adoption; see the header addendum) |
+| completion view (`CompletionView`, `Session::completion_view`, `Session::has_function`) | A | the completer's live state as one owned snapshot in `rubash::api`, beside the §5.3 state views: the capture reads the executor's own snapshot functions (session cwd, the full variable table in `env_vars_snapshot`'s rendering with its attribute pseudo-entries, function names, open fd numbers) and derives the env content fingerprint from that rendering, so the contract and the shell cannot disagree; `Session::has_function` is the same executor lookup in `&self` form. It supersedes the host's tier-C completion reads and its per-line re-synchronized snapshot struct when the host lane lands (niubash#863 GAP-4 + GAP-4b; recorded staged ahead of host adoption; see the header addendum). The host's `/tmp` answer (`resolve_shell_path`) is NOT part of this family — the path resolver's face is GAP-5's object |
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
@@ -633,6 +666,7 @@ item rubash::api::BindRemovalView
 item rubash::api::BindView
 item rubash::api::CompletionOutcome
 item rubash::api::CompletionPolicy
+item rubash::api::CompletionView
 item rubash::api::Flow
 item rubash::api::InvocationShape
 item rubash::api::PreparedLine
@@ -748,11 +782,13 @@ method rubash::api::Session::call_function_with_env
 method rubash::api::Session::close
 method rubash::api::Session::complete
 method rubash::api::Session::complete_detailed
+method rubash::api::Session::completion_view
 method rubash::api::Session::executor
 method rubash::api::Session::executor_mut
 method rubash::api::Session::expand_prompt
 method rubash::api::Session::functions
 method rubash::api::Session::has_compspec
+method rubash::api::Session::has_function
 method rubash::api::Session::inherit_process_stdin
 method rubash::api::Session::invocation_shape
 method rubash::api::Session::last_status
