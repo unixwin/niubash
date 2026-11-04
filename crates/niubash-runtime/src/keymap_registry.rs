@@ -168,6 +168,15 @@ pub enum DroppedReason {
     /// A terminal response sequence (e.g. the DSR answer `\e[0n`):
     /// the input layer does not deliver it as a key event.
     ResponseSequence,
+    /// A `bind -m <name>` whose keymap name the host does not know
+    /// at all (niubash#834): the entry was filtered out before any
+    /// mirror path could see it, most likely a typo.
+    KeymapMismatch,
+    /// A bind addressed to a real keymap that is not the session's
+    /// active editing mode (niubash#834): e.g. a no-`-m` bind under
+    /// `set -o vi` lands in the emacs map, which this session never
+    /// builds, so the key can never fire.
+    NotActiveKeymap,
 }
 
 impl DroppedReason {
@@ -196,6 +205,14 @@ impl DroppedReason {
                 "key sequence shape the input layer does not deliver"
             }
             DroppedReason::UnknownFunction => "function is not in the host's deliverable set",
+            DroppedReason::KeymapMismatch => {
+                "keymap name the host does not know — the bind was \
+                 discarded before it could be mirrored"
+            }
+            DroppedReason::NotActiveKeymap => {
+                "bind targets a keymap that is not this session's \
+                 active editing mode — the key can never fire"
+            }
             DroppedReason::ResponseSequence => {
                 "terminal response sequence — the input layer does not \
                  deliver it as a key"
@@ -244,6 +261,14 @@ impl DroppedBind {
             ),
             DroppedReason::UnknownFunction => {
                 format!("bind -x '\"{}\": <your command>'", self.keyseq)
+            }
+            DroppedReason::KeymapMismatch => format!(
+                "bind -m emacs '\"{}\": {}'",
+                self.keyseq,
+                self.target_name.as_deref().unwrap_or("<function>")
+            ),
+            DroppedReason::NotActiveKeymap => {
+                "set -o vi / set -o emacs, or re-bind with -m <the active keymap>".to_string()
             }
             DroppedReason::ChainedSequence
             | DroppedReason::UnparseableKeyseq
@@ -678,11 +703,19 @@ pub fn startup_notices(new_dropped: &[DroppedBind]) -> Vec<String> {
 }
 
 /// Where the runtime state file lives: `~/.niubash/state.json`.
-pub fn state_path() -> PathBuf {
-    crate::path_utils::shell_home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".niubash")
-        .join("state.json")
+///
+/// `None` when no home directory resolves at all (niubash#843):
+/// the old fallback fabricated `./.niubash/state.json` under the
+/// process cwd, leaking runtime state into whatever directory the
+/// user happened to launch from. Callers skip persistence in that
+/// case — the registry still lives in-process.
+pub fn state_path() -> Option<PathBuf> {
+    state_path_for(crate::path_utils::shell_home_dir())
+}
+
+/// [`state_path`] against an explicit home resolution (the test seam).
+fn state_path_for(home: Option<PathBuf>) -> Option<PathBuf> {
+    home.map(|home| home.join(".niubash").join("state.json"))
 }
 
 /// Load the persisted state; a missing or corrupt file is simply
@@ -722,7 +755,26 @@ pub fn current_registry() -> Option<KeymapRegistry> {
 /// the state with them; if the same triple reappears later it is new
 /// again and reminds again.
 pub fn publish(registry: KeymapRegistry) -> Vec<String> {
-    publish_at(&state_path(), registry)
+    match state_path() {
+        Some(path) => publish_at(&path, registry),
+        None => {
+            // niubash#843: no home directory — keep the registry
+            // in-process only and skip persistence entirely (never
+            // ./state.json in the process cwd). Every dropped record
+            // is new in this build, so the notices are the full set.
+            if let Ok(mut slot) = CURRENT.lock() {
+                *slot = Some(registry.clone());
+            }
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "niubash: no home directory resolved; keymap state will not be persisted"
+                );
+            }
+            startup_notices(&registry.dropped)
+        }
+    }
 }
 
 /// [`publish`] against an explicit state path (the test seam).
@@ -903,6 +955,18 @@ mod tests {
             kind,
             keymap: None,
         }
+    }
+
+    // niubash#843(c): with no home directory there is no state
+    // path at all — never a fabricated ./.niubash/state.json under
+    // the process cwd.
+    #[test]
+    fn issue843_state_path_is_none_without_a_home() {
+        assert_eq!(state_path_for(None), None);
+        assert_eq!(
+            state_path_for(Some(PathBuf::from("/home/tester"))),
+            Some(PathBuf::from("/home/tester/.niubash/state.json"))
+        );
     }
 
     #[test]
