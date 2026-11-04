@@ -1457,25 +1457,29 @@ fn run_stdin_script() -> anyhow::Result<()> {
         // same stop rule as the engine's own stdin driver (rubash
         // script_driver::run_stdin_script): a recorded top-level jump
         // (Shell::take_script_exit_jump for the batches this shell
-        // flattened itself, Executor::take_exit_jump_pending for the
-        // engine-driver-routed ones), a read-time parse error, or a
-        // nonzero status while errexit is armed (execute_cmd.c:652-656
-        // exempts a `!`-inverted command). An ordinary nonzero status
-        // just becomes the new last status and reading continues.
+        // flattened itself), the engine's exit-jump pending for the
+        // driver-routed batches (run_source_impl arms it for every
+        // non-discard unwind, the errexit break included), or a
+        // read-time parse error. The errexit stop is never re-derived
+        // here: since GAP-1 (rubash#2795) every route reports its own
+        // unwind from the engine's verdict — the flattened fast path
+        // records the ExitCode unwind (the `exit` jump and the
+        // errexit break share that classification, niubash#402), the
+        // Session-contract arm records the classification's
+        // adjudicated unwind, and the driver routes arm the pending
+        // above — so a nonzero status with no unwind recorded is a
+        // failure in an errexit-exempt position (a non-final `&&`/`||`
+        // member, a tested or `!`-inverted command:
+        // execute_cmd.c:652-656's family), which GNU reads past. The
+        // previous host-side clause (status + SHELLOPTS errexit +
+        // last_command_inverted) stopped the stream there; it existed
+        // only because the Session arm's old Flow fold reported no
+        // errexit stop to record. An ordinary nonzero status just
+        // becomes the new last status and reading continues.
         let jumped = shell.take_script_exit_jump();
         let engine_jumped = shell.executor_mut().take_exit_jump_pending();
         let parse_error = shell.executor_mut().take_parse_error();
-        if jumped
-            || engine_jumped
-            || parse_error
-            || (code != 0
-                && shell
-                    .session_mut()
-                    .variables()
-                    .resolved_value("SHELLOPTS")
-                    .is_some_and(|options| options.split(':').any(|option| option == "errexit"))
-                && !shell.executor_mut().last_command_inverted())
-        {
+        if jumped || engine_jumped || parse_error {
             break;
         }
         pending.clear();
