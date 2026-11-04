@@ -1346,11 +1346,24 @@ mod tests {
             std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let session_path = dir.to_string_lossy().into_owned();
-        assert_eq!(
-            which_tool("t839tool", Some(&session_path), None),
-            Some(tool.clone()),
-            "a session-PATH-only tool must be fingerprint-visible"
-        );
+        // On Windows the resolved path carries the PATHEXT entry's own
+        // case (the ambient PATHEXT spells `.EXE`), which names the
+        // same file as the on-disk `.exe`; compare case-insensitively
+        // there. Elsewhere the comparison stays byte-exact.
+        let found = which_tool("t839tool", Some(&session_path), None);
+        if cfg!(windows) {
+            assert_eq!(
+                found.as_ref().map(|p| p.to_string_lossy().to_lowercase()),
+                Some(tool.to_string_lossy().to_lowercase()),
+                "a session-PATH-only tool must be fingerprint-visible"
+            );
+        } else {
+            assert_eq!(
+                found,
+                Some(tool.clone()),
+                "a session-PATH-only tool must be fingerprint-visible"
+            );
+        }
         let elsewhere = dir.join("elsewhere");
         assert_eq!(
             which_tool("t839tool", Some(&elsewhere.to_string_lossy()), None),
@@ -1536,7 +1549,13 @@ mod tests {
             ]
         );
         let defaults = pathext_extensions(None);
-        assert!(defaults.contains(&".exe".to_string()) && defaults.contains(&".bat".to_string()));
+        // With no session value the function falls back to the ambient
+        // PATHEXT environment before its built-in defaults, so the
+        // case of the entries is the environment's own (`.EXE` on a
+        // Windows runner, `.exe` in the built-in list). The claim this
+        // pins is membership, not spelling: compare case-insensitively.
+        let has_ext = |want: &str| defaults.iter().any(|e| e.eq_ignore_ascii_case(want));
+        assert!(has_ext(".exe") && has_ext(".bat"));
     }
 
     /// niubash#845 end-to-end (unix): two `takes_value` flags sharing
