@@ -1,99 +1,33 @@
-//! The gated Tier C bind surface (1.5.0 PLAN row 11, step M-3).
+//! The gated Tier C bind surface (1.5.0 PLAN row 11, step M-3) —
+//! what remains of it after the GAP-3 migration (niubash#863).
 //!
-//! The engine's bind registry (`rubash::shell::bind_registry`)
-//! is Tier C in the API ledger: its target home is "the
-//! interactive layer's own gated surface". This module is that
-//! gate on the niubash side. It is the **only** file in this
-//! crate that names the registry's types or the executor's
-//! registry accessors, and the conversion to the niu-owned
-//! mirror types below happens here, behind the `internals`
-//! feature:
+//! The registry's whole READ side retired in GAP-3: the entry
+//! snapshot, the generation, the `bind -r` tombstones and the
+//! readline variable table now arrive through the tier-A
+//! `Session::bind_view` (`rubash::api::BindView` — entries with
+//! the engine's canonical bytes, removals, editing mode,
+//! variables), and the niu-owned mirror types this module used
+//! to convert the snapshot into are gone.
 //!
-//! - With the feature (the default), the mirror is populated
-//!   from the engine registry exactly as before this row.
+//! Two faces remain behind this gate because the Session
+//! contract has no tier-A shape for them yet:
+//!
+//! - registering one macro into the engine registry (the plugin
+//!   `rl_macro_bind` route), and
+//! - the engine's keymap-name table (the `[keymap]` rule
+//!   parser's validity check).
+//!
+//! This module is still the **only** file in this crate that
+//! names the registry's types or the executor's registry
+//! accessors, behind the `internals` feature:
+//!
+//! - With the feature (the default), the two faces work as
+//!   before.
 //! - Without it (`--no-default-features`), the crate still
-//!   builds and runs: the mirror is simply empty, so the editor
-//!   keeps its built-in keybindings and runtime `bind` entries
-//!   are not mirrored. That build is the compile-level proof
-//!   that no Tier C reference leaks outside this gate.
-//!
-//! Everything outside this module — the REPL's keymap
-//! translation, the shell's `bind -x` dispatch — works on the
-//! mirror types only.
-
-/// One engine-registered `bind` entry, mirrored into niu-owned
-/// data (the registry entry's three facts, nothing else).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngineBindEntry {
-    /// The key sequence, in readline spelling.
-    pub keyseq: String,
-    /// The entry's action.
-    pub kind: EngineBindKind,
-    /// The `-m keymap` target, when one was named.
-    pub keymap: Option<String>,
-}
-
-/// The action of an engine bind entry (mirrors the registry's
-/// `BindKind` variant for variant).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EngineBindKind {
-    /// `bind -x`: run this command on the keypress.
-    Execute {
-        /// The command text.
-        command: String,
-    },
-    /// A readline function name.
-    Function {
-        /// The function's name.
-        name: String,
-    },
-    /// A macro: insert this text.
-    Macro {
-        /// The macro text.
-        text: String,
-    },
-}
-
-/// Take the engine registry's snapshot and generation, converted
-/// to the mirror types. Outside the `internals` feature the
-/// snapshot is empty and the generation is 0, consistently, so
-/// staleness checks simply never fire.
-#[cfg(feature = "internals")]
-pub fn load_engine_bindings(executor: &rubash::Executor) -> (Vec<EngineBindEntry>, u64) {
-    let generation = executor.bind_registry_generation();
-    let entries = executor
-        .bind_registry_snapshot()
-        .into_iter()
-        .map(convert)
-        .collect();
-    (entries, generation)
-}
-
-/// The registry's current generation (the staleness probe the
-/// REPL runs between prompts).
-#[cfg(feature = "internals")]
-pub fn current_generation(executor: &rubash::Executor) -> u64 {
-    executor.bind_registry_generation()
-}
-
-#[cfg(not(feature = "internals"))]
-pub fn load_engine_bindings(_executor: &rubash::Executor) -> (Vec<EngineBindEntry>, u64) {
-    (Vec::new(), 0)
-}
-
-/// The engine's `bind -r` / `bind -u` tombstones, as `(keyseq, keymap)`
-/// pairs.  A host mirroring GNU's keymaps must subtract these from the
-/// defaults (`rubash#2337`: GNU's unbind mutates the keymap, defaults
-/// included). Outside the `internals` feature the list is empty.
-#[cfg(feature = "internals")]
-pub fn load_engine_bind_removals(executor: &rubash::Executor) -> Vec<(String, Option<String>)> {
-    executor.bind_removed_keyseqs()
-}
-
-#[cfg(not(feature = "internals"))]
-pub fn load_engine_bind_removals(_executor: &rubash::Executor) -> Vec<(String, Option<String>)> {
-    Vec::new()
-}
+//!   builds and runs: macro registration is refused and the
+//!   keymap-name check does not fire. That build is the
+//!   compile-level proof that no Tier C reference leaks outside
+//!   this gate.
 
 /// Register one macro in the engine's readline registry — the same data
 /// plane a rc `bind '"\C-t": "text"'` writes.  A plugin's `rl_macro_bind`
@@ -127,26 +61,6 @@ pub fn register_engine_macro(
     false
 }
 
-#[cfg(not(feature = "internals"))]
-pub fn current_generation(_executor: &rubash::Executor) -> u64 {
-    0
-}
-
-/// The engine registry's readline variable table, in GNU dump
-/// order (the registry seeds it from `READLINE_VARIABLE_DEFAULTS`
-/// and `set` lines update it in place) — the data the host's
-/// `dump-variables` prints (niubash#765). Outside the `internals`
-/// feature the mirror is empty, like the bindings mirror.
-#[cfg(feature = "internals")]
-pub fn load_readline_variables(executor: &rubash::Executor) -> Vec<(String, String)> {
-    executor.bind_registry().borrow().variables.clone()
-}
-
-#[cfg(not(feature = "internals"))]
-pub fn load_readline_variables(_executor: &rubash::Executor) -> Vec<(String, String)> {
-    Vec::new()
-}
-
 /// Whether `name` is one of the engine registry's known keymap
 /// names (the `-m` targets a bind entry may name). The `[keymap]`
 /// rule parser consults this through the gate so a rule naming an
@@ -163,69 +77,4 @@ pub fn is_known_keymap(name: &str) -> bool {
 #[cfg(not(feature = "internals"))]
 pub fn is_known_keymap(_name: &str) -> bool {
     true
-}
-
-#[cfg(feature = "internals")]
-fn convert(entry: rubash::shell::bind_registry::BindEntry) -> EngineBindEntry {
-    use rubash::shell::bind_registry::BindKind;
-    let kind = match entry.kind {
-        BindKind::Execute { command } => EngineBindKind::Execute { command },
-        BindKind::Function { name } => EngineBindKind::Function { name },
-        BindKind::Macro { text } => EngineBindKind::Macro { text },
-    };
-    EngineBindEntry {
-        keyseq: entry.keyseq,
-        kind,
-        keymap: entry.keymap,
-    }
-}
-
-#[cfg(all(test, feature = "internals"))]
-mod tests {
-    use super::{convert, EngineBindKind};
-    use rubash::shell::bind_registry::{BindEntry, BindKind};
-
-    #[test]
-    fn conversion_mirrors_every_variant() {
-        let execute = convert(BindEntry {
-            keyseq: "\\C-r".to_string(),
-            kind: BindKind::Execute {
-                command: "echo x".to_string(),
-            },
-            keymap: None,
-        });
-        assert_eq!(
-            execute.kind,
-            EngineBindKind::Execute {
-                command: "echo x".to_string()
-            }
-        );
-        let function = convert(BindEntry {
-            keyseq: "\\C-a".to_string(),
-            kind: BindKind::Function {
-                name: "beginning-of-line".to_string(),
-            },
-            keymap: Some("emacs".to_string()),
-        });
-        assert_eq!(function.keymap.as_deref(), Some("emacs"));
-        assert_eq!(
-            function.kind,
-            EngineBindKind::Function {
-                name: "beginning-of-line".to_string()
-            }
-        );
-        let mac = convert(BindEntry {
-            keyseq: "\\C-t".to_string(),
-            kind: BindKind::Macro {
-                text: "text".to_string(),
-            },
-            keymap: None,
-        });
-        assert_eq!(
-            mac.kind,
-            EngineBindKind::Macro {
-                text: "text".to_string()
-            }
-        );
-    }
 }

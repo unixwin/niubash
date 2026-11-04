@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use reedline::Reedline;
-use rubash::api::{PreparedLine, RunOptions, Session};
+use rubash::api::{BindEntryView, BindKindView, PreparedLine, RunOptions, Session};
 use rubash::{
     decode_to_visible_text, executor::Executor, lexer::tokenize, parser::parse, Ast, Token,
     TokenKind,
@@ -272,16 +272,18 @@ pub struct Shell {
     /// User-declared widget bindings parsed from `NIU_BINDKEYS` in the
     /// startup rc. Applied regardless of the native-widget pack gate.
     pub user_widget_bindings: Vec<NativeWidgetBinding>,
-    /// Engine-registered `bind` bindings (registry snapshot taken after
-    /// rc sourcing / at the last keymap rebuild). The reedline keymaps
-    /// mirror these; `bind -x` entries trigger through the `__niu_bindx`
-    /// sentinel and run via [`Shell::run_bind_x_command`].
-    pub engine_bindings: Vec<crate::bind_surface::EngineBindEntry>,
+    /// Engine-registered `bind` bindings (the `Session::bind_view`
+    /// snapshot taken after rc sourcing / at the last keymap
+    /// rebuild). The reedline keymaps mirror these; `bind -x`
+    /// entries trigger through the `__niu_bindx` sentinel and run
+    /// via [`Shell::run_bind_x_command`].
+    pub engine_bindings: Vec<BindEntryView>,
     /// Registry generation at snapshot time; compared against
-    /// the registry's live generation (through the bind surface)
-    /// between prompts so a runtime `bind` call rebuilds the
-    /// mirrored keymaps (GNU takes effect immediately; reedline
-    /// keymaps are baked at editor build time).
+    /// the registry's live generation (the bind view's
+    /// `generation`) between prompts so a runtime `bind` call
+    /// rebuilds the mirrored keymaps (GNU takes effect
+    /// immediately; reedline keymaps are baked at editor build
+    /// time).
     pub engine_bind_generation: u64,
     /// The `NIU_BINDKEYS` text the last `load_user_widget_bindings` call
     /// parsed (niubash#849): the staleness probe compares the live
@@ -3055,10 +3057,10 @@ impl Shell {
     ///
     /// inputrc: GNU seeds the editing mode from readline's
     /// `set editing-mode` in INPUTRC (~/.inputrc, bound.c:2992), read
-    /// after the rc. The engine exposes the value through
-    /// `Executor::bind_editing_mode()`; it feeds the same initial
-    /// observation (the `None` branch below), with the rc's `set -o`
-    /// flags as the fallback.
+    /// after the rc. The engine exposes the value through the
+    /// bind view's `editing_mode` (niubash#863 GAP-3); it feeds
+    /// the same initial observation (the `None` branch below),
+    /// with the rc's `set -o` flags as the fallback.
     pub fn refresh_edit_mode(&mut self) -> Option<EditorMode> {
         // Value check mirrors rubash set/options.rs shell_option_enabled:
         // the key holds "1"/"0" and a missing key falls back to the option
@@ -3080,8 +3082,9 @@ impl Shell {
         // therefore wins over the rc's `set -o vi|emacs` flags on the
         // first observation (GNU order: startup files, then inputrc).
         let inputrc_mode = self
-            .executor()
-            .bind_editing_mode()
+            .session()
+            .bind_view()
+            .editing_mode
             .and_then(|value| EditorMode::parse(&value));
         let resolved = match self.edit_flags_seen.replace(now) {
             // First observation (startup, after the rc has run): inputrc
@@ -3148,13 +3151,16 @@ impl Shell {
         // the rc, before the snapshot — is what makes inputrc variables
         // and bindings visible to the mirrored keymaps.
         self.executor_mut().initialize_readline();
-        // The registry itself is Tier C: the snapshot arrives
-        // through the gated bind surface, already converted to
-        // niu-owned mirror types (PLAN row 11, M-3).
-        let (entries, generation) = crate::bind_surface::load_engine_bindings(self.executor());
-        let removals = crate::bind_surface::load_engine_bind_removals(self.executor());
-        self.engine_bindings = entries;
-        self.engine_bind_generation = generation;
+        // The snapshot is the tier-A bind view (niubash#863
+        // GAP-3): one owned capture of the registry — entries
+        // with the engine's canonical bytes, the `bind -r`
+        // tombstones and the mutation generation — replacing
+        // the gated Tier C reads and the niu-owned mirror
+        // conversion that used to run here (PLAN row 11, M-3).
+        let view = self.session().bind_view();
+        let removals = view.removals;
+        self.engine_bindings = view.entries;
+        self.engine_bind_generation = view.generation;
         // niubash#775: the same engine bindings are the host keymap half of
         // the in-process readline ABI.  Mirroring them into the exported
         // `emacs_standard_keymap` / vi keymaps is what lets a loadable
@@ -3178,9 +3184,9 @@ impl Shell {
 
     /// Whether the engine's bind registry has moved since the
     /// last snapshot (the REPL's between-prompts staleness
-    /// probe, routed through the same gated surface).
+    /// probe, read off the bind view's generation).
     pub fn engine_bindings_stale(&self) -> bool {
-        crate::bind_surface::current_generation(self.executor()) != self.engine_bind_generation
+        self.session().bind_view().generation != self.engine_bind_generation
     }
 
     /// Run an engine `bind -x` command for a keypress and produce the
@@ -3211,7 +3217,7 @@ impl Shell {
         let Some(entry) = entry else {
             return WidgetOutcome::default();
         };
-        let crate::bind_surface::EngineBindKind::Execute { command } = &entry.kind else {
+        let BindKindView::Execute { command } = &entry.kind else {
             return WidgetOutcome::default();
         };
         let command = command.clone();
@@ -7080,7 +7086,7 @@ mod tests {
         shell.home_dir = home.clone();
         // The bind line lands in the registry…
         assert_eq!(shell.reread_init_file_bindings(), 1);
-        let (entries, _) = crate::bind_surface::load_engine_bindings(shell.executor());
+        let entries = shell.session().bind_view().entries;
         assert!(entries.iter().any(|e| e.keyseq == "\\C-o"));
         // GNU's inputrc leg is re-read too ($INPUTRC/~/.inputrc).
         assert!(
@@ -7100,7 +7106,7 @@ mod tests {
         // Editing the rc and re-reading picks the new binding up.
         std::fs::write(home.join(NIU_RC_FILE), "bind '\"\\C-g\": abort'\n").unwrap();
         assert_eq!(shell.reread_init_file_bindings(), 1);
-        let (entries, _) = crate::bind_surface::load_engine_bindings(shell.executor());
+        let entries = shell.session().bind_view().entries;
         assert!(entries.iter().any(|e| e.keyseq == "\\C-g"));
         let _ = std::fs::remove_dir_all(&temp);
     }
@@ -7780,7 +7786,7 @@ __fzf_history_stub() {
         assert_eq!(shell.engine_bindings[0].keyseq, r#"\C-r"#);
         assert!(matches!(
             &shell.engine_bindings[0].kind,
-            crate::bind_surface::EngineBindKind::Execute { command }
+            BindKindView::Execute { command }
                 if command == "__fzf_history_stub"
         ));
 

@@ -397,7 +397,7 @@ pub fn is_script_macro_text(text: &str) -> bool {
 pub fn dropped_reason(
     structural: Option<DroppedReason>,
     keyseq: &str,
-    kind: &crate::bind_surface::EngineBindKind,
+    kind: &rubash::api::BindKindView,
 ) -> DroppedReason {
     if let Some(reason) = structural {
         return reason;
@@ -409,26 +409,19 @@ pub fn dropped_reason(
         return DroppedReason::ResponseSequence;
     }
     match kind {
-        crate::bind_surface::EngineBindKind::Function { .. } => DroppedReason::UnknownFunction,
+        rubash::api::BindKindView::Function { .. } => DroppedReason::UnknownFunction,
         _ => DroppedReason::UnparseableKeyseq,
     }
 }
 
 /// Build a dropped record from an engine bind entry and its reason.
-pub fn dropped_bind_for(
-    entry: &crate::bind_surface::EngineBindEntry,
-    reason: DroppedReason,
-) -> DroppedBind {
+pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReason) -> DroppedBind {
     let (kind, target_name) = match &entry.kind {
-        crate::bind_surface::EngineBindKind::Execute { command } => {
+        rubash::api::BindKindView::Execute { command } => {
             (DroppedKind::Execute, Some(command.clone()))
         }
-        crate::bind_surface::EngineBindKind::Function { name } => {
-            (DroppedKind::Function, Some(name.clone()))
-        }
-        crate::bind_surface::EngineBindKind::Macro { text } => {
-            (DroppedKind::Macro, Some(text.clone()))
-        }
+        rubash::api::BindKindView::Function { name } => (DroppedKind::Function, Some(name.clone())),
+        rubash::api::BindKindView::Macro { text } => (DroppedKind::Macro, Some(text.clone())),
     };
     DroppedBind {
         keyseq: entry.keyseq.clone(),
@@ -501,7 +494,7 @@ pub fn key_display(modifiers: KeyModifiers, code: KeyCode) -> String {
 /// the engine snapshot to the command they run.
 pub fn action_summary(
     event: &ReedlineEvent,
-    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    engine_bindings: &[rubash::api::BindEntryView],
 ) -> String {
     match event {
         ReedlineEvent::ExecuteHostCommand(payload) => {
@@ -511,7 +504,7 @@ pub fn action_summary(
             {
                 match engine_bindings.get(index) {
                     Some(entry) => match &entry.kind {
-                        crate::bind_surface::EngineBindKind::Execute { command } => {
+                        rubash::api::BindKindView::Execute { command } => {
                             format!("host command: {command}")
                         }
                         _ => format!("host command (bind #{index})"),
@@ -626,7 +619,7 @@ pub type KeymapStacks = Vec<((KeyModifiers, KeyCode), Vec<(KeymapSource, Reedlin
 pub fn entries_from_stacks(
     mode: KeymapMode,
     stacks: KeymapStacks,
-    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    engine_bindings: &[rubash::api::BindEntryView],
 ) -> Vec<KeymapEntry> {
     let mut entries: Vec<KeymapEntry> = stacks
         .into_iter()
@@ -947,13 +940,17 @@ pub fn how_to_change_block() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+    use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
 
     fn engine_entry(keyseq: &str, kind: BindKind) -> BindEntry {
+        // The registry paths under test read keyseq/kind only;
+        // bytes and dump ride along inert (GAP-3 view shape).
         BindEntry {
             keyseq: keyseq.to_string(),
+            bytes: Vec::new(),
             kind,
-            keymap: None,
+            keymap: "emacs-standard".to_string(),
+            dump: String::new(),
         }
     }
 
