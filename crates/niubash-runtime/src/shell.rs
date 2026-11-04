@@ -73,6 +73,40 @@ thread_local! {
     /// completer field. Installed by `build_line_editor`, main thread only.
     static COMPLETION_BRIDGE: RefCell<Option<Rc<RefCell<Shell>>>> =
         const { RefCell::new(None) };
+    /// niubash#831: scoped bridge for shells that are not wrapped in an
+    /// `Rc<RefCell<Shell>>` — the library probe surface
+    /// ([`Shell::completion_probe`]) holds a plain `&mut Shell`, so for
+    /// the duration of one probe call it lends that borrow to the
+    /// completer through this raw pointer. The pointer is installed by
+    /// [`ScopedCompletionBridge`], is only dereferenced on the installing
+    /// thread while the guard lives, and the ACTIVE flag makes a nested
+    /// bridge call (a completion triggered from inside a bridge call)
+    /// observe "no bridge" instead of aliasing the live `&mut`.
+    static SCOPED_COMPLETION_BRIDGE: RefCell<Option<*mut Shell>> =
+        const { RefCell::new(None) };
+    static SCOPED_COMPLETION_BRIDGE_ACTIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard lending a plain `&mut Shell` to the completion bridge for
+/// one scoped call (niubash#831; see `SCOPED_COMPLETION_BRIDGE`).
+struct ScopedCompletionBridge {
+    previous: Option<*mut Shell>,
+}
+
+impl ScopedCompletionBridge {
+    fn install(shell: *mut Shell) -> Self {
+        let previous = SCOPED_COMPLETION_BRIDGE.with(|cell| cell.borrow_mut().replace(shell));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedCompletionBridge {
+    fn drop(&mut self) {
+        SCOPED_COMPLETION_BRIDGE.with(|cell| {
+            *cell.borrow_mut() = self.previous;
+        });
+    }
 }
 
 /// Install the interactive shell bridge for shell-function completions
@@ -100,10 +134,25 @@ pub(crate) fn uninstall_completion_bridge() {
 /// Run `f` with mutable access to the bridged shell, or `None` when no
 /// bridge is installed on this thread.
 pub(crate) fn with_completion_bridge<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
-    let rc = COMPLETION_BRIDGE.with(|cell| cell.borrow().as_ref().cloned())?;
-    let mut shell = rc.borrow_mut();
-    let result = f(&mut shell);
-    drop(shell);
+    if let Some(rc) = COMPLETION_BRIDGE.with(|cell| cell.borrow().as_ref().cloned()) {
+        let mut shell = rc.borrow_mut();
+        let result = f(&mut shell);
+        drop(shell);
+        return Some(result);
+    }
+    // niubash#831: the scoped bridge a `Shell::completion_probe` call
+    // installed for a shell that lives outside an `Rc`. Re-entrant use
+    // is refused (returns `None`) rather than aliasing the live borrow.
+    let ptr = SCOPED_COMPLETION_BRIDGE.with(|cell| *cell.borrow())?;
+    if SCOPED_COMPLETION_BRIDGE_ACTIVE.with(|active| active.replace(true)) {
+        return None;
+    }
+    // SAFETY: the guard that installed `ptr` is alive for the whole
+    // probe call this thread is inside, the pointee outlives the guard,
+    // and the ACTIVE flag above guarantees this is the only live
+    // `&mut Shell` derived from the pointer.
+    let result = unsafe { f(&mut *ptr) };
+    SCOPED_COMPLETION_BRIDGE_ACTIVE.with(|active| active.set(false));
     Some(result)
 }
 
@@ -246,6 +295,14 @@ pub struct Shell {
     pub aliases: HashMap<String, String>,
     pub last_interactive_command: Option<String>,
     pub last_interactive_exit_code: Option<i32>,
+    /// niubash#846: wall-clock duration of the last executed
+    /// interactive line, measured by the host around the engine call.
+    /// This is the REAL producer behind the prompt's
+    /// `NIU_CMD_EXEC_TIME_MS` / `NIU_LAST_COMMAND_DURATION` channels:
+    /// `run_precmd_hooks` publishes it to the process env the prompt
+    /// segments read, once per prompt pass. `None` until a line has
+    /// actually executed (a discarded line measures nothing).
+    pub last_command_duration_ms: Option<u64>,
     pub line_editor: Option<Reedline>,
     process_stdin_pipeline_bridge: bool,
     bash_prompt_command_running: bool,
@@ -867,6 +924,7 @@ impl Shell {
             aliases,
             last_interactive_command: None,
             last_interactive_exit_code: None,
+            last_command_duration_ms: None,
             line_editor: None,
             process_stdin_pipeline_bridge: false,
             bash_prompt_command_running: false,
@@ -1538,7 +1596,14 @@ impl Shell {
         // this used to call directly; same funnel, same outcomes).
         let code = match self.session_mut().prepare_line(line) {
             PreparedLine::Execute(expanded) => {
-                let code = self.execute_line_with_options(&expanded, true, line_offset)?;
+                // niubash#846: measure the line's wall-clock duration
+                // here, where the execution actually happens — the
+                // prompt's execution-time channels are published from
+                // this measurement in `run_precmd_hooks`.
+                let started = std::time::Instant::now();
+                let outcome = self.execute_line_with_options(&expanded, true, line_offset);
+                self.last_command_duration_ms = Some(started.elapsed().as_millis() as u64);
+                let code = outcome?;
                 self.invalidate_command_probe_after_line(&expanded);
                 self.invalidate_git_prompt_after_line();
                 code
@@ -1556,6 +1621,12 @@ impl Shell {
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
             self.run_chpwd_hooks_if_changed(&old_pwd, &new_pwd);
         }
+        // niubash#846: re-run the NIU_* env sync after every
+        // interactive line — an interactive `export
+        // NIU_COMPLETION_STYLE=gnu` (or `NIU_SEGMENT_*`, or any knob
+        // on the sync list) must take effect in THIS session from the
+        // next prompt, not only in child processes / the next launch.
+        self.sync_niu_environment_from_engine();
         self.update_completion_state();
         Ok(code)
     }
@@ -1576,7 +1647,10 @@ impl Shell {
         self.run_preexec_hooks(script);
         let line_offset = self.interactive_lines_read;
         self.interactive_lines_read += script.split_inclusive('\n').count().max(1);
-        let code = self.execute_script_with_options(script, true, line_offset)?;
+        let started = std::time::Instant::now();
+        let outcome = self.execute_script_with_options(script, true, line_offset);
+        self.last_command_duration_ms = Some(started.elapsed().as_millis() as u64);
+        let code = outcome?;
         self.invalidate_command_probe_after_line(script);
         self.invalidate_git_prompt_after_line();
         self.remember_interactive_command(script, code);
@@ -1584,6 +1658,12 @@ impl Shell {
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
             self.run_chpwd_hooks_if_changed(&old_pwd, &new_pwd);
         }
+        // niubash#846: re-run the NIU_* env sync after every
+        // interactive line — an interactive `export
+        // NIU_COMPLETION_STYLE=gnu` (or `NIU_SEGMENT_*`, or any knob
+        // on the sync list) must take effect in THIS session from the
+        // next prompt, not only in child processes / the next launch.
+        self.sync_niu_environment_from_engine();
         self.update_completion_state();
         Ok(code)
     }
@@ -1693,6 +1773,12 @@ impl Shell {
     /// the rc ran. This is what makes `export NIU_COMPLETION_STYLE=...`
     /// (and the migration's `export NIU_*` lines) take effect in the
     /// session that sourced them, not only in child processes.
+    ///
+    /// niubash#846: this used to run ONLY here at startup (plus the
+    /// setup re-apply), so an interactive `export NIU_COMPLETION_STYLE=
+    /// ...` written to the engine env mid-session was never observed
+    /// by the process-env readers. It now also runs after every
+    /// interactive line and at the end of every precmd pass.
     pub fn sync_niu_environment_from_engine(&mut self) {
         const NAMES: &[&str] = &[
             "NIU_COMPLETION_STYLE",
@@ -1712,6 +1798,38 @@ impl Shell {
                 if !value.is_empty() {
                     std::env::set_var(name, value);
                 }
+            }
+        }
+        // niubash#846: `NIU_SEGMENT_<NAME>` is an OPEN family (the
+        // prompt's Custom segment reads `NIU_SEGMENT_<NAME>` from the
+        // process env), so it cannot ride the fixed list above.
+        // Mirror the whole family from the session env, reconciling
+        // removals: a name the session unset must stop feeding the
+        // segment instead of lingering in the process env forever.
+        // The session env starts as a superset of the inherited
+        // process env, so a value exported before launch is mirrored
+        // (unchanged), never deleted by this reconciliation.
+        let segment_values: Vec<(String, String)> = self
+            .executor()
+            .env_vars()
+            .iter()
+            .filter(|(name, _)| name.starts_with("NIU_SEGMENT_"))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        for (name, value) in &segment_values {
+            std::env::set_var(name, value);
+        }
+        let mirrored: std::collections::HashSet<&str> = segment_values
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let process_segment_names: Vec<String> = std::env::vars_os()
+            .filter_map(|(name, _)| name.into_string().ok())
+            .filter(|name| name.starts_with("NIU_SEGMENT_"))
+            .collect();
+        for name in process_segment_names {
+            if !mirrored.contains(name.as_str()) {
+                std::env::remove_var(&name);
             }
         }
         self.menu_config = self.menu_config.with_env_overrides();
@@ -2740,6 +2858,26 @@ impl Shell {
         {
             self.invalidate_git_prompt_after_line();
         }
+        // niubash#846: publish the prompt channels the shell core
+        // genuinely owns, through the same process-env surface the
+        // existing NIU_LAST_EXIT_CODE producer above already uses.
+        // The duration is the host's own measurement of the last
+        // executed line (see `execute_interactive_line`); both
+        // historical spellings are written because two readers exist
+        // (the segment engine reads NIU_CMD_EXEC_TIME_MS, the
+        // template prompt reads NIU_LAST_COMMAND_DURATION first).
+        // Before this, neither name had any writer anywhere: both
+        // readers were orphans and the segments were permanently
+        // empty.
+        if let Some(duration_ms) = self.last_command_duration_ms {
+            let duration = duration_ms.to_string();
+            std::env::set_var("NIU_CMD_EXEC_TIME_MS", &duration);
+            std::env::set_var("NIU_LAST_COMMAND_DURATION", &duration);
+        }
+        // A precmd hook / PROMPT_COMMAND can itself export NIU_*
+        // knobs or NIU_SEGMENT_* values; re-run the sync so this same
+        // prompt pass already observes them.
+        self.sync_niu_environment_from_engine();
         self.sync_bash_prompt_from_env();
         let title = self.resolve_title_value();
         self.run_title_hooks(&title);
@@ -3507,14 +3645,22 @@ impl Shell {
     /// an empty submission never reaches either site, so it costs
     /// nothing.
     fn invalidate_git_prompt_after_line(&self) {
-        #[cfg(windows)]
-        {
-            if self.one_shot {
-                return;
-            }
-            if let Ok(cwd) = std::env::current_dir() {
-                crate::git_prompt::invalidate_segment_for_cwd(&cwd);
-            }
+        // niubash#842: this body used to be `#[cfg(windows)]`-only, so
+        // on Unix the command-cycle mark never landed and the cached
+        // segment could serve a stale clean/dirty state indefinitely.
+        // The un-gating rests on a verified negative: the cache's
+        // fingerprint (`git_prompt_cache::RepoFingerprint`) covers
+        // ONLY the HEAD contents and the index stat — the cache core's
+        // own freshness contract states a command "can rewrite
+        // worktree files without touching HEAD or the index — exactly
+        // what the fingerprint cannot see", which is why the cycle
+        // mark exists. Worktree content mtimes are not fingerprinted
+        // on any platform, so the mark must land on every platform.
+        if self.one_shot {
+            return;
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            crate::git_prompt_cache::invalidate_segment_for_cwd(&cwd);
         }
     }
 
@@ -3525,6 +3671,20 @@ impl Shell {
         if self.one_shot {
             return;
         }
+        self.sync_completion_state();
+    }
+
+    /// niubash#831: the state sync with the one-shot early return forced
+    /// past. Probes are a completion surface in their own right — a
+    /// one-shot shell asked for candidates must snapshot the same
+    /// env/alias/function/fd/tmp state the REPL completer reads, or
+    /// variable/alias/function candidates silently vanish from exactly
+    /// the surface agents diagnose completion through.
+    fn update_completion_state_for_probe(&self) {
+        self.sync_completion_state();
+    }
+
+    fn sync_completion_state(&self) {
         // niubash#594: this runs after every interactive line, and the
         // snapshot used to re-clone the whole env map, the alias name set
         // and the function name set unconditionally — a per-line tax that
@@ -3597,9 +3757,30 @@ impl Shell {
     ///
     /// This is primarily a deterministic probe surface for binary tests and
     /// agent diagnostics; it avoids trying to drive reedline through a TTY.
-    pub fn completion_probe(&self, input: &str, cursor_pos: usize) -> Vec<String> {
-        self.update_completion_state();
-        let mut completer = NiubashCompleter::new(self.completion_state.clone());
+    ///
+    /// niubash#831: the probe mirrors the REPL sequence exactly — the
+    /// rc-declared `NIU_COMPDEFS` are (re)loaded and the completion
+    /// bridge is installed before the completer runs, and the state
+    /// sync runs even on one-shot shells. Before this, the library
+    /// probe had neither: `with_completion_bridge` returned `None`, so
+    /// `has_compspec` collapsed to `false`, the path fallback was not
+    /// suppressed, and the probe returned candidates exactly where the
+    /// REPL showed zero (the surface mismatch that made a probe "work"
+    /// while the REPL was broken during the #828 diagnosis). The CLI
+    /// verb (`niu --completion-probe`) already mirrored the REPL by
+    /// hand; the library surface now carries the same contract itself.
+    pub fn completion_probe(&mut self, input: &str, cursor_pos: usize) -> Vec<String> {
+        self.load_user_compdefs();
+        self.update_completion_state_for_probe();
+        let state = self.completion_state.clone();
+        // Lend this shell to the completer through the scoped bridge
+        // for the duration of the call: candidate generation re-enters
+        // the engine through the bridge (compspec gate, `Session::
+        // complete`, compdef hooks), exactly as at a live Tab. When an
+        // Rc bridge is already installed on this thread it wins inside
+        // `with_completion_bridge` and the scoped lend is inert.
+        let _bridge = ScopedCompletionBridge::install(self as *mut Shell);
+        let mut completer = NiubashCompleter::new(state);
         let cursor_pos = cursor_pos.min(input.len());
         completer
             .complete(input, cursor_pos)
@@ -9754,6 +9935,159 @@ complete -F _envtooldyn_hook envtooldyn
         reedline::Prompt::render_prompt_left(prompt).into_owned()
     }
 
+    /// niubash#842: on every platform (this pin is deliberately NOT
+    /// windows-gated — the bug was a windows-only body), a worktree-only
+    /// edit is invisible to the fingerprint, and ONE interactive line
+    /// must land the command-cycle mark that refreshes the segment.
+    /// Before the un-gating, the Unix half of this sequence served
+    /// "main" forever: no mark, no refresh, no dirty star.
+    #[test]
+    fn issue842_interactive_line_invalidates_git_prompt_segment() {
+        fn git(dir: &std::path::Path, args: &[&str]) -> bool {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("tracked.txt"), b"v1").unwrap();
+        if !git(
+            tmp.path(),
+            &["init", "--quiet", "--initial-branch=main", "."],
+        ) || !git(tmp.path(), &["add", "tracked.txt"])
+            || !git(tmp.path(), &["commit", "--quiet", "-m", "add"])
+        {
+            return; // git unusable on this machine: abort quietly
+        }
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let key = crate::git_prompt_cache::worktree_key_for(tmp.path()).unwrap();
+        // Settle the cold entry: one spawn, clean segment.
+        let _ = crate::git_prompt_cache::branch_segment(tmp.path());
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
+        assert_eq!(
+            crate::git_prompt_cache::branch_segment(tmp.path()).as_deref(),
+            Some("main")
+        );
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 1);
+        // A worktree-only edit moves neither HEAD nor the index: the
+        // fingerprint cannot see it, and without a cycle mark nothing
+        // refreshes.
+        std::fs::write(tmp.path().join("tracked.txt"), b"v2").unwrap();
+        assert_eq!(
+            crate::git_prompt_cache::branch_segment(tmp.path()).as_deref(),
+            Some("main")
+        );
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 1);
+        // One interactive line lands the mark on this platform too:
+        // exactly one background refresh, and the star appears.
+        let mut shell = test_shell(HookConfig::default());
+        shell.execute_interactive_line("true").unwrap();
+        let _ = crate::git_prompt_cache::branch_segment(tmp.path());
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
+            std::time::Duration::from_secs(30)
+        ));
+        assert_eq!(
+            crate::git_prompt_cache::read_status_call_count(&key),
+            2,
+            "the command cycle costs exactly one refresh after the un-gating"
+        );
+        assert_eq!(
+            crate::git_prompt_cache::branch_segment(tmp.path()).as_deref(),
+            Some("main*")
+        );
+    }
+
+    /// niubash#846: an interactive `export` lands in the session env
+    /// only — the per-line re-sync must mirror it into the process
+    /// env channels the prompt readers consult, in the SAME session:
+    /// a sync-list knob (`NIU_COMPLETION_STYLE`) and an open-family
+    /// Custom segment value (`NIU_SEGMENT_*`). Unsetting the segment
+    /// value in the session must also un-feed the segment.
+    #[test]
+    fn issue846_interactive_export_resyncs_prompt_channels() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_COMPLETION_STYLE",
+            "NIU_SEGMENT_T846",
+        ]);
+        std::env::remove_var("NIU_COMPLETION_STYLE");
+        std::env::remove_var("NIU_SEGMENT_T846");
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_interactive_line("export NIU_COMPLETION_STYLE=gnu NIU_SEGMENT_T846=segval")
+            .unwrap();
+        assert_eq!(
+            std::env::var("NIU_COMPLETION_STYLE").as_deref(),
+            Ok("gnu"),
+            "the sync-list knob must reach the process env after one interactive line"
+        );
+        assert_eq!(
+            std::env::var("NIU_SEGMENT_T846").as_deref(),
+            Ok("segval"),
+            "the NIU_SEGMENT_* family must be mirrored after one interactive line"
+        );
+        shell
+            .execute_interactive_line("unset NIU_SEGMENT_T846")
+            .unwrap();
+        assert!(
+            std::env::var("NIU_SEGMENT_T846").is_err(),
+            "a session unset must un-feed the Custom segment (reconciled mirror)"
+        );
+    }
+
+    /// niubash#846: the prompt's duration channels have a real
+    /// producer — after a line executes, the precmd pass publishes
+    /// the host-measured duration under both historical spellings,
+    /// next to the already-produced last-exit-code channel.
+    #[test]
+    fn issue846_precmd_publishes_measured_command_duration() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_CMD_EXEC_TIME_MS",
+            "NIU_LAST_COMMAND_DURATION",
+            "NIU_LAST_EXIT_CODE",
+        ]);
+        std::env::remove_var("NIU_CMD_EXEC_TIME_MS");
+        std::env::remove_var("NIU_LAST_COMMAND_DURATION");
+        let mut shell = test_shell(HookConfig::default());
+        assert_eq!(shell.last_command_duration_ms, None, "nothing executed yet");
+        shell.execute_interactive_line("false").unwrap();
+        assert!(
+            shell.last_command_duration_ms.is_some(),
+            "executing a line records its measured duration"
+        );
+        shell.run_precmd_hooks();
+        let segment_ms: u64 = std::env::var("NIU_CMD_EXEC_TIME_MS")
+            .expect("the segment channel must be published by the precmd pass")
+            .parse()
+            .expect("the published duration is a plain millisecond count");
+        let template_ms: u64 = std::env::var("NIU_LAST_COMMAND_DURATION")
+            .expect("the template channel must be published by the precmd pass")
+            .parse()
+            .expect("the published duration is a plain millisecond count");
+        assert_eq!(
+            segment_ms, template_ms,
+            "both spellings carry the one measurement"
+        );
+        assert_eq!(
+            std::env::var("NIU_LAST_EXIT_CODE").as_deref(),
+            Ok("1"),
+            "the exit-code channel keeps publishing the real last status"
+        );
+    }
+
     /// Probe cells 1+2 (§6) and the §5 rows they cover (first frame,
     /// ordinary pass, repaint storm, completion/resize repaints — all
     /// repaints of the handed-out prompt), under the niubash#685
@@ -9790,10 +10124,10 @@ complete -F _envtooldyn_hook envtooldyn
             let _ = render_left_of(&prompt);
             let _ = reedline::Prompt::render_prompt_right(&prompt);
         }
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
-        let after_storm = crate::git_prompt::read_status_call_count(&key);
+        let after_storm = crate::git_prompt_cache::read_status_call_count(&key);
         eprintln!("issue592 probe cell1 (#685): after_10_repaints_spawns={after_storm}");
         assert_eq!(after_storm, 1, "one background spawn; repaints never spawn");
 
@@ -9805,7 +10139,7 @@ complete -F _envtooldyn_hook envtooldyn
                 let _ = render_left_of(&p);
             }
             assert!(render_left_of(&p).contains("main"));
-            let total = crate::git_prompt::read_status_call_count(&key);
+            let total = crate::git_prompt_cache::read_status_call_count(&key);
             eprintln!("issue592 probe cell2 (#685): passes={k} total_spawns={total}");
             assert_eq!(total, 1, "pass {k} must be a cache hit");
         }
@@ -9837,12 +10171,12 @@ complete -F _envtooldyn_hook envtooldyn
 
         // Settle the cache on the pre-hook value.
         let _ = shell.prompt_for_display();
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
         let before = shell.prompt_for_display();
         assert!(render_left_of(&before).contains("main"));
-        assert_eq!(crate::git_prompt::read_status_call_count(&key), 1);
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 1);
 
         // REPL order: hooks first, prompt second. Under the Wine shim
         // the "repository change" is the canned status flipping to the
@@ -9866,10 +10200,10 @@ complete -F _envtooldyn_hook envtooldyn
         // the hook's branch for the next pass.
         let prompt = shell.prompt_for_display();
         let left = render_left_of(&prompt);
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
-        let spawns = crate::git_prompt::read_status_call_count(&key);
+        let spawns = crate::git_prompt_cache::read_status_call_count(&key);
         eprintln!("issue592 probe cell5 (#685): total_spawns={spawns} pass_after_hook={left:?}");
         assert_eq!(
             spawns, 2,
@@ -9884,7 +10218,7 @@ complete -F _envtooldyn_hook envtooldyn
             render_left_of(&next).contains("hooked"),
             "the hook's branch is visible from the next pass"
         );
-        assert_eq!(crate::git_prompt::read_status_call_count(&key), 2);
+        assert_eq!(crate::git_prompt_cache::read_status_call_count(&key), 2);
     }
 
     /// §5 rows "empty Enter" / "prompt Ctrl+C": both return to the
@@ -9914,10 +10248,10 @@ complete -F _envtooldyn_hook envtooldyn
         for m in 1..=3usize {
             let p = shell.prompt_for_display();
             let _ = render_left_of(&p);
-            assert!(crate::git_prompt::wait_for_segment_cache_idle(
+            assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
                 std::time::Duration::from_secs(30)
             ));
-            let total = crate::git_prompt::read_status_call_count(&key);
+            let total = crate::git_prompt_cache::read_status_call_count(&key);
             eprintln!("issue592 probe empty-enter shape (#685): passes={m} total_spawns={total}");
             assert_eq!(total, 1, "pass {m} must be served by the one landing");
         }
@@ -9939,7 +10273,7 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut shell = segments_shell_with_vcs();
-        assert!(crate::git_prompt::worktree_key_for(tmp.path()).is_none());
+        assert!(crate::git_prompt_cache::worktree_key_for(tmp.path()).is_none());
         for _ in 0..3 {
             let p = shell.prompt_for_display();
             for _ in 0..4 {
@@ -9980,7 +10314,7 @@ complete -F _envtooldyn_hook envtooldyn
         std::env::set_current_dir(repo_a.path()).unwrap();
         let key_a = crate::git_prompt::worktree_key_for(&std::env::current_dir().unwrap()).unwrap();
         let _ = shell.prompt_for_display();
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
         let at_root = render_left_of(&shell.prompt_for_display());
@@ -10006,7 +10340,7 @@ complete -F _envtooldyn_hook envtooldyn
             !cold_b.contains("other"),
             "the first pass in a new repository does not wait: {cold_b:?}"
         );
-        assert!(crate::git_prompt::wait_for_segment_cache_idle(
+        assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)
         ));
         let at_b = render_left_of(&shell.prompt_for_display());
@@ -10679,6 +11013,7 @@ complete -F _envtooldyn_hook envtooldyn
             aliases: HashMap::new(),
             last_interactive_command: None,
             last_interactive_exit_code: None,
+            last_command_duration_ms: None,
             line_editor: None,
             process_stdin_pipeline_bridge: false,
             bash_prompt_command_running: false,
@@ -10908,6 +11243,139 @@ mod invocation_name_tests {
         // Net dirs complete nothing past the guide form.
         let net = shell.completion_probe("cat /dev/tcp/", "cat /dev/tcp/".len());
         assert!(net.is_empty(), "{net:?}");
+    }
+
+    /// niubash#831: the library probe surface and the REPL completer
+    /// surface agree over a compspec matrix — same bridge, same
+    /// compdefs, same state. The `-F` leg is the #828 shape: the hook
+    /// yields an empty COMPREPLY, so both surfaces must return zero
+    /// candidates even though a matching file sits in the cwd (the
+    /// pre-fix probe had no bridge, `has_compspec` collapsed to false,
+    /// and the path fallback served the file the REPL suppressed).
+    #[test]
+    fn issue831_completion_probe_matches_repl_completer() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use super::{install_completion_bridge, uninstall_completion_bridge, NiubashCompleter};
+
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "niubash-issue831-parity-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("alpine.txt"), "x").unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        let cd = format!("cd {}", temp.to_string_lossy().replace('\\', "/"));
+        shell.execute_interactive_line(&cd).unwrap();
+        shell
+            .execute_script(
+                r#"
+complete -W 'alpha beta gamma' t831word
+t831dyn() { COMPREPLY=(); }
+complete -F t831dyn t831dyn
+t831fn() { NIU_COMP_RESULT="compdef-one"; }
+NIU_COMPDEFS="t831def:t831fn"
+T831_PROBE_VAR=hello
+"#,
+            )
+            .unwrap();
+        // The REPL loads the rc-declared compdefs before the editor
+        // runs; mirror that for the REPL surface. The probe surface
+        // must load them itself (that is the #831 fix), so the probe
+        // calls below deliberately do NOT repeat this call first —
+        // they run after the shell is taken back out of the Rc, with
+        // `compdefs` reset to prove the probe reloads them.
+        shell.load_user_compdefs();
+
+        let shell = Rc::new(RefCell::new(shell));
+        install_completion_bridge(&shell);
+        shell.borrow().update_completion_state();
+        let repl_values = |input: &str| -> Vec<String> {
+            let mut completer = NiubashCompleter::new(shell.borrow().completion_state.clone());
+            completer
+                .complete(input, input.len())
+                .into_iter()
+                .map(|suggestion| suggestion.value)
+                .collect()
+        };
+        let matrix = [
+            "t831word a",
+            "t831dyn al",
+            "t831def ",
+            "echo $T831_PROBE_V",
+            "t831wo",
+        ];
+        let repl: Vec<Vec<String>> = matrix.iter().map(|input| repl_values(input)).collect();
+        uninstall_completion_bridge();
+        let mut shell = Rc::try_unwrap(shell)
+            .unwrap_or_else(|_| panic!("bridge uninstalled; shell Rc must be unique"))
+            .into_inner();
+        // Prove the probe (re)loads compdefs itself: without the fix
+        // this reset leaves the compdef leg with no function to run.
+        shell.compdefs = Vec::new();
+
+        for (input, expected) in matrix.iter().zip(repl.iter()) {
+            let probed = shell.completion_probe(input, input.len());
+            assert_eq!(
+                &probed, expected,
+                "probe and REPL completer diverge for {input:?}"
+            );
+        }
+        // The #828 shape, asserted directly: empty hook, matching file
+        // in cwd — zero candidates, no path fallback.
+        assert!(
+            shell
+                .completion_probe("t831dyn al", "t831dyn al".len())
+                .is_empty(),
+            "an empty -F compspec must suppress the path fallback in the probe too"
+        );
+        assert!(repl[1].is_empty(), "REPL surface agrees: {repl:?}");
+        // And the compdef leg really served through the probe's own
+        // compdef load.
+        assert!(
+            shell
+                .completion_probe("t831def ", "t831def ".len())
+                .contains(&"compdef-one".to_string()),
+            "probe must serve compdef candidates without a manual load_user_compdefs"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// niubash#831: on a one-shot shell the probe forces the state
+    /// sync past the `one_shot` early return — variable and function
+    /// candidates exist on the probe surface even though no REPL will
+    /// ever read the state.
+    #[test]
+    fn issue831_one_shot_probe_snapshots_state() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = crate::Shell::new_one_shot().unwrap();
+        assert!(shell.one_shot);
+        shell
+            .execute_script("T831_OS_VAR=hello\nt831osfn() { true; }\n")
+            .unwrap();
+        assert!(
+            shell
+                .completion_probe("echo $T831_OS_V", "echo $T831_OS_V".len())
+                .contains(&"$T831_OS_VAR".to_string()),
+            "one-shot probe must snapshot env vars"
+        );
+        assert!(
+            shell
+                .completion_probe("t831osf", "t831osf".len())
+                .contains(&"t831osfn".to_string()),
+            "one-shot probe must snapshot functions"
+        );
     }
 
     /// niubash#627 G2 end-to-end (Windows, where /tmp is the enclave

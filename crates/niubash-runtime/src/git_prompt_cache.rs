@@ -409,8 +409,8 @@ fn notify_landing_observers(worktree: &Path, value: &Option<String>) {
 /// Mark the cached segment for the repository containing `cwd` dirty:
 /// the host's command-cycle invalidation (see the freshness contract
 /// above). A repository with no entry needs no mark — its next pass
-/// computes cold anyway.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// computes cold anyway. Called on every platform since niubash#842
+/// un-gated the host's per-line invalidation.
 pub(crate) fn invalidate_segment_for_cwd(cwd: &Path) {
     let Some(worktree) = find_worktree(cwd) else {
         return;
@@ -576,20 +576,35 @@ fn read_status(worktree: &Path) -> Option<(String, bool)> {
 /// Win32 `WaitForSingleObject` wakes the instant the process exits — polling
 /// `try_wait` in a sleep loop costs a scheduler quantum (~15 ms) per hop on
 /// Windows, which would double the segment's cost.
+/// niubash#847: the Win32 wait predicate, factored pure so it is
+/// pinned on every platform even though only the Windows wait
+/// consumes it: a wait counts as "the child finished" ONLY on
+/// `WAIT_OBJECT_0` (0). The pre-fix predicate was
+/// `status == WAIT_OBJECT_0 || status != WAIT_TIMEOUT` — every
+/// non-timeout status, including `WAIT_FAILED` (0xFFFFFFFF, a failed
+/// wait on a broken handle) and `WAIT_ABANDONED_0`, counted as
+/// finished, so the caller skipped its kill and blocked in
+/// `child.wait()` unboundedly on a possibly-wedged git; the refresh
+/// thread parked forever, `entry.refreshing` stayed true, and that
+/// worktree's segment served its stale value for the whole session.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn wait_status_is_finished(status: u32) -> bool {
+    status == 0 // WAIT_OBJECT_0
+}
+
 fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+        use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
         let handle = child.as_raw_handle() as HANDLE;
         // SAFETY: `handle` is the live process handle owned by `child`.
         let status = unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) };
-        // deep-audit A4-07: only WAIT_OBJECT_0 means "exited". The old
-        // `|| status != WAIT_TIMEOUT` also read WAIT_FAILED (and any
-        // abandoned-mutex face) as finished, sending the caller down
-        // the parse-the-scratch path for a child that may still run.
-        status == WAIT_OBJECT_0
+        // niubash#847 / deep-audit A4-07 (same defect, both waves): only
+        // WAIT_OBJECT_0 means "exited" — the factored predicate above
+        // carries the rule and its cross-platform pin.
+        wait_status_is_finished(status)
     }
     #[cfg(not(windows))]
     {
@@ -733,6 +748,20 @@ mod tests {
             }
             _ => String::new(),
         }
+    }
+
+    /// niubash#847: only WAIT_OBJECT_0 means the child finished.
+    /// WAIT_FAILED (the wedged-handle shape) and WAIT_ABANDONED must
+    /// take the kill path, never the "finished" path. This predicate
+    /// is the whole fix; the Windows caller cannot be exercised from
+    /// a non-Windows build, so the predicate is pinned here on every
+    /// platform and the Windows wait itself is CI-verified.
+    #[test]
+    fn issue847_only_wait_object_0_counts_as_finished() {
+        assert!(wait_status_is_finished(0), "WAIT_OBJECT_0");
+        assert!(!wait_status_is_finished(258), "WAIT_TIMEOUT");
+        assert!(!wait_status_is_finished(0xFFFF_FFFF), "WAIT_FAILED");
+        assert!(!wait_status_is_finished(0x80), "WAIT_ABANDONED_0");
     }
 
     // ---- niubash#643: the #592 phase-one contract, pinned on the
