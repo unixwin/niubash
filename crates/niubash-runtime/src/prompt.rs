@@ -181,6 +181,11 @@ impl NiubashPrompt {
 
         let time_str = format_local_time();
         let time_str_24 = time_str.clone();
+        // niubash#846: both spellings are published per prompt pass
+        // by `Shell::run_precmd_hooks` from the host's measured
+        // duration of the last executed line — real producers, at
+        // last; before #846 neither name had a writer and this token
+        // always expanded to nothing.
         let command_execution_time = std::env::var("NIU_LAST_COMMAND_DURATION")
             .or_else(|_| std::env::var("NIU_CMD_EXEC_TIME_MS"))
             .unwrap_or_default();
@@ -275,9 +280,12 @@ impl NiubashPrompt {
     }
 
     fn render_prompt_template(&self, template: &str) -> String {
-        let last_status = std::env::var("NIU_LAST_STATUS")
-            .or_else(|_| std::env::var("NIU_LAST_EXIT_CODE"))
-            .unwrap_or_default();
+        // niubash#846: `NIU_LAST_STATUS` was an orphan read — no
+        // writer existed anywhere, and the value always came from
+        // the fallback. The one real channel is `NIU_LAST_EXIT_CODE`,
+        // published per prompt pass by `Shell::run_precmd_hooks`
+        // from the engine's actual last status; read exactly that.
+        let last_status = std::env::var("NIU_LAST_EXIT_CODE").unwrap_or_default();
         let status_token = if last_status.is_empty() || last_status == "0" {
             String::new()
         } else {
@@ -770,6 +778,41 @@ mod tests {
         let prompt = NiubashPrompt::new(Some("left> ".to_string()), Some("right".to_string()));
 
         assert_eq!(prompt.render_prompt_right(), "right");
+    }
+
+    /// niubash#846: the template prompt's {status} token is fed by
+    /// the one produced channel, `NIU_LAST_EXIT_CODE` — and the
+    /// deleted orphan alias `NIU_LAST_STATUS` must NOT feed it (a
+    /// hand-set alias value is not shell data).
+    #[test]
+    fn issue846_status_token_reads_the_produced_channel_only() {
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_LAST_EXIT_CODE",
+            "NIU_LAST_STATUS",
+            "NIU_LAST_COMMAND_DURATION",
+            "NIU_CMD_EXEC_TIME_MS",
+        ]);
+        std::env::remove_var("NIU_LAST_EXIT_CODE");
+        std::env::set_var("NIU_LAST_STATUS", "9");
+        let prompt = NiubashPrompt::new(Some("{status}X".to_string()), None);
+        assert_eq!(
+            prompt.render_prompt_left(),
+            "X",
+            "the orphan NIU_LAST_STATUS alias must not feed the status token"
+        );
+        std::env::remove_var("NIU_LAST_STATUS");
+        std::env::set_var("NIU_LAST_EXIT_CODE", "7");
+        assert_eq!(
+            prompt.render_prompt_left(),
+            "status:7 X",
+            "the produced NIU_LAST_EXIT_CODE channel feeds the status token"
+        );
+        // The {command_execution_time} token renders the published
+        // duration (producer pinned in shell.rs).
+        std::env::set_var("NIU_CMD_EXEC_TIME_MS", "42");
+        let prompt = NiubashPrompt::new(Some("{command_execution_time}".to_string()), None);
+        assert_eq!(prompt.render_prompt_left(), "42");
     }
 
     // niubash#431 (wt91-allthemes F9 family): the engine's decode_prompt_string

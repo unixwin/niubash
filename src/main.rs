@@ -297,7 +297,9 @@ fn run_main() -> ExitCode {
     let mut args = match extract_cwd_state_options(&args) {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("niu: {error}");
+            // deep-audit A4-10: render the anyhow chain ({:#}), not
+            // just the outermost context — see the run() site below.
+            eprintln!("niu: {error:#}");
             return ExitCode::from(1);
         }
     };
@@ -314,7 +316,13 @@ fn run_main() -> ExitCode {
         if is_broken_pipe_error(&e) {
             return ExitCode::from(1);
         }
-        eprintln!("niu: {}", e);
+        // deep-audit A4-10: `{}` prints only the outermost anyhow
+        // context, silently discarding every cause the runtime
+        // attached (the serde detail under "could not parse …", the
+        // io error under a context string) — several CLI failures
+        // surfaced as a bare context line with no actionable content.
+        // `{:#}` renders the whole chain on one line.
+        eprintln!("niu: {:#}", e);
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
@@ -486,7 +494,10 @@ fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Re
     // (rubash#132). Merging them refused every Latin-1 script with
     // rc 126 while rubash and GNU ran it fine.
     if rubash::script_driver::check_binary_file(&bytes) {
-        eprintln!("cannot execute binary file");
+        // deep-audit A4-06: name the operand like every sibling arm
+        // (and GNU's shell_execve diagnostic) — the bare string left
+        // the user guessing which file was refused.
+        eprintln!("niu: {name}: cannot execute binary file");
         piped_stdout::finish_and_exit(126);
     }
     Ok(rubash::script_driver::bytes_to_script_text(&bytes))
@@ -874,6 +885,18 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     shell.no_profile = invocation.no_profile;
     shell.rc_file = invocation.rc_file.clone().map(PathBuf::from);
     shell.no_editing = invocation.no_editing;
+    // B5-06: GNU seeds $0 from $BASH_ARGV0 at shell startup (variables.c:
+    // shell_name / argv0 handling in shell.c runs before any startup file),
+    // so BASH_ENV and the rc files already observe the caller's value.
+    // The constructors above seed the name from argv[0] instead, which
+    // CLOBBERS the inherited BASH_ARGV0 variable in the table. Seed the
+    // inherited value here, before every route's startup sourcing; the
+    // route-specific rebinds that GNU also performs later still win over
+    // it (the `-c` name argument via apply_invocation_before_startup and
+    // this function's -c arm, the script operand's name in the script arm).
+    if let Some(argv0) = &inherited_argv0 {
+        shell.set_script_name(argv0);
+    }
     shell
         .apply_invocation_before_startup(&invocation)
         .map_err(|error| {
@@ -899,6 +922,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // `exit` in any of these startup files ends the invocation with its
         // status before the command string runs.
         if invocation.interactive {
+            // GNU defaults HISTFILE at shell_initialize, before the
+            // startup files (deep-audit A4-01): the REPL route asserts
+            // it in enter_interactive, this route must assert it here.
+            shell.default_histfile_if_unset();
             if let Some(status) = shell.run_interactive_startup_rc() {
                 finish_startup_exit(&mut shell, status);
             }
@@ -906,11 +933,14 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             finish_startup_exit(&mut shell, status);
         }
         niubash_runtime::startup_trace::tick("invocation: setup done");
-        // GNU shell.c: $0 for -c is the word after the command string, or
-        // $BASH_ARGV0 from the environment when exported by the caller.
-        if let Some(argv0) = inherited_argv0.clone() {
-            shell.set_script_name(&argv0);
-        } else if let Some(name) = invocation.command_name.clone() {
+        // GNU shell.c: $0 for -c is the word after the command string when
+        // one is given — it outranks $BASH_ARGV0 for the command body —
+        // and the $BASH_ARGV0 seed otherwise. Both were seeded before the
+        // startup files ran (the BASH_ARGV0 seed at Shell construction
+        // above, the name via apply_invocation_before_startup); re-assert
+        // the name here so the precedence survives any startup-file
+        // reassignment of the carrier variables (B5-06).
+        if let Some(name) = invocation.command_name.clone() {
             shell.set_script_name(&name);
         }
         shell
@@ -962,6 +992,8 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // the sourced file ends the invocation with its status before the
         // script body runs.
         if invocation.interactive {
+            // Same HISTFILE default as the -c route (deep-audit A4-01).
+            shell.default_histfile_if_unset();
             if let Some(status) = shell.run_interactive_startup_rc() {
                 finish_startup_exit(&mut shell, status);
             }
@@ -997,6 +1029,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // inherited PS1 must be discarded here too, before run_startup_rc
         // (unixwin/niubash#117; same rule as enter_interactive).
         shell.discard_foreign_inherited_prompt();
+        // GNU defaults HISTFILE at shell_initialize, before the
+        // startup files; the engine stdin driver's load reads whatever
+        // HISTFILE holds after them (deep-audit A4-01).
+        shell.default_histfile_if_unset();
         // GNU decides "interactive" from the -i flag, never from the shape
         // of stdin (shell.c:672 forced_interactive is set in option parsing,
         // before run_startup_files at shell.c:722 sources ~/.bashrc for an
@@ -1304,6 +1340,14 @@ fn run_stdin_script() -> anyhow::Result<()> {
     // and skip the REPL-only initialization (prompt backend, completion
     // directory scan, completion snapshot) the full constructor pays.
     let mut shell = niubash_runtime::Shell::new_for_stdin_script_fast()?;
+    // B5-06: GNU seeds $0 from $BASH_ARGV0 at startup on the stdin route
+    // too (nothing rebinds $0 for a stdin script), and BASH_ENV observes
+    // the seeded value. The fast constructor seeds the name from argv[0],
+    // clobbering the inherited variable; re-seed before the #431 bind
+    // below (which only fills an absent name) and before startup sourcing.
+    if let Some(argv0) = std::env::var("BASH_ARGV0").ok().filter(|v| !v.is_empty()) {
+        shell.set_script_name(&argv0);
+    }
     shell.session_mut().inherit_process_stdin();
     // niubash#548: this reader is niu's own stdin driver, so it owes the
     // marker the engine's driver arms in its run_stdin_script
@@ -1413,21 +1457,42 @@ fn run_stdin_script() -> anyhow::Result<()> {
         // same stop rule as the engine's own stdin driver (rubash
         // script_driver::run_stdin_script): a recorded top-level jump
         // (Shell::take_script_exit_jump for the batches this shell
-        // flattened itself, Executor::take_exit_jump_pending for the
-        // engine-driver-routed ones), a read-time parse error, or a
-        // nonzero status while errexit is armed (execute_cmd.c:652-656
-        // exempts a `!`-inverted command). An ordinary nonzero status
-        // just becomes the new last status and reading continues.
+        // flattened itself), the engine's raw exit jump for the
+        // driver-routed batches (run_source_impl arms the pending
+        // for every non-discard unwind, the errexit break included),
+        // or a read-time parse error. The errexit stop is never
+        // re-derived here: since GAP-1 (rubash#2795) every route
+        // reports its own unwind from the engine's verdict — the
+        // flattened fast path records the ExitCode unwind (the
+        // `exit` jump and the errexit break share that
+        // classification, niubash#402), the Session-contract arms
+        // (tracked history/alias, and the unclosed arm since GAP-2)
+        // fold their classification's stop facts into that same
+        // record, and the remaining driver/fast-path batches leave
+        // their facts in the executor's pendings — so a nonzero
+        // status with no unwind recorded is a failure in an
+        // errexit-exempt position (a non-final `&&`/`||` member, a
+        // tested or `!`-inverted command:
+        // execute_cmd.c:652-656's family), which GNU reads past. The
+        // previous host-side clause (status + SHELLOPTS errexit +
+        // last_command_inverted) stopped the stream there; it existed
+        // only because the Session arm's old Flow fold reported no
+        // errexit stop to record. An ordinary nonzero status just
+        // becomes the new last status and reading continues.
+        //
+        // GAP-2 (rubash#2800): the two pending reads are contract
+        // values now — Session::take_classification drains the same
+        // flags this loop used to take off the executor by hand and
+        // returns them on the classification (the raw jump exactly
+        // as armed, either unwind class; the parse-error fact
+        // alongside). For the Session-routed batches the drain
+        // reports empty by construction: their facts were folded
+        // into the jump record above at the arm.
         let jumped = shell.take_script_exit_jump();
-        let engine_jumped = shell.executor_mut().take_exit_jump_pending();
-        let parse_error = shell.executor_mut().take_parse_error();
-        if jumped
-            || engine_jumped
-            || parse_error
-            || (code != 0
-                && rubash::script_driver::stdin_script_errexit_enabled(shell.executor())
-                && !shell.executor_mut().last_command_inverted())
-        {
+        let classification = shell.session_mut().take_classification();
+        let engine_jumped = classification.exit_jump_raw;
+        let parse_error = classification.parse_error;
+        if jumped || engine_jumped || parse_error {
             break;
         }
         pending.clear();
@@ -3234,7 +3299,10 @@ fn run_help_command(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         Some(topic) if topic == keymap_registry::KEYMAP_HELP_TOPIC => {
-            let state = keymap_registry::load_state_from(&keymap_registry::state_path());
+            // niubash#843: no home directory → no state path → the
+            // "no snapshot yet" rendering.
+            let state = keymap_registry::state_path()
+                .and_then(|path| keymap_registry::load_state_from(&path));
             print!("{}", keymap_registry::render_keymap_help(state.as_ref()));
             Ok(())
         }
@@ -3515,6 +3583,19 @@ fn run_plugin_list_command(args: &[String]) -> anyhow::Result<()> {
 /// `niu plugin enable|disable <target>` — source id, asset name, or
 /// `<source>/<asset>` qualified name.
 fn run_plugin_enable_command(args: &[String], enable: bool) -> anyhow::Result<()> {
+    // deep-audit A4-05: `-h`/`--help` is a help request, not an operand —
+    // without this guard the verb answered "no source or asset named
+    // '-h'", while `add -h` prints usage (the niubash#176 pattern).
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        println!(
+            "Usage:  niu plugin {} <source>[/<asset>]\n\n{} all of a source's assets, or one asset with \
+             <source>/<asset> (e.g. oh-my-bash/git.plugin.sh). The change lands in \
+             ~/.niubash/plugins.json and the generated loader on the next `niu plugin sync`.",
+            if enable { "enable" } else { "disable" },
+            if enable { "Enable" } else { "Disable" }
+        );
+        return Ok(());
+    }
     let Some(target) = args.first() else {
         anyhow::bail!(
             "plugin {} requires a source id, asset name, or <source>/<asset>",

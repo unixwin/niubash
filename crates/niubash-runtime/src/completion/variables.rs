@@ -25,15 +25,13 @@ impl VariableCompleter {
         }
 
         // Extract variable name (after $ and potentially {)
+        // niubash#838: an empty name is the bare prefix ('echo $',
+        // 'echo ${') — GNU lists every variable for it, exactly as
+        // `complete_names` below already does. Bail only when the
+        // word carries no $ prefix at all (handled above).
         let var_name = if let Some(stripped) = word.strip_prefix("${") {
-            if stripped.is_empty() {
-                return Ok(None);
-            }
             stripped
         } else if let Some(stripped) = word.strip_prefix('$') {
-            if stripped.is_empty() {
-                return Ok(None);
-            }
             stripped
         } else {
             return Ok(None);
@@ -130,52 +128,13 @@ impl VariableCompleter {
         ]
     }
 
-    /// Expand environment variables in a string
-    pub fn expand_variables(input: &str, env_vars: &HashMap<String, String>) -> String {
-        let mut result = input.to_string();
-
-        // Expand $VAR format
-        while let Some(start) = result.find('$') {
-            let rest = &result[start + 1..];
-
-            // Check for ${VAR} format
-            if rest.starts_with('{') {
-                if let Some(end) = rest.find('}') {
-                    let var_name = &rest[1..end];
-                    let replacement = Self::get_variable_value(var_name, env_vars);
-                    result = format!("{}{}{}", &result[..start], replacement, &rest[end + 1..]);
-                    continue;
-                }
-            }
-
-            // Find end of variable name
-            let end = rest
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .unwrap_or(rest.len());
-
-            let var_name = &rest[..end];
-            let replacement = Self::get_variable_value(var_name, env_vars);
-            result = format!("{}{}{}", &result[..start], replacement, &rest[end..]);
-        }
-
-        result
-    }
-
-    /// Get the value of a variable
-    fn get_variable_value(var_name: &str, env_vars: &HashMap<String, String>) -> String {
-        // Check shell variables first
-        if let Some(value) = env_vars.get(var_name) {
-            return value.clone();
-        }
-
-        // Check environment variables
-        if let Ok(value) = std::env::var(var_name) {
-            return value;
-        }
-
-        // Return empty string if not found
-        String::new()
-    }
+    // niubash#843(f): `expand_variables` used to live here — a
+    // string-rewriting expander whose replacement could itself
+    // contain `$`, so a value like `$A` in a variable looped
+    // forever. It was dead code (its only caller was its own test;
+    // real expansion is the engine's), so it is deleted rather
+    // than bounded: nothing in the crate may reintroduce a
+    // host-side variable expander next to the engine's.
 }
 
 #[cfg(test)]
@@ -200,17 +159,6 @@ mod tests {
         let vars = VariableCompleter::get_common_variables();
         assert!(vars.contains(&"PATH".to_string()));
         assert!(vars.contains(&"HOME".to_string()));
-    }
-
-    #[test]
-    fn test_expand_variables() {
-        let mut env_vars = HashMap::new();
-        env_vars.insert("TEST".to_string(), "value".to_string());
-
-        // Note: This test might not pass if TEST is not in env_vars or system env
-        // Just testing the function exists and runs
-        let result = VariableCompleter::expand_variables("echo $TEST", &env_vars);
-        assert!(result.contains("echo"));
     }
 
     #[test]

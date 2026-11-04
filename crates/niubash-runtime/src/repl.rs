@@ -762,6 +762,12 @@ fn apply_widget_outcome(line_editor: &mut Reedline, outcome: &crate::shell::Widg
 enum SentinelOutcome {
     /// Payload was not one of ours: fall through to ordinary handling.
     NotSentinel,
+    /// The payload was a `__niu_widget` sentinel naming a function
+    /// the shell does not have (niubash#834): the drop has been
+    /// surfaced (diagnostic + ding) by the runner; the caller just
+    /// resumes — the key must not fall through to ordinary handling
+    /// and vanish silently.
+    DeadWidget,
     /// The widget ran and resumed editing (bind -x always lands here —
     /// GNU returns to the edit line, bashline.c:4701-4706).
     Resumed,
@@ -821,7 +827,20 @@ fn run_host_sentinel(
         return SentinelOutcome::NotSentinel;
     };
     if !shell.borrow().widget_function_available(&widget.function) {
-        return SentinelOutcome::NotSentinel;
+        // niubash#834: a widget sentinel naming a missing function
+        // used to fall through as NotSentinel and be swallowed at
+        // both call sites — a dead key with no trace. Surface the
+        // drop instead: a diagnostic naming the function and the
+        // help face, plus the ding an undeliverable key gets
+        // elsewhere.
+        eprintln!(
+            "niubash: widget function '{}' is not defined — this key does nothing; \
+             define the function or remove the binding (see `{}`)",
+            widget.function,
+            crate::keymap_registry::keymap_help_command()
+        );
+        readline_ding();
+        return SentinelOutcome::DeadWidget;
     }
     let editor_buffer = line_editor.current_buffer_contents().to_string();
     let editor_cursor = line_editor.current_insertion_point();
@@ -942,7 +961,15 @@ thread_local! {
 /// dynamic-complete-history's tokenization read (niubash#767). The
 /// engine-side history list is empty on the REPL path, so the
 /// editor is the only honest source.
-fn editor_history_entries(line_editor: &Reedline) -> Vec<String> {
+///
+/// The backend error travels with the result (niubash#843): the
+/// old `unwrap_or_default` collapse made a failing history backend
+/// indistinguishable from an empty history, so an expansion ran
+/// against a silently truncated past. Callers decide what the
+/// failure means for their command — GNU leaves the line untouched
+/// on a history-expansion error — but none of them may mistake it
+/// for "no history".
+fn editor_history_entries(line_editor: &Reedline) -> Result<Vec<String>, String> {
     line_editor
         .history()
         .search(reedline::SearchQuery::everything(
@@ -950,7 +977,7 @@ fn editor_history_entries(line_editor: &Reedline) -> Vec<String> {
             None,
         ))
         .map(|items| items.into_iter().map(|item| item.command_line).collect())
-        .unwrap_or_default()
+        .map_err(|err| err.to_string())
 }
 
 /// `rl_forward_word` (lib/readline/text.c:482) from POSITION:
@@ -1126,9 +1153,20 @@ fn run_readline_command(
         "shell-expand-line" => {
             let buffer = line_editor.current_buffer_contents().to_string();
             let cursor = line_editor.current_insertion_point();
-            let entries = editor_history_entries(line_editor);
-            if let Some(expanded) = shell.borrow_mut().shell_expand_line(&buffer, &entries) {
-                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            // niubash#843: a history-backend failure is not an empty
+            // history — expanding against a truncated past could
+            // rewrite the line wrongly, so the line stays untouched
+            // (GNU's expansion-error shape) and the failure is said.
+            match editor_history_entries(line_editor) {
+                Ok(entries) => {
+                    if let Some(expanded) = shell.borrow_mut().shell_expand_line(&buffer, &entries)
+                    {
+                        replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("niubash: shell-expand-line: history unavailable: {err}");
+                }
             }
         }
         // bashline.c:2902 history_expand_line: only the history
@@ -1138,9 +1176,18 @@ fn run_readline_command(
         "history-expand-line" => {
             let buffer = line_editor.current_buffer_contents().to_string();
             let cursor = line_editor.current_insertion_point();
-            let entries = editor_history_entries(line_editor);
-            if let Some(expanded) = shell.borrow_mut().history_expand_line(&buffer, &entries) {
-                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            // niubash#843: same failure honesty as shell-expand-line.
+            match editor_history_entries(line_editor) {
+                Ok(entries) => {
+                    if let Some(expanded) =
+                        shell.borrow_mut().history_expand_line(&buffer, &entries)
+                    {
+                        replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("niubash: history-expand-line: history unavailable: {err}");
+                }
             }
         }
         // util.c:99 _rl_abort_internal / util.c:122 rl_abort: clear
@@ -1184,7 +1231,16 @@ fn run_readline_command(
             let cursor = line_editor.current_insertion_point();
             let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
             let word = &buffer[start..end];
-            let entries = editor_history_entries(line_editor);
+            // niubash#843: a history-backend failure dings like an
+            // empty match set but says why — it is not "no history".
+            let entries = match editor_history_entries(line_editor) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    eprintln!("niubash: dynamic-complete-history: history unavailable: {err}");
+                    readline_ding();
+                    return SentinelOutcome::Resumed;
+                }
+            };
             let matches = crate::readline_commands::history_completion_matches(&entries, word);
             if matches.is_empty() {
                 readline_ding();
@@ -1572,6 +1628,27 @@ impl LayeredKeymap {
                     .push((source.clone(), event.clone()));
             }
         }
+        // niubash#843(e): a layer can also REMOVE a slot (the plugin
+        // layer's `rl_unbind_key` removals run inside the script
+        // layer). A removal leaves no trace in the loop above — the
+        // combo is simply absent afterwards — so without this sweep
+        // the registry kept listing the key as bound by its earlier
+        // layer while the editor had it unbound. A removed slot
+        // loses its whole stack; a later layer re-binding it starts
+        // a fresh one.
+        for combo in before.keys() {
+            if !self.keybindings.bindings.contains_key(combo) {
+                self.stacks.remove(&(combo.modifier, combo.key_code));
+            }
+        }
+        // Residual (niubash#843(g), cosmetic): a layer that rebinds
+        // a slot to the IDENTICAL event leaves no observable trace
+        // in this before/after diff, so the stack keeps the earlier
+        // writer as the slot's attribution even though the later
+        // layer wrote last. reedline's Keybindings exposes no write
+        // counter to diff against, and the misattribution only shows
+        // in `niu help keys`' source column for exact-duplicate
+        // rebinds — documented here rather than papered over.
         out
     }
 
@@ -1621,6 +1698,9 @@ fn build_keymap_for_target(
     builder.layer(KeymapSource::HostBaseline, |keybindings| {
         add_native_widget_keybindings(keybindings, target, native_widgets, native_widget_bindings)
     });
+    // niubash#834: bundle bindings that cannot be mirrored produce
+    // dropped records too, collected alongside the script layer's.
+    let mut bundle_dropped = Vec::new();
     if native_widgets.import_bindkeys {
         for binding in native_widget_bindings {
             let source = KeymapSource::Bundle {
@@ -1630,16 +1710,19 @@ fn build_keymap_for_target(
                     .map(|path| path.display().to_string()),
                 line: binding.line,
             };
-            builder.layer(source, |keybindings| {
+            if let Some(drop) = builder.layer(source, |keybindings| {
                 apply_bundle_widget_binding(keybindings, target, binding)
-            });
+            }) {
+                bundle_dropped.push(drop);
+            }
         }
     }
-    let dropped = builder
+    let mut dropped = builder
         .layer(KeymapSource::Script, |keybindings| {
             add_engine_bind_keybindings_recorded(keybindings, target, engine_bindings, 0)
         })
         .1;
+    dropped.extend(bundle_dropped);
     // niubash#775: plugin registrations made through the live readline ABI
     // (`rl_add_defun`/`rl_bind_key*`) join the script layer.  The user's own
     // NIU_BINDKEYS layer still applies last, matching GNU's last-write rule.
@@ -1687,7 +1770,7 @@ fn build_edit_mode(
     use crate::keymap_registry::{KeymapMode, KeymapRegistry};
     match mode {
         EditorMode::Emacs => {
-            let (keybindings, entries, dropped) = build_keymap_for_target(
+            let (keybindings, entries, mut dropped) = build_keymap_for_target(
                 default_emacs_keybindings(),
                 NativeKeymapTarget::Emacs,
                 KeymapMode::Emacs,
@@ -1698,6 +1781,45 @@ fn build_edit_mode(
                 completion_interaction,
             );
             let alt_keys = alt_bound_keys(&keybindings);
+            // niubash#834: the chord layer's own drops (unknown
+            // function names, keyless self-insert, keymap-filtered
+            // entries) join the registry records, deduped against
+            // the flat path's records for the same entries.
+            // niubash#848: layered lowest-first in the DESIGN §5.3
+            // build order (defaults < host < bundle < script < user —
+            // the same order `build_keymap_for_target` applies to
+            // the flat keymap, where a later `layer()` call
+            // overwrites an earlier slot): GNU defaults (Default)
+            // first, engine `bind` chords (Script) next, plugin
+            // chords last so they win. `ChordIndex` keeps the LAST
+            // exact match, mirroring the flat keymap's
+            // last-write-wins layering; the old order (engine → GNU
+            // → plugin, first match kept) silently inverted this and
+            // made every plugin chord on an engine/GNU-claimed
+            // sequence dead.
+            let mut chords = gnu_default_chord_bindings();
+            let (engine_chords, chord_dropped) =
+                collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
+            chords.extend(engine_chords);
+            for bind in chord_dropped {
+                if !dropped.contains(&bind) {
+                    dropped.push(bind);
+                }
+            }
+            let abi_unbinds = crate::readline_live::plugin_chord_unbinds(NativeKeymapTarget::Emacs);
+            chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
+            chords.extend(
+                crate::readline_live::plugin_chords(NativeKeymapTarget::Emacs)
+                    .into_iter()
+                    .map(|(keys, event)| ChordBinding { keys, event }),
+            );
+            // niubash#843(e): plugin unbinds reach the quote layer.
+            let mut quote_sequences =
+                collect_quote_sequences(engine_bindings, NativeKeymapTarget::Emacs);
+            retain_unbound_quote_sequences(
+                &mut quote_sequences,
+                &plugin_unbind_keysets(NativeKeymapTarget::Emacs),
+            );
             (
                 Box::new(Emacs::new(keybindings)),
                 KeymapRegistry {
@@ -1707,41 +1829,9 @@ fn build_edit_mode(
                     dropped,
                 },
                 ChordLayerParts {
-                    chords: {
-                        // niubash#848: layered lowest-first in the DESIGN
-                        // §5.3 build order (defaults < host < bundle <
-                        // script < user — the same order
-                        // `build_keymap_for_target` applies to the flat
-                        // keymap, where a later `layer()` call overwrites
-                        // an earlier slot): GNU defaults (Default) first,
-                        // engine `bind` chords (Script) next, plugin
-                        // chords last so they win. `ChordIndex` keeps the
-                        // LAST exact match, mirroring the flat keymap's
-                        // last-write-wins layering; the old order (engine
-                        // → GNU → plugin, first match kept) silently
-                        // inverted this and made every plugin chord on an
-                        // engine/GNU-claimed sequence dead.
-                        let mut chords = gnu_default_chord_bindings();
-                        chords.extend(collect_chord_bindings(
-                            engine_bindings,
-                            NativeKeymapTarget::Emacs,
-                            0,
-                        ));
-                        let abi_unbinds =
-                            crate::readline_live::plugin_chord_unbinds(NativeKeymapTarget::Emacs);
-                        chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
-                        chords.extend(
-                            crate::readline_live::plugin_chords(NativeKeymapTarget::Emacs)
-                                .into_iter()
-                                .map(|(keys, event)| ChordBinding { keys, event }),
-                        );
-                        chords
-                    },
+                    chords,
                     alt_keys,
-                    quote_sequences: collect_quote_sequences(
-                        engine_bindings,
-                        NativeKeymapTarget::Emacs,
-                    ),
+                    quote_sequences,
                 },
             )
         }
@@ -1773,6 +1863,46 @@ fn build_edit_mode(
                 }
             }
             let alt_keys = alt_bound_keys(&insert_keybindings);
+            // Chords and quote sequences are collected before the
+            // registry is assembled: the chord layer's dropped
+            // records (niubash#834) merge into it, deduped like the
+            // normal map's records above.
+            // niubash#851: the GNU defaults layer comes first here
+            // too — it used to be emacs-only, so under `set -o vi`
+            // the C-x C-r / C-x C-e / kbd-macro chords did not exist
+            // at all, while GNU's vi maps carry the C-x family.
+            // niubash#848: same DESIGN §5.3 last-write-wins order as
+            // the emacs arm — lowest layer first, plugin chords
+            // last, so a plugin claim wins an exact-match collision
+            // in `ChordIndex`.
+            let mut chords = gnu_default_chord_bindings();
+            for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                let (target_chords, chord_dropped) =
+                    collect_chord_bindings(engine_bindings, target, 0);
+                chords.extend(target_chords);
+                for bind in chord_dropped {
+                    if !dropped.contains(&bind) {
+                        dropped.push(bind);
+                    }
+                }
+                chords.extend(
+                    crate::readline_live::plugin_chords(target)
+                        .into_iter()
+                        .map(|(keys, event)| ChordBinding { keys, event }),
+                );
+            }
+            let abi_unbinds: Vec<_> = [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal]
+                .into_iter()
+                .flat_map(crate::readline_live::plugin_chord_unbinds)
+                .collect();
+            chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
+            let mut quote_sequences = Vec::new();
+            for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
+                // niubash#843(e): plugin unbinds reach the quote layer.
+                let mut target_quotes = collect_quote_sequences(engine_bindings, target);
+                retain_unbound_quote_sequences(&mut target_quotes, &plugin_unbind_keysets(target));
+                quote_sequences.extend(target_quotes);
+            }
             (
                 Box::new(Vi::new(
                     insert_keybindings,
@@ -1789,41 +1919,9 @@ fn build_edit_mode(
                     dropped,
                 },
                 ChordLayerParts {
-                    chords: {
-                        // niubash#848: same DESIGN §5.3 last-write-wins
-                        // order as the emacs arm — lowest layer first,
-                        // plugin chords last, so a plugin claim wins an
-                        // exact-match collision in `ChordIndex`.
-                        // niubash#851: the GNU defaults layer comes
-                        // first here too — it used to be emacs-only, so
-                        // under `set -o vi` the C-x C-r / C-x C-e /
-                        // kbd-macro chords did not exist at all, while
-                        // GNU's vi maps carry the C-x family.
-                        let mut chords = gnu_default_chord_bindings();
-                        for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
-                            chords.extend(collect_chord_bindings(engine_bindings, target, 0));
-                            chords.extend(
-                                crate::readline_live::plugin_chords(target)
-                                    .into_iter()
-                                    .map(|(keys, event)| ChordBinding { keys, event }),
-                            );
-                        }
-                        let abi_unbinds: Vec<_> =
-                            [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal]
-                                .into_iter()
-                                .flat_map(crate::readline_live::plugin_chord_unbinds)
-                                .collect();
-                        chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
-                        chords
-                    },
+                    chords,
                     alt_keys,
-                    quote_sequences: {
-                        let mut quotes = Vec::new();
-                        for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
-                            quotes.extend(collect_quote_sequences(engine_bindings, target));
-                        }
-                        quotes
-                    },
+                    quote_sequences,
                 },
             )
         }
@@ -2278,7 +2376,15 @@ impl PasteChunkEditMode {
     ) -> Option<Vec<EditCommand>> {
         use crate::completion::cycle_menu::{grid_move, CycleMove};
         let session = self.cycle_session.as_ref()?;
-        let mut state = session.lock().ok()?;
+        // niubash#833 (carry-over, flagged by the T2 cluster): the
+        // same poison recovery as the completion_state sites — a
+        // poisoned cycle-session lock must not silently yield None
+        // (the key would fall through to its plain translation and
+        // the live menu would desync); the state behind a poisoned
+        // lock is still the session's state.
+        let mut state = session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.is_open() || state.candidates.len() < 2 {
             return None;
         }
@@ -3273,6 +3379,13 @@ fn add_engine_bind_keybindings_recorded(
     let mut dropped = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+            // niubash#834: an entry no map of this session builds is
+            // recorded, not silently filtered — a typo'd `-m` name or
+            // a bind for the inactive editing mode used to vanish
+            // before `note_unusable_bind` could see it.
+            if let Some(drop) = keymap_filter_drop(entry, target) {
+                dropped.push(drop);
+            }
             continue;
         }
         let Some((modifiers, key_code)) = parse_key_sequence(&entry.keyseq) else {
@@ -3471,6 +3584,68 @@ fn engine_keymap_applies(keymap: Option<&str>, target: NativeKeymapTarget) -> bo
         "vi-insert" => target == NativeKeymapTarget::ViInsert,
         _ => false,
     }
+}
+
+/// Whether KEYMAP is a name [`engine_keymap_applies`] recognizes at
+/// all (niubash#834): an unrecognized name is a mismatch (usually a
+/// typo), not merely an inactive keymap.
+fn engine_keymap_known(keymap: &str) -> bool {
+    matches!(
+        keymap,
+        "emacs"
+            | "emacs-standard"
+            | "emacs-meta"
+            | "emacs-ctlx"
+            | "vi"
+            | "vi-move"
+            | "vi-command"
+            | "vi-movement"
+            | "vi-insert"
+    )
+}
+
+/// The keymap targets one editor build produces for the session
+/// containing TARGET: an emacs session builds only the emacs map; a
+/// vi session builds both vi maps (niubash#834).
+fn session_keymap_targets(target: NativeKeymapTarget) -> &'static [NativeKeymapTarget] {
+    match target {
+        NativeKeymapTarget::Emacs => &[NativeKeymapTarget::Emacs],
+        NativeKeymapTarget::ViInsert | NativeKeymapTarget::ViNormal => {
+            &[NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal]
+        }
+    }
+}
+
+/// The dropped record for an engine entry the keymap filter at
+/// TARGET is about to skip (niubash#834), or `None` when the entry
+/// lands in a sibling map of the same session build (a `-m vi-insert`
+/// entry seen while building the vi-normal map is delivered, not
+/// dropped). An entry that no map of this session can take is
+/// recorded: an unknown keymap name is a
+/// [`DroppedReason::KeymapMismatch`]; a real keymap this session
+/// does not build — including a no-`-m` entry under `set -o vi`,
+/// which GNU routes to the emacs map the session never builds — is
+/// a [`DroppedReason::NotActiveKeymap`].
+fn keymap_filter_drop(
+    entry: &crate::bind_surface::EngineBindEntry,
+    target: NativeKeymapTarget,
+) -> Option<crate::keymap_registry::DroppedBind> {
+    if engine_keymap_applies(entry.keymap.as_deref(), target) {
+        return None;
+    }
+    if session_keymap_targets(target)
+        .iter()
+        .any(|sibling| engine_keymap_applies(entry.keymap.as_deref(), *sibling))
+    {
+        return None;
+    }
+    let reason = match entry.keymap.as_deref() {
+        Some(name) if !engine_keymap_known(name) => {
+            crate::keymap_registry::DroppedReason::KeymapMismatch
+        }
+        _ => crate::keymap_registry::DroppedReason::NotActiveKeymap,
+    };
+    Some(crate::keymap_registry::dropped_bind_for(entry, reason))
 }
 
 /// Convert a CHARACTER offset (GNU READLINE_POINT unit,
@@ -3785,34 +3960,118 @@ fn add_bundle_widget_keybindings(
     }
 
     for binding in bindings {
-        apply_bundle_widget_binding(keybindings, target, binding);
+        let _ = apply_bundle_widget_binding(keybindings, target, binding);
     }
+}
+
+/// The dropped record for a bundle widget binding the keymap
+/// filter at TARGET is about to skip (niubash#834), or `None` when
+/// the binding lands in a sibling map of the same session build.
+/// Bundle keymap spellings are the pack's own (`main`/`all`/
+/// `emacs`/`viins`/`vicmd`); an unrecognized spelling is a
+/// [`DroppedReason::KeymapMismatch`], a real one this session does
+/// not build is a [`DroppedReason::NotActiveKeymap`].
+fn bundle_keymap_filter_drop(
+    binding: &NativeWidgetBinding,
+    target: NativeKeymapTarget,
+) -> Option<crate::keymap_registry::DroppedBind> {
+    if native_widget_keymap_applies(binding.keymap.as_deref(), target) {
+        return None;
+    }
+    if session_keymap_targets(target)
+        .iter()
+        .any(|sibling| native_widget_keymap_applies(binding.keymap.as_deref(), *sibling))
+    {
+        return None;
+    }
+    let reason = match binding.keymap.as_deref() {
+        Some(name) if !matches!(name, "main" | "all" | "emacs" | "viins" | "vicmd") => {
+            crate::keymap_registry::DroppedReason::KeymapMismatch
+        }
+        _ => crate::keymap_registry::DroppedReason::NotActiveKeymap,
+    };
+    Some(crate::keymap_registry::DroppedBind {
+        keyseq: binding.key.clone().unwrap_or_default(),
+        kind: crate::keymap_registry::DroppedKind::Function,
+        target_name: Some(binding.widget.clone()),
+        reason,
+        reminded: false,
+    })
 }
 
 /// Apply one bundle-declared widget binding (the per-binding form of
 /// [`add_bundle_widget_keybindings`], so the keymap registry build
 /// can attribute each slot to its declaring file and line).
+///
+/// Returns the dropped record when the binding could not be
+/// mirrored (niubash#834): the bundle path used to swallow a
+/// malformed key silently where the `NIU_BINDKEYS` user path
+/// eprintln!s — now it does both (the same diagnostic, plus the
+/// registry record the reminder pass and `niu help keys` read).
 fn apply_bundle_widget_binding(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
     binding: &NativeWidgetBinding,
-) {
+) -> Option<crate::keymap_registry::DroppedBind> {
     if !native_widget_keymap_applies(binding.keymap.as_deref(), target) {
-        return;
+        return bundle_keymap_filter_drop(binding, target);
     }
     let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
-        return;
+        eprintln!(
+            "niubash: bundle keybindings: cannot parse key '{}' for widget '{}'",
+            binding.key.as_deref().unwrap_or_default(),
+            binding.widget
+        );
+        return Some(crate::keymap_registry::DroppedBind {
+            keyseq: binding.key.clone().unwrap_or_default(),
+            kind: crate::keymap_registry::DroppedKind::Function,
+            target_name: Some(binding.widget.clone()),
+            reason: crate::keymap_registry::DroppedReason::UnparseableKeyseq,
+            reminded: false,
+        });
     };
     let Some(event) = native_widget_event(&binding.widget) else {
-        return;
+        return Some(crate::keymap_registry::DroppedBind {
+            keyseq: binding.key.clone().unwrap_or_default(),
+            kind: crate::keymap_registry::DroppedKind::Function,
+            target_name: Some(binding.widget.clone()),
+            reason: crate::keymap_registry::DroppedReason::UnknownFunction,
+            reminded: false,
+        });
     };
     keybindings.add_binding(key.0, key.1, event);
+    None
+}
+
+/// The preset names [`add_native_widget_preset_keybindings`]
+/// knows (niubash#843): exactly one exists today.
+fn native_widget_preset_known(preset: &str) -> bool {
+    preset.eq_ignore_ascii_case("autosuggestions")
+}
+
+/// The preset names in PRESETS the host does not know, in order
+/// (niubash#843).
+fn unknown_native_widget_presets(presets: &[String]) -> Vec<&str> {
+    presets
+        .iter()
+        .map(String::as_str)
+        .filter(|preset| !native_widget_preset_known(preset))
+        .collect()
 }
 
 fn add_native_widget_preset_keybindings(keybindings: &mut Keybindings, presets: &[String]) {
+    // niubash#843: an unknown preset name (a typo in
+    // NIU_NATIVE_WIDGETS) used to disable the pack silently — warn
+    // per name, the way other binding diagnostics do.
+    for preset in unknown_native_widget_presets(presets) {
+        eprintln!(
+            "niubash: unknown native-widget preset '{preset}' — ignored \
+             (known presets: autosuggestions)"
+        );
+    }
     if presets
         .iter()
-        .any(|preset| preset.eq_ignore_ascii_case("autosuggestions"))
+        .any(|preset| native_widget_preset_known(preset))
     {
         keybindings.add_binding(
             KeyModifiers::CONTROL,
@@ -4344,10 +4603,16 @@ fn collect_chord_bindings(
     entries: &[crate::bind_surface::EngineBindEntry],
     target: NativeKeymapTarget,
     index_base: usize,
-) -> Vec<ChordBinding> {
+) -> (Vec<ChordBinding>, Vec<crate::keymap_registry::DroppedBind>) {
     let mut chords = Vec::new();
+    let mut dropped = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+            // niubash#834: same keymap-filter record as the flat
+            // path (the build merges and dedups the two).
+            if let Some(drop) = keymap_filter_drop(entry, target) {
+                dropped.push(drop);
+            }
             continue;
         }
         let Some(keys) = parse_chord_sequence(&entry.keyseq) else {
@@ -4366,43 +4631,101 @@ fn collect_chord_bindings(
             crate::bind_surface::EngineBindKind::Function { name } => {
                 // `quoted-insert` sequences arm the chord layer's
                 // quote state; they are not chord events (see
-                // `collect_quote_sequences`, niubash#731).
+                // `collect_quote_sequences`, niubash#731). Delivered
+                // by design — no dropped record (niubash#834).
                 if name == "quoted-insert" {
                     continue;
                 }
                 // A chord ending in `self-insert` inserts the chord's
                 // last key — the same key-dependent translation as the
-                // flat path (niubash#731).
+                // flat path (niubash#731). A last key with no
+                // character of its own cannot be delivered: recorded,
+                // not silently skipped (niubash#834).
                 if name == "self-insert" {
                     match keys
                         .last()
                         .and_then(|(mods, code)| key_literal_text(*mods, *code))
                     {
                         Some(text) => edit_event(EditCommand::InsertString(text)),
-                        None => continue,
+                        None => {
+                            dropped.push(crate::keymap_registry::dropped_bind_for(
+                                entry,
+                                crate::keymap_registry::dropped_reason(
+                                    None,
+                                    &entry.keyseq,
+                                    &entry.kind,
+                                ),
+                            ));
+                            continue;
+                        }
                     }
                 } else {
                     match native_widget_event(name) {
+                        // The sentinel fallthrough is an unknown
+                        // readline function name: recorded, not
+                        // silently skipped (niubash#834).
                         Some(ReedlineEvent::ExecuteHostCommand(payload))
                             if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
                         {
-                            continue
+                            dropped.push(crate::keymap_registry::dropped_bind_for(
+                                entry,
+                                crate::keymap_registry::dropped_reason(
+                                    None,
+                                    &entry.keyseq,
+                                    &entry.kind,
+                                ),
+                            ));
+                            continue;
                         }
                         Some(event) => event,
-                        None => continue,
+                        None => {
+                            dropped.push(crate::keymap_registry::dropped_bind_for(
+                                entry,
+                                crate::keymap_registry::dropped_reason(
+                                    None,
+                                    &entry.keyseq,
+                                    &entry.kind,
+                                ),
+                            ));
+                            continue;
+                        }
                     }
                 }
             }
         };
         chords.push(ChordBinding { keys, event });
     }
-    chords
+    (chords, dropped)
 }
 
 /// Collect the key sequences bound to GNU `quoted-insert` for the
 /// chord layer's quote state (niubash#731): any parseable sequence
 /// counts — a single key (`"\C-v"`) or a chain — filtered by the
 /// same keymap targeting as every other engine-bind consumer. The
+/// Every key sequence a plugin unbound for TARGET, flat (single
+/// key) and chord spellings alike (niubash#843(e)).
+fn plugin_unbind_keysets(target: NativeKeymapTarget) -> Vec<Vec<(KeyModifiers, KeyCode)>> {
+    let mut sets = crate::readline_live::plugin_chord_unbinds(target);
+    sets.extend(
+        crate::readline_live::plugin_flat_unbinds(target)
+            .into_iter()
+            .map(|unbind| unbind.keys),
+    );
+    sets
+}
+
+/// Drop the quote sequences a plugin unbound (niubash#843(e)): the
+/// quote layer is a layer like any other, so an `rl_unbind_key`
+/// against the quoted-insert key must disarm it — it used to reach
+/// only the flat and chord layers, leaving the quote armed on a
+/// key the plugin had explicitly unbound.
+fn retain_unbound_quote_sequences(
+    sequences: &mut Vec<Vec<(KeyModifiers, KeyCode)>>,
+    unbinds: &[Vec<(KeyModifiers, KeyCode)>],
+) {
+    sequences.retain(|sequence| !unbinds.contains(sequence));
+}
+
 /// pinned ruline fork DOES carry a quoted-insert event of its own
 /// (`ReedlineEvent::QuotedInsert` at rev 8351932, dispatched in its
 /// engine — the `native_widget_event` arm returns it), but sequences
@@ -6560,6 +6883,9 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 // intact around the widget run.
                 match run_host_sentinel(&shell, &mut line_editor, &payload) {
                     SentinelOutcome::Resumed => flush_repl_output(),
+                    // niubash#834: the drop was already surfaced by
+                    // the runner; just redraw like a resumed widget.
+                    SentinelOutcome::DeadWidget => flush_repl_output(),
                     SentinelOutcome::Accept(Some(buffer)) => {
                         // A widget that accepts from a host-command
                         // keypress submits its buffer as ordinary input.
@@ -6603,6 +6929,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                     // sentinels arrive through Signal::HostCommand above.
                     match run_host_sentinel(&shell, &mut line_editor, &line) {
                         SentinelOutcome::Resumed => {
+                            flush_repl_output();
+                            continue;
+                        }
+                        // niubash#834: same dead-widget drop as the
+                        // host-command path — surfaced by the runner,
+                        // never executed as an ordinary line.
+                        SentinelOutcome::DeadWidget => {
                             flush_repl_output();
                             continue;
                         }
@@ -7996,7 +8329,10 @@ mod tests {
             Some(ReedlineEvent::Multiple(_))
         ));
 
-        let mut keybindings = Keybindings::default();
+        // Seeded from the editor defaults, mirroring production
+        // (`build_keymap_for_target` layers over the reedline defaults):
+        // the C-g expectation below follows the editor's own table.
+        let mut keybindings = reedline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let tilde_event = ReedlineEvent::ExecuteHostCommand(format!(
             "{}tilde-expand",
@@ -8021,10 +8357,24 @@ mod tests {
         let host = |name: &str| {
             ReedlineEvent::ExecuteHostCommand(format!("{}{}", READLINE_HOST_COMMAND_PREFIX, name))
         };
-        assert_eq!(
-            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(host("abort"))
-        );
+        // C-g follows the editor default (#811): with a native abort
+        // default (ruline#15 shape, C-g bound to the editor's abort
+        // event) the native binding survives; under older pins the
+        // host-command override is the abort surface.
+        if reedline::default_emacs_keybindings()
+            .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
+            .is_some_and(|event| event == ReedlineEvent::Esc)
+        {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+                Some(ReedlineEvent::Esc)
+            );
+        } else {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+                Some(host("abort"))
+            );
+        }
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('^')),
             Some(host("history-expand-line"))
@@ -8117,14 +8467,19 @@ mod tests {
     /// active search. Under older pins (C-g natively `Edit(Redo)`) the
     /// host override is the only GNU abort surface those pins can
     /// deliver, so it stays. The test reads the pinned editor's actual
-    /// default table and asserts the layer followed it — under the
-    /// current pin (8351932) that is the override arm.
+    /// default table and asserts the layer followed it. Under pin
+    /// 8351932 that was the override arm; since the ruline pin rose to
+    /// 92bbb10f (ruline#26 keymap parity, the ruline#15 shape) the
+    /// native arm is the live one. The composition mirrors production
+    /// (`build_keymap_for_target` layers the GNU defaults over the
+    /// editor's own default table), so the table is seeded from the
+    /// editor defaults rather than empty.
     #[test]
     fn issue811_c_g_abort_binding_follows_the_editor_default() {
         let native_abort = reedline::default_emacs_keybindings()
             .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
             .is_some_and(|event| event == ReedlineEvent::Esc);
-        let mut keybindings = Keybindings::default();
+        let mut keybindings = reedline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let bound = keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'));
         if native_abort {
@@ -8501,7 +8856,7 @@ mod tests {
         assert_eq!(unusable[0].keyseq, r"\e[5~");
 
         // Chord-final self-insert inserts the chord's last key.
-        let chords = collect_chord_bindings(
+        let (chords, _) = collect_chord_bindings(
             &[function(r"\C-xa", "self-insert")],
             NativeKeymapTarget::Emacs,
             0,
@@ -9446,7 +9801,7 @@ mod tests {
                 keymap: None,
             },
         ];
-        let chords = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs, 0);
+        let (chords, _) = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs, 0);
         assert_eq!(chords.len(), 2);
         assert_eq!(
             chords[0].event,
@@ -9982,6 +10337,274 @@ mod tests {
             matches!(ctrl_x, ReedlineEvent::KeySequence(_)),
             "raw-byte macros replay too: {ctrl_x:?}"
         );
+    }
+
+    // niubash#834: entries the keymap filter used to swallow before
+    // any recording path — a typo'd `-m` name, a bind for the
+    // session's inactive keymap, a no-`-m` bind under `set -o vi` —
+    // now land in the registry's dropped records, classified by
+    // whether the keymap name exists at all.
+    #[test]
+    fn issue834_keymap_filtered_binds_are_recorded() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use crate::keymap_registry::{DroppedReason, KeymapMode};
+        let entry = |keyseq: &str, keymap: Option<&str>, name: &str| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: keymap.map(str::to_string),
+        };
+        let dropped_for = |target: NativeKeymapTarget, mode: KeymapMode, engine: &[BindEntry]| {
+            let defaults = match target {
+                NativeKeymapTarget::Emacs => default_emacs_keybindings(),
+                NativeKeymapTarget::ViInsert => default_vi_insert_keybindings(),
+                NativeKeymapTarget::ViNormal => default_vi_normal_keybindings(),
+            };
+            build_keymap_for_target(
+                defaults,
+                target,
+                mode,
+                &NativeWidgetConfig::default(),
+                &[],
+                &[],
+                engine,
+                CompletionInteraction::Insert,
+            )
+            .2
+        };
+
+        // `bind -m emac` — a keymap name the host does not know.
+        let dropped = dropped_for(
+            NativeKeymapTarget::Emacs,
+            KeymapMode::Emacs,
+            &[entry(r"\C-t", Some("emac"), "transpose-chars")],
+        );
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].reason, DroppedReason::KeymapMismatch);
+        assert_eq!(dropped[0].keyseq, r"\C-t");
+
+        // A real keymap, but not this session's: `-m vi-insert`
+        // under an emacs build.
+        let dropped = dropped_for(
+            NativeKeymapTarget::Emacs,
+            KeymapMode::Emacs,
+            &[entry(r"\C-t", Some("vi-insert"), "transpose-chars")],
+        );
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].reason, DroppedReason::NotActiveKeymap);
+
+        // No `-m` at all under a vi build: GNU routes it to the
+        // emacs map, which a vi session never builds.
+        let dropped = dropped_for(
+            NativeKeymapTarget::ViInsert,
+            KeymapMode::ViInsert,
+            &[entry(r"\C-t", None, "transpose-chars")],
+        );
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].reason, DroppedReason::NotActiveKeymap);
+
+        // A sibling map of the same session is delivery, not a
+        // drop: `-m vi-insert` seen from the vi-normal build lands
+        // in the insert map.
+        let dropped = dropped_for(
+            NativeKeymapTarget::ViNormal,
+            KeymapMode::ViNormal,
+            &[entry(r"\C-t", Some("vi-insert"), "transpose-chars")],
+        );
+        assert!(
+            dropped.is_empty(),
+            "a sibling-map bind must not be recorded: {dropped:?}"
+        );
+    }
+
+    // niubash#834: the chord layer's silent `continue`s — an unknown
+    // function name and a keyless `self-insert` — produce dropped
+    // records; `quoted-insert` stays record-free by design (the
+    // quote state delivers it).
+    #[test]
+    fn issue834_chord_layer_drops_are_recorded() {
+        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use crate::keymap_registry::DroppedReason;
+        let function = |keyseq: &str, name: &str| BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: None,
+        };
+        let entries = vec![
+            function(r"\C-x\C-t", "unknown-fn"),
+            // PageUp carries no character of its own.
+            function(r"\C-x\e[5~", "self-insert"),
+            function(r"\C-x\C-v", "quoted-insert"),
+        ];
+        let (chords, dropped) = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs, 0);
+        assert!(chords.is_empty());
+        let shapes: Vec<(&str, DroppedReason)> = dropped
+            .iter()
+            .map(|bind| (bind.keyseq.as_str(), bind.reason))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (r"\C-x\C-t", DroppedReason::UnknownFunction),
+                (r"\C-x\e[5~", DroppedReason::UnknownFunction),
+            ]
+        );
+    }
+
+    // niubash#834: a bundle widget binding with a malformed key or
+    // an unknown widget name produces a dropped record (the user
+    // path's parity), instead of the bundle path's old silent
+    // return.
+    #[test]
+    fn issue834_bundle_widget_binding_drops_are_recorded() {
+        use crate::keymap_registry::DroppedReason;
+        let binding = |key: &str, widget: &str| NativeWidgetBinding {
+            widget: widget.to_string(),
+            function: None,
+            key: Some(key.to_string()),
+            keymap: None,
+            source_file: None,
+            line: None,
+            origin: "test".to_string(),
+        };
+        let mut keybindings = default_emacs_keybindings();
+
+        // `\C-x\C-f` is a chord — not a single key a bundle binding
+        // can carry.
+        let drop = apply_bundle_widget_binding(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &binding(r"\C-x\C-f", "autosuggest-accept"),
+        )
+        .expect("a malformed bundle key is recorded");
+        assert_eq!(drop.reason, DroppedReason::UnparseableKeyseq);
+        assert_eq!(drop.target_name.as_deref(), Some("autosuggest-accept"));
+
+        // An unknown bundle widget name is NOT a drop: on current
+        // master semantics any unknown name is a shell-function
+        // widget (native_widget_event's default arm), so the bundle
+        // path binds it as one. (The tranche's original pin expected
+        // an UnknownFunction drop here; that arm of
+        // apply_bundle_widget_binding is unreachable since the
+        // function-widget default landed. A function widget whose
+        // function is missing is recorded by the dead-widget path —
+        // see issue834_missing_widget_function_is_a_dead_widget_drop.)
+        let bound = apply_bundle_widget_binding(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &binding(r"\C-t", "no-such-widget"),
+        );
+        assert!(bound.is_none());
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{WIDGET_HOST_COMMAND_PREFIX}no-such-widget"
+            )))
+        );
+
+        // A deliverable binding records nothing and binds.
+        let ok = apply_bundle_widget_binding(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &binding(r"\C-t", "autosuggest-accept"),
+        );
+        assert!(ok.is_none());
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('t')),
+            Some(ReedlineEvent::HistoryHintComplete)
+        );
+    }
+
+    // niubash#834: a `__niu_widget` sentinel naming a function the
+    // shell does not have is a surfaced drop (DeadWidget), not a
+    // swallowed NotSentinel.
+    #[test]
+    fn issue834_missing_widget_function_is_a_dead_widget_drop() {
+        let shell = Rc::new(RefCell::new(Shell::new().unwrap()));
+        let mut editor = Reedline::create();
+        let outcome = run_host_sentinel(&shell, &mut editor, "__niu_widget no_such_widget_fn_834");
+        assert!(matches!(outcome, SentinelOutcome::DeadWidget));
+        // A payload that is not a sentinel at all still falls
+        // through untouched.
+        let outcome = run_host_sentinel(&shell, &mut editor, "echo hello");
+        assert!(matches!(outcome, SentinelOutcome::NotSentinel));
+    }
+
+    // niubash#843(a): the history read no longer collapses a
+    // backend error into an empty vec — the Result IS the pin: a
+    // healthy editor answers Ok, and the type forces every caller
+    // to distinguish failure from "no history".
+    #[test]
+    fn issue843_editor_history_entries_distinguishes_error_from_empty() {
+        let editor = Reedline::create();
+        let entries = editor_history_entries(&editor)
+            .expect("a healthy history backend answers Ok, not a collapsed empty vec");
+        assert!(entries.is_empty());
+    }
+
+    // niubash#843(d): unknown native-widget preset names are named,
+    // not silently ignored; the one known preset still binds.
+    #[test]
+    fn issue843_unknown_native_widget_presets_are_named() {
+        let presets = vec![
+            "autosuggestions".to_string(),
+            "autosugestions".to_string(),
+            "fuzzy".to_string(),
+        ];
+        assert_eq!(
+            unknown_native_widget_presets(&presets),
+            vec!["autosugestions", "fuzzy"]
+        );
+        let mut keybindings = default_emacs_keybindings();
+        add_native_widget_preset_keybindings(&mut keybindings, &presets);
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char(' ')),
+            Some(ReedlineEvent::HistoryHintComplete)
+        );
+    }
+
+    // niubash#843(e): a layer that REMOVES a slot (the plugin
+    // layer's rl_unbind_key path) clears the slot's registry stack,
+    // so `niu help keys` stops listing the key as bound.
+    #[test]
+    fn issue843_layer_removal_clears_registry_stack() {
+        let mut builder = LayeredKeymap::new(default_emacs_keybindings());
+        // Ctrl-R is a reedline default (history search).
+        builder.layer(
+            crate::keymap_registry::KeymapSource::Script,
+            |keybindings| {
+                keybindings.remove_binding(KeyModifiers::CONTROL, KeyCode::Char('r'));
+            },
+        );
+        let (keybindings, stacks) = builder.finish();
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('r')),
+            None
+        );
+        assert!(
+            !stacks
+                .iter()
+                .any(|((modifiers, code), _)| *modifiers == KeyModifiers::CONTROL
+                    && *code == KeyCode::Char('r')),
+            "a removed slot must not keep a registry stack: {stacks:?}"
+        );
+    }
+
+    // niubash#843(e): plugin unbinds reach the quote layer — an
+    // unbound quoted-insert sequence no longer arms the quote.
+    #[test]
+    fn issue843_quote_sequences_respect_plugin_unbinds() {
+        let ctrl_v = vec![(KeyModifiers::CONTROL, KeyCode::Char('v'))];
+        let chord = vec![
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::CONTROL, KeyCode::Char('v')),
+        ];
+        let mut sequences = vec![ctrl_v.clone(), chord.clone()];
+        retain_unbound_quote_sequences(&mut sequences, &[ctrl_v]);
+        assert_eq!(sequences, vec![chord]);
     }
 
     #[test]
@@ -11967,6 +12590,36 @@ mod tests {
         let state = session.lock().unwrap();
         assert_eq!(state.index, 1);
         assert_eq!(state.nav_seq, 3);
+    }
+
+    // niubash#833 carry-over: a poisoned cycle-session lock recovers
+    // the state (unwrap_or_else(into_inner)) instead of
+    // cycle_navigation_edits silently yielding None — TAB still
+    // navigates the live session.
+    #[test]
+    fn issue833_poisoned_cycle_session_still_navigates() {
+        let (mut detector, session) = cycle_detector();
+        arm_cycle_session_with_candidates(&session);
+        // Poison the session mutex: a panicking holder, the shape
+        // the #833 recovery idiom exists for.
+        let poisoner = session.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the cycle session for the #833 pin");
+        });
+        assert!(handle.join().is_err());
+        assert!(session.lock().is_err(), "the mutex must be poisoned");
+
+        let event = detector.parse_event(tab());
+        assert_eq!(
+            event,
+            ReedlineEvent::Edit(crate::completion::cycle_menu::whole_line_edits(
+                "git cherry",
+                10,
+            ))
+        );
+        let state = session.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.index, 1);
     }
 
     /// The menu-select session the CycleMenu publishes after TAB #1

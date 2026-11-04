@@ -1,16 +1,17 @@
 {
   "schema": 1,
-  "winuxcmd_tag": "v1.1.20",
+  "winuxcmd_tag": "v1.2.1",
   "description": "WinuxCmd release pin for niubash releases (niubash#312). Tag-push releases bundle exactly this WinuxCmd tag: the workflow downloads the matching WinuxCmd-*-win-<arch>.zip asset and fails unless its SHA-256 equals the value recorded here. workflow_dispatch releases must instead pass the same information explicitly via the winuxcmd_tag and winuxcmd_sha256 inputs; this file is then only the reference for what the last pinned release used.",
   "sha256": {
-    "windows-x64": "790d1f6eef3a555fd2c043866d32c6edbf936a8a70d25e554b3383e67b36ad43",
-    "windows-arm64": "205edb87a06b8b5b3c6fb731884d2b91b60fe406b9e7f3dbe625326489bb89df"
+    "windows-x64": "5e00f7891d33350eea4e4b0248e24710d087428c145b34e1fbc996f86d357bd7",
+    "windows-arm64": "c00017dc29caead94d3c94a97bfd87e839d0139fc052e202452c43583b3d752d"
   },
   "notes": [
     "Recorded from WinuxCmd v1.1.20 (2026-10-22); values taken from the v1.1.20 GitHub Release asset digests.",
     "The hashes cover the WinuxCmd-<version>-win-<arch>.zip release assets (the only format the release bundles), not the .7z/.tar.gz/setup.exe variants.",
     "Bumping the pin is a deliberate release decision: update winuxcmd_tag and both sha256 values together, and rerun a release so the bundled engine changes intentionally.",
     "History: v1.1.13 = first release where a forced upgrade completes while a running git holds the payload; v1.1.14 shipped the layout:shim forwarder's code without the binary; v1.1.15 = first zip verifiably carrying winuxcmd-shim.exe (WinuxCmd#1207/#1225); v1.1.16 carries the POSIX drive-dialect fixes for mkdir/ln/stat/realpath/readlink (WinuxCmd#1233/#1235/#1241/#1245); v1.1.18 suppresses orphan console window creation in winuxcmd-shim.exe when the parent has no visible console (WinuxCmd#1282, niubash#466); v1.1.19 carries the gawk BINMODE argv-prefix adapter (WinuxCmd#1270); v1.1.20 resolves bare MSYS drive roots (ls /e) across the applet surface (WinuxCmd#1274), folds env --file (WinuxCmd#1277) and csplit -f/--prefix (WinuxCmd#1278) through the shared boundary, and ends every applet's --help with the unixwin.dev portal link (WinuxCmd#1273).",
-    "BINMODE floor (niubash#467): closed — the adapter ships since v1.1.19; the staged verify's raw-byte awk probes pass on the x64 gate from this pin on."
+    "BINMODE floor (niubash#467): closed — the adapter ships since v1.1.19; the staged verify's raw-byte awk probes pass on the x64 gate from this pin on.",
+    "Bumped to WinuxCmd v1.2.1 (2026-11-03) for the niubash 1.5.0 release; values taken from the v1.2.1 GitHub Release asset digests (WinuxCmd-1.2.1-win-<arch>.zip)."
   ]
 }
