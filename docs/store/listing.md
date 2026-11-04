@@ -23,7 +23,7 @@ Niubash 是一个 Windows 原生的 bash 兼容命令行 shell。它不是模拟
 - **IDE 级补全**：带描述的补全菜单，敲命令不用背
 - **对人和对 AI 都友好**：非交互模式安静、确定、退出码精确，适合脚本与
   智能体调用
-- **轻量**：核心二进制仅约 4 MB，冷启动快
+- **轻量**：单二进制约 14 MB，冷启动毫秒级，无后台服务
 
 **适合谁**
 
@@ -47,8 +47,11 @@ bash, shell, terminal, 终端, command line, 命令行, wsl alternative, ssh age
 
 ### 新增功能（此版本）
 
-v1.1.0：IDE 风格补全菜单、彩色插件 CLI、NIU_ENV/BASH_ENV 一次性环境文件、
-启动开销优化、二进制体积缩减，以及上游 rubash v1.1.0 的 CTLESC 泄漏修复。
+v1.5.0：**原生脚本调试器**（`niu --debug` 终端交互调试、`niu --dap` 直接
+对接 VS Code，随包附带零依赖扩展）、GNU `possible-completions`（`M-?`/`M-=`）、
+readline ABI 双向开放（`enable -f` 插件可直接驱动编辑器与补全）、config 体系
+GNU 化（TOML 移除，提供 `niu config migrate` 幂等迁移），以及 MSIX 布局
+`NIU_ROOT` 修复——本商店包的命令树解析正依赖这一修复。
 
 ### 截图计划（≥4 张，1366x768 以上）
 
