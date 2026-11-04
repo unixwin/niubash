@@ -37,9 +37,11 @@ fn issue838_bare_dollar_lists_variables() {
         "bare $ must list session variables, got {values:?}"
     );
     // Process environment variables ride along (PATH exists in
-    // every test environment).
+    // every test environment — spelled `Path` on Windows, whose
+    // environment block is case-preserving, so match the name
+    // case-insensitively).
     assert!(
-        values.iter().any(|v| v == "$PATH"),
+        values.iter().any(|v| v.eq_ignore_ascii_case("$PATH")),
         "bare $ must list environment variables, got {values:?}"
     );
 }
