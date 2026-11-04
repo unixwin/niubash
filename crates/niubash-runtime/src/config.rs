@@ -1060,6 +1060,15 @@ pub fn migrate_legacy_config() -> anyhow::Result<Option<MigrationReport>> {
         )
     })?;
     let mut skipped = Vec::new();
+    // deep-audit A4-03: serde ignores unknown keys, so a misspelled key
+    // or a whole section the translator does not know used to vanish
+    // without a word — the migration renamed the only copy of the
+    // user's settings and reported success for the rest. Diff the raw
+    // document against the known key set and report every stranger as
+    // skipped, like an untranslatable known value.
+    if let Ok(raw) = text.parse::<toml::Value>() {
+        collect_unknown_legacy_keys(&raw, &mut skipped);
+    }
     let lines = legacy_lines(&parsed, &mut skipped);
     let rc_path = primary_rc_path();
     let rc_changed = if lines.is_empty() {
@@ -1081,6 +1090,39 @@ pub fn migrate_legacy_config() -> anyhow::Result<Option<MigrationReport>> {
         skipped,
         rc_changed,
     }))
+}
+
+/// Report legacy config keys the typed translator does not know
+/// (deep-audit A4-03). `schema` is the document's own format marker and
+/// is always welcome; every other top-level key must be a translated
+/// scalar or one of the known sections, and each section's keys must
+/// be ones `legacy_lines` reads.
+fn collect_unknown_legacy_keys(raw: &toml::Value, skipped: &mut Vec<String>) {
+    let Some(table) = raw.as_table() else {
+        return;
+    };
+    const SECTIONS: [(&str, &[&str]); 3] = [
+        ("completion", &["style", "interaction"]),
+        ("startup", &["rc-policy"]),
+        ("keymap", &["bind", "unbind"]),
+    ];
+    for (key, value) in table {
+        if key == "schema" || key == "command-not-found-hint" {
+            continue;
+        }
+        match SECTIONS.iter().find(|(name, _)| name == key) {
+            Some((_, known)) => {
+                if let Some(section) = value.as_table() {
+                    for inner in section.keys() {
+                        if !known.contains(&inner.as_str()) {
+                            skipped.push(format!("{key}.{inner} (unknown key)"));
+                        }
+                    }
+                }
+            }
+            None => skipped.push(format!("{key} (unknown key)")),
+        }
+    }
 }
 
 fn rename_legacy_config(path: &Path) -> anyhow::Result<PathBuf> {
@@ -1581,6 +1623,60 @@ unbind = ['"\C-a"']
         );
         assert!(rc.contains("export NIU_COMPLETION_STYLE=gnu"), "{rc}");
         assert!(report.rc_changed);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a4_03_migrate_reports_unknown_keys_and_sections_as_skipped() {
+        let _lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = temp_dir("migrate-unknown");
+        std::fs::create_dir_all(&home).unwrap();
+        let legacy = home.join("config.toml");
+        let _restore = EnvRestore::capture(&["HOME", "NIU_CONFIG"]);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("NIU_CONFIG", &legacy);
+        write_legacy_config(
+            &legacy,
+            r#"
+boguskey = "x"
+
+[completion]
+style = "list"
+bogus-inner = 1
+
+[history]
+size = 5000
+"#,
+        );
+        let report = migrate_legacy_config()
+            .unwrap()
+            .expect("legacy file exists");
+        // The known key still migrates…
+        assert_eq!(
+            report.lines,
+            vec!["export NIU_COMPLETION_STYLE=list".to_string()]
+        );
+        // …and every stranger is reported, not silently dropped.
+        assert!(
+            report.skipped.iter().any(|s| s.contains("boguskey")),
+            "{:?}",
+            report.skipped
+        );
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.contains("completion.bogus-inner")),
+            "{:?}",
+            report.skipped
+        );
+        assert!(
+            report.skipped.iter().any(|s| s.contains("history")),
+            "{:?}",
+            report.skipped
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

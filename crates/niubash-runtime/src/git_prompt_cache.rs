@@ -601,6 +601,9 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> bool
         let handle = child.as_raw_handle() as HANDLE;
         // SAFETY: `handle` is the live process handle owned by `child`.
         let status = unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) };
+        // niubash#847 / deep-audit A4-07 (same defect, both waves): only
+        // WAIT_OBJECT_0 means "exited" — the factored predicate above
+        // carries the rule and its cross-platform pin.
         wait_status_is_finished(status)
     }
     #[cfg(not(windows))]

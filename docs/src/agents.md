@@ -13,7 +13,63 @@ a WSL2 distro installed; opencode, codex (forked), ZCode). Entries added in
 the 2026-10-21 expansion are marked **source-verified** when the claim comes
 from reading shipped code rather than a live run; entries from upstream issue
 threads are marked as reported. Behaviour statements track the current
-release, v1.4.3.
+release, v1.5.0.
+
+## `--ec` — the verbatim handoff cookbook
+
+When a host cannot guarantee byte-exact quoting — or the command travels
+through several shells on its way to this one — stop quoting altogether:
+encode the command as base64 and hand niu the payload. It arrives as one
+argv word no transport layer can rewrite; niu decodes it and runs it through
+the regular `-c` route. Leading shell flags (`-e -u -o pipefail --norc`)
+apply exactly as with `-c`, words after the payload are `$0` plus positional
+parameters, and the exit code and GNU error surface are the unencoded ones.
+
+| Host | Encode + invoke |
+| --- | --- |
+| bash / WSL | `niu --ec "$(printf '%s' "$cmd" \| base64 -w0)"` |
+| PowerShell | `niu -EncodedCommand [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cmd))` |
+| Python | `subprocess.run(["niu", "--ec", base64.b64encode(cmd.encode()).decode()], ...)` |
+| Node | `child_process.execFile("niu", ["--ec", Buffer.from(cmd).toString("base64")], ...)` |
+| Rust | `Command::new("niu").arg("--ec").arg(B64.encode(cmd.as_bytes()))` — the `base64` crate, `B64` being its `general_purpose::STANDARD` engine (imports in the snippet below) |
+
+### The spawn-site change: `-c` → `--ec`
+
+Tools that shell out to niu make one change where the command line is built —
+wherever the code assembles `["-c", cmd]`, it assembles `["--ec", b64]`
+instead:
+
+```rust
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+
+// before — the command travels as raw argv; any layer that re-quotes,
+// expands, or truncates it breaks the call
+c.args(["-c", command]);
+// after — base64 in, the command bytes reach niu verbatim
+c.args(["--ec", &B64.encode(command.as_bytes())]);
+```
+
+The swap is the same shape in every host language — a Python `subprocess` arg
+list, a Node `execFile` argv array, a Go `exec.Command`, all take the encoded
+payload as one more argument. Launcher flags keep working in front of the
+payload: `niu -eu -o pipefail --ec <b64>` runs the decoded command under
+`errexit` and `pipefail`, and words after the payload stay `$0` plus
+positional parameters.
+
+Decoder tolerance is built for LLM-shaped payloads: an optional `v1:` prefix
+(guards against MSYS-family path rewriting in transit), ASCII whitespace and
+wrapped lines ignored, missing `=` padding accepted. The payload encoding is
+**UTF-8**. PowerShell's own `-EncodedCommand` uses UTF-16LE, so a payload
+produced for PowerShell must be re-encoded for niu — a UTF-16 payload fails
+loudly (`payload is not valid UTF-8`), never silently. Windows caps one
+command line at ~32 K chars (~24 K of script after base64 inflation); for
+larger payloads write a temp script file and execute it.
+
+Failure modes this removes at the transport level: nested-quote re-escaping
+per host layer, `$`/backtick expansion by the calling shell, heredoc
+corruption, `\\` collapse across cmd→wsl→ssh, and CRLF translation of
+inline scripts.
 
 ## The one thing that usually just works
 

@@ -4,6 +4,12 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deep-audit host fix wave (1.5.1-bound, 2026-11-04)**: seven non-interactive host findings fixed (#886) — including corrupt plugin-spec errors now naming the file and the cause; `$BASH_ARGV0` seed no longer clobbered by host startup and `NIU_COMP_WORDS` no longer duplicated (#887, with the engine-side compspec fixes in rubash #2756); frozen interactive config specs (`NIU_BINDKEYS`/`NIU_COMPDEFS`) re-applied on setup re-run (#891, closing #889/#890). The remaining host finding (#888, exported HISTFILE) is a recorded owner decision. Engine-side counterparts landed in rubash's deep-audit wave (see the rubash changelog).
+
+## [1.5.0] - 2026-11-03
+
 ### Added
 
 - **GNU `possible-completions` defaults (`M-?`, `M-=`)**: both keys now print the candidate list without editing `rl_line_buffer` or moving point, matching readline's `rl_possible_completions`. The GNU menu distinguishes the engine's list-only activation from a TAB, so a queued list event can no longer splice the common prefix. TAB completion itself is unchanged: the default stays zsh-style (first TAB opens the candidate grid), per the owner ruling on niubash#342.

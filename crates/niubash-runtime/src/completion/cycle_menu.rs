@@ -868,17 +868,21 @@ impl CycleMenu {
             starts,
             fields,
         };
-        if let Ok(mut session) = self.session.lock() {
-            if session.open && session.grid != grid {
-                // A resize (or the first paint) changed the columns:
-                // re-anchor the highlight to the same candidate's cell.
-                // Unchanged geometry preserves zsh's `wishcol` across
-                // paints.
-                let (_, start) = grid.position(session.index);
-                session.grid = grid;
-                session.mcol = start;
-                session.wish_col = start;
-            }
+        // niubash#832 (the #833 discipline, carried over from T1):
+        // every session-cell lock in this file recovers a poisoned
+        // lock instead of silently skipping — the cell is plain data,
+        // and a frozen `if let Ok` here would wedge the cycle menu
+        // for the rest of the session.
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        if session.open && session.grid != grid {
+            // A resize (or the first paint) changed the columns:
+            // re-anchor the highlight to the same candidate's cell.
+            // Unchanged geometry preserves zsh's `wishcol` across
+            // paints.
+            let (_, start) = grid.position(session.index);
+            session.grid = grid;
+            session.mcol = start;
+            session.wish_col = start;
         }
     }
 
@@ -924,14 +928,15 @@ impl CycleMenu {
                 append_whitespace: suggestion.append_whitespace,
             })
             .collect();
-        if let Ok(mut session) = self.session.lock() {
-            session.begin(
+        self.session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .begin(
                 snapshot,
                 candidates,
                 (span.start, span.end),
                 self.select_mode,
             );
-        }
         self.publish_grid();
         if self.values.len() == 1 {
             // A lone candidate completes outright and ends the session
@@ -977,9 +982,10 @@ impl CycleMenu {
             UndoBehavior::CreateUndoPoint,
         );
         self.region = (start, new_end);
-        if let Ok(mut session) = self.session.lock() {
-            session.mark_spliced(self.region);
-        }
+        self.session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_spliced(self.region);
     }
 
     /// End the session (any reason): the menu closes and the shared
@@ -1008,9 +1014,7 @@ impl CycleMenu {
         if let Some(menu_open) = &self.menu_open {
             menu_open.store(false, Ordering::Relaxed);
         }
-        if let Ok(mut session) = self.session.lock() {
-            session.end();
-        }
+        self.session.lock().unwrap_or_else(|e| e.into_inner()).end();
     }
 
     /// Back to factory state (the `Deactivate` path via `clear_input`).
@@ -1082,16 +1086,18 @@ impl CycleMenu {
             }
             CycleMove::Grid(direction) => {
                 let len = self.values.len();
-                let (index, mcol, wish_col) = match self.session.lock() {
-                    Ok(session) if session.open => grid_move(
+                let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+                let (index, mcol, wish_col) = if session.open {
+                    grid_move(
                         &session.grid,
                         len,
                         self.index,
                         session.mcol,
                         session.wish_col,
                         direction,
-                    ),
-                    _ => (self.index, 0, 0),
+                    )
+                } else {
+                    (self.index, 0, 0)
                 };
                 (index, mcol, wish_col)
             }
@@ -1111,12 +1117,11 @@ impl CycleMenu {
         // binding, say). Mirror the outcome into
         // the cell so the wrapper's view stays truthful — without a
         // nav_seq bump: no Edit echo follows a menu-side splice.
-        if let Ok(mut session) = self.session.lock() {
-            session.index = self.index;
-            session.region = self.region;
-            session.mcol = self.mcol;
-            session.wish_col = self.wish_col;
-        }
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        session.index = self.index;
+        session.region = self.region;
+        session.mcol = self.mcol;
+        session.wish_col = self.wish_col;
     }
 
     /// An edit landed while the menu was up. Two kinds arrive here:
@@ -1127,16 +1132,16 @@ impl CycleMenu {
     /// as accepted-in-place: the candidate in the line stays, the
     /// edit already applied on top of it.
     fn apply_edit(&mut self) {
-        if let Ok(session) = self.session.lock() {
-            if session.open && self.echoes_seen < session.nav_seq {
-                self.echoes_seen += 1;
-                self.index = session.index;
-                self.region = session.region;
-                self.mcol = session.mcol;
-                self.wish_col = session.wish_col;
-                return;
-            }
+        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        if session.open && self.echoes_seen < session.nav_seq {
+            self.echoes_seen += 1;
+            self.index = session.index;
+            self.region = session.region;
+            self.mcol = session.mcol;
+            self.wish_col = session.wish_col;
+            return;
         }
+        drop(session);
         self.end_session();
     }
 
@@ -1341,11 +1346,10 @@ impl Menu for CycleMenu {
                 MenuEvent::Activate(_) => Some(true),
                 MenuEvent::Deactivate => Some(false),
                 MenuEvent::Edit(_) => {
-                    let echo_pending = self
-                        .session
-                        .lock()
-                        .map(|session| session.open && self.echoes_seen < session.nav_seq)
-                        .unwrap_or(false);
+                    let echo_pending = {
+                        let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+                        session.open && self.echoes_seen < session.nav_seq
+                    };
                     if echo_pending {
                         None
                     } else {
@@ -1539,6 +1543,44 @@ mod tests {
         let _ = menu.can_partially_complete(false, editor, completer);
         menu.menu_event(event);
         menu.drain_events(editor, completer);
+    }
+
+    /// niubash#832 (T1 carry-over, the #833 discipline): a poisoned
+    /// session cell must not freeze the cycle menu — every lock site
+    /// recovers the guard instead of silently skipping its work.
+    /// Here the cell is poisoned before the session ends: the
+    /// `end_session` clear and the `apply_edit` read must still land.
+    #[test]
+    fn issue832_poisoned_session_cell_still_recovers() {
+        let (mut menu, session) = menu_with_session();
+        {
+            let mut state = session.lock().unwrap();
+            state.open = true;
+        }
+        // Poison the cell: a panicking writer while holding the lock.
+        let poisoner = session.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("issue832 test poison");
+        })
+        .join();
+        assert!(session.is_poisoned());
+
+        menu.end_session();
+        assert!(
+            !session.lock().unwrap_or_else(|e| e.into_inner()).open,
+            "end_session must still clear a poisoned cell"
+        );
+
+        // The Edit-echo read recovers too (it drives apply_edit's
+        // session sync; a frozen read would end live sessions early).
+        {
+            let mut state = session.lock().unwrap_or_else(|e| e.into_inner());
+            state.open = true;
+            state.nav_seq = 1;
+        }
+        menu.apply_edit();
+        assert_eq!(menu.echoes_seen, 1, "the echo sync must survive poison");
     }
 
     #[test]
