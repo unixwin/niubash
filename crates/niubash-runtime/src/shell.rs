@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use reedline::Reedline;
-use rubash::api::{Flow, PreparedLine, RunOptions, Session};
+use rubash::api::{PreparedLine, RunOptions, Session};
 use rubash::{
     decode_to_visible_text, executor::Executor, lexer::tokenize, parser::parse, Ast, Token,
     TokenKind,
@@ -1266,26 +1266,25 @@ impl Shell {
     /// Read alias-bearing interactive input through the engine's grouped reader.
     /// Each submission is a fresh read boundary, even when its line number is one.
     ///
-    /// #863 slice 2 migration note: this site stays on the tracked
-    /// driver call instead of moving to `Session::run`. The driver's
-    /// stop bool is `(exit_jump && !parse_error) || errexit_stop`
-    /// (rubash script_driver's grouped reader), and the REPL consumes
+    /// #863 slice 2 migration, landed with GAP-1 (rubash#2795): the
+    /// stop signal is the grouped driver's published classification,
+    /// not its folded stop bool. The driver decomposes its own stop
+    /// into `GroupedRunClassification.stop` — `ExitJump` for a real
+    /// `exit`/fatal jump that counts (a jump riding a parse abort is
+    /// a discard and does not count), `ErrexitBreak` for the errexit
+    /// verdict (including a parse error whose status trips it) —
+    /// computed once inside the engine from the marked raise sites
+    /// and the shared `errexit_break_verdict`. The REPL consumes
     /// exactly one signal from it — `session_exit_jump`; the loop has
     /// no second stop predicate of its own (repl.rs's consumption
-    /// sites). `run()`'s grouped route folds every `errexit_stop`
-    /// outcome into `Flow::Completed` — the errexit break itself, a
-    /// real `exit` with a nonzero status while errexit is enabled,
-    /// and a parse error whose status trips errexit — so mapping the
-    /// jump from `Flow` alone would keep the session alive on
-    /// submissions that end it today. Reconstructing the bool
-    /// host-side needs `last_command_inverted`, which has no contract
-    /// face (GAP-1, run classification surfacing). The non-interactive
-    /// tracked arm in `execute_script_inner` could migrate because
-    /// the batch feeder re-derives the errexit stop through its own
-    /// predicate; the REPL has no equivalent. Revisit when the
-    /// contract surfaces the run classification; the
+    /// sites), and the host derives nothing from status + flags any
+    /// more: stop iff `classification.stop.is_some()`, with the run's
+    /// own status. (The slice-2 stop, PR #880, existed because the
+    /// contract then had no such surface: `Session::run`'s `Flow`
+    /// folded every errexit stop into `Flow::Completed`, and the bool
+    /// could not be reconstructed host-side.) The
     /// `issue863_reader_batch_*` pins below lock the stop semantics
-    /// the eventual mapping must reproduce.
+    /// per outcome class against this mapping.
     fn execute_interactive_reader_batch(
         &mut self,
         script: &str,
@@ -1308,15 +1307,15 @@ impl Shell {
         if !needs_reader {
             return None;
         }
-        let (code, exit_shell) =
-            rubash::script_driver::run_script_with_history_at_line_offset_tracked(
+        let (code, _exit_shell, classification) =
+            rubash::script_driver::run_script_with_history_at_line_offset_classified(
                 self.executor_mut(),
                 script,
                 line_offset,
                 None,
             );
-        if exit_shell {
-            // The grouped reader already excluded the parse-abort discard
+        if classification.stop.is_some() {
+            // The classification already excluded the parse-abort discard
             // (niubash R1): the engine unwound this submission for real —
             // `true; exit 3`, an alias expanding to `exit`, errexit — so the
             // REPL must end the session instead of prompting again.
@@ -4171,30 +4170,34 @@ impl Shell {
             // a host-owned history provider authoritative instead of
             // installing a scratch session over it (niubash#508).
             //
-            // 1.5.0 migration: this arm runs through the Session
-            // contract's run(), whose tracked route is this same
-            // driver. The contract's Flow separates a real exit
-            // (ExitRequested) from the errexit break the driver's
-            // stop bool conflates; the batch feeder's stop rule
-            // already handles the errexit break through its own
-            // predicate, so recording the jump on ExitRequested
-            // alone preserves the stop behavior. Admission above
-            // stays the host's (#414 live-flag form); the
-            // contract's internal alias liveness additionally
-            // requires a non-empty alias table, so an alias-shaped
-            // script with an empty table takes the contract's
-            // line-offset route inside run() — with no aliases to
-            // expand and no history use admitted, the routes agree
-            // on the outcome.
+            // 1.5.0 migration, completed by GAP-1 (rubash#2795):
+            // this arm runs through the Session contract's run(),
+            // whose tracked route is this same driver. The contract's
+            // classification decomposes the run's stop into the
+            // adjudicated unwind — a real exit (`RunUnwind::ExitJump`)
+            // apart from the errexit break (`RunUnwind::ErrexitBreak`)
+            // that the pre-GAP-1 Flow fold hid in `Flow::Completed` —
+            // so the jump is recorded on the classification's verdict
+            // alone: `unwind.is_some()`, either kind, with the run's
+            // own status. The batch feeder's stop rule consumes that
+            // record; it no longer re-derives the errexit stop from
+            // status + SHELLOPTS host-side (see run_stdin_script in
+            // main.rs). Admission above stays the host's (#414
+            // live-flag form); the contract's internal alias liveness
+            // additionally requires a non-empty alias table, so an
+            // alias-shaped script with an empty table takes the
+            // contract's line-offset route inside run() — the
+            // classification populates the same unwind verdict on
+            // that route, so the routes agree on the record.
             let mut options = RunOptions::default();
             options.line_offset = line_offset;
             let outcome = self
                 .session_mut()
                 .run(&script, &options)
                 .map_err(|error| anyhow::anyhow!("session run failed: {error:?}"))?;
-            if let Flow::ExitRequested(status) = outcome.flow {
+            if outcome.classification.unwind.is_some() {
                 self.script_exit_jump = true;
-                self.note_session_exit_jump(status);
+                self.note_session_exit_jump(outcome.status);
             }
             self.sync_process_cwd_from_executor_pwd();
             self.sync_process_path_from_executor_path();
@@ -10305,16 +10308,16 @@ complete -F _envtooldyn_hook envtooldyn
     }
 
     /// niubash#863 (slice 2): the reader batch's stop semantics, pinned
-    /// per outcome class. `execute_interactive_reader_batch` stays on
-    /// the engine's tracked grouped driver because `Session::run`'s
-    /// `Flow` cannot express the driver's stop bool (see the migration
-    /// note on that fn): these pins lock the values a future
-    /// contract-based mapping must reproduce, and they fail if the
-    /// submissions below stop taking the grouped route or the route's
-    /// classification drifts. The parse-error pins double as the
-    /// route proof: the host's plain parse route drops the stray `)`
-    /// and would run the line with status 0 instead of discarding the
-    /// group at status 2.
+    /// per outcome class. Since GAP-1 (rubash#2795) the mapping under
+    /// test is the classification-based one: `execute_interactive_reader_batch`
+    /// consumes the grouped driver's published classification and stops
+    /// iff `stop.is_some()` (see the migration note on that fn). These
+    /// pins lock the values that mapping produces per outcome class,
+    /// and they fail if the submissions below stop taking the grouped
+    /// route or the route's classification drifts. The parse-error
+    /// pins double as the route proof: the host's plain parse route
+    /// drops the stray `)` and would run the line with status 0
+    /// instead of discarding the group at status 2.
     #[test]
     fn issue863_reader_batch_parse_error_discards_group_and_keeps_session() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -10324,8 +10327,8 @@ complete -F _envtooldyn_hook envtooldyn
 
         // Errexit off: a syntax error in a `;` batch discards the
         // failing group and ends the submission at 2; the session
-        // keeps running (the driver's parse-abort arm: stop bool
-        // false).
+        // keeps running (the driver's parse-abort arm: the
+        // classification's stop stays None).
         let code = shell
             .execute_interactive_line("echo ok; echo )bad")
             .unwrap();
@@ -10352,10 +10355,9 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(shell.execute_interactive_line("set -e").unwrap(), 0);
         assert_eq!(shell.take_session_exit_jump(), None);
         // The failing first command now breaks the batch (ERREXIT):
-        // the grouped driver reports the unwind and the REPL must end
-        // the session with the failing status instead of prompting
-        // again. `Session::run` reports this outcome as
-        // Flow::Completed — the fold that blocks the migration.
+        // the grouped driver's classification adjudicates the stop
+        // as ErrexitBreak and the REPL must end the session with the
+        // failing status instead of prompting again.
         assert_eq!(
             shell
                 .execute_interactive_line("false; echo unreachable")
@@ -10374,11 +10376,11 @@ complete -F _envtooldyn_hook envtooldyn
 
         assert_eq!(shell.execute_interactive_line("set -e").unwrap(), 0);
         assert_eq!(shell.take_session_exit_jump(), None);
-        // A real `exit` with a nonzero status resolves to the
-        // errexit arm inside `Session::run` (its documented known
-        // boundary), but the session still ends, with the exit's own
-        // status (rubash#2535: the jump payload, not the crossed
-        // traps' restored `$?`).
+        // A real `exit` with a nonzero status under armed errexit
+        // classifies as ExitJump — the jump outranks the errexit
+        // verdict in the driver's decomposition (GAP-1) — and the
+        // session ends, with the exit's own status (rubash#2535: the
+        // jump payload, not the crossed traps' restored `$?`).
         assert_eq!(shell.execute_interactive_line("true; exit 3").unwrap(), 3);
         assert_eq!(shell.take_session_exit_jump(), Some(3));
     }
@@ -10394,10 +10396,12 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(shell.take_session_exit_jump(), None);
         // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN
         // under errexit — the batch ends with the inverted status 1
-        // and the session lives. The exemption's witness
-        // (`last_command_inverted`) has no contract face (GAP-1), so
-        // a host-side reconstruction of the stop bool from status +
-        // errexit alone would end the session here.
+        // and the session lives. The exemption is applied inside the
+        // engine's shared errexit verdict (the classification carries
+        // `last_inverted` as a reported fact); a host-side
+        // reconstruction of the stop bool from status + errexit alone
+        // would end the session here — which is why the host consumes
+        // the classification instead.
         let code = shell.execute_interactive_line("echo ok; ! true").unwrap();
         assert_eq!(code, 1);
         assert_eq!(shell.take_session_exit_jump(), None);
@@ -10581,7 +10585,8 @@ complete -F _envtooldyn_hook envtooldyn
     /// `;` batch is a DISCARD (rubash#1662): the batch's group
     /// machinery consumes the classification without arming the exit
     /// jump, so the session prompts again — the stop-semantics class
-    /// a future `Session::run` mapping must keep jump-free. The
+    /// the classification-based mapping keeps jump-free (the
+    /// classification's signal_discard stands, its stop stays None). The
     /// returned code is deliberately not asserted: whether the
     /// gatherer hands the reader one group or two decides if the
     /// trailing `echo` still runs after the discard (an engine-side
