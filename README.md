@@ -21,6 +21,8 @@ Docs & downloads: [unixwin.dev](https://unixwin.dev)
 
 </div>
 
+**[Install](#quick-start) · [Niubash vs Git Bash](#niubash-vs-git-bash) · [Why not Git Bash / MSYS2 / Cygwin](#why-not-git-bash--msys2--cygwin) · [AI agents](#built-for-ai-agents) · [Compatibility](#compatibility--testing) · [Performance](#performance) · [Limitations](#known-limitations-stated-plainly)**
+
 **niubash** is a Bash-compatible shell implemented natively in Rust — a Git Bash alternative. On Windows, the flagship platform, one `niu.exe` carries the whole stack:
 
 - the [rubash](https://github.com/unixwin/rubash) language engine — GNU Bash 5.3 semantics with no emulation layer;

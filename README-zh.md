@@ -21,6 +21,8 @@
 
 </div>
 
+**[安装](#快速开始) · [Niubash vs Git Bash](#niubash-vs-git-bash) · [为什么不用 Git Bash / MSYS2 / Cygwin](#为什么不用-git-bash--msys2--cygwin) · [AI agent](#为-ai-agent-而建) · [兼容性与测试](#兼容性与测试) · [性能](#性能) · [已知限制](#已知限制明说)**
+
 **niubash** 是用 Rust 原生实现的 Bash 兼容 shell（Git Bash alternative）。在旗舰平台 Windows 上，一个 `niu.exe` 装下整个栈：
 
 - [rubash](https://github.com/unixwin/rubash) 语言引擎——GNU Bash 5.3 语义，无模拟层；
