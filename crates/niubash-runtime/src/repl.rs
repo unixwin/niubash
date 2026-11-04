@@ -902,7 +902,7 @@ fn remove_keyseq(by_name: &mut [(String, Vec<String>)], seq: &str) {
 /// plus the host defaults. The readable form (GNU's explicit-
 /// argument variant) does not travel the host-command channel,
 /// which carries no prefix argument.
-fn dump_function_lines(entries: &[crate::bind_surface::EngineBindEntry]) -> Vec<String> {
+fn dump_function_lines(entries: &[rubash::api::BindEntryView]) -> Vec<String> {
     let mut by_name: Vec<(String, Vec<String>)> = Vec::new();
     for (seq, name) in rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS {
         push_keyseq(&mut by_name, name, seq.to_string());
@@ -911,11 +911,11 @@ fn dump_function_lines(entries: &[crate::bind_surface::EngineBindEntry]) -> Vec<
         push_keyseq(&mut by_name, name, seq.to_string());
     }
     for entry in entries {
-        if !engine_keymap_applies(entry.keymap.as_deref(), NativeKeymapTarget::Emacs) {
+        if !engine_keymap_applies(&entry.keymap, NativeKeymapTarget::Emacs) {
             continue;
         }
         remove_keyseq(&mut by_name, &entry.keyseq);
-        if let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind {
+        if let rubash::api::BindKindView::Function { name } = &entry.kind {
             push_keyseq(&mut by_name, name, entry.keyseq.clone());
         }
     }
@@ -1059,7 +1059,7 @@ fn run_readline_command(
         // plus the dumper's own leading "\n" — one blank line —
         // then one line per funmap name.
         "dump-functions" => {
-            let (entries, _) = crate::bind_surface::load_engine_bindings(shell.borrow().executor());
+            let entries = shell.borrow().session().bind_view().entries;
             let lines = dump_function_lines(&entries);
             let mut out = String::from("\n\n");
             for line in lines {
@@ -1071,13 +1071,13 @@ fn run_readline_command(
         // bind.c:2905 rl_dump_macros → rl_macro_dumper(0): the
         // registry's macro entries in GNU plain form.
         "dump-macros" => {
-            let (entries, _) = crate::bind_surface::load_engine_bindings(shell.borrow().executor());
+            let entries = shell.borrow().session().bind_view().entries;
             let mut out = String::from("\n");
             for entry in &entries {
-                if !engine_keymap_applies(entry.keymap.as_deref(), NativeKeymapTarget::Emacs) {
+                if !engine_keymap_applies(&entry.keymap, NativeKeymapTarget::Emacs) {
                     continue;
                 }
-                if let crate::bind_surface::EngineBindKind::Macro { text } = &entry.kind {
+                if let rubash::api::BindKindView::Macro { text } = &entry.kind {
                     out.push_str(&rubash::builtins::bind::format_macro_plain(
                         &entry.keyseq,
                         text,
@@ -1090,7 +1090,7 @@ fn run_readline_command(
         // bind.c:3076 rl_dump_variables → rl_variable_dumper(0):
         // the registry's variable table in GNU plain form.
         "dump-variables" => {
-            let variables = crate::bind_surface::load_readline_variables(shell.borrow().executor());
+            let variables = shell.borrow().session().bind_view().variables;
             let mut out = String::from("\n");
             for (name, value) in &variables {
                 out.push_str(&rubash::builtins::bind::format_variable_plain(name, value));
@@ -1677,7 +1677,7 @@ fn build_keymap_for_target(
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
-    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    engine_bindings: &[rubash::api::BindEntryView],
     completion_interaction: CompletionInteraction,
 ) -> (
     Keybindings,
@@ -1759,7 +1759,7 @@ fn build_edit_mode(
     native_widgets: &NativeWidgetConfig,
     native_widget_bindings: &[NativeWidgetBinding],
     user_widget_bindings: &[NativeWidgetBinding],
-    engine_bindings: &[crate::bind_surface::EngineBindEntry],
+    engine_bindings: &[rubash::api::BindEntryView],
     engine_bind_generation: u64,
     completion_interaction: CompletionInteraction,
 ) -> (
@@ -3285,6 +3285,39 @@ fn unusable_function_reason(name: &str) -> UnusableBindReason {
     }
 }
 
+/// The single key an engine bind entry names, read off the
+/// entry's canonical bytes (niubash#863 GAP-3): the engine
+/// decoded the written spelling once (`keyseq_bytes`), and the
+/// host's one remaining translation is bytes → key events
+/// ([`key_units_from_bytes`], meta folded — the flat keymap's
+/// reading). The written-form concessions of
+/// [`parse_key_sequence`] (named keys, caret singles) do NOT
+/// apply here: those are spellings a user types into host
+/// configuration, while an engine keyseq means exactly the
+/// bytes GNU's `rl_translate_keyseq` produces for it — a
+/// literal `^` included.
+fn key_from_bind_bytes(bytes: &[u8]) -> Option<(KeyModifiers, KeyCode)> {
+    let units = key_units_from_bytes(bytes, true)?;
+    if units.len() == 1 {
+        Some(units[0])
+    } else {
+        None
+    }
+}
+
+/// The chord (two or more key units) an engine bind entry
+/// names, read off its canonical bytes — the chord layer's
+/// reading of [`key_units_from_bytes`], ESC kept as its own
+/// keystroke. See [`key_from_bind_bytes`].
+fn chord_from_bind_bytes(bytes: &[u8]) -> Option<Vec<(KeyModifiers, KeyCode)>> {
+    let units = key_units_from_bytes(bytes, false)?;
+    if units.len() < 2 {
+        None
+    } else {
+        Some(units)
+    }
+}
+
 /// Record an entry the editor cannot mirror, classified by reason
 /// (niubash#612). The entry also lands in the unified keymap
 /// registry's dropped records (niubash#630), with the coarse reason
@@ -3293,7 +3326,7 @@ fn unusable_function_reason(name: &str) -> UnusableBindReason {
 fn note_unusable_bind(
     unusable: &mut Vec<UnusableBind>,
     dropped: &mut Vec<crate::keymap_registry::DroppedBind>,
-    entry: &crate::bind_surface::EngineBindEntry,
+    entry: &rubash::api::BindEntryView,
     reason: UnusableBindReason,
 ) {
     unusable.push(UnusableBind {
@@ -3350,7 +3383,7 @@ fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[Native
 fn add_engine_bind_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
-    entries: &[crate::bind_surface::EngineBindEntry],
+    entries: &[rubash::api::BindEntryView],
 ) -> Vec<UnusableBind> {
     add_engine_bind_keybindings_recorded(keybindings, target, entries, 0).0
 }
@@ -3372,13 +3405,13 @@ fn add_engine_bind_keybindings(
 fn add_engine_bind_keybindings_recorded(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
-    entries: &[crate::bind_surface::EngineBindEntry],
+    entries: &[rubash::api::BindEntryView],
     index_base: usize,
 ) -> (Vec<UnusableBind>, Vec<crate::keymap_registry::DroppedBind>) {
     let mut unusable = Vec::new();
     let mut dropped = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+        if !engine_keymap_applies(&entry.keymap, target) {
             // niubash#834: an entry no map of this session builds is
             // recorded, not silently filtered — a typo'd `-m` name or
             // a bind for the inactive editing mode used to vanish
@@ -3388,12 +3421,12 @@ fn add_engine_bind_keybindings_recorded(
             }
             continue;
         }
-        let Some((modifiers, key_code)) = parse_key_sequence(&entry.keyseq) else {
+        let Some((modifiers, key_code)) = key_from_bind_bytes(&entry.bytes) else {
             // A clean chain of key units is a chord: `ChordEditMode`
             // delivers those (niubash#630), so it is neither dropped nor
             // reported. Anything else that fails to parse is malformed
             // and stays actionable (niubash#612).
-            if parse_chord_sequence(&entry.keyseq).is_some() {
+            if chord_from_bind_bytes(&entry.bytes).is_some() {
                 // The chord layer delivers chains — except a function
                 // name neither layer carries (the widget-sentinel
                 // fallthrough in `native_widget_event`, which
@@ -3402,7 +3435,7 @@ fn add_engine_bind_keybindings_recorded(
                 // (niubash#805). `self-insert` chains are carried by
                 // the chord layer's own arm, and `quoted-insert`
                 // reads as delivered, so neither is recorded.
-                if let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind {
+                if let rubash::api::BindKindView::Function { name } = &entry.kind {
                     if name != "self-insert" && !gnu_name_is_delivered(name) {
                         dropped.push(crate::keymap_registry::dropped_bind_for(
                             entry,
@@ -3420,14 +3453,12 @@ fn add_engine_bind_keybindings_recorded(
             // self-insert natively here, and ble.sh's byte-at-a-time
             // decode hooks are this same class). Structural drop with
             // a record — not an actionable bind failure (niubash#805).
-            if let Some(bytes) = decode_keyseq_bytes(&entry.keyseq) {
-                if bytes.iter().any(|byte| *byte >= 0x80) {
-                    dropped.push(crate::keymap_registry::dropped_bind_for(
-                        entry,
-                        crate::keymap_registry::DroppedReason::UnparseableKeyseq,
-                    ));
-                    continue;
-                }
+            if entry.bytes.iter().any(|byte| *byte >= 0x80) {
+                dropped.push(crate::keymap_registry::dropped_bind_for(
+                    entry,
+                    crate::keymap_registry::DroppedReason::UnparseableKeyseq,
+                ));
+                continue;
             }
             note_unusable_bind(
                 &mut unusable,
@@ -3438,13 +3469,10 @@ fn add_engine_bind_keybindings_recorded(
             continue;
         };
         let event = match &entry.kind {
-            crate::bind_surface::EngineBindKind::Execute { .. } => {
-                ReedlineEvent::ExecuteHostCommand(format!(
-                    "{BINDX_HOST_COMMAND_PREFIX}{}",
-                    index_base + index
-                ))
-            }
-            crate::bind_surface::EngineBindKind::Macro { text } => {
+            rubash::api::BindKindView::Execute { .. } => ReedlineEvent::ExecuteHostCommand(
+                format!("{BINDX_HOST_COMMAND_PREFIX}{}", index_base + index),
+            ),
+            rubash::api::BindKindView::Macro { text } => {
                 if crate::keymap_registry::is_script_macro_text(text) {
                     // K3: the key-script executor — the macro decodes to
                     // the keystrokes it carries and binds
@@ -3473,7 +3501,7 @@ fn add_engine_bind_keybindings_recorded(
             // skipped; the sentinel fallthrough of native_widget_event is
             // for zsh-style shell-function widgets, which `bind` to a
             // readline function position has no meaning for.
-            crate::bind_surface::EngineBindKind::Function { name } => {
+            rubash::api::BindKindView::Function { name } => {
                 // GNU `do-lowercase-version` (text.c:1179) is not a
                 // command: `_rl_dispatch_subseq` (readline.c:916-922)
                 // special-cases it and re-dispatches the pressed key
@@ -3534,7 +3562,7 @@ fn add_engine_bind_keybindings_recorded(
                         Some(ReedlineEvent::ExecuteHostCommand(payload))
                             if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
                         {
-                            if parse_chord_sequence(&entry.keyseq).is_some() {
+                            if chord_from_bind_bytes(&entry.bytes).is_some() {
                                 dropped.push(crate::keymap_registry::dropped_bind_for(
                                     entry,
                                     crate::keymap_registry::DroppedReason::UnknownFunction,
@@ -3572,10 +3600,12 @@ fn add_engine_bind_keybindings_recorded(
 /// single emacs keymap (the sequence text carries any \e or \C-x prefix);
 /// GNU's vi-movement aliases land on vi normal, vi-insert on vi insert
 /// (bashline.c:4771 get_cmd_xmap_from_keymap).
-fn engine_keymap_applies(keymap: Option<&str>, target: NativeKeymapTarget) -> bool {
-    let Some(keymap) = keymap else {
-        return target == NativeKeymapTarget::Emacs;
-    };
+fn engine_keymap_applies(keymap: &str, target: NativeKeymapTarget) -> bool {
+    // The bind view's keymap is always resolved (the registry
+    // stamps a no-`-m` registration with the map current at
+    // register time, GAP-3), so there is no keymap-less case
+    // here: the old mirror's `None` arm (emacs) is exactly the
+    // name such an entry now carries.
     match keymap {
         "emacs" | "emacs-standard" | "emacs-meta" | "emacs-ctlx" => {
             target == NativeKeymapTarget::Emacs
@@ -3627,23 +3657,22 @@ fn session_keymap_targets(target: NativeKeymapTarget) -> &'static [NativeKeymapT
 /// which GNU routes to the emacs map the session never builds — is
 /// a [`DroppedReason::NotActiveKeymap`].
 fn keymap_filter_drop(
-    entry: &crate::bind_surface::EngineBindEntry,
+    entry: &rubash::api::BindEntryView,
     target: NativeKeymapTarget,
 ) -> Option<crate::keymap_registry::DroppedBind> {
-    if engine_keymap_applies(entry.keymap.as_deref(), target) {
+    if engine_keymap_applies(&entry.keymap, target) {
         return None;
     }
     if session_keymap_targets(target)
         .iter()
-        .any(|sibling| engine_keymap_applies(entry.keymap.as_deref(), *sibling))
+        .any(|sibling| engine_keymap_applies(&entry.keymap, *sibling))
     {
         return None;
     }
-    let reason = match entry.keymap.as_deref() {
-        Some(name) if !engine_keymap_known(name) => {
-            crate::keymap_registry::DroppedReason::KeymapMismatch
-        }
-        _ => crate::keymap_registry::DroppedReason::NotActiveKeymap,
+    let reason = if !engine_keymap_known(&entry.keymap) {
+        crate::keymap_registry::DroppedReason::KeymapMismatch
+    } else {
+        crate::keymap_registry::DroppedReason::NotActiveKeymap
     };
     Some(crate::keymap_registry::dropped_bind_for(entry, reason))
 }
@@ -4600,14 +4629,14 @@ fn alt_bound_keys(keybindings: &Keybindings) -> std::collections::HashSet<KeyCod
 }
 
 fn collect_chord_bindings(
-    entries: &[crate::bind_surface::EngineBindEntry],
+    entries: &[rubash::api::BindEntryView],
     target: NativeKeymapTarget,
     index_base: usize,
 ) -> (Vec<ChordBinding>, Vec<crate::keymap_registry::DroppedBind>) {
     let mut chords = Vec::new();
     let mut dropped = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+        if !engine_keymap_applies(&entry.keymap, target) {
             // niubash#834: same keymap-filter record as the flat
             // path (the build merges and dedups the two).
             if let Some(drop) = keymap_filter_drop(entry, target) {
@@ -4615,20 +4644,17 @@ fn collect_chord_bindings(
             }
             continue;
         }
-        let Some(keys) = parse_chord_sequence(&entry.keyseq) else {
+        let Some(keys) = chord_from_bind_bytes(&entry.bytes) else {
             continue;
         };
         let event = match &entry.kind {
-            crate::bind_surface::EngineBindKind::Execute { .. } => {
-                ReedlineEvent::ExecuteHostCommand(format!(
-                    "{BINDX_HOST_COMMAND_PREFIX}{}",
-                    index_base + index
-                ))
-            }
-            crate::bind_surface::EngineBindKind::Macro { text } => {
+            rubash::api::BindKindView::Execute { .. } => ReedlineEvent::ExecuteHostCommand(
+                format!("{BINDX_HOST_COMMAND_PREFIX}{}", index_base + index),
+            ),
+            rubash::api::BindKindView::Macro { text } => {
                 edit_event(EditCommand::InsertString(text.clone()))
             }
-            crate::bind_surface::EngineBindKind::Function { name } => {
+            rubash::api::BindKindView::Function { name } => {
                 // `quoted-insert` sequences arm the chord layer's
                 // quote state; they are not chord events (see
                 // `collect_quote_sequences`, niubash#731). Delivered
@@ -4737,22 +4763,22 @@ fn retain_unbound_quote_sequences(
 /// the fork had no such variant, citing the superseded rev 401393f —
 /// that claim was stale.)
 fn collect_quote_sequences(
-    entries: &[crate::bind_surface::EngineBindEntry],
+    entries: &[rubash::api::BindEntryView],
     target: NativeKeymapTarget,
 ) -> Vec<Vec<(KeyModifiers, KeyCode)>> {
     let mut sequences = Vec::new();
     for entry in entries {
-        if !engine_keymap_applies(entry.keymap.as_deref(), target) {
+        if !engine_keymap_applies(&entry.keymap, target) {
             continue;
         }
-        let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind else {
+        let rubash::api::BindKindView::Function { name } = &entry.kind else {
             continue;
         };
         if name != "quoted-insert" {
             continue;
         }
-        let keys = parse_chord_sequence(&entry.keyseq)
-            .or_else(|| parse_key_sequence(&entry.keyseq).map(|single| vec![single]));
+        let keys = chord_from_bind_bytes(&entry.bytes)
+            .or_else(|| key_from_bind_bytes(&entry.bytes).map(|single| vec![single]));
         if let Some(keys) = keys {
             sequences.push(keys);
         }
@@ -5123,7 +5149,12 @@ const DEFAULT_KEYSEQ_TIMEOUT_MS: u64 = 500;
 /// keyseq-timeout 250'` in the rc, or `~/.inputrc`). `None` when the engine
 /// has no such variable (older revision).
 fn engine_keyseq_timeout(shell: &Shell) -> Option<std::time::Duration> {
-    let raw = shell.executor().bind_readline_variable("keyseq-timeout")?;
+    let view = shell.session().bind_view();
+    let raw = view
+        .variables
+        .iter()
+        .find(|(name, _)| name == "keyseq-timeout")
+        .map(|(_, value)| value.clone())?;
     raw.trim()
         .parse::<u64>()
         .ok()
@@ -5148,10 +5179,25 @@ fn completion_event() -> ReedlineEvent {
 /// the shell prompt; there is no second grammar. Failures carry the
 /// reason verbatim: `niu config migrate` refuses a legacy rule with it
 /// instead of writing an unusable rc line.
-pub(crate) fn parse_keymap_bind_rule(
-    spec: &str,
-) -> Result<crate::bind_surface::EngineBindEntry, String> {
-    use crate::bind_surface::{EngineBindEntry, EngineBindKind};
+/// One parsed `[keymap].bind` rule (niubash#630, K4): the host's
+/// own config-grammar artifact, NOT an engine registry entry —
+/// the keymap stays optional because its resolution happens
+/// later, when the migrated `bind` line runs in the engine. The
+/// payload class is the contract's `BindKindView` (the classes
+/// are the engine's; only the targeting is the rule's).
+// The fields are the parse result: the production consumer
+// (config migration) validates with the Ok/Err alone, and the
+// field-level assertions live in this module's pins.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct KeymapBindRule {
+    pub keyseq: String,
+    pub kind: rubash::api::BindKindView,
+    pub keymap: Option<String>,
+}
+
+pub(crate) fn parse_keymap_bind_rule(spec: &str) -> Result<KeymapBindRule, String> {
+    use rubash::api::BindKindView;
     let mut rest = spec.trim();
     if rest.is_empty() {
         return Err("the rule is empty".to_string());
@@ -5214,9 +5260,9 @@ pub(crate) fn parse_keymap_bind_rule(
     if execute {
         let (keyseq, command) =
             rubash::builtins::bind::parse_unix_command_spec(rest).map_err(reason)?;
-        return Ok(EngineBindEntry {
+        return Ok(KeymapBindRule {
             keyseq,
-            kind: EngineBindKind::Execute { command },
+            kind: BindKindView::Execute { command },
             keymap,
         });
     }
@@ -5227,10 +5273,10 @@ pub(crate) fn parse_keymap_bind_rule(
     }
     let parsed = rubash::builtins::bind::parse_positional_binding(rest).map_err(reason)?;
     let kind = match parsed.spec {
-        rubash::builtins::bind::BindingSpec::Function { name } => EngineBindKind::Function { name },
-        rubash::builtins::bind::BindingSpec::Macro { text } => EngineBindKind::Macro { text },
+        rubash::builtins::bind::BindingSpec::Function { name } => BindKindView::Function { name },
+        rubash::builtins::bind::BindingSpec::Macro { text } => BindKindView::Macro { text },
     };
-    Ok(EngineBindEntry {
+    Ok(KeymapBindRule {
         keyseq: parsed.keyseq,
         kind,
         keymap,
@@ -7911,15 +7957,17 @@ mod tests {
     /// grouped residue; any *new* unmapped key is a regression.
     #[test]
     fn gnu_default_bind_table_mirrors_except_known_gaps() {
-        let entries: Vec<crate::bind_surface::EngineBindEntry> =
+        let entries: Vec<rubash::api::BindEntryView> =
             rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
                 .iter()
-                .map(|(keyseq, name)| crate::bind_surface::EngineBindEntry {
+                .map(|(keyseq, name)| rubash::api::BindEntryView {
                     keyseq: (*keyseq).to_string(),
-                    kind: crate::bind_surface::EngineBindKind::Function {
+                    bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
+                    kind: rubash::api::BindKindView::Function {
                         name: (*name).to_string(),
                     },
-                    keymap: Some("emacs-standard".to_string()),
+                    keymap: "emacs-standard".to_string(),
+                    dump: String::new(),
                 })
                 .collect();
 
@@ -7938,7 +7986,7 @@ mod tests {
         let mut table_names: Vec<&str> = entries
             .iter()
             .map(|entry| match &entry.kind {
-                crate::bind_surface::EngineBindKind::Function { name } => name.as_str(),
+                rubash::api::BindKindView::Function { name } => name.as_str(),
                 _ => unreachable!("this gate feeds function entries only"),
             })
             .collect();
@@ -8258,19 +8306,23 @@ mod tests {
         // A user function binding joins its function's list, and a
         // macro rebind of a default seq retires the function claim.
         let entries = vec![
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: "\\C-o".to_string(),
-                kind: crate::bind_surface::EngineBindKind::Function {
+                bytes: decode_keyseq_bytes("\\C-o").unwrap_or_default(),
+                kind: rubash::api::BindKindView::Function {
                     name: "operate-and-get-next".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: "\\C-a".to_string(),
-                kind: crate::bind_surface::EngineBindKind::Macro {
+                bytes: decode_keyseq_bytes("\\C-a").unwrap_or_default(),
+                kind: rubash::api::BindKindView::Macro {
                     text: "home".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
         ];
         let lines = dump_function_lines(&entries);
@@ -8827,13 +8879,15 @@ mod tests {
     /// own stays an actionable drop.
     #[test]
     fn issue731_self_insert_inserts_the_bound_key() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let function = |keyseq: &str, name: &str| BindEntry {
             keyseq: keyseq.to_string(),
+            bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
             kind: BindKind::Function {
                 name: name.to_string(),
             },
-            keymap: None,
+            keymap: "emacs-standard".to_string(),
+            dump: String::new(),
         };
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
@@ -8874,13 +8928,15 @@ mod tests {
     /// collected per keymap target.
     #[test]
     fn issue731_quoted_insert_bind_is_collected_not_dropped() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let function = |keyseq: &str, keymap: Option<&str>, name: &str| BindEntry {
             keyseq: keyseq.to_string(),
+            bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
             kind: BindKind::Function {
                 name: name.to_string(),
             },
-            keymap: keymap.map(str::to_string),
+            keymap: keymap.unwrap_or("emacs-standard").to_string(),
+            dump: String::new(),
         };
         let entries = vec![
             function(r"\C-v", Some("emacs-standard"), "quoted-insert"),
@@ -9291,38 +9347,46 @@ mod tests {
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
             // ble's Enter hook, spelled the way its binder writes it.
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r"\C-m".to_string(),
-                kind: crate::bind_surface::EngineBindKind::Execute {
+                bytes: decode_keyseq_bytes(r"\C-m").unwrap_or_default(),
+                kind: rubash::api::BindKindView::Execute {
                     command: "ble-decode-enter".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // ble's C-u hook in the raw-byte spelling.
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: "\u{15}".to_string(),
-                kind: crate::bind_surface::EngineBindKind::Execute {
+                bytes: decode_keyseq_bytes("\u{15}").unwrap_or_default(),
+                kind: rubash::api::BindKindView::Execute {
                     command: "ble-decode-ctrl-u".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // A lone high byte: undeliverable, recorded as dropped.
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r"\201".to_string(),
-                kind: crate::bind_surface::EngineBindKind::Execute {
+                bytes: decode_keyseq_bytes(r"\201").unwrap_or_default(),
+                kind: rubash::api::BindKindView::Execute {
                     command: "ble-decode-high-byte".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // GNU's shell-backward-word default: a host function niu
             // does not implement, on a chain-shaped keyseq — dropped
             // with a record, not reported as an actionable failure.
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r"\e\C-b".to_string(),
-                kind: crate::bind_surface::EngineBindKind::Function {
+                bytes: decode_keyseq_bytes(r"\e\C-b").unwrap_or_default(),
+                kind: rubash::api::BindKindView::Function {
                     name: "shell-backward-word".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
         ];
         let (unusable, dropped) = add_engine_bind_keybindings_recorded(
@@ -9777,28 +9841,34 @@ mod tests {
 
     #[test]
     fn collect_chord_bindings_carries_events_and_bindx_indices() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let entries = vec![
             BindEntry {
                 keyseq: r"\C-t".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-t").unwrap_or_default(),
                 kind: BindKind::Execute {
                     command: "flat".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             BindEntry {
                 keyseq: r"\C-x\C-e".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-x\C-e").unwrap_or_default(),
                 kind: BindKind::Execute {
                     command: "chord".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             BindEntry {
                 keyseq: r"\C-x\C-r".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-x\C-r").unwrap_or_default(),
                 kind: BindKind::Macro {
                     text: "reload".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
         ];
         let (chords, _) = collect_chord_bindings(&entries, NativeKeymapTarget::Emacs, 0);
@@ -9828,53 +9898,65 @@ mod tests {
     fn engine_bind_entries_mirror_into_reedline_keybindings() {
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r#"\C-r"#.to_string(),
-                kind: crate::bind_surface::EngineBindKind::Execute {
+                bytes: decode_keyseq_bytes(r#"\C-r"#).unwrap_or_default(),
+                kind: rubash::api::BindKindView::Execute {
                     command: "__fzf_history__".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r#"\C-t"#.to_string(),
-                kind: crate::bind_surface::EngineBindKind::Macro {
+                bytes: decode_keyseq_bytes(r#"\C-t"#).unwrap_or_default(),
+                kind: rubash::api::BindKindView::Macro {
                     text: "ins-macro".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r#"\C-o"#.to_string(),
-                kind: crate::bind_surface::EngineBindKind::Function {
+                bytes: decode_keyseq_bytes(r#"\C-o"#).unwrap_or_default(),
+                kind: rubash::api::BindKindView::Function {
                     name: "accept-line".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // Unknown readline function name: GNU silently drops it
             // (wt100 probe), so the bridge reports it unusable.
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r#"\C-g"#.to_string(),
-                kind: crate::bind_surface::EngineBindKind::Function {
+                bytes: decode_keyseq_bytes(r#"\C-g"#).unwrap_or_default(),
+                kind: rubash::api::BindKindView::Function {
                     name: "no-such-fn".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // Multi-key sequence: reedline cannot represent it.
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r#"\C-x\C-f"#.to_string(),
-                kind: crate::bind_surface::EngineBindKind::Execute {
+                bytes: decode_keyseq_bytes(r#"\C-x\C-f"#).unwrap_or_default(),
+                kind: rubash::api::BindKindView::Execute {
                     command: "multi".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // vi-insert keymap entry must not land on the emacs keymap
             // (\C-6 is unbound in the emacs defaults, so a hit would be
             // ours and ours alone).
-            crate::bind_surface::EngineBindEntry {
+            rubash::api::BindEntryView {
                 keyseq: r#"\C-6"#.to_string(),
-                kind: crate::bind_surface::EngineBindKind::Execute {
+                bytes: decode_keyseq_bytes(r#"\C-6"#).unwrap_or_default(),
+                kind: rubash::api::BindKindView::Execute {
                     command: "vi-only".to_string(),
                 },
-                keymap: Some("vi-insert".to_string()),
+                keymap: "vi-insert".to_string(),
+                dump: String::new(),
             },
         ];
 
@@ -9929,13 +10011,15 @@ mod tests {
     // entries still mirror.
     #[test]
     fn issue612_fzf_workaround_binds_drop_silently() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let function = |keyseq: &str, keymap: &str, name: &str| BindEntry {
             keyseq: keyseq.to_string(),
+            bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
             kind: BindKind::Function {
                 name: name.to_string(),
             },
-            keymap: Some(keymap.to_string()),
+            keymap: keymap.to_string(),
+            dump: String::new(),
         };
         // Verbatim from fzf 0.74.5 `shell/key-bindings.bash`.
         let workarounds = vec![
@@ -9980,24 +10064,30 @@ mod tests {
         let mut entries = vec![
             BindEntry {
                 keyseq: r"\C-t".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-t").unwrap_or_default(),
                 kind: BindKind::Execute {
                     command: "fzf-file-widget".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             BindEntry {
                 keyseq: r"\C-r".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-r").unwrap_or_default(),
                 kind: BindKind::Execute {
                     command: "__fzf_history__".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             BindEntry {
                 keyseq: r"\ec".to_string(),
+                bytes: decode_keyseq_bytes(r"\ec").unwrap_or_default(),
                 kind: BindKind::Execute {
                     command: "__fzf_cd__".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
         ];
         entries.extend(workarounds);
@@ -10028,93 +10118,123 @@ mod tests {
     // delivered by `ChordEditMode` (the chord layer), editing-mode toggles
     // by `SwitchMode`, and `redraw-current-line` maps to `Repaint`. What
     // still warns is exactly what a user can act on: an unknown function
-    // and a malformed sequence.
+    // and a genuinely undeliverable byte shape. (A dangling modifier
+    // used to be the "malformed" case; since GAP-3 the engine's
+    // canonical bytes rule, and GNU reads it as C-@ — it binds.)
     #[test]
     fn issue612_structural_classes_are_gone() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let mut keybindings = default_emacs_keybindings();
         let entries = vec![
             // A chord: delivered by the chord layer, never dropped.
             BindEntry {
                 keyseq: r"\C-x\C-a".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-x\C-a").unwrap_or_default(),
                 kind: BindKind::Execute {
                     command: "hypothetical-tool-cmd".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // A chord macro, same.
             BindEntry {
                 keyseq: r"\C-b\C-b".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-b\C-b").unwrap_or_default(),
                 kind: BindKind::Macro {
                     text: "xx".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // A mode toggle: maps to SwitchMode.
             BindEntry {
                 keyseq: r"\C-q".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-q").unwrap_or_default(),
                 kind: BindKind::Function {
                     name: "vi-editing-mode".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // A deliverable readline function: maps to Repaint.
             BindEntry {
                 keyseq: r"\C-y".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-y").unwrap_or_default(),
                 kind: BindKind::Function {
                     name: "redraw-current-line".to_string(),
                 },
-                keymap: Some("emacs-standard".to_string()),
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
             // Unknown function name: actionable, still warns.
             BindEntry {
                 keyseq: r"\C-g".to_string(),
+                bytes: decode_keyseq_bytes(r"\C-g").unwrap_or_default(),
                 kind: BindKind::Function {
                     name: "no-such-fn".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
-            // Malformed sequence (dangling modifier): still warns.
+            // Dangling modifier: the retired host decoder called
+            // this malformed and warned; the engine's canonical
+            // bytes are the authority since GAP-3, and GNU
+            // processes an incomplete `\C-` prefix as the prefix
+            // for '\0' (rl_translate_keyseq, bind.c:516) — byte
+            // 0x00, the deliverable C-@ key. It binds, silently.
             BindEntry {
                 keyseq: r"\C-".to_string(),
+                bytes: vec![0x00],
                 kind: BindKind::Execute {
-                    command: "broken".to_string(),
+                    command: "nul-cmd".to_string(),
                 },
-                keymap: None,
+                keymap: "emacs-standard".to_string(),
+                dump: String::new(),
             },
         ];
         let unusable =
             add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &entries);
         let reasons: Vec<UnusableBindReason> = unusable.iter().map(|bind| bind.reason).collect();
+        assert_eq!(reasons, vec![UnusableBindReason::Other]);
+        assert_eq!(warned_keyseqs(&unusable), vec![r"\C-g"]);
+        // The dangling-`\C-` entry (index 5) landed on C-@.
         assert_eq!(
-            reasons,
-            vec![UnusableBindReason::Other, UnusableBindReason::Other]
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char(' ')),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{BINDX_HOST_COMMAND_PREFIX}5"
+            )))
         );
-        assert_eq!(warned_keyseqs(&unusable), vec![r"\C-g", r"\C-"]);
     }
 
     #[test]
     fn engine_keymap_targets_split_vi_insert_and_normal() {
-        assert!(engine_keymap_applies(None, NativeKeymapTarget::Emacs));
-        assert!(!engine_keymap_applies(None, NativeKeymapTarget::ViInsert));
+        // GAP-3 re-home: the old pin's `None` case (a no-`-m`
+        // entry) no longer exists in the type — the bind view
+        // carries the resolved name such an entry is stamped
+        // with, "emacs-standard" under an emacs session.
         assert!(engine_keymap_applies(
-            Some("vi-insert"),
+            "emacs-standard",
+            NativeKeymapTarget::Emacs
+        ));
+        assert!(!engine_keymap_applies(
+            "emacs-standard",
             NativeKeymapTarget::ViInsert
         ));
         assert!(engine_keymap_applies(
-            Some("vi"),
-            NativeKeymapTarget::ViNormal
+            "vi-insert",
+            NativeKeymapTarget::ViInsert
         ));
+        assert!(engine_keymap_applies("vi", NativeKeymapTarget::ViNormal));
         assert!(engine_keymap_applies(
-            Some("vi-command"),
+            "vi-command",
             NativeKeymapTarget::ViNormal
         ));
         assert!(!engine_keymap_applies(
-            Some("vi-insert"),
+            "vi-insert",
             NativeKeymapTarget::ViNormal
         ));
         assert!(engine_keymap_applies(
-            Some("emacs-meta"),
+            "emacs-meta",
             NativeKeymapTarget::Emacs
         ));
     }
@@ -10194,14 +10314,16 @@ mod tests {
     // and what it shadowed.
     #[test]
     fn issue630_user_binding_beats_script_binding() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let config = NativeWidgetConfig::default();
         let engine = vec![BindEntry {
             keyseq: r"\C-g".to_string(),
+            bytes: decode_keyseq_bytes(r"\C-g").unwrap_or_default(),
             kind: BindKind::Execute {
                 command: "script-widget".to_string(),
             },
-            keymap: None,
+            keymap: "emacs-standard".to_string(),
+            dump: String::new(),
         }];
         let user = vec![native_widget_binding("^G", None, "accept-line")];
         let (built, entries, dropped) = build_keymap_for_target(
@@ -10243,12 +10365,14 @@ mod tests {
     // pre-K3 literal insert.
     #[test]
     fn issue630_dropped_records_classify_by_shape() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         use crate::keymap_registry::{DroppedKind, DroppedReason};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let entry = |keyseq: &str, kind: BindKind| BindEntry {
             keyseq: keyseq.to_string(),
+            bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
             kind,
-            keymap: None,
+            keymap: "emacs-standard".to_string(),
+            dump: String::new(),
         };
         let engine = vec![
             entry(
@@ -10346,14 +10470,16 @@ mod tests {
     // whether the keymap name exists at all.
     #[test]
     fn issue834_keymap_filtered_binds_are_recorded() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         use crate::keymap_registry::{DroppedReason, KeymapMode};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let entry = |keyseq: &str, keymap: Option<&str>, name: &str| BindEntry {
             keyseq: keyseq.to_string(),
+            bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
             kind: BindKind::Function {
                 name: name.to_string(),
             },
-            keymap: keymap.map(str::to_string),
+            keymap: keymap.unwrap_or("emacs-standard").to_string(),
+            dump: String::new(),
         };
         let dropped_for = |target: NativeKeymapTarget, mode: KeymapMode, engine: &[BindEntry]| {
             let defaults = match target {
@@ -10424,14 +10550,16 @@ mod tests {
     // quote state delivers it).
     #[test]
     fn issue834_chord_layer_drops_are_recorded() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
         use crate::keymap_registry::DroppedReason;
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         let function = |keyseq: &str, name: &str| BindEntry {
             keyseq: keyseq.to_string(),
+            bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
             kind: BindKind::Function {
                 name: name.to_string(),
             },
-            keymap: None,
+            keymap: "emacs-standard".to_string(),
+            dump: String::new(),
         };
         let entries = vec![
             function(r"\C-x\C-t", "unknown-fn"),
@@ -10609,15 +10737,17 @@ mod tests {
 
     #[test]
     fn k3_script_macro_decodes_keystrokes() {
-        use crate::bind_surface::{EngineBindEntry as BindEntry, EngineBindKind as BindKind};
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
         // fzf Alt-C, stored form: " \x02\x0b \x15`__fzf_cd__`\x1b\x05\x1br\r"
         // = space C-b C-k space C-u `__fzf_cd__` M-C-e M-r Enter.
         let entry = BindEntry {
             keyseq: r"\ec".to_string(),
+            bytes: decode_keyseq_bytes(r"\ec").unwrap_or_default(),
             kind: BindKind::Macro {
                 text: " \u{2}\u{b} \u{15}`__fzf_cd__`\u{1b}\u{5}\u{1b}r\r".to_string(),
             },
-            keymap: None,
+            keymap: "emacs-standard".to_string(),
+            dump: String::new(),
         };
         let (built, _, dropped) = build_keymap_for_target(
             default_emacs_keybindings(),
@@ -10662,7 +10792,7 @@ mod tests {
     // everything that cannot register a binding, with the reason.
     #[test]
     fn issue630_keymap_bind_rule_parser_forms() {
-        use crate::bind_surface::EngineBindKind as BindKind;
+        use rubash::api::BindKindView as BindKind;
         let entry = parse_keymap_bind_rule(r#""\C-g": redisplay"#).expect("function form");
         assert_eq!(entry.keyseq, r"\C-g");
         assert_eq!(

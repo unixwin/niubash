@@ -1072,7 +1072,11 @@ fn host_function_pointer(name: &str) -> usize {
 }
 
 /// Translate a GNU keyseq spelling into the raw bytes `rl_function_of_keyseq`
-/// consumes, through the ABI's own inputrc translator.
+/// consumes, through the ABI's own inputrc translator. Production
+/// mirroring reads the bind view's canonical bytes since GAP-3
+/// (niubash#863); this stays for the ABI test surface, which
+/// cross-checks the ABI's own translator against them.
+#[cfg(test)]
 fn translate_keyseq(keyseq: &str) -> Option<Vec<u8>> {
     let cseq = CString::new(keyseq).ok()?;
     let mut buffer = [0 as c_char; 256];
@@ -1137,37 +1141,34 @@ fn bind_raw_macro(root: usize, path: &[u8], text: &[u8]) -> bool {
 /// an untouched host key survives; a later host rebind of that key wins,
 /// like GNU's last-write rule.
 pub fn sync_host_keymap(
-    entries: &[crate::bind_surface::EngineBindEntry],
-    removals: &[(String, Option<String>)],
+    entries: &[rubash::api::BindEntryView],
+    removals: &[rubash::api::BindRemovalView],
 ) -> bool {
     let mut desired: BTreeMap<(usize, Vec<u8>), Option<AbiSlot>> = BTreeMap::new();
 
-    for (keyseq, keymap) in removals {
-        let root = keymap_name_root(keymap.as_deref());
-        if let Some(path) = translate_keyseq(keyseq) {
-            if !path.is_empty() {
-                desired.insert((root, path), None);
-            }
+    // GAP-3 (niubash#863): the key paths are the bind view's
+    // canonical bytes — the engine's own `keyseq_bytes` output —
+    // so the ABI mirror reads the same byte entries the editor
+    // bridge does instead of re-translating the written spellings
+    // through `rl_translate_keyseq` here.
+    for removal in removals {
+        let root = keymap_name_root(Some(&removal.keymap));
+        if !removal.bytes.is_empty() {
+            desired.insert((root, removal.bytes.clone()), None);
         }
     }
     for entry in entries {
-        let root = keymap_name_root(entry.keymap.as_deref());
-        let Some(path) = translate_keyseq(&entry.keyseq) else {
-            continue;
-        };
-        if path.is_empty() {
+        let root = keymap_name_root(Some(&entry.keymap));
+        if entry.bytes.is_empty() {
             continue;
         }
+        let path = entry.bytes.clone();
         let value = match &entry.kind {
-            crate::bind_surface::EngineBindKind::Function { name } => {
+            rubash::api::BindKindView::Function { name } => {
                 AbiSlot::Function(host_function_pointer(name))
             }
-            crate::bind_surface::EngineBindKind::Execute { .. } => {
-                AbiSlot::Function(host_command_pointer())
-            }
-            crate::bind_surface::EngineBindKind::Macro { text } => {
-                AbiSlot::Macro(text.as_bytes().to_vec())
-            }
+            rubash::api::BindKindView::Execute { .. } => AbiSlot::Function(host_command_pointer()),
+            rubash::api::BindKindView::Macro { text } => AbiSlot::Macro(text.as_bytes().to_vec()),
         };
         desired.insert((root, path), Some(value));
     }
@@ -1417,12 +1418,14 @@ mod tests {
             let name = CString::new("dump-variables").unwrap();
             readline::rl_named_function(name.as_ptr()).expect("dump-variables")
         };
-        let entries = vec![crate::bind_surface::EngineBindEntry {
+        let entries = vec![rubash::api::BindEntryView {
             keyseq: keyseq.to_string(),
-            kind: crate::bind_surface::EngineBindKind::Function {
+            bytes: path.clone(),
+            kind: rubash::api::BindKindView::Function {
                 name: "dump-variables".to_string(),
             },
-            keymap: Some("emacs-standard".to_string()),
+            keymap: "emacs-standard".to_string(),
+            dump: String::new(),
         }];
         assert!(sync_host_keymap(&entries, &[]));
         let seen = unsafe {
@@ -1442,7 +1445,11 @@ mod tests {
         // `bind -r`: the tombstone clears the slot for ABI consumers.
         assert!(sync_host_keymap(
             &[],
-            &[(keyseq.to_string(), Some("emacs-standard".to_string()))]
+            &[rubash::api::BindRemovalView {
+                keyseq: keyseq.to_string(),
+                bytes: path.clone(),
+                keymap: "emacs-standard".to_string(),
+            }]
         ));
         let cleared = unsafe {
             let raw = CString::new(path.clone()).unwrap();
