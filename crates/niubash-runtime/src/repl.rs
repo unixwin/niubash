@@ -10,6 +10,7 @@ use std::{borrow::Cow, io::Write};
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::cycle_menu::SharedCycleSession;
 use crate::completion::insert_menu::InsertStopMenu;
+use crate::completion::menu_open::MenuOpenFlagMenu;
 use crate::completion::NiubashCompleter;
 use crate::config::{
     CompletionInteraction, CompletionStyle, EditorMode, MenuConfig, NativeWidgetBinding,
@@ -372,6 +373,11 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // too instead of leaving M-* without a candidate source.
     let engine_completer = NiubashCompleter::new(shell_ref.completion_state.clone());
     let menu_open = Arc::new(AtomicBool::new(false));
+    // niubash#832: every editor build starts with the flag DOWN. The
+    // Arc is fresh per build today, but the guarantee is stated, not
+    // incidental: a flag stuck true silences the hinter for the whole
+    // session, so no build may inherit one.
+    menu_open.store(false, std::sync::atomic::Ordering::Relaxed);
     let completion_menu = ReedlineMenu::WithCompleter {
         menu: configured_completion_menu(
             COMPLETION_MENU,
@@ -382,10 +388,16 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         ),
         completer: Box::new(completer),
     };
-    let history_menu = ReedlineMenu::HistoryMenu(Box::new(configured_list_menu(
-        HISTORY_MENU,
-        menu_config.history_page_size,
-        menu_config,
+    // niubash#832: the history menu is a ListMenu too — it carries the
+    // flag through the same wrapper as the completion list faces, so
+    // the hinter stands down while history is being browsed as well.
+    let history_menu = ReedlineMenu::HistoryMenu(Box::new(MenuOpenFlagMenu::new(
+        Box::new(configured_list_menu(
+            HISTORY_MENU,
+            menu_config.history_page_size,
+            menu_config,
+        )),
+        menu_open.clone(),
     )));
 
     let build_args = (
@@ -620,7 +632,9 @@ fn configured_completion_menu(
             let menu = crate::completion::gnu_menu::GnuMenu::default()
                 .with_name(name)
                 .with_marker(gnu_indicator);
-            Box::new(menu)
+            // niubash#832: the GNU menu carries the hinter stand-down
+            // flag through the wrapper, like every other style.
+            Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
         }
         CompletionStyle::Ide => {
             // Multi-column popup with descriptions (VS Code style). Column
@@ -635,10 +649,15 @@ fn configured_completion_menu(
                 .with_description_mode(reedline::DescriptionMode::PreferRight);
             // insert interaction: first TAB splices the common prefix and
             // stops; TAB #2 opens the popup (niubash#778 follow-up).
+            // niubash#832: the flag wrapper sits OUTSIDE the insert-stop
+            // wrapper so a splice-and-stop deactivation lowers the flag.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
         CompletionStyle::Column => {
@@ -665,10 +684,14 @@ fn configured_completion_menu(
         }
         CompletionStyle::List => {
             let menu = configured_list_menu(name, config.completion_page_size, config);
+            // niubash#832: flag wrapper, same composition as the Ide arm.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
         CompletionStyle::Inline => {
@@ -678,10 +701,14 @@ fn configured_completion_menu(
                 .with_page_size(1)
                 .with_max_entry_lines(config.max_entry_lines)
                 .with_only_buffer_difference(false);
+            // niubash#832: flag wrapper, same composition as the Ide arm.
             if config.completion_interaction == CompletionInteraction::Insert {
-                Box::new(InsertStopMenu::new(Box::new(menu)))
+                Box::new(MenuOpenFlagMenu::new(
+                    Box::new(InsertStopMenu::new(Box::new(menu))),
+                    menu_open.clone(),
+                ))
             } else {
-                Box::new(menu)
+                Box::new(MenuOpenFlagMenu::new(Box::new(menu), menu_open.clone()))
             }
         }
     }
@@ -1240,7 +1267,12 @@ fn run_readline_command(
                 });
             }
         }
-        _ => {}
+        _ => {
+            // niubash#835: a name that lands here rode the readline
+            // host channel but has no host implementation — name it
+            // in the log instead of swallowing it silently.
+            log::warn!("readline command {name:?} has no host implementation; ignoring");
+        }
     }
     SentinelOutcome::Resumed
 }
@@ -3317,7 +3349,40 @@ fn add_engine_bind_keybindings_recorded(
             // reported. Anything else that fails to parse is malformed
             // and stays actionable (niubash#612).
             if parse_chord_sequence(&entry.keyseq).is_some() {
+                // The chord layer delivers chains — except a function
+                // name neither layer carries (the widget-sentinel
+                // fallthrough in `native_widget_event`, which
+                // `collect_chord_bindings` also skips): such a chain
+                // used to vanish without a trace here. Record it
+                // (niubash#805). `self-insert` chains are carried by
+                // the chord layer's own arm, and `quoted-insert`
+                // reads as delivered, so neither is recorded.
+                if let crate::bind_surface::EngineBindKind::Function { name } = &entry.kind {
+                    if name != "self-insert" && !gnu_name_is_delivered(name) {
+                        dropped.push(crate::keymap_registry::dropped_bind_for(
+                            entry,
+                            crate::keymap_registry::DroppedReason::UnknownFunction,
+                        ));
+                    }
+                }
                 continue;
+            }
+            // A decoded byte ≥ 0x80 that no unit accepted is a lone
+            // high byte: the input layer decodes terminal text into
+            // characters before keys, so the byte names no key event
+            // and never will (GNU's byte map binds `\200`–`\377` to
+            // self-insert; the characters those bytes belong to
+            // self-insert natively here, and ble.sh's byte-at-a-time
+            // decode hooks are this same class). Structural drop with
+            // a record — not an actionable bind failure (niubash#805).
+            if let Some(bytes) = decode_keyseq_bytes(&entry.keyseq) {
+                if bytes.iter().any(|byte| *byte >= 0x80) {
+                    dropped.push(crate::keymap_registry::dropped_bind_for(
+                        entry,
+                        crate::keymap_registry::DroppedReason::UnparseableKeyseq,
+                    ));
+                    continue;
+                }
             }
             note_unusable_bind(
                 &mut unusable,
@@ -3411,9 +3476,26 @@ fn add_engine_bind_keybindings_recorded(
                         // native_widget_event's sentinel fallthrough means
                         // "unknown readline function": skipped, like GNU's
                         // silent rl_parse_and_bind drop (wt100 probe).
+                        // On a chain-shaped keyseq the bridge has always
+                        // ledgered that outcome without a warning (the
+                        // chord-parse branch above used to swallow it
+                        // whole): GNU's `\e\C-b` family (shell-backward-
+                        // word and siblings) names host functions niu
+                        // does not implement, and neither layer carries
+                        // the widget sentinel for them. Keep the trace —
+                        // a dropped record, not a silent vanish — but
+                        // stay out of the actionable warning list
+                        // (niubash#805).
                         Some(ReedlineEvent::ExecuteHostCommand(payload))
                             if payload.starts_with(WIDGET_HOST_COMMAND_PREFIX) =>
                         {
+                            if parse_chord_sequence(&entry.keyseq).is_some() {
+                                dropped.push(crate::keymap_registry::dropped_bind_for(
+                                    entry,
+                                    crate::keymap_registry::DroppedReason::UnknownFunction,
+                                ));
+                                continue;
+                            }
                             note_unusable_bind(
                                 &mut unusable,
                                 &mut dropped,
@@ -3620,44 +3702,50 @@ fn normalize_macro_escapes(text: &str) -> String {
     if !text.contains('\\') {
         return text.to_string();
     }
-    let mut out = String::with_capacity(text.len());
+    // niubash#844: accumulate BYTES, not chars. A `\xHH` escape names a
+    // raw byte; pushing it as `byte as char` widened 0x80..=0xFF to
+    // U+0080..U+00FF, whose UTF-8 re-encoding is two bytes — so
+    // `\xc3\xa9` (the UTF-8 spelling of `é`) came out as `Ã©`
+    // mojibake. Ordinary text is UTF-8-encoded into the same byte
+    // stream and the whole output is decoded once at the end.
+    let mut out: Vec<u8> = Vec::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
-            out.push(c);
+            push_macro_char(&mut out, c);
             continue;
         }
         match chars.next() {
-            None => out.push('\\'),
+            None => push_macro_char(&mut out, '\\'),
             Some(tag @ ('C' | 'M')) if chars.peek() == Some(&'-') => {
                 chars.next(); // consume '-'
                 match chars.next() {
                     Some(key) => {
                         if tag == 'M' {
-                            out.push('\u{1b}');
-                            out.push(key);
+                            push_macro_char(&mut out, '\u{1b}');
+                            push_macro_char(&mut out, key);
                         } else {
-                            out.push(control_byte_for_letter(key));
+                            push_macro_char(&mut out, control_byte_for_letter(key));
                         }
                     }
                     None => {
-                        out.push('\\');
-                        out.push(tag);
-                        out.push('-');
+                        push_macro_char(&mut out, '\\');
+                        push_macro_char(&mut out, tag);
+                        push_macro_char(&mut out, '-');
                     }
                 }
             }
-            Some('e') => out.push('\u{1b}'),
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('a') => out.push('\u{7}'),
-            Some('b') => out.push('\u{8}'),
-            Some('d') => out.push('\u{7f}'),
-            Some('f') => out.push('\u{c}'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('v') => out.push('\u{b}'),
+            Some('e') => push_macro_char(&mut out, '\u{1b}'),
+            Some('\\') => push_macro_char(&mut out, '\\'),
+            Some('"') => push_macro_char(&mut out, '"'),
+            Some('a') => push_macro_char(&mut out, '\u{7}'),
+            Some('b') => push_macro_char(&mut out, '\u{8}'),
+            Some('d') => push_macro_char(&mut out, '\u{7f}'),
+            Some('f') => push_macro_char(&mut out, '\u{c}'),
+            Some('n') => push_macro_char(&mut out, '\n'),
+            Some('r') => push_macro_char(&mut out, '\r'),
+            Some('t') => push_macro_char(&mut out, '\t'),
+            Some('v') => push_macro_char(&mut out, '\u{b}'),
             Some('x') => {
                 // \xHH: two hex digits; fewer keeps the escape literal.
                 let hi = chars.next();
@@ -3665,27 +3753,34 @@ fn normalize_macro_escapes(text: &str) -> String {
                 match (hi, lo) {
                     (Some(h), Some(l)) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
                         let byte = u8::from_str_radix(&format!("{h}{l}"), 16).unwrap_or(0);
-                        out.push(byte as char);
+                        out.push(byte);
                     }
                     _ => {
-                        out.push('\\');
-                        out.push('x');
+                        push_macro_char(&mut out, '\\');
+                        push_macro_char(&mut out, 'x');
                         if let Some(h) = hi {
-                            out.push(h);
+                            push_macro_char(&mut out, h);
                         }
                         if let Some(l) = lo {
-                            out.push(l);
+                            push_macro_char(&mut out, l);
                         }
                     }
                 }
             }
             Some(other) => {
-                out.push('\\');
-                out.push(other);
+                push_macro_char(&mut out, '\\');
+                push_macro_char(&mut out, other);
             }
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Append one char's UTF-8 bytes to a byte-accumulating macro output
+/// (niubash#844, see [`normalize_macro_escapes`]).
+fn push_macro_char(out: &mut Vec<u8>, c: char) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 }
 
 /// The control byte a `\C-` letter names (readline translate_keyseq):
@@ -4074,9 +4169,21 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "complete" => Some(completion_event()),
         // `menu-complete` is GNU's cycling completion: the same event
         // (the menu cycles under the host's interaction rules,
-        // niubash#731). The backward/old variants stay undelivered —
-        // the editor has no open-the-menu-backward event.
+        // niubash#731).
         "menu-complete" => Some(completion_event()),
+        // GNU `menu-complete-backward` (complete.c
+        // `rl_menu_complete_backward`, niubash#835): step the open
+        // menu backwards, opening it when closed — the mirror of the
+        // cycle interaction's TAB composition in
+        // `add_menu_keybindings`. `MenuPrevious` is Handled only
+        // while a menu is active and `Menu(name)` is Inapplicable
+        // while one is, so the UntilFound order delivers exactly one
+        // of them per press. (The `old-menu-complete` spelling stays
+        // undelivered.)
+        "menu-complete-backward" => Some(ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::MenuPrevious,
+            ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+        ])),
         // GNU's listing / bulk-insert completion functions (complete.c
         // `rl_possible_completions`, `rl_insert_completions`).
         "possible-completions" => Some(ReedlineEvent::PossibleCompletions),
@@ -4087,7 +4194,11 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             Some(edit_event(EditCommand::CutFromLineStart))
         }
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
-        "yank" => Some(edit_event(EditCommand::PasteCutBufferBefore)),
+        // niubash#850: `Yank`, not `PasteCutBufferBefore` — the
+        // editor's YankPop gates on the last edit being Yank/YankPop,
+        // so the paste-before variant made every later yank-pop
+        // inapplicable (a dead M-y after any niu yank).
+        "yank" => Some(edit_event(EditCommand::Yank)),
         "undo" => Some(edit_event(EditCommand::Undo)),
         "suspend" => Some(ReedlineEvent::Suspend),
         "redo" => Some(edit_event(EditCommand::Redo)),
@@ -4112,7 +4223,12 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "unix-filename-rubout" | "vi-filename-rubout" => {
             Some(edit_event(EditCommand::CutFilenameLeft))
         }
-        "exchange-point-and-mark" => Some(edit_event(EditCommand::SwapCursorAndAnchor)),
+        // niubash#850: the real `ExchangePointAndMark` (rl_mark
+        // semantics, the command the editor's own C-x C-x delivers),
+        // not `SwapCursorAndAnchor` — the selection-anchor flip
+        // no-ops without a live selection, so the two paths to the
+        // same GNU function used to do different things.
+        "exchange-point-and-mark" => Some(edit_event(EditCommand::ExchangePointAndMark)),
         // GNU `set-mark` (C-@ / M-SPC): drop the mark at point.
         "set-mark" => Some(edit_event(EditCommand::SetMark)),
         // Verbatim next-key insertion (`rl_quoted_insert`).
@@ -4165,13 +4281,14 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // explicit argument — the only shape reachable without
         // readline's prefix-argument machinery): move to the line
         // start, insert the comment-begin string (GNU's default is
-        // `#`, rlconf.h `RL_COMMENT_BEGIN_DEFAULT`), and accept the
+        // `# `, rlconf.h `RL_COMMENT_BEGIN_DEFAULT` — the same string
+        // the editor's own M-# inserts, niubash#850), and accept the
         // line. A customized comment-begin is not consulted, the same
         // static-arm limit as the rest of this table (niubash#731).
         "insert-comment" => Some(ReedlineEvent::Multiple(vec![
             ReedlineEvent::Edit(vec![
                 EditCommand::MoveToLineStart { select: false },
-                EditCommand::InsertString("#".to_string()),
+                EditCommand::InsertString("# ".to_string()),
             ]),
             ReedlineEvent::Enter,
         ])),
@@ -4348,7 +4465,9 @@ fn gnu_default_chord_bindings() -> Vec<ChordBinding> {
         (')', ReedlineEvent::EndKbdMacro),
         ('e', ReedlineEvent::CallLastKbdMacro),
         ('u', edit_event(EditCommand::Undo)),
-        ('x', edit_event(EditCommand::SwapCursorAndAnchor)),
+        // niubash#850: C-x C-x is exchange-point-and-mark — the real
+        // mark command, matching the native_widget_event arm.
+        ('x', edit_event(EditCommand::ExchangePointAndMark)),
     ] {
         chords.push(ChordBinding {
             keys: vec![
@@ -4533,11 +4652,6 @@ fn collect_chord_bindings(
 /// chord layer's quote state (niubash#731): any parseable sequence
 /// counts — a single key (`"\C-v"`) or a chain — filtered by the
 /// same keymap targeting as every other engine-bind consumer. The
-/// pinned reedline fork has no quoted-insert event of its own (no
-/// such variant in its `ReedlineEvent`/`EditCommand` at rev
-/// 401393f), so the delivery is the host layer's: completing one of
-/// these sequences arms the quote, and the next key inserts its own
-/// character literally.
 /// Every key sequence a plugin unbound for TARGET, flat (single
 /// key) and chord spellings alike (niubash#843(e)).
 fn plugin_unbind_keysets(target: NativeKeymapTarget) -> Vec<Vec<(KeyModifiers, KeyCode)>> {
@@ -4562,6 +4676,16 @@ fn retain_unbound_quote_sequences(
     sequences.retain(|sequence| !unbinds.contains(sequence));
 }
 
+/// pinned ruline fork DOES carry a quoted-insert event of its own
+/// (`ReedlineEvent::QuotedInsert` at rev 8351932, dispatched in its
+/// engine — the `native_widget_event` arm returns it), but sequences
+/// arriving through the engine-bind/chord layer are intercepted by
+/// this layer's quote state before the engine sees them, so the host
+/// delivery still stands for that path: completing one of these
+/// sequences arms the quote, and the next key inserts its own
+/// character literally. (niubash#835: this comment previously claimed
+/// the fork had no such variant, citing the superseded rev 401393f —
+/// that claim was stale.)
 fn collect_quote_sequences(
     entries: &[crate::bind_surface::EngineBindEntry],
     target: NativeKeymapTarget,
@@ -4749,8 +4873,8 @@ impl EditMode for ChordEditMode {
 }
 
 impl ChordEditMode {
-    fn dispatch(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
-        let Some(key) = chord_key(&raw) else {
+    fn dispatch(&mut self, mut raw: crossterm29::event::Event) -> ReedlineEvent {
+        let Some(mut key) = chord_key(&raw) else {
             // Non-key traffic (key releases, focus flicker, resize): the
             // lookahead can pull one in as an Esc partner and hand it
             // straight here — an unconvertible event must be inert, not
@@ -4760,6 +4884,34 @@ impl ChordEditMode {
                 Err(_) => ReedlineEvent::None,
             };
         };
+        // GNU `do-lowercase-version` (text.c rl_do_lowercase_version),
+        // one-event form: a terminal sends ESC + `X` for Meta-X, and
+        // the input layer folds that into one Alt+Shift+Char('X')
+        // event. Bindings live at the lowercase Meta slot (the bridge
+        // lowercases every Meta partner it installs), and the inner
+        // machine's lookup keeps SHIFT, so the folded event could
+        // never match — ble.sh's ESC-prefixed macros for uppercase
+        // partners were dead on arrival (niubash#805). The dispatch
+        // layer owns this fallback (see the bridge's do-lowercase
+        // note): rewrite to the lowercase Meta key before anything
+        // else claims it. Emacs only, like the meta fold below; no
+        // binding can exist at the shifted slot (the bridge cannot
+        // install one), so nothing is shadowed.
+        if self.inner.edit_mode() == PromptEditMode::Emacs
+            && key.0.contains(KeyModifiers::ALT)
+            && key.0.contains(KeyModifiers::SHIFT)
+        {
+            if let KeyCode::Char(c) = key.1 {
+                if c.is_ascii_uppercase() {
+                    let modifiers = key.0 - KeyModifiers::SHIFT;
+                    let code = KeyCode::Char(c.to_ascii_lowercase());
+                    raw = crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
+                        code, modifiers,
+                    ));
+                    key = (modifiers, code);
+                }
+            }
+        }
         // An armed quote consumes the key as data before anything
         // else can claim it — including the meta fold below, so a
         // quoted ESC inserts the ESC byte itself (niubash#731). A
@@ -5071,163 +5223,502 @@ pub(crate) fn parse_keymap_unbind_key(spec: &str) -> Result<(KeyModifiers, KeyCo
     })
 }
 
+/// Parse a written keyseq (GNU bind/inputrc spelling) into the key
+/// units it names, by way of the bytes GNU would bind.
+///
+/// GNU readline is byte-oriented: `rl_translate_keyseq`
+/// (lib/readline/bind.c) turns the written spelling into a byte
+/// string, and the keymap slot IS that byte string. The host's input
+/// layer is key-event-oriented, so the translation runs in two
+/// steps: decode the spelling to bytes ([`decode_keyseq_bytes`]),
+/// then read the bytes as the key events the terminal layer will
+/// actually deliver ([`key_units_from_bytes`]). Keeping the byte
+/// step explicit is what makes the spellings agree: `\C-m`, `^M` and
+/// a raw CR byte in the string are the same GNU key (byte 0x0D),
+/// and the input layer delivers that key as `KeyCode::Enter` — a
+/// bind on any of the three spellings must land on Enter, or it can
+/// never fire (niubash#805: ble.sh binds its decode hooks by byte,
+/// `\C-m` and `\C-i` among them; spelled `\C-` they used to land on
+/// `Char('m')`/`Char('i')` + CONTROL, keys no terminal ever sends,
+/// so Enter and Tab were dead under ble.sh while `^M` worked).
+///
+/// `fold_meta` selects the ESC reading: the flat keymap folds an
+/// ESC-prefixed byte into the one meta key event the input layer
+/// delivers for it, while the chord layer must see the ESC as its
+/// own keystroke — a terminal sends ESC and the partner as separate
+/// presses, and sequences like `\e\C-b` (GNU's shell-backward-word)
+/// are two units in the dispatch trie, not one modified key.
+fn keyseq_key_units_folded(value: &str, fold_meta: bool) -> Option<Vec<(KeyModifiers, KeyCode)>> {
+    // The caret spelling of ESC (`^[[A`) is the same byte stream.
+    let normalized;
+    let value = if let Some(rest) = value.strip_prefix("^[") {
+        normalized = format!("\\e{rest}");
+        normalized.as_str()
+    } else {
+        value
+    };
+    let bytes = decode_keyseq_bytes(value)?;
+    key_units_from_bytes(&bytes, fold_meta)
+}
+
 pub(crate) fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     if let Some(key) = parse_named_key_sequence(value) {
         return Some(key);
     }
-    match value {
-        "^[[A" | "\\e[A" | "\\eOA" => Some((KeyModifiers::NONE, KeyCode::Up)),
-        "^[[B" | "\\e[B" | "\\eOB" => Some((KeyModifiers::NONE, KeyCode::Down)),
-        "^[[C" | "\\e[C" | "\\eOC" => Some((KeyModifiers::NONE, KeyCode::Right)),
-        "^[[D" | "\\e[D" | "\\eOD" => Some((KeyModifiers::NONE, KeyCode::Left)),
-        // The VT100/xterm keypad and editing-key spellings real terminals
-        // send, which GNU's own default map binds (`bind -p` on bash 5.3:
-        // `"\e[1~": beginning-of-line`, `"\e[4~": end-of-line`,
-        // `"\e[3~": delete-char`, ...). Both the `~`-numbered and the
-        // `O`/`[` letter forms are accepted; `\e[7~`/`\e[8~` are the rxvt
-        // spellings of Home/End.
-        "\\e[1~" | "^[[1~" | "\\e[7~" | "^[[7~" | "\\e[H" | "^[[H" | "\\eOH" => {
-            Some((KeyModifiers::NONE, KeyCode::Home))
-        }
-        "\\e[4~" | "^[[4~" | "\\e[8~" | "^[[8~" | "\\e[F" | "^[[F" | "\\eOF" => {
-            Some((KeyModifiers::NONE, KeyCode::End))
-        }
-        "\\e[2~" | "^[[2~" => Some((KeyModifiers::NONE, KeyCode::Insert)),
-        "\\e[3~" | "^[[3~" => Some((KeyModifiers::NONE, KeyCode::Delete)),
-        "\\e[5~" | "^[[5~" | "\\e[I" | "^[[I" => Some((KeyModifiers::NONE, KeyCode::PageUp)),
-        "\\e[6~" | "^[[6~" | "\\e[G" | "^[[G" => Some((KeyModifiers::NONE, KeyCode::PageDown)),
-        // CSI modifier spellings in GNU's terminal table (xterm/rxvt
-        // send these for modified arrows and Delete). The terminal
-        // layer delivers the same chord as KeyCode+modifier, so map
-        // both spellings to one key.
-        "\\e[1;3C" => Some((KeyModifiers::ALT, KeyCode::Right)),
-        "\\e[1;3D" => Some((KeyModifiers::ALT, KeyCode::Left)),
-        "\\e[1;5C" | "\\e[5C" => Some((KeyModifiers::CONTROL, KeyCode::Right)),
-        "\\e[1;5D" | "\\e[5D" => Some((KeyModifiers::CONTROL, KeyCode::Left)),
-        "\\e[3;5~" => Some((KeyModifiers::CONTROL, KeyCode::Delete)),
-        // A bare ESC is one of GNU's default binds (`"\e": emacs-editing-mode`).
-        // It arrives here only when it is the whole keyseq; `\e[...` forms
-        // were matched above.
-        "\\e" | "^[" => Some((KeyModifiers::NONE, KeyCode::Esc)),
-        "^?" => Some((KeyModifiers::NONE, KeyCode::Backspace)),
-        _ => parse_meta_control_combined(value)
-            .or_else(|| parse_alt_key_sequence(value))
-            .or_else(|| parse_meta_key_sequence(value))
-            .or_else(|| parse_control_key_sequence(value))
-            .or_else(|| parse_plain_key_sequence(value)),
+    // Legacy caret singles keep their established reading (`^M` for
+    // Enter, `^H` for Backspace): those spellings are display forms
+    // a user may paste from another shell's listing, and the byte
+    // path below reads byte 0x08 as C-h, the event the input layer
+    // actually delivers for it. Only the two-character form takes
+    // this branch; caret chains decode as bytes like everything else.
+    let bytes = value.as_bytes();
+    if bytes.len() == 2 && bytes[0] == b'^' {
+        return parse_control_key_sequence(value);
+    }
+    let units = keyseq_key_units_folded(value, true)?;
+    if units.len() == 1 {
+        Some(units[0])
+    } else {
+        None
     }
 }
 
-/// Split a readline keyseq into per-key units and parse each unit.
-///
-/// The flat keymap owns single-key sequences; this returns `Some` only for
-/// a clean chain of two or more units (niubash#630: bash's
-/// `\C-x\C-e`-style chords, fzf's `\C-\e(`). A token that does not parse
-/// makes the whole sequence unparseable — the caller keeps reporting those
-/// (they are typos, not chords).
+/// Split a readline keyseq into its key units: `Some` only for a
+/// clean chain of two or more units (niubash#630: bash's
+/// `\C-x\C-e`-style chords, fzf's `\C-\e(`). A unit that does not
+/// resolve makes the whole sequence unparseable — the caller keeps
+/// reporting those (they are typos or undeliverable shapes, not
+/// chords).
 fn parse_chord_sequence(value: &str) -> Option<Vec<(KeyModifiers, KeyCode)>> {
-    let units = split_key_units(value)?;
+    let units = keyseq_key_units_folded(value, false)?;
     if units.len() < 2 {
         return None;
-    }
-    units
-        .into_iter()
-        .map(parse_key_sequence)
-        .collect::<Option<Vec<_>>>()
-}
-
-/// Split a readline keyseq into its written units without interpreting
-/// them: `\C-x`, `\M-x`, `\e` (ESC), `\e[...]` terminal sequences, `^X`,
-/// and single literal characters.
-fn split_key_units(value: &str) -> Option<Vec<&str>> {
-    let mut rest = value;
-    let mut units = Vec::new();
-    while !rest.is_empty() {
-        let (unit, tail) = if let Some(tail) = rest
-            .strip_prefix("\\C-")
-            .or_else(|| rest.strip_prefix("\\M-"))
-        {
-            // The unit is the prefix plus one (possibly escaped)
-            // character — or, for the combined `\M-\C-x` spelling,
-            // the second prefix plus its character.
-            let tail = tail
-                .strip_prefix("\\C-")
-                .or_else(|| tail.strip_prefix("\\M-"))
-                .unwrap_or(tail);
-            let ch = tail.chars().next()?;
-            let end = rest.len() - tail.len() + ch.len_utf8();
-            (&rest[..end], &rest[end..])
-        } else if rest.starts_with("\\e[") {
-            let end = rest
-                .char_indices()
-                .skip(2)
-                .find(|(_, c)| c.is_ascii_alphabetic() || *c == '~')
-                .map(|(i, c)| i + c.len_utf8())?;
-            (&rest[..end], &rest[end..])
-        } else if let Some(tail) = rest.strip_prefix("\\e") {
-            // `\e` alone is ESC; `\eX` is the meta form one key (the same
-            // shape `parse_key_sequence` accepts as ALT+X), so it is not a
-            // chord unit boundary.
-            let mut chars = tail.chars();
-            let end = match (chars.next(), chars.next()) {
-                (Some('['), _) => unreachable!("handled above"),
-                (Some(ch), None) => rest.len() - tail.len() + ch.len_utf8(),
-                _ => rest.len() - tail.len(),
-            };
-            (&rest[..end], &rest[end..])
-        } else if let Some(tail) = rest.strip_prefix('^') {
-            let ch = tail.chars().next()?;
-            let end = 1 + ch.len_utf8();
-            (&rest[..end], &rest[end..])
-        } else {
-            let ch = rest.chars().next()?;
-            (&rest[..ch.len_utf8()], &rest[ch.len_utf8()..])
-        };
-        units.push(unit);
-        rest = tail;
     }
     Some(units)
 }
 
-/// GNU bind/inputrc `\C-x` / `\M-x` forms (readline rl_translate_keyseq).
-/// Multi-key tails (`\C-x\C-f`) are not representable as a single
-/// reedline binding and return None (the bridge warns once).
-fn parse_meta_control_sequence(
-    value: &str,
-    prefix: &str,
-    base: KeyModifiers,
-) -> Option<(KeyModifiers, KeyCode)> {
-    let rest = value.strip_prefix(prefix)?;
-    let mut chars = rest.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
-        return None;
+/// Decode one written unit at `chars[pos..]` into (byte, meta):
+/// the byte the unit names, and whether a `\M-` transform prefixes
+/// it with ESC. `\C-` and `\M-` recurse into their base unit, so the
+/// combined forms work in either order (`\M-\C-e`, `\C-\M-e`); a
+/// transform with no base after it is malformed (`None`).
+fn read_translated_byte(chars: &[char], pos: &mut usize) -> Option<(u8, bool)> {
+    let c = *chars.get(*pos)?;
+    match c {
+        '\\' => {
+            let Some(&esc) = chars.get(*pos + 1) else {
+                // A trailing backslash stands for itself.
+                *pos += 1;
+                return Some((0x5c, false));
+            };
+            match esc {
+                'C' if chars.get(*pos + 2) == Some(&'-') => {
+                    *pos += 3;
+                    let (base, meta) = read_translated_byte(chars, pos)?;
+                    Some((control_byte(base), meta))
+                }
+                'M' if chars.get(*pos + 2) == Some(&'-') => {
+                    *pos += 3;
+                    let (base, _) = read_translated_byte(chars, pos)?;
+                    Some((base, true))
+                }
+                'e' => {
+                    *pos += 2;
+                    Some((0x1b, false))
+                }
+                'a' => {
+                    *pos += 2;
+                    Some((0x07, false))
+                }
+                'b' => {
+                    *pos += 2;
+                    Some((0x08, false))
+                }
+                'd' => {
+                    *pos += 2;
+                    Some((0x7f, false))
+                }
+                'f' => {
+                    *pos += 2;
+                    Some((0x0c, false))
+                }
+                'n' => {
+                    *pos += 2;
+                    Some((0x0a, false))
+                }
+                'r' => {
+                    *pos += 2;
+                    Some((0x0d, false))
+                }
+                't' => {
+                    *pos += 2;
+                    Some((0x09, false))
+                }
+                'v' => {
+                    *pos += 2;
+                    Some((0x0b, false))
+                }
+                'x' => {
+                    let hex: String = chars[*pos + 2..]
+                        .iter()
+                        .take(2)
+                        .take_while(|d| d.is_ascii_hexdigit())
+                        .collect();
+                    if hex.is_empty() {
+                        *pos += 2;
+                        Some((b'x', false))
+                    } else {
+                        let byte = u8::from_str_radix(&hex, 16).ok()?;
+                        *pos += 2 + hex.len();
+                        Some((byte, false))
+                    }
+                }
+                '0'..='7' => {
+                    let digits: String = chars[*pos + 1..]
+                        .iter()
+                        .take(3)
+                        .take_while(|d| matches!(d, '0'..='7'))
+                        .collect();
+                    let byte = u32::from_str_radix(&digits, 8).ok()? as u8;
+                    *pos += 1 + digits.len();
+                    Some((byte, false))
+                }
+                _ => {
+                    // `\\`, `\"`, and any other escaped char stand for
+                    // the char itself (rl_translate_keyseq keeps it).
+                    *pos += 2;
+                    Some((first_byte(esc), false))
+                }
+            }
+        }
+        // A caret is a literal character here: rl_translate_keyseq
+        // does not translate `^X` forms (the caret is readline's
+        // *display* spelling). niu's two-character caret singles are
+        // read by `parse_control_key_sequence` before this decoder
+        // runs, and `^[` is normalized in `keyseq_key_units_folded`.
+        _ => {
+            *pos += 1;
+            Some((first_byte(c), false))
+        }
     }
-    Some((base, KeyCode::Char(ch.to_ascii_lowercase())))
 }
 
-fn parse_meta_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    parse_meta_control_sequence(value, "\\C-", KeyModifiers::CONTROL)
-        .or_else(|| parse_meta_control_sequence(value, "\\M-", KeyModifiers::ALT))
+/// The byte a `\C-` transform makes of a base byte: `?` is DEL,
+/// everything else keeps its low five bits (so `@`..`_` and letters
+/// in either case land on 0x00..0x1F).
+fn control_byte(base: u8) -> u8 {
+    if base == b'?' {
+        0x7f
+    } else {
+        base & 0x1f
+    }
 }
 
-/// The combined meta-control spelling `\M-\C-x` (either prefix
-/// order), one key carrying both modifiers — GNU's
-/// rl_translate_keyseq accepts it (e.g. `\M-\C-e` for
-/// shell-expand-line, `\M-\C-i` for dynamic-complete-history).
-fn parse_meta_control_combined(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    let rest = value
-        .strip_prefix("\\M-\\C-")
-        .or_else(|| value.strip_prefix("\\C-\\M-"))?;
-    let mut chars = rest.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
+/// The first byte of a character's UTF-8 form: what a byte-oriented
+/// keymap sees of it. Plain characters reach the byte stream whole
+/// (see [`decode_keyseq_bytes`]); this is only for transform bases
+/// and escape tails, where GNU also works one byte at a time.
+fn first_byte(c: char) -> u8 {
+    let mut buf = [0u8; 4];
+    c.encode_utf8(&mut buf).as_bytes()[0]
+}
+
+/// Decode a written keyseq into the byte string GNU binds
+/// (rl_translate_keyseq, lib/readline/bind.c). Literal characters
+/// contribute their whole UTF-8 form; everything else contributes
+/// exactly one byte per written unit, ESC-prefixed when a `\M-`
+/// transform asks for it. `None` on a malformed tail (a dangling
+/// `\C-`/`\M-` with no base).
+fn decode_keyseq_bytes(value: &str) -> Option<Vec<u8>> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = Vec::with_capacity(chars.len());
+    let mut pos = 0usize;
+    while pos < chars.len() {
+        let c = chars[pos];
+        if c != '\\' && c != '^' {
+            // A literal character: its bytes enter the stream whole
+            // (a raw control character is one byte: itself).
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            pos += 1;
+            continue;
+        }
+        let (byte, meta) = read_translated_byte(&chars, &mut pos)?;
+        if meta {
+            out.push(0x1b);
+        }
+        out.push(byte);
+    }
+    Some(out)
+}
+
+/// Read a byte string (a decoded keyseq) as the key units the input
+/// layer delivers for those bytes: CSI and SS3 terminal sequences
+/// collapse to their single key event, an ESC prefix makes the next
+/// byte a Meta unit, and bare bytes map one-to-one — with the three
+/// bytes the terminal layer reports as named keys folded onto them
+/// (CR → Enter, HT → Tab, DEL → Backspace). A byte with no key
+/// event (a lone byte ≥ 0x80, an incomplete or unmapped terminal
+/// sequence, the bracketed-paste markers the input layer consumes
+/// itself) makes the whole sequence undeliverable: `None`.
+fn key_units_from_bytes(bytes: &[u8], fold_meta: bool) -> Option<Vec<(KeyModifiers, KeyCode)>> {
+    let mut units = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != 0x1b {
+            let (unit, len) = plain_byte_unit(&bytes[i..])?;
+            units.push(unit);
+            i += len;
+            continue;
+        }
+        // ESC: alone it is the Esc key; before `[`/`O` it opens a
+        // terminal sequence; before anything else it is a Meta
+        // prefix on that byte's unit.
+        match bytes.get(i + 1) {
+            None => {
+                units.push((KeyModifiers::NONE, KeyCode::Esc));
+                i += 1;
+            }
+            Some(b'[') => {
+                let (unit, len) = csi_unit(&bytes[i + 2..])?;
+                units.push(unit);
+                i += 2 + len;
+            }
+            Some(b'O') => {
+                let final_byte = *bytes.get(i + 2)?;
+                units.push(ss3_unit(final_byte)?);
+                i += 3;
+            }
+            Some(0x1b) => {
+                units.push((KeyModifiers::NONE, KeyCode::Esc));
+                i += 1;
+            }
+            Some(_) => {
+                if fold_meta {
+                    let (unit, len) = meta_byte_unit(&bytes[i + 1..])?;
+                    units.push(unit);
+                    i += 1 + len;
+                } else {
+                    // The chord reading: ESC is its own keystroke and
+                    // the partner byte keeps its own unit (ESC C-b is
+                    // two presses in the dispatch trie, not one
+                    // Ctrl-Alt event).
+                    units.push((KeyModifiers::NONE, KeyCode::Esc));
+                    i += 1;
+                }
+            }
+        }
+    }
+    Some(units)
+}
+
+/// One bare byte (and its UTF-8 continuation, for a literal
+/// character) as a key unit, with the number of bytes it spans.
+fn plain_byte_unit(bytes: &[u8]) -> Option<((KeyModifiers, KeyCode), usize)> {
+    let b = bytes[0];
+    match b {
+        0x0d => Some(((KeyModifiers::NONE, KeyCode::Enter), 1)),
+        0x09 => Some(((KeyModifiers::NONE, KeyCode::Tab), 1)),
+        0x7f => Some(((KeyModifiers::NONE, KeyCode::Backspace), 1)),
+        0x00 => Some(((KeyModifiers::CONTROL, KeyCode::Char(' ')), 1)),
+        0x01..=0x1a => Some((
+            (KeyModifiers::CONTROL, KeyCode::Char((b | 0x60) as char)),
+            1,
+        )),
+        0x1c => Some(((KeyModifiers::CONTROL, KeyCode::Char('\\')), 1)),
+        0x1d => Some(((KeyModifiers::CONTROL, KeyCode::Char(']')), 1)),
+        0x1e => Some(((KeyModifiers::CONTROL, KeyCode::Char('^')), 1)),
+        0x1f => Some(((KeyModifiers::CONTROL, KeyCode::Char('_')), 1)),
+        0x20..=0x7e => Some(((KeyModifiers::NONE, KeyCode::Char(b as char)), 1)),
+        _ => {
+            // A byte ≥ 0x80 only names a key as a whole UTF-8
+            // character; on its own it is a byte no key event
+            // carries (the input layer decodes text before keys).
+            let text = std::str::from_utf8(bytes).ok()?;
+            let ch = text.chars().next()?;
+            if ch.len_utf8() == 1 {
+                return None;
+            }
+            Some(((KeyModifiers::NONE, KeyCode::Char(ch)), ch.len_utf8()))
+        }
+    }
+}
+
+/// The unit an ESC prefix makes of the following byte(s): the
+/// byte's own control reading with ALT added (ESC + C-u is
+/// Ctrl-Alt-u, ESC + CR is Ctrl-Alt-m — the meta forms keep the
+/// letter, they do not fold onto Enter/Tab the way the bare bytes
+/// do), DEL becomes Alt-Backspace, and a printable byte becomes
+/// Alt+char (letters lowercased, matching the editor's own
+/// modified-char folding).
+fn meta_byte_unit(bytes: &[u8]) -> Option<((KeyModifiers, KeyCode), usize)> {
+    let b = bytes[0];
+    match b {
+        0x7f => Some(((KeyModifiers::ALT, KeyCode::Backspace), 1)),
+        0x00 => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char(' '),
+            ),
+            1,
+        )),
+        0x01..=0x1a => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char((b | 0x60) as char),
+            ),
+            1,
+        )),
+        0x1c => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('\\'),
+            ),
+            1,
+        )),
+        0x1d => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char(']'),
+            ),
+            1,
+        )),
+        0x1e => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('^'),
+            ),
+            1,
+        )),
+        0x1f => Some((
+            (
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('_'),
+            ),
+            1,
+        )),
+        0x20..=0x7e => {
+            let ch = (b as char).to_ascii_lowercase();
+            Some(((KeyModifiers::ALT, KeyCode::Char(ch)), 1))
+        }
+        _ => {
+            let text = std::str::from_utf8(bytes).ok()?;
+            let ch = text.chars().next()?;
+            if ch.len_utf8() == 1 {
+                return None;
+            }
+            Some(((KeyModifiers::ALT, KeyCode::Char(ch)), ch.len_utf8()))
+        }
+    }
+}
+
+/// The xterm modifier parameter as key modifiers: the parameter is
+/// 1 + (shift=1, alt=2, ctrl=4) bit flags.
+fn csi_modifiers(value: u32) -> KeyModifiers {
+    let bits = value.saturating_sub(1);
+    let mut modifiers = KeyModifiers::NONE;
+    if bits & 1 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if bits & 2 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if bits & 4 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    modifiers
+}
+
+/// One CSI sequence (the bytes after `ESC [`) as a key unit, with
+/// the number of bytes it spans including the final byte. `None`
+/// for shapes the input layer does not deliver as a key: the
+/// bracketed-paste markers (200~/201~, consumed by the paste
+/// machinery), kitty `u`-encoded keys, unknown finals.
+fn csi_unit(bytes: &[u8]) -> Option<((KeyModifiers, KeyCode), usize)> {
+    let mut end = 0usize;
+    while end < bytes.len() && (0x20..=0x3f).contains(&bytes[end]) {
+        end += 1;
+    }
+    let final_byte = *bytes.get(end)?;
+    if !(0x40..=0x7e).contains(&final_byte) {
         return None;
     }
-    Some((
-        KeyModifiers::CONTROL | KeyModifiers::ALT,
-        KeyCode::Char(ch.to_ascii_lowercase()),
-    ))
+    let params: Vec<&str> = std::str::from_utf8(&bytes[..end])
+        .ok()?
+        .trim_start_matches('?')
+        .split(';')
+        .collect();
+    let param = |idx: usize| -> Option<u32> {
+        params
+            .get(idx)
+            .and_then(|p| if p.is_empty() { None } else { p.parse().ok() })
+    };
+    let modifiers = if params.len() >= 2 {
+        csi_modifiers(param(1).unwrap_or(1))
+    } else if param(0) == Some(5) && final_byte.is_ascii_alphabetic() {
+        // The rxvt one-parameter form the fixed table already
+        // carried (`\e[5C` = Ctrl-Right).
+        KeyModifiers::CONTROL
+    } else {
+        KeyModifiers::NONE
+    };
+    let code = match final_byte {
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'F' => KeyCode::End,
+        b'H' => KeyCode::Home,
+        b'G' => KeyCode::PageDown,
+        b'I' => KeyCode::PageUp,
+        b'Z' => return Some(((KeyModifiers::SHIFT | modifiers, KeyCode::BackTab), end + 1)),
+        b'P' => KeyCode::F(1),
+        b'Q' => KeyCode::F(2),
+        b'R' => KeyCode::F(3),
+        b'S' => KeyCode::F(4),
+        b'~' => match param(0)? {
+            1 | 7 => KeyCode::Home,
+            2 => KeyCode::Insert,
+            3 => KeyCode::Delete,
+            4 | 8 => KeyCode::End,
+            5 => KeyCode::PageUp,
+            6 => KeyCode::PageDown,
+            11 => KeyCode::F(1),
+            12 => KeyCode::F(2),
+            13 => KeyCode::F(3),
+            14 => KeyCode::F(4),
+            15 => KeyCode::F(5),
+            17 => KeyCode::F(6),
+            18 => KeyCode::F(7),
+            19 => KeyCode::F(8),
+            20 => KeyCode::F(9),
+            21 => KeyCode::F(10),
+            23 => KeyCode::F(11),
+            24 => KeyCode::F(12),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(((modifiers, code), end + 1))
+}
+
+/// One SS3 final byte (after `ESC O`) as a key unit.
+fn ss3_unit(final_byte: u8) -> Option<(KeyModifiers, KeyCode)> {
+    let code = match final_byte {
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'F' => KeyCode::End,
+        b'H' => KeyCode::Home,
+        b'P' => KeyCode::F(1),
+        b'Q' => KeyCode::F(2),
+        b'R' => KeyCode::F(3),
+        b'S' => KeyCode::F(4),
+        _ => return None,
+    };
+    Some((KeyModifiers::NONE, code))
 }
 
 fn parse_named_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
@@ -5271,18 +5762,6 @@ fn parse_modified_named_key(
     Some((modifiers, KeyCode::Char(ch)))
 }
 
-fn parse_alt_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    let rest = value
-        .strip_prefix("^[")
-        .or_else(|| value.strip_prefix("\\e"))?;
-    let mut chars = rest.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
-        return None;
-    }
-    Some((KeyModifiers::ALT, KeyCode::Char(ch.to_ascii_lowercase())))
-}
-
 fn parse_control_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     let rest = value.strip_prefix('^')?;
     let mut chars = rest.chars();
@@ -5302,15 +5781,6 @@ fn parse_control_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
         )),
         ch => Some((KeyModifiers::CONTROL, KeyCode::Char(ch))),
     }
-}
-
-fn parse_plain_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
-    let mut chars = value.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() {
-        return None;
-    }
-    Some((KeyModifiers::NONE, KeyCode::Char(ch)))
 }
 
 /// Lets Enter grow an unfinished command into a multi-line buffer instead of
@@ -6686,6 +7156,54 @@ mod tests {
         assert_eq!(menu.name(), "custom_menu");
     }
 
+    /// niubash#832: every completion style's menu raises the shared
+    /// menu_open flag while it is active — the hinter stand-down used
+    /// to reach only the cycle and column menus, so the GNU / Ide /
+    /// List / Inline menus painted under the ghost text (and Right
+    /// accepted the ghost instead of navigating the grid).
+    #[test]
+    fn issue832_every_completion_style_raises_the_menu_open_flag() {
+        use std::sync::atomic::Ordering;
+        for style in [
+            CompletionStyle::Gnu,
+            CompletionStyle::Ide,
+            CompletionStyle::Column,
+            CompletionStyle::List,
+            CompletionStyle::Inline,
+        ] {
+            for interaction in [CompletionInteraction::Insert, CompletionInteraction::Select] {
+                let flag = Arc::new(AtomicBool::new(false));
+                let config = MenuConfig {
+                    completion_page_size: 10,
+                    history_page_size: 7,
+                    max_entry_lines: 3,
+                    completion_style: style,
+                    completion_interaction: interaction,
+                };
+                let mut menu =
+                    configured_completion_menu(COMPLETION_MENU, config, "", flag.clone(), None);
+                assert!(
+                    !flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: the flag must start down"
+                );
+                menu.menu_event(reedline::MenuEvent::Activate(false));
+                assert!(
+                    menu.is_active(),
+                    "{style:?}/{interaction:?}: the menu must be active"
+                );
+                assert!(
+                    flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: an open menu must raise the flag"
+                );
+                menu.menu_event(reedline::MenuEvent::Deactivate);
+                assert!(
+                    !flag.load(Ordering::Relaxed),
+                    "{style:?}/{interaction:?}: the flag must fall with the menu"
+                );
+            }
+        }
+    }
+
     #[test]
     fn completion_menu_passes_full_buffer_not_only_difference() {
         // When FromStr calls configure the completion-list menu, only_buffer_difference
@@ -7747,7 +8265,10 @@ mod tests {
             Some(ReedlineEvent::Multiple(_))
         ));
 
-        let mut keybindings = Keybindings::default();
+        // Seeded from the editor defaults, mirroring production
+        // (`build_keymap_for_target` layers over the reedline defaults):
+        // the C-g expectation below follows the editor's own table.
+        let mut keybindings = reedline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let tilde_event = ReedlineEvent::ExecuteHostCommand(format!(
             "{}tilde-expand",
@@ -7772,10 +8293,24 @@ mod tests {
         let host = |name: &str| {
             ReedlineEvent::ExecuteHostCommand(format!("{}{}", READLINE_HOST_COMMAND_PREFIX, name))
         };
-        assert_eq!(
-            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
-            Some(host("abort"))
-        );
+        // C-g follows the editor default (#811): with a native abort
+        // default (ruline#15 shape, C-g bound to the editor's abort
+        // event) the native binding survives; under older pins the
+        // host-command override is the abort surface.
+        if reedline::default_emacs_keybindings()
+            .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
+            .is_some_and(|event| event == ReedlineEvent::Esc)
+        {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+                Some(ReedlineEvent::Esc)
+            );
+        } else {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g')),
+                Some(host("abort"))
+            );
+        }
         assert_eq!(
             keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('^')),
             Some(host("history-expand-line"))
@@ -7868,14 +8403,19 @@ mod tests {
     /// active search. Under older pins (C-g natively `Edit(Redo)`) the
     /// host override is the only GNU abort surface those pins can
     /// deliver, so it stays. The test reads the pinned editor's actual
-    /// default table and asserts the layer followed it — under the
-    /// current pin (8351932) that is the override arm.
+    /// default table and asserts the layer followed it. Under pin
+    /// 8351932 that was the override arm; since the ruline pin rose to
+    /// 92bbb10f (ruline#26 keymap parity, the ruline#15 shape) the
+    /// native arm is the live one. The composition mirrors production
+    /// (`build_keymap_for_target` layers the GNU defaults over the
+    /// editor's own default table), so the table is seeded from the
+    /// editor defaults rather than empty.
     #[test]
     fn issue811_c_g_abort_binding_follows_the_editor_default() {
         let native_abort = reedline::default_emacs_keybindings()
             .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
             .is_some_and(|event| event == ReedlineEvent::Esc);
-        let mut keybindings = Keybindings::default();
+        let mut keybindings = reedline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let bound = keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'));
         if native_abort {
@@ -7901,7 +8441,7 @@ mod tests {
     /// `CharSearch`/the yank-arg pair/`OperateAndGetNext`/the kbd-macro
     /// trio/the numeric-argument events/`ClearScrollback`/`OpenEditor` and
     /// the `EditCommand` additions (`YankPop`, `SwapWords`,
-    /// `CapitalizeWord`, `SwapCursorAndAnchor`, `RevertLine`,
+    /// `CapitalizeWord`, `ExchangePointAndMark`, `RevertLine`,
     /// `CutFilenameLeft`, `DeleteHorizontalSpace`). Every arm below must
     /// produce the real event shape, not the unknown-widget sentinel.
     #[test]
@@ -7921,7 +8461,7 @@ mod tests {
         );
         assert_eq!(
             native_widget_event("exchange-point-and-mark"),
-            Some(edit_event(EditCommand::SwapCursorAndAnchor))
+            Some(edit_event(EditCommand::ExchangePointAndMark))
         );
         assert_eq!(
             native_widget_event("revert-line"),
@@ -8009,13 +8549,107 @@ mod tests {
         );
 
         // `insert-comment` is the composite: go to line start, insert
-        // `#`, accept the line.
+        // `# `, accept the line.
         assert_eq!(
             native_widget_event("insert-comment"),
             Some(ReedlineEvent::Multiple(vec![
                 ReedlineEvent::Edit(vec![
                     EditCommand::MoveToLineStart { select: false },
-                    EditCommand::InsertString("#".to_string()),
+                    EditCommand::InsertString("# ".to_string()),
+                ]),
+                ReedlineEvent::Enter,
+            ]))
+        );
+    }
+
+    /// niubash#835: `menu-complete-backward` used to fall through to
+    /// the shell-function widget sentinel and be swallowed — a dead
+    /// key via NIU_BINDKEYS/bundle binds. It now dispatches the
+    /// backward-cycling composition: step the open menu backwards,
+    /// opening it when closed (and it counts as delivered, so GNU
+    /// default bindings for it can land).
+    #[test]
+    fn issue835_menu_complete_backward_dispatches_backward_cycling() {
+        match native_widget_event("menu-complete-backward") {
+            Some(ReedlineEvent::UntilFound(events)) => {
+                assert_eq!(
+                    events,
+                    vec![
+                        ReedlineEvent::MenuPrevious,
+                        ReedlineEvent::Menu(COMPLETION_MENU.to_string()),
+                    ]
+                );
+            }
+            other => panic!(
+                "menu-complete-backward must dispatch the backward-cycling \
+                 composition, got {other:?}"
+            ),
+        }
+        assert!(gnu_name_is_delivered("menu-complete-backward"));
+    }
+
+    /// niubash#844: `\xHH` macro escapes name raw bytes. Decoding
+    /// them as `byte as char` widened every byte >= 0x80 into a
+    /// two-byte UTF-8 sequence — mojibake in the normalized text and
+    /// in any KeySequence/insert replay built from it.
+    #[test]
+    fn issue844_hex_escapes_decode_as_bytes_not_chars() {
+        // The UTF-8 spelling of `é` survives as `é` (one char, two
+        // bytes) — the byte-as-char decode produced `Ã©` (four bytes).
+        assert_eq!(normalize_macro_escapes(r"\xc3\xa9"), "é");
+        assert_eq!(normalize_macro_escapes(r"\xc3\xa9").len(), 2);
+        // Plain text around the escapes is untouched, and a lone
+        // non-UTF-8 byte degrades through from_utf8_lossy instead of
+        // widening into U+00E9.
+        assert_eq!(normalize_macro_escapes(r"a\xc3\xa9b"), "aéb");
+        assert_eq!(normalize_macro_escapes(r"\xe9"), "\u{fffd}");
+        // ASCII escapes and the other spellings keep their meaning.
+        assert_eq!(normalize_macro_escapes(r"\x41\x42"), "AB");
+        assert_eq!(normalize_macro_escapes(r"\e"), "\u{1b}");
+        assert_eq!(normalize_macro_escapes(r"\n"), "\n");
+        // Fewer than two hex digits keeps the escape literal.
+        assert_eq!(normalize_macro_escapes(r"\xg1"), r"\xg1");
+        assert_eq!(normalize_macro_escapes(r"\x"), r"\x");
+    }
+
+    /// niubash#850: three host arms named the wrong editor command
+    /// for their GNU function. `yank` must be `EditCommand::Yank`
+    /// (YankPop in the editor gates on the last edit being Yank /
+    /// YankPop — `PasteCutBufferBefore` made M-y permanently
+    /// inapplicable after a niu yank); `exchange-point-and-mark`
+    /// must be the mark command the editor's own C-x C-x delivers,
+    /// not the selection-anchor flip; the `insert-comment` composite
+    /// must insert `# `, the `RL_COMMENT_BEGIN_DEFAULT` string the
+    /// editor's M-# inserts.
+    #[test]
+    fn issue850_host_mappings_match_the_editors_own_commands() {
+        assert_eq!(
+            native_widget_event("yank"),
+            Some(edit_event(EditCommand::Yank))
+        );
+        assert_eq!(
+            native_widget_event("exchange-point-and-mark"),
+            Some(edit_event(EditCommand::ExchangePointAndMark))
+        );
+        // The C-x C-x chord entry delivers the same command as the
+        // named arm — one GNU function, one command, every path.
+        let chord = gnu_default_chord_bindings()
+            .into_iter()
+            .find(|chord| {
+                chord.keys
+                    == vec![
+                        (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                        (KeyModifiers::NONE, KeyCode::Char('x')),
+                    ]
+            })
+            .expect("the C-x C-x chord entry exists");
+        assert_eq!(chord.event, edit_event(EditCommand::ExchangePointAndMark));
+        assert_eq!(
+            native_widget_event("insert-comment"),
+            Some(ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![
+                    EditCommand::MoveToLineStart { select: false },
+                    EditCommand::InsertString("# ".to_string()),
                 ]),
                 ReedlineEvent::Enter,
             ]))
@@ -8058,7 +8692,7 @@ mod tests {
             Some(ReedlineEvent::Multiple(vec![
                 ReedlineEvent::Edit(vec![
                     EditCommand::MoveToLineStart { select: false },
-                    EditCommand::InsertString("#".to_string()),
+                    EditCommand::InsertString("# ".to_string()),
                 ]),
                 ReedlineEvent::Enter,
             ]))
@@ -8488,6 +9122,174 @@ mod tests {
     }
 
     #[test]
+    fn parse_key_sequence_805_byte_spellings_agree() {
+        // niubash#805: the keyseq is a byte string in GNU. Every
+        // spelling of the same byte lands on the same key — in
+        // particular the bytes the input layer reports as named
+        // keys. ble.sh binds its decode hooks by byte (`\C-m` is its
+        // Enter hook); spelled `\C-` these used to land on
+        // Char('m')/Char('i') + CONTROL, keys no terminal sends.
+        assert_eq!(
+            parse_key_sequence(r"\C-m"),
+            Some((KeyModifiers::NONE, KeyCode::Enter))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\C-i"),
+            Some((KeyModifiers::NONE, KeyCode::Tab))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\C-?"),
+            Some((KeyModifiers::NONE, KeyCode::Backspace))
+        );
+        assert_eq!(
+            parse_key_sequence("\r"),
+            Some((KeyModifiers::NONE, KeyCode::Enter))
+        );
+        // The raw-byte and octal/hex spellings of C-u (ble.sh binds
+        // its uvw hooks with $'\025'-style raw bytes).
+        assert_eq!(
+            parse_key_sequence("\u{15}"),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('u')))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\025"),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('u')))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\x15"),
+            Some((KeyModifiers::CONTROL, KeyCode::Char('u')))
+        );
+        // Generalized CSI: the full modifier matrix, not a fixed
+        // table of popular sequences.
+        assert_eq!(
+            parse_key_sequence(r"\e[1;5A"),
+            Some((KeyModifiers::CONTROL, KeyCode::Up))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[1;2B"),
+            Some((KeyModifiers::SHIFT, KeyCode::Down))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[1;3D"),
+            Some((KeyModifiers::ALT, KeyCode::Left))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[3;5~"),
+            Some((KeyModifiers::CONTROL, KeyCode::Delete))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[Z"),
+            Some((KeyModifiers::SHIFT, KeyCode::BackTab))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\e[15~"),
+            Some((KeyModifiers::NONE, KeyCode::F(5)))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\eOP"),
+            Some((KeyModifiers::NONE, KeyCode::F(1)))
+        );
+        // The caret spelling of ESC (zsh bindkeys form, which the
+        // bundle widget path feeds through here).
+        assert_eq!(
+            parse_key_sequence("^[[A"),
+            Some((KeyModifiers::NONE, KeyCode::Up))
+        );
+        // Undeliverable shapes stay unparseable (recorded, not bound):
+        // the paste markers are the input layer's own, and a lone
+        // high byte names no key event.
+        assert_eq!(parse_key_sequence(r"\e[200~"), None);
+        assert_eq!(parse_key_sequence(r"\200"), None);
+        assert_eq!(parse_key_sequence(r"\e\200"), None);
+        // Meta forms keep the letter: no Enter/Tab fold under ESC.
+        assert_eq!(
+            parse_key_sequence(r"\e\C-m"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('m')
+            ))
+        );
+        assert_eq!(
+            parse_key_sequence(r"\M-\C-i"),
+            Some((
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('i')
+            ))
+        );
+    }
+
+    #[test]
+    fn engine_bind_805_blesh_shapes_land_or_leave_a_record() {
+        // niubash#805: the bind shapes ble.sh actually registers —
+        // byte-spelled bind -x hooks and ESC-prefixed macros — must
+        // either land on the key the terminal delivers or leave a
+        // dropped record; nothing vanishes silently.
+        let mut keybindings = default_emacs_keybindings();
+        let entries = vec![
+            // ble's Enter hook, spelled the way its binder writes it.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: r"\C-m".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Execute {
+                    command: "ble-decode-enter".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            // ble's C-u hook in the raw-byte spelling.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: "\u{15}".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Execute {
+                    command: "ble-decode-ctrl-u".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            // A lone high byte: undeliverable, recorded as dropped.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: r"\201".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Execute {
+                    command: "ble-decode-high-byte".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+            // GNU's shell-backward-word default: a host function niu
+            // does not implement, on a chain-shaped keyseq — dropped
+            // with a record, not reported as an actionable failure.
+            crate::bind_surface::EngineBindEntry {
+                keyseq: r"\e\C-b".to_string(),
+                kind: crate::bind_surface::EngineBindKind::Function {
+                    name: "shell-backward-word".to_string(),
+                },
+                keymap: Some("emacs-standard".to_string()),
+            },
+        ];
+        let (unusable, dropped) = add_engine_bind_keybindings_recorded(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &entries,
+            0,
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::NONE, KeyCode::Enter),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 0".to_string()
+            )),
+            "the \\C-m bind -x hook must land on Enter"
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('u')),
+            Some(ReedlineEvent::ExecuteHostCommand(
+                "__niu_bindx 1".to_string()
+            )),
+            "the raw-byte C-u bind -x hook must land on C-u"
+        );
+        assert!(
+            unusable.is_empty(),
+            "no ble-shaped bind may be reported unusable: {unusable:?}"
+        );
+        let dropped_keyseqs: Vec<&str> = dropped.iter().map(|bind| bind.keyseq.as_str()).collect();
+        assert_eq!(dropped_keyseqs, vec![r"\201", r"\e\C-b"]);
+    }
+
+    #[test]
     fn parse_chord_sequence_splits_readline_chains() {
         // bash's `\C-x\C-e` and fzf's `\C-\e(` are chords; single units are
         // the flat keymap's business.
@@ -8498,14 +9300,23 @@ mod tests {
                 (KeyModifiers::CONTROL, KeyCode::Char('e')),
             ])
         );
+        // `\C-\e(` is NOT Ctrl-\ + `e` + `(`: rl_translate_keyseq
+        // (lib/readline/bind.c) treats `\C-` as a flag on the next
+        // translated character, and `\e` translates to ESC, whose
+        // control form is ESC itself — the byte string is ESC + `(`,
+        // one Meta key. Verified against GNU bash 5.3.20: after
+        // `bind '"\C-\e(": redraw-current-line'`, `bind -q` reports
+        // the binding as `"\e("`. The old pin codified the previous
+        // splitter's unit-wise reading, not GNU's (corrected
+        // 2026-11-02, niubash#805 work).
+        assert_eq!(
+            parse_key_sequence(r"\C-\e("),
+            Some((KeyModifiers::ALT, KeyCode::Char('(')))
+        );
         assert_eq!(
             parse_chord_sequence(r"\C-\e("),
-            // Readline semantics: `\\C-\\` consumes the escape, so this is
-            // Ctrl-\\ then the *literal* `e` and `(` — the "impossible to
-            // type" marker fzf picked.
             Some(vec![
-                (KeyModifiers::CONTROL, KeyCode::Char('\\')),
-                (KeyModifiers::NONE, KeyCode::Char('e')),
+                (KeyModifiers::NONE, KeyCode::Esc),
                 (KeyModifiers::NONE, KeyCode::Char('(')),
             ])
         );
@@ -8555,6 +9366,36 @@ mod tests {
             ),
             other => panic!("expected ESC + Down as one batch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn folded_meta_uppercase_event_reaches_the_lowercase_binding() {
+        // niubash#805: the input layer folds ESC + `X` into one
+        // Alt+Shift+Char('X') event; GNU resolves it through
+        // do-lowercase-version to the Meta-x binding. ble.sh's
+        // ESC-prefixed macros for uppercase partners ride on this.
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::ALT,
+            KeyCode::Char('x'),
+            edit_event(EditCommand::InsertString("META-X".to_string())),
+        );
+        let inner = Emacs::new(keybindings);
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            Vec::new(),
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        let event = mode.parse_event(chord_test_key(
+            KeyCode::Char('X'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(
+            event,
+            edit_event(EditCommand::InsertString("META-X".to_string()))
+        );
     }
 
     #[test]

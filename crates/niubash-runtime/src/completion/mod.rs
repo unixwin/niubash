@@ -11,6 +11,7 @@ pub mod external;
 pub mod file_colors;
 pub mod gnu_menu;
 pub mod insert_menu;
+pub mod menu_open;
 pub mod path;
 pub mod sources;
 pub mod variables;
@@ -91,6 +92,21 @@ pub struct CompletionContext {
     /// session's re-queries. Contexts built outside the completer
     /// keep `None` and enumerate uncached, exactly as before.
     pub dir_cache: Option<crate::completion::path::DirCacheHandle>,
+    /// The session's `PATH` at snapshot time, from
+    /// `CompletionState::env_vars` (niubash#839). Producers that must
+    /// resolve a tool the way the SESSION would — the dynamic
+    /// completion fingerprint in `external.rs` — probe this value,
+    /// not the process `PATH`: a tool that exists only on the session
+    /// PATH (an interactive `export PATH=...` the process never saw)
+    /// is otherwise invisible to the fingerprint while `Command::new`
+    /// still resolves it at spawn. Contexts built without session
+    /// state keep `None` and fall back to the process env.
+    pub session_path: Option<String>,
+    /// The session's `PATHEXT` at snapshot time (niubash#845), the
+    /// companion of `session_path` for Windows tool resolution.
+    /// `None` outside a session snapshot, with the same process-env
+    /// fallback discipline.
+    pub session_pathext: Option<String>,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -128,6 +144,8 @@ impl CompletionContext {
             tmp_base: std::env::temp_dir(),
             file_colors: None,
             dir_cache: None,
+            session_path: None,
+            session_pathext: None,
         }
     }
 
@@ -195,9 +213,26 @@ impl CompletionContext {
     /// Get the command name at the start of the current input line segment
     pub fn get_command_name(&self) -> Option<String> {
         let (segment_start, segment) = self.current_segment_before_cursor();
-        shell_words_in_segment(segment, segment_start)
-            .first()
-            .map(|word| word.value.clone())
+        let words = shell_words_in_segment(segment, segment_start);
+        // niubash#830: the command word is not always the segment's
+        // first word — grouping openers (`( git …`, `{ git …`) and
+        // environment assignment prefixes (`VAR=1 git …`) precede it.
+        // Skip those so callers (the compspec probe, the external
+        // plugin's definition lookup, the path completer's
+        // directory-only check) name the command GNU would name. An
+        // assignment with no following word still reports itself:
+        // the line names no command yet.
+        for (index, word) in words.iter().enumerate() {
+            let value = word.value.trim_start_matches('(');
+            if value.is_empty() || value == "{" {
+                continue;
+            }
+            if is_assignment_word(value) && index + 1 < words.len() {
+                continue;
+            }
+            return Some(value.to_string());
+        }
+        None
     }
 
     /// Get the token immediately before the current word (the previous token)
@@ -272,6 +307,12 @@ pub struct CompletionResult {
     pub styles: Vec<Option<nu_ansi_term::Style>>,
     /// Common prefix (for partial completion)
     pub common_prefix: Option<String>,
+    /// The governing compspec asked for no trailing space after an
+    /// accepted match (`-o nospace` → rl_completion_suppress_append,
+    /// carried on rubash's CompletionPolicy since rubash#2573). Only
+    /// the rubash-engine producer sets this (niubash#837); every
+    /// other producer leaves it false and keeps the text-shape rule.
+    pub suppress_append: bool,
 }
 
 impl CompletionResult {
@@ -283,6 +324,7 @@ impl CompletionResult {
             descriptions: vec![None; len],
             styles: vec![None; len],
             common_prefix,
+            suppress_append: false,
         }
     }
 
@@ -294,6 +336,7 @@ impl CompletionResult {
             descriptions,
             styles: vec![None; len],
             common_prefix,
+            suppress_append: false,
         }
     }
 
@@ -307,6 +350,7 @@ impl CompletionResult {
             descriptions: vec![None; len],
             styles,
             common_prefix,
+            suppress_append: false,
         }
     }
 
@@ -411,6 +455,20 @@ fn last_command_separator(input: &str) -> Option<usize> {
     }
 
     last
+}
+
+/// True for a `NAME=value` environment assignment word (a valid
+/// shell identifier before the first `=`).
+fn is_assignment_word(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn shell_words_in_segment(segment: &str, offset: usize) -> Vec<ShellWord> {

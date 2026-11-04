@@ -48,8 +48,12 @@ pub struct CommandCompleter;
 impl CommandCompleter {
     /// Get all available commands (built-in + common + PATH)
     pub fn get_all_commands() -> Vec<String> {
+        // niubash#833: the command caches recover from lock poison
+        // (unwrap_or_else(into_inner)) instead of degrading to a
+        // full rescan on every call for the rest of the session.
         let fingerprint = path_cache_fingerprint();
-        if let Ok(cache) = ALL_COMMANDS_CACHE.lock() {
+        {
+            let cache = ALL_COMMANDS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((cached_fingerprint, commands)) = &*cache {
                 if *cached_fingerprint == fingerprint {
                     return commands.clone();
@@ -61,9 +65,8 @@ impl CommandCompleter {
         commands.extend(Self::get_path_commands_cached());
         commands.sort();
         commands.dedup();
-        if let Ok(mut cache) = ALL_COMMANDS_CACHE.lock() {
-            *cache = Some((fingerprint, commands.clone()));
-        }
+        *ALL_COMMANDS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((fingerprint, commands.clone()));
         commands
     }
 
@@ -73,12 +76,10 @@ impl CommandCompleter {
     /// to the #574 command probe's explicit clear, which exists for
     /// exactly the same blind spot.
     pub(crate) fn invalidate_command_caches() {
-        if let Ok(mut cache) = PATH_CMD_CACHE.lock() {
-            *cache = None;
-        }
-        if let Ok(mut cache) = ALL_COMMANDS_CACHE.lock() {
-            *cache = None;
-        }
+        // niubash#833: poison recovery, as in `get_all_commands` —
+        // a skipped invalidation would serve a stale command list.
+        *PATH_CMD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *ALL_COMMANDS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Get shell builtins owned by rubash.
@@ -315,8 +316,10 @@ impl CommandCompleter {
 
     /// Get cached PATH commands (one scan per env fingerprint)
     fn get_path_commands_cached() -> Vec<String> {
+        // niubash#833: poison recovery, as in `get_all_commands`.
         let fingerprint = path_cache_fingerprint();
-        if let Ok(cache) = PATH_CMD_CACHE.lock() {
+        {
+            let cache = PATH_CMD_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((cached_fingerprint, commands)) = &*cache {
                 if *cached_fingerprint == fingerprint {
                     return commands.clone();
@@ -324,9 +327,8 @@ impl CommandCompleter {
             }
         }
         let cmds = Self::get_path_commands();
-        if let Ok(mut cache) = PATH_CMD_CACHE.lock() {
-            *cache = Some((fingerprint, cmds.clone()));
-        }
+        *PATH_CMD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((fingerprint, cmds.clone()));
         cmds
     }
 
@@ -474,6 +476,32 @@ mod tests {
         assert!(!commands.contains(&"cp".to_string()));
         assert!(!commands.contains(&"self-update".to_string()));
         assert!(!commands.contains(&"update-niubash".to_string()));
+    }
+
+    #[test]
+    fn issue833_poisoned_command_caches_still_serve() {
+        // niubash#833: poison both command caches the way a panic in
+        // a writer would. Before the fix every later lookup degraded
+        // to a full rescan and `invalidate_command_caches` silently
+        // stopped clearing, so a stale list could be served forever.
+        fn poison<T: Send>(mutex: &'static Mutex<T>) {
+            std::thread::scope(|scope| {
+                let handle = scope.spawn(move || {
+                    let _guard = mutex.lock().unwrap();
+                    panic!("issue833: deliberate command-cache poison");
+                });
+                assert!(handle.join().is_err());
+            });
+            assert!(mutex.lock().is_err());
+        }
+        poison(&ALL_COMMANDS_CACHE);
+        poison(&PATH_CMD_CACHE);
+
+        let commands = CommandCompleter::get_all_commands();
+        assert!(commands.contains(&"echo".to_string()));
+        CommandCompleter::invalidate_command_caches();
+        let commands = CommandCompleter::get_all_commands();
+        assert!(commands.contains(&"echo".to_string()));
     }
 
     #[test]

@@ -25,15 +25,13 @@ impl VariableCompleter {
         }
 
         // Extract variable name (after $ and potentially {)
+        // niubash#838: an empty name is the bare prefix ('echo $',
+        // 'echo ${') — GNU lists every variable for it, exactly as
+        // `complete_names` below already does. Bail only when the
+        // word carries no $ prefix at all (handled above).
         let var_name = if let Some(stripped) = word.strip_prefix("${") {
-            if stripped.is_empty() {
-                return Ok(None);
-            }
             stripped
         } else if let Some(stripped) = word.strip_prefix('$') {
-            if stripped.is_empty() {
-                return Ok(None);
-            }
             stripped
         } else {
             return Ok(None);

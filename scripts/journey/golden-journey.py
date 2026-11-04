@@ -20,9 +20,12 @@ this product, a known pitfall, so both point at the sandbox):
   J2 wizard full run, entered through the explicit `niu setup` verb
      at the J1 prompt: `niu setup` -> the wizard welcome block (the
      v-banner, environment panel, "No external themes installed yet")
-     -> collection "full" -> Apply -> the real `git clone`s progress on
-     the terminal -> trust-now question -> "Trust now" (现在信任) -> theme
-     gallery lists >60 themes -> pick `powerline-multiline` -> rc written
+     -> collection "full" -> Q2.6 completion style -> Q2.7 completion
+     interaction -> Apply -> the real `git clone`s progress on the
+     terminal -> the post-install theme gallery lists >60 themes
+     (no trust question — the trust mechanism was removed from the
+     product on 2026-10-28, niubash#647) -> pick `powerline-multiline`
+     -> rc written
      (the pick's ownership note; the activation itself lives in the #359
      generated loader), spec written, undo receipts listed on the finish
      screen -> the live REPL prompt again.
@@ -30,15 +33,17 @@ this product, a known pitfall, so both point at the sandbox):
      source ~/.niubashrc in a live session -> ZERO syntax errors anywhere.
   J4 new-terminal x3
      each fresh `niu` session: no "Cloning into" (no re-downloads), no
-     "not declared" nags, at most the documented per-source awaiting-trust
-     notices, prompt renders.
+     "not declared" nags, no plugin notices of any kind (no sync runs
+     at startup; the trust state is retired), prompt renders.
   J5 daily battery (in the live session left open by J4)
      `ls | wc -l`, `echo hi | cat -n`, `cd ~ && pwd`,
      `[[ a != b ]] && echo ok` — each must produce output, not errors,
      with the prompt still alive after each command.
-  J6 trust + activate bash-completion (the owner's exact flow)
-     `niu plugin trust bash-completion` -> `source ~/.niubashrc` -> a
-     fresh terminal -> ZERO syntax errors (bash_completion included).
+  J6 activate bash-completion (the owner's exact flow)
+     `niu plugin trust` refuses as an unknown subcommand (no trust
+     state) -> `niu plugin enable bash-completion` ->
+     `source ~/.niubashrc` -> a fresh terminal -> ZERO syntax errors
+     (bash_completion included).
   J7 gallery live preview (niubash#170)
      re-run `niu setup` -> the pane below the gallery highlight renders
      that theme's real PS1 (header follows the highlight; a hung theme
@@ -49,12 +54,12 @@ Wave-1 persistence lane (wt79/jw1-persistence, journey-spec P3 + P8-S4 —
 the two live P0s #168/#167 plus F4/F5 aged state). Registered as phases
 P3 and P8 in PHASE_RUNNERS; like every phase they compose AFTER the base
 gate on the same sandbox, walking on the installed state J1–J7 leave
-(the theme-bearing source is still installed — J6 only trusts
+(the theme-bearing source is still installed — J6 only enables
 bash-completion — and P8-S4 restores what it removes):
 
   P3-S1 reopen sandbox session (aged state)
      a fresh terminal after J5: prompt renders; the picked theme still
-     owns the rc (`OSH_THEME`/`BASH_IT_THEME` line intact); the spec
+     owns the loader (`OSH_THEME`/`BASH_IT_THEME` line intact); the spec
      still declares the wizard's sources; the session reads back a
      marker file a PREVIOUS session wrote (the wake-flag capability:
      a session detects "a previous session mutated state"), proving the
@@ -68,8 +73,8 @@ bash-completion — and P8-S4 restores what it removes):
      with no activated/deactivated flip of the theme source; the
      WHOLE-rc comparison stays as an informational note only, because
      other managed blocks may legally materialize between snapshots once
-     their spec declaration goes trusted/declared (release run
-     37218948432: the bash-completion block J6 trusted) — materializing
+     their spec declaration lands (release run 37218948432: the
+     bash-completion block J6 activated) — materializing
      it is sync's job, not a stability break; (b) the picked theme's
      variable still present, unchanged, on the same framework; (c) the
      string `selection materialized` (the #168 rewrite tell) never
@@ -87,11 +92,11 @@ bash-completion — and P8-S4 restores what it removes):
      send runs wake-free, so the gate stops masking #167.
   P3-S4 aged state: damaged tree + bootstrap-failures ledger (F5)
      seed between sessions (the `seed` capability): rename a file
-     inside the trusted oh-my-bash tree (the guarded loader must no-op
+     inside the installed oh-my-bash tree (the guarded loader must no-op
      silently) and hand-write a spec entry for a declared-but-missing
-     origin plus its `bootstrap-failures.toml` memo. The next terminal
-     reaches a prompt within 10s with at most the documented one-line
-     notices (deferred / awaiting-trust); the explicit verbs repair
+     origin plus its `bootstrap-failures.json` memo. The next terminal
+     reaches a prompt within 10s in silence (no sync rows, no notices —
+     the boot runs no sync); the explicit verbs repair
      (`niu plugin sync` retries the missing origin readably, `niu
      plugin restore` rebuilds the tree); after healing the spec, the
      final terminal is silent again.
@@ -99,7 +104,7 @@ bash-completion — and P8-S4 restores what it removes):
      `niu plugin source remove oh-my-bash` while its theme is applied:
      spec declaration drops, registry record and tree drop, fresh
      terminal(s) fall back to the floor prompt with no resurrection and
-     no syntax-error storm; then re-add + trust + re-enable restores the
+     no syntax-error storm; then re-add + re-enable restores the
      theme, and the rc carries exactly one oh-my-bash block (no orphan
      blocks) at steady state. The theme under test is DERIVED from the
      live state at step start (whatever P4 left active — see the
@@ -118,8 +123,8 @@ Driver capabilities landed with this lane (journey-steps.json
              back — a session detects "a previous session mutated
              state" without any driver-internal channel.
   seed       the `SandboxSeed` helper: byte snapshots of the rc,
-             spec `[[sources]]` stanza add/drop, a product-format
-             `bootstrap-failures.toml` memo write, and tree-file
+             spec entry add/drop (JSON), a product-format
+             `bootstrap-failures.json` memo write, and tree-file
              damage — all under the sandbox home, between sessions.
 
 `--phases` selects what runs (comma-separated): the base J1–J7 gate
@@ -182,7 +187,6 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -255,7 +259,7 @@ WAKE_GAP_SECONDS = 0.15
 # last row that is neither the typed input line nor any row carrying the
 # command text (anchor condition in await_output_anchor). Bounded like
 # everything here; the known-long journey commands carry their own bound
-# (trust 90s, source 60s) and an expiry is ledgered, never silent.
+# (enable 90s, source 60s) and an expiry is ledgered, never silent.
 ANCHOR_POLL_SECONDS = 0.1
 ANCHOR_TIMEOUT_SECONDS = 30.0
 
@@ -647,8 +651,9 @@ class Session:
         codes INSIDE the word (`\\x1b[36mecho\\x1b[0m DUM...`) and a raw
         substring test can never match; pyte's rendered row holds the
         glyphs contiguously. `before` is the pre-send viewport — a match
-        that was already on screen is not an echo (the awaiting-trust
-        nag spells `niu plugin trust bash-completion`; drv-run1's
+        that was already on screen is not an echo (a startup notice can
+        spell a command line verbatim — the retired awaiting-trust nag
+        spelled `niu plugin trust bash-completion`; drv-run1's
         raw-stream false confirm hid the eaten first byte)."""
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -777,7 +782,7 @@ class Session:
         sits below the typed line — so the NEXT send in this session can
         never land while this command is still executing (the gluing).
         `anchor_timeout` carries the known-long commands' own bounds
-        (trust 90s, source 60s); the default covers everything else.
+        (enable 90s, source 60s); the default covers everything else.
 
         `anchor=False` skips that post-execution anchor for commands
         whose completion is INTERACTIVE, not a returning prompt — the
@@ -1316,32 +1321,44 @@ def await_bare_line(session: Session, text, timeout=30):
 
 
 def sync_row_keys(body: str, action: str):
-    """Distinct source ids of `niu plugin sync: <action> <id> ...` rows in
-    a mixed transcript+raw body. The same row appears twice (the pyte
-    transcript AND the raw stream both carry it) and stray console noise
-    can glue onto a physical line, so row identity is (action, id) —
-    never the physical line count."""
+    """Distinct source ids of `<action> <id> ...` sync rows in a mixed
+    transcript+raw body. The current row form is the one
+    `print_sync_rows` prints (src/main.rs run_plugin_sync_command): the
+    action, the id, the detail — no prefix. (The retired startup form
+    spelled rows `niu plugin sync: <action> <id>`; that prefix is still
+    tolerated so a regression reviving it is parsed, not missed.) The
+    same row appears twice (the pyte transcript AND the raw stream both
+    carry it) and stray console noise can glue onto a physical line, so
+    row identity is (action, id) — never the physical line count."""
     return {
         match.group(1)
         for match in re.finditer(
-            rf"niu plugin sync: {re.escape(action)}\s+(\S+)", body)
+            rf"(?:niu plugin sync:\s*|^\s*){re.escape(action)}\s+(\S+)",
+            body, re.M)
     }
 
 
-def untrusted_registry_ids(home: Path):
-    """The source ids the sandbox registry still marks untrusted — the
-    documented awaiting-trust bound. Since wt78 expanded the `full`
-    collection to nine entries, a literal cap goes stale on every
-    entry-set change (six-plus untrusted at J4 is the documented new
-    normal), so the bound derives from the registry — the same state
-    sync --bootstrap reads (the J4 derivation, shared with P3-S4)."""
-    registry_path = home / ".niubash" / "sources" / "registry.toml"
+def registry_source_ids(home: Path):
+    """The source ids the sandbox registry records, read from the
+    current registry format (`~/.niubash/sources/registry.json` —
+    plugins/sources.rs SourceRegistry, schema
+    `niubash:plugin-source-registry@0.4.0`). The registry carries no
+    trust field (the trust state was removed with niubash#647; a
+    record's state is only ever ready/missing), so there is no
+    untrusted subset to derive a notice bound from anymore — the
+    helper this replaces (`untrusted_registry_ids`, a registry.toml
+    `trusted`-flag read) could only ever return the empty set against
+    the current product."""
+    registry_path = home / ".niubash" / "sources" / "registry.json"
     if not registry_path.is_file():
         return set()
-    registry = tomllib.loads(registry_path.read_text(encoding="utf-8"))
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
     ids = {record.get("id", "")
            for record in registry.get("sources", [])
-           if not record.get("trusted", False)}
+           if isinstance(record, dict)}
     ids.discard("")
     return ids
 
@@ -1409,7 +1426,7 @@ class SandboxSeed:
 
     @property
     def spec_path(self) -> Path:
-        return self.home / ".niubash" / "plugins.toml"
+        return self.home / ".niubash" / "plugins.json"
 
     @property
     def sources_root(self) -> Path:
@@ -1417,10 +1434,12 @@ class SandboxSeed:
 
     @property
     def ledger_path(self) -> Path:
-        """The startup install-failure memo (`bootstrap-failures.toml`,
+        """The legacy install-failure memo (`bootstrap-failures.json`,
         changelog 1.3.1 F5) — under the sources root, the product's own
-        `bootstrap_failure_path()` location."""
-        return self.sources_root / "bootstrap-failures.toml"
+        `bootstrap_failure_path()` location (plugins/sync.rs). JSON
+        since the 1.5.0 product-TOML deletion; the TOML sibling is
+        migrate-only and no runtime path reads it."""
+        return self.sources_root / "bootstrap-failures.json"
 
     def marker_path(self) -> Path:
         return self.home / ".journey-wake.flag"
@@ -1449,57 +1468,91 @@ class SandboxSeed:
             return ""
 
     # ── spec hand-editing (the documented workflow: edit + sync) ──
-    def add_spec_source(self, stanza_body: str):
-        """Append one `[[sources]]` stanza (body lines without the
-        header) to the spec — the same shape `niu plugin add` writes."""
+    def _read_spec(self) -> dict:
+        """The spec document as data (plugins.json — plugins/spec.rs
+        PluginSpec: `{schema, sources: [...]}`); an absent or blank
+        file is the empty spec, the same tolerance parse_spec_json
+        applies."""
         text = self.spec_text()
-        if text and not text.endswith("\n"):
-            text += "\n"
-        text += "\n[[sources]]\n" + stanza_body.rstrip("\n") + "\n"
+        if not text.strip():
+            return {"schema": "niubash:plugin-spec@0.1.0", "sources": []}
+        spec = json.loads(text)
+        spec.setdefault("sources", [])
+        return spec
+
+    def _write_spec(self, spec: dict):
         self.spec_path.parent.mkdir(parents=True, exist_ok=True)
-        self.spec_path.write_text(text, encoding="utf-8", newline="\n")
+        self.spec_path.write_text(
+            json.dumps(spec, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8", newline="\n")
+
+    def add_spec_source(self, target: str, source_id: str = None,
+                        enable=None, theme: str = None,
+                        kind: str = None, ref_name: str = None):
+        """Append one source entry to the spec — the same shape the
+        product's own spec writes produce (spec.rs SpecSource field
+        order: target, id, kind, ref, theme, enable; unset Option
+        fields omitted)."""
+        entry = {"target": target}
+        if source_id is not None:
+            entry["id"] = source_id
+        if kind is not None:
+            entry["kind"] = kind
+        if ref_name is not None:
+            entry["ref"] = ref_name
+        if theme is not None:
+            entry["theme"] = theme
+        if enable:
+            entry["enable"] = list(enable)
+        spec = self._read_spec()
+        spec["sources"].append(entry)
+        self._write_spec(spec)
 
     def drop_spec_source(self, id_or_target: str) -> bool:
-        """Remove every `[[sources]]` stanza whose text names
-        `id_or_target` (its `id =` or `target =` line). Returns True when
-        a stanza was dropped."""
-        text = self.spec_text()
-        stanzas = text.split("[[sources]]")
-        kept = [stanzas[0]]
-        dropped = False
-        for stanza in stanzas[1:]:
-            if id_or_target in stanza:
-                dropped = True
-                continue
-            kept.append("[[sources]]" + stanza)
+        """Remove every spec entry whose id or target names
+        `id_or_target` (substring match, the old stanza-text rule).
+        Returns True when an entry was dropped."""
+        spec = self._read_spec()
+        kept = [entry for entry in spec["sources"]
+                if id_or_target not in str(entry.get("id", ""))
+                and id_or_target not in str(entry.get("target", ""))]
+        dropped = len(kept) != len(spec["sources"])
         if dropped:
-            self.spec_path.write_text("".join(kept), encoding="utf-8",
-                                      newline="\n")
+            spec["sources"] = kept
+            self._write_spec(spec)
         return dropped
 
     # ── the F5 ledger, in the product's exact format ──
-    def seed_bootstrap_failure(self, target: str, error: str,
-                               ref_name=None):
-        """Write (or merge into) `bootstrap-failures.toml` exactly the way
-        `sync.rs write_bootstrap_failures` formats a startup failure for
-        (target, ref) — the shape `bootstrap_failure_recorded` matches
-        against the resolved origin of a spec entry."""
-        entry = f"\n[[failure]]\ntarget = \"{target}\"\n"
-        if ref_name:
-            entry += f"ref = \"{ref_name}\"\n"
-        entry += (f"error = \"{error}\"\n"
-                  f"at = \"{datetime.now(timezone.utc).isoformat(timespec='seconds')}\"\n")
+    def seed_bootstrap_failure(self, target: str, ref_name=None):
+        """Write (or merge into) `bootstrap-failures.json` in the shape
+        `sync.rs` reads back (`BootstrapFailureLedger`:
+        `{schema, failure: [{target, ref?}]}` — the record carries no
+        error/timestamp fields; the shape did not change in the TOML
+        deletion, only the syntax). This is the memo
+        `bootstrap_failure_recorded` matches against the resolved
+        origin of a spec entry. Nothing in the current product writes
+        the ledger (the writer retired with the startup sync form);
+        it is seeded here precisely because the product still READS
+        it — an explicit sync retry or `--prune` clears the entry it
+        resolves (sync.rs clear_bootstrap_failure)."""
         path = self.ledger_path
         path.parent.mkdir(parents=True, exist_ok=True)
+        ledger = {"schema": "niubash:plugin-bootstrap-failures@1",
+                  "failure": []}
         if path.is_file():
-            path.write_text(path.read_text(encoding="utf-8") + entry,
-                            encoding="utf-8", newline="\n")
-        else:
-            path.write_text(
-                "# Startup install-failure memo (niu plugin sync --bootstrap).\n"
-                "# Cleared by an explicit `niu plugin sync` / `niu plugin add` retry.\n"
-                "schema = \"niubash:plugin-bootstrap-failures@1\"\n" + entry,
-                encoding="utf-8", newline="\n")
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(existing.get("failure"), list):
+                    ledger = existing
+            except (OSError, ValueError, AttributeError):
+                pass  # a corrupt seed target is rewritten whole
+        entry = {"target": target}
+        if ref_name:
+            entry["ref"] = ref_name
+        ledger["failure"].append(entry)
+        path.write_text(
+            json.dumps(ledger, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8", newline="\n")
 
     # ── tree damage (the `tree missing` / guarded-loader contract) ──
     def damage_source_file(self, source_id: str, relative: str,
@@ -1652,9 +1705,9 @@ def p3_s2_rc_stability(exe, home, env, verdict, seed, state):
         # present exactly once, with no activated/deactivated flip of the
         # theme source. The WHOLE-rc equality the pre-wt78 gate asserted
         # is informational only: another managed block may legally
-        # materialize between snapshots once its spec declaration goes
-        # trusted/declared (release run 37218948432: the bash-completion
-        # block J6 trusted landed here and was mislabeled a stability
+        # materialize between snapshots once its spec declaration lands
+        # (release run 37218948432: the bash-completion block J6
+        # activated landed here and was mislabeled a stability
         # break) — materializing it is sync's job (wt87 recalibration).
         for milestone in ("after-reopen", "after-source", "after-term1",
                           "after-term2"):
@@ -1709,7 +1762,8 @@ def p3_s2_rc_stability(exe, home, env, verdict, seed, state):
 
         # (a2) no activated/deactivated flip of the THEME source in any
         # P3 session stream: the enable/disable life cycle would print
-        # `niu plugin sync: activated|deactivated oh-my-bash`.
+        # `activated|deactivated oh-my-bash` sync rows (the
+        # print_sync_rows form — src/main.rs).
         for label in sorted(raws):
             if not label.startswith(("P3-S1", "P3-S2")):
                 continue
@@ -1835,9 +1889,9 @@ def p3_s3_first_key(exe, home, env, verdict, seed, state):
 
 
 def p3_s4_aged_state(exe, home, env, verdict, seed, state):
-    """P3-S4: aged state — a damaged trusted tree plus a seeded F5
-    bootstrap-failures ledger. Bounded startup, documented one-line
-    notices, guarded-loader silence, explicit-verb repair, silent after."""
+    """P3-S4: aged state — a damaged installed tree plus a seeded F5
+    bootstrap-failures ledger. Bounded startup, guarded-loader
+    silence, explicit-verb repair, silent after."""
     step = verdict.step(
         "P3-S4", "aged state: damaged tree + bootstrap-failures ledger "
         "(changelog 1.3.1 F5)")
@@ -1845,20 +1899,16 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
         # ── seed between sessions (the `seed` capability) ──
         missing = seed.home / ".journey-missing-origin"
         target = missing.as_posix()
-        seed.add_spec_source(f'target = "{target}"\n'
-                             'id = "journey-missing-origin"')
-        seed.seed_bootstrap_failure(
-            target=target,
-            error="seeded by the journey (the previous session's install "
-                  "failed)")
-        step.check("bootstrap-failures.toml ledger seeded for the "
+        seed.add_spec_source(target, source_id="journey-missing-origin")
+        seed.seed_bootstrap_failure(target=target)
+        step.check("bootstrap-failures.json ledger seeded for the "
                    "declared-but-missing origin",
                    seed.ledger_path.is_file()
                    and target in seed.ledger_path.read_text(encoding="utf-8"),
                    f"ledger: {seed.ledger_path}")
         old, new = seed.damage_source_file("oh-my-bash", "oh-my-bash.sh")
-        step.check("trusted tree damaged (the guarded loader's entry file "
-                   "renamed)",
+        step.check("installed tree damaged (the guarded loader's entry "
+                   "file renamed)",
                    new.is_file() and not old.exists(),
                    f"{old.name} -> {new.name}")
 
@@ -1870,8 +1920,8 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
             label="P3-S4-damaged", delivery_log=verdict.delivery_events)
         try:
             secs = time_to_first_prompt(term, timeout=30.0, started=started)
-            step.check("prompt within the 30s wedge bound (the failed "
-                       "install is deferred, not retried at startup)",
+            step.check("prompt within the 30s wedge bound (nothing is "
+                       "retried at startup — the boot runs no sync)",
                        secs is not None,
                        "no prompt within 30s"
                        if secs is None else f"{secs:.1f}s to first prompt")
@@ -1888,39 +1938,34 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
             degraded = sync_row_keys(body, "degraded") | {
                 line.strip()[:60] for line in body.splitlines()
                 if "tree missing" in line}
-            nags = sync_row_keys(body, "awaiting-trust")
-            # The documented bound is "at most" the one-line deferred memo
-            # (journey-steps.json P3-S4). Post-#359 the boot runs NO startup
-            # sync at all — the rc bootstrap line is a compatibility no-op
-            # (src/main.rs run_plugin_sync_command) and the generated loader
-            # is the boot plane — so the silent boot is the new steady state
-            # and 0 deferred rows is legal; failed/degraded rows remain
-            # forbidden (the wedge/retry-storm class must never print).
+            # Post-#359 the boot runs NO startup sync at all — the rc
+            # bootstrap line is a compatibility no-op (src/main.rs
+            # run_plugin_sync_command) and the generated loader is the
+            # boot plane — so the silent boot is the steady state: no
+            # sync rows of any action may appear. 'deferred' is not a
+            # current action at all (plugins/sync.rs SyncRow actions:
+            # installed/activated/unchanged/deactivated/missing/
+            # failed/removed/unsupported/merged), and failed/degraded
+            # rows remain the forbidden wedge/retry-storm class.
             first = next(iter(sorted(deferred | failed | degraded)),
                          "(none)")
-            step.check("at most the documented one-line notices (post-#359 "
-                       "the boot runs no startup sync, so zero deferred "
-                       "rows is the silent-boot steady state; never "
-                       "failed/degraded rows)",
-                       len(deferred) <= 1 and not failed and not degraded,
+            step.check("no sync rows at startup (post-#359 the boot "
+                       "runs no startup sync — the generated loader is "
+                       "the boot plane; never failed/degraded rows)",
+                       not deferred and not failed and not degraded,
                        f"deferred={sorted(deferred)} failed={sorted(failed)} "
                        f"degraded={sorted(degraded)}; first: "
                        f"{first.strip()[:140]}")
-            # The documented nag: one line per still-untrusted declared
-            # source. The bound derives from the sandbox registry (the
-            # J4 derivation): since wt78 expanded `full` to nine entries
-            # the literal "<=2" went stale — five untrusted remain after
-            # J6 trusted bash-completion, and every one of them must be
-            # allowed to name itself.
-            untrusted = untrusted_registry_ids(home)
-            unexpected = nags - untrusted
-            step.check("awaiting-trust notices stay documented (one per "
-                       "untrusted source)",
-                       not unexpected and len(nags) <= len(untrusted),
-                       f"{len(nags)} source(s) vs {len(untrusted)} "
-                       f"untrusted in the registry: {sorted(nags)}"
-                       + (f"; unexpected: {sorted(unexpected)}"
-                          if unexpected else ""))
+            # No awaiting-trust notices can exist: the trust state was
+            # removed with niubash#647 — the registry carries no
+            # trusted flag and an installed source contributes
+            # immediately (plugins/sources.rs), so the documented nag
+            # this block used to bound (one line per untrusted source,
+            # the bound derived from the registry) has no current
+            # form. Hard absence.
+            step.check("no awaiting-trust notices (trust state "
+                       "retired — niubash#647)",
+                       "awaiting-trust" not in body)
             storm = {line.strip()[:120] for line in body.splitlines()
                      if "command not found" in line}
             step.check("guarded loader no-ops silently (no error storm)",
@@ -1971,7 +2016,9 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
                        f"{guarded}")
             # Heal the spec the documented way (hand-edit the declaration
             # away); the ledger entry — already cleared by the explicit
-            # retry's clear-before-install — is inert either way.
+            # retry (sync.rs: a declared-but-not-installed entry clears
+            # its failure memo on the way in; the explicit pass IS the
+            # retry) — is inert either way.
             dropped = seed.drop_spec_source(".journey-missing-origin")
             step.check("healed: the missing origin's declaration dropped "
                        "from the spec", dropped)
@@ -2002,22 +2049,15 @@ def p3_s4_aged_state(exe, home, env, verdict, seed, state):
             prompt_alive(healed, "P3S4B_ALIVE")
             drain_notices(healed)
             body = healed.transcript() + "\n" + healed.raw_stripped()
-            bad = [line for line in body.splitlines()
-                   if re.search(r"niu plugin sync: (deferred|failed|"
-                                "degraded)\b", line)]
+            bad = (sync_row_keys(body, "deferred")
+                   | sync_row_keys(body, "failed")
+                   | sync_row_keys(body, "degraded"))
             step.check("terminal after repair is silent (no deferred/"
                        "failed/degraded rows)", not bad,
-                       f"{len(bad)} line(s), first: "
-                       f"{bad[0].strip()[:140] if bad else ''}")
-            nags = sync_row_keys(body, "awaiting-trust")
-            untrusted = untrusted_registry_ids(home)
-            unexpected = nags - untrusted
-            step.check("only the documented awaiting-trust lines remain",
-                       not unexpected and len(nags) <= len(untrusted),
-                       f"{len(nags)} source(s) vs {len(untrusted)} "
-                       f"untrusted in the registry: {sorted(nags)}"
-                       + (f"; unexpected: {sorted(unexpected)}"
-                          if unexpected else ""))
+                       f"row ids: {sorted(bad)}")
+            step.check("no awaiting-trust lines remain (trust state "
+                       "retired — niubash#647)",
+                       "awaiting-trust" not in body)
             verdict_for_syntax_errors(
                 step, "zero syntax errors after repair",
                 all_syntax_errors(healed))
@@ -2043,13 +2083,13 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
     after J2 (release runs 37218948432 / 37224044818 red a hardcoded
     `powerline-multiline` precondition here while the product was correct
     at every hop). No active theme is a legal state too: the
-    removal-then-restore contract then runs themeless (re-add + trust
-    only; nothing may resurrect)."""
+    removal-then-restore contract then runs themeless (re-add only;
+    nothing may resurrect)."""
     step = verdict.step(
         "P8-S4", "remove the source providing the ACTIVE theme "
         "(changelog 1.3.1 F4)")
     tree = seed.sources_root / "oh-my-bash"
-    registry_path = seed.sources_root / "registry.toml"
+    registry_path = seed.sources_root / "registry.json"
     try:
         rc_text = seed.rc_bytes().decode("utf-8", errors="replace")
         loader_text = loader_text_for(home)
@@ -2082,8 +2122,8 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
                    f"oh-my-bash block: {block_vars}; tree: {tree.is_dir()}")
         if not themed:
             step.note("no theme active at step start — the removal-then-"
-                      "restore contract runs themeless (re-add + trust "
-                      "only; nothing may resurrect)")
+                      "restore contract runs themeless (re-add only; "
+                      "nothing may resurrect)")
 
         remover = Session(
             [str(exe)], home, env,
@@ -2137,12 +2177,12 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
         # F4's resurrection guard, on disk, immediately.
         step.check("F4: the spec declaration dropped",
                    "oh-my-bash" not in seed.spec_text(),
-                   "plugins.toml still names oh-my-bash")
+                   "plugins.json still names oh-my-bash")
         registry_text = (registry_path.read_text(encoding="utf-8")
                          if registry_path.is_file() else "")
         step.check("F4: the registry record dropped",
                    "oh-my-bash" not in registry_text,
-                   "registry.toml still records oh-my-bash")
+                   "registry.json still records oh-my-bash")
         step.check("F4: the tree is gone", not tree.exists(),
                    f"{tree} still present")
 
@@ -2210,7 +2250,10 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
             finally:
                 floor.close()
 
-        # Re-add + trust + re-enable (the manifest's restore path).
+        # Re-add + re-enable (the manifest's restore path). There is
+        # no trust leg: the verb was removed with niubash#647 — an
+        # installed source contributes immediately, so the re-add
+        # below is the whole restore precondition.
         restorer = Session(
             [str(exe)], home, env,
             raw_log=verdict.transcripts / "P8-S4-restore.raw.ansi",
@@ -2246,15 +2289,6 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
                     break
             step.check("`niu plugin add oh-my-bash` re-installed the "
                        "source", installed is True, add_detail)
-            restorer.send_line("niu plugin trust oh-my-bash",
-                               anchor_timeout=90)
-            try:
-                restorer.wait_for("is now trusted", timeout=90)
-                step.check("`niu plugin trust oh-my-bash` reported trusted",
-                           True)
-            except TimeoutError as err:
-                step.check("`niu plugin trust oh-my-bash` reported trusted",
-                           False, str(err))
             if themed:
                 # Re-enable the theme that was ACTIVE at step start (the
                 # live state's own pick — restoring the state P8-S4 found,
@@ -2270,8 +2304,8 @@ def p8_s4_remove_active_theme_source(exe, home, env, verdict, seed, state):
                                f"{active_theme}` re-applied the theme",
                                False, str(err))
             else:
-                step.note("themeless state — the restore leg is re-add + "
-                          "trust only; nothing may resurrect")
+                step.note("themeless state — the restore leg is re-add "
+                          "only; nothing may resurrect")
         finally:
             restorer.close()
 
@@ -2430,7 +2464,7 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     # stage 1 (the wizard never auto-starts), so the fresh REPL J1 left
     # open is asked for it.
     step = verdict.step(
-        "J2", "wizard full run via `niu setup`: full -> trust now -> "
+        "J2", "wizard full run via `niu setup`: full -> "
               "powerline-multiline")
     try:
         # Entering the verb draws the full wizard welcome block (the
@@ -2481,6 +2515,25 @@ def journey(exe: Path, root: Path, verdict: Verdict,
             raise AssertionError(
                 f"TAB completion style question never appeared: {err}")
 
+        # Q2.7 (niubash#631, new in 1.5.0): the TAB completion
+        # *interaction* question runs immediately after Q2.6, on first
+        # runs AND re-runs. The current effective interaction is
+        # pre-highlighted, so Enter is a no-op pick — no rc line is
+        # written when the pick equals the effective interaction, the
+        # same rule as Q2.6. (Release run 41591846072 died without this
+        # step: the wizard stayed parked on the Q2.7 menu while the
+        # harness waited downstream for the providers question.)
+        try:
+            session.wait_for("TAB completion interaction?", timeout=60)
+            session.wait_quiescent()
+            session.answer(ENTER)
+            step.check("completion-interaction question answered with "
+                       "the pre-highlighted default", True)
+        except TimeoutError as err:
+            raise AssertionError(
+                f"TAB completion interaction question never appeared: "
+                f"{err}")
+
         # Q3 is CONDITIONAL (niubash#230 follow-up): an installation whose
         # bundle already carries niu-git (opt/niugit) skips the question
         # silently — it records the "installed" answer and moves straight
@@ -2525,12 +2578,22 @@ def journey(exe: Path, root: Path, verdict: Verdict,
         except TimeoutError as err:
             raise AssertionError(f"no clone ever started: {err}")
 
-        # Singular (one theme-bearing source) or plural (several); the
-        # 'full' collection installs two theme-bearing frameworks. Abort
-        # on the tour/REPL: an install that failed outright never asks
-        # this question, and the wait must fail fast with the real reason.
+        # Post-install theme pick (owner ruling 2026-10-03): once the
+        # collection apply lands, the wizard lists the fresh sources'
+        # themes DIRECTLY in the gallery — there is no trust question
+        # in front of it. The trust mechanism was removed from the
+        # product on 2026-10-28 (niubash#647), so the old
+        # "to list its themes?" wait was a fossil: that text exists
+        # nowhere in the product, and the "Trust now" answer that
+        # followed it would have landed in the gallery as a stray
+        # row-jump + confirm. The 'full' collection installs two
+        # theme-bearing frameworks, and the gallery only draws after
+        # the apply finishes, so its title is the completion signal
+        # for the clones. Abort on the tour/REPL: an install that
+        # failed outright never reaches the gallery, and the wait must
+        # fail fast with the real reason.
         try:
-            session.wait_for("to list its themes?", "to list their themes?",
+            session.wait_for("Pick a theme",
                              timeout=CLONE_TIMEOUT,
                              abort_on=("press any key to continue",
                                        "Type `about` for a quick tour"))
@@ -2538,9 +2601,10 @@ def journey(exe: Path, root: Path, verdict: Verdict,
             step.check("multiple sources cloned (>=2 clone progress lines)",
                        clones >= 2, f"counted {clones} 'Cloning into' lines")
             verdict.capture("J2-after-clones", session)
+            verdict.capture("J2-gallery", session)
             # Every collection entry must have landed (a failed entry is a
             # real gap — the user sees the failure line in their terminal).
-            # Settle first: the question draws while git stderr is still
+            # Settle first: the gallery draws while git stderr is still
             # draining, then read the RAW stream only — it is append-only
             # and byte-ordered, immune to menu redraws and screen clears.
             time.sleep(1.0)
@@ -2556,21 +2620,14 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                 check_with_known_fail(
                     step, "every collection entry installed (no 'failed' "
                     "lines)", "\n".join(failed_lines))
-            session.answer("2\r")  # 2 = Trust now (现在信任)
-            step.check("trust-now chosen (现在信任)", True)
-        except TimeoutError as err:
-            raise AssertionError(f"trust question never appeared: {err}")
-
-        # Theme gallery: >60 themes, then navigate to powerline-multiline.
-        # The size proof is deterministic, not a screen scrape: after
-        # navigating, powerline-multiline's own row number (it sorts deep
-        # in the list) proves the gallery size; a mid-redraw scroll marker
-        # can read "0 more" and must never gate on its own.
-        try:
-            session.wait_for("Pick a theme", timeout=120)
-            verdict.capture("J2-gallery", session)
         except TimeoutError as err:
             raise AssertionError(f"theme gallery never appeared: {err}")
+
+        # Gallery navigation: walk to powerline-multiline. The size
+        # proof is deterministic, not a screen scrape: after navigating,
+        # powerline-multiline's own row number (it sorts deep in the
+        # list) proves the gallery size; a mid-redraw scroll marker
+        # can read "0 more" and must never gate on its own.
 
         def highlight_row(target: str):
             for line in session.text().splitlines():
@@ -2639,8 +2696,12 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     # Durable receipts (screen tails can drop at process exit — the files
     # are the truth, the smoke-journey discipline).
     rc_path = home / ".niubashrc"
-    spec_path = home / ".niubash" / "plugins.toml"
-    journal_path = home / ".niubash" / "setup-journal.toml"
+    # The spec and the setup journal are JSON since the 1.5.0
+    # product-TOML deletion (plugins.json, setup-journal.json); the
+    # .toml paths here named files the product no longer writes, so
+    # every read below silently saw "".
+    spec_path = home / ".niubash" / "plugins.json"
+    journal_path = home / ".niubash" / "setup-journal.json"
     rc = rc_path.read_text(encoding="utf-8") if rc_path.is_file() else ""
     spec = spec_path.read_text(encoding="utf-8") if spec_path.is_file() else ""
     journal = (journal_path.read_text(encoding="utf-8")
@@ -2649,21 +2710,40 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     finish_file = verdict.transcripts / "J2-finish.txt"
     if finish_file.is_file():
         finish_text = finish_file.read_text(encoding="utf-8")
-    # The #359 contract: the rc carries the pick as a human-facing note
-    # and NEVER as a theme line — the activation lives in the generated
-    # loader (probe evidence, 2026-10-19: "# Prompt owned by the oh-my-bash
-    # theme 'powerline-multiline'; PS1 renders via the bash-compatible
-    # channel." + ~/.niubash/generated/plugins.niu holding the OSH_THEME
-    # line).
+    # The #359 contract: the GENERATED rc text carries the pick as a
+    # human-facing note and NEVER as a theme line — the activation
+    # lives in the generated loader (probe evidence, 2026-10-19:
+    # "# Prompt owned by the oh-my-bash theme 'powerline-multiline';
+    # PS1 renders via the bash-compatible channel." +
+    # ~/.niubash/generated/plugins.niu holding the OSH_THEME line).
+    # Which file holds that generated text is the create-only question
+    # answered by the note check below.
     loader_path = home / ".niubash" / "generated" / "plugins.niu"
     loader = (loader_path.read_text(encoding="utf-8")
               if loader_path.is_file() else "")
-    step.check("~/.niubashrc written with the pick's ownership note "
-               "(theme lines retired from the rc — #359)",
-               rc_path.is_file()
-               and ("# Prompt owned by the oh-my-bash theme "
-                    "'powerline-multiline'") in rc,
-               f"rc exists: {rc_path.is_file()}")
+    # Where the note lands depends on the rc slot (niubash#359
+    # create-only, setup_wizard.rs write_primary_rc): a fresh slot is
+    # created WITH the note; an occupied slot is never touched and the
+    # generated text — note included — parks as the candidates sample
+    # the journal's rc_sample names. In this sandbox the slot is
+    # occupied by the time the wizard applies (the J1 session precedes
+    # it), so the note verifiably lands in the sample (first J2
+    # alignment pass, driven end-to-end). Assert the note in the file
+    # the journal says received the generated rc — and that the user's
+    # rc itself carries no theme line either way.
+    sample_rel = journal_value(journal, "rc_sample")
+    note_carrier = Path(sample_rel) if sample_rel else rc_path
+    note_text = (note_carrier.read_text(encoding="utf-8")
+                 if note_carrier.is_file() else "")
+    step.check("the generated rc carries the pick's ownership note "
+               "(in the journal's rc_sample proposal when the rc slot "
+               "was occupied; theme lines retired from the rc — #359)",
+               ("# Prompt owned by the oh-my-bash theme "
+                "'powerline-multiline'") in note_text
+               and not rc_theme_vars(rc),
+               f"carrier: {note_carrier} (exists: "
+               f"{note_carrier.is_file()}); rc exists: "
+               f"{rc_path.is_file()}")
     step.check("generated loader carries the picked theme (the #359 "
                "activation plane)",
                "OSH_THEME='powerline-multiline'" in loader
@@ -2675,9 +2755,8 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                "bash-completion" in spec)
     step.check("spec carries the picked theme",
                "powerline-multiline" in spec)
-    step.check("setup journal records collection = 'full'",
-               "collection = 'full'" in journal
-               or 'collection = "full"' in journal)
+    step.check("setup journal records collection 'full'",
+               '"collection": "full"' in journal)
     step.check("finish screen undo receipts captured",
                "Undo this run" in finish_text
                or "Undo this run" in session.raw_text())
@@ -2761,34 +2840,19 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                        "not declared" not in body)
             nag_lines = [line for line in body.splitlines()
                          if "awaiting-trust" in line]
-            # The documented nag: one line per still-untrusted declared
-            # source. Since niubash#171 the `full` collection lands EIGHT
-            # sources and only oh-my-bash is trusted by the theme pick, so
-            # the bound derives from the sandbox registry (the same state
-            # sync --bootstrap reads) instead of a literal that every
-            # entry-set change would stale: every notice must name a real
-            # still-untrusted source, and the unique set may not exceed it
-            # (the screen render and the raw stream can each hold a copy).
-            untrusted_ids = set()
-            registry_path = home / ".niubash" / "sources" / "registry.toml"
-            if registry_path.is_file():
-                registry = tomllib.loads(
-                    registry_path.read_text(encoding="utf-8"))
-                for record in registry.get("sources", []):
-                    if not record.get("trusted", False):
-                        untrusted_ids.add(record.get("id", ""))
-                untrusted_ids.discard("")
-            noticed = {m.group(1) for line in nag_lines
-                       for m in [re.search(r"awaiting-trust\s+(\S+)", line)]
-                       if m}
-            unexpected = noticed - untrusted_ids
-            step.check(f"terminal #{i}: awaiting-trust notices stay "
-                       "documented (one per untrusted source)",
-                       not unexpected and len(noticed) <= len(untrusted_ids),
-                       f"{len(nag_lines)} line(s), {len(noticed)} unique vs "
-                       f"{len(untrusted_ids)} untrusted sources"
-                       + (f"; unexpected: {sorted(unexpected)}"
-                          if unexpected else "")
+            # No trust notices can exist anymore: the trust mechanism
+            # was removed 2026-10-28 (niubash#647) — an installed source
+            # contributes immediately (plugins/sources.rs), the
+            # registry carries no trusted flag, and startup runs no
+            # sync at all (plugins/sync.rs), so a fresh terminal prints
+            # no plugin notices of any kind. The old allowance (one
+            # awaiting-trust line per still-untrusted declared source,
+            # its bound derived from the registry) is a hard absence
+            # now.
+            step.check(f"terminal #{i}: no 'awaiting-trust' notices "
+                       "(trust state retired — niubash#647)",
+                       not nag_lines,
+                       f"{len(nag_lines)} line(s)"
                        + (f", first: {nag_lines[0].strip()[:100]}"
                           if nag_lines else ""))
             verdict.capture(f"J4-terminal-{i}", s)
@@ -2889,14 +2953,23 @@ def journey(exe: Path, root: Path, verdict: Verdict,
             live.close()
         step.finish()
 
-    # ── J6: the owner's exact flow — trust + activate bash-completion.
+    # ── J6: the owner's exact flow — activate bash-completion. The step
+    # was born as "trust + activate" around `niu plugin trust`; the
+    # trust verb (and the whole trust state) was removed 2026-10-28
+    # (niubash#647), so the flow's intent — a J2-installed source
+    # contributing its completion with no further gate — is now
+    # exercised by asserting the refusal of the retired verb and then
+    # the current activation verb (`niu plugin enable`, the WholeSource
+    # arm of plugins/assets.rs enable(): declared in the spec and
+    # activated through its own loader, no trust state anywhere).
     step = verdict.step(
-        "J6", "trust + activate bash-completion, zero syntax errors")
+        "J6", "activate bash-completion (no trust state), zero syntax "
+              "errors")
     s6 = Session([str(exe)], home, env,
                  raw_log=verdict.transcripts / "J6.raw.ansi", label="J6",
                  delivery_log=verdict.delivery_events)
     try:
-        # The aliveness probe and the trust verb travel as ONE anchored
+        # The aliveness probe and the retired verb travel as ONE anchored
         # line: two back-to-back sends after session open were the release
         # glue twice (37153503706 / 37157587488) — prompt_alive's
         # wait_for + 0.3s sleep is not an output anchor, and on slow
@@ -2910,29 +2983,47 @@ def journey(exe: Path, root: Path, verdict: Verdict,
         except TimeoutError:
             step.check("live session prompt renders", False,
                        "echo J6_ALIVE did not come back")
-        # The trust step's own expected-output wait is 90s; the anchor
-        # bound matches it so a slow trust run expires the anchor, not
-        # the sequencing (run 37153503706's 90s timeout was the glue).
-        s6.send_line("niu plugin trust bash-completion", anchor_timeout=90)
+        # The retired verb must refuse readably: run_plugin_command
+        # (src/main.rs) bails `unknown plugin subcommand 'trust'` for
+        # any verb outside the current set — there is no trust state a
+        # source could be waiting on. The wait's 90s bound matches the
+        # anchor bound so a slow run expires the anchor, not the
+        # sequencing (run 37153503706's 90s timeout was the glue).
         try:
-            s6.wait_for("is now trusted", timeout=90)
-            step.check("`niu plugin trust bash-completion` reported trusted",
-                       True)
+            s6.wait_for("unknown plugin subcommand 'trust'", timeout=90)
+            step.check("`niu plugin trust` no longer exists (refused as "
+                       "an unknown subcommand — no trust state gates "
+                       "activation, niubash#647)", True)
         except TimeoutError as err:
-            step.check("`niu plugin trust bash-completion` reported trusted",
+            step.check("`niu plugin trust` no longer exists (refused as "
+                       "an unknown subcommand — no trust state gates "
+                       "activation, niubash#647)", False, str(err))
+        # The activation itself: bash-completion is a WholeSource
+        # catalog source (plugins/sources.rs adapter tests), so enable
+        # declares it in the spec and activates it through its own
+        # loader — idempotent over the collection's declaration.
+        s6.send_line("niu plugin enable bash-completion",
+                     anchor_timeout=90)
+        try:
+            s6.wait_for("declared in the spec and activated", timeout=90)
+            step.check("`niu plugin enable bash-completion` activated "
+                       "the source through its own loader", True)
+        except TimeoutError as err:
+            step.check("`niu plugin enable bash-completion` activated "
+                       "the source through its own loader",
                        False, str(err))
         s6.send_line("source ~/.niubashrc", anchor_timeout=60)
         s6.send_line("echo J6_SRC_DONE")
         try:
             s6.wait_for("J6_SRC_DONE", timeout=60)
-            step.check("source ~/.niubashrc completed after trust", True)
+            step.check("source ~/.niubashrc completed after enable", True)
         except TimeoutError as err:
-            step.check("source ~/.niubashrc completed after trust", False,
+            step.check("source ~/.niubashrc completed after enable", False,
                        str(err))
         drain_notices(s6)
-        verdict.capture("J6-after-trust-source", s6)
+        verdict.capture("J6-after-enable-source", s6)
         verdict_for_syntax_errors(
-            step, "zero syntax errors after trust + source",
+            step, "zero syntax errors after enable + source",
             all_syntax_errors(s6))
     finally:
         s6.close()
@@ -2944,7 +3035,7 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                   raw_log=verdict.transcripts / "J6-fresh.raw.ansi",
                   label="J6-fresh", delivery_log=verdict.delivery_events)
     try:
-        step.check("fresh terminal after trust: prompt renders",
+        step.check("fresh terminal after enable: prompt renders",
                    prompt_alive(s6b, "J6B_ALIVE"))
         drain_notices(s6b)
         verdict.capture("J6-fresh-terminal", s6b)
@@ -3028,7 +3119,8 @@ def journey(exe: Path, root: Path, verdict: Verdict,
                 f"header: {header}\npane:\n" + body, encoding="utf-8")
             # A pane that shows a theme header line (`<name> · <source>`)
             # proves the preview follows THIS highlight. The real gallery
-            # mixes sources (J2 trusted oh-my-bash AND bash-it), so the
+            # mixes sources (J2's collection installed oh-my-bash AND
+            # bash-it), so the
             # source name varies per row — assert the header anatomy, not
             # one source.
             step.check(f"preview follows highlight {position + 1}",
@@ -3213,26 +3305,39 @@ def rc_theme_vars(rc_text: str) -> dict:
 
 
 def spec_source_blocks(spec_text: str) -> list:
-    """The [[sources]] entry bodies of the plugin spec (minimal split for
-    user-visible file assertions only)."""
-    blocks, current = [], None
-    for line in spec_text.splitlines():
-        if line.strip() == "[[sources]]":
-            current = []
-            blocks.append(current)
-        elif current is not None:
-            current.append(line)
-    return ["\n".join(block) for block in blocks]
+    """One compact JSON string per entry of the plugin spec's `sources`
+    list (plugins.json since the 1.5.0 TOML deletion — plugins/spec.rs
+    PluginSpec). The block strings exist for user-visible file
+    assertions only: substring checks and entry_field reads run over
+    them exactly the way they ran over the retired TOML stanzas."""
+    if not spec_text.strip():
+        return []
+    try:
+        spec = json.loads(spec_text)
+    except ValueError:
+        return []
+    return [json.dumps(entry, ensure_ascii=False)
+            for entry in spec.get("sources", [])
+            if isinstance(entry, dict)]
 
 
 def entry_field(block: str, field: str):
-    match = (re.search(rf"^{field}\s*=\s*'([^']*)'", block, re.M)
-             or re.search(rf'^{field}\s*=\s*"([^"]*)"', block, re.M))
-    return match.group(1) if match else None
+    """One field of a spec entry block. Fields the product leaves unset
+    are OMITTED from the JSON (spec.rs SpecSource serializes its
+    Option fields with skip_serializing_if), so an absent field reads
+    as None — a cleared theme pick is the absence of `theme`, never an
+    empty string."""
+    try:
+        entry = json.loads(block)
+    except ValueError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+    return entry.get(field)
 
 
 def spec_entry(spec_text: str, source_id: str):
-    """The [[sources]] block whose id or target names `source_id`."""
+    """The spec entry block whose id or target names `source_id`."""
     for block in spec_source_blocks(spec_text):
         if (entry_field(block, "id") == source_id
                 or entry_field(block, "target") == source_id):
@@ -3241,11 +3346,22 @@ def spec_entry(spec_text: str, source_id: str):
 
 
 def journal_value(journal_text: str, key: str):
-    match = (re.search(rf"^{re.escape(key)}\s*=\s*'(.*)'\s*$", journal_text,
-                       re.M)
-             or re.search(rf'^{re.escape(key)}\s*=\s*"(.*)"\s*$',
-                          journal_text, re.M))
-    return match.group(1) if match else None
+    """One top-level field of the setup journal (setup-journal.json
+    since the 1.5.0 TOML deletion — setup_wizard.rs
+    SetupJournalRecord: flat fields, unset Options omitted). `theme`
+    is the pick's name, `theme_source` its source id, `rc_sample` the
+    parked proposal path when the run could not create the rc. There
+    is no `rc_backup` field: create-only setup never backs an rc up
+    (niubash#359)."""
+    if not journal_text.strip():
+        return None
+    try:
+        journal = json.loads(journal_text)
+    except ValueError:
+        return None
+    if not isinstance(journal, dict):
+        return None
+    return journal.get(key)
 
 
 def fresh_terminal(exe, home, env, verdict, label: str) -> Session:
@@ -3306,12 +3422,13 @@ def gallery_walk_to(session: Session, candidates):
 def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
                  pick, expect_current: str = None):
     """One `niu setup` re-run inside a live REPL session (setup_wizard.rs
-    rerun_wizard — 'Reconfigure your interactive prompt/plugins. Existing
-    rc will be backed up.'). pick=None answers the gallery's
+    rerun_wizard — 'Reconfigure your interactive prompt/plugins. Your
+    existing rc stays untouched.'). pick=None answers the gallery's
     'Skip - keep my current theme' (the highlighted default); a name or
     candidate list is DOWN-walked in the gallery. Every question after the
-    gallery (Q2.6 TAB completion style, Q3 niu-git, Q4 external completion
-    providers) takes its highlighted default via Enter. Returns the theme
+    gallery (Q2.6 TAB completion style, Q2.7 TAB completion interaction,
+    Q3 niu-git, Q4 external completion providers) takes its highlighted
+    default via Enter. Returns the theme
     name the run picked (None = Skip). Every key is gated on the wizard's
     own screens; delivery hardening comes from send_line/answer."""
     session.send_line("niu setup", anchor=False)
@@ -3350,6 +3467,12 @@ def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
     # swallowed (the local stall of 2026-10-19).
     session.wait_quiescent()
     session.answer(ENTER)
+    session.wait_for("TAB completion interaction?", timeout=60)
+    # Q2.7 (niubash#631) runs immediately after Q2.6 on re-runs too;
+    # the current effective interaction is pre-highlighted, so Enter
+    # is a no-op pick, exactly like Q2.6.
+    session.wait_quiescent()
+    session.answer(ENTER)
     # Q3 is conditional (niubash#230): a bundle that already carries
     # niu-git (opt/niugit) skips the question silently — nothing to
     # answer, the flow moves straight to Q4. Wait briefly; the J2 walk
@@ -3368,12 +3491,23 @@ def wizard_rerun(session: Session, verdict: Verdict, step, capture: str,
     session.wait_for("Apply this configuration?", timeout=60)
     session.wait_quiescent()
     session.answer(ENTER)  # Apply — the highlighted default
-    session.wait_for("Shell rc written", timeout=120)
+    # The rc outcome line names the branch the run took
+    # (setup_wizard.rs write_rc_and_mark_done): a created rc prints
+    # "Shell rc written to ..."; a re-run's occupied slot prints the
+    # proposal line instead (create-only — the existing rc is never
+    # written). Wait for either.
+    session.wait_for("Shell rc written", "proposed configuration was "
+                     "written", timeout=120)
     try:
         session.wait_for("Undo this run", timeout=60)
         step.check("finish screen printed the undo receipts", True)
-        session.wait_for("restore the previous rc", timeout=30)
-        step.check("undo receipt names the rc restore (cp line)", True)
+        # The re-run's rc receipt is the proposal sample's removal —
+        # there is no cp-restore line anymore: create-only setup never
+        # backs an rc up, so there is nothing to restore FROM
+        # (setup_wizard.rs setup_undo_lines, niubash#359).
+        session.wait_for("remove the unused proposal sample", timeout=30)
+        step.check("undo receipt names the proposal-sample removal "
+                   "(the rc was never touched)", True)
         if picked is not None:
             session.wait_for("niu plugin disable", timeout=30)
             step.check("undo receipt names `niu plugin disable` for the pick",
@@ -3389,12 +3523,13 @@ def hop_terminal_asserts(step, verdict: Verdict, exe, home, env, tag: str,
                          spec_path: Path, journal_path: Path):
     """The user-visible state one wizard theme hop must leave, plus the
     fresh-terminal leg: the generated loader's managed block rewritten to
-    the pick (the #359 activation plane; the rc carries only the ownership
-    note), exactly one framework's theme variable, journal + backup
-    receipts, and — the niu#168 gate — the pick STICKING across the
-    terminal (loader + spec agree). Green expected since wt72/themeback
-    landed (1.3.4); a red is a plain #168 regression — the wt73 label
-    retired with the fix."""
+    the pick (the #359 activation plane; the generated rc text carries
+    the ownership note — parked as the journal's rc_sample on a re-run,
+    since the existing rc is never touched), exactly one framework's
+    theme variable, journal + sample receipts, and — the niu#168
+    gate — the pick STICKING across the terminal (loader + spec
+    agree). Green expected since wt72/themeback landed (1.3.4); a red
+    is a plain #168 regression — the wt73 label retired with the fix."""
     rc = read_text(rc_path)
     loader = loader_text_for(Path(home))
     # The #359 activation plane: the pick lives in the generated loader's
@@ -3413,19 +3548,30 @@ def hop_terminal_asserts(step, verdict: Verdict, exe, home, env, tag: str,
     step.check(f"{tag}: exactly one oh-my-bash managed block in the loader "
                f"(no orphans)",
                count == 1, f"count = {count}")
-    note = f"# Prompt owned by the oh-my-bash theme '{picked}'"
-    step.check(f"{tag}: the rc carries the pick's ownership note and no "
-               f"theme line (the #359 rc contract)",
-               note in rc and not rc_theme_vars(rc),
-               f"note present: {note in rc}; rc theme variables: "
-               f"{sorted(rc_theme_vars(rc).items())}")
     journal = read_text(journal_path)
     step.check(f"{tag}: journal records the pick",
                journal_value(journal, "theme") == picked,
                f"journal theme = {journal_value(journal, 'theme')!r}")
-    backup = journal_value(journal, "rc_backup")
-    step.check(f"{tag}: journal names an existing rc backup",
-               bool(backup) and Path(backup).is_file(), f"rc_backup = {backup!r}")
+    # The hop's generated rc text (carrying the pick's ownership note)
+    # parks as the journal's rc_sample — a re-run never touches the
+    # existing rc (create-only, niubash#359) — so the note is asserted
+    # in the sample; when no sample is journaled the run created the
+    # rc and the note is in the rc itself. The rc must carry no theme
+    # line either way.
+    sample = journal_value(journal, "rc_sample")
+    note = f"# Prompt owned by the oh-my-bash theme '{picked}'"
+    carrier = read_text(Path(sample)) if sample else rc
+    step.check(f"{tag}: the generated rc carries the pick's ownership "
+               f"note and the rc holds no theme line (the #359 rc "
+               f"contract)",
+               note in carrier and not rc_theme_vars(rc),
+               f"note present in {'rc_sample' if sample else 'rc'}: "
+               f"{note in carrier}; rc theme variables: "
+               f"{sorted(rc_theme_vars(rc).items())}")
+    step.check(f"{tag}: journal names the parked proposal sample "
+               f"(create-only: no rc backup exists)",
+               bool(sample) and Path(sample).is_file(),
+               f"rc_sample = {sample!r}")
 
     terminal = fresh_terminal(exe, home, env, verdict, f"{tag}-terminal")
     try:
@@ -3486,8 +3632,8 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
     theme A ('powerline-multiline') active in rc + spec from J2's pick.
     (seed/state are the shared runner protocol; P4 walks the live files.)"""
     rc_path = home / ".niubashrc"
-    spec_path = home / ".niubash" / "plugins.toml"
-    journal_path = home / ".niubash" / "setup-journal.toml"
+    spec_path = home / ".niubash" / "plugins.json"
+    journal_path = home / ".niubash" / "setup-journal.json"
     theme_a = "powerline-multiline"   # the base gate's J2 pick
     hop_b_candidates = ["edsonarios", "agnoster", "brainy", "hawaii50",
                         "iterate"]  # any second gallery theme (spec names one)
@@ -3555,7 +3701,8 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
         return
 
     # ── P4-S2 — theme switch A→B→A through the wizard gallery; each hop
-    # rewrites the rc block, journals the pick + receipts, and must stick.
+    # re-materializes the loader block and journals the pick + receipts
+    # (the rc itself is never rewritten — #359), and must stick.
     step = verdict.step("P4-S2", "theme switch A→B→A through the wizard gallery")
     try:
         wizard = fresh_terminal(exe, home, env, verdict, "P4-S2-wizard-B")
@@ -3598,27 +3745,35 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
         step.check("P4-S2 completed", False, str(err))
     step.finish()
 
-    # ── P4-S3 — execute the undo receipts the finish screen printed: the
-    # exact `cp` restore line + the `niu plugin disable` line, then verify
-    # the state and that nothing resurrects at the next sync (F4).
-    step = verdict.step("P4-S3", "execute the undo receipts (cp restore + "
-                                 "`niu plugin disable`)")
+    # ── P4-S3 — execute the undo receipts the finish screen printed for
+    # the last hop: the proposal-sample removal (`rm <rc_sample>` — the
+    # only rc-shaped receipt a re-run can print, since create-only
+    # setup never backs an rc up, niubash#359) + the `niu plugin
+    # disable` line, then verify the state and that nothing resurrects
+    # at the next sync (F4). setup_wizard.rs setup_undo_lines is the
+    # receipt composer.
+    step = verdict.step("P4-S3", "execute the undo receipts (rm the "
+                                 "proposal sample + `niu plugin disable`)")
     disable_error = ""
     try:
         journal = read_text(journal_path)
-        backup = journal_value(journal, "rc_backup")
+        sample = journal_value(journal, "rc_sample")
         theme_pick = journal_value(journal, "theme")
         step.check("the journal carries the receipts to execute",
-                   bool(backup) and bool(theme_pick),
-                   f"rc_backup = {backup!r}, theme = {theme_pick!r}")
-        backup_bytes = read_bytes(Path(backup)) if backup else b""
+                   bool(sample) and bool(theme_pick),
+                   f"rc_sample = {sample!r}, theme = {theme_pick!r}")
+        rc_bytes_before = read_bytes(rc_path)
         undo = fresh_terminal(exe, home, env, verdict, "P4-S3-undo")
         try:
             step.check("live session ready", prompt_alive(undo, "P4S3_READY"))
-            # Receipt 1: the exact `cp <backup> <rc>` line the journal named.
-            undo.send_line(f"cp {backup} {rc_path}", anchor_timeout=30)
-            step.check("the cp receipt restored the previous rc byte-for-byte",
-                       read_bytes(rc_path) == backup_bytes)
+            # Receipt 1: the exact `rm <sample>` line the finish screen
+            # printed. Its contract: the sample goes away and the rc —
+            # which the wizard never touched — stays byte-identical.
+            undo.send_line(f"rm {sample}", anchor_timeout=30)
+            step.check("the rm receipt removed the proposal sample and "
+                       "left the rc byte-identical (it was never touched)",
+                       bool(sample) and not Path(sample).is_file()
+                       and read_bytes(rc_path) == rc_bytes_before)
             # Receipt 2: the exact `niu plugin disable <theme>` line.
             undo.send_line(f"niu plugin disable {theme_pick}",
                            anchor_timeout=90)
@@ -3661,8 +3816,9 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
                            if "THEME" in line)[:160])
         omb_entry = spec_entry(read_text(spec_path), "oh-my-bash")
         declared = entry_field(omb_entry, "theme") if omb_entry else None
-        s3_check("the spec's theme pick is explicitly cleared (theme = '')",
-                 declared == "", f"declared = {declared!r}")
+        s3_check("the spec's theme pick is cleared (no theme declared — "
+                 "the field is omitted from the JSON, not emptied)",
+                 declared in (None, ""), f"declared = {declared!r}")
         verify = fresh_terminal(exe, home, env, verdict, "P4-S3-verify")
         try:
             step.check("session after the undo boots",
@@ -3684,7 +3840,7 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
     step.finish()
 
     # ── P4-S4 — dual-framework same-name theme routing: with BOTH frameworks
-    # trusted, pick the name both ship; the gallery priority must route it
+    # installed, pick the name both ship; the gallery priority must route it
     # through oh-my-bash, exactly one guard block may activate it, and the
     # attribution must stick across a second terminal. Green expected since
     # wt72/themeback landed (1.3.4); a red is a plain #168 regression.
@@ -3694,16 +3850,19 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
         wizard = fresh_terminal(exe, home, env, verdict, "P4-S4-wizard")
         try:
             step.check("live session ready", prompt_alive(wizard, "P4S4_READY"))
-            # The dual-framework precondition: a gallery lists trusted
-            # sources only, so bash-it's themes join only after its trust.
-            wizard.send_line("niu plugin trust bash-it", anchor_timeout=90)
-            try:
-                wizard.wait_for("is now trusted", timeout=90)
-                step.check("bash-it trusted (both frameworks' themes are in "
-                           "the gallery)", True)
-            except TimeoutError as err:
-                step.check("bash-it trusted (both frameworks' themes are in "
-                           "the gallery)", False, str(err))
+            # The dual-framework precondition: a gallery lists the
+            # themes of INSTALLED sources — there is no trust gate (an
+            # installed source contributes its theme entries
+            # immediately, plugins/sources.rs, niubash#647). bash-it
+            # landed with the J2 collection; assert its tree and spec
+            # declaration are on disk before the walk.
+            bash_it_tree = home / ".niubash" / "sources" / "bash-it"
+            step.check("both frameworks installed (their themes are in "
+                       "the gallery — no trust gate)",
+                       bash_it_tree.is_dir()
+                       and spec_entry(read_text(spec_path), "bash-it")
+                       is not None,
+                       f"bash-it tree present: {bash_it_tree.is_dir()}")
             picked = wizard_rerun(wizard, verdict, step, "P4-S4",
                                   pick=dual_theme)
         finally:
@@ -3783,7 +3942,7 @@ def phase_p4(exe, home, env, verdict, seed=None, state=None):
 @register_phase("P7")
 def phase_p7(exe, home, env, verdict, seed=None, state=None):
     """journey-spec P7 — the documented power-user workflow: hand-edit
-    `~/.niubash/plugins.toml` + `niu plugin sync` (plugins-guide 'Merge
+    `~/.niubash/plugins.json` + `niu plugin sync` (plugins-guide 'Merge
     semantics: spec vs your hand edits', design §14.6), its corruption
     behavior (a wedged startup bricks every terminal — the hang class),
     and #168's inverse invariant (sync claims only what the spec declares).
@@ -3791,7 +3950,7 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
     base gate) left, snapshotting bytes before each mutation.
     (seed/state are the shared runner protocol; P7 writes the live files.)"""
     rc_path = home / ".niubashrc"
-    spec_path = home / ".niubash" / "plugins.toml"
+    spec_path = home / ".niubash" / "plugins.json"
     fixture_root = home / "plugin-fixtures" / "tinysh"
     fixture_root.mkdir(parents=True, exist_ok=True)
     (fixture_root / "tiny.sh").write_text(
@@ -3799,10 +3958,13 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
         "tiny_hello() { echo tiny-hello; }\n",
         encoding="utf-8", newline="\n")
 
-    # ── P7-S1 — hand-add a source entry: sync installs it (untrusted) and
-    # declares it; the second sync is a byte-identical no-op.
-    step = verdict.step("P7-S1", "hand-add a source entry: sync installs it "
-                                 "(untrusted) + declares it; second sync is a "
+    # ── P7-S1 — hand-add a source entry: sync installs it and declares
+    # it (the derived id is bound back into the spec); the second sync
+    # is a byte-identical no-op. No trust state exists anywhere in the
+    # flow (niubash#647): the hand-declared source activates as soon as
+    # it is installed.
+    step = verdict.step("P7-S1", "hand-add a source entry: sync installs "
+                                 "it + declares it; second sync is a "
                                  "byte-identical no-op")
     session = None
     rc_stable = None
@@ -3813,29 +3975,35 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
         verdict.capture("P7-session-open", session)
         rc_stable = read_bytes(rc_path)
         spec_before = read_bytes(spec_path)
-        hand_entry = (f"\n[[sources]]\n"
-                      f"target = '{fixture_root.as_posix()}'\n"
-                      f"enable = ['tiny.sh']\n").encode("utf-8")
-        spec_path.write_bytes(spec_before + hand_entry)
+        # The hand edit itself, in the spec's current format: append
+        # one entry object to the JSON sources list (the documented
+        # hand-edit workflow — plugins-guide 'The spec').
+        spec_doc = json.loads(spec_before.decode("utf-8"))
+        spec_doc.setdefault("sources", []).append(
+            {"target": fixture_root.as_posix(), "enable": ["tiny.sh"]})
+        spec_path.write_bytes(
+            (json.dumps(spec_doc, indent=2) + "\n").encode("utf-8"))
         session.send_line("niu plugin sync", anchor_timeout=120)
         try:
-            session.wait_for("awaiting-trust", timeout=90)
-            step.check("sync installed the hand-declared source untrusted "
-                       "(awaiting-trust row)", True)
+            session.wait_for("tinysh", timeout=90)
+            # The verb's row for a declared-but-not-installed entry
+            # names the derived id with the 'activated' action (the
+            # sync pass installs + materializes it — sync.rs's own
+            # tests pin that action for exactly this shape).
+            rows = (sync_row_keys(session.raw_stripped(), "activated")
+                    | sync_row_keys(session.raw_stripped(), "installed"))
+            step.check("sync installed the hand-declared source "
+                       "(activated row, no trust step)",
+                       "tinysh" in rows,
+                       f"sync rows naming tinysh: {sorted(rows)}")
         except TimeoutError as err:
-            step.check("sync installed the hand-declared source untrusted "
-                       "(awaiting-trust row)", False, str(err))
-        try:
-            session.wait_for("niu plugin trust tinysh", timeout=30)
-            step.check("sync printed the exact trust verb for the new source",
-                       True)
-        except TimeoutError as err:
-            step.check("sync printed the exact trust verb for the new source",
-                       False, str(err))
+            step.check("sync installed the hand-declared source "
+                       "(activated row, no trust step)", False, str(err))
         spec_after = read_bytes(spec_path)
         step.check("sync declared the entry (derived id bound into the spec)",
-                   b"id = 'tinysh'" in spec_after)
-        step.check("the untrusted install left the rc byte-identical",
+                   b'"id": "tinysh"' in spec_after)
+        step.check("the install left the rc byte-identical (sync never "
+                   "writes the rc — #359)",
                    read_bytes(rc_path) == rc_stable)
         session.send_line("niu plugin sync", anchor_timeout=120)
         step.check("second sync: rc byte-identical (no-op)",
@@ -3928,11 +4096,11 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
                    read_bytes(loader_file) == loader_after_bytes)
         step.check("second sync: spec byte-identical",
                    read_bytes(spec_path) == spec_before)
-        omb_entry = spec_entry(read_text(spec_path), "oh-my-bash") or ""
+        omb_entry = spec_entry(read_text(spec_path), "oh-my-bash")
+        omb_enable = entry_field(omb_entry, "enable") if omb_entry else None
         step.check("the hand-added item was not absorbed into the spec's own "
-                   "set", "enable = ['git']" not in omb_entry,
-                   (["line matches enable = ['git']"] if
-                    "enable = ['git']" in omb_entry else []))
+                   "set", "git" not in (omb_enable or []),
+                   f"the spec's oh-my-bash enable list: {omb_enable!r}")
     except AssertionError as err:
         step.check("P7-S2 completed", False, str(err))
     step.finish()
@@ -3940,7 +4108,7 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
     # ── P7-S3 — corrupt the spec (truncated file): sync fails SOFT with a
     # readable error, the default floor session still boots bounded, the rc
     # is never destroyed. A wedged startup here would brick every terminal.
-    step = verdict.step("P7-S3", "corrupt spec (truncated TOML): sync fails "
+    step = verdict.step("P7-S3", "corrupt spec (truncated JSON): sync fails "
                                  "soft, floor session still boots, no panic, "
                                  "rc not destroyed")
     try:
@@ -3950,7 +4118,8 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
         session.send_line("niu plugin sync", anchor_timeout=30)
         raw = session.raw_stripped()
         step.check("the failed sync printed a readable error",
-                   "niu:" in raw or "TOML" in raw or "toml" in raw)
+                   "niu:" in raw or "JSON" in raw or "json" in raw
+                   or "expected" in raw)
         step.check("no panic anywhere in the session",
                    "panicked" not in raw)
         step.check("the failed sync did not touch the rc",
@@ -4016,15 +4185,13 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
             # silently wrong one, and the readable error belongs to the
             # explicit sync (asserted above). What must never happen is
             # the wedge-class fallout: a panic or a failed/degraded storm.
-            storm = [line for line in boot_raw.splitlines()
-                     if re.search(r"niu plugin sync: (failed|degraded)\b",
-                                  line)]
+            storm = (sync_row_keys(boot_raw, "failed")
+                     | sync_row_keys(boot_raw, "degraded"))
             step.check("the corrupt-spec boot stays quiet and clean (the "
                        "loader is the boot plane; no panic, no failed/"
                        "degraded storm)",
                        "panicked" not in boot_raw and not storm,
-                       f"{len(storm)} storm line(s), first: "
-                       f"{storm[0].strip()[:140] if storm else ''}")
+                       f"{len(storm)} storm row(s): {sorted(storm)}")
             verdict.capture("P7-S3-corrupt-boot", terminal)
         finally:
             terminal.close()
@@ -4053,8 +4220,13 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
     try:
         rc_stable = read_bytes(rc_path)
         spec_before = read_bytes(spec_path)
-        hand_key = b"\nnote_field = 'hand-added by the journey'\n"
-        spec_path.write_bytes(spec_before + hand_key)
+        # An unknown TOP-LEVEL key, added as JSON data (the spec is a
+        # JSON document now — appending foreign syntax would corrupt
+        # it, which is P7-S3's case, not this one).
+        spec_doc = json.loads(spec_before.decode("utf-8"))
+        spec_doc["note_field"] = "hand-added by the journey"
+        hand_bytes = (json.dumps(spec_doc, indent=2) + "\n").encode("utf-8")
+        spec_path.write_bytes(hand_bytes)
         session.send_line("niu plugin sync && echo P7S4_SYNC_OK",
                           anchor_timeout=120)
         try:
@@ -4067,7 +4239,7 @@ def phase_p7(exe, home, env, verdict, seed=None, state=None):
                   "(the spec parser ignores unrecognized fields; the known "
                   "fields are documented in plugins-guide.md 'The spec')")
         step.check("the unknown key survives the sync (spec not rewritten)",
-                   read_bytes(spec_path) == spec_before + hand_key)
+                   read_bytes(spec_path) == hand_bytes)
         step.check("rc byte-identical across the sync",
                    read_bytes(rc_path) == rc_stable)
     except AssertionError as err:
