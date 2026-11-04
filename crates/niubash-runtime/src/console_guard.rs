@@ -281,16 +281,22 @@ mod platform {
         let stdout = live_std_handle(STD_OUTPUT_HANDLE);
         let stderr = live_std_handle(STD_ERROR_HANDLE);
         let ok = f();
-        if ok {
-            if let Some(h) = stdin {
-                let _ = SetStdHandle(STD_INPUT_HANDLE, h);
-            }
-            if let Some(h) = stdout {
-                let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
-            }
-            if let Some(h) = stderr {
-                let _ = SetStdHandle(STD_ERROR_HANDLE, h);
-            }
+        // niubash#852: restore on partial failure too, not only on
+        // success — a half-failed AllocConsoleWithOptions may already
+        // have swapped some std handles, and leaving the swap in
+        // place hands broken handles to every later adopt/spawn path.
+        // Restoring unconditionally is safe: on full success the
+        // handles are put back exactly as before, and when `f` never
+        // touched them the restore is a no-op rewrite of the same
+        // values.
+        if let Some(h) = stdin {
+            let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+        }
+        if let Some(h) = stdout {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+        }
+        if let Some(h) = stderr {
+            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
         }
         ok
     }
@@ -446,6 +452,23 @@ mod platform {
             enable_vt_output();
             restore(&baseline);
             restore(&baseline);
+        }
+
+        /// niubash#852 (CI-verifies, windows-only code): the std
+        /// handles must be restored even when the guarded operation
+        /// reports failure — a partially-failed console allocation
+        /// used to leave them swapped.
+        #[test]
+        fn issue852_preserve_std_handles_restores_on_failure() {
+            use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+            let before = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+            let ok = unsafe { preserve_std_handles(|| false) };
+            assert!(!ok, "the guarded failure must still report false");
+            assert_eq!(
+                unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+                before,
+                "a failed guarded call must not leave std handles swapped"
+            );
         }
     }
 }

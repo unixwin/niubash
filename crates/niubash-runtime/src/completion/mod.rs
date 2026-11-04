@@ -235,6 +235,20 @@ impl CompletionContext {
         None
     }
 
+    /// All words of the current command segment before the cursor, in
+    /// order, with quoting/escaping already resolved by the same
+    /// segment machinery `get_command_name` uses (niubash#851): the
+    /// segment starts after the last top-level `;`/`|`/`&` separator,
+    /// so words from an earlier command on the line never leak in, and
+    /// a quoted word yields its unescaped value.
+    pub fn current_segment_words(&self) -> Vec<String> {
+        let (segment_start, segment) = self.current_segment_before_cursor();
+        shell_words_in_segment(segment, segment_start)
+            .into_iter()
+            .map(|word| word.value)
+            .collect()
+    }
+
     /// Get the token immediately before the current word (the previous token)
     pub fn get_prev_token(&self) -> Option<String> {
         let (segment_start, segment) = self.current_segment_before_cursor();

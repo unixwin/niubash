@@ -399,14 +399,17 @@ fn clip_line(s: &str, max: usize) -> String {
     out
 }
 
-/// Get terminal width. Falls back to 80 if detection fails.
+/// Get terminal width. Falls back to 80 if detection fails or the
+/// terminal reports a real 0 width (niubash#852: a zero is not a
+/// size — layout math would paint past the edge).
 pub fn term_width() -> u16 {
-    terminal::size().map(|(w, _)| w).unwrap_or(80)
+    crate::terminal::sane_terminal_size(terminal::size().ok()).0
 }
 
-/// Get terminal height. Falls back to 24 if detection fails.
+/// Get terminal height. Falls back to 24 if detection fails or the
+/// terminal reports a real 0 height (niubash#852).
 pub fn term_height() -> u16 {
-    terminal::size().map(|(_, h)| h).unwrap_or(24)
+    crate::terminal::sane_terminal_size(terminal::size().ok()).1
 }
 
 /// Print content in a side-by-side layout: logo on the left, wizard text on the right.

@@ -1326,7 +1326,10 @@ fn event_loop() -> anyhow::Result<()> {
     prefetch_neighbors(&model, &previews);
     let (job_tx, job_rx) = mpsc::channel::<Result<String, String>>();
     let mut stdout = std::io::stdout();
-    let (mut width, mut height) = terminal::size().unwrap_or((80, 24));
+    // niubash#852: a queried 0 dimension is not a size — resolve it
+    // through the guarded fallback instead of `unwrap_or`, which
+    // only covered a failed query.
+    let (mut width, mut height) = crate::terminal::sane_terminal_size(terminal::size().ok());
     let mut dirty = true;
 
     loop {
@@ -1385,8 +1388,10 @@ fn event_loop() -> anyhow::Result<()> {
                     }
                 }
                 Event::Resize(new_width, new_height) => {
-                    width = new_width;
-                    height = new_height;
+                    // niubash#852: a resize may also report a zero
+                    // dimension mid-reconfigure; guard it the same way.
+                    (width, height) =
+                        crate::terminal::sane_terminal_size(Some((new_width, new_height)));
                     dirty = true;
                 }
                 _ => {}

@@ -53,8 +53,30 @@ const PASTE_CHUNK_GAP: Duration = Duration::from_millis(50);
 /// Paste-chunk detection is a Windows-console-path replacement for bracketed
 /// paste; on Unix the terminal wraps pastes in ESC[200~/ESC[201~ and
 /// crossterm delivers one `Event::Paste` per chunk (niubash#234), so no
-/// heuristic is wanted there.
-const PASTE_CHUNK_DETECTION: bool = cfg!(windows);
+/// heuristic is wanted there — EXCEPT on terminals that cannot do
+/// bracketed paste at all (niubash#852): with a dumb-class `TERM`
+/// (old `screen`, serial consoles, `TERM=dumb`) the markers never
+/// arrive, the paste lands as ordinary key events, and every pasted
+/// newline executes its line — the exact hazard the Windows
+/// heuristic exists to prevent. Those terminals get the same
+/// chunk heuristic as a fallback.
+fn paste_chunk_detection() -> bool {
+    cfg!(windows) || term_is_dumb_class(std::env::var("TERM").ok().as_deref())
+}
+
+/// The dumb terminal class for the paste fallback (niubash#852):
+/// `TERM` values whose terminfo carries no bracketed-paste support
+/// worth trusting. Deliberately narrow — `dumb` and `unknown` (and
+/// their `-` suffixed variants); an unset `TERM` does NOT qualify
+/// (a merely unconfigured modern terminal keeps the bracketed-paste
+/// path, unchanged from before).
+fn term_is_dumb_class(term: Option<&str>) -> bool {
+    let Some(term) = term else {
+        return false;
+    };
+    let term = term.trim().to_ascii_lowercase();
+    term == "dumb" || term == "unknown" || term.starts_with("dumb-") || term.starts_with("unknown-")
+}
 
 /// Budget for the paste-signature lookahead at a bare Enter (see
 /// [`PasteChunkEditMode`]). Two machine-fed shapes exist on this path:
@@ -1763,14 +1785,27 @@ fn build_edit_mode(
             // function names, keyless self-insert, keymap-filtered
             // entries) join the registry records, deduped against
             // the flat path's records for the same entries.
-            let (mut chords, chord_dropped) =
+            // niubash#848: layered lowest-first in the DESIGN §5.3
+            // build order (defaults < host < bundle < script < user —
+            // the same order `build_keymap_for_target` applies to
+            // the flat keymap, where a later `layer()` call
+            // overwrites an earlier slot): GNU defaults (Default)
+            // first, engine `bind` chords (Script) next, plugin
+            // chords last so they win. `ChordIndex` keeps the LAST
+            // exact match, mirroring the flat keymap's
+            // last-write-wins layering; the old order (engine → GNU
+            // → plugin, first match kept) silently inverted this and
+            // made every plugin chord on an engine/GNU-claimed
+            // sequence dead.
+            let mut chords = gnu_default_chord_bindings();
+            let (engine_chords, chord_dropped) =
                 collect_chord_bindings(engine_bindings, NativeKeymapTarget::Emacs, 0);
+            chords.extend(engine_chords);
             for bind in chord_dropped {
                 if !dropped.contains(&bind) {
                     dropped.push(bind);
                 }
             }
-            chords.extend(gnu_default_chord_bindings());
             let abi_unbinds = crate::readline_live::plugin_chord_unbinds(NativeKeymapTarget::Emacs);
             chords.retain(|chord| !abi_unbinds.contains(&chord.keys));
             chords.extend(
@@ -1832,7 +1867,15 @@ fn build_edit_mode(
             // registry is assembled: the chord layer's dropped
             // records (niubash#834) merge into it, deduped like the
             // normal map's records above.
-            let mut chords = Vec::new();
+            // niubash#851: the GNU defaults layer comes first here
+            // too — it used to be emacs-only, so under `set -o vi`
+            // the C-x C-r / C-x C-e / kbd-macro chords did not exist
+            // at all, while GNU's vi maps carry the C-x family.
+            // niubash#848: same DESIGN §5.3 last-write-wins order as
+            // the emacs arm — lowest layer first, plugin chords
+            // last, so a plugin claim wins an exact-match collision
+            // in `ChordIndex`.
+            let mut chords = gnu_default_chord_bindings();
             for target in [NativeKeymapTarget::ViInsert, NativeKeymapTarget::ViNormal] {
                 let (target_chords, chord_dropped) =
                     collect_chord_bindings(engine_bindings, target, 0);
@@ -1969,7 +2012,8 @@ fn build_edit_mode(
 /// Every other event is delegated unchanged to the wrapped
 /// [`EditMode`](Emacs)/[`EditMode`](Vi), so keybindings, widgets and the
 /// vi/emacs state machines behave identically. Only the Windows console
-/// path enables the rewrite ([`PASTE_CHUNK_DETECTION`]); Unix keeps the
+/// path (and dumb-class Unix terminals, niubash#852) enable the rewrite
+/// ([`paste_chunk_detection`]); capable Unix terminals keep the
 /// real bracketed paste of niubash#234, whose `Event::Paste` never emits a
 /// bare `Enter` and is untouched by this logic. The Ctrl+V
 /// (`EditCommand::PasteSystem`) path never produces Enter events either, so
@@ -2789,10 +2833,11 @@ impl EditMode for PasteChunkEditMode {
 impl PasteChunkEditMode {
     /// Translate one raw event through the paste-chunk state machine.
     fn translate_event(&mut self, raw: crossterm29::event::Event) -> ReedlineEvent {
-        if !PASTE_CHUNK_DETECTION {
-            // Unix: bracketed paste (niubash#234) delivers `Event::Paste`
-            // chunks; the arrival heuristic is a Windows-console fallback
-            // only and must never rewrite Unix input.
+        if !paste_chunk_detection() {
+            // Capable Unix terminals: bracketed paste (niubash#234)
+            // delivers `Event::Paste` chunks; the arrival heuristic is
+            // a fallback (Windows console, dumb-class terminals) and
+            // must never rewrite their input.
             return self.delegate(raw);
         }
         // Key releases carry no text and no submit; everything else goes
@@ -4495,8 +4540,13 @@ struct ChordBinding {
 /// built once at editor build, where the old code scanned on every key.
 #[derive(Default)]
 struct ChordIndex {
-    /// Full sequences. Duplicates keep the FIRST binding, matching the old
-    /// `iter().find()` priority.
+    /// Full sequences. Duplicates keep the LAST binding (niubash#848):
+    /// callers build the chord vec lowest-layer-first in the DESIGN §5.3
+    /// order, and the flat keymap this layer sits beside resolves a slot
+    /// last-write-wins (`LayeredKeymap::layer` overwrites), so the index
+    /// does the same. First-match here inverted the documented layer
+    /// order and made plugin (Script/user-layer) chords on sequences the
+    /// defaults or the engine already claimed silently dead.
     exact: HashMap<Vec<(KeyModifiers, KeyCode)>, ReedlineEvent>,
     /// Every proper prefix of every chord. A full sequence that is also a
     /// prefix of a longer chord belongs here too (readline waits for the
@@ -4516,10 +4566,10 @@ impl ChordIndex {
             for len in 1..chord.keys.len() {
                 index.prefixes.insert(chord.keys[..len].to_vec());
             }
-            index
-                .exact
-                .entry(chord.keys.clone())
-                .or_insert_with(|| chord.event.clone());
+            // Last write wins (niubash#848, DESIGN §5.3 layer order —
+            // see the `exact` field doc): the vec arrives lowest-first,
+            // so a later layer's binding replaces an earlier one's.
+            index.exact.insert(chord.keys.clone(), chord.event.clone());
         }
         index
     }
@@ -6654,7 +6704,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // editor before the next prompt. The buffer is empty at this
         // boundary (the previous line was submitted or interrupted) and
         // history writes through to the file, so the rebuild is lossless.
-        if shell.borrow().engine_bindings_stale() {
+        // niubash#849: the staleness probe also covers the rc
+        // declarations (NIU_BINDKEYS / NIU_COMPDEFS) — they used to join
+        // a rebuild only when the engine bind generation happened to
+        // move for an unrelated reason.
+        let engine_stale = shell.borrow().engine_bindings_stale();
+        let declarations_stale = shell.borrow_mut().user_declarations_stale();
+        if engine_stale || declarations_stale {
+            shell.borrow_mut().load_user_widget_bindings();
+            shell.borrow_mut().load_user_compdefs();
             shell.borrow_mut().load_engine_bindings();
             line_editor = build_line_editor(&shell)?;
         }
@@ -6748,7 +6806,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             // applied by rebuilding through `build_line_editor` — the same
             // construction path as startup, so menus, hinter and bindings
             // come along.
-            if shell.borrow_mut().refresh_edit_mode().is_some() {
+            // niubash#849: a setup re-apply above may already have
+            // consumed the edit-mode flip through its own
+            // `refresh_edit_mode` call; it flags the change so this
+            // rebuild still happens.
+            let edit_mode_changed = shell.borrow_mut().refresh_edit_mode().is_some();
+            let setup_mode_changed = shell.borrow_mut().take_edit_mode_rebuild_pending();
+            if edit_mode_changed || setup_mode_changed {
                 line_editor = build_line_editor(&shell)?;
             }
             let prompt = shell.borrow_mut().prompt_for_display();
@@ -9504,8 +9568,11 @@ mod tests {
         let b = (KeyModifiers::NONE, KeyCode::Char('b'));
         let index = ChordIndex::new(&[
             chord(&[ctrl_x, z], "first"),
-            // Duplicate sequences keep the first binding, like the old
-            // `iter().find()` scan.
+            // Duplicate sequences keep the LAST binding (niubash#848):
+            // the vec is built lowest-layer-first in the DESIGN §5.3
+            // order, so the later entry is the higher layer's win —
+            // the flat keymap's last-write-wins, not the old
+            // `iter().find()` first-match scan.
             chord(&[ctrl_x, z], "second"),
             chord(&[ctrl_x, z, e], "longer"),
             chord(&[ctrl_a, b], "other"),
@@ -9513,7 +9580,7 @@ mod tests {
 
         assert_eq!(
             index.exact(&[ctrl_x, z]),
-            Some(edit_event(EditCommand::InsertString("first".to_string())))
+            Some(edit_event(EditCommand::InsertString("second".to_string())))
         );
         assert_eq!(
             index.exact(&[ctrl_x, z, e]),
@@ -9538,6 +9605,115 @@ mod tests {
         );
         assert!(!index.is_prefix(&[ctrl_x, b]), "mismatched tail");
         assert!(!index.is_prefix(&[e]), "unrelated key");
+    }
+
+    /// niubash#848: the chord vec is built lowest-layer-first in the
+    /// DESIGN §5.3 order (GNU defaults < engine `bind` script chords <
+    /// plugin chords), and the index resolves an exact sequence to the
+    /// HIGHEST layer that claimed it — a plugin `rl_bind_keyseq` on a
+    /// GNU/engine-claimed sequence (here C-x e, the GNU kbd-macro
+    /// chord) must fire, not die behind the default. Before the fix
+    /// the order was engine → GNU → plugin with first-match kept, so
+    /// the plugin chord never won.
+    #[test]
+    fn issue848_plugin_chord_beats_gnu_and_engine_chords() {
+        let chord = |keys: &[(KeyModifiers, KeyCode)], text: &str| ChordBinding {
+            keys: keys.to_vec(),
+            event: edit_event(EditCommand::InsertString(text.to_string())),
+        };
+        let cx_e = [
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::CONTROL, KeyCode::Char('e')),
+        ];
+        // The build order `build_edit_mode` now produces: defaults,
+        // then engine, then plugin.
+        let index = ChordIndex::new(&[
+            chord(&cx_e, "gnu-default"),
+            chord(&cx_e, "engine-bind"),
+            chord(&cx_e, "plugin"),
+        ]);
+        assert_eq!(
+            index.exact(&cx_e),
+            Some(edit_event(EditCommand::InsertString("plugin".to_string()))),
+            "the plugin (highest) layer must win the claimed sequence"
+        );
+        // Without a plugin claim the engine (Script) still beats the
+        // GNU default, per the same §5.3 order.
+        let index = ChordIndex::new(&[chord(&cx_e, "gnu-default"), chord(&cx_e, "engine-bind")]);
+        assert_eq!(
+            index.exact(&cx_e),
+            Some(edit_event(EditCommand::InsertString(
+                "engine-bind".to_string()
+            )))
+        );
+        // And the real GNU defaults really do claim the C-x family
+        // (the kbd-macro spelling C-x e is pushed unconditionally by
+        // `gnu_default_chord_bindings`), so the collision class above
+        // is the live one, not a synthetic shape.
+        let cx_macro_e = [
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::NONE, KeyCode::Char('e')),
+        ];
+        assert!(
+            gnu_default_chord_bindings()
+                .iter()
+                .any(|binding| binding.keys == cx_macro_e),
+            "GNU defaults claim C-x e (call-last-kbd-macro)"
+        );
+    }
+
+    /// niubash#851: the vi chord layer must carry the GNU C-x chords
+    /// too — `gnu_default_chord_bindings` used to be fed only into
+    /// the emacs arm, so under `set -o vi` C-x C-r / C-x C-e and the
+    /// kbd-macro chords did not exist, while GNU's vi maps carry
+    /// them.
+    #[test]
+    fn issue851_vi_chords_carry_the_gnu_cx_family() {
+        let config = NativeWidgetConfig::default();
+        let (_, _, parts) = build_edit_mode(
+            EditorMode::Vi,
+            &config,
+            &[],
+            &[],
+            &[],
+            0,
+            CompletionInteraction::Insert,
+        );
+        let cx_macro_e = [
+            (KeyModifiers::CONTROL, KeyCode::Char('x')),
+            (KeyModifiers::NONE, KeyCode::Char('e')),
+        ];
+        assert!(
+            parts.chords.iter().any(|chord| chord.keys == cx_macro_e),
+            "vi chords must include the GNU C-x e kbd-macro chord, got {} chords",
+            parts.chords.len()
+        );
+        // And the vi set is a superset of the GNU defaults layer,
+        // exactly like the emacs arm's.
+        for gnu in gnu_default_chord_bindings() {
+            assert!(
+                parts.chords.iter().any(|chord| chord.keys == gnu.keys),
+                "vi chords missing GNU default {:?}",
+                gnu.keys
+            );
+        }
+    }
+
+    /// niubash#852: the paste-chunk fallback arms on dumb-class
+    /// terminals (no bracketed paste: a pasted newline would execute
+    /// its line-by-line), and ONLY there — capable terminals and an
+    /// unset TERM keep the bracketed-paste path untouched.
+    #[test]
+    fn issue852_dumb_term_arms_the_paste_chunk_fallback() {
+        assert!(term_is_dumb_class(Some("dumb")));
+        assert!(term_is_dumb_class(Some("DUMB")));
+        assert!(term_is_dumb_class(Some("unknown")));
+        assert!(term_is_dumb_class(Some("dumb-color")));
+        assert!(!term_is_dumb_class(Some("xterm-256color")));
+        assert!(!term_is_dumb_class(Some("screen")));
+        assert!(!term_is_dumb_class(Some("linux")));
+        assert!(!term_is_dumb_class(Some("")));
+        assert!(!term_is_dumb_class(None));
     }
 
     #[test]
@@ -10590,11 +10766,13 @@ mod tests {
     // ---- PasteChunkEditMode (Windows paste-chunk detection, niubash#202/#284) ----
     //
     // The detection layer is compiled everywhere but armed only when
-    // `PASTE_CHUNK_DETECTION` is true (cfg!(windows)); on Unix the editor
-    // uses bracketed paste and `translate_event` delegates untouched. Tests
-    // that pin the rewrite state machine are therefore Windows-only
-    // (`#[cfg(windows)]`); the cross-platform wrapper/menu and console-record
-    // mapping tests below stay runnable on every host.
+    // `paste_chunk_detection()` is true (Windows, or a dumb-class
+    // `TERM` on Unix per niubash#852); on capable Unix terminals the
+    // editor uses bracketed paste and `translate_event` delegates
+    // untouched. Tests that pin the rewrite state machine are
+    // therefore Windows-only (`#[cfg(windows)]`); the cross-platform
+    // wrapper/menu and console-record mapping tests below stay
+    // runnable on every host.
 
     fn paste_key(
         code: crossterm29::event::KeyCode,

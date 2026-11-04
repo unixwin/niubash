@@ -114,15 +114,45 @@ pub fn candidates_dir() -> PathBuf {
         .join("candidates")
 }
 
+/// The three honest outcomes of reading the generated loader
+/// (niubash#852): a missing loader is a normal state ("no plugins
+/// managed yet"), while a loader that EXISTS but cannot be read as
+/// text (permissions, invalid UTF-8) is a corrupt managed state and
+/// must never be folded into "missing".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoaderTextRead {
+    Missing,
+    Loaded(String),
+    Unreadable(String),
+}
+
+/// Read the loader from disk, distinguishing missing from unreadable
+/// (niubash#852).
+pub fn read_loader_text_diagnosed() -> LoaderTextRead {
+    read_loader_text_diagnosed_at(&loader_path())
+}
+
+/// [`read_loader_text_diagnosed`] against an explicit path (the
+/// testable shape).
+pub fn read_loader_text_diagnosed_at(path: &std::path::Path) -> LoaderTextRead {
+    if !path.is_file() {
+        return LoaderTextRead::Missing;
+    }
+    match fs::read_to_string(path) {
+        Ok(text) => LoaderTextRead::Loaded(text),
+        Err(err) => LoaderTextRead::Unreadable(err.to_string()),
+    }
+}
+
 /// Read the loader from disk. `None` = missing or unreadable (the host
 /// then simply does not load; generation is the verbs' job — startup never
-/// generates).
+/// generates). Callers that must tell a corrupt loader apart from an
+/// absent one use [`read_loader_text_diagnosed`] instead (niubash#852).
 pub fn read_loader_text() -> Option<String> {
-    let path = loader_path();
-    if !path.is_file() {
-        return None;
+    match read_loader_text_diagnosed() {
+        LoaderTextRead::Loaded(text) => Some(text),
+        _ => None,
     }
-    fs::read_to_string(&path).ok()
 }
 
 /// The rollback switch (design §4.3): `NIU_PLUGIN_LOADER` set to
@@ -652,7 +682,23 @@ pub fn migrate_rc(
         superseded.insert(super::assets::begin_marker_for(&block.id));
         superseded.insert(super::assets::end_marker_for(&block.id));
     }
-    let loader_text = read_loader_text().unwrap_or_default();
+    // niubash#852: a loader that exists but cannot be read as text
+    // is a corrupt managed state — fail the diagnostic honestly
+    // (the same shape as an unreadable rc above) instead of folding
+    // it into "no loader" and reporting `loader_ids: []` below as
+    // if nothing were managed.
+    let loader_text = match read_loader_text_diagnosed() {
+        LoaderTextRead::Loaded(text) => text,
+        LoaderTextRead::Missing => String::new(),
+        LoaderTextRead::Unreadable(err) => {
+            return Err(anyhow!(err)).with_context(|| {
+                format!(
+                    "the generated plugin loader exists but could not be read as text: {}",
+                    loader_path().display()
+                )
+            })
+        }
+    };
     for section in parse_sections(&loader_text) {
         superseded.insert(super::assets::begin_marker_for(&section.id));
         superseded.insert(super::assets::end_marker_for(&section.id));
@@ -706,7 +752,10 @@ pub fn migrate_rc(
         None
     };
 
-    let loader_ids: Vec<String> = parse_sections(&read_loader_text().unwrap_or_default())
+    // Reuse the diagnosed read above (niubash#852): re-reading here
+    // through the folding `read_loader_text` could still turn a
+    // loader that went unreadable mid-run into a silent empty list.
+    let loader_ids: Vec<String> = parse_sections(&loader_text)
         .into_iter()
         .map(|s| s.id)
         .collect();
@@ -727,6 +776,43 @@ pub fn migrate_rc(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// niubash#852: the loader read must distinguish missing from
+    /// unreadable — a corrupt (non-UTF-8) loader is not "no plugins".
+    #[test]
+    fn issue852_loader_read_distinguishes_unreadable_from_missing() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "niubash-issue852-loader-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plugins.niu");
+
+        assert_eq!(
+            read_loader_text_diagnosed_at(&path),
+            LoaderTextRead::Missing
+        );
+
+        fs::write(&path, b"\xff\xfe not utf-8").unwrap();
+        match read_loader_text_diagnosed_at(&path) {
+            LoaderTextRead::Unreadable(err) => {
+                assert!(!err.is_empty(), "the error must be surfaced, got empty")
+            }
+            other => panic!("a non-UTF-8 loader must read as Unreadable, got {other:?}"),
+        }
+
+        fs::write(&path, "# loader\n").unwrap();
+        assert_eq!(
+            read_loader_text_diagnosed_at(&path),
+            LoaderTextRead::Loaded("# loader\n".to_string())
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
 
     struct EnvGuard {
         name: &'static str,

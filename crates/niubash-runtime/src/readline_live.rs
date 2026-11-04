@@ -302,6 +302,7 @@ pub fn begin_read(line_editor: &mut Reedline, prompt: &str) {
         sync_editor_to_abi(&buffer, point, Some(0));
         deactivate_abi_mark();
         set_abi_pending_input(0);
+        reset_pending_key_state();
         set_abi_done(0);
         remove_state(RL_STATE_DONE | RL_STATE_EOF | RL_STATE_INPUTPENDING);
     } else {
@@ -375,6 +376,82 @@ pub fn take_done() -> bool {
     true
 }
 
+/// Bytes of a multi-byte character a plugin queued one
+/// `rl_pending_input` at a time, held until the sequence completes
+/// (niubash#851). GNU's buffer is bytes, so a lead byte is simply the
+/// first byte of the character; the editor's buffer is a `String`,
+/// so the bytes are reassembled here instead of being dropped.
+/// Reset at every fresh `readline()` (`begin_read`), like
+/// `rl_pending_input` itself.
+static PENDING_RAW_BYTES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// An ESC queued as `rl_pending_input` is GNU's meta prefix, not a
+/// key of its own (niubash#851): it arms this flag and the NEXT
+/// pending key dispatches as Alt+key through the GNU meta defaults
+/// ([`meta_pending_command`]). Before the fix the ESC fell into the
+/// unmapped arm and vanished, taking the Alt+key binding with it.
+static PENDING_META: AtomicBool = AtomicBool::new(false);
+
+/// Drop the held pending-key state (a fresh `readline()` boundary).
+fn reset_pending_key_state() {
+    if let Ok(mut held) = PENDING_RAW_BYTES.lock() {
+        held.clear();
+    }
+    PENDING_META.store(false, Ordering::SeqCst);
+}
+
+/// The GNU emacs-meta defaults for a key arriving after an ESC
+/// prefix (lib/readline/emacs_keymap.c): word motion/kill/case and
+/// yank-pop. A meta key with no default here returns `None` — GNU
+/// rings the bell for it; the ESC was still consumed as a prefix,
+/// which is the observable difference from dropping it.
+fn meta_pending_command(byte: u8) -> Option<EditCommand> {
+    match byte {
+        b'b' => Some(EditCommand::MoveWordLeft { select: false }),
+        b'f' => Some(EditCommand::MoveWordRight { select: false }),
+        b'd' => Some(EditCommand::CutWordRight),
+        0x7f => Some(EditCommand::CutWordLeft),
+        b'u' => Some(EditCommand::UppercaseWord),
+        b'l' => Some(EditCommand::LowercaseWord),
+        b'c' => Some(EditCommand::CapitalizeWord),
+        b't' => Some(EditCommand::SwapWords),
+        b'y' => Some(EditCommand::YankPop),
+        _ => None,
+    }
+}
+
+/// Insert the held raw bytes into the editor, decoding what has
+/// accumulated: a complete UTF-8 sequence inserts its character(s);
+/// an incomplete tail stays held for the next pending byte; invalid
+/// bytes flush lossy (the replacement character) instead of being
+/// silently lost (niubash#851).
+fn flush_pending_raw_bytes(line_editor: &mut Reedline, final_flush: bool) {
+    let mut held = match PENDING_RAW_BYTES.lock() {
+        Ok(held) => held,
+        Err(_) => return,
+    };
+    if held.is_empty() {
+        return;
+    }
+    match std::str::from_utf8(&held) {
+        Ok(_) => {
+            let text = String::from_utf8_lossy(&held).into_owned();
+            held.clear();
+            drop(held);
+            line_editor.run_edit_commands(&[EditCommand::InsertString(text)]);
+        }
+        Err(err) if err.error_len().is_none() && !final_flush => {
+            // Incomplete multi-byte tail: keep holding.
+        }
+        Err(_) => {
+            let text = String::from_utf8_lossy(&held).into_owned();
+            held.clear();
+            drop(held);
+            line_editor.run_edit_commands(&[EditCommand::InsertString(text)]);
+        }
+    }
+}
+
 /// Inject one plugin-queued key into the live editor.  Returns the line
 /// when the key accepts it (`rl_pending_input = '\r'`), mirroring
 /// `rl_read_key` → keymap dispatch for the common editing keys.  The
@@ -383,6 +460,40 @@ pub fn take_done() -> bool {
 /// equivalent `EditCommand` here (see docs/audit/readline-live-abi.md).
 pub fn apply_pending_key(line_editor: &mut Reedline, key: c_int) -> Option<String> {
     let byte = u8::try_from(key).ok()?;
+    // ESC arms the meta prefix (niubash#851); the next key dispatches
+    // through the meta defaults. A second ESC simply re-arms. A
+    // high byte after ESC has no meta default and falls through to
+    // the raw-byte path below.
+    if PENDING_META.swap(false, Ordering::SeqCst) && byte < 0x80 && byte != 0x1b {
+        if let Some(command) = meta_pending_command(byte) {
+            line_editor.run_edit_commands(&[command]);
+        }
+        let buffer = line_editor.current_buffer_contents().to_string();
+        let point = line_editor.current_insertion_point();
+        sync_editor_to_abi(&buffer, point, None);
+        return None;
+    }
+    if byte == 0x1b {
+        PENDING_META.store(true, Ordering::SeqCst);
+        return None;
+    }
+    if byte >= 0x80 {
+        // niubash#851: GNU passes the byte through as a raw byte of
+        // the buffer; reassemble the character here (see
+        // PENDING_RAW_BYTES) instead of dropping every byte ≥ 0x80.
+        if let Ok(mut held) = PENDING_RAW_BYTES.lock() {
+            held.push(byte);
+        }
+        flush_pending_raw_bytes(line_editor, false);
+        let buffer = line_editor.current_buffer_contents().to_string();
+        let point = line_editor.current_insertion_point();
+        sync_editor_to_abi(&buffer, point, None);
+        return None;
+    }
+    // An ASCII/control key after a held raw tail: the tail can no
+    // longer complete, so flush it lossy before this key (byte order
+    // is preserved) rather than dropping it.
+    flush_pending_raw_bytes(line_editor, true);
     if byte == b'\r' || byte == b'\n' {
         return Some(line_editor.current_buffer_contents().to_string());
     }
@@ -1471,6 +1582,62 @@ mod tests {
         assert_eq!(editor.current_insertion_point(), 0);
         let accepted = apply_pending_key(&mut editor, '\r' as c_int);
         assert_eq!(accepted.as_deref(), Some("abX"));
+    }
+
+    /// niubash#851: pending bytes ≥ 0x80 are GNU raw bytes, not
+    /// drops — a UTF-8 character queued byte by byte (é = C3 A9)
+    /// lands whole, and an invalid byte flushes lossy instead of
+    /// vanishing.
+    #[test]
+    fn issue851_pending_raw_bytes_reassemble_utf8() {
+        let _guard = lock_abi();
+        reset_pending_key_state();
+        let mut editor = Reedline::create();
+        assert_eq!(apply_pending_key(&mut editor, 0xc3), None);
+        assert_eq!(
+            editor.current_buffer_contents(),
+            "",
+            "a lone lead byte is held, neither dropped nor inserted half"
+        );
+        assert_eq!(apply_pending_key(&mut editor, 0xa9), None);
+        assert_eq!(editor.current_buffer_contents(), "é");
+        assert_eq!(apply_pending_key(&mut editor, 0xff), None);
+        assert_eq!(
+            editor.current_buffer_contents(),
+            "é\u{fffd}",
+            "an invalid byte flushes as the replacement character"
+        );
+        reset_pending_key_state();
+    }
+
+    /// niubash#851: a queued ESC is the meta prefix — the next
+    /// pending key dispatches as Alt+key (ESC f = forward-word,
+    /// ESC d = kill-word) instead of the ESC being dropped and the
+    /// partner key inserting literally.
+    #[test]
+    fn issue851_pending_esc_arms_the_meta_prefix() {
+        let _guard = lock_abi();
+        reset_pending_key_state();
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("hello world".to_string())]);
+        assert_eq!(apply_pending_key(&mut editor, 0x01), None); // C-a
+        assert_eq!(editor.current_insertion_point(), 0);
+        assert_eq!(apply_pending_key(&mut editor, 0x1b), None); // ESC
+        assert_eq!(apply_pending_key(&mut editor, b'f' as c_int), None); // M-f
+        assert_eq!(
+            editor.current_insertion_point(),
+            5,
+            "ESC f must dispatch forward-word, not insert `f`"
+        );
+        assert_eq!(editor.current_buffer_contents(), "hello world");
+        assert_eq!(apply_pending_key(&mut editor, 0x1b), None); // ESC
+        assert_eq!(apply_pending_key(&mut editor, b'd' as c_int), None); // M-d
+        assert_eq!(
+            editor.current_buffer_contents(),
+            "hello",
+            "ESC d must dispatch kill-word"
+        );
+        reset_pending_key_state();
     }
 
     #[test]
