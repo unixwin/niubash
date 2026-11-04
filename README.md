@@ -44,7 +44,7 @@ niu is not MSYS2, Cygwin, Git Bash, or WSL — there is no POSIX emulation layer
 
 All downloads start at [unixwin.dev](https://unixwin.dev). Latest release: **v1.5.0** (2026-11-03; the [releases page](https://github.com/unixwin/niubash/releases) always carries the newest build).
 
-Windows via winget (installs **1.4.4** today; the 1.5.0 update is in Microsoft's review queue — for 1.5.0 today use the installer or portable assets below):
+Windows via winget (**1.5.0**):
 
 ```powershell
 winget install --id Unixwin.Niubash

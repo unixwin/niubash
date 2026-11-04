@@ -44,7 +44,7 @@ niu 不是 MSYS2、Cygwin、Git Bash，也不是 WSL——没有 POSIX 模拟层
 
 下载统一从 [unixwin.dev](https://unixwin.dev) 进入。最新版本：**v1.5.0**（2026-11-03；最新构建始终在 [Releases](https://github.com/unixwin/niubash/releases) 页）。
 
-Windows（winget，今天装到的是 **1.4.4**；1.5.0 更新已提交、正在微软审核队列中——1.5.0 今天请用下方安装器或便携包）：
+Windows（winget，**1.5.0**）：
 
 ```powershell
 winget install --id Unixwin.Niubash
