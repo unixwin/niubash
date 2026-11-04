@@ -33,6 +33,30 @@ parameters, and the exit code and GNU error surface are the unencoded ones.
 | Node | `child_process.execFile("niu", ["--ec", Buffer.from(cmd).toString("base64")], ...)` |
 | Rust | `Command::new("niu").arg("--ec").arg(BASE64_STANDARD.encode(cmd.as_bytes()))` — the `base64` crate's `general_purpose::STANDARD` engine |
 
+### The spawn-site change: `-c` → `--ec`
+
+Tools that shell out to niu make one change where the command line is built —
+wherever the code assembles `["-c", cmd]`, it assembles `["--ec", b64]`
+instead:
+
+```rust
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+
+// before — the command travels as raw argv; any layer that re-quotes,
+// expands, or truncates it breaks the call
+c.args(["-c", command]);
+// after — base64 in, the command bytes reach niu verbatim
+c.args(["--ec", &B64.encode(command.as_bytes())]);
+```
+
+The swap is the same shape in every host language — a Python `subprocess` arg
+list, a Node `execFile` argv array, a Go `exec.Command`, all take the encoded
+payload as one more argument. Launcher flags keep working in front of the
+payload: `niu -eu -o pipefail --ec <b64>` runs the decoded command under
+`errexit` and `pipefail`, and words after the payload stay `$0` plus
+positional parameters.
+
 Decoder tolerance is built for LLM-shaped payloads: an optional `v1:` prefix
 (guards against MSYS-family path rewriting in transit), ASCII whitespace and
 wrapped lines ignored, missing `=` padding accepted. The payload encoding is

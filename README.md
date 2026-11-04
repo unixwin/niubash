@@ -128,6 +128,21 @@ Models are trained on Bash; on a Windows machine their commands deserve a shell 
   ```
 
   Same output as typing the command by hand — but the agent never wrote a single quote. (Captured in the niubash checkout, 2026-11-04.) PowerShell users already know this shape: `-EncodedCommand`, spelled the same way and case-insensitive (`--ec` is the short alias). The decoder accepts wrapped lines, missing padding, and an optional `v1:` prefix that guards the payload through Git-Bash-style layers. Full cookbook for Python / Node / Rust / PowerShell — encoders, the failure modes this removes, payload limits — in [Coding agents on Windows](docs/src/agents.md).
+
+  **Wiring a tool to niu?** The integration is a one-line change where the command line gets built — wherever the code assembles `["-c", cmd]`, it assembles `["--ec", b64]` instead:
+
+  ```rust
+  use base64::engine::general_purpose::STANDARD as B64;
+  use base64::Engine as _;
+
+  // before — the command travels as raw argv; any layer that re-quotes,
+  // expands, or truncates it breaks the call
+  c.args(["-c", command]);
+  // after — base64 in, the command bytes reach niu verbatim
+  c.args(["--ec", &B64.encode(command.as_bytes())]);
+  ```
+
+  The swap is the same shape in every host language. Shell flags keep working in front of the payload: `niu -eu -o pipefail --ec <b64>` runs the decoded command under `errexit` and `pipefail`.
 - **Real agent usage came first.** OpenCode users run `niu.exe` as their agent's shell and drove the environment-driven init work ([#82](https://github.com/unixwin/niubash/issues/82)); a Hermes integration failure — literal quotes leaking into external-command arguments — was filed and fixed ([#124](https://github.com/unixwin/niubash/issues/124)); and after three false-baseline incidents in a single day, `--version` now carries build metadata, so an agent can always tell exactly which build it is talking to ([rubash#488](https://github.com/unixwin/rubash/issues/488) — shown under [First run, verified](#first-run-verified) above).
 - **Deterministic non-interactive behavior.** `niu -c` and script runs are quiet and stable: no banners, stable stdout/stderr, exact exit-code propagation — the properties an agent's tool loop depends on.
 - **No path roulette.** There is no `MSYS_NO_PATHCONV` to remember and no heuristic rewriting arguments behind the child's back — `/flags` stay `/flags`, and path-shaped operands are translated by one documented contract ([windows-path-contract.md](docs/src/windows-path-contract.md)).

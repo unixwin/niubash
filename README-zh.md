@@ -128,6 +128,20 @@ $ niu -c 'echo $BASH_VERSION'
   ```
 
   输出和你手敲一模一样——但 agent 全程没写过一个引号。（2026-11-04 在 niubash 检出下实测。）熟悉 PowerShell 的直接用 `-EncodedCommand`（同样的形状，大小写不敏感），`--ec` 是短写。解码器认换行包装、缺 padding、可选 `v1:` 前缀（防 Git-Bash 系层改写路径）。Python / Node / Rust / PowerShell 的完整 cookbook——编码端写法、它消灭的失败模式、载荷上限——见 [Coding agents on Windows](docs/src/agents.md)。
+
+  **把 niu 接进你的工具？** 集成只是「拼命令行」处的一行改动——凡代码里拼 `["-c", cmd]` 的地方，改拼 `["--ec", b64]`：
+
+  ```rust
+  use base64::engine::general_purpose::STANDARD as B64;
+  use base64::Engine as _;
+
+  // 之前——命令以裸 argv 传输，任何一层重新加引号、展开或截断都会弄坏调用
+  c.args(["-c", command]);
+  // 之后——base64 进，命令字节原样到达 niu
+  c.args(["--ec", &B64.encode(command.as_bytes())]);
+  ```
+
+  各宿主语言的换法形状相同。shell 选项照旧放在载荷前面：`niu -eu -o pipefail --ec <b64>` 会让解码后的命令在 `errexit` 和 `pipefail` 下运行。
 - **真实的 agent 使用在先。** OpenCode 用户把 `niu.exe` 设为 agent 的 shell，并直接推动了环境变量驱动的 init 工作（[#82](https://github.com/unixwin/niubash/issues/82)）；一处 Hermes 集成故障——字面引号漏进外部命令参数——被立案并修复（[#124](https://github.com/unixwin/niubash/issues/124)）；一天之内三起假基线事故之后，`--version` 现在带构建元数据，agent 永远能确切知道自己在跟哪个构建说话（[rubash#488](https://github.com/unixwin/rubash/issues/488)——实测样例见上文[首跑实测](#首跑实测)）。
 - **非交互行为是确定性的。** `niu -c` 与脚本运行安静而稳定：无横幅，stdout/stderr 稳定，退出码精确传播——agent 的工具循环靠的正是这些性质。
 - **没有路径轮盘赌。** 没有需要记的 `MSYS_NO_PATHCONV`，没有在子进程背后偷偷改写参数的启发式——`/flags` 还是 `/flags`，路径形操作数按一份成文契约翻译（[windows-path-contract.md](docs/src/windows-path-contract.md)）。
