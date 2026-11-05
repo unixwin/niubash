@@ -329,6 +329,13 @@ pub struct Shell {
     pub rc_file: Option<PathBuf>,
     // --noediting: disable readline-style line editing in the REPL.
     pub no_editing: bool,
+    // niubash#863 GAP-12 host-lane blocker: the Session retains the
+    // applied invocation for `finish_startup`, but this clone
+    // survives ONLY for `enter_interactive`'s read of the
+    // invocation's `shopt_flags` (`expand_aliases` REPL default).
+    // No Session face exposes the retained invocation's shopt
+    // flags yet; this field deletes when the engine lands one.
+    // See REPORT.md.
     startup_invocation: Option<rubash::invocation::ShellInvocation>,
     // rubash#2129 (niu companion): this session's login classification,
     // owned by the host and derived ONLY from this process's own
@@ -773,10 +780,13 @@ impl Shell {
         // the interactive shape (enter_interactive, the piped `-i`
         // route, the theme-preview channel) writes it after
         // classification, from the session's own parse.
+        // niubash#863 GAP-12: both removals ride the contract face
+        // `Session::remove_env` (Q-C(i)) — the restore-grade
+        // removal, not the unset builtin's leaf.
         if !own_login_shell {
-            session.executor_mut().unset_env("__RUBASH_LOGIN_SHELL");
+            session.remove_env("__RUBASH_LOGIN_SHELL");
         }
-        session.executor_mut().unset_env("__RUBASH_INTERACTIVE");
+        session.remove_env("__RUBASH_INTERACTIVE");
         // GNU bash defaults expand_aliases on only for interactive shells
         // (shell.c init_interactive()/init_interactive_script()); -c,
         // script-file, and stdin runs keep the engine default (off).
@@ -1685,24 +1695,15 @@ impl Shell {
         &mut self,
         invocation: &rubash::invocation::ShellInvocation,
     ) -> Result<(), String> {
-        invocation.apply_to_executor_before_startup(self.executor_mut())?;
-        // niubash#806 (R4): GNU's `-i` sets forced_interactive during option
-        // parsing (shell.c parse_shell_options' 'i' arm), and an interactive
-        // shell then runs change_flag ('i', FLAG_ON) (shell.c:672) — the
-        // letter `$-` prints between `h` and `k` reads that very global
-        // (flags.c:174 { 'i', &forced_interactive }). The engine's own argv
-        // walk writes the interactive shape at its `-i` arm (rubash main.rs:
-        // OWN_INTERACTIVE_SHELL + `__RUBASH_INTERACTIVE`); a Session-
-        // contract host declares the same shape through the published
-        // funnel (`Executor::set_invocation_shape`), so `niu -ic 'echo $-'`
-        // reports `i` in `$-` exactly like GNU (WSL GNU 5.3.20 oracle:
-        // `bash --noprofile --norc -i -c 'echo $-'` -> himBHc; plain `-c`
-        // stays hBc). The login half passes the invocation's own value,
-        // which the mark_login_shell arm above already applied.
-        if invocation.interactive {
-            self.executor_mut()
-                .set_invocation_shape(true, invocation.login);
-        }
+        // niubash#863 GAP-12: the apply face (Q-A(i)) — the Session
+        // retains the invocation for the second phase, and absorbs
+        // the hop the host used to write by hand (the typed
+        // interactive flag via set_invocation_shape, niubash#806:
+        // GNU's `-i` sets forced_interactive during option parsing,
+        // so `$-` gains `i` — the face is now the single writer of
+        // the applied shape).
+        self.session_mut()
+            .apply_invocation_before_startup(invocation)?;
         // rubash#2129 (niu companion): the parse is this process's own
         // word on its shape. An earned `--login`/`-l` joins the
         // construction-time argv[0] seed in the host classification
@@ -1715,6 +1716,18 @@ impl Shell {
         if invocation.login {
             self.own_login_shell = true;
         }
+        // GAP-12 host-lane blocker (reported, not bridged): the
+        // Session retains the invocation for `finish_startup`, but
+        // `enter_interactive` still reads the invocation's
+        // `shopt_flags` for the `expand_aliases` REPL default
+        // (explicit flag wins, else GNU's interactive default on),
+        // and no Session face exposes the retained invocation's
+        // shopt flags — the engine's apply already wrote the
+        // explicit value into the option store, so only the
+        // explicit-vs-silent distinction is missing, and the store
+        // cannot carry it (one bit). This host clone survives
+        // ONLY for that read until the engine lands a read face
+        // for the applied shopt flags; see REPORT.md.
         self.startup_invocation = Some(invocation.clone());
         Ok(())
     }
@@ -1724,17 +1737,19 @@ impl Shell {
     /// (the launcher's legacy `niu -c -l` route, niubash#587): the
     /// host classification (`own_login_shell`) and the engine's
     /// carrier + `login_shell` shopt projection
-    /// (`Executor::mark_login_shell`, so `$-` gains `l`) move
+    /// (`Session::mark_login_shell`, so `$-` gains `l`) move
     /// together, here only — each reader takes its own side.
     pub fn mark_own_login_shell(&mut self) {
         self.own_login_shell = true;
-        self.executor_mut().mark_login_shell();
+        self.session_mut().mark_login_shell();
     }
 
     fn finish_startup(&mut self) {
-        if let Some(invocation) = self.startup_invocation.take() {
-            invocation.finish_startup(self.executor_mut());
-        }
+        // niubash#863 GAP-12: the second phase now runs the Session
+        // face (Q-A(i)) — the Session retained the applied
+        // invocation, so there is no host take anymore; the face is
+        // a no-op without an apply and idempotent on repeat.
+        self.session_mut().finish_invocation_startup();
         // niubash#400: the rbash face activates HERE — the same point the
         // `-r`/`--restricted` flag write lands (the engine's
         // ShellInvocation::finish_startup, "after the host finishes startup
@@ -4693,13 +4708,15 @@ fn fallback_recorded_dir(recorded: &Path) -> PathBuf {
 fn restore_executor_env(session: &mut Session, name: &str, value: Option<String>) {
     match value {
         Some(value) => session.variables().set(name, &value),
-        // No faithful contract twin for the removal arm:
-        // `VariablesView::unset` is the unset *builtin's* leaf
-        // (readonly refusal, typed-cell drop), while
-        // `Executor::unset_env` is the host restore-grade removal
-        // (invocation-carrier clearing, env journal, typed cell
-        // left as-is). #863 slice 1 keeps this one seam call.
-        None => session.executor_mut().unset_env(name),
+        // niubash#863 GAP-12: the removal arm rides the contract
+        // face `Session::remove_env` (Q-C(i)) — the restore-grade
+        // removal (invocation-carrier clearing, env journal,
+        // typed cell left as-is). `VariablesView::unset` is the
+        // unset *builtin's* leaf (readonly refusal, typed-cell
+        // drop) and is NOT this arm: the side-by-side
+        // differential is pinned in the GAP-12 engine consumer
+        // pins.
+        None => session.remove_env(name),
     }
 }
 
@@ -10741,8 +10758,174 @@ complete -F _envtooldyn_hook envtooldyn
                 .as_deref(),
             Some("1")
         );
-        assert!(shell.startup_invocation.is_none());
+        // niubash#863 GAP-12: finish_startup now runs the Session
+        // face, which retains the invocation (no host take
+        // anymore); the observable is that restrictions are live
+        // after the startup chain, and a second finish is a no-op
+        // (the face is idempotent).
+        assert_eq!(
+            shell.session_mut().options().get("restricted"),
+            Some(true),
+            "restrictions are live after the startup chain"
+        );
+        shell.finish_startup();
+        assert_eq!(
+            shell.session_mut().options().get("restricted"),
+            Some(true),
+            "a second finish is a no-op (GAP-12 idempotence)"
+        );
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// niubash#863 GAP-12: the apply face writes the LIVE shape —
+    /// `applied_invocation_shape()` is the applied invocation,
+    /// while the declared `invocation_shape()` is still the
+    /// construction-time declaration (a test shell declares
+    /// nothing). The host classification follows the applied
+    /// login half, and the carrier projection is written.
+    #[test]
+    fn issue863_gap12_apply_live_read_pairing() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+
+        let mut shell = test_shell(HookConfig::default());
+        // Declared shape before any apply: the construction-time
+        // declaration (nothing declared).
+        let declared = shell.session_mut().invocation_shape();
+        assert!(!declared.interactive);
+        assert!(!declared.login);
+
+        let invocation =
+            rubash::invocation::ShellInvocation::parse(&["-i".into(), "-l".into()]).unwrap();
+        shell.apply_invocation_before_startup(&invocation).unwrap();
+
+        // Live shape is the applied invocation, not the declaration.
+        let live = shell.session_mut().applied_invocation_shape();
+        assert!(live.interactive, "applied shape is interactive");
+        assert!(live.login, "applied shape is login");
+        // Declared shape is untouched by the apply.
+        let declared_after = shell.session_mut().invocation_shape();
+        assert_eq!(
+            declared_after, declared,
+            "apply does not rewrite the declaration"
+        );
+        // Host classification follows the applied login half.
+        assert!(shell.login_shell_active());
+        // Carrier projection written by the apply.
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("__RUBASH_LOGIN_SHELL")
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    /// niubash#863 GAP-12: the restore arm rides
+    /// `Session::remove_env` — a marked login carrier is removed
+    /// (env entry + typed login flag both clear) and a recorded
+    /// value is restored through the set arm.
+    #[test]
+    fn issue863_gap12_restore_arm_removes_carrier() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.session_mut().mark_login_shell();
+        assert!(
+            shell.session_mut().applied_invocation_shape().login,
+            "mark arms the typed login flag"
+        );
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("__RUBASH_LOGIN_SHELL")
+                .as_deref(),
+            Some("1")
+        );
+
+        restore_executor_env(shell.session_mut(), "__RUBASH_LOGIN_SHELL", None);
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("__RUBASH_LOGIN_SHELL")
+                .as_deref(),
+            None,
+            "restore arm removes the carrier"
+        );
+        assert!(
+            !shell.session_mut().applied_invocation_shape().login,
+            "restore arm clears the typed login flag"
+        );
+
+        restore_executor_env(
+            shell.session_mut(),
+            "__RUBASH_LOGIN_SHELL",
+            Some("1".to_string()),
+        );
+        assert_eq!(
+            shell
+                .session_mut()
+                .variables()
+                .resolved_value("__RUBASH_LOGIN_SHELL")
+                .as_deref(),
+            Some("1"),
+            "restore arm reinstates a recorded value"
+        );
+    }
+
+    /// niubash#863 GAP-12: the construction scrub rides
+    /// `Session::remove_env` — a parent session's exported shape
+    /// carriers never survive construction: the env entries are
+    /// gone and the typed flags stay clear. Process env is
+    /// restored on every path (panic included).
+    #[test]
+    fn issue863_gap12_construction_scrub_removes_inherited_carriers() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+
+        let old_login = std::env::var("__RUBASH_LOGIN_SHELL").ok();
+        let old_interactive = std::env::var("__RUBASH_INTERACTIVE").ok();
+        std::env::set_var("__RUBASH_LOGIN_SHELL", "1");
+        std::env::set_var("__RUBASH_INTERACTIVE", "1");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut shell = Shell::new().unwrap();
+            assert_eq!(
+                shell
+                    .session_mut()
+                    .variables()
+                    .resolved_value("__RUBASH_LOGIN_SHELL")
+                    .as_deref(),
+                None,
+                "inherited login carrier is scrubbed at construction"
+            );
+            assert_eq!(
+                shell
+                    .session_mut()
+                    .variables()
+                    .resolved_value("__RUBASH_INTERACTIVE")
+                    .as_deref(),
+                None,
+                "inherited interactive carrier is scrubbed at construction"
+            );
+            let live = shell.session_mut().applied_invocation_shape();
+            assert!(!live.login, "scrubbed session is not login");
+            assert!(!live.interactive, "scrubbed session is not interactive");
+        }));
+        match old_login {
+            Some(value) => std::env::set_var("__RUBASH_LOGIN_SHELL", value),
+            None => std::env::remove_var("__RUBASH_LOGIN_SHELL"),
+        }
+        match old_interactive {
+            Some(value) => std::env::set_var("__RUBASH_INTERACTIVE", value),
+            None => std::env::remove_var("__RUBASH_INTERACTIVE"),
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// niubash#422: on the login posix face (`sh -l -i`), an `exit` in the
