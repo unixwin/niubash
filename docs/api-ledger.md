@@ -413,6 +413,82 @@
 > it; the §2.2 trap-step rows zero out when the host
 > lane lands, and the §2.3 `begin_finish` count goes
 > 0 → N then.
+>
+> Addendum (GAP-9 token-view record, 2026-11-05,
+> niubash#863 GAP-9): the tier-A token view
+> — `Session::token_view` projecting the lexer onto
+> caller-fed text as `TokenView` / `TokenSpan` /
+> `TokenKindView` / `TokenRole` — and the completeness
+> face `Session::needs_more_input` are recorded (§2.1
+> row, §2.3 rows, §4 rows, §6 entries). The view is
+> the contract replacement for the host editor's two
+> private tokenizers (the highlighter's word scanner
+> and the completer's shell-word splitter) and for its
+> direct tier-B lexer reads: spans carry absolute byte
+> offsets over the input as fed, dequoted values built
+> from the raw source slices (the lexer's in-band
+> carrier bytes never cross the surface), command
+> positions and roles folded at projection time from
+> the lexer's own stamps and the engine's builtin
+> table, and comment spans synthesized from inter-token
+> text (the lexer drops comments). Recorded difference
+> from the GAP-3/4 views: the input is caller text, not
+> session state; tokenization derives in the session's
+> posix mode, exactly as `Session::parse` derives (the
+> one tokenization delta between the modes is `time`,
+> a reserved word only outside posix mode).
+> `Session::needs_more_input` ENTERS the ledger with
+> this record: the §6.5 completeness family has had
+> this §4 target home since the RFC, and the face
+> itself is as old as the Session, but it was recorded
+> nowhere — no §2.3 row, no §6 entry — the accretion
+> shape this ledger exists to catch. Its verdict
+> parity with the host's scanner walk is pinned over
+> the adjudicated subset of the host completeness
+> corpus (the GAP-9 Q-B differential, 54 of 66 rows
+> agreeing) in the engine's consumer tests; the two
+> divergence classes — heredoc-pending (the face
+> carries no heredoc-pending signal; the host's
+> heredoc arm reads the lexer's unterminated-body
+> stamp directly today) and the function-body stray
+> close (`f() {\n)` and kin, terminal for both the
+> host walk and the engine's reader, not for the
+> face's token walk) — are recorded UNCLASSIFIED in
+> the GAP-9 engine lane report pending the captain's
+> classification, and the host lane does not adopt the
+> face for those shapes until they are classified.
+> One fidelity note the host lane inherits: a brace
+> group is ONE folded lexer token, so the view does
+> not project a group's interior words — the host's
+> character scanner paints them today, and the host
+> lane records how it keeps that painting. niubash
+> consumes neither face yet, so the record is staged
+> ahead of the host's adoption, like the GAP-8 record
+> before it; the §2.1 `lexer` row's host counts retire
+> (2 → 1: the heredoc-arm `tokenize` read) when the
+> host lane lands.
+> Round 2 (GAP-9 captain adjudications executed,
+> 2026-11-05): both divergence classes are classified
+> DIVERGE — engine reader governs — and the face is
+> fixed in the same PR: heredoc-pending joins the
+> completeness composition (the token walk reads the
+> lexer's unterminated-body stamp; parse.y:3119
+> `gather_here_documents` — an unread body is part of
+> the still-open read), and the composition gains a
+> terminal channel (a token-walk terminal verdict —
+> stray `)`, foreign keyword closers, stray
+> `;;`-family — overrides the text half's
+> continuation verdicts; parse.y:6724 `yyerror` ends
+> the read at the token), with the parked-feeder
+> verdict fusions making the same cut so the fresh
+> and parked paths agree. The Q-B differential now
+> stands at 66 of 66 AGREE, pinned in the consumer
+> tests. The brace-group fidelity note is discharged
+> in the same round: the projection descends into
+> folded brace groups (recursively), projecting the
+> interior words with their own spans, positions and
+> roles; command substitutions remain unprojected
+> (word-shaped units, captain-ruled).
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -595,7 +671,7 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum); plus the `&self` variable read faces `Session::environment_full` / `Session::variable_value` — the niubash#863 GAP-6 full-table snapshot and single-value stored-value probe (recorded staged ahead of host adoption; see the header addendum); plus the completion-attempt guard family `CompletionAttempt` (+ methods `complete` / `complete_detailed` / `call_function_with_env` / `session`), with the opener `Session::begin_completion_attempt` — the niubash#863 GAP-7 reentrancy-aware attempt object replacing the host's thread-local shell lend (recorded staged ahead of host adoption; see the header addendum); plus the finish guard family `Finish` (+ methods `run_exit_trap` / `final_cwd` / `run_stream_end_duties` / `finish_all`) / `FinishOutcome` / `FinishDuties` / `SessionHistoryWrite`, with the opener `Session::begin_finish` and the report face `Session::close_with_report` — the niubash#863 GAP-8 step-decomposed finish object replacing the host's hand-composed finish funnels (recorded staged ahead of host adoption; see the header addendum) |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum); plus the `&self` variable read faces `Session::environment_full` / `Session::variable_value` — the niubash#863 GAP-6 full-table snapshot and single-value stored-value probe (recorded staged ahead of host adoption; see the header addendum); plus the completion-attempt guard family `CompletionAttempt` (+ methods `complete` / `complete_detailed` / `call_function_with_env` / `session`), with the opener `Session::begin_completion_attempt` — the niubash#863 GAP-7 reentrancy-aware attempt object replacing the host's thread-local shell lend (recorded staged ahead of host adoption; see the header addendum); plus the finish guard family `Finish` (+ methods `run_exit_trap` / `final_cwd` / `run_stream_end_duties` / `finish_all`) / `FinishOutcome` / `FinishDuties` / `SessionHistoryWrite`, with the opener `Session::begin_finish` and the report face `Session::close_with_report` — the niubash#863 GAP-8 step-decomposed finish object replacing the host's hand-composed finish funnels (recorded staged ahead of host adoption; see the header addendum); plus the token view family `TokenView` (+ methods `word_at` / `segment_words_before` / `last_separator_before`) / `TokenSpan` / `TokenKindView` / `TokenRole`, with the read face `Session::token_view` and the completeness face `Session::needs_more_input` — the niubash#863 GAP-9 lexer projection onto caller-fed text and the session completeness query (recorded staged ahead of host adoption; see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (0) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
@@ -803,6 +879,8 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::complete` / `complete_detailed` / `has_compspec` | 0 / 0 / 1 | GAP-7 (niubash#863): the completion bridge this row used to name is retired — no direct `Session::complete` / `complete_detailed` calls remain; the generation call routes through the completion attempt's `complete_detailed` (counted under `Session::begin_completion_attempt` above) and the compspec gate reads through the guard's `session()` lend. `CompletionOutcome`/`CompletionPolicy` (rubash#2573) reach the host as the guard's outcome, consumed by niubash#837 |
 | `Session::aliases` / `functions` | 1 / 2 | snapshots for completion state |
 | `Session::close` | 0 | GAP-8 (niubash#863): re-based on the `Session::begin_finish` guard's one-call pass engine-side (signature unchanged); the host's one-shot funnel used to be this row's one consumer and now opens the guard directly (see the GAP-8 retirement paragraph in §2.2), so the host count reads 0 — the host no longer consumes a session to finish it |
+| `Session::token_view` | 0 | GAP-9 (niubash#863): the lexer projected onto caller-fed text — a flat `TokenView` span stream (absolute byte spans, projected kinds, dequoted values built from the raw slices, command positions and roles folded at projection time from the lexer's stamps and the engine's builtin table, comment spans synthesized from inter-token text), tokenized in the session's posix mode. The contract replacement for the host editor's two private tokenizers and its direct tier-B lexer reads; recorded staged ahead of the GAP-9 host adoption, so the count is 0 (niubash consumes the §2.1 `lexer` row today). Consumed in-repo by the GAP-9 consumer pins |
+| `Session::needs_more_input` | 0 | GAP-9 (niubash#863): ENTERS the ledger with this record — the §6.5 completeness face (`stdin_source_needs_more_posix` as a session query, in the session's posix mode) has had its §4 target home since the RFC but was recorded nowhere (the GAP-9 scoping finding). The host's REPL validator is its adopter-in-waiting: it reads the face through its own completeness composition today, not through this name, so the production count is 0 until the GAP-9 host lane re-points the validator at it; verdict parity with the host's scanner walk is pinned over the adjudicated corpus subset in the GAP-9 consumer pins, with the two UNCLASSIFIED divergence classes (heredoc-pending, function-body stray close) recorded in the header addendum |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
@@ -872,10 +950,10 @@ to the split core crate without changing its shape.
 | `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome`; the finish-path half of `run_exit_trap_with_status` lands as the `Session::begin_finish` guard's trap step (niubash#863 GAP-8 — see the finish guard row below) |
 | `script_driver` run family | A (driver wrappers B) | `Session::run`; thin wrappers stay in the driver crate |
 | `pre_process_interactive_line` + `InteractiveExpansion` | A | `Session::prepare_line` |
-| completeness (`has_unclosed_input_syntax*`, `script_uses_*`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`) | A / B | `Session::needs_more_input`; helpers in `api::syntax` |
+| completeness (`has_unclosed_input_syntax*`, `script_uses_*`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`) | A / B | `Session::needs_more_input`; helpers in `api::syntax` — the face is recorded with the GAP-9 record (see the header addendum): verdict parity with the host's scanner walk is pinned over the full corpus in the engine's consumer tests — 66 of 66 rows AGREE since the GAP-9 round-2 adjudication classified both divergence classes DIVERGE/engine-governs and fixed the face (the token walk reads the lexer's unterminated-body stamp for heredoc-pending, parse.y:3119 `gather_here_documents`; the composition gained a terminal channel so a token-walk terminal verdict overrides the text half's continuation verdicts, parse.y:6724 `yyerror`), with the parked-feeder verdict fusions making the same cut, so the host lane adopts the face for every corpus shape |
 | `usage` printers and option tables | B | stay the shared host/engine bridge |
 | `parser` family (`parse*`, `CommandNode`, `ParseLoopOptions`, `WordMetadata`, `ast_print`) | B | `Session::parse` + `api::syntax` view types (no internal `Ast` in Tier A) |
-| `lexer` family (`tokenize*`) | B | `api::syntax` token view |
+| `lexer` family (`tokenize*`) | B | `api::syntax` token view — the target home is REACHED with the GAP-9 record: the token view exists in `api::syntax` (`Session::token_view`; see the header addendum). The family's remaining host reads retire when the GAP-9 host lane lands |
 | `locale` dump face (`collect_locale_strings`, `render_locale_string_dump`) | B | driver-layer text pass over the public lexer (locale.c's home); the rubash binary's main consumes it too |
 | `special_paths` registry (`SpecialPathClass`, `classify_special_path`, `special_dev_entries`, `synthetic_proc_dir_entries`) | B | stays in the `special_paths` module in-tree — one registry read by the engine's open points and the host's completion / highlighting faces alike (recorded in the 2026-10-29 backfill) |
 | `shell::bind_registry` (`BindEntry`, `BindKind`) | C | interactive layer's own gated surface — **landed as gated in row 11**: niubash consumes it only inside `crates/niubash-runtime/src/bind_surface.rs`, behind niubash's `internals` feature (default on; a `--no-default-features` build has zero Tier C references), converted there to niu-owned mirror types |
@@ -974,6 +1052,10 @@ item rubash::api::RunOutcome
 item rubash::api::Session
 item rubash::api::SessionBuilder
 item rubash::api::SessionHistoryWrite
+item rubash::api::TokenKindView
+item rubash::api::TokenRole
+item rubash::api::TokenSpan
+item rubash::api::TokenView
 item rubash::builtins::bind::BindSpecError
 item rubash::builtins::bind::BindingSpec
 item rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
@@ -1058,6 +1140,32 @@ variant rubash::api::RespawnSource::EngineChild
 variant rubash::api::RespawnSource::Fresh
 variant rubash::api::SessionHistoryWrite::Run
 variant rubash::api::SessionHistoryWrite::Skip
+variant rubash::api::TokenKindView::And
+variant rubash::api::TokenKindView::Append
+variant rubash::api::TokenKindView::Assignment
+variant rubash::api::TokenKindView::Background
+variant rubash::api::TokenKindView::BraceExpand
+variant rubash::api::TokenKindView::CommandSubst
+variant rubash::api::TokenKindView::Comment
+variant rubash::api::TokenKindView::HereDoc
+variant rubash::api::TokenKindView::HereDocBody
+variant rubash::api::TokenKindView::HereString
+variant rubash::api::TokenKindView::Keyword
+variant rubash::api::TokenKindView::Or
+variant rubash::api::TokenKindView::Pipe
+variant rubash::api::TokenKindView::PipeErr
+variant rubash::api::TokenKindView::RedirectErr
+variant rubash::api::TokenKindView::RedirectErrAppend
+variant rubash::api::TokenKindView::RedirectIn
+variant rubash::api::TokenKindView::RedirectOut
+variant rubash::api::TokenKindView::Semicolon
+variant rubash::api::TokenKindView::Variable
+variant rubash::api::TokenKindView::Word
+variant rubash::api::TokenRole::Assignment
+variant rubash::api::TokenRole::Builtin
+variant rubash::api::TokenRole::Plain
+variant rubash::api::TokenRole::RedirectTarget
+variant rubash::api::TokenRole::Reserved
 variant rubash::builtins::bind::BindingSpec::Function
 variant rubash::builtins::bind::BindingSpec::Macro
 variant rubash::executor::ExecuteError::CommandNotFound
@@ -1105,6 +1213,7 @@ method rubash::api::Session::has_function
 method rubash::api::Session::inherit_process_stdin
 method rubash::api::Session::invocation_shape
 method rubash::api::Session::last_status
+method rubash::api::Session::needs_more_input
 method rubash::api::Session::options
 method rubash::api::Session::prepare_line
 method rubash::api::Session::resolve_shell_path
@@ -1118,6 +1227,7 @@ method rubash::api::Session::set_last_status
 method rubash::api::Session::set_positional
 method rubash::api::Session::shell_pwd_display_path
 method rubash::api::Session::take_classification
+method rubash::api::Session::token_view
 method rubash::api::Session::variables
 method rubash::api::Session::variable_value
 method rubash::api::SessionBuilder::argv0
@@ -1130,6 +1240,11 @@ method rubash::api::SessionBuilder::invocation_shape
 method rubash::api::SessionBuilder::login_shell
 method rubash::api::SessionBuilder::shell_root
 method rubash::api::SessionBuilder::winuxcmd_path
+method rubash::api::TokenKindView::is_separator
+method rubash::api::TokenKindView::is_word_shaped
+method rubash::api::TokenView::last_separator_before
+method rubash::api::TokenView::segment_words_before
+method rubash::api::TokenView::word_at
 method rubash::api::VariablesView::resolved_value
 method rubash::api::VariablesView::set
 method rubash::api::VariablesView::unset
