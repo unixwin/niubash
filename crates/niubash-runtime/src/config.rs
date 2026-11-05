@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use rubash::api::Session;
 
 use crate::completion::CompletionBehavior;
 use crate::path_utils::shell_home_dir;
@@ -982,7 +983,11 @@ struct LegacyKeymapSection {
     unbind: Option<Vec<String>>,
 }
 
-fn legacy_lines(config: &LegacyConfigFile, skipped: &mut Vec<String>) -> Vec<String> {
+fn legacy_lines(
+    config: &LegacyConfigFile,
+    session: &Session,
+    skipped: &mut Vec<String>,
+) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(value) = config.command_not_found_hint.as_deref() {
         match CommandNotFoundHint::parse(value) {
@@ -1017,7 +1022,7 @@ fn legacy_lines(config: &LegacyConfigFile, skipped: &mut Vec<String>) -> Vec<Str
     }
     if let Some(keymap) = &config.keymap {
         for spec in keymap.bind.iter().flatten() {
-            match crate::repl::parse_keymap_bind_rule(spec) {
+            match crate::repl::parse_keymap_bind_rule(session, spec) {
                 Ok(_) => lines.push(format!("bind {}", shell_quote(spec))),
                 Err(reason) => skipped.push(format!("keymap.bind {spec:?}: {reason}")),
             }
@@ -1069,7 +1074,16 @@ pub fn migrate_legacy_config() -> anyhow::Result<Option<MigrationReport>> {
     if let Ok(raw) = text.parse::<toml::Value>() {
         collect_unknown_legacy_keys(&raw, &mut skipped);
     }
-    let lines = legacy_lines(&parsed, &mut skipped);
+    // niubash#863 GAP-13: the `[keymap]` rule parser validates `-m`
+    // names through the Session face, so the migration builds one
+    // throwaway session for that check. Building a session reads no
+    // startup files — it only constructs the executor — and this verb
+    // runs before any shell exists, so there is no live session to
+    // borrow.
+    let session = Session::builder()
+        .build()
+        .with_context(|| "could not build a session to validate keymap rules")?;
+    let lines = legacy_lines(&parsed, &session, &mut skipped);
     let rc_path = primary_rc_path();
     let rc_changed = if lines.is_empty() {
         false

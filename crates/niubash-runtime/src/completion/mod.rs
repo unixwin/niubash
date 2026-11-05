@@ -20,16 +20,14 @@ pub mod winuxcmd_assets;
 pub(crate) use completer::CompletionHostFaces;
 pub use completer::{CommandProbe, CompletionState, NiubashCompleter, SpecificCompletion};
 pub use file_colors::FileColors;
-/// The engine's candidate-kind vocabulary (niubash#863 GAP-11):
-/// the host's own `CandidateKind` is deleted — filesystem classes
+/// The engine's candidate-kind vocabulary (niubash#863 GAP-11):\n/// the host's own `CandidateKind` is deleted — filesystem classes
 /// are named by the engine type everywhere (`ListedKind` stays:
 /// dirent truth is a different thing from candidate kind).
-/// NOTE: the ledger §6 spells this `rubash::api::CandidateKind`,
-/// but the engine (#2839) never added the re-export — the real
-/// path is `rubash::api::capabilities::CandidateKind`. The host
-/// uses the real path; the one-line re-export is engine-side
-/// work, reported in REPORT.md, not fixed in this lane.
-pub use rubash::api::capabilities::CandidateKind;
+/// The ledger §6 spells this `rubash::api::CandidateKind`, and the
+/// GAP-13 entity lane (rubash#2850) added the one-line re-export, so
+/// the host consumes the re-export path — the checker matches the
+/// consumed path against the recorded one exactly.
+pub use rubash::api::CandidateKind;
 
 use std::path::PathBuf;
 

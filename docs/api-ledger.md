@@ -650,6 +650,43 @@
 > `Session::initialize_readline`, rubash#2833 Q-A/Q-B) are
 > recorded NOWHERE by this wave, per the GAP-13 ruling
 > Q-G — they enter the ledger with the entity engine PR.
+> Addendum (GAP-13 bind/readline assembly faces, 2026-11-06,
+> rubash#2833): the ten-round re-audit's entity part. The
+> bind/readline ASSEMBLY is contract now — the two verbs the
+> bookkeeping wave recorded nowhere (Q-G):
+> `Session::register_binding` (the engine converts the
+> `BindKindView` and constructs the `BindEntry` itself, into
+> the same registry pool the `bind` builtin writes; keymap
+> None resolves at registration, a register clears the
+> `bind -r` tombstone, same-key replaces in place,
+> generation +1 per call) and `Session::initialize_readline`
+> (a pure lift of the executor's inputrc read; ordering —
+> after rc, before the first snapshot — is the caller's duty,
+> the face does not enforce it; idempotent by the engine
+> flag; missing files silent), plus the membership probe
+> `Session::is_known_keymap` (plain `KEYMAP_NAMES`
+> membership, no alias folding — folding lives in the
+> register path). The write path this retires: one host
+> production site per verb — the bind surface's
+> `register_bind_entry` call (`bind_surface.rs:46`) and the
+> shell's `load_engine_bindings` call (`shell.rs:3145`) —
+> against two engine-internal sites each (the `bind`
+> builtin's two `register_bind_entry` arms; its lazy init
+> plus the interactive-stdin driver's entry init). The three
+> faces are recorded staged ahead of the GAP-13 host adoption
+> (§2.3 rows, staged 0); that lane deletes `bind_surface.rs`
+> entirely and the `BindEntry` / `BindKind` §6 items revert
+> to internal with it (Q-E — see the §2.1 note). The same
+> wave records `Session::parse` in §6 as a staged entry
+> (unconsumed; its §4 target home predates it) and adds the
+> GAP-12 follow-up read `Session::applied_invocation_shopt_flag`
+> (rubash#2848): the retained invocation's explicit `-O`/`+O`
+> flag for a name (last entry wins, `None` when the
+> invocation said nothing) — the read `enter_interactive`
+> needs for `expand_aliases`, which the shape read cannot
+> carry; the apply face's doc now says the host's
+> `startup_invocation` field deletes only once the host
+> adopts the retained-invocation reads. §6 grows 279 → 284.
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -845,7 +882,7 @@ the 1.5.0 tiers exist to fix.
 | `lexer` | `tokenize` (1), `tokenize_with_initial_posix` (0), `has_unclosed_input_syntax` (0), `has_unclosed_input_syntax_posix` (1) — the two zeros are a correction carried with the GAP-9 ledger mirror (captain adjudication): a repo-wide grep of niubash master (f54af426, target/ excluded) finds no reference to `tokenize_with_initial_posix` or to the non-posix `has_unclosed_input_syntax` outside this ledger, so both stale (1)s are corrected to the measured figure; the posix variant's (1) stands — it is a live call in niubash-runtime's shell module |
 | `locale` | `collect_locale_strings` (1), `render_locale_string_dump` (1) — the -D dump face (rubash#1977); `decode_to_visible_text` is recorded under root re-exports above |
 | `special_paths` | `classify_special_path` (2), `special_dev_entries` (4), `synthetic_proc_dir_entries` (3), `SpecialPathClass` + variant `Filesystem` (2) — the special-path registry the engine's open points judge by, read by niubash's completion and syntax-highlighting faces (recorded in the 2026-10-29 backfill; see §0) |
-| `shell::bind_registry` | `BindEntry` (10), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 23 references at the v2 re-census, all of them inside niubash's gated bind surface since row 11 (see §4); plus `KEYMAP_NAMES` (recorded in v3) |
+| `shell::bind_registry` | `BindEntry` (10), `BindKind` + variants `Execute` (6), `Function` (3), `Macro` (2) — 23 references at the v2 re-census, all of them inside niubash's gated bind surface since row 11 (see §4); plus `KEYMAP_NAMES` (recorded in v3). (GAP-13 entity wave, rubash#2833 Q-E: the write path is one host production site — the bind surface's `register_bind_entry` call (`bind_surface.rs:46`), replaced by the `Session::register_binding` face — plus the engine's own `bind`-builtin arms; the types revert to internal once the GAP-13 host lane deletes `bind_surface.rs` (host production refs to the bind_registry types → 0 outside tests), and the §6 `BindEntry` / `BindKind` items leave the ledger with that lane.) |
 | `invocation` | `ShellInvocation` (3, + `parse`, §2.2), `materialize_command_file` (1) |
 | `usage` | `LONG_OPTIONS` (3), `SHORT_OPTIONS` (2), `LONG_OPTIONS_WITH_VALUE` (1), `show_shell_version` (1), `show_shell_help` (1), `is_short_option_letter` (1), `invocation_help_name` (1), plus 2 module-level references |
 | `builtins::kill` | **exited in row 11 (M-3)**: `note_console_ctrl_c` (2) and `consume_background_wrapper_handshake` (1) are no longer consumed — niubash calls the Tier B driver faces `script_driver::inject_console_ctrl_c` / `script_driver::consume_background_wrapper_handshake` instead, and the Tier A replacements are `Executor::inject_signal` / `Executor::interrupt`. The kill items' demotion to `pub(crate)` landed with the migration's companion change (Ledger v4); niubash consumes neither hook. (One of these hooks disappearing is what broke niubash master in the bulk-merge incident — which is why the exit is staged, not abrupt.) |
@@ -1162,6 +1199,10 @@ its test-module reads named separately in the row):
 | `Session::expand_shell_words` | 1 | GAP-13 (rubash#2833): ENTERS the ledger with this record — the shell-words expansion as a contract face: the host's word expansion over live session state (`shell.rs:3360`, `session().expand_shell_words(&text)`). Recorded nowhere before (the ten-round re-audit's finding 2; same blind spot as the glob face above) |
 | `Session::environment` | 1 | GAP-13 (rubash#2833): ENTERS the ledger with this record — the exported environment table as a contract face: the session's exported variables as a value (`repl.rs:1131`, the `tilde-expand` readline command collects it to expand the word prefix over the session environment). Exported-only — distinct from `Session::environment_full` (the GAP-6 full table with attribute pseudo-entries). Recorded nowhere before, and caught by the Session-method census (§5.5) itself — the careful human audit of the re-audit missed it, which is the census's founding evidence |
 | `Session::call_function_with_env` | 1 | GAP-13 (rubash#2833): ENTERS the ledger as a §2.3 row with this record — the function call with an environment channel as a `Session` face (the §6 entry predates it). The host's widget driver calls it at `shell.rs:3462` (`session_mut().call_function_with_env(...)`); the attempt-guard form (`CompletionAttempt::call_function_with_env`) is the GAP-7 guard's method, counted under `Session::begin_completion_attempt` above (`completer.rs:1093`), and the GAP-7 pins call the guard form twice from test modules. The §2.2 `call_function_with_env` row retires 1 → 0 with this record — the Executor-form call is gone; the remaining leg is this Session face |
+| `Session::register_binding` | 0 | GAP-13 (niubash#863): ENTERS the ledger with this record — the bind assembly write as a contract face: the engine converts the `BindKindView` and constructs the `BindEntry` itself, into the same registry pool the `bind` builtin writes (keymap None resolves at registration; a register clears the `bind -r` tombstone for the same keyseq/keymap; same-key replaces in place; generation +1 per call). Recorded staged ahead of the GAP-13 host adoption, so the count is 0; consumed in-repo by the GAP-13 consumer pins (read-back through `bind_view`, re-register replace + generation, tombstone clear, face writes visible to the `bind` builtin's dumps). The host's one production write site (`bind_surface.rs:46`) retires with the host lane; `BindEntry` / `BindKind` revert to internal with it (Q-E) |
+| `Session::initialize_readline` | 0 | GAP-13 (niubash#863): ENTERS the ledger with this record — the inputrc read as a contract face: a pure lift of `Executor::initialize_readline` (GNU bashline.c:451); ordering — after rc, before the first snapshot — is the caller's duty and the face does not enforce it; idempotent by the engine flag; missing files silent. Recorded staged ahead of the GAP-13 host adoption, so the count is 0; consumed in-repo by the GAP-13 consumer pins (inputrc vars + bindings land in the view; second call is a no-op after a file change) and the U-1 probe (first call with HOME empty poisons the flag — GNU parity, bashline.c:451-456/:646). The host's one production call site (`shell.rs:3145`, `load_engine_bindings`) retires with the host lane |
+| `Session::is_known_keymap` | 0 | GAP-13 (niubash#863): ENTERS the ledger with this record — the keymap membership probe as a contract face: plain `KEYMAP_NAMES` membership, no alias folding (folding lives in the register path inside the engine — the `[keymap]` parser's plain membership, niubash#863 GAP-13 Q-F/U-3). Recorded staged ahead of the GAP-13 host adoption, so the count is 0; consumed in-repo by the GAP-13 consumer pins (all eight names true, fake names false) |
+| `Session::applied_invocation_shopt_flag` | 0 | GAP-12 follow-up (niubash#863, rubash#2848): ENTERS the ledger with this record — the retained invocation's explicit shopt flag as a contract face: the last `-O`/`+O` entry for a name in the invocation applied through `Session::apply_invocation_before_startup`, or `None` when the invocation said nothing about it (and `None` when no invocation was applied). The host needs the explicit-vs-silent distinction the shape read cannot carry: `enter_interactive` arms `expand_aliases` for an interactive session unless the invocation explicitly turned it off (`+O expand_aliases -i` must win over the interactive default; the three GNU oracle arms are pinned in the GAP-13 consumer pins). Recorded staged ahead of the host adoption, so the count is 0; the host follow-up that deletes its `startup_invocation` field rides on this face plus `applied_invocation_shape` |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
@@ -1545,6 +1586,7 @@ method rubash::api::InvocationShape::new
 method rubash::api::OptionsView::set
 method rubash::api::Session::aliases
 method rubash::api::Session::applied_invocation_shape
+method rubash::api::Session::applied_invocation_shopt_flag
 method rubash::api::Session::apply_invocation_before_startup
 method rubash::api::Session::begin_completion_attempt
 method rubash::api::Session::begin_finish
@@ -1569,13 +1611,17 @@ method rubash::api::Session::has_compspec
 method rubash::api::Session::has_function
 method rubash::api::Session::history_entries
 method rubash::api::Session::inherit_process_stdin
+method rubash::api::Session::initialize_readline
 method rubash::api::Session::invocation_shape
+method rubash::api::Session::is_known_keymap
 method rubash::api::Session::last_status
 method rubash::api::Session::mark_login_shell
 method rubash::api::Session::needs_more_input
 method rubash::api::Session::notify_terminal_size
 method rubash::api::Session::options
+method rubash::api::Session::parse
 method rubash::api::Session::prepare_line
+method rubash::api::Session::register_binding
 method rubash::api::Session::remove_env
 method rubash::api::Session::resolve_shell_path
 method rubash::api::Session::resolve_shell_path_from_env

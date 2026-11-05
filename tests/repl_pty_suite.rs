@@ -1461,3 +1461,140 @@ fn repl_pty_completion_compspec_default_fallback_chain() {
     s.expect("zebra.txt");
     s.expect_prompt();
 }
+
+// ---------------------------------------------------------------------------
+// Chain 12 — bind assembly (niubash#863 GAP-13): the inputrc read, a
+// runtime `bind`, and a `bind -r` removal all land in the mirrored
+// editor keymap — each step's keypress proves the previous step's
+// registration, and the inputrc rewrite proves the once-only
+// initialize is really once-only. The links, in order:
+//
+// 1. inputrc (`"\C-t": "INPUTRC"`) — read by the host's
+//    `Session::initialize_readline` call in `load_engine_bindings`,
+//    after the rc, before the first snapshot.
+// 2. runtime `bind '"\C-y": "RCBIND"'` — the next prompt's editor
+//    has it (generation moves, mirror rebuilds).
+// 3. inputrc rewritten mid-session, then a second runtime `bind`
+//    moves the generation (which re-runs the load): the second
+//    initialize is a no-op, so Ctrl-T still inserts the FIRST
+//    file's text.
+// 4. `bind -r '\C-u'` — the tombstone rebuilds the mirror and the
+//    key stops inserting.
+//
+// The rc deliberately carries NO `bind` line: the engine
+// self-initializes on its first `bind` invocation
+// (bind_builtins.rs), so an rc `bind` would read the inputrc
+// during rc sourcing and mask the host call site — link 1 would
+// pass even with the host call deleted, and the mutation
+// self-check below would be vacuous. With a bind-free rc, the
+// host's `load_engine_bindings` call is the ONLY trigger for the
+// first inputrc read.
+//
+// The plugin-macro write face (`Session::register_binding`, the
+// `rl_macro_bind` route) is not driven here: it needs a loadable
+// plugin, which this suite cannot build without a C toolchain. It is
+// covered by the `loadable-builtin-niu` probe in
+// scripts/readline-plugin-probes (pty_probes.py: `rl_probe macro` ->
+// Ctrl-T inserts MAGIC) and by the lib-level
+// `issue863_gap13_register_macro_binding_*` pins.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn repl_pty_bind_inputrc_rc_runtime_removal_chain() {
+    if !require_pty_or_skip("repl_pty_bind_inputrc_rc_runtime_removal_chain") {
+        return;
+    }
+    const CTRL_T: &str = "\u{14}";
+    const CTRL_U: &str = "\u{15}";
+    const CTRL_Y: &str = "\u{19}";
+
+    let root = unique_root("bind");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".inputrc"), "\"\\\\C-t\": \"INPUTRC\"\n").unwrap();
+    // Bind-free rc (see the header comment): the host's initialize
+    // call must be the trigger for the first inputrc read.
+    let mut s = ReplSession::spawn_shared("bind", &root, "");
+
+    // Link 1 — inputrc macro: Ctrl-T inserts the file's text.
+    s.send("echo ");
+    s.send(CTRL_T);
+    let f = s.frame();
+    assert!(
+        f.contains("echo INPUTRC"),
+        "Ctrl-T must insert the inputrc macro text (`echo INPUTRC`)\nframe:\n{f}"
+    );
+    s.send("\r");
+    s.expect("INPUTRC");
+    s.expect_prompt();
+
+    // Link 2 — runtime bind macro: Ctrl-Y inserts the runtime text.
+    s.send_line("bind '\"\\\\C-y\": \"RCBIND\"'");
+    s.expect_prompt();
+    s.send("echo ");
+    s.send(CTRL_Y);
+    let f = s.frame();
+    assert!(
+        f.contains("echo RCBIND"),
+        "Ctrl-Y must insert the runtime bind macro text (`echo RCBIND`)\nframe:\n{f}"
+    );
+    s.send("\r");
+    s.expect("RCBIND");
+    s.expect_prompt();
+
+    // Link 3 — rewrite the inputrc, then move the generation with a
+    // second runtime bind: the second initialize is a no-op, so
+    // Ctrl-T must still insert the FIRST file's text, never the
+    // rewritten one — while the new runtime macro lands.
+    std::fs::write(home.join(".inputrc"), "\"\\\\C-t\": \"INPUTRC-V2\"\n").unwrap();
+    s.send_line("bind '\"\\\\C-u\": \"RUNTIME\"'");
+    s.expect_prompt();
+
+    s.send("echo ");
+    s.send(CTRL_T);
+    let f = s.frame();
+    assert!(
+        f.contains("echo INPUTRC") && !f.contains("INPUTRC-V2"),
+        "after the inputrc rewrite Ctrl-T must still insert the first file's text\nframe:\n{f}"
+    );
+    s.send("\r");
+    s.expect("INPUTRC");
+    s.expect_prompt();
+
+    s.send("echo ");
+    s.send(CTRL_U);
+    let f = s.frame();
+    assert!(
+        f.contains("echo RUNTIME"),
+        "Ctrl-U must insert the runtime bind macro text (`echo RUNTIME`)\nframe:\n{f}"
+    );
+    s.send("\r");
+    s.expect("RUNTIME");
+    s.expect_prompt();
+
+    // Link 4 — removal: `bind -r` clears the macro; Ctrl-U must no
+    // longer insert it (and must not resurrect the earlier text).
+    s.send_line("bind -r '\\C-u'");
+    s.expect_prompt();
+    s.drain();
+    s.send("echo ");
+    s.send(CTRL_U);
+    let f = s.frame();
+    assert!(
+        !f.contains("RUNTIME"),
+        "after `bind -r` Ctrl-U must no longer insert the removed macro\nframe:\n{f}"
+    );
+    s.send(CTRL_C);
+    s.expect_prompt();
+    settle();
+
+    assert_eq!(s.exit_niu(0), 0);
+    #[cfg(unix)]
+    assert_eq!(
+        s.exit_carrier(),
+        0,
+        "carrier must exit cleanly\n{}",
+        s.transcript()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

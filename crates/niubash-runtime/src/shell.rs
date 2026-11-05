@@ -3154,11 +3154,14 @@ impl Shell {
         // GNU's readline initialization order (bashline.c:451): the
         // inputrc file ($INPUTRC, else ~/.inputrc) is read once per
         // process, AFTER the startup files, so rc `bind` commands run
-        // first and inputrc overrides them. The engine's
-        // `initialize_readline` is idempotent; calling it here — after
-        // the rc, before the snapshot — is what makes inputrc variables
-        // and bindings visible to the mirrored keymaps.
-        self.executor_mut().initialize_readline();
+        // first and inputrc overrides them. The Session
+        // `initialize_readline` face (niubash#863 GAP-13) is
+        // idempotent; calling it here — after the rc, before the
+        // snapshot — is what makes inputrc variables and bindings
+        // visible to the mirrored keymaps. Ordering stays the
+        // caller's duty (the face documents it); this call site
+        // keeps the rc-then-inputrc-then-snapshot order.
+        self.session_mut().initialize_readline();
         // The snapshot is the tier-A bind view (niubash#863
         // GAP-3): one owned capture of the registry — entries
         // with the engine's canonical bytes, the `bind -r`
@@ -3182,12 +3185,23 @@ impl Shell {
     /// build installs it through the ordinary engine `bind` path and the
     /// host mirror copies it back into the ABI keymap.
     pub fn register_macro_binding(&mut self, keyseq: &str, text: &str, keymap: &str) -> bool {
-        crate::bind_surface::register_engine_macro(
-            self.executor_mut(),
-            keyseq.to_string(),
-            text.to_string(),
-            Some(keymap.to_string()),
-        )
+        if keyseq.is_empty() {
+            return false;
+        }
+        // niubash#863 GAP-13: the registration rides the Session
+        // face — the engine constructs the entry itself, so the host
+        // never names the engine's internal registry types on this
+        // path. The entry lands in the same registry the `bind`
+        // builtin writes, so the next snapshot mirrors it into the
+        // editor keymap.
+        self.session_mut().register_binding(
+            keyseq,
+            BindKindView::Macro {
+                text: text.to_string(),
+            },
+            Some(keymap),
+        );
+        true
     }
 
     /// Whether the engine's bind registry has moved since the
@@ -10925,6 +10939,160 @@ complete -F _envtooldyn_hook envtooldyn
         }
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// niubash#863 GAP-13: `Shell::register_macro_binding` rides
+    /// `Session::register_binding` — the macro lands in the same
+    /// registry the `bind` builtin writes, so a `bind_view` taken
+    /// afterwards shows the entry (keymap resolved, kind
+    /// round-trips) and the generation moved by exactly one.
+    /// Re-registering the same sequence replaces in place and bumps
+    /// the generation again; an empty keyseq is refused with no
+    /// generation move.
+    #[test]
+    fn issue863_gap13_register_macro_binding_reads_back_through_bind_view() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+
+        let mut shell = test_shell(HookConfig::default());
+        let before = shell.session().bind_view().generation;
+        assert!(shell.register_macro_binding("\\C-t", "PLUGIN-TEXT", "emacs-standard"));
+        let view = shell.session().bind_view();
+        assert_eq!(
+            view.generation,
+            before + 1,
+            "one registration bumps the generation once"
+        );
+        let entry = view
+            .entries
+            .iter()
+            .find(|e| e.keyseq == "\\C-t")
+            .expect("registered macro reads back through bind_view");
+        assert_eq!(entry.keymap, "emacs-standard");
+        assert_eq!(
+            entry.kind,
+            BindKindView::Macro {
+                text: "PLUGIN-TEXT".to_string()
+            },
+            "macro kind round-trips through the face"
+        );
+
+        // Re-register: replace in place, generation +1 again.
+        assert!(shell.register_macro_binding("\\C-t", "PLUGIN-TEXT-2", "emacs-standard"));
+        let view = shell.session().bind_view();
+        assert_eq!(view.generation, before + 2);
+        let found: Vec<_> = view
+            .entries
+            .iter()
+            .filter(|e| e.keyseq == "\\C-t")
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "re-register replaces in place, no duplicate"
+        );
+        assert_eq!(
+            found[0].kind,
+            BindKindView::Macro {
+                text: "PLUGIN-TEXT-2".to_string()
+            }
+        );
+
+        // Empty keyseq refused, generation untouched.
+        assert!(!shell.register_macro_binding("", "NOPE", "emacs-standard"));
+        assert_eq!(shell.session().bind_view().generation, before + 2);
+    }
+
+    /// niubash#863 GAP-13: `Session::initialize_readline` reads the
+    /// inputrc once — a second call after the file changed is a
+    /// no-op (re-reading is the separate `bind -f` route). Pinned
+    /// through the host's `load_engine_bindings` call site, which is
+    /// the production caller: the first load installs the file's
+    /// macro, the second load (after an edit) leaves the registry
+    /// exactly as it was.
+    #[test]
+    fn issue863_gap13_initialize_readline_second_call_is_noop() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+
+        let temp = tempfile::tempdir().unwrap();
+        let inputrc = temp.path().join("inputrc");
+        std::fs::write(&inputrc, "\"\\C-t\": \"INPUTRC-V1\"\n").unwrap();
+        let _inputrc_guard = EnvVarGuard::set("INPUTRC", &inputrc);
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.load_engine_bindings();
+        let view = shell.session().bind_view();
+        assert_eq!(
+            view.entries
+                .iter()
+                .find(|e| e.keyseq == "\\C-t")
+                .map(|e| &e.kind),
+            Some(&BindKindView::Macro {
+                text: "INPUTRC-V1".to_string()
+            }),
+            "first load installs the inputrc macro"
+        );
+        let generation = view.generation;
+        // Rewrite the file, then load again: the second initialize
+        // is a no-op, the registry must not move.
+        std::fs::write(&inputrc, "\"\\C-t\": \"INPUTRC-V2\"\n").unwrap();
+        shell.load_engine_bindings();
+        let view = shell.session().bind_view();
+        assert_eq!(
+            view.generation, generation,
+            "second load must not re-read the file"
+        );
+        assert_eq!(
+            view.entries
+                .iter()
+                .find(|e| e.keyseq == "\\C-t")
+                .map(|e| &e.kind),
+            Some(&BindKindView::Macro {
+                text: "INPUTRC-V1".to_string()
+            }),
+            "the first file's macro survives the second load"
+        );
+    }
+
+    /// niubash#863 GAP-13: `Session::is_known_keymap` is the plain
+    /// membership test the `[keymap]` parser consults — all eight GNU
+    /// names pass, and lookalikes (case, affixes, the normalized
+    /// `vi-movement`, empty) fail. No alias folding happens here:
+    /// folding belongs to the register path inside the engine.
+    #[test]
+    fn issue863_gap13_is_known_keymap_true_and_false_sets() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = test_shell(HookConfig::default());
+        for name in [
+            "emacs",
+            "emacs-standard",
+            "emacs-meta",
+            "emacs-ctlx",
+            "vi",
+            "vi-move",
+            "vi-command",
+            "vi-insert",
+        ] {
+            assert!(
+                shell.session().is_known_keymap(name),
+                "{name} is a known keymap"
+            );
+        }
+        for name in [
+            "",
+            "VI",
+            "Vi-Insert",
+            "emacs-standard ",
+            " emacs",
+            "bogus",
+            "vi-movement",
+        ] {
+            assert!(
+                !shell.session().is_known_keymap(name),
+                "{name} must not be a known keymap"
+            );
         }
     }
 
