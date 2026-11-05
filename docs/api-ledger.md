@@ -514,16 +514,16 @@ RFC §3.2 top set it cites is pre-migration history).
 
 | Method | Calls | Method | Calls |
 | --- | --- | --- | --- |
-| `get_env` | 18 | `take_exit_jump_pending` | 2 |
+| `get_env` | 0 | `take_exit_jump_pending` | 2 |
 | `set_env` | 10 | `call_function_with_env` | 2 |
-| `resolve_shell_path` | 0 | `env_vars_snapshot` | 2 |
+| `resolve_shell_path` | 0 | `env_vars_snapshot` | 0 |
 | `alias_expansion_enabled` | 4 | `set_shopt_option` | 2 |
 | `take_parse_error` | 4 | `has_compspec` | 2 |
 | `execute_ast` | 4 | `bind_registry_snapshot` | 1 |
 | `resolve_shell_path_from_env` (assoc) | 0 | `set_history_provider` | 1 |
 | `bind_registry_generation` | 2 | `run_bind_x_command` | 1 |
 | `resolve_shell_path_process_entries_from_env` (assoc) | 0 | `has_function` | 1 |
-| `take_signal_discard_pending` | 2 | `env_vars` | 1 |
+| `take_signal_discard_pending` | 2 | `env_vars` | 0 |
 | `run_exit_trap_with_status` | 1 | `close_all_persistent_output_process_substitutions` | 1 |
 | `execute_command` | 1 | `unset_env` | 1 |
 | `export_env` | 1 | `last_exit_code` | 1 |
@@ -545,6 +545,22 @@ moved every resolution read to the Session faces, so
 these counts now read 0; the methods themselves stay
 `pub` in the engine.
 
+Retirement landed (niubash#863 GAP-6): the two read classes
+the note below names — the full-table snapshots
+(`env_vars`, `env_vars_snapshot`) and the `&self` probes
+(`get_env`) — are the tier-C forms of the variable reads
+whose tier-A `Session` faces are recorded in §2.3. The host
+migration moved every variable read to the Session faces, so
+these counts now read 0; the methods themselves stay `pub`
+in the engine. Survey correction, recorded here so the
+engine-time figure in the header addendum stays intelligible
+as history: the lane found 7 lib-code `get_env` probes, not
+8 — the brief's "+4 more" overcounted by one (the tree holds
+`THIS_SH`, `__RUBASH_POSIX_MODE`, the env-file expansion
+probe, `PS1`, `NIU_TITLE`, and `PWD` twice); the addendum's
+8 is the engine-time survey figure, the 7 here is the
+landed count.
+
 Note what the retained set is made of: the bind registry and the
 design-§3.2 AST routes (`execute_ast`, `execute_command`), the
 classification plumbing of the routes that stay direct
@@ -554,16 +570,16 @@ full-table snapshots (`env_vars`, `env_vars_snapshot` — the
 contract's `environment()` is exported-only), the post-build
 history-provider install, the exit-trap funnel the REPL finish
 composes by hand, and the read probes in `&self` host methods
-(the contract's state views are `&mut`-shaped; the 8 lib-code
-`get_env` seam reads are exactly those probes). The read side
+(the contract's state views are `&mut`-shaped; the 7 lib-code
+`get_env` seam reads were exactly those probes). The read side
 still leads what remains — but the bulk of it (102
 `resolved_value` calls) now goes through the variables view.
-GAP-6 (recorded staged, see the header addendum) retires the
-two read classes this note names: the full-table snapshots
-move to `Session::environment_full` and the `&self` probes to
+GAP-6 (niubash#863) retired the two read classes this note
+named: the full-table snapshots moved to
+`Session::environment_full` and the `&self` probes to
 `Session::variable_value`; the `env_vars` / `env_vars_snapshot`
-rows and the lib-code share of the `get_env` row zero out when
-the host lane lands.
+rows and the `get_env` row read 0 (see the retirement
+paragraph above).
 
 ### 2.3 `Session` faces niubash calls (Ledger v4 census)
 
@@ -588,8 +604,8 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::resolve_shell_path_from_env` | 0 | GAP-5 associated form: resolution against a caller-supplied environment map, delegating to the same `executor::path` function as the executor's associated form; adopted by the GAP-5 host migration as the primitive under the host's `resolve_shell_path_argument` composition family — that family is `#[cfg(test)]`-gated today, so the production count is 0 and the remaining calls (the two family primitives and one test call) are test-module occurrences |
 | `Session::resolve_shell_path_process_entries_from_env` | 2 | GAP-5 PATH-entry form: one shell PATH entry resolved to its native directories against a caller-supplied environment map, same source as the executor's associated form; adopted by the GAP-5 host migration — the host's PATH-entry reads (shell.rs's process-path conversion and syntax_highlighting.rs's PATH-dir read) go through this face |
 | `Session::shell_pwd_display_path` | 1 | GAP-5 display form: the module function `rubash::executor::shell_pwd_display_path` under a `Session` associated name; adopted by the GAP-5 host migration — the host's direct module-function call (the persona pwd display read) moves to this face |
-| `Session::environment_full` | 0 | GAP-6 full-table read: the whole variable table in `env_vars_snapshot`'s rendering (attribute pseudo-entries included), sorted by name, through the one rendering shared with `CompletionView`'s `env` component; recorded staged ahead of host adoption — the host's remaining tier-C full-table reads (the process-PATH synchronization's conversion context) move to this face when the host lane lands |
-| `Session::variable_value` | 0 | GAP-6 single-value probe: the stored value of one variable — the `&self` form of the executor's raw table read (`get_env`), deliberately not the `$name` expansion read (`resolved_value` keeps dynamic getters, nameref resolution and the typed-cell layer; the GAP-6 consumer pins record both readings per shape); recorded staged ahead of host adoption — the 8 lib-code `get_env` seam reads in `&self` host methods (prompt / title / mode probes) move to this face when the host lane lands |
+| `Session::environment_full` | 2 | GAP-6 full-table read: the whole variable table in `env_vars_snapshot`'s rendering (attribute pseudo-entries included), sorted by name, through the one rendering shared with `CompletionView`'s `env` component; adopted by the GAP-6 host migration — the process-PATH synchronization's conversion context and the `NIU_SEGMENT_` prompt mirror read the full table through this face (the mirror's name filter cannot match an attribute pseudo-entry key), and the §2.2 `env_vars` / `env_vars_snapshot` rows retire to 0; the new GAP-6 routing pin reads this face once from the test module |
+| `Session::variable_value` | 7 | GAP-6 single-value probe: the stored value of one variable — the `&self` form of the executor's raw table read (`get_env`), deliberately not the `$name` expansion read (`resolved_value` keeps dynamic getters, nameref resolution and the typed-cell layer; the GAP-6 consumer pins record both readings per shape); adopted by the GAP-6 host migration — the 7 lib-code `get_env` seam reads in `&self` host methods (`THIS_SH`, `__RUBASH_POSIX_MODE`, the env-file expansion probe, `PS1`, `NIU_TITLE`, `PWD` twice) move to this face, and the §2.2 `get_env` row retires to 0; the new GAP-6 routing pin reads this face twice from the test module |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
 | `Session::prepare_line` | 1 | REPL history expansion |
 | `Session::complete` / `complete_detailed` / `has_compspec` | 1 / 0 / 1 | completion bridge (complete_detailed + CompletionOutcome/CompletionPolicy: rubash#2573, consumed by niubash#837) |
