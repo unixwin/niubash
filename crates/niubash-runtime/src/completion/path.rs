@@ -1400,6 +1400,82 @@ mod glob_completion_tests {
     }
 }
 
+/// Regression pin for niubash PR #911 (external contributor):
+/// directories-only completion dropped symlinks that point at
+/// directories. A dirent reports a symlink as a symlink, never as a
+/// directory, so `cd` (and `pushd`) never offered a symlinked folder.
+/// The fix stats the link when directories are wanted and marks a
+/// link-to-directory candidate like a directory (trailing `/`).
+///
+/// Oracle: GNU bash `compgen -d` semantics — in a directory holding
+/// realdir/, realfile, linkdir -> realdir, linkfile -> realfile and
+/// brokenlink -> nonexistent, the directory set is exactly
+/// {linkdir, realdir}; a link to a file and a broken link stay out.
+#[cfg(all(test, unix))]
+mod symlinked_directory_tests {
+    use super::*;
+
+    fn ctx(dir: &Path, input: &str) -> CompletionContext {
+        CompletionContext::new(dir.to_path_buf(), input.to_string(), input.len())
+    }
+
+    fn complete_values(dir: &Path, input: &str) -> Vec<String> {
+        let context = ctx(dir, input);
+        PathCompleter::complete(&context)
+            .unwrap()
+            .map(|result| result.completions)
+            .unwrap_or_default()
+    }
+
+    fn seed_dir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "niubash-symlink-dir-completion-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("realdir")).unwrap();
+        std::fs::write(dir.join("realfile"), "x").unwrap();
+        std::os::unix::fs::symlink("realdir", dir.join("linkdir")).unwrap();
+        std::os::unix::fs::symlink("realfile", dir.join("linkfile")).unwrap();
+        std::os::unix::fs::symlink("nonexistent", dir.join("brokenlink")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cd_offers_symlink_to_directory_with_trailing_slash() {
+        let dir = seed_dir();
+        let mut values = complete_values(&dir, "cd ");
+        values.sort();
+        assert_eq!(
+            values,
+            vec!["linkdir/".to_string(), "realdir/".to_string()],
+            "cd must offer the symlink to a directory, marked like one: {values:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cd_prefix_filters_symlink_to_directory() {
+        let dir = seed_dir();
+        let values = complete_values(&dir, "cd li");
+        assert_eq!(values, vec!["linkdir/".to_string()], "{values:?}");
+
+        // A link to a file is not a directory: no match.
+        let values = complete_values(&dir, "cd linkf");
+        assert!(values.is_empty(), "{values:?}");
+
+        // A broken link resolves to nothing: no match.
+        let values = complete_values(&dir, "cd broken");
+        assert!(values.is_empty(), "{values:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 #[cfg(test)]
 mod simulated_namespace_tests {
     use super::*;
