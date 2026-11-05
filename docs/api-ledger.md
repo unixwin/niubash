@@ -527,6 +527,45 @@
 > niubash consumes the new face not yet; the host lane
 > adopts it, and the GAP-10 host migration completes the
 > §2.2 retirement in substance.
+> Addendum (GAP-11 candidate kind, 2026-11-05,
+> niubash#863 GAP-11): each `Candidate` carries the
+> engine-side kind its generator knew — `CandidateKind`
+> (`Directory` / `Symlink` / `Executable` / `File`), a
+> filesystem-only taxonomy mirroring the host's vocabulary, or
+> `None` when the producer could not classify from evidence
+> already in hand. Kind is marked at generation (the
+> generator-classification principle: kind names the entry as
+> the producing action classified it — a directory action
+> follows links, so a symlink-to-directory it produces is
+> `Directory`; the same entry in a plain file listing stays
+> `Symlink`), rides the existing `complete_detailed` channel
+> (§2.3 row, staged 0 — the host lane adopts it), and never
+> leaks into text (`compgen` output is byte-identical, pinned).
+> Dynamic candidates (`-F` COMPREPLY, `-C` output) stay
+> unmarked; the attempt's filename flavor is carried instead
+> by the `CompletionPolicy.filenames_intent` bit (a
+> spec-intent fact, never a per-candidate claim). Marking uses
+> only in-hand evidence — the dirent's class, the followed
+> stat a directory action already performs, the PATH walk's
+> executability verdict — and adds no per-candidate stat
+> (the #747 budget): a regular file reads `File` even when
+> executable (the host refines exec-ness from its memoized
+> verdict), and an unclassifiable entry stays unmarked.
+> Per-producer marking table: `-A directory` → Directory for
+> every entry; `-A file` → Directory / File / Symlink from
+> the dirent, unmarked for fifo/socket/device; `-A command` →
+> Executable for PATH-walk entries, unmarked for aliases /
+> keywords / functions / builtins; every other action arm,
+> globpat matches and `-W` wordlists → unmarked; `-o
+> dirnames` / `-o plusdirs` / `-o default` fallbacks and the
+> no-spec filename fallback → marked through the same
+> filename generator. Compatibility: `Candidate::new` /
+> `described` default kind to `None` (constructor users are
+> source-compatible); struct-literal construction of
+> `Candidate` outside the tree breaks on the new field — a
+> 1.5.1 contract change recorded here, with no
+> `#[non_exhaustive]` added. The host lane deletes its own
+> `CandidateKind` and uses this type (GAP-11 Q-E(ii)).
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -934,7 +973,7 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::begin_finish` | 3 | GAP-8 finish guard opener: opens one `Finish` per finish from the `&mut Session` the host holds, with the route's pending status as a value; the guard's coarse steps (`run_exit_trap` — pending status in, resolved status out; `final_cwd` — the post-trap directory read; `run_stream_end_duties` — the finish's non-trap duties with the engine history step gated per route through `FinishDuties`; `finish_all` — the one-call pass) decompose the one finish implementation around the host's interleaved duties, and `FinishOutcome` reports the finish boundary as values (status / final cwd / trap ran / history written / duties run). Adopted by the GAP-8 host migration (see the GAP-8 retirement paragraph in §2.2): the count is the three `Shell` funnel sites in shell.rs, by route — the one-shot funnel (`finish_with_engine_finish`, the guard's `finish_all`), the non-consuming trap step (`finish_exit_trap`, driven by the REPL session end, the startup exit, and through the session end the REPL tails), and the duties step (`finish_stream_end_duties`, driven by the REPL session end and the startup exit with the engine history write gated off). `Session::close` / `close_with_report` are already re-based on it engine-side, and the GAP-8 consumer pins open it from test modules |
 | `Session::close_with_report` | 0 | GAP-8 (niubash#863): ENTERS the ledger with this record — a pub tier-A-shaped face recorded nowhere before (the GAP-8 scoping finding). The report form of `Session::close` (rubash#2039): the final status plus the post-trap cwd as a `CloseReport` value; re-based on the `Session::begin_finish` guard's one-call pass in the GAP-8 engine PR (adopt-and-extend, captain adjudication D4). No niubash consumer yet; consumed in-repo by `Session::close` and the issue2039 close pins |
 | `Session::prepare_line` | 1 | REPL history expansion |
-| `Session::complete` / `complete_detailed` / `has_compspec` | 0 / 0 / 1 | GAP-7 (niubash#863): the completion bridge this row used to name is retired — no direct `Session::complete` / `complete_detailed` calls remain; the generation call routes through the completion attempt's `complete_detailed` (counted under `Session::begin_completion_attempt` above) and the compspec gate reads through the guard's `session()` lend. `CompletionOutcome`/`CompletionPolicy` (rubash#2573) reach the host as the guard's outcome, consumed by niubash#837 |
+| `Session::complete` / `complete_detailed` / `has_compspec` | 0 / 0 / 1 | GAP-7 (niubash#863): the completion bridge this row used to name is retired — no direct `Session::complete` / `complete_detailed` calls remain; the generation call routes through the completion attempt's `complete_detailed` (counted under `Session::begin_completion_attempt` above) and the compspec gate reads through the guard's `session()` lend. `CompletionOutcome`/`CompletionPolicy` (rubash#2573) reach the host as the guard's outcome, consumed by niubash#837. GAP-11 (niubash#863): each `Candidate` now carries the engine-side kind its generator knew (`CandidateKind`: `Directory` / `Symlink` / `Executable` / `File`, or `None` when unclassifiable from in-hand evidence), marked at generation under the generator-classification principle; the attempt's filename flavor rides the new `CompletionPolicy.filenames_intent` bit. Recorded staged ahead of the GAP-11 host adoption, so the counts are unchanged — the channel's consumers are already counted here |
 | `Session::aliases` / `functions` | 1 / 2 | snapshots for completion state |
 | `Session::close` | 0 | GAP-8 (niubash#863): re-based on the `Session::begin_finish` guard's one-call pass engine-side (signature unchanged); the host's one-shot funnel used to be this row's one consumer and now opens the guard directly (see the GAP-8 retirement paragraph in §2.2), so the host count reads 0 — the host no longer consumes a session to finish it |
 | `Session::token_view` | 4 | GAP-9 (niubash#863): the lexer projected onto caller-fed text — a flat `TokenView` span stream (absolute byte spans, projected kinds, dequoted values built from the raw slices, command positions and roles folded at projection time from the lexer's stamps and the engine's builtin table, comment spans synthesized from inter-token text), tokenized in the session's posix mode. The contract replacement for the host editor's two private tokenizers and its direct tier-B lexer reads. Adopted by the GAP-9 host migration — the completer's two attempt pipelines (`complete_specific_with_engine`, `complete_input`) capture the attempt session's view into the context, the stateless oracle session reads it for session-less contexts (the tokenize source the highlighter's shell-less instances share), and the highlighter's live arm reads the editor shell's session view; the REPL validator's direct tier-B `tokenize` read is deleted with the H4 retirement, so the §2.1 `lexer` row's `tokenize` count retires 2 → 1. The two extglob pins read the face from test modules (the extglob-on session view and the oracle view) |
@@ -1009,7 +1048,7 @@ to the split core crate without changing its shape.
 | env methods (`get_env`, `set_env`, `unset_env`, `export_env`, `env_vars_snapshot`) | A | `Session::variables()` view; the read side is staged for GAP-6 retirement — the `&self` `get_env` probes move to `Session::variable_value` and the full-table `env_vars_snapshot` reads to `Session::environment_full` (see the header addendum) |
 | option methods (`set_shell_option`, `set_shopt_option`) | A | `Session::options()` view |
 | `last_exit_code` / `set_last_exit_code` | A | `Session::last_status` + `RunOutcome` |
-| `complete_line` / `complete_line_detailed`, `has_compspec` | A | `Session::complete` / `complete_detailed` + compspec view (the detailed pair carries the CompletionPolicy of rubash#2573) |
+| `complete_line` / `complete_line_detailed`, `has_compspec` | A | `Session::complete` / `complete_detailed` + compspec view (the detailed pair carries the CompletionPolicy of rubash#2573). GAP-11 (niubash#863): the detailed pair's candidates carry `Candidate.kind: Option<CandidateKind>` (filesystem four, marked at generation under the generator-classification principle) and the policy carries the `filenames_intent` bit; `Candidate::new` / `described` default kind to `None` (constructor users source-compatible), struct-literal construction of `Candidate` outside the tree breaks on the new field — a 1.5.1 contract change, with no `#[non_exhaustive]` added |
 | `set_history_provider` + `HistoryProvider` | A | `Session::set_history_provider` — the post-build install face (pure lift of the executor setter, replace-always); builder injection (`SessionBuilder::history_provider`) is the build-time spelling of the same install (trait unchanged) |
 | `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` / `Session::call_function_with_env` + functions view (the env channel landed on the contract surface with rubash#2001; until then this row's env half was carried by the tier-C seam below) |
 | `inherit_process_stdin` | A | builder stream binding |
@@ -1136,6 +1175,7 @@ item rubash::api::BindEntryView
 item rubash::api::BindKindView
 item rubash::api::BindRemovalView
 item rubash::api::BindView
+item rubash::api::CandidateKind
 item rubash::api::CompletionAttempt
 item rubash::api::CompletionOutcome
 item rubash::api::CompletionPolicy
@@ -1233,6 +1273,10 @@ variant rubash::TokenKind::Word
 variant rubash::api::BindKindView::Execute
 variant rubash::api::BindKindView::Function
 variant rubash::api::BindKindView::Macro
+variant rubash::api::CandidateKind::Directory
+variant rubash::api::CandidateKind::Executable
+variant rubash::api::CandidateKind::File
+variant rubash::api::CandidateKind::Symlink
 variant rubash::api::Flow::ExitRequested
 variant rubash::api::PreparedLine::Discard
 variant rubash::api::PreparedLine::Execute

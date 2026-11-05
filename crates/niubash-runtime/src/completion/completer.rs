@@ -724,12 +724,46 @@ impl NiubashCompleter {
                         // policy (rubash#2573's CompletionPolicy) never
                         // reached the renderer's append-whitespace
                         // decision at all.
-                        let (texts, descriptions): (Vec<String>, Vec<Option<String>>) = outcome
-                            .candidates
-                            .into_iter()
-                            .map(|candidate| (candidate.text, candidate.description))
-                            .unzip();
+                        //
+                        // GAP-11 (niubash#863): the kind rides the
+                        // same channel. Engine candidates are painted
+                        // through the session's LS_COLORS table by
+                        // kind, exactly like host-produced filename
+                        // candidates — and a directory the engine
+                        // classified gets its trailing `/` from the
+                        // KIND, not from a text-shape guess: the
+                        // engine never appends one, so the old guess
+                        // (`should_append_completion_whitespace`,
+                        // which only withholds the space for text
+                        // ending in `/`) appended a space to every
+                        // engine-produced directory. With the slash
+                        // in the text the shared append rule fires
+                        // correctly; unmarked candidates (`None`)
+                        // keep the old behavior — the GNU-faithful
+                        // display-side fallback, never a fabricated
+                        // class.
+                        let mut texts = Vec::new();
+                        let mut descriptions = Vec::new();
+                        let mut styles = Vec::new();
+                        for candidate in outcome.candidates {
+                            let mut text = candidate.text;
+                            if candidate.kind == Some(crate::completion::CandidateKind::Directory)
+                                && !text.ends_with('/')
+                                && !text.ends_with('\\')
+                            {
+                                text.push('/');
+                            }
+                            styles.push(candidate.kind.and_then(|kind| {
+                                context
+                                    .file_colors
+                                    .as_ref()
+                                    .and_then(|colors| colors.style_for(kind, &text))
+                            }));
+                            texts.push(text);
+                            descriptions.push(candidate.description);
+                        }
                         let mut result = CompletionResult::with_descriptions(texts, descriptions);
+                        result.styles = styles;
                         result.suppress_append = outcome.policy.suppress_append;
                         all_suggestions.extend(self.format_completions_for(result, &context));
                     }
@@ -783,7 +817,7 @@ impl NiubashCompleter {
             if !context.behavior.matches(file_name, &word) {
                 continue;
             }
-            let is_dir = entry.kind == ListedKind::Directory;
+            let mut is_dir = entry.kind == ListedKind::Directory;
             // niubash#671: a non-directory qualifies for the command
             // slot only when it is executable — offering plain files
             // (`notes.txt`) as `./notes.txt` manufactures commands the
@@ -798,6 +832,20 @@ impl NiubashCompleter {
                 if !is_exec {
                     continue;
                 }
+            }
+            // GAP-11 (niubash#863): the FILTER above is unchanged —
+            // a symlink still has to pass the exec verdict to be
+            // offered at all — but its KIND follows the link: a
+            // symlink-to-directory completes like a directory
+            // (`./name/`, directory paint, no trailing space), the
+            // same classification the engine's `-d` generation and
+            // GNU's display stat (`path_isdir`, which follows
+            // links) give it. One link-following stat, only for
+            // symlink entries that already passed the gate — the
+            // same shape path.rs's directories-only arm uses.
+            if !is_dir && entry.kind == ListedKind::Symlink {
+                is_dir = std::fs::metadata(context.current_dir.join(file_name))
+                    .is_ok_and(|md| md.is_dir());
             }
             if file_name.starts_with('.') && !word.starts_with('.') {
                 continue;
@@ -1676,6 +1724,182 @@ niu_git_comp() {
     }
 
     #[test]
+    fn gap11_engine_directory_candidate_gets_slash_and_directory_style() {
+        // GAP-11 (niubash#863): an engine-produced directory
+        // candidate used to be accepted with a SPACE appended — the
+        // host guessed append-whitespace from a trailing `/` the
+        // engine never adds. The kind now drives it: a Directory
+        // candidate arrives with a `/` and paints with the
+        // directory style.
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp_dir = unique_temp_dir("niubash-gap11-dir");
+        std::fs::create_dir_all(temp_dir.join("srcdir")).unwrap();
+        std::fs::write(temp_dir.join("somefile.tar"), "x").unwrap();
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(&format!("cd {}", temp_dir.display()))
+            .is_ok());
+        assert!(shell
+            .execute_script("export LS_COLORS='di=01;34:ln=01;36:ex=01;32:*.tar=01;31'")
+            .is_ok());
+        assert!(shell.execute_script("complete -A directory mycmd").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
+        let suggestions = completer.complete("mycmd src", "mycmd src".len());
+
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["srcdir/"],
+            "an engine directory candidate must arrive with a trailing slash"
+        );
+        let dir = &suggestions[0];
+        assert!(
+            !dir.append_whitespace,
+            "a directory candidate must not append a space"
+        );
+        let colors = crate::completion::FileColors::parse("di=01;34:ln=01;36:ex=01;32:*.tar=01;31");
+        assert_eq!(
+            dir.style,
+            colors.style_for(crate::completion::CandidateKind::Directory, "srcdir")
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn gap11_engine_file_candidate_gets_space_and_suffix_style() {
+        // GAP-11 (niubash#863): the file half of the same contract
+        // — an engine file candidate keeps its bare text, appends a
+        // space on accept, and paints by the LS_COLORS suffix rule
+        // (a plain file with no rule paints nothing).
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp_dir = unique_temp_dir("niubash-gap11-file");
+        std::fs::create_dir_all(temp_dir.join("srcdir")).unwrap();
+        std::fs::write(temp_dir.join("somefile.tar"), "x").unwrap();
+        std::fs::write(temp_dir.join("plain.txt"), "x").unwrap();
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(&format!("cd {}", temp_dir.display()))
+            .is_ok());
+        assert!(shell
+            .execute_script("export LS_COLORS='di=01;34:ln=01;36:ex=01;32:*.tar=01;31'")
+            .is_ok());
+        assert!(shell.execute_script("complete -A file mycmd").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
+        let colors = crate::completion::FileColors::parse("di=01;34:ln=01;36:ex=01;32:*.tar=01;31");
+
+        let suggestions = completer.complete("mycmd somef", "mycmd somef".len());
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["somefile.tar"]
+        );
+        let file = &suggestions[0];
+        assert!(file.append_whitespace);
+        assert_eq!(
+            file.style,
+            colors.style_for(crate::completion::CandidateKind::File, "somefile.tar")
+        );
+
+        let suggestions = completer.complete("mycmd plain", "mycmd plain".len());
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["plain.txt"]
+        );
+        assert!(suggestions[0].append_whitespace);
+        assert!(suggestions[0].style.is_none());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn gap11_engine_symlink_to_dir_is_directory_by_action() {
+        // GAP-11 (niubash#863): the generator-classification
+        // principle at the host boundary — the SAME entry is a
+        // Directory under a directory action (the action follows
+        // links) and a Symlink under a plain file listing.
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp_dir = unique_temp_dir("niubash-gap11-symlink");
+        std::fs::create_dir_all(temp_dir.join("realdir")).unwrap();
+        std::os::unix::fs::symlink("realdir", temp_dir.join("linkdir")).unwrap();
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(&format!("cd {}", temp_dir.display()))
+            .is_ok());
+        assert!(shell
+            .execute_script("export LS_COLORS='di=01;34:ln=01;36:ex=01;32:*.tar=01;31'")
+            .is_ok());
+        assert!(shell.execute_script("complete -A directory mycmd").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
+        let colors = crate::completion::FileColors::parse("di=01;34:ln=01;36:ex=01;32:*.tar=01;31");
+
+        let suggestions = completer.complete("mycmd link", "mycmd link".len());
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["linkdir/"]
+        );
+        assert!(!suggestions[0].append_whitespace);
+        assert_eq!(
+            suggestions[0].style,
+            colors.style_for(crate::completion::CandidateKind::Directory, "linkdir")
+        );
+
+        // The same entry under a file action: a bare Symlink, space
+        // appended, link paint.
+        assert!(shell
+            .borrow_mut()
+            .execute_script("complete -A file mycmd")
+            .is_ok());
+        let suggestions = completer.complete("mycmd link", "mycmd link".len());
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["linkdir"]
+        );
+        assert!(suggestions[0].append_whitespace);
+        assert_eq!(
+            suggestions[0].style,
+            colors.style_for(crate::completion::CandidateKind::Symlink, "linkdir")
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
     fn test_load_completion_dirs() {
         let mut state = CompletionState::new(PathBuf::from("."));
         state.load_completion_dirs(&[]);
@@ -2128,6 +2352,77 @@ mod cwd_priority_tests {
 
         assert_eq!(dir_suggestion.span.start, 5);
         assert_eq!(dir_suggestion.span.end, 8);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn gap11_cwd_overlay_symlink_to_dir_completes_as_directory() {
+        // GAP-11 (niubash#863): the `./` overlay used to route a
+        // symlink-to-directory through the exec verdict and offer
+        // it as `./name` painted Executable — the engine's `-d`
+        // generation and GNU's display stat both treat the same
+        // entry as a directory. The FILTER is unchanged (the link
+        // still has to pass the exec verdict to be offered); only
+        // the KIND changes: `./name/`, directory paint, no space.
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp_dir = unique_temp_dir("niubash-gap11-overlay");
+        std::fs::create_dir_all(temp_dir.join("realdir")).unwrap();
+        std::os::unix::fs::symlink("realdir", temp_dir.join("linkdir")).unwrap();
+        std::fs::write(temp_dir.join("tool.exe"), "x").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                temp_dir.join("tool.exe"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell
+            .execute_script(&format!("cd {}", temp_dir.display()))
+            .is_ok());
+        assert!(shell
+            .execute_script("export LS_COLORS='di=01;34:ln=01;36:ex=01;32:*.tar=01;31'")
+            .is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+
+        let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
+        let colors = crate::completion::FileColors::parse("di=01;34:ln=01;36:ex=01;32:*.tar=01;31");
+
+        let suggestions = completer.complete("link", 4);
+        let link = suggestions
+            .iter()
+            .find(|suggestion| suggestion.value == "./linkdir/")
+            .unwrap_or_else(|| panic!("expected ./linkdir/ in {suggestions:?}"));
+        assert_eq!(link.span.start, 0);
+        assert_eq!(link.span.end, 4);
+        assert!(!link.append_whitespace);
+        assert_eq!(
+            link.style,
+            colors.style_for(crate::completion::CandidateKind::Directory, "linkdir")
+        );
+
+        // Control: a plain executable file keeps the old shape —
+        // `./tool.exe`, space appended, executable paint — so the
+        // kind change is proven to be the symlink follow, not a
+        // blanket reclassification of the overlay.
+        let suggestions = completer.complete("tool", 4);
+        let tool = suggestions
+            .iter()
+            .find(|suggestion| suggestion.value == "./tool.exe")
+            .unwrap_or_else(|| panic!("expected ./tool.exe in {suggestions:?}"));
+        assert!(tool.append_whitespace);
+        assert_eq!(
+            tool.style,
+            colors.style_for(crate::completion::CandidateKind::Executable, "tool.exe")
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

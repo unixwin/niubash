@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::completion::file_colors::{CandidateKind, FileColors};
+use crate::completion::file_colors::FileColors;
+use crate::completion::CandidateKind;
 use crate::completion::{CompletionBehavior, CompletionContext, CompletionResult};
 use crate::path_utils::{resolve_logical_shell_path, shell_home_dir, shell_path_to_host_path};
 use anyhow::Result;
