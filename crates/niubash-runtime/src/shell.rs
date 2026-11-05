@@ -641,8 +641,9 @@ impl Shell {
         // HISTFILE cannot create a second, competing history stream.
         // (Consequence for the builder: no history provider is
         // injected at construction — the provider is installed at
-        // interactive entry, through the tier-C seam, so the
-        // single-stream discipline above is preserved.)
+        // interactive entry, through the Session face
+        // (`Session::set_history_provider`, niubash#863 GAP-10), so
+        // the single-stream discipline above is preserved.)
         // Niubash delegates Windows elevation to external providers such as the
         // WPM gsudo package. The experimental Rubash builtin is opt-in only.
         if std::env::var("NIU_ENABLE_RUBASH_SUDO").as_deref() != Ok("1") {
@@ -1121,7 +1122,7 @@ impl Shell {
                     self.history_path.clone(),
                 ),
             ));
-            self.executor_mut().set_history_provider(provider.clone());
+            self.session_mut().set_history_provider(provider.clone());
             self.history_provider = Some(provider);
         }
         // niubash#660: GNU interactive shells default the `history`
@@ -6361,6 +6362,10 @@ mod tests {
 
     #[test]
     fn host_history_provider_is_installed_only_on_interactive_entry() {
+        // niubash#863 GAP-10: the install reaches the session through
+        // the contract face (`Session::set_history_provider`), not
+        // the tier-C seam — the history builtin below must read and
+        // write the provider, and no second (engine) list may appear.
         use rubash::history::HistoryProvider;
 
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -6376,6 +6381,19 @@ mod tests {
         assert_eq!(
             provider.borrow_mut().entries().unwrap(),
             ["interactive-entry"]
+        );
+        shell.execute_line("history -s gap10-face-probe").unwrap();
+        assert!(
+            provider
+                .borrow_mut()
+                .entries()
+                .unwrap()
+                .contains(&"gap10-face-probe".to_string()),
+            "the session history builtin must write into the provider installed through the face"
+        );
+        assert!(
+            shell.session_mut().history_entries().is_none(),
+            "no second (engine) history list may be created while a provider is installed"
         );
         provider.borrow_mut().clear().unwrap();
         shell.enter_interactive();
