@@ -9,10 +9,17 @@
 //! Fix: the one-shot / host-stream route tails (script file, -c, the
 //! host stdin driver) now finish through the engine's shared
 //! `script_driver::finish_shell` (`Shell::finish_with_engine_finish`),
-//! and the shared trap funnel (`finish_with_exit_trap`, used by the
-//! REPL exit and startup exits) closes persistent output procsubs
-//! after the trap. GNU/rubash parity shapes below were verified
-//! against rubash (finish_shell) and GNU bash 5.3.20 on Linux.
+//! and the shared trap funnel (used by the REPL exit and startup
+//! exits) closes persistent output procsubs after the trap.
+//! GNU/rubash parity shapes below were verified against rubash
+//! (finish_shell) and GNU bash 5.3.20 on Linux.
+//!
+//! niubash#863 GAP-8: the funnels above are now thin openings of the
+//! engine finish guard (`Session::begin_finish`): the one-shot
+//! funnel is the guard's one-call pass, and the REPL / startup
+//! routes drive the guard's trap step and duties step (history
+//! gated off) — the hand composition this file's routes used to
+//! thread is deleted, the asserted behavior is unchanged.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
