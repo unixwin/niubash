@@ -37,7 +37,7 @@ niu --cwd-state <file> [--cwd-state-verbose] -c '<cmd>'
 
 | 决策 | 原因 |
 |---|---|
-| 记录在 `finish_with_exit_trap` **之后** | `EXIT` trap 里的 `cd` 也算"shell 最终在哪"；`execute_script` 末尾已把进程 cwd 同步到 shell 的 `PWD`，而 trap 的 `cd` 只更新 `PWD` |
+| 记录在退出 trap 步（`finish_exit_trap`）**之后** | `EXIT` trap 里的 `cd` 也算"shell 最终在哪"；`execute_script` 末尾已把进程 cwd 同步到 shell 的 `PWD`，而 trap 的 `cd` 只更新 `PWD` |
 | 记录在**退出码传播之前** | 等价于 `; pwd > state` 而不是 `&& pwd > state`：命令失败也要记录，否则一次失败就丢目录 |
 | 取值用 shell 的 `PWD`（`Shell::current_host_cwd()`） | `PWD` 是 shell 自己认账的目录（`pwd` 的输出），比进程 cwd 更贴近语义；`PWD` 不可用时才退进程 cwd |
 | 无效状态**静默回退** | 目录被删/文件手改坏/权限不足都不该变成命令失败；下一次记录自动覆盖，状态自愈 |

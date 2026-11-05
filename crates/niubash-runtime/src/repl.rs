@@ -26,6 +26,7 @@ use reedline::{
     PromptHistorySearch, PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
     Signal, ValidationResult, Validator, Vi,
 };
+use rubash::api::SessionHistoryWrite;
 
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";
@@ -248,7 +249,16 @@ fn repl_exit_status(line: &str) -> Option<i32> {
 /// `exit_shell`), persist session history (a hard exit skips the history
 /// provider's `Drop`), and leave with the trap's status as the process code.
 fn end_repl_session(shell: &mut Shell, status: i32) -> ! {
-    let code = shell.finish_with_exit_trap(status).unwrap_or(status);
+    let code = shell.finish_exit_trap(status);
+    // niubash#863 GAP-8: the finish's remaining stream-end duties,
+    // with the engine session-history write gated OFF — this route's
+    // history store is the host provider flushed below, so the
+    // engine write would double-write (niubash#642, impossible by
+    // construction now, not by care). The duties still close the
+    // persistent output procsubs (niubash#652) and run the hangup
+    // duties, in the retired funnel's position: after the trap,
+    // before the provider flush.
+    shell.finish_stream_end_duties(code, SessionHistoryWrite::Skip);
     // niubash#646: the session-end write consults the HIST* values as
     // the EXIT trap left them — GNU reads HISTFILESIZE/histappend at
     // the write itself (bashhist.c maybe_save_shell_history).
@@ -7058,8 +7068,16 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                     pending.clear();
                     continue;
                 }
-                let _ = shell.borrow_mut().finish_with_exit_trap(0);
-                break;
+                // niubash#863 GAP-8 (captain adjudication D2): EOF ends
+                // the session through the shared session-end shape with
+                // the last command's status as the pending status (GNU
+                // exit_shell's last_command_exit_value) — the trap
+                // observes it, and the trap step's resolved status
+                // decides the process code. The retired shape ran the
+                // trap with a hard-coded 0, discarded the result, and
+                // fell out of the loop to exit 0 unconditionally.
+                let status = shell.borrow_mut().last_exit_code();
+                end_repl_session(&mut shell.borrow_mut(), status);
             }
             Ok(Signal::CtrlC) => {
                 crate::readline_live::finish_abandoned();
@@ -7107,13 +7125,20 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
             Err(e) => {
                 crate::readline_live::finish_abandoned();
                 eprintln!("niubash: line editor error: {}", e);
-                let _ = shell.borrow_mut().finish_with_exit_trap(1);
-                break;
+                // niubash#863 GAP-8 (captain adjudication D2): the
+                // editor-failure route ends through the shared
+                // session-end shape with the route's status (1) as the
+                // pending status, and the finish's resolved status
+                // decides the process code — the retired shape ran the
+                // trap with 1 and discarded the result.
+                end_repl_session(&mut shell.borrow_mut(), 1);
             }
         }
     }
-
-    Ok(())
+    // No tail return: since GAP-8's D2 re-point, every arm of the
+    // loop above either continues it, returns from an early route,
+    // or leaves through end_repl_session's process exit — the loop
+    // has no break left, so it is the function's tail.
 }
 
 /// `--noediting` fallback: read plain input lines with no
@@ -7183,8 +7208,13 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
             end_repl_session(shell, status);
         }
     }
-    let _ = shell.finish_with_exit_trap(0);
-    Ok(())
+    // niubash#863 GAP-8 (captain adjudication D2): EOF on the
+    // no-editing route ends through the shared session-end shape
+    // with the last command's status as the pending status, exactly
+    // like the line-editor loop's Ctrl-D arm — the retired shape ran
+    // the trap with a hard-coded 0 and discarded the result.
+    let status = shell.last_exit_code();
+    end_repl_session(shell, status)
 }
 
 fn flush_repl_output() {

@@ -637,7 +637,7 @@ RFC §3.2 top set it cites is pre-migration history).
 | `bind_registry_generation` | 2 | `run_bind_x_command` | 1 |
 | `resolve_shell_path_process_entries_from_env` (assoc) | 0 | `has_function` | 1 |
 | `take_signal_discard_pending` | 2 | `env_vars` | 0 |
-| `run_exit_trap_with_status` | 1 | `close_all_persistent_output_process_substitutions` | 1 |
+| `run_exit_trap_with_status` | 0 | `close_all_persistent_output_process_substitutions` | 0 |
 | `execute_command` | 1 | `unset_env` | 1 |
 | `export_env` | 1 | `last_exit_code` | 1 |
 | `builtin_command_names` (assoc) | 1 | `find_script_on_path` | 1 |
@@ -704,6 +704,52 @@ installed the Rc bridge by hand in `src/main.rs`; it now
 calls the library probe surface, which carries the whole
 contract itself (niubash#831).
 
+Retirement landed (niubash#863 GAP-8): the host's five
+hand-composed finish compositions are deleted, and every
+finish route drives the tier-A finish guard recorded in
+§2.3 (`Session::begin_finish`). The five: (1) the tier-C
+trap funnel `Shell::finish_with_exit_trap` (zshexit hooks +
+`run_exit_trap_with_status` through the executor seam + a
+direct persistent-output procsub close — the two §2.2 rows
+above read 0 now); (2) the one-shot funnel's hand
+composition (trap funnel, then the post-trap directory
+parked in a `finish_cwd` field, the resolved status
+injected through `set_last_status`, and a consuming
+`Session::close` for the remaining duties — the field, the
+injection, and the consumption are all deleted; the funnel
+is the guard's one-call pass, and the §2.3 `Session::close`
+row reads 0: the host no longer consumes a session to
+finish it, and the `--cwd-state` recorder reads the
+post-trap directory from the still-live session's `PWD`,
+the #668 value the guard's outcome reports as
+`final_cwd`); (3) the REPL session end, which composed
+(1) by hand and never closed — it now drives the guard's
+trap step, interleaves the host duties (the #646
+trap-then-write provider flush), and runs the guard's
+duties step with the engine history write gated off, so
+the #642 double-write is impossible by construction;
+(4) the startup-exit composition in the binary, re-pointed
+at the same trap step + gated duties; (5) the three REPL
+tails that ran the trap with a hard-coded 0/1 and
+discarded the result (`let _ =`) — the Ctrl-D/EOF arm,
+the line-editor error arm, and the no-editing EOF tail
+now route through the session-end shape with the route's
+real pending status (EOF: the last command's status, GNU
+`exit_shell(last_command_exit_value)`), and the trap
+step's resolved status decides the process code (captain
+adjudication D2, a deliberate behavior correction). The
+piped-stdin tail's second finish is also gone: the engine
+driver already runs the full finish pass at stream end,
+so that call could only re-report a consumed trap — the
+host-only zshexit hooks, which no driver can run, stay as
+the route's only host step. The finish order itself is
+the engine pass's (captain adjudication D1: on the plain
+path the trap runs before the history write, GNU
+shell.c:1000-1009), which retires the split composition's
+recorded ordering delta. The retained-set note below
+names "the exit-trap funnel the REPL finish composes by
+hand" — that entry is the funnel retired here.
+
 Note what the retained set is made of: the bind registry and the
 design-§3.2 AST routes (`execute_ast`, `execute_command`), the
 classification plumbing of the routes that stay direct
@@ -751,12 +797,12 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::variable_value` | 7 | GAP-6 single-value probe: the stored value of one variable — the `&self` form of the executor's raw table read (`get_env`), deliberately not the `$name` expansion read (`resolved_value` keeps dynamic getters, nameref resolution and the typed-cell layer; the GAP-6 consumer pins record both readings per shape); adopted by the GAP-6 host migration — the 7 lib-code `get_env` seam reads in `&self` host methods (`THIS_SH`, `__RUBASH_POSIX_MODE`, the env-file expansion probe, `PS1`, `NIU_TITLE`, `PWD` twice) move to this face, and the §2.2 `get_env` row retires to 0; the new GAP-6 routing pin reads this face twice from the test module |
 | `Session::begin_completion_attempt` | 3 | GAP-7 guard opener: opens one `CompletionAttempt` per completion attempt from the `&mut Session` the host holds; the guard drives the attempt's execution faces (`complete_detailed`, `call_function_with_env` for the widget/compdef callbacks) and lends `&Session` reads (`session()`) live at every nesting depth. Adopted by the GAP-7 host migration as the attempt object replacing the thread-local lend (one install point, seven reads — see the GAP-7 retirement paragraph in §2.2): the two attempt drivers in `Shell` (`drive_completion` / `drive_completion_specific`, serving the probe surface and, through `EditorShellHandle`, the editor flavor) and the highlighter's short view attempt open this face in production; the GAP-7 pins and the reshaped compdef test open it six more times from test modules |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
-| `Session::begin_finish` | 0 | GAP-8 finish guard opener: opens one `Finish` per finish from the `&mut Session` the host holds, with the route's pending status as a value; the guard's coarse steps (`run_exit_trap` — pending status in, resolved status out; `final_cwd` — the post-trap directory read; `run_stream_end_duties` — the finish's non-trap duties with the engine history step gated per route through `FinishDuties`; `finish_all` — the one-call pass) decompose the one finish implementation around the host's interleaved duties, and `FinishOutcome` reports the finish boundary as values (status / final cwd / trap ran / history written / duties run). Recorded staged ahead of host adoption (the GAP-8 engine record, see the header addendum); `Session::close` / `close_with_report` are already re-based on it engine-side, and the GAP-8 consumer pins open it from test modules |
+| `Session::begin_finish` | 3 | GAP-8 finish guard opener: opens one `Finish` per finish from the `&mut Session` the host holds, with the route's pending status as a value; the guard's coarse steps (`run_exit_trap` — pending status in, resolved status out; `final_cwd` — the post-trap directory read; `run_stream_end_duties` — the finish's non-trap duties with the engine history step gated per route through `FinishDuties`; `finish_all` — the one-call pass) decompose the one finish implementation around the host's interleaved duties, and `FinishOutcome` reports the finish boundary as values (status / final cwd / trap ran / history written / duties run). Adopted by the GAP-8 host migration (see the GAP-8 retirement paragraph in §2.2): the count is the three `Shell` funnel sites in shell.rs, by route — the one-shot funnel (`finish_with_engine_finish`, the guard's `finish_all`), the non-consuming trap step (`finish_exit_trap`, driven by the REPL session end, the startup exit, and through the session end the REPL tails), and the duties step (`finish_stream_end_duties`, driven by the REPL session end and the startup exit with the engine history write gated off). `Session::close` / `close_with_report` are already re-based on it engine-side, and the GAP-8 consumer pins open it from test modules |
 | `Session::close_with_report` | 0 | GAP-8 (niubash#863): ENTERS the ledger with this record — a pub tier-A-shaped face recorded nowhere before (the GAP-8 scoping finding). The report form of `Session::close` (rubash#2039): the final status plus the post-trap cwd as a `CloseReport` value; re-based on the `Session::begin_finish` guard's one-call pass in the GAP-8 engine PR (adopt-and-extend, captain adjudication D4). No niubash consumer yet; consumed in-repo by `Session::close` and the issue2039 close pins |
 | `Session::prepare_line` | 1 | REPL history expansion |
 | `Session::complete` / `complete_detailed` / `has_compspec` | 0 / 0 / 1 | GAP-7 (niubash#863): the completion bridge this row used to name is retired — no direct `Session::complete` / `complete_detailed` calls remain; the generation call routes through the completion attempt's `complete_detailed` (counted under `Session::begin_completion_attempt` above) and the compspec gate reads through the guard's `session()` lend. `CompletionOutcome`/`CompletionPolicy` (rubash#2573) reach the host as the guard's outcome, consumed by niubash#837 |
 | `Session::aliases` / `functions` | 1 / 2 | snapshots for completion state |
-| `Session::close` | 1 | the one-shot finish funnel; GAP-8 (niubash#863): re-based on the `Session::begin_finish` guard's one-call pass (signature unchanged) |
+| `Session::close` | 0 | GAP-8 (niubash#863): re-based on the `Session::begin_finish` guard's one-call pass engine-side (signature unchanged); the host's one-shot funnel used to be this row's one consumer and now opens the guard directly (see the GAP-8 retirement paragraph in §2.2), so the host count reads 0 — the host no longer consumes a session to finish it |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:

@@ -17,7 +17,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use reedline::Reedline;
-use rubash::api::{BindEntryView, BindKindView, PreparedLine, RunOptions, Session};
+use rubash::api::{
+    BindEntryView, BindKindView, FinishDuties, PreparedLine, RunOptions, Session,
+    SessionHistoryWrite,
+};
 use rubash::{
     decode_to_visible_text, executor::Executor, lexer::tokenize, parser::parse, Ast, Token,
     TokenKind,
@@ -155,24 +158,17 @@ impl EditorShellHandle {
 /// Top-level shell state.
 pub struct Shell {
     /// The engine session this shell drives (the 1.5.0 Session
-    /// contract). `None` only after
-    /// [`Shell::finish_with_engine_finish`] consumes it through
-    /// `Session::close` on a route tail; the accessors below panic
-    /// on use after that point, which is a host bug by construction.
-    /// The one sanctioned post-close read is
-    /// [`Shell::current_host_cwd`], which the finish funnel feeds
-    /// through `finish_cwd` below before consuming the session.
+    /// contract). Finish routes drive the session's finish guard
+    /// ([`Session::begin_finish`], niubash#863 GAP-8) on this
+    /// borrow and never consume it, so the session stays live
+    /// after a finish and the accessors below keep reading it —
+    /// the sanctioned post-finish read is
+    /// [`Shell::current_host_cwd`], whose post-trap `PWD` read is
+    /// the #668 value the finish outcome reports as `final_cwd`.
+    /// `None` only transiently during construction; the accessors
+    /// panic on use before that point, which is a host bug by
+    /// construction.
     pub session: Option<Session>,
-    /// The shell's final directory, captured by
-    /// [`Shell::finish_with_engine_finish`] after the EXIT trap has
-    /// run and before the session is consumed by `Session::close`.
-    /// The `--cwd-state` recorder in the binary reads the directory
-    /// AFTER the finish funnel returns (docs/cwd-state.md §3: the
-    /// record happens after the trap, from `PWD`, because a trap's
-    /// `cd` updates `PWD` but not the process cwd), so the value
-    /// must be taken while the session is still alive and handed
-    /// over here. `None` until that funnel runs.
-    finish_cwd: Option<PathBuf>,
     pub completion_state: Arc<Mutex<CompletionState>>,
     /// niubash#840: the completion behavior this shell currently
     /// resolves — the config layer's value at construction, re-resolved
@@ -905,7 +901,6 @@ impl Shell {
         let gitbash_prompt_active = cfg!(windows) && !one_shot && prompt_style == "gitbash";
         let mut shell = Self {
             session: Some(session),
-            finish_cwd: None,
             completion_state,
             completion_behavior: config.completion_behavior,
             prompt: prompt.clone(),
@@ -3851,14 +3846,14 @@ impl Shell {
     /// `PWD` is the truth for "where did this invocation end" — the value
     /// the `--cwd-state` host contract records.
     pub fn current_host_cwd(&self) -> PathBuf {
-        // After `finish_with_engine_finish` consumed the session the
-        // executor is gone; the funnel captured the final directory
-        // (post-EXIT-trap) into `finish_cwd` for exactly this read.
+        // The finish routes never consume the session (GAP-8), so
+        // the post-finish read is the live one: once the EXIT trap
+        // has run, `PWD` holds the trap's final directory — the
+        // value the finish guard's outcome reports as `final_cwd`,
+        // which the retired parked `finish_cwd` field used to carry
+        // across a consuming close.
         if self.session.is_none() {
-            return self
-                .finish_cwd
-                .clone()
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         }
         self.executor_pwd_host_path()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -3947,92 +3942,82 @@ impl Shell {
         self.session().last_status()
     }
 
-    /// Run shell process teardown semantics that live in rubash's binary entry.
-    pub fn finish_with_exit_trap(&mut self, status: i32) -> anyhow::Result<i32> {
+    /// niubash#863 GAP-8: the non-consuming finish's trap step, for
+    /// the routes that interleave host duties inside the finish or
+    /// never consume the session (REPL session end, startup-file
+    /// exits). The host's zshexit hooks run first — the retained
+    /// host step, before the trap exactly as the retired
+    /// `finish_with_exit_trap` funnel ran them — then the engine
+    /// finish guard's EXIT trap step runs with `status` as the
+    /// pending status (the step also carries the pass's termsig
+    /// marks, SIGHUP hangup, and end-of-stream job-notification
+    /// flush). Returns the trap step's resolved status: the trap's
+    /// own `exit` overrides, plain completion keeps `status`. The
+    /// session is NOT consumed; the finish's remaining duties are
+    /// the caller's to run through
+    /// [`Shell::finish_stream_end_duties`] once its interleaved
+    /// duties are done.
+    pub fn finish_exit_trap(&mut self, status: i32) -> i32 {
         self.run_zshexit_hooks();
-        let result = match self.executor_mut().run_exit_trap_with_status(status) {
-            Ok(code) => Ok(code),
-            Err(rubash::executor::ExecuteError::ExitCode(code)) => Ok(code),
-            Err(e) => {
-                if !is_broken_pipe_execute_error(&e) {
-                    eprintln!("niubash: {}", e);
-                }
-                Ok(1)
-            }
-        };
-        // niubash#652: after the EXIT trap (whose writes still belong to
-        // the streams), close every still-open persistent output process
-        // substitution so its deferred body runs with the accumulated
-        // input — the `finish_shell` step rubash's own main always runs
-        // (rubash#1336: `exec > >(tee log)` lost the whole log when the
-        // shell simply ended). This funnel is shared by the REPL exit
-        // (#649's end_repl_session), startup-file exits, and the engine
-        // stdin route, so the close lives here; it is idempotent (closed
-        // entries are skipped), so routes whose engine driver already
-        // finished internally are unaffected.
-        self.executor_mut()
-            .close_all_persistent_output_process_substitutions();
-        result
+        self.session_mut().begin_finish(status).run_exit_trap()
     }
 
-    /// niubash#652: teardown for the one-shot and host-driven stream
-    /// routes (script file, -c, the host stdin driver) via the engine's
-    /// shared finish duties — the same set `script_driver::finish_shell`
-    /// performs at rubash's own route tails: the session-history write
-    /// (inert on these routes unless the script itself armed history,
-    /// rubash#1049 parity), the end-of-stream job-notification flush
-    /// (rubash#1853), the EXIT trap, the debugger exit note, and the
-    /// persistent output procsub close (rubash#1336). These routes
-    /// previously ran only the trap (finish_with_exit_trap), so the
-    /// flush and the close never happened: a signal death reaped during
-    /// the last command stayed silent, and `exec > >(cat > LOG)` lost
-    /// the whole log. The composition below runs the trap through
-    /// finish_with_exit_trap and the remaining duties through
-    /// `Session::close`; the in-body comment explains why (the
-    /// --cwd-state post-finish read) and records the one ordering
-    /// delta. REPL exits do NOT come here: the REPL's history write
-    /// is the ledger-reconciled provider flush in end_repl_session
-    /// (#642/#649), which must stay after the trap.
+    /// niubash#863 GAP-8: the non-consuming finish's duties step —
+    /// the stream-end duties (the engine session-history write,
+    /// gated per route; the debugger exit note; the persistent
+    /// output process-substitution close, niubash#652 / rubash#1336;
+    /// the huponexit hangup) through the engine finish guard,
+    /// opened with the finish's resolved status. Pass
+    /// [`SessionHistoryWrite::Skip`] when the route's history store
+    /// is the host provider's (the interactive routes, whose
+    /// session-end write is the provider flush — the engine write
+    /// would double-write, niubash#642) and
+    /// [`SessionHistoryWrite::Run`] when the engine list is the
+    /// route's store. Once-only inside the pass, and the trap step
+    /// is not re-run: paired with [`Shell::finish_exit_trap`] this
+    /// completes the finish the retired hand funnels composed.
+    pub fn finish_stream_end_duties(&mut self, status: i32, history: SessionHistoryWrite) {
+        let duties = FinishDuties { history };
+        self.session_mut()
+            .begin_finish(status)
+            .run_stream_end_duties(duties);
+    }
+
+    /// niubash#652 / niubash#863 GAP-8: teardown for the one-shot
+    /// and host-driven stream routes (script file, -c, the host
+    /// stdin driver) through the engine finish guard's one-call
+    /// pass — the same single finish implementation
+    /// `script_driver::finish_shell` performs at rubash's own route
+    /// tails and `Session::close` is re-based on: the EXIT trap,
+    /// the session-history write (inert on these routes unless the
+    /// script itself armed history, rubash#1049 parity), the
+    /// end-of-stream job-notification flush (rubash#1853), the
+    /// debugger exit note, and the persistent output procsub close
+    /// (rubash#1336). These routes once ran only the trap, so the
+    /// flush and the close never happened: a signal death reaped
+    /// during the last command stayed silent, and
+    /// `exec > >(cat > LOG)` lost the whole log.
+    ///
+    /// The guard is opened with the route's status as a value —
+    /// the pending status the retired composition injected through
+    /// `set_last_status` before a consuming `close` — and the
+    /// session is NOT consumed, so the binary's `--cwd-state`
+    /// recorder still reads the post-trap directory through
+    /// [`Shell::current_host_cwd`] after this funnel returns
+    /// (docs/cwd-state.md §3: the record reflects the EXIT trap's
+    /// `cd`, which updates `PWD` but not the process cwd — the
+    /// #668 value the guard's outcome reports as `final_cwd`, no
+    /// longer parked in a field across a consuming close). The
+    /// single pass also retires the retired composition's recorded
+    /// ordering delta: trap, history write, and job flush now run
+    /// in the pass's canonical order (captain adjudication D1),
+    /// not split across two funnels. REPL exits do NOT come here:
+    /// the REPL's history write is the ledger-reconciled provider
+    /// flush in end_repl_session (#642/#649), which must stay
+    /// after the trap.
     pub fn finish_with_engine_finish(&mut self, status: i32) -> i32 {
-        // Composition (repaired after PR #668's cwd-state
-        // regression): the EXIT trap runs FIRST, through the host's
-        // retained trap funnel, and the shell's final directory is
-        // captured immediately afterwards; only then is the session
-        // consumed by `Session::close` for the remaining finish
-        // duties (session-history write, stream-end job flush,
-        // debugger exit note — the trap inside close's finish_shell
-        // is already taken and the procsub close already done, so
-        // both are no-ops there).
-        //
-        // Why the trap cannot stay inside close(): the binary's
-        // `--cwd-state` recorder reads the final directory through
-        // `current_host_cwd` AFTER this funnel returns, and the
-        // documented contract (docs/cwd-state.md §3) is that the
-        // record reflects the EXIT trap's `cd`, which updates
-        // `PWD` but not the process cwd. A consuming close() leaves
-        // no live session to read that `PWD` from: the first
-        // version of this migration step closed first and read
-        // afterwards, the accessor panicked ("shell session
-        // already closed"), the process exited 1, and the state
-        // file was never written (tests/cwd_state.rs 9/11 on
-        // PR #668's CI). Capturing between the trap and the close
-        // is the only point where the post-trap directory exists.
-        //
-        // Known ordering delta vs a single finish_shell pass: the
-        // history write and the job-notification flush now run
-        // (inside close) after the trap instead of before it. No
-        // pin covers trap-vs-flush ordering (#652's pins assert
-        // the notice is flushed and the procsub bodies are
-        // delivered, both unchanged); the delta is confined to a
-        // trap that itself mutates history state or races a job
-        // notice. The status close() finishes with is the trap
-        // funnel's resulting code, made the session's last status
-        // first, exactly as the direct close did.
-        let code = self.finish_with_exit_trap(status).unwrap_or(status);
-        self.finish_cwd = Some(self.current_host_cwd());
-        self.session_mut().set_last_status(code);
-        let session = self.session.take().expect("shell session already closed");
-        session.close()
+        self.run_zshexit_hooks();
+        self.session_mut().begin_finish(status).finish_all().status
     }
 
     /// niubash#576: whether the most recent script run through this
@@ -11243,7 +11228,6 @@ complete -F _envtooldyn_hook envtooldyn
         session.options().set("expand_aliases", true);
         let mut shell = Shell {
             session: Some(session),
-            finish_cwd: None,
             completion_state: Arc::new(Mutex::new(CompletionState::new(PathBuf::from(".")))),
             completion_behavior: CompletionBehavior::default(),
             prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),

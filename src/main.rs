@@ -1077,7 +1077,15 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         .run_stdin()
         .map_err(|error| anyhow::anyhow!("session stdin run failed: {error:?}"))?
         .status;
-    let code = shell.finish_with_exit_trap(code)?;
+    // niubash#863 GAP-8: the engine's stdin driver already ran the
+    // full finish pass at stream end (script_driver's finish_shell:
+    // EXIT trap + stream-end duties with the stream's own status),
+    // so the retired host trap-funnel call here was a double finish
+    // — its trap step and procsub close could only re-report a trap
+    // the driver had already consumed and re-close substitutions
+    // the driver's duties had already closed. The one host-only
+    // step no engine driver can run is the zshexit hooks; they stay.
+    shell.run_zshexit_hooks();
     if code != 0 {
         finish_one_shot(&shell, code);
     }
@@ -4862,7 +4870,15 @@ fn read_cwd_state(state: &Path) -> Option<PathBuf> {
 /// or stdin driver runs (GNU jump_to_top_level unwinds reader_loop). `exit 0`
 /// also terminates, so this always exits — unlike [`finish_one_shot`].
 fn finish_startup_exit(shell: &mut niubash_runtime::Shell, status: i32) -> ! {
-    let code = shell.finish_with_exit_trap(status).unwrap_or(status);
+    let code = shell.finish_exit_trap(status);
+    // niubash#863 GAP-8: the finish's remaining stream-end duties
+    // through the engine guard, with the engine session-history
+    // write gated off — a startup exit precedes any session whose
+    // history the engine list owns (the interactive route's store
+    // is the host provider's; the non-interactive routes have no
+    // session-end write), so the gate is Skip on this route too.
+    // The retired funnel's procsub close rides this step.
+    shell.finish_stream_end_duties(code, niubash_runtime::SessionHistoryWrite::Skip);
     record_cwd_state(shell);
     piped_stdout::finish_and_exit(code);
 }

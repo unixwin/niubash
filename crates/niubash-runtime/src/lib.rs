@@ -113,6 +113,12 @@ pub use prompt_segments::{
 };
 pub use shell::Shell;
 
+/// niubash#863 GAP-8: the engine finish guard's per-route history
+/// gate, re-exported so the binary's finish funnels can name the
+/// gate for the duties step without reaching into the engine
+/// crate directly.
+pub use rubash::api::SessionHistoryWrite;
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::Mutex;
