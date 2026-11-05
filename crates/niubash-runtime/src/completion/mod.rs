@@ -23,6 +23,8 @@ pub use file_colors::{CandidateKind, FileColors};
 
 use std::path::PathBuf;
 
+use rubash::api::{TokenKindView, TokenSpan, TokenView};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompletionMatchMode {
     #[default]
@@ -109,6 +111,16 @@ pub struct CompletionContext {
     /// `None` outside a session snapshot, with the same process-env
     /// fallback discipline.
     pub session_pathext: Option<String>,
+    /// The engine token view of `input` (GAP-9, niubash#863),
+    /// captured by the completer from the open attempt's session
+    /// (`Session::token_view`, derived in the session's posix
+    /// mode). Contexts built without a session leave it `None`;
+    /// their lexical methods then derive the view from the
+    /// module's stateless oracle session (default posix mode —
+    /// the contract the retired host segment machinery served,
+    /// since it had no posix notion either). Only
+    /// session-carrying contexts observe a non-default mode.
+    pub token_view: Option<TokenView>,
 }
 
 /// Shell word under the cursor, parsed only for completion purposes.
@@ -148,7 +160,26 @@ impl CompletionContext {
             dir_cache: None,
             session_path: None,
             session_pathext: None,
+            token_view: None,
         }
+    }
+
+    /// The cursor as a byte offset into `input`, clamped to the
+    /// input and rounded down to a char boundary.
+    fn cursor(&self) -> usize {
+        let pos = self.cursor_pos.min(self.input.len());
+        floor_char_boundary(&self.input, pos)
+    }
+
+    /// The token view this context's lexical methods read
+    /// (GAP-9, niubash#863): the view the completer captured
+    /// from the open attempt's session when it built this
+    /// context; for session-less contexts, the stateless
+    /// oracle's view of `input`.
+    fn view(&self) -> TokenView {
+        self.token_view
+            .clone()
+            .unwrap_or_else(|| stateless_token_view(&self.input))
     }
 
     /// Get the word under cursor
@@ -158,11 +189,9 @@ impl CompletionContext {
 
     /// Get the shell word under cursor, including raw span and unescaped value.
     pub fn get_current_shell_word(&self) -> Option<ShellWord> {
-        let (segment_start, segment) = self.current_segment_before_cursor();
-        if segment_ends_with_unescaped_whitespace(segment) {
-            return None;
-        }
-        shell_words_in_segment(segment, segment_start).pop()
+        self.view()
+            .word_at(self.cursor())
+            .map(|span| shell_word_from_span(span))
     }
 
     /// Get the replacement span for the current shell word.
@@ -173,13 +202,13 @@ impl CompletionContext {
 
     /// Check if cursor is at command position (first word or after separator)
     pub fn is_command_position(&self) -> bool {
-        let (_, segment) = self.current_segment_before_cursor();
-        if segment.trim().is_empty() {
+        let view = self.view();
+        let cursor = self.cursor();
+        let words = view.segment_words_before(cursor);
+        if words.is_empty() {
             return true;
         }
-
-        let words = shell_words_in_segment(segment, 0);
-        words.is_empty() || (words.len() == 1 && !segment_ends_with_unescaped_whitespace(segment))
+        words.len() == 1 && !segment_ends_with_whitespace(&view, cursor)
     }
 
     /// Check if current word is a path (contains / or \ or starts with .)
@@ -214,8 +243,8 @@ impl CompletionContext {
 
     /// Get the command name at the start of the current input line segment
     pub fn get_command_name(&self) -> Option<String> {
-        let (segment_start, segment) = self.current_segment_before_cursor();
-        let words = shell_words_in_segment(segment, segment_start);
+        let view = self.view();
+        let words = view.segment_words_before(self.cursor());
         // niubash#830: the command word is not always the segment's
         // first word — grouping openers (`( git …`, `{ git …`) and
         // environment assignment prefixes (`VAR=1 git …`) precede it.
@@ -223,13 +252,15 @@ impl CompletionContext {
         // plugin's definition lookup, the path completer's
         // directory-only check) name the command GNU would name. An
         // assignment with no following word still reports itself:
-        // the line names no command yet.
+        // the line names no command yet. (GAP-9: the skip facts are
+        // the token view's — the assignment shape is the span's
+        // projected kind, folded by the engine's own lexer.)
         for (index, word) in words.iter().enumerate() {
             let value = word.value.trim_start_matches('(');
             if value.is_empty() || value == "{" {
                 continue;
             }
-            if is_assignment_word(value) && index + 1 < words.len() {
+            if word.kind == TokenKindView::Assignment && index + 1 < words.len() {
                 continue;
             }
             return Some(value.to_string());
@@ -238,43 +269,34 @@ impl CompletionContext {
     }
 
     /// All words of the current command segment before the cursor, in
-    /// order, with quoting/escaping already resolved by the same
-    /// segment machinery `get_command_name` uses (niubash#851): the
-    /// segment starts after the last top-level `;`/`|`/`&` separator,
-    /// so words from an earlier command on the line never leak in, and
-    /// a quoted word yields its unescaped value.
+    /// order, with quoting/escaping already resolved (niubash#851):
+    /// the segment starts after the last top-level separator, so
+    /// words from an earlier command on the line never leak in, and
+    /// a quoted word yields its dequoted value. (GAP-9: the words
+    /// are the token view's segment derivation.)
     pub fn current_segment_words(&self) -> Vec<String> {
-        let (segment_start, segment) = self.current_segment_before_cursor();
-        shell_words_in_segment(segment, segment_start)
+        self.view()
+            .segment_words_before(self.cursor())
             .into_iter()
-            .map(|word| word.value)
+            .map(|span| span.value.clone())
             .collect()
     }
 
     /// Get the token immediately before the current word (the previous token)
     pub fn get_prev_token(&self) -> Option<String> {
-        let (segment_start, segment) = self.current_segment_before_cursor();
-        let words = shell_words_in_segment(segment, segment_start);
+        let view = self.view();
+        let cursor = self.cursor();
+        let words = view.segment_words_before(cursor);
         if words.is_empty() {
             return None;
         }
-        if segment_ends_with_unescaped_whitespace(segment) {
+        if segment_ends_with_whitespace(&view, cursor) {
             return words.last().map(|word| word.value.clone());
         }
         if words.len() >= 2 {
             return words.get(words.len() - 2).map(|word| word.value.clone());
         }
         None
-    }
-
-    fn current_segment_before_cursor(&self) -> (usize, &str) {
-        let pos = self.cursor_pos.min(self.input.len());
-        let pos = floor_char_boundary(&self.input, pos);
-        let before_cursor = &self.input[..pos];
-        let segment_start = last_command_separator(before_cursor)
-            .map(|idx| ceil_char_boundary(before_cursor, idx + 1))
-            .unwrap_or(0);
-        (segment_start, &before_cursor[segment_start..])
     }
 }
 
@@ -286,6 +308,69 @@ pub fn completion_span(input: &str, cursor: usize) -> (usize, usize) {
     CompletionContext::new(PathBuf::new(), input.to_string(), cursor)
         .current_word_span()
         .unwrap_or((cursor, cursor))
+}
+
+/// Fill a [`ShellWord`] from one engine token span (GAP-9,
+/// niubash#863): raw = the span's source text, value = its
+/// dequoted value, quote = the span's leading quote character.
+fn shell_word_from_span(span: &TokenSpan) -> ShellWord {
+    ShellWord {
+        start: span.start,
+        end: span.end,
+        raw: span.text.clone(),
+        value: span.value.clone(),
+        quote: span
+            .text
+            .chars()
+            .next()
+            .filter(|ch| *ch == '\'' || *ch == '"'),
+    }
+}
+
+/// Whether the cursor's segment ends in whitespace before the
+/// cursor, read off the token view: the segment's last word
+/// ends strictly before the cursor, so only gap text
+/// (whitespace, a comment, a continuation) separates it from
+/// the cursor — the verdict the retired segment scan's char
+/// machine computed by hand.
+fn segment_ends_with_whitespace(view: &TokenView, cursor: usize) -> bool {
+    view.segment_words_before(cursor)
+        .last()
+        .is_some_and(|word| word.end < cursor)
+}
+
+thread_local! {
+    /// Stateless tokenize oracle for session-less contexts
+    /// (GAP-9, niubash#863). A context the completer built
+    /// under an open attempt carries the attempt session's own
+    /// view; every other context (producer probes, unit
+    /// contexts) has no session to ask — the GAP-7 settlement
+    /// leaves their engine-owned inputs empty. The token view
+    /// is the one input that cannot stay empty: the context's
+    /// lexical methods ARE the view's derivations. The oracle
+    /// is a private session owned by this thread, used only
+    /// as a tokenize source in the default posix mode — the
+    /// contract the retired host segment machinery served,
+    /// since it had no posix notion either. It holds no user
+    /// state, never observes the REPL's session, and executes
+    /// nothing; it is a tokenize oracle, not a session lend.
+    static TOKEN_VIEW_ORACLE: std::cell::RefCell<Option<rubash::api::Session>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The token view of `text` from the stateless oracle session.
+/// Shared with the syntax highlighter (GAP-9, niubash#863),
+/// whose shell-less instances have no session of their own.
+pub(crate) fn stateless_token_view(text: &str) -> TokenView {
+    TOKEN_VIEW_ORACLE.with(|oracle| {
+        let mut slot = oracle.borrow_mut();
+        let session = slot.get_or_insert_with(|| {
+            rubash::api::Session::builder()
+                .build()
+                .expect("stateless token-view oracle session builds")
+        });
+        session.token_view(text)
+    })
 }
 
 /// Trait for pluggable completion providers.
@@ -408,213 +493,6 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
     p
 }
 
-/// Round `pos` up to the nearest UTF-8 char boundary in `s`.
-/// If `pos >= s.len()` returns `s.len()`.
-fn ceil_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut p = pos;
-    while p < s.len() && !s.is_char_boundary(p) {
-        p += 1;
-    }
-    p
-}
-
-fn last_command_separator(input: &str) -> Option<usize> {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut last = None;
-    // niubash#530: the `|` inside an extglob group (`@(a|b)`, `*(a|b)`, …)
-    // separates alternatives, not commands — track group depth so a word
-    // like `@(a|b)` stays one segment and the completer sees the whole
-    // pattern instead of the fragment after the last `|`.
-    let mut extglob_depth = 0usize;
-    let mut prev: Option<char> = None;
-
-    for (idx, ch) in input.char_indices() {
-        if escaped {
-            escaped = false;
-            prev = Some(ch);
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-            prev = Some(ch);
-            continue;
-        }
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            }
-            prev = Some(ch);
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            prev = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' if matches!(prev, Some('@' | '*' | '+' | '?' | '!')) => {
-                extglob_depth += 1;
-            }
-            ')' => {
-                extglob_depth = extglob_depth.saturating_sub(1);
-            }
-            ';' | '|' | '&' | '\n' if extglob_depth == 0 => {
-                last = Some(idx);
-            }
-            _ => {}
-        }
-        prev = Some(ch);
-    }
-
-    last
-}
-
-/// True for a `NAME=value` environment assignment word (a valid
-/// shell identifier before the first `=`).
-fn is_assignment_word(word: &str) -> bool {
-    let Some((name, _)) = word.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-fn shell_words_in_segment(segment: &str, offset: usize) -> Vec<ShellWord> {
-    let mut words = Vec::new();
-    let mut start = None;
-    let mut quote = None;
-    let mut escaped = false;
-
-    for (idx, ch) in segment.char_indices() {
-        if start.is_none() {
-            if ch.is_whitespace() {
-                continue;
-            }
-            start = Some(idx);
-        }
-
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-            continue;
-        }
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            continue;
-        }
-        if ch.is_whitespace() {
-            if let Some(start_idx) = start.take() {
-                words.push(make_shell_word(segment, offset, start_idx, idx));
-            }
-        }
-    }
-
-    if let Some(start_idx) = start {
-        words.push(make_shell_word(segment, offset, start_idx, segment.len()));
-    }
-
-    words
-}
-
-fn make_shell_word(segment: &str, offset: usize, start: usize, end: usize) -> ShellWord {
-    let raw = segment[start..end].to_string();
-    let quote = raw.chars().next().filter(|ch| *ch == '\'' || *ch == '"');
-    ShellWord {
-        start: offset + start,
-        end: offset + end,
-        value: unescape_shell_word(&raw),
-        raw,
-        quote,
-    }
-}
-
-fn unescape_shell_word(raw: &str) -> String {
-    let mut value = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-
-    for ch in raw.chars() {
-        if escaped {
-            value.push(ch);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-            continue;
-        }
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            } else {
-                value.push(ch);
-            }
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            continue;
-        }
-        value.push(ch);
-    }
-
-    if escaped {
-        value.push('\\');
-    }
-    value
-}
-
-fn segment_ends_with_unescaped_whitespace(segment: &str) -> bool {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut ends_with_whitespace = false;
-
-    for ch in segment.chars() {
-        if escaped {
-            escaped = false;
-            ends_with_whitespace = false;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-            ends_with_whitespace = false;
-            continue;
-        }
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            }
-            ends_with_whitespace = false;
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            ends_with_whitespace = false;
-            continue;
-        }
-        ends_with_whitespace = ch.is_whitespace();
-    }
-
-    ends_with_whitespace
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,7 +577,28 @@ mod tests {
         // niubash#530: in `ls @(a|b)` the `|` separates extglob
         // alternatives, not commands; the current word is the whole
         // pattern and the command name is still `ls`.
-        let ctx = CompletionContext::new(PathBuf::from("/home/user"), "ls @(a|b)".to_string(), 9);
+        //
+        // GAP-9 (niubash#863): that verdict is only true with
+        // `extglob` on — with the option off GNU parses `ls @(a|b)`
+        // as a pipeline (`ls @(a | b)`), and the engine's token
+        // view reports exactly that (probe: off-state spans `@`,
+        // `(`, `a`, `|` Pipe, `b`, `)`; on-state span `@(a|b)`).
+        // The old host scanner treated extglob groups as one word
+        // unconditionally, ignoring shopt state; the view is the
+        // authority now, so this pin carries its precondition
+        // explicitly: the context is built from a live session
+        // with `shopt -s extglob`. The gate is process-global, so
+        // the test takes PROCESS_STATE_LOCK and restores the gate
+        // before asserting.
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut shell = crate::shell::Shell::new().unwrap();
+        shell.execute_script("shopt -s extglob").unwrap();
+        let mut ctx =
+            CompletionContext::new(PathBuf::from("/home/user"), "ls @(a|b)".to_string(), 9);
+        ctx.token_view = Some(shell.session().token_view("ls @(a|b)"));
+        shell.execute_script("shopt -u extglob").unwrap();
         assert_eq!(ctx.get_current_word(), Some("@(a|b)".to_string()));
         assert_eq!(ctx.get_command_name(), Some("ls".to_string()));
 
@@ -707,6 +606,24 @@ mod tests {
         let piped = CompletionContext::new(PathBuf::from("/home/user"), "ls | gre".to_string(), 8);
         assert!(piped.is_command_position());
         assert_eq!(piped.get_command_name(), Some("gre".to_string()));
+    }
+
+    #[test]
+    fn test_extglob_off_pipe_is_a_command_separator() {
+        // GAP-9 (niubash#863): the extglob-off counterpart of #530.
+        // With `extglob` off (the GNU default) the `|` in
+        // `ls @(a|b)` IS a pipe: the view reports `b` as the new
+        // segment's command word and `)` as the word under the
+        // cursor. This is the GNU-faithful verdict the old host
+        // scanner's unconditional extglob treatment hid.
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut shell = crate::shell::Shell::new().unwrap();
+        shell.execute_script("shopt -u extglob").unwrap();
+        let ctx = CompletionContext::new(PathBuf::from("/home/user"), "ls @(a|b)".to_string(), 9);
+        assert_eq!(ctx.get_current_word(), Some(")".to_string()));
+        assert_eq!(ctx.get_command_name(), Some("b".to_string()));
     }
 
     #[test]

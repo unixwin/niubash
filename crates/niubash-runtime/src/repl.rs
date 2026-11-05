@@ -6826,15 +6826,9 @@ mod tests {
         let shell = crate::shell::Shell::new().unwrap();
         let complete = |input: &str| !shell.session().needs_more_input(input);
         assert!(!complete("if [ $HTTP_CODE -eq 200 ]; then"));
-        assert!(!complete(
-            "if [ $HTTP_CODE -eq 200 ]; then\n  echo OK"
-        ));
-        assert!(complete(
-            "if [ $HTTP_CODE -eq 200 ]; then\n  echo OK\nfi"
-        ));
-        assert!(complete(
-            "if [ $HTTP_CODE -eq 200 ]; then echo OK; fi"
-        ));
+        assert!(!complete("if [ $HTTP_CODE -eq 200 ]; then\n  echo OK"));
+        assert!(complete("if [ $HTTP_CODE -eq 200 ]; then\n  echo OK\nfi"));
+        assert!(complete("if [ $HTTP_CODE -eq 200 ]; then echo OK; fi"));
     }
 
     #[test]
@@ -6846,16 +6840,10 @@ mod tests {
         let shell = crate::shell::Shell::new().unwrap();
         let complete = |input: &str| !shell.session().needs_more_input(input);
         assert!(!complete("for item in a b; do"));
-        assert!(complete(
-            "for item in a b; do\n  echo $item\ndone"
-        ));
+        assert!(complete("for item in a b; do\n  echo $item\ndone"));
 
-        assert!(complete(
-            "for ((i=0; i<height; i++)); do\n  echo $i\ndone"
-        ));
-        assert!(!complete(
-            "for ((i=0; i<height; i++); do\n  echo $i\ndone"
-        ));
+        assert!(complete("for ((i=0; i<height; i++)); do\n  echo $i\ndone"));
+        assert!(!complete("for ((i=0; i<height; i++); do\n  echo $i\ndone"));
 
         assert!(!complete("while true; do"));
         assert!(complete("while true; do\n  break\ndone"));
@@ -6887,9 +6875,7 @@ mod tests {
         // across lines) until the last line completes it.
         // GAP-9 (niubash#863): the validator carries the editor
         // shell handle and reads the engine's completeness face.
-        let shell = std::rc::Rc::new(std::cell::RefCell::new(
-            crate::shell::Shell::new().unwrap(),
-        ));
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(crate::shell::Shell::new().unwrap()));
         let validator = ReplValidator::new(shell);
         assert!(matches!(
             validator.validate("echo \"unterminated"),
@@ -6965,25 +6951,17 @@ mod tests {
         // push a phantom `fi` block and wedge the REPL in continuation mode).
         assert!(complete("f() {\ncat <<EOF\nx; if y\nEOF\n}"));
         assert!(complete("cat <<EOF\nx; if y\nEOF"));
-        assert!(complete(
-            "cat <<'EOF'\nbody with \"quotes && (parens)\nEOF"
-        ));
+        assert!(complete("cat <<'EOF'\nbody with \"quotes && (parens)\nEOF"));
         // <<- strips leading tabs from the delimiter line only.
-        assert!(complete(
-            "cat <<-EOF\n\tindented; if x\n\tEOF"
-        ));
+        assert!(complete("cat <<-EOF\n\tindented; if x\n\tEOF"));
         // Sequential multi-heredoc gathering.
-        assert!(complete(
-            "cat <<E1 <<E2\nA; if a\nB; fi b\nE1\nE2"
-        ));
+        assert!(complete("cat <<E1 <<E2\nA; if a\nB; fi b\nE1\nE2"));
         // A here-string is not a heredoc; its payload stays code.
         assert!(!complete("cat <<< \"unterminated"));
         // Unterminated bodies still keep the REPL reading.
         assert!(!complete("cat <<EOF\nnever closed"));
         // A delimiter line with trailing text is body data, not a delimiter.
-        assert!(!complete(
-            "cat <<EOF\nbody\nEOF trailing\nmore"
-        ));
+        assert!(!complete("cat <<EOF\nbody\nEOF trailing\nmore"));
     }
 
     #[test]
@@ -6995,18 +6973,12 @@ mod tests {
         let shell = crate::shell::Shell::new().unwrap();
         let complete = |input: &str| !shell.session().needs_more_input(input);
         assert!(complete("# 11. 条件判断 (if)"));
-        assert!(complete(
-            "# case/esac/function() are comments"
-        ));
-        assert!(complete(
-            "# 11. 条件判断 (if)\nprintf \"ok\\n\""
-        ));
+        assert!(complete("# case/esac/function() are comments"));
+        assert!(complete("# 11. 条件判断 (if)\nprintf \"ok\\n\""));
         assert!(complete("echo foo#bar"));
         assert!(complete("echo foo # if (comment)"));
         assert!(!complete("if true; then\n  # fi in comment"));
-        assert!(complete(
-            "if true; then\n  # fi in comment\n  echo ok\nfi"
-        ));
+        assert!(complete("if true; then\n  # fi in comment\n  echo ok\nfi"));
     }
 
     /// NEW with the GAP-9 host migration (captain adjudication
