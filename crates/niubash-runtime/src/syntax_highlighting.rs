@@ -65,6 +65,12 @@ pub struct NiubashSyntaxHighlighter {
     styles: HashMap<SyntaxKind, Style>,
     commands: HashSet<String>,
     completion_state: Option<Arc<Mutex<CompletionState>>>,
+    /// GAP-7 (niubash#863): the editor flavor's handle on the
+    /// REPL's shell — the known-command probe reads the live
+    /// completion view through one short completion attempt opened
+    /// on it. `None` for highlighters built without a shell (their
+    /// probe falls back to the process environment, as before).
+    shell: Option<crate::shell::EditorShellHandle>,
     /// Live-probe memo for highlighters built without engine state; the
     /// state-carrying path shares [`CompletionState::command_probe`] instead.
     local_probe: Mutex<CommandProbe>,
@@ -132,9 +138,21 @@ impl NiubashSyntaxHighlighter {
             styles,
             commands: command_set,
             completion_state,
+            shell: None,
             local_probe: Mutex::new(CommandProbe::default()),
             max_length: config.max_length,
         }
+    }
+
+    /// GAP-7 (niubash#863): attach the editor shell handle (the
+    /// REPL's editor instance). The handle's safety contract is
+    /// documented on `EditorShellHandle`.
+    pub fn with_shell(
+        mut self,
+        shell: std::rc::Rc<std::cell::RefCell<crate::shell::Shell>>,
+    ) -> Self {
+        self.shell = Some(crate::shell::EditorShellHandle::new(shell));
+        self
     }
 
     fn style(&self, kind: SyntaxKind) -> Style {
@@ -552,7 +570,7 @@ impl NiubashSyntaxHighlighter {
 
         // Host-owned dynamic names first — aliases and plugin
         // names live on the shared state and never needed the
-        // bridge (a state-carrying highlighter away from a live
+        // engine (a state-carrying highlighter away from a live
         // shell still resolves them).
         match state.lock() {
             Ok(state) => {
@@ -568,17 +586,42 @@ impl NiubashSyntaxHighlighter {
             Err(_) => return false,
         }
 
-        // GAP-4 (niubash#863): the dynamic function names and the
+        // GAP-7 (niubash#863): the dynamic function names and the
         // probe's env come from one live capture of the engine's
-        // completion view through the bridge — the snapshot fields
-        // this read used to clone are retired. Without a bridge
-        // the session faces have no source: process-env probe.
-        let Some(view) =
-            crate::shell::with_completion_bridge(|shell| shell.session().completion_view())
-        else {
+        // completion view, read through a short completion attempt
+        // on the editor shell (GAP-4's bridge capture, guard form).
+        // Without a shell handle the session faces have no source:
+        // process-env probe.
+        let Some(view) = self.live_completion_view() else {
             return self.probe_process_env(command);
         };
+        self.known_command_name_with_view(command, &view, state)
+    }
 
+    /// The live completion view, read through one short completion
+    /// attempt opened on the editor shell handle (GAP-7,
+    /// niubash#863). `None` when this highlighter carries no shell.
+    fn live_completion_view(&self) -> Option<rubash::api::CompletionView> {
+        let handle = self.shell.as_ref()?;
+        let mut shell = handle.borrow_mut();
+        let attempt = shell.session_mut().begin_completion_attempt();
+        Some(attempt.session().completion_view())
+    }
+
+    /// The view-consuming half of the known-command probe: resolve
+    /// `command` against a live completion view (function names,
+    /// then the memoized PATH probe keyed by the view's env
+    /// fingerprint). Split out so a driver holding an open attempt
+    /// can resolve against the attempt's view directly — the
+    /// nested-completion shape GAP-7 makes live (the GAP-4 pin's
+    /// dark shape: a probe consulted under nesting observed no
+    /// engine source at all).
+    pub(crate) fn known_command_name_with_view(
+        &self,
+        command: &str,
+        view: &rubash::api::CompletionView,
+        state: &Arc<Mutex<CompletionState>>,
+    ) -> bool {
         // Function names and the memoized probe answers share the
         // completion lock; a memo miss reads the env from the
         // capture and re-locks only to record the outcome, so the
@@ -1047,10 +1090,11 @@ mod tests {
     #[test]
     fn highlights_dynamic_functions_as_commands() {
         // GAP-4 (niubash#863): the function name reaches the
-        // highlighter from the engine's live completion view
-        // through the bridge, not from a state field — define it
-        // in a real shell and install the bridge, the same shape
-        // production highlights in.
+        // highlighter from the engine's live completion view, not
+        // from a state field — define it in a real shell and hand
+        // the shell to the highlighter, the same shape production
+        // highlights in. GAP-7: the view is read through a short
+        // completion attempt on that handle.
         let _env_lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1058,22 +1102,20 @@ mod tests {
         let mut shell = crate::shell::Shell::new().unwrap();
         assert!(shell.execute_script("deploy_site() { true; }").is_ok());
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
             std::iter::empty::<String>(),
             state,
-        );
+        )
+        .with_shell(shell.clone());
         let styled = highlighter.highlight("deploy_site --production", 0);
 
         assert_eq!(
             style_for(&styled, "deploy_site"),
             highlighter.style(SyntaxKind::Command)
         );
-
-        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
@@ -1225,18 +1267,16 @@ mod tests {
     }
 
     /// GAP-4 (niubash#863): a real shell whose session PATH is
-    /// `path`, with the completion bridge installed — the #574
-    /// live-probe pins read the probe env from the engine's live
-    /// completion view, so their env lives in the session itself
-    /// (the state fields they used to poke retired with the
-    /// snapshot). Returns the Rc the bridge borrows; callers
-    /// uninstall the bridge at the end of the test.
+    /// `path` — the #574 live-probe pins read the probe env from
+    /// the engine's live completion view, so their env lives in
+    /// the session itself (the state fields they used to poke
+    /// retired with the snapshot). Returns the Rc; callers hand it
+    /// to the highlighter via `with_shell` (GAP-7: the attempt
+    /// handle replaces the installed bridge).
     fn probe_shell(path: &str) -> std::rc::Rc<std::cell::RefCell<crate::shell::Shell>> {
         let mut shell = crate::shell::Shell::new().unwrap();
         shell.session_mut().variables().set("PATH", path);
-        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
-        shell
+        std::rc::Rc::new(std::cell::RefCell::new(shell))
     }
 
     fn probe_shell_set(
@@ -1264,13 +1304,14 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let _shell = probe_shell(&temp.display().to_string());
+        let shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
             std::iter::empty::<String>(),
             state.clone(),
-        );
+        )
+        .with_shell(shell.clone());
 
         let styled = highlighter.highlight("probe574fresh --help", 0);
         assert_eq!(
@@ -1294,7 +1335,6 @@ mod tests {
             highlighter.style(SyntaxKind::Command)
         );
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -1310,13 +1350,14 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let _shell = probe_shell(&temp.display().to_string());
+        let shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
             std::iter::empty::<String>(),
             state.clone(),
-        );
+        )
+        .with_shell(shell.clone());
 
         for flag in ["--help", "--version", "--flag"] {
             let styled = highlighter.highlight(&format!("probe574memo {flag}"), 0);
@@ -1327,7 +1368,6 @@ mod tests {
         }
         assert_eq!(state.lock().unwrap().command_probe.probe_count(), 1);
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -1343,13 +1383,14 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let _shell = probe_shell(&temp.display().to_string());
+        let shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
             std::iter::empty::<String>(),
             state.clone(),
-        );
+        )
+        .with_shell(shell.clone());
 
         state.lock().unwrap().command_probe.clear();
         let styled = highlighter.highlight("probe574notreal --help", 0);
@@ -1358,7 +1399,6 @@ mod tests {
             highlighter.style(SyntaxKind::UnknownToken)
         );
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -1383,7 +1423,8 @@ mod tests {
             &SyntaxHighlightConfig::default(),
             std::iter::empty::<String>(),
             state.clone(),
-        );
+        )
+        .with_shell(shell.clone());
 
         let styled = highlighter.highlight("probe574fp --help", 0);
         assert_eq!(
@@ -1422,7 +1463,6 @@ mod tests {
             highlighter.style(SyntaxKind::Command)
         );
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp_a);
         let _ = std::fs::remove_dir_all(temp_b);
     }
@@ -1439,13 +1479,14 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let _shell = probe_shell(&temp.display().to_string());
+        let shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
             std::iter::empty::<String>(),
             state.clone(),
-        );
+        )
+        .with_shell(shell.clone());
 
         let styled = highlighter.highlight("dir/probe574missing", 0);
         assert_eq!(
@@ -1454,7 +1495,6 @@ mod tests {
         );
         assert_eq!(state.lock().unwrap().command_probe.probe_count(), 0);
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 

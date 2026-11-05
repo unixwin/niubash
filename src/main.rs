@@ -4615,23 +4615,17 @@ fn print_completion_probe(rest: &[String]) -> anyhow::Result<()> {
     // a startup-file exit-jump has no invocation to terminate here.
     let _ = shell.source_non_interactive_env();
     let _ = shell.run_startup_rc();
-    // The REPL loads the rc-declared completion functions (NIU_COMPDEFS)
-    // after sourcing and installs the completion bridge before the line
-    // editor runs (repl.rs); the probe mirrors that sequence so compdef and
-    // compspec candidates reach the same completer state a Tab press sees.
-    // Runs after both startup files so NIU_COMPDEFS declared in NIU_ENV /
-    // BASH_ENV lands in the same registry.
-    shell.load_user_compdefs();
-    let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-    niubash_runtime::shell::install_completion_bridge(&shell);
-    // Sync the completer state, then run the completer with NO borrow held
-    // on the shell: candidate generation re-enters the engine through the
-    // bridge (compdef hooks run shell functions), exactly as at a live Tab.
-    shell.borrow().update_completion_state();
-    let mut completer =
-        niubash_runtime::completion::NiubashCompleter::new(shell.borrow().completion_state.clone());
-    for suggestion in completer.complete(line, cursor_pos.min(line.len())) {
-        println!("{}", suggestion.value);
+    // The library probe surface carries the whole REPL-mirroring
+    // sequence itself (niubash#831): it (re)loads the rc-declared
+    // completion functions (NIU_COMPDEFS) after both startup files
+    // so declarations in NIU_ENV / BASH_ENV land in the registry,
+    // syncs the completer state even on a one-shot shell, and drives
+    // the completer through one completion attempt (GAP-7,
+    // niubash#863) — candidate generation re-enters the engine
+    // through the guard (compdef hooks run shell functions), exactly
+    // as at a live Tab.
+    for value in shell.completion_probe(line, cursor_pos.min(line.len())) {
+        println!("{value}");
     }
     Ok(())
 }

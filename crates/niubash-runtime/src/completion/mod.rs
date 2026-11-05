@@ -17,7 +17,7 @@ pub mod sources;
 pub mod variables;
 pub mod winuxcmd_assets;
 
-pub(crate) use completer::CompletionCapture;
+pub(crate) use completer::CompletionHostFaces;
 pub use completer::{CommandProbe, CompletionState, NiubashCompleter, SpecificCompletion};
 pub use file_colors::{CandidateKind, FileColors};
 

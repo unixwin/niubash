@@ -342,10 +342,12 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // undid the ledger's view hide (#614) and cleared-base accounting
     // (#642) that the provider maintains.
 
-    let completer = NiubashCompleter::new(shell_ref.completion_state.clone());
-    // Shell-function completions reach the engine through the main-thread
-    // bridge installed here; reedline completers must stay `Send`.
-    crate::shell::install_completion_bridge(shell);
+    let completer = NiubashCompleter::with_shell(shell_ref.completion_state.clone(), shell.clone());
+    // GAP-7 (niubash#863): shell-function completions reach the
+    // engine through the completion attempt each completer call
+    // opens on this shell handle — the thread-local bridge that
+    // used to be installed here is retired (see `EditorShellHandle`
+    // for the `Send` settlement).
     let menu_config = shell_ref.menu_config;
 
     // niubash#631: the cycle interaction's shared session cell. The
@@ -393,7 +395,8 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     // read `Reedline`'s own completer, not the menu's. The menu owns a
     // separate instance over the same shared state, so give the engine one
     // too instead of leaving M-* without a candidate source.
-    let engine_completer = NiubashCompleter::new(shell_ref.completion_state.clone());
+    let engine_completer =
+        NiubashCompleter::with_shell(shell_ref.completion_state.clone(), shell.clone());
     let menu_open = Arc::new(AtomicBool::new(false));
     // niubash#832: every editor build starts with the flag DOWN. The
     // Arc is fresh per build today, but the guarantee is stated, not
@@ -576,7 +579,8 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
                 &shell_ref.syntax_highlighting,
                 commands,
                 shell_ref.completion_state.clone(),
-            ),
+            )
+            .with_shell(shell.clone()),
         ));
     }
 
@@ -1318,7 +1322,12 @@ fn run_specific_completion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedlin
     let buffer = line_editor.current_buffer_contents().to_string();
     let cursor = line_editor.current_insertion_point();
     let matches: Vec<String> = {
-        let mut completer = NiubashCompleter::new(shell.borrow().completion_state.clone());
+        // GAP-7 (niubash#863): the completer carries the shell
+        // handle, so `complete_specific` drives the call through a
+        // completion attempt on this shell (the retired bridge
+        // served this surface from the editor-build install).
+        let mut completer =
+            NiubashCompleter::with_shell(shell.borrow().completion_state.clone(), shell.clone());
         completer
             .complete_specific(mode, &buffer, cursor)
             .into_iter()

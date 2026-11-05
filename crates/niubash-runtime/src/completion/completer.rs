@@ -237,21 +237,34 @@ pub enum SpecificCompletion {
     Glob,
 }
 
-/// One live capture of everything a completion call reads, taken
-/// through the completion bridge (GAP-4, niubash#863): the
-/// engine's `CompletionView` plus the host-spelled faces
-/// (directory, `/tmp` base, behavior, aliases). Produced by
-/// `Shell::capture_completion_inputs`.
-pub(crate) struct CompletionCapture {
-    pub view: rubash::api::CompletionView,
+/// The host-spelled faces of one completion call, captured by
+/// `Shell::completion_host_faces` before the attempt opens
+/// (GAP-7, niubash#863): the current directory in host form, the
+/// `/tmp` base, the resolved behavior, the alias names, and the
+/// compdef registry. The engine-owned faces are NOT here — the
+/// pipeline reads them live through the open attempt's
+/// `session()` for the attempt's duration (the GAP-4 capture's
+/// `view` component is exactly that read).
+pub(crate) struct CompletionHostFaces {
     pub current_dir: PathBuf,
     pub tmp_base: PathBuf,
     pub behavior: CompletionBehavior,
     pub aliases: HashSet<String>,
+    pub compdefs: Vec<(String, String)>,
 }
 
-/// The inputs of one completion call. Without a bridge the
-/// engine-owned inputs are empty — what the bridge-dependent
+/// One open completion attempt plus the host faces captured for
+/// it — the pipeline's engine source while the attempt lives.
+/// Drivers (GAP-7, niubash#863) open the guard through
+/// `Session::begin_completion_attempt` and hand it down; every
+/// engine read and execution of the call routes through it.
+pub(crate) struct AttemptRun<'a, 's> {
+    pub attempt: &'a mut rubash::api::CompletionAttempt<'s>,
+    pub faces: &'a CompletionHostFaces,
+}
+
+/// The inputs of one completion call. Without an attempt the
+/// engine-owned inputs are empty — what the attempt-dependent
 /// faces already observed in that shape, now extended to the
 /// variable / function / fd faces the retired snapshot used to
 /// keep serving there (GAP-4, niubash#863).
@@ -270,18 +283,49 @@ struct CompletionInputs {
 /// Custom completer for WinSH
 pub struct NiubashCompleter {
     state: Arc<Mutex<CompletionState>>,
+    /// GAP-7 (niubash#863): the editor flavor's handle on the
+    /// REPL's shell. A completer carrying it opens one
+    /// `Session::begin_completion_attempt` guard per `complete` /
+    /// `complete_specific` call (through `Shell::drive_completion`)
+    /// and routes every engine read and execution of the call
+    /// through that guard. `None` for standalone completers (unit
+    /// probes, one-shot diagnostics): their engine-owned inputs
+    /// stay empty — exactly what the retired thread-local bridge's
+    /// absence produced on those surfaces.
+    shell: Option<crate::shell::EditorShellHandle>,
 }
 
 impl NiubashCompleter {
     /// Create a new completer with shared state
     pub fn new(state: Arc<Mutex<CompletionState>>) -> Self {
-        Self { state }
+        Self { state, shell: None }
+    }
+
+    /// Create a completer that drives completion attempts on the
+    /// REPL's shell (GAP-7, niubash#863): the line editor's
+    /// instances and the REPL's specific-completion driver. The
+    /// handle's safety contract is documented on
+    /// `EditorShellHandle`.
+    pub fn with_shell(
+        state: Arc<Mutex<CompletionState>>,
+        shell: std::rc::Rc<std::cell::RefCell<crate::shell::Shell>>,
+    ) -> Self {
+        Self {
+            state,
+            shell: Some(crate::shell::EditorShellHandle::new(shell)),
+        }
     }
 
     /// Assemble the inputs of one completion call: host-owned
-    /// faces from the shared state (niubash#833 poison recovery),
-    /// engine-owned faces from a live bridge capture.
-    fn capture_inputs(&self) -> CompletionInputs {
+    /// faces from the shared state (niubash#833 poison recovery);
+    /// with an attempt open, the engine-owned faces from the
+    /// attempt's live `Session::completion_view` and the host
+    /// faces captured for the attempt (GAP-7, niubash#863 — the
+    /// GAP-4 bridge capture's two halves, taken from their owners).
+    fn capture_inputs(
+        &self,
+        engine: Option<(&rubash::api::CompletionAttempt<'_>, &CompletionHostFaces)>,
+    ) -> CompletionInputs {
         let mut inputs = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             CompletionInputs {
@@ -296,23 +340,44 @@ impl NiubashCompleter {
                 dir_cache: state.dir_cache.clone(),
             }
         };
-        if let Some(capture) =
-            crate::shell::with_completion_bridge(|shell| shell.capture_completion_inputs())
-        {
-            inputs.current_dir = capture.current_dir;
-            inputs.env_vars = capture.view.env.into_iter().collect();
-            inputs.aliases = capture.aliases;
-            inputs.functions = capture.view.functions.into_iter().collect();
-            inputs.open_fds = capture.view.open_fds;
-            inputs.tmp_base = capture.tmp_base;
-            inputs.behavior = capture.behavior;
+        if let Some((attempt, faces)) = engine {
+            let view = attempt.session().completion_view();
+            inputs.current_dir = faces.current_dir.clone();
+            inputs.env_vars = view.env.into_iter().collect();
+            inputs.aliases = faces.aliases.clone();
+            inputs.functions = view.functions.into_iter().collect();
+            inputs.open_fds = view.open_fds;
+            inputs.tmp_base = faces.tmp_base.clone();
+            inputs.behavior = faces.behavior;
         }
         inputs
     }
 
     /// Return plain suggestions for internal probes and tests.
+    ///
+    /// A completer carrying the editor shell handle drives the
+    /// call through one completion attempt on that shell; a
+    /// standalone completer runs the same pipeline with no engine
+    /// source.
     pub fn complete(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        self.complete_input(input, cursor_pos)
+        if let Some(handle) = self.shell.clone() {
+            return handle.with_shell_mut(|shell| shell.drive_completion(self, input, cursor_pos));
+        }
+        self.complete_input(None, input, cursor_pos)
+    }
+
+    /// Complete through a caller-opened attempt (GAP-7,
+    /// niubash#863): the driver owns the guard — the probe surface
+    /// and nested-completion drivers — and every engine read and
+    /// execution of this call routes through it.
+    pub fn complete_with_attempt(
+        &mut self,
+        attempt: &mut rubash::api::CompletionAttempt<'_>,
+        faces: &CompletionHostFaces,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Vec<Suggestion> {
+        self.complete_input(Some(AttemptRun { attempt, faces }), input, cursor_pos)
     }
 
     /// Look up `name` in a session env snapshot, case-insensitively:
@@ -340,10 +405,43 @@ impl NiubashCompleter {
         input: &str,
         cursor_pos: usize,
     ) -> Vec<Suggestion> {
-        // GAP-4 (niubash#863): the engine-owned inputs are captured
-        // live through the bridge, not read from a per-line snapshot;
-        // the host-owned faces come from the shared state (with
-        // niubash#833 poison recovery, as before).
+        if let Some(handle) = self.shell.clone() {
+            return handle.with_shell_mut(|shell| {
+                shell.drive_completion_specific(self, mode, input, cursor_pos)
+            });
+        }
+        self.complete_specific_with_engine(None, mode, input, cursor_pos)
+    }
+
+    /// [`Self::complete_specific`] through a caller-opened attempt
+    /// (GAP-7, niubash#863); see [`Self::complete_with_attempt`].
+    pub fn complete_specific_with_attempt(
+        &mut self,
+        attempt: &mut rubash::api::CompletionAttempt<'_>,
+        faces: &CompletionHostFaces,
+        mode: SpecificCompletion,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Vec<Suggestion> {
+        self.complete_specific_with_engine(
+            Some(AttemptRun { attempt, faces }),
+            mode,
+            input,
+            cursor_pos,
+        )
+    }
+
+    fn complete_specific_with_engine(
+        &mut self,
+        mut engine: Option<AttemptRun<'_, '_>>,
+        mode: SpecificCompletion,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Vec<Suggestion> {
+        // GAP-7 (niubash#863): the engine-owned inputs are captured
+        // live through the open attempt, not read from a per-line
+        // snapshot; the host-owned faces come from the shared state
+        // (with niubash#833 poison recovery, as before).
         let CompletionInputs {
             current_dir,
             env_vars,
@@ -354,7 +452,7 @@ impl NiubashCompleter {
             behavior,
             dir_cache,
             ..
-        } = self.capture_inputs();
+        } = self.capture_inputs(engine.as_ref().map(|run| (&*run.attempt, run.faces)));
 
         let cursor_pos = cursor_pos.min(input.len());
         let mut context = CompletionContext::with_behavior(
@@ -429,10 +527,10 @@ impl NiubashCompleter {
                 SpecificCompletion::Glob => {
                     let word = context.get_current_word().unwrap_or_default();
                     let pattern = format!("{word}*");
-                    let matches = crate::shell::with_completion_bridge(|shell| {
-                        shell.session().glob_filename(&pattern)
-                    })
-                    .unwrap_or_default();
+                    let matches = engine
+                        .as_mut()
+                        .map(|run| run.attempt.session().glob_filename(&pattern))
+                        .unwrap_or_default();
                     (!matches.is_empty()).then(|| CompletionResult::new(matches))
                 }
             };
@@ -444,10 +542,16 @@ impl NiubashCompleter {
     }
 
     /// Complete input
-    fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        // GAP-4 (niubash#863): live capture through the bridge, as
-        // in `complete_specific` (niubash#833 poison recovery for
-        // the host-owned faces lives in `capture_inputs`).
+    fn complete_input(
+        &mut self,
+        mut engine: Option<AttemptRun<'_, '_>>,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Vec<Suggestion> {
+        // GAP-7 (niubash#863): live capture through the open
+        // attempt, as in `complete_specific` (niubash#833 poison
+        // recovery for the host-owned faces lives in
+        // `capture_inputs`).
         let CompletionInputs {
             current_dir,
             env_vars,
@@ -458,7 +562,7 @@ impl NiubashCompleter {
             behavior,
             plugins,
             dir_cache,
-        } = self.capture_inputs();
+        } = self.capture_inputs(engine.as_ref().map(|run| (&*run.attempt, run.faces)));
 
         let mut context = CompletionContext::with_behavior(
             current_dir.clone(),
@@ -508,19 +612,18 @@ impl NiubashCompleter {
         let command_word = context.get_command_name().unwrap_or_default();
         let has_compspec = !context.is_command_position()
             && !command_word.is_empty()
-            && crate::shell::with_completion_bridge(|shell| {
-                shell.session().has_compspec(&command_word)
-            })
-            .unwrap_or(false);
+            && engine
+                .as_ref()
+                .is_some_and(|run| run.attempt.session().has_compspec(&command_word));
 
-        // Shell-function completions (`NIU_COMPDEFS`): only available while
-        // the interactive REPL has installed the shell bridge. Skipped
+        // Shell-function completions (`NIU_COMPDEFS`): only available
+        // while a completion attempt is open on the shell. Skipped
         // when a compspec owns the command (niubash#836): GNU precedence
         // gives the compspec the command's arguments outright, and
         // merging the compdef's candidates into its set produced
         // silently wrong candidate lists.
         if !has_compspec {
-            if let Some(result) = compdef_suggestions(&context) {
+            if let Some(result) = compdef_suggestions(&context, engine.as_mut()) {
                 all_suggestions.extend(self.format_completions(result, input, cursor_pos));
             }
         }
@@ -583,7 +686,8 @@ impl NiubashCompleter {
 
         // GNU programmable completion (rubash engine): when the command has a
         // compspec registered via the `complete` builtin, argument candidates
-        // come from `Session::complete_detailed` through the shell bridge. The
+        // come from the attempt's `complete_detailed` (GAP-7, niubash#863:
+        // the guard form of `Session::complete_detailed`). The
         // completion *engine* lives in rubash while niubash keeps its
         // cwd-priority, common-command, and file overlays for everything else.
         // The `has_compspec` gate keeps this free for commands without a
@@ -591,9 +695,8 @@ impl NiubashCompleter {
         // raw-unquoted file names that duplicate the path completer above).
         {
             if has_compspec {
-                if let Some(outcome) = crate::shell::with_completion_bridge(|shell| {
-                    shell.session_mut().complete_detailed(input, cursor_pos)
-                }) {
+                if let Some(run) = engine.as_mut() {
+                    let outcome = run.attempt.complete_detailed(input, cursor_pos);
                     if !outcome.candidates.is_empty() {
                         // niubash#837: carry the engine's per-candidate
                         // descriptions and the attempt's insert policy
@@ -868,22 +971,29 @@ fn should_append_completion_whitespace(completion: &str) -> bool {
     !(value.ends_with('/') || value.ends_with('\\'))
 }
 
-/// Run a registered shell-function completion through the installed shell
-/// bridge and shape its candidates. The function is resolved by the command
-/// word; its candidates are filtered by the current word prefix.
-fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> {
+/// Run a registered shell-function completion through the open
+/// completion attempt and shape its candidates. The function is
+/// resolved by the command word against the compdef registry the
+/// driver captured into the attempt's host faces; its candidates
+/// are filtered by the current word prefix. Without an attempt
+/// there is no compdef source (the retired bridge's absence
+/// produced the same `None`).
+fn compdef_suggestions(
+    context: &CompletionContext,
+    engine: Option<&mut AttemptRun<'_, '_>>,
+) -> Option<CompletionResult> {
     if context.is_command_position() {
         return None;
     }
+    let engine = engine?;
     let command_word = command_words_before_cursor(context)?.first()?.clone();
     let cword = comp_cword(context);
-    let function = crate::shell::with_completion_bridge(|shell| {
-        let (_, function) = shell
-            .compdefs
-            .iter()
-            .find(|(cmd, _)| cmd == &command_word)?;
-        Some(function.clone())
-    })??;
+    let function = engine
+        .faces
+        .compdefs
+        .iter()
+        .find(|(cmd, _)| cmd == &command_word)
+        .map(|(_, function)| function.clone())?;
 
     // COMP_WORDS includes the word being completed, matching bash.
     // `command_words_before_cursor` splits the segment up to the cursor,
@@ -905,9 +1015,7 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
         words.push(String::new());
     }
 
-    let entries = crate::shell::with_completion_bridge(|shell| {
-        shell.run_compdef_function(&function, &words, cword)
-    })?;
+    let entries = run_compdef_through_attempt(engine.attempt, &function, &words, cword);
     if entries.is_empty() {
         return None;
     }
@@ -938,8 +1046,63 @@ fn compdef_suggestions(context: &CompletionContext) -> Option<CompletionResult> 
     ))
 }
 
+/// Run one compdef function through the open attempt's function
+/// face (GAP-7, niubash#863) — the guard form of the retired
+/// `Shell::run_compdef_function`, with the same contract:
+///
+/// The function sees the command line through `NIU_COMP_WORDS` (space
+/// joined) and `NIU_COMP_CWORD` (bash COMP_CWORD semantics), passed
+/// as the call's temporary env — the guard restores both when the
+/// call returns. It writes back `NIU_COMP_RESULT` with one candidate
+/// per line, shaped `value` or `value<TAB>description`. Compdef
+/// functions must not print to stdout: completion runs while the
+/// line editor owns the terminal. `NIU_COMP_RESULT` is deliberately
+/// NOT unset here — the guard exposes no post-call mutation face —
+/// the driver unsets it once the attempt drops
+/// (`Shell::drive_completion`), before any later command can
+/// observe it.
+pub(crate) fn run_compdef_through_attempt(
+    attempt: &mut rubash::api::CompletionAttempt<'_>,
+    function: &str,
+    words: &[String],
+    cword: usize,
+) -> Vec<(String, Option<String>)> {
+    let joined = words.join(" ");
+    if let Err(err) = attempt.call_function_with_env(
+        function,
+        std::iter::empty::<String>(),
+        [
+            ("NIU_COMP_WORDS", joined.as_str()),
+            ("NIU_COMP_CWORD", cword.to_string().as_str()),
+        ],
+    ) {
+        log::warn!("completion function '{}' failed: {}", function, err);
+    }
+
+    // The stored read (GAP-6's `variable_value`): the result
+    // channel is a plain assignment by contract, where the stored
+    // read and the retired method's expansion read agree; the
+    // guard exposes no `&mut` variables view for the expansion
+    // form.
+    let result = attempt.session().variable_value("NIU_COMP_RESULT");
+
+    result
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.split_once('\t') {
+            Some((value, description)) => (
+                value.trim().to_string(),
+                Some(description.trim().to_string()),
+            ),
+            None => (line.to_string(), None),
+        })
+        .collect()
+}
+
 /// Words of the current command segment before the cursor (the compdef
-/// bridge's COMP_WORDS/COMP_CWORD inputs). Moved here from the retired
+/// call's COMP_WORDS/COMP_CWORD inputs). Moved here from the retired
 /// completion::runtime module — this file is their only consumer.
 fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String>> {
     let pos = context.cursor_pos.min(context.input.len());
@@ -1047,7 +1210,11 @@ impl PartialOrd for CwdPathCandidate {
 
 impl Completer for NiubashCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> ReedlineCompletionResult {
-        ReedlineCompletionResult::fresh(self.complete_input(line, pos))
+        // Through the inherent `complete` so an editor-flavor
+        // completer drives the call through a completion attempt
+        // (GAP-7, niubash#863) — the trait surface is how reedline's
+        // menus invoke this completer at a live Tab.
+        ReedlineCompletionResult::fresh(self.complete(line, pos))
     }
 }
 
@@ -1065,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_bridge_compdef_produces_candidates() {
+    fn attempt_compdef_produces_candidates() {
         use crate::test_support::PROCESS_STATE_LOCK;
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Dropping this Shell must not take the test process's PATH
@@ -1084,10 +1251,9 @@ niu_git_comp() {
             .is_ok());
         shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
         let suggestions = completer.complete("git ", 4);
 
         let alpha = suggestions
@@ -1097,9 +1263,10 @@ niu_git_comp() {
         assert_eq!(alpha.description.as_deref(), Some("First"));
         assert!(suggestions.iter().any(|s| s.value == "beta"));
         // Drop the Shell inside this test, while _env_restore is still
-        // armed (the thread-local bridge would otherwise defer the drop
-        // to thread teardown).
-        crate::shell::uninstall_completion_bridge();
+        // armed: the completer's handle holds an Rc clone, so drop it
+        // first, then the test's own Rc.
+        drop(completer);
+        drop(shell);
     }
 
     /// B5 compdef word fidelity: NIU_COMP_WORDS must equal bash's
@@ -1131,10 +1298,9 @@ niu_git_comp() {{
             .is_ok());
         shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
 
         // Cursor inside the partial word: it is COMP_WORDS[COMP_CWORD],
         // present exactly once.
@@ -1154,7 +1320,6 @@ niu_git_comp() {{
             "the empty current word must occupy the COMP_CWORD slot"
         );
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -1181,10 +1346,9 @@ complete -W 'speconly' git
             .is_ok());
         shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
         let suggestions = completer.complete("git ", 4);
         assert_eq!(
             suggestions
@@ -1194,7 +1358,6 @@ complete -W 'speconly' git
             vec!["speconly"],
             "the compspec owns git: the compdef candidate must not merge in"
         );
-        crate::shell::uninstall_completion_bridge();
 
         // Control: the same compdef without a compspec still produces
         // its candidate.
@@ -1210,16 +1373,14 @@ niu_git_comp() {
             .is_ok());
         shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
         let suggestions = completer.complete("git ", 4);
         assert!(
             suggestions.iter().any(|s| s.value == "compdefonly"),
             "without a compspec the compdef must still fire, got {suggestions:?}"
         );
-        crate::shell::uninstall_completion_bridge();
     }
 
     /// niubash#836: `command_words_before_cursor` must split on the
@@ -1292,10 +1453,18 @@ niu_git_comp() {
             .is_ok());
         shell.compdefs = vec![("git".to_string(), "niu_git_comp".to_string())];
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let context = CompletionContext::new(PathBuf::from("."), "git AL".to_string(), 6);
-        let result = compdef_suggestions(&context)
+        // GAP-7 (niubash#863): the direct compdef call now takes the
+        // open attempt explicitly.
+        let mut shell = shell.borrow_mut();
+        let faces = shell.completion_host_faces();
+        let mut attempt = shell.session_mut().begin_completion_attempt();
+        let mut run = AttemptRun {
+            attempt: &mut attempt,
+            faces: &faces,
+        };
+        let result = compdef_suggestions(&context, Some(&mut run))
             .unwrap_or_else(|| panic!("compdef must produce candidates for `git AL`"));
         assert!(
             result.completions.iter().any(|value| value == "Alpha"),
@@ -1306,7 +1475,6 @@ niu_git_comp() {
             !result.completions.iter().any(|value| value == "beta"),
             "`beta` does not match `AL` in any mode"
         );
-        crate::shell::uninstall_completion_bridge();
     }
     #[test]
     fn compspec_candidates_flow_through_rubash_hook() {
@@ -1323,10 +1491,9 @@ niu_git_comp() {
             .execute_script("complete -W 'alpha beta gamma' mycmd")
             .is_ok());
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
         // Completing the second word of `mycmd a`: the compspec wordlist
         // filtered by the prefix `a` must yield `alpha` through the hook.
         let suggestions = completer.complete("mycmd a", 7);
@@ -1336,9 +1503,10 @@ niu_git_comp() {
             "missing compspec candidate alpha, got {suggestions:?}"
         );
         // Drop the Shell inside this test, while _env_restore is still
-        // armed (the thread-local bridge would otherwise defer the drop
-        // to thread teardown).
-        crate::shell::uninstall_completion_bridge();
+        // armed: the completer's handle holds an Rc clone, so drop it
+        // first, then the test's own Rc.
+        drop(completer);
+        drop(shell);
     }
 
     #[test]
@@ -1350,17 +1518,16 @@ niu_git_comp() {
         let mut shell = crate::shell::Shell::new().unwrap();
         // A compspec carrying -o nospace: the engine's insert policy
         // (rubash#2573 CompletionPolicy.suppress_append) must reach
-        // the Suggestion's append_whitespace through the bridge —
-        // before niubash#837 the bridge used Session::complete and
+        // the Suggestion's append_whitespace through the completer —
+        // before niubash#837 the host used Session::complete and
         // the policy never crossed.
         assert!(shell
             .execute_script("complete -o nospace -W 'zzone zztwo' mycmd837")
             .is_ok());
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
         let suggestions = completer.complete("mycmd837 zz", 11);
         let zzone = suggestions
             .iter()
@@ -1370,13 +1537,12 @@ niu_git_comp() {
             !zzone.append_whitespace,
             "-o nospace must suppress the appended space: {zzone:?}"
         );
-        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
     fn issue837_format_completions_carries_descriptions_and_suppress_append() {
-        // The shaping half of the bridge contract: a CompletionResult
-        // built the way the engine bridge now builds it (descriptions
+        // The shaping half of the contract: a CompletionResult
+        // built the way the engine leg now builds it (descriptions
         // unzipped from Candidate.description, suppress_append from
         // the attempt's policy) must surface both on the Suggestion.
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
@@ -1411,10 +1577,9 @@ niu_git_comp() {
         // the static table contributes nothing.
         assert!(shell.execute_script("complete -W 'zzz' git").is_ok());
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
         let suggestions = completer.complete("git ", 4);
 
         assert_eq!(
@@ -1436,10 +1601,9 @@ niu_git_comp() {
         let mut shell = crate::shell::Shell::new().unwrap();
         assert!(shell.execute_script("complete -W 'zzz' git").is_ok());
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
 
         // niubash#830: the probe used to take the first whitespace
         // token of the WHOLE line, so on each of these lines it asked
@@ -1487,8 +1651,6 @@ niu_git_comp() {
                 .collect::<Vec<_>>(),
             vec!["zzz"]
         );
-
-        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
@@ -1507,10 +1669,9 @@ niu_git_comp() {
         let script = format!("cd {}", temp_dir.display());
         assert!(shell.execute_script(&script).is_ok());
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
 
         let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
         let suggestions =
             completer.complete_specific(SpecificCompletion::Glob, "cat al*", "cat al*".len());
 
@@ -1527,7 +1688,6 @@ niu_git_comp() {
             assert_eq!(suggestion.span.end, 7);
         }
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
@@ -1673,12 +1833,13 @@ niu_git_comp() {
         std::fs::write(temp_dir.join("spec-file-alpha.txt"), "x").unwrap();
         let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
         // GAP-4 (niubash#863): the alias, variable and directory
-        // all reach the completer from one live shell through the
-        // bridge (aliases from the host map the capture reads,
-        // variables from the engine view, the directory from the
-        // host-spelled capture) — so this pin composes them on a
-        // real shell, the same shape production completes in,
-        // instead of planting them in state fields.
+        // all reach the completer from one live shell (aliases from
+        // the host map the attempt's faces capture, variables from
+        // the engine view, the directory from the host-spelled
+        // faces) — so this pin composes them on a real shell, the
+        // same shape production completes in, instead of planting
+        // them in state fields. GAP-7: the live shell arrives
+        // through the completer's attempt-driving handle.
         let _env_lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1691,8 +1852,7 @@ niu_git_comp() {
             .is_ok());
         assert!(shell.execute_script("NIU_SPECIFIC_VAR=1").is_ok());
         let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
-        crate::shell::install_completion_bridge(&shell);
-        let mut completer = NiubashCompleter::new(state);
+        let mut completer = NiubashCompleter::with_shell(state, shell.clone());
 
         // complete-command ignores the cursor's argument position:
         // GNU's command_word_completion_function always completes a
@@ -1727,7 +1887,6 @@ niu_git_comp() {
             "filename mode must complete the file: {files:?}"
         );
 
-        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 
