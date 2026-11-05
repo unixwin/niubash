@@ -23,7 +23,7 @@ use rubash::{
     TokenKind,
 };
 
-use crate::completion::{CompletionBehavior, CompletionState, NiubashCompleter};
+use crate::completion::{CompletionBehavior, CompletionCapture, CompletionState, NiubashCompleter};
 use crate::config::{
     load as load_config, AutosuggestConfig, CommandNotFoundHint, EditorMode, HookConfig,
     MenuConfig, NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
@@ -3256,8 +3256,10 @@ impl Shell {
     }
 
     /// True when the named widget function exists in the shell engine.
+    /// GAP-4b (niubash#863): the `&self` Session face — the tier-C
+    /// `executor().has_function(name)` read this replaces is retired.
     pub fn widget_function_available(&self, name: &str) -> bool {
-        self.executor().has_function(name)
+        self.session().has_function(name)
     }
 
     /// Re-read the keybinding files — the host face of GNU
@@ -3672,29 +3674,6 @@ impl Shell {
         }
     }
 
-    /// Order-independent fingerprint of the engine's live env map
-    /// (niubash#594): the sum of per-entry hashes, so equal maps always
-    /// yield equal fingerprints regardless of iteration order, and any
-    /// name or value change moves the sum (short of a hash collision).
-    /// Never returns 0, which `CompletionState` reserves for "no
-    /// snapshot yet".
-    fn completion_env_fingerprint(env: &std::collections::HashMap<String, String>) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut acc = (env.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        for (name, value) in env {
-            let mut hasher = DefaultHasher::new();
-            name.hash(&mut hasher);
-            value.hash(&mut hasher);
-            acc = acc.wrapping_add(hasher.finish());
-        }
-        if acc == 0 {
-            1
-        } else {
-            acc
-        }
-    }
-
     /// niubash#574: forget the highlighter's memoized live-probe answers
     /// after a submitted line that can move command resolution without
     /// moving the probe fingerprint — `hash` (every form mutates or clears
@@ -3750,94 +3729,80 @@ impl Shell {
         }
     }
 
-    /// Update the shared completion state from the current env + cwd.
+    /// GAP-4 (niubash#863): one live capture of everything a
+    /// completion call reads, for the completer's bridge read. The
+    /// engine-owned faces come from `Session::completion_view`;
+    /// the host-spelled faces are the current directory in host
+    /// form (the view's cwd is physical), the `/tmp` base through
+    /// the engine resolver (GAP-5's face — deliberately NOT in the
+    /// view), the resolved behavior, and the host's alias names.
+    pub(crate) fn capture_completion_inputs(&self) -> CompletionCapture {
+        let view = self.session().completion_view();
+        let current_dir = self
+            .executor_pwd_host_path()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| {
+                let state = self
+                    .completion_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                fallback_recorded_dir(&state.current_dir)
+            });
+        CompletionCapture {
+            view,
+            current_dir,
+            tmp_base: self.executor().resolve_shell_path("/tmp"),
+            behavior: self.completion_behavior,
+            aliases: self.aliases.keys().cloned().collect(),
+        }
+    }
+
+    /// Refresh the host-carried completion faces from the current
+    /// shell state. GAP-4 (niubash#863): the engine snapshot this
+    /// used to re-synchronize every line (variable table, function
+    /// names, open fds, niubash#594 fingerprint gates) is retired —
+    /// the completer captures those live through
+    /// `Session::completion_view`. What remains is host-owned:
+    /// the resolved behavior (niubash#840), the alias names, the
+    /// `/tmp` base (niubash#627 G2), and the host-spelled current
+    /// directory (the bridge-less fallback's read).
     pub fn update_completion_state(&self) {
-        // One-shot shells have no REPL that reads completion state; the full
-        // env clone + function snapshot would be pure startup overhead.
+        // One-shot shells have no REPL that reads completion state;
+        // the refresh would be pure startup overhead.
         if self.one_shot {
             return;
         }
         self.sync_completion_state();
     }
 
-    /// niubash#831: the state sync with the one-shot early return forced
-    /// past. Probes are a completion surface in their own right — a
-    /// one-shot shell asked for candidates must snapshot the same
-    /// env/alias/function/fd/tmp state the REPL completer reads, or
-    /// variable/alias/function candidates silently vanish from exactly
-    /// the surface agents diagnose completion through.
-    fn update_completion_state_for_probe(&self) {
-        self.sync_completion_state();
-    }
-
     fn sync_completion_state(&self) {
-        // niubash#594: this runs after every interactive line, and the
-        // snapshot used to re-clone the whole env map, the alias name set
-        // and the function name set unconditionally — a per-line tax that
-        // grows with session state although the state is only read by the
-        // completer (Tab) and the syntax highlighter. Gate each component
-        // on exactly what it stores: env name/value pairs via a
-        // fingerprint of the engine's live env map, function and alias
-        // name sets via exact comparison of the sorted names. A component
-        // whose stored content is unchanged keeps its existing
-        // allocation; readers observe the same state as a full rebuild
-        // would have produced.
-        //
-        // Bounded exception: `env_vars_snapshot` also renders the
-        // engine's attribute lists (EXPORTED_VARS, READONLY_VARS, ...)
-        // into the snapshot. A pure attribute toggle on an existing
-        // variable (e.g. `readonly x`) does not touch the live env map,
-        // so those rendered pseudo-entries refresh on the next real env
-        // change instead of immediately. They are engine storage keys,
-        // not user variables; the variable names and values completion
-        // actually consumes are always current.
-        let env_fingerprint = Self::completion_env_fingerprint(self.executor().env_vars());
-        let function_names = self.session().functions();
-        // niubash#627: the /dev/fd completion tier lists the session's
-        // live fd numbers; sync them from the engine's fd table with
-        // the same compare-and-store discipline as the other
-        // components (the vec is tiny — fd counts, not env-sized).
-        let open_fds = self.executor().open_fds();
-        // niubash#627 G2: the /tmp backing directory, resolved by the
-        // engine from the SESSION env (its TMPDIR wins, the process
-        // temp dir is the engine's own fallback) through the Session
-        // seam. Completion and highlighting root /tmp spellings in
-        // this value, so a session `TMPDIR=/x` moves them on the very
-        // next line — the same immediacy the engine's opens have —
-        // instead of pinning both readers to the process env forever.
+        // niubash#627 G2: the /tmp backing directory, resolved by
+        // the engine from the SESSION env through the Session
+        // seam, so state-carrying readers follow a session
+        // `TMPDIR=/x` on the very next line. (The completer itself
+        // resolves it live at completion time.)
         let tmp_base = self.executor().resolve_shell_path("/tmp");
-        let mut alias_names: Vec<String> = self.aliases.keys().cloned().collect();
-        alias_names.sort_unstable();
         // niubash#833: a poisoned lock (a panic while a writer held
         // it) must not skip this update forever — recover the guard
-        // and refresh the snapshot as usual.
+        // and refresh as usual.
         let mut state = self
             .completion_state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // niubash#840: re-sync the behavior on every update — it is
-        // a small `Copy` struct, so no fingerprint gate is needed.
-        // Seeding it only at construction made the completer blind
-        // to any behavior resolved after startup.
+        // niubash#840: re-sync the behavior on every update — a
+        // small `Copy` struct, no gate needed; seeding it only at
+        // construction made readers blind to later resolutions.
         state.behavior = self.completion_behavior;
         state.current_dir = self
             .executor_pwd_host_path()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| fallback_recorded_dir(&state.current_dir));
-        if state.snapshot_env_fingerprint != env_fingerprint {
-            state.env_vars = self.executor().env_vars_snapshot();
-            state.snapshot_env_fingerprint = env_fingerprint;
-        }
-        if state.snapshot_function_names != function_names {
-            state.functions = function_names.iter().cloned().collect();
-            state.snapshot_function_names = function_names;
-        }
-        if state.snapshot_alias_names != alias_names {
-            state.aliases = alias_names.iter().cloned().collect();
-            state.snapshot_alias_names = alias_names;
-        }
-        if state.open_fds != open_fds {
-            state.open_fds = open_fds;
+        // Alias names are the host's own map; compare against the
+        // stored set directly — the niubash#594 sorted-name
+        // bookkeeping retired with the snapshot.
+        let alias_names: std::collections::HashSet<String> = self.aliases.keys().cloned().collect();
+        if state.aliases != alias_names {
+            state.aliases = alias_names;
         }
         if state.tmp_base != tmp_base {
             state.tmp_base = tmp_base;
@@ -3862,7 +3827,13 @@ impl Shell {
     /// hand; the library surface now carries the same contract itself.
     pub fn completion_probe(&mut self, input: &str, cursor_pos: usize) -> Vec<String> {
         self.load_user_compdefs();
-        self.update_completion_state_for_probe();
+        // niubash#831: the refresh runs even on one-shot shells —
+        // probes are a completion surface in their own right, and
+        // the host faces must not silently vanish from exactly
+        // the surface agents diagnose completion through. (The
+        // engine-owned candidates come from the live view the
+        // scoped bridge below serves, not from this refresh.)
+        self.sync_completion_state();
         let state = self.completion_state.clone();
         // Lend this shell to the completer through the scoped bridge
         // for the duration of the call: candidate generation re-enters
@@ -8651,33 +8622,55 @@ complete -F _envtooldyn_hook envtooldyn
             .contains(&"$SOURCE_COMPLETION_VAR".to_string()));
     }
 
+    /// GAP-4 (niubash#863): line-interleaved changes are visible to
+    /// completion IMMEDIATELY — a variable and a function defined
+    /// after the last refresh point are candidates on the very next
+    /// probe with NO `update_completion_state` call in between,
+    /// because the completer captures `Session::completion_view`
+    /// live. This is the property the retired snapshot machine
+    /// could only approximate (and the reason niubash#594's
+    /// fingerprint-gate pin, which asserted the gate's skip-rebuild
+    /// bookkeeping on the snapshot fields themselves, retired with
+    /// it: the gate is gone, the observable contract — readers
+    /// never see stale state — is asserted here and by the
+    /// `issue594_completion_state_tracks_*` pins below).
     #[test]
-    fn issue594_completion_state_skips_rebuild_when_nothing_changed() {
+    fn gap4_completion_reads_live_view_without_sync() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
 
-        shell.execute_interactive_line("ISSUE594_VAR=one").unwrap();
-        // Plant sentinels in the shared state: a rebuild would replace
-        // all three components wholesale and wipe them, so their
-        // survival proves the niubash#594 gate skipped the re-clone.
-        {
-            let mut state = shell.completion_state.lock().unwrap();
-            state
-                .env_vars
-                .insert("ISSUE594_SENTINEL".to_string(), "keep".to_string());
-            state.functions.insert("issue594_sentinel_fn".to_string());
-            state.aliases.insert("issue594_sentinel_alias".to_string());
-        }
         shell.update_completion_state();
-        let state = shell.completion_state.lock().unwrap();
-        assert!(state.env_vars.contains_key("ISSUE594_SENTINEL"));
-        assert!(state.functions.contains("issue594_sentinel_fn"));
-        assert!(state.aliases.contains("issue594_sentinel_alias"));
-        assert_eq!(
-            state.env_vars.get("ISSUE594_VAR").map(String::as_str),
-            Some("one")
+        // Define AFTER the refresh point, then probe without any
+        // further update call: under the snapshot these candidates
+        // could not exist until the next line's sync ran.
+        shell
+            .execute_script("GAP4_LIVE_VAR=now\ngap4livefn() { true; }\n")
+            .unwrap();
+        assert!(
+            shell
+                .completion_probe("$GAP4_LIVE_V", "$GAP4_LIVE_V".len())
+                .contains(&"$GAP4_LIVE_VAR".to_string()),
+            "a variable defined after the last sync must complete live"
         );
+        assert!(
+            shell
+                .completion_probe("gap4livef", "gap4livef".len())
+                .contains(&"gap4livefn".to_string()),
+            "a function defined after the last sync must complete live"
+        );
+
+        // And the reverse direction is live too: unsetting removes
+        // the candidate with no sync in between.
+        shell
+            .execute_script("unset GAP4_LIVE_VAR\nunset -f gap4livefn\n")
+            .unwrap();
+        assert!(!shell
+            .completion_probe("$GAP4_LIVE_V", "$GAP4_LIVE_V".len())
+            .contains(&"$GAP4_LIVE_VAR".to_string()));
+        assert!(!shell
+            .completion_probe("gap4livef", "gap4livef".len())
+            .contains(&"gap4livefn".to_string()));
     }
 
     /// niubash#840: the completion behavior was write-once — seeded
@@ -8756,19 +8749,15 @@ complete -F _envtooldyn_hook envtooldyn
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
 
+        // GAP-4 (niubash#863): the variable's presence is read from
+        // the live view through the probe — the snapshot field this
+        // pin used to assert on retired with the snapshot machine.
         shell
             .execute_interactive_line("ISSUE833_VAR=before")
             .unwrap();
-        assert_eq!(
-            shell
-                .completion_state
-                .lock()
-                .unwrap()
-                .env_vars
-                .get("ISSUE833_VAR")
-                .map(String::as_str),
-            Some("before")
-        );
+        assert!(shell
+            .completion_probe("$ISSUE833_VA", "$ISSUE833_VA".len())
+            .contains(&"$ISSUE833_VAR".to_string()));
 
         // Poison the completion_state lock the way a panic in a
         // writer would: the guard drops during unwind.
@@ -8784,7 +8773,11 @@ complete -F _envtooldyn_hook envtooldyn
         );
 
         // Before the fix, every later update_completion_state was
-        // skipped silently and the snapshot froze at "before".
+        // skipped silently and the host faces froze at their
+        // pre-poison values. The refresh must still land (through
+        // the recovered guard), and the completer — whose engine
+        // faces no longer pass through this lock at all — must
+        // still serve the new variable.
         shell
             .execute_interactive_line("ISSUE833_VAR=after")
             .unwrap();
@@ -8794,11 +8787,11 @@ complete -F _envtooldyn_hook envtooldyn
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(
-            state.env_vars.get("ISSUE833_VAR").map(String::as_str),
-            Some("after")
+            state.tmp_base,
+            shell.executor().resolve_shell_path("/tmp"),
+            "the host-carried refresh must land despite the poison"
         );
         drop(state);
-        // And the completer still reads the (poisoned) snapshot.
         assert!(shell
             .completion_probe("$ISSUE833_VA", "$ISSUE833_VA".len())
             .contains(&"$ISSUE833_VAR".to_string()));
@@ -8822,56 +8815,41 @@ complete -F _envtooldyn_hook envtooldyn
             .completion_probe("i594l", "i594l".len())
             .contains(&"i594ll".to_string()));
 
+        // GAP-4 (niubash#863): the env half reads the live view
+        // through the probe — the snapshot field this pin used to
+        // read directly retired with the snapshot machine. The
+        // observable contract is unchanged: the completer tracks
+        // the value's define (and, via the probe's candidate set,
+        // its presence) as lines run.
         shell.execute_interactive_line("ISSUE594_V=alpha").unwrap();
-        assert_eq!(
-            shell
-                .completion_state
-                .lock()
-                .unwrap()
-                .env_vars
-                .get("ISSUE594_V")
-                .map(String::as_str),
-            Some("alpha")
-        );
+        assert!(shell
+            .completion_probe("$ISSUE594_", "$ISSUE594_".len())
+            .contains(&"$ISSUE594_V".to_string()));
         shell.execute_interactive_line("ISSUE594_V=beta").unwrap();
+        assert!(shell
+            .completion_probe("$ISSUE594_", "$ISSUE594_".len())
+            .contains(&"$ISSUE594_V".to_string()));
+        // The captured view carries the CURRENT value, not the
+        // first one the old snapshot would have gated on.
+        let view = shell.session().completion_view();
         assert_eq!(
-            shell
-                .completion_state
-                .lock()
-                .unwrap()
-                .env_vars
-                .get("ISSUE594_V")
-                .map(String::as_str),
+            view.env
+                .iter()
+                .find(|(name, _)| name == "ISSUE594_V")
+                .map(|(_, value)| value.as_str()),
             Some("beta")
         );
     }
 
-    #[test]
-    fn issue594_completion_env_fingerprint_is_stable_and_change_sensitive() {
-        let mut a = std::collections::HashMap::new();
-        a.insert("A".to_string(), "1".to_string());
-        a.insert("B".to_string(), "2".to_string());
-        let mut b = std::collections::HashMap::new();
-        b.insert("B".to_string(), "2".to_string());
-        b.insert("A".to_string(), "1".to_string());
-        // Insertion order must not matter, and 0 is the reserved
-        // "no snapshot yet" sentinel the helper must never emit.
-        assert_eq!(
-            Shell::completion_env_fingerprint(&a),
-            Shell::completion_env_fingerprint(&b)
-        );
-        assert_ne!(Shell::completion_env_fingerprint(&a), 0);
-        b.insert("B".to_string(), "changed".to_string());
-        assert_ne!(
-            Shell::completion_env_fingerprint(&a),
-            Shell::completion_env_fingerprint(&b)
-        );
-        b.remove("B");
-        assert_ne!(
-            Shell::completion_env_fingerprint(&a),
-            Shell::completion_env_fingerprint(&b)
-        );
-    }
+    // GAP-4 (niubash#863): the niubash#594 host fingerprint pin
+    // (`issue594_completion_env_fingerprint_is_stable_and_change_sensitive`)
+    // retired with the helper it pinned — the host no longer derives
+    // an env fingerprint for its snapshot gate, because there is no
+    // snapshot and no gate. The fingerprint contract itself (same
+    // state ⇒ same fingerprint, any change ⇒ different) moved to the
+    // engine's `CompletionView::env_fingerprint`, pinned engine-side
+    // in rubash's GAP-4 consumer tests; the highlighter's memo
+    // retirement on env change is pinned by the niubash#574 tests.
 
     #[test]
     fn execute_interactive_script_runs_multiline_compound_blocks() {
@@ -11633,10 +11611,67 @@ T831_PROBE_VAR=hello
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    /// niubash#831: on a one-shot shell the probe forces the state
-    /// sync past the `one_shot` early return — variable and function
-    /// candidates exist on the probe surface even though no REPL will
-    /// ever read the state.
+    /// GAP-4 (niubash#863): what a completer invoked INSIDE a
+    /// scoped-bridge call observes. The scoped bridge refuses
+    /// re-entrant bridge use (the ACTIVE flag), so a nested
+    /// completer's bridge-dependent faces (compspec gate, glob,
+    /// engine completion) get `None`.
+    ///
+    /// Pre-migration probe (run on master 70c2df82 before this
+    /// lane's edits): the nested completer DID serve variable and
+    /// function candidates — from the last synced snapshot, the
+    /// one read the bridge refusal did not gate. With the snapshot
+    /// retired, the nested completer's engine-owned inputs are
+    /// empty, consistent with every other bridge-dependent face in
+    /// that shape. This pin asserts the post-migration shape; the
+    /// lane REPORT carries the pre-migration evidence and flags
+    /// the shape for captain adjudication.
+    #[test]
+    fn gap4_reentry_nested_completer_has_no_engine_source() {
+        use super::{with_completion_bridge, NiubashCompleter, ScopedCompletionBridge};
+
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_interactive_line("GAP4REENTRY_VAR=present")
+            .unwrap();
+        shell
+            .execute_interactive_line("gap4reentryfn() { true; }")
+            .unwrap();
+        shell.update_completion_state();
+        let state = shell.completion_state.clone();
+        let _bridge = ScopedCompletionBridge::install(&raw mut shell);
+        let (var_hit, fn_hit) = with_completion_bridge(|_shell| {
+            let mut completer = NiubashCompleter::new(state.clone());
+            let var_hit = completer
+                .complete("$GAP4REENTRY_VA", "$GAP4REENTRY_VA".len())
+                .iter()
+                .any(|s| s.value == "$GAP4REENTRY_VAR");
+            let fn_hit = completer
+                .complete("gap4reentryf", "gap4reentryf".len())
+                .iter()
+                .any(|s| s.value == "gap4reentryfn");
+            (var_hit, fn_hit)
+        })
+        .expect("the outer bridge call must run");
+        assert!(
+            !var_hit,
+            "post-GAP-4: a nested completer under a refused bridge has no env source"
+        );
+        assert!(
+            !fn_hit,
+            "post-GAP-4: a nested completer under a refused bridge has no function source"
+        );
+    }
+
+    /// niubash#831: on a one-shot shell the probe forces the host
+    /// refresh past the `one_shot` early return — variable and
+    /// function candidates exist on the probe surface even though
+    /// no REPL will ever read the state. (GAP-4, niubash#863: the
+    /// candidates themselves now come from the live completion
+    /// view the probe's scoped bridge serves; the forced refresh
+    /// still carries the host faces.)
     #[test]
     fn issue831_one_shot_probe_snapshots_state() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());

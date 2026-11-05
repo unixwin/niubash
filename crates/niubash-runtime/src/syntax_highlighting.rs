@@ -550,30 +550,64 @@ impl NiubashSyntaxHighlighter {
             return self.probe_process_env(command);
         };
 
-        // Dynamic names and the memoized probe answers share the completion
-        // lock; a memo miss snapshots the env and re-locks only to record
-        // the outcome, so the filesystem walk never runs under the lock
-        // (niubash#574).
+        // Host-owned dynamic names first — aliases and plugin
+        // names live on the shared state and never needed the
+        // bridge (a state-carrying highlighter away from a live
+        // shell still resolves them).
+        match state.lock() {
+            Ok(state) => {
+                if state
+                    .aliases
+                    .iter()
+                    .chain(state.plugin_command_names().iter())
+                    .any(|name| name.eq_ignore_ascii_case(command))
+                {
+                    return true;
+                }
+            }
+            Err(_) => return false,
+        }
+
+        // GAP-4 (niubash#863): the dynamic function names and the
+        // probe's env come from one live capture of the engine's
+        // completion view through the bridge — the snapshot fields
+        // this read used to clone are retired. Without a bridge
+        // the session faces have no source: process-env probe.
+        let Some(view) =
+            crate::shell::with_completion_bridge(|shell| shell.session().completion_view())
+        else {
+            return self.probe_process_env(command);
+        };
+
+        // Function names and the memoized probe answers share the
+        // completion lock; a memo miss reads the env from the
+        // capture and re-locks only to record the outcome, so the
+        // filesystem walk never runs under the lock (niubash#574).
         let (fingerprint, env_vars) = {
             let Ok(mut state) = state.lock() else {
                 return false;
             };
-            let dynamic = state
-                .aliases
+            if view
+                .functions
                 .iter()
-                .chain(state.functions.iter())
-                .chain(state.plugin_command_names().iter())
-                .any(|name| name.eq_ignore_ascii_case(command));
-            if dynamic {
+                .any(|name| name.eq_ignore_ascii_case(command))
+            {
                 return true;
             }
             if !probe_eligible(command) {
                 return false;
             }
-            let fingerprint = command_probe_fingerprint(&state.env_vars);
+            // The memo key is the engine's own env fingerprint
+            // (GAP-4): any variable change retires the memo,
+            // covering the PATH / PATHEXT / hash-table moves the
+            // retired host fingerprint keyed on (niubash#574).
+            let fingerprint = view.env_fingerprint.to_string();
             match state.command_probe.lookup(&fingerprint, command) {
                 Some(known) => return known,
-                None => (fingerprint, state.env_vars.clone()),
+                None => {
+                    let env_vars: HashMap<String, String> = view.env.iter().cloned().collect();
+                    (fingerprint, env_vars)
+                }
             }
         };
 
@@ -620,20 +654,6 @@ impl NiubashSyntaxHighlighter {
 /// a path separator or drive colon is a path the `path_kind` arm handles.
 fn probe_eligible(command: &str) -> bool {
     !command.is_empty() && !command.chars().any(|ch| matches!(ch, '/' | '\\' | ':'))
-}
-
-/// Fingerprint of the env a live probe ran under. PATH and PATHEXT are the
-/// probe inputs; the serialized `hash` table rides along so `hash -r/-d/-p`
-/// and per-command hashing retire remembered answers (niubash#574).
-fn command_probe_fingerprint(env_vars: &HashMap<String, String>) -> String {
-    let mut fingerprint = String::new();
-    for key in ["PATH", "PATHEXT", "__RUBASH_HASH_TABLE"] {
-        if let Some(value) = env_vars.get(key) {
-            fingerprint.push_str(value);
-        }
-        fingerprint.push('\u{1e}');
-    }
-    fingerprint
 }
 
 fn process_env_fingerprint() -> String {
@@ -1026,12 +1046,21 @@ mod tests {
 
     #[test]
     fn highlights_dynamic_functions_as_commands() {
-        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        state
+        // GAP-4 (niubash#863): the function name reaches the
+        // highlighter from the engine's live completion view
+        // through the bridge, not from a state field — define it
+        // in a real shell and install the bridge, the same shape
+        // production highlights in.
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
             .lock()
-            .unwrap()
-            .functions
-            .insert("deploy_site".to_string());
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell.execute_script("deploy_site() { true; }").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
             std::iter::empty::<String>(),
@@ -1043,6 +1072,8 @@ mod tests {
             style_for(&styled, "deploy_site"),
             highlighter.style(SyntaxKind::Command)
         );
+
+        crate::shell::uninstall_completion_bridge();
     }
 
     #[test]
@@ -1193,17 +1224,47 @@ mod tests {
         format!("{base}.exe")
     }
 
+    /// GAP-4 (niubash#863): a real shell whose session PATH is
+    /// `path`, with the completion bridge installed — the #574
+    /// live-probe pins read the probe env from the engine's live
+    /// completion view, so their env lives in the session itself
+    /// (the state fields they used to poke retired with the
+    /// snapshot). Returns the Rc the bridge borrows; callers
+    /// uninstall the bridge at the end of the test.
+    fn probe_shell(path: &str) -> std::rc::Rc<std::cell::RefCell<crate::shell::Shell>> {
+        let mut shell = crate::shell::Shell::new().unwrap();
+        shell.session_mut().variables().set("PATH", path);
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
+        shell
+    }
+
+    fn probe_shell_set(
+        shell: &std::rc::Rc<std::cell::RefCell<crate::shell::Shell>>,
+        name: &str,
+        value: &str,
+    ) {
+        shell
+            .borrow_mut()
+            .session_mut()
+            .variables()
+            .set(name, value);
+    }
+
     /// niubash#574: a command installed mid-session is absent from the
     /// startup command set, but the live probe finds it on PATH once the
     /// memo is invalidated (the `wpm install` hook clears it).
     #[test]
     fn live_probe_renders_mid_session_install_known_after_invalidation() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
         let temp = unique_temp_dir("niubash-highlight-probe");
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        state.lock().unwrap().env_vars =
-            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+        let _shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
@@ -1233,6 +1294,7 @@ mod tests {
             highlighter.style(SyntaxKind::Command)
         );
 
+        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -1240,12 +1302,15 @@ mod tests {
     /// must not re-walk PATH every keystroke (niubash#574 acceptance).
     #[test]
     fn live_probe_memo_prevents_repeated_path_walks() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
         let temp = unique_temp_dir("niubash-highlight-probe-memo");
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        state.lock().unwrap().env_vars =
-            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+        let _shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
@@ -1262,6 +1327,7 @@ mod tests {
         }
         assert_eq!(state.lock().unwrap().command_probe.probe_count(), 1);
 
+        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -1269,12 +1335,15 @@ mod tests {
     /// invalidation — the probe answers what the filesystem says.
     #[test]
     fn live_probe_keeps_gibberish_unknown() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
         let temp = unique_temp_dir("niubash-highlight-probe-gibberish");
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        state.lock().unwrap().env_vars =
-            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+        let _shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
@@ -1289,6 +1358,7 @@ mod tests {
             highlighter.style(SyntaxKind::UnknownToken)
         );
 
+        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -1296,6 +1366,10 @@ mod tests {
     /// through the fingerprint — no explicit clear needed (niubash#574).
     #[test]
     fn live_probe_retires_memo_when_path_or_hash_table_moves() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
         let temp_a = unique_temp_dir("niubash-highlight-probe-fp-a");
         let temp_b = unique_temp_dir("niubash-highlight-probe-fp-b");
         std::fs::create_dir_all(&temp_a).unwrap();
@@ -1303,8 +1377,7 @@ mod tests {
         write_probe_command(&temp_b.join(probe_command_file_name("probe574fp")));
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        state.lock().unwrap().env_vars =
-            HashMap::from([("PATH".to_string(), temp_a.display().to_string())]);
+        let shell = probe_shell(&temp_a.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
@@ -1320,12 +1393,11 @@ mod tests {
 
         // PATH gained the install dir: the fingerprint moved, so the next
         // paint re-probes and finds the command with no explicit clear.
+        // (GAP-4: the fingerprint is the engine's whole-env fingerprint,
+        // so a PATH move — like the hash-table move below — retires the
+        // memo through the same single key.)
         let grown = format!("{};{}", temp_a.display(), temp_b.display());
-        state
-            .lock()
-            .unwrap()
-            .env_vars
-            .insert("PATH".to_string(), grown);
+        probe_shell_set(&shell, "PATH", &grown);
         let styled = highlighter.highlight("probe574fp --help", 0);
         assert_eq!(
             style_for(&styled, "probe574fp"),
@@ -1336,27 +1408,21 @@ mod tests {
         // so the miss is memoized under a new fingerprint, add the command
         // where the new PATH can see it, then flip the serialized table
         // the engine publishes on `hash -r`/`-d`/`-p`.
-        state
-            .lock()
-            .unwrap()
-            .env_vars
-            .insert("PATH".to_string(), temp_a.display().to_string());
+        probe_shell_set(&shell, "PATH", &temp_a.display().to_string());
         let styled = highlighter.highlight("probe574fp --help", 0);
         assert_eq!(
             style_for(&styled, "probe574fp"),
             highlighter.style(SyntaxKind::UnknownToken)
         );
         write_probe_command(&temp_a.join(probe_command_file_name("probe574fp")));
-        state.lock().unwrap().env_vars.insert(
-            "__RUBASH_HASH_TABLE".to_string(),
-            "probe574fp=D:/x$1$1".to_string(),
-        );
+        probe_shell_set(&shell, "__RUBASH_HASH_TABLE", "probe574fp=D:/x$1$1");
         let styled = highlighter.highlight("probe574fp --help", 0);
         assert_eq!(
             style_for(&styled, "probe574fp"),
             highlighter.style(SyntaxKind::Command)
         );
 
+        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp_a);
         let _ = std::fs::remove_dir_all(temp_b);
     }
@@ -1365,12 +1431,15 @@ mod tests {
     /// separator or drive colon stay path-kind candidates, never probes.
     #[test]
     fn live_probe_skips_path_shaped_words() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
         let temp = unique_temp_dir("niubash-highlight-probe-skip");
         std::fs::create_dir_all(&temp).unwrap();
 
         let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("."))));
-        state.lock().unwrap().env_vars =
-            HashMap::from([("PATH".to_string(), temp.display().to_string())]);
+        let _shell = probe_shell(&temp.display().to_string());
 
         let highlighter = NiubashSyntaxHighlighter::new_with_commands_and_state(
             &SyntaxHighlightConfig::default(),
@@ -1385,6 +1454,7 @@ mod tests {
         );
         assert_eq!(state.lock().unwrap().command_probe.probe_count(), 0);
 
+        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp);
     }
 
