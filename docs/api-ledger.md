@@ -452,7 +452,7 @@ the 1.5.0 tiers exist to fix.
 | Family | Items (occurrences) |
 | --- | --- |
 | `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum) |
-| `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
+| `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (0) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
 | `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `format_macro_plain`, `format_variable_plain`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `READLINE_FUNCTIONS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface. The `READLINE_FUNCTIONS` table and the `format_macro_plain` / `format_variable_plain` plain-form formatters (recorded in the 2026-11-01 backfill, see header addendum) are a further exception: niubash's host readline layer calls them directly — the funmap in niubash-runtime's readline_commands module reads the table, and the repl's dump-macros / dump-variables faces format through the pair, over data the gated bind surface loads |
@@ -485,13 +485,13 @@ RFC §3.2 top set it cites is pre-migration history).
 | --- | --- | --- | --- |
 | `get_env` | 18 | `take_exit_jump_pending` | 2 |
 | `set_env` | 10 | `call_function_with_env` | 2 |
-| `resolve_shell_path` | 5 | `env_vars_snapshot` | 2 |
+| `resolve_shell_path` | 0 | `env_vars_snapshot` | 2 |
 | `alias_expansion_enabled` | 4 | `set_shopt_option` | 2 |
 | `take_parse_error` | 4 | `has_compspec` | 2 |
 | `execute_ast` | 4 | `bind_registry_snapshot` | 1 |
-| `resolve_shell_path_from_env` (assoc) | 3 | `set_history_provider` | 1 |
+| `resolve_shell_path_from_env` (assoc) | 0 | `set_history_provider` | 1 |
 | `bind_registry_generation` | 2 | `run_bind_x_command` | 1 |
-| `resolve_shell_path_process_entries_from_env` (assoc) | 2 | `has_function` | 1 |
+| `resolve_shell_path_process_entries_from_env` (assoc) | 0 | `has_function` | 1 |
 | `take_signal_discard_pending` | 2 | `env_vars` | 1 |
 | `run_exit_trap_with_status` | 1 | `close_all_persistent_output_process_substitutions` | 1 |
 | `execute_command` | 1 | `unset_env` | 1 |
@@ -503,16 +503,16 @@ RFC §3.2 top set it cites is pre-migration history).
 Two further non-`Executor` methods are consumed:
 `ShellInvocation::parse` (2) and `WordMetadata::literal` (1).
 
-Staged retirement (niubash#863 GAP-5): the three resolution
-rows above — `resolve_shell_path` (5),
-`resolve_shell_path_from_env` (assoc, 3) and
-`resolve_shell_path_process_entries_from_env` (assoc, 2) —
-and the §2.1 `executor` row's `shell_pwd_display_path` (1)
-are the tier-C forms of the path resolver whose tier-A
-`Session` faces are recorded in §2.3, staged ahead of host
-adoption. These counts zero out when the host lane lands
-and the host's resolution reads move to the Session faces;
-the methods themselves stay `pub` in the engine.
+Retirement landed (niubash#863 GAP-5): the three resolution
+rows above — `resolve_shell_path`,
+`resolve_shell_path_from_env` (assoc) and
+`resolve_shell_path_process_entries_from_env` (assoc) —
+and the §2.1 `executor` row's `shell_pwd_display_path`
+were the tier-C forms of the path resolver whose tier-A
+`Session` faces are recorded in §2.3. The host migration
+moved every resolution read to the Session faces, so
+these counts now read 0; the methods themselves stay
+`pub` in the engine.
 
 Note what the retained set is made of: the bind registry and the
 design-§3.2 AST routes (`execute_ast`, `execute_command`), the
@@ -547,10 +547,10 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::bind_view` | 7 | GAP-3 bind view: the registry snapshot (`BindView` — generation / editing mode / readline variables / removal tombstones / entries with canonical bytes, kind, resolved keymap and GNU dump line); adopted by the GAP-3 host migration — shell binding load/staleness/edit-mode, bind -x lookup, repl dump handlers and keyseq-timeout read the view, and the host's tier-C registry reads plus the `bind_surface.rs` conversion layer are deleted |
 | `Session::completion_view` | 2 | GAP-4 completion view: the completer's live state as one `&self` capture (`CompletionView` — session cwd / the whole variable table in `env_vars_snapshot`'s rendering, attribute pseudo-entries included, sorted by name, with its content fingerprint / function names / open fd numbers); adopted by the GAP-4 host migration — the completer's capture and the highlighter's known-command probe read the view at use time, and the host's `CompletionState` env/function/fd snapshot fields plus their per-line re-synchronization are deleted |
 | `Session::has_function` | 1 | GAP-4b: the `&self` function probe (the executor's own lookup; `StateViews::has_function` is the `&mut`-shaped form); adopted by the GAP-4 host migration — the widget-availability probe reads it live, and the tier-C `executor().has_function(name)` read is deleted |
-| `Session::resolve_shell_path` | 0 | GAP-5 path resolution: the `&self` instance form of the `executor::path` resolver (the executor's own method over the session's live environment); recorded staged ahead of host adoption — the host's tier-C `executor().resolve_shell_path(...)` reads move here when the host lane lands |
-| `Session::resolve_shell_path_from_env` | 0 | GAP-5 associated form: resolution against a caller-supplied environment map, delegating to the same `executor::path` function as the executor's associated form; recorded staged ahead of host adoption |
-| `Session::resolve_shell_path_process_entries_from_env` | 0 | GAP-5 PATH-entry form: one shell PATH entry resolved to its native directories against a caller-supplied environment map, same source as the executor's associated form; recorded staged ahead of host adoption |
-| `Session::shell_pwd_display_path` | 0 | GAP-5 display form: the module function `rubash::executor::shell_pwd_display_path` under a `Session` associated name; recorded staged ahead of host adoption — the host's direct module-function call moves here when the host lane lands |
+| `Session::resolve_shell_path` | 7 | GAP-5 path resolution: the `&self` instance form of the `executor::path` resolver (the executor's own method over the session's live environment); adopted by the GAP-5 host migration — the host's tier-C `executor().resolve_shell_path(...)` reads (the stdin script path, the login profile paths, env-file resolution, the completer's `/tmp` base in both its capture and its per-line sync, the pwd host/display reads) now go through this face |
+| `Session::resolve_shell_path_from_env` | 0 | GAP-5 associated form: resolution against a caller-supplied environment map, delegating to the same `executor::path` function as the executor's associated form; adopted by the GAP-5 host migration as the primitive under the host's `resolve_shell_path_argument` composition family — that family is `#[cfg(test)]`-gated today, so the production count is 0 and the remaining calls (the two family primitives and one test call) are test-module occurrences |
+| `Session::resolve_shell_path_process_entries_from_env` | 2 | GAP-5 PATH-entry form: one shell PATH entry resolved to its native directories against a caller-supplied environment map, same source as the executor's associated form; adopted by the GAP-5 host migration — the host's PATH-entry reads (shell.rs's process-path conversion and syntax_highlighting.rs's PATH-dir read) go through this face |
+| `Session::shell_pwd_display_path` | 1 | GAP-5 display form: the module function `rubash::executor::shell_pwd_display_path` under a `Session` associated name; adopted by the GAP-5 host migration — the host's direct module-function call (the persona pwd display read) moves to this face |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
 | `Session::prepare_line` | 1 | REPL history expansion |
 | `Session::complete` / `complete_detailed` / `has_compspec` | 1 / 0 / 1 | completion bridge (complete_detailed + CompletionOutcome/CompletionPolicy: rubash#2573, consumed by niubash#837) |

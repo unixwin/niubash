@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
-use rubash::executor::Executor;
+use rubash::api::Session;
 
 use crate::autosuggest::parse_style;
 use crate::completion::{command::CommandCompleter, CommandProbe, CompletionState};
@@ -678,7 +678,7 @@ fn env_path_dirs(env_vars: &HashMap<String, String>) -> Vec<PathBuf> {
         .iter()
         .flat_map(|entry| {
             if cfg!(windows) {
-                Executor::resolve_shell_path_process_entries_from_env(entry, env_vars)
+                Session::resolve_shell_path_process_entries_from_env(entry, env_vars)
             } else {
                 vec![PathBuf::from(entry)]
             }
