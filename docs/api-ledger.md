@@ -573,7 +573,7 @@ RFC §3.2 top set it cites is pre-migration history).
 | Method | Calls | Method | Calls |
 | --- | --- | --- | --- |
 | `get_env` | 0 | `take_exit_jump_pending` | 2 |
-| `set_env` | 10 | `call_function_with_env` | 2 |
+| `set_env` | 10 | `call_function_with_env` | 1 |
 | `resolve_shell_path` | 0 | `env_vars_snapshot` | 0 |
 | `alias_expansion_enabled` | 4 | `set_shopt_option` | 2 |
 | `take_parse_error` | 4 | `has_compspec` | 2 |
@@ -618,6 +618,36 @@ as history: the lane found 7 lib-code `get_env` probes, not
 probe, `PS1`, `NIU_TITLE`, and `PWD` twice); the addendum's
 8 is the engine-time survey figure, the 7 here is the
 landed count.
+
+Retirement landed (niubash#863 GAP-7): the completion bridge
+— the thread-local shell lend (`COMPLETION_BRIDGE`, the scoped
+raw-pointer lend `SCOPED_COMPLETION_BRIDGE` with its
+reentrancy flag, and the `install_completion_bridge` /
+`with_completion_bridge` / `uninstall_completion_bridge`
+functions) — is deleted, and its install point and seven
+production reads route through the tier-A attempt guard
+recorded in §2.3 (`Session::begin_completion_attempt`). The
+reads: the completer's capture (the `CompletionView` through
+the guard's `session()`), the compspec gate, the glob face,
+the generation call (`complete_detailed` on the guard), the
+compdef registry and call (`call_function_with_env` on the
+guard — the §2.2 `call_function_with_env` row drops to the
+widget leg alone), and the highlighter's known-command view
+read (one short attempt). Drivers holding `&mut Shell` (the
+probe surface) open the guard directly; the editor's
+completer and highlighter hold the REPL's `Rc<RefCell<Shell>>`
+behind `EditorShellHandle` — the `Send` settlement recorded
+on that type — and open one guard per call through the same
+drivers. Nested completion is live at every depth: the GAP-4
+reentry pin's dark shape is inverted by the GAP-7 pins, and
+the scoped lend's refusal semantics have no successor.
+Survey correction, recorded here so the engine-time figure
+in the header addendum stays intelligible as history: the
+lane found TWO install points, not one — beside the editor
+build in `repl.rs`, the CLI verb (`niu --completion-probe`)
+installed the Rc bridge by hand in `src/main.rs`; it now
+calls the library probe surface, which carries the whole
+contract itself (niubash#831).
 
 Note what the retained set is made of: the bind registry and the
 design-§3.2 AST routes (`execute_ast`, `execute_command`), the
@@ -664,10 +694,10 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::shell_pwd_display_path` | 1 | GAP-5 display form: the module function `rubash::executor::shell_pwd_display_path` under a `Session` associated name; adopted by the GAP-5 host migration — the host's direct module-function call (the persona pwd display read) moves to this face |
 | `Session::environment_full` | 2 | GAP-6 full-table read: the whole variable table in `env_vars_snapshot`'s rendering (attribute pseudo-entries included), sorted by name, through the one rendering shared with `CompletionView`'s `env` component; adopted by the GAP-6 host migration — the process-PATH synchronization's conversion context and the `NIU_SEGMENT_` prompt mirror read the full table through this face (the mirror's name filter cannot match an attribute pseudo-entry key), and the §2.2 `env_vars` / `env_vars_snapshot` rows retire to 0; the new GAP-6 routing pin reads this face once from the test module |
 | `Session::variable_value` | 7 | GAP-6 single-value probe: the stored value of one variable — the `&self` form of the executor's raw table read (`get_env`), deliberately not the `$name` expansion read (`resolved_value` keeps dynamic getters, nameref resolution and the typed-cell layer; the GAP-6 consumer pins record both readings per shape); adopted by the GAP-6 host migration — the 7 lib-code `get_env` seam reads in `&self` host methods (`THIS_SH`, `__RUBASH_POSIX_MODE`, the env-file expansion probe, `PS1`, `NIU_TITLE`, `PWD` twice) move to this face, and the §2.2 `get_env` row retires to 0; the new GAP-6 routing pin reads this face twice from the test module |
-| `Session::begin_completion_attempt` | 0 | GAP-7 guard opener: opens one `CompletionAttempt` per completion attempt from the `&mut Session` the host holds; the guard drives the attempt's execution faces (`complete_detailed`, `call_function_with_env` for the widget/compdef callbacks) and lends `&Session` reads (`session()`) live at every nesting depth. Recorded staged ahead of host adoption — the host lane adopts it as the attempt object replacing the thread-local lend (one install point, seven reads); the new GAP-7 guard pins open this face three times from the test module |
+| `Session::begin_completion_attempt` | 3 | GAP-7 guard opener: opens one `CompletionAttempt` per completion attempt from the `&mut Session` the host holds; the guard drives the attempt's execution faces (`complete_detailed`, `call_function_with_env` for the widget/compdef callbacks) and lends `&Session` reads (`session()`) live at every nesting depth. Adopted by the GAP-7 host migration as the attempt object replacing the thread-local lend (one install point, seven reads — see the GAP-7 retirement paragraph in §2.2): the two attempt drivers in `Shell` (`drive_completion` / `drive_completion_specific`, serving the probe surface and, through `EditorShellHandle`, the editor flavor) and the highlighter's short view attempt open this face in production; the GAP-7 pins and the reshaped compdef test open it six more times from test modules |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
 | `Session::prepare_line` | 1 | REPL history expansion |
-| `Session::complete` / `complete_detailed` / `has_compspec` | 1 / 0 / 1 | completion bridge (complete_detailed + CompletionOutcome/CompletionPolicy: rubash#2573, consumed by niubash#837) |
+| `Session::complete` / `complete_detailed` / `has_compspec` | 0 / 0 / 1 | GAP-7 (niubash#863): the completion bridge this row used to name is retired — no direct `Session::complete` / `complete_detailed` calls remain; the generation call routes through the completion attempt's `complete_detailed` (counted under `Session::begin_completion_attempt` above) and the compspec gate reads through the guard's `session()` lend. `CompletionOutcome`/`CompletionPolicy` (rubash#2573) reach the host as the guard's outcome, consumed by niubash#837 |
 | `Session::aliases` / `functions` | 1 / 2 | snapshots for completion state |
 | `Session::close` | 1 | the one-shot finish funnel |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
