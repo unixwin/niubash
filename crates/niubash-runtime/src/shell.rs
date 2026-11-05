@@ -11295,7 +11295,7 @@ complete -F _envtooldyn_hook envtooldyn
         shell
     }
 
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
+    pub(super) fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -11382,7 +11382,7 @@ complete -F _envtooldyn_hook envtooldyn
 
 #[cfg(test)]
 mod invocation_name_tests {
-    use super::tests::{test_shell, CwdGuard};
+    use super::tests::{test_shell, unique_temp_dir, CwdGuard};
     use super::{default_script_name_from, HookConfig};
     use crate::test_support::PROCESS_STATE_LOCK;
 
