@@ -1022,7 +1022,7 @@ impl Shell {
         }
 
         let script_name = decode_to_visible_text(&cmd.words[1]);
-        let script_path = self.executor().resolve_shell_path(&script_name);
+        let script_path = self.session().resolve_shell_path(&script_name);
         if !script_path.is_file() {
             return None;
         }
@@ -1992,7 +1992,7 @@ impl Shell {
     /// skipped silently (open_startup_file's failed fopen is not an error).
     fn login_profile_paths(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        let system_profile = self.executor().resolve_shell_path("/etc/profile");
+        let system_profile = self.session().resolve_shell_path("/etc/profile");
         if system_profile.exists() {
             files.push(system_profile);
         }
@@ -2538,7 +2538,7 @@ impl Shell {
         } else {
             PathBuf::from(shell_path_to_host_path(&expanded))
         };
-        self.executor().resolve_shell_path(&path.to_string_lossy())
+        self.session().resolve_shell_path(&path.to_string_lossy())
     }
 
     /// Expand an env-file value (NIU_ENV / BASH_ENV / $ENV) the way GNU
@@ -3751,7 +3751,7 @@ impl Shell {
         CompletionCapture {
             view,
             current_dir,
-            tmp_base: self.executor().resolve_shell_path("/tmp"),
+            tmp_base: self.session().resolve_shell_path("/tmp"),
             behavior: self.completion_behavior,
             aliases: self.aliases.keys().cloned().collect(),
         }
@@ -3781,7 +3781,7 @@ impl Shell {
         // seam, so state-carrying readers follow a session
         // `TMPDIR=/x` on the very next line. (The completer itself
         // resolves it live at completion time.)
-        let tmp_base = self.executor().resolve_shell_path("/tmp");
+        let tmp_base = self.session().resolve_shell_path("/tmp");
         // niubash#833: a poisoned lock (a panic while a writer held
         // it) must not skip this update forever — recover the guard
         // and refresh as usual.
@@ -3874,7 +3874,7 @@ impl Shell {
 
     fn executor_pwd_host_path(&self) -> Option<PathBuf> {
         let pwd = self.executor().get_env("PWD")?;
-        let host_path = self.executor().resolve_shell_path(pwd);
+        let host_path = self.session().resolve_shell_path(pwd);
         host_path.is_dir().then_some(host_path)
     }
 
@@ -3888,7 +3888,7 @@ impl Shell {
     /// `/...` spelling; native drive spelling stays a spawn-boundary concern
     /// (process cwd, child argv, PATH translation).
     fn persona_pwd_from_host_path(&self, host_path: &str) -> String {
-        rubash::executor::shell_pwd_display_path(&host_path_to_shell_path_with_root(
+        Session::shell_pwd_display_path(&host_path_to_shell_path_with_root(
             host_path,
             self.shell_root.as_deref(),
         ))
@@ -3924,7 +3924,7 @@ impl Shell {
                 return;
             }
         };
-        let host_pwd = self.executor_mut().resolve_shell_path(&pwd);
+        let host_pwd = self.session().resolve_shell_path(&pwd);
         let target = host_pwd.clone();
         if !target.is_dir() {
             let cwd = std::env::current_dir().unwrap_or_default();
@@ -6128,13 +6128,13 @@ fn resolve_shell_path_argument_with_env(
         return path;
     }
 
-    let candidate = Executor::resolve_shell_path_from_env(arg, env);
+    let candidate = Session::resolve_shell_path_from_env(arg, env);
     let normalized = arg.replace('\\', "/");
     if candidate.is_absolute() || is_windows_drive_path(&normalized) {
         return candidate;
     }
 
-    Executor::resolve_shell_path_from_env(pwd, env).join(candidate)
+    Session::resolve_shell_path_from_env(pwd, env).join(candidate)
 }
 
 #[cfg(test)]
@@ -6247,7 +6247,7 @@ fn shell_path_entry_to_process_paths(
 ) -> Vec<String> {
     if cfg!(windows) {
         let paths = env
-            .map(|env| Executor::resolve_shell_path_process_entries_from_env(entry, env))
+            .map(|env| Session::resolve_shell_path_process_entries_from_env(entry, env))
             .unwrap_or_else(|| vec![PathBuf::from(shell_path_to_host_path(entry))]);
         paths
             .into_iter()
@@ -8788,7 +8788,7 @@ complete -F _envtooldyn_hook envtooldyn
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(
             state.tmp_base,
-            shell.executor().resolve_shell_path("/tmp"),
+            shell.session().resolve_shell_path("/tmp"),
             "the host-carried refresh must land despite the poison"
         );
         drop(state);
@@ -9161,7 +9161,7 @@ complete -F _envtooldyn_hook envtooldyn
             )
         );
         assert_eq!(
-            Executor::resolve_shell_path_from_env("/etc", &env),
+            Session::resolve_shell_path_from_env("/etc", &env),
             configured.join("etc")
         );
         assert_eq!(
@@ -11802,5 +11802,68 @@ T831_PROBE_VAR=hello
         shell.update_completion_state();
         let state = shell.completion_state.lock().unwrap();
         assert_eq!(state.tmp_base, std::path::PathBuf::from("/tmp"));
+    }
+
+    /// niubash#863 GAP-5: the host's path reads route through the
+    /// Session faces — the completer's `/tmp` answer (the GAP-4
+    /// capture and the completion-state sync) and the absolute
+    /// script/profile shapes are the session's own resolution of
+    /// its live state, not a tier-C executor read and not a
+    /// process-global. The values below are steered purely by
+    /// session assignments the process environment never carried:
+    /// on Windows a session TMPDIR moves both `/tmp` reads and a
+    /// session shell root moves the profile path; off Windows a
+    /// session TMPDIR must not bend the engine's answer (the host
+    /// invents no resolution of its own either way).
+    #[test]
+    fn gap5_host_path_reads_route_through_the_session_face() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shell = test_shell(HookConfig::default());
+        let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
+
+        #[cfg(windows)]
+        {
+            let root = unique_temp_dir("gap5-session-root");
+            let session_tmp = root.join("session-temp");
+            std::fs::create_dir_all(&session_tmp).unwrap();
+            shell
+                .execute_interactive_line(&format!("__RUBASH_SHELL_ROOT={}", slash(&root)))
+                .unwrap();
+            // The script/profile shape follows the session root.
+            assert_eq!(
+                shell.session().resolve_shell_path("/etc/profile"),
+                root.join("etc").join("profile")
+            );
+            shell
+                .execute_interactive_line(&format!("TMPDIR={}", slash(&session_tmp)))
+                .unwrap();
+            // Both `/tmp` host reads follow the session TMPDIR
+            // through the Session face.
+            assert_eq!(shell.session().resolve_shell_path("/tmp"), session_tmp);
+            assert_eq!(shell.capture_completion_inputs().tmp_base, session_tmp);
+            shell.update_completion_state();
+            let state = shell.completion_state.lock().unwrap();
+            assert_eq!(state.tmp_base, session_tmp);
+            drop(state);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        #[cfg(not(windows))]
+        {
+            shell
+                .execute_interactive_line("TMPDIR=/definitely/not/the/base")
+                .unwrap();
+            assert_eq!(
+                shell.session().resolve_shell_path("/tmp"),
+                std::path::PathBuf::from("/tmp")
+            );
+            assert_eq!(
+                shell.capture_completion_inputs().tmp_base,
+                std::path::PathBuf::from("/tmp")
+            );
+            shell.update_completion_state();
+            let state = shell.completion_state.lock().unwrap();
+            assert_eq!(state.tmp_base, std::path::PathBuf::from("/tmp"));
+        }
     }
 }

@@ -55,14 +55,14 @@ pub(crate) fn shell_path_to_host_path(value: &str) -> String {
 /// completion walk and the syntax highlighter used to carry a private
 /// copy each, and both read the *process* environment's temp dir for
 /// the `/tmp` arm, so a session-level `TMPDIR=/x` never moved them —
-/// while the engine's own resolution (`Executor::resolve_shell_path`)
+/// while the engine's own resolution (`Session::resolve_shell_path`)
 /// reads the executor's session env and follows the assignment
 /// immediately. There is now exactly this definition; both readers
 /// call it and no third copy may grow.
 ///
 /// `tmp_base` is the backing directory for the session's `/tmp`: the
 /// engine-resolved value the host syncs out of the Session (Shell's
-/// completion-state sync stores `Executor::resolve_shell_path("/tmp")`
+/// completion-state sync stores `Session::resolve_shell_path("/tmp")`
 /// per line). Callers without session state pass
 /// `std::env::temp_dir()` — the process environment is the fallback
 /// only for the not-yet-synced/stateless case, never the source once a
