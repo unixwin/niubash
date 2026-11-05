@@ -23,7 +23,9 @@ use rubash::{
     TokenKind,
 };
 
-use crate::completion::{CompletionBehavior, CompletionCapture, CompletionState, NiubashCompleter};
+use crate::completion::{
+    CompletionBehavior, CompletionHostFaces, CompletionState, NiubashCompleter,
+};
 use crate::config::{
     load as load_config, AutosuggestConfig, CommandNotFoundHint, EditorMode, HookConfig,
     MenuConfig, NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
@@ -66,94 +68,88 @@ pub struct WidgetOutcome {
     pub accept: bool,
 }
 
-thread_local! {
-    /// Interactive-REPL bridge letting the completer run shell functions in
-    /// the engine during completion. reedline completers must be `Send`, so
-    /// the shell is reached through this main-thread registry instead of a
-    /// completer field. Installed by `build_line_editor`, main thread only.
-    static COMPLETION_BRIDGE: RefCell<Option<Rc<RefCell<Shell>>>> =
-        const { RefCell::new(None) };
-    /// niubash#831: scoped bridge for shells that are not wrapped in an
-    /// `Rc<RefCell<Shell>>` — the library probe surface
-    /// ([`Shell::completion_probe`]) holds a plain `&mut Shell`, so for
-    /// the duration of one probe call it lends that borrow to the
-    /// completer through this raw pointer. The pointer is installed by
-    /// [`ScopedCompletionBridge`], is only dereferenced on the installing
-    /// thread while the guard lives, and the ACTIVE flag makes a nested
-    /// bridge call (a completion triggered from inside a bridge call)
-    /// observe "no bridge" instead of aliasing the live `&mut`.
-    static SCOPED_COMPLETION_BRIDGE: RefCell<Option<*mut Shell>> =
-        const { RefCell::new(None) };
-    static SCOPED_COMPLETION_BRIDGE_ACTIVE: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-}
-
-/// RAII guard lending a plain `&mut Shell` to the completion bridge for
-/// one scoped call (niubash#831; see `SCOPED_COMPLETION_BRIDGE`).
-struct ScopedCompletionBridge {
-    previous: Option<*mut Shell>,
-}
-
-impl ScopedCompletionBridge {
-    fn install(shell: *mut Shell) -> Self {
-        let previous = SCOPED_COMPLETION_BRIDGE.with(|cell| cell.borrow_mut().replace(shell));
-        Self { previous }
-    }
-}
-
-impl Drop for ScopedCompletionBridge {
-    fn drop(&mut self) {
-        SCOPED_COMPLETION_BRIDGE.with(|cell| {
-            *cell.borrow_mut() = self.previous;
-        });
-    }
-}
-
-/// Install the interactive shell bridge for shell-function completions
-/// (`NIU_COMPDEFS`). Replaces any previous bridge for this thread.
-pub fn install_completion_bridge(shell: &Rc<RefCell<Shell>>) {
-    COMPLETION_BRIDGE.with(|cell| {
-        *cell.borrow_mut() = Some(shell.clone());
-    });
-}
-
-/// Remove the completion bridge installed on this thread, dropping the
-/// bridged Shell if the caller holds no other `Rc` clone.
+/// GAP-7 (niubash#863): the editor callbacks' handle on the REPL's
+/// shell — the structural settlement of the completion `Send`
+/// question, replacing the retired thread-local bridge
+/// (`COMPLETION_BRIDGE` / `SCOPED_COMPLETION_BRIDGE`).
 ///
-/// Test-only: the bridge is thread-local, so without an explicit
-/// uninstall the Shell outlives the test function and is dropped at
-/// thread teardown — after any test-local state restore has already
-/// run (see `test_support::ProcessEnvRestore`).
-#[cfg(test)]
-pub(crate) fn uninstall_completion_bridge() {
-    COMPLETION_BRIDGE.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
+/// reedline's completion callbacks are invoked synchronously inside
+/// `Reedline::read_line`, on the REPL's main thread, while the
+/// shell's `Rc<RefCell<Shell>>` borrow lives in the REPL caller
+/// frame — and every callback slot is `Send`-bound
+/// (`Reedline::with_completer` takes `Box<dyn Completer + Send>`,
+/// the menus carry `Box<dyn Completer + Send>` too, and
+/// `Highlighter: Send`), while `Session` is deliberately `!Send`
+/// (its `PhantomData<Rc<()>>` marker) and `Shell` carries `Rc`
+/// state. The callbacks therefore cannot own or borrow the session
+/// across the `read_line` call, and ruline exposes no hook that
+/// would let the host service a completion from outside the read.
+/// What a callback CAN do is hold the REPL's own
+/// `Rc<RefCell<Shell>>` and, at the moment it is invoked (when the
+/// session legitimately lives on this thread), borrow it and open
+/// one `Session::begin_completion_attempt` guard per completion.
+/// This handle is that `Rc`, wrapped for the `Send` bound.
+///
+/// The handle is never `Sync`: a completer or highlighter is only
+/// ever reached through `&mut` / `&` calls reedline makes on the
+/// thread driving the editor, never shared between threads.
+///
+/// SAFETY (the `unsafe impl Send` below): the handle records the
+/// thread that created it, and every access asserts the current
+/// thread is that home thread, so a violation of the confinement
+/// invariant panics instead of racing an `Rc` refcount. The
+/// invariant itself is the REPL's construction: handles are
+/// created only in `build_line_editor` (and test drivers) from the
+/// REPL loop's own `Rc`; the editor receiving the callbacks is
+/// created, driven (`read_line`) and dropped on that same thread;
+/// and no niubash code moves a `Reedline`, completer, menu or
+/// highlighter to another thread — background workers (git prompt
+/// cache, segment refresh, idle repaint) receive only `Arc`-shared
+/// state, never the editor. The wrapped `Rc` therefore never
+/// leaves its home thread and its refcount is only touched there.
+#[derive(Clone)]
+pub(crate) struct EditorShellHandle {
+    shell: Rc<RefCell<Shell>>,
+    home: std::thread::ThreadId,
 }
 
-/// Run `f` with mutable access to the bridged shell, or `None` when no
-/// bridge is installed on this thread.
-pub(crate) fn with_completion_bridge<R>(f: impl FnOnce(&mut Shell) -> R) -> Option<R> {
-    if let Some(rc) = COMPLETION_BRIDGE.with(|cell| cell.borrow().as_ref().cloned()) {
-        let mut shell = rc.borrow_mut();
-        let result = f(&mut shell);
-        drop(shell);
-        return Some(result);
+// SAFETY: see the type documentation — the handle is confined to
+// its recorded home thread by an assertion on every access, and
+// the editor that carries it never leaves that thread.
+unsafe impl Send for EditorShellHandle {}
+
+impl EditorShellHandle {
+    pub(crate) fn new(shell: Rc<RefCell<Shell>>) -> Self {
+        Self {
+            shell,
+            home: std::thread::current().id(),
+        }
     }
-    // niubash#831: the scoped bridge a `Shell::completion_probe` call
-    // installed for a shell that lives outside an `Rc`. Re-entrant use
-    // is refused (returns `None`) rather than aliasing the live borrow.
-    let ptr = SCOPED_COMPLETION_BRIDGE.with(|cell| *cell.borrow())?;
-    if SCOPED_COMPLETION_BRIDGE_ACTIVE.with(|active| active.replace(true)) {
-        return None;
+
+    fn assert_home_thread(&self) {
+        assert_eq!(
+            std::thread::current().id(),
+            self.home,
+            "editor shell handle used off its home thread: the handle must stay \
+             on the thread that built the line editor"
+        );
     }
-    // SAFETY: the guard that installed `ptr` is alive for the whole
-    // probe call this thread is inside, the pointee outlives the guard,
-    // and the ACTIVE flag above guarantees this is the only live
-    // `&mut Shell` derived from the pointer.
-    let result = unsafe { f(&mut *ptr) };
-    SCOPED_COMPLETION_BRIDGE_ACTIVE.with(|active| active.set(false));
-    Some(result)
+
+    /// Run `f` with the shell mutably borrowed — the editor
+    /// flavor's entry into the attempt drivers
+    /// (`Shell::drive_completion` and siblings).
+    pub(crate) fn with_shell_mut<R>(&self, f: impl FnOnce(&mut Shell) -> R) -> R {
+        self.assert_home_thread();
+        f(&mut self.shell.borrow_mut())
+    }
+
+    /// Borrow the shell mutably for one attempt-scoped read (the
+    /// highlighter's live-view read opens a short attempt on this
+    /// borrow).
+    pub(crate) fn borrow_mut(&self) -> std::cell::RefMut<'_, Shell> {
+        self.assert_home_thread();
+        self.shell.borrow_mut()
+    }
 }
 
 /// Top-level shell state.
@@ -3453,56 +3449,6 @@ impl Shell {
         }
     }
 
-    /// Run a shell-function completion (`compdef`) and collect its
-    /// candidates.
-    ///
-    /// The function sees the command line through `NIU_COMP_WORDS` (space
-    /// joined) and `NIU_COMP_CWORD` (bash COMP_CWORD semantics). It writes
-    /// back `NIU_COMP_RESULT` with one candidate per line, shaped
-    /// `value` or `value<TAB>description`. Compdef functions must not print
-    /// to stdout: completion runs while the line editor owns the terminal.
-    /// Output variables are unset again before returning.
-    pub fn run_compdef_function(
-        &mut self,
-        function: &str,
-        words: &[String],
-        cword: usize,
-    ) -> Vec<(String, Option<String>)> {
-        let joined = words.join(" ");
-        if let Err(err) = self.session_mut().call_function_with_env(
-            function,
-            std::iter::empty::<String>(),
-            [
-                ("NIU_COMP_WORDS", joined.as_str()),
-                ("NIU_COMP_CWORD", cword.to_string().as_str()),
-            ],
-        ) {
-            log::warn!("completion function '{}' failed: {}", function, err);
-        }
-
-        let result = self
-            .session_mut()
-            .variables()
-            .resolved_value("NIU_COMP_RESULT");
-        self.session_mut().variables().unset("NIU_COMP_WORDS");
-        self.session_mut().variables().unset("NIU_COMP_CWORD");
-        self.session_mut().variables().unset("NIU_COMP_RESULT");
-
-        result
-            .unwrap_or_default()
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| match line.split_once('\t') {
-                Some((value, description)) => (
-                    value.trim().to_string(),
-                    Some(description.trim().to_string()),
-                ),
-                None => (line.to_string(), None),
-            })
-            .collect()
-    }
-
     /// Run a shell-function widget and collect its editor outcome.
     ///
     /// The function sees the current editor state through `NIU_WIDGET_BUFFER`
@@ -3730,15 +3676,16 @@ impl Shell {
         }
     }
 
-    /// GAP-4 (niubash#863): one live capture of everything a
-    /// completion call reads, for the completer's bridge read. The
-    /// engine-owned faces come from `Session::completion_view`;
-    /// the host-spelled faces are the current directory in host
-    /// form (the view's cwd is physical), the `/tmp` base through
-    /// the engine resolver (GAP-5's face — deliberately NOT in the
-    /// view), the resolved behavior, and the host's alias names.
-    pub(crate) fn capture_completion_inputs(&self) -> CompletionCapture {
-        let view = self.session().completion_view();
+    /// GAP-7 (niubash#863): the host-spelled faces of one
+    /// completion call, captured before the attempt opens (the
+    /// GAP-4 capture's host half; its engine half — the
+    /// `Session::completion_view` — is now read through the open
+    /// attempt). The current directory in host form (the view's
+    /// cwd is physical), the `/tmp` base through the engine
+    /// resolver (GAP-5's face — deliberately NOT in the view), the
+    /// resolved behavior, the host's alias names, and the compdef
+    /// registry.
+    pub(crate) fn completion_host_faces(&self) -> CompletionHostFaces {
         let current_dir = self
             .executor_pwd_host_path()
             .or_else(|| std::env::current_dir().ok())
@@ -3749,13 +3696,57 @@ impl Shell {
                     .unwrap_or_else(|e| e.into_inner());
                 fallback_recorded_dir(&state.current_dir)
             });
-        CompletionCapture {
-            view,
+        CompletionHostFaces {
             current_dir,
             tmp_base: self.session().resolve_shell_path("/tmp"),
             behavior: self.completion_behavior,
             aliases: self.aliases.keys().cloned().collect(),
+            compdefs: self.compdefs.clone(),
         }
+    }
+
+    /// GAP-7 (niubash#863): drive one ordinary completion through
+    /// a single completion attempt on this shell — capture the
+    /// host faces, open the guard, run the completer through it,
+    /// and clear the compdef result channel once the attempt has
+    /// dropped (the guard exposes no post-call mutation face, so
+    /// `NIU_COMP_RESULT` is unset here, before any later command
+    /// can observe it; the retired host method unset it inside the
+    /// call). Every driver that holds `&mut Shell` — the probe
+    /// surface, the editor flavor through its handle — funnels
+    /// through here, so the attempt discipline lives in one place.
+    pub(crate) fn drive_completion(
+        &mut self,
+        completer: &mut NiubashCompleter,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Vec<reedline::Suggestion> {
+        let faces = self.completion_host_faces();
+        let suggestions = {
+            let mut attempt = self.session_mut().begin_completion_attempt();
+            completer.complete_with_attempt(&mut attempt, &faces, input, cursor_pos)
+        };
+        self.session_mut().variables().unset("NIU_COMP_RESULT");
+        suggestions
+    }
+
+    /// GAP-7 (niubash#863): [`Self::drive_completion`] for one
+    /// context-specific completion (`complete-command` and
+    /// siblings).
+    pub(crate) fn drive_completion_specific(
+        &mut self,
+        completer: &mut NiubashCompleter,
+        mode: crate::completion::SpecificCompletion,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Vec<reedline::Suggestion> {
+        let faces = self.completion_host_faces();
+        let suggestions = {
+            let mut attempt = self.session_mut().begin_completion_attempt();
+            completer.complete_specific_with_attempt(&mut attempt, &faces, mode, input, cursor_pos)
+        };
+        self.session_mut().variables().unset("NIU_COMP_RESULT");
+        suggestions
     }
 
     /// Refresh the host-carried completion faces from the current
@@ -3766,7 +3757,7 @@ impl Shell {
     /// `Session::completion_view`. What remains is host-owned:
     /// the resolved behavior (niubash#840), the alias names, the
     /// `/tmp` base (niubash#627 G2), and the host-spelled current
-    /// directory (the bridge-less fallback's read).
+    /// directory (the attempt-less fallback's read).
     pub fn update_completion_state(&self) {
         // One-shot shells have no REPL that reads completion state;
         // the refresh would be pure startup overhead.
@@ -3816,16 +3807,24 @@ impl Shell {
     /// agent diagnostics; it avoids trying to drive reedline through a TTY.
     ///
     /// niubash#831: the probe mirrors the REPL sequence exactly — the
-    /// rc-declared `NIU_COMPDEFS` are (re)loaded and the completion
-    /// bridge is installed before the completer runs, and the state
-    /// sync runs even on one-shot shells. Before this, the library
-    /// probe had neither: `with_completion_bridge` returned `None`, so
-    /// `has_compspec` collapsed to `false`, the path fallback was not
-    /// suppressed, and the probe returned candidates exactly where the
-    /// REPL showed zero (the surface mismatch that made a probe "work"
+    /// rc-declared `NIU_COMPDEFS` are (re)loaded before the completer
+    /// runs, and the state sync runs even on one-shot shells. Before
+    /// this, the library probe had neither: the compspec gate
+    /// collapsed to `false`, the path fallback was not suppressed,
+    /// and the probe returned candidates exactly where the REPL
+    /// showed zero (the surface mismatch that made a probe "work"
     /// while the REPL was broken during the #828 diagnosis). The CLI
-    /// verb (`niu --completion-probe`) already mirrored the REPL by
-    /// hand; the library surface now carries the same contract itself.
+    /// verb (`niu --completion-probe`) calls this surface; the
+    /// library carries the whole contract itself.
+    ///
+    /// GAP-7 (niubash#863): the completer runs through
+    /// [`Self::drive_completion`] — one completion attempt opened
+    /// from this `&mut Shell`, with candidate generation re-entering
+    /// the engine through the guard (compspec gate,
+    /// `complete_detailed`, compdef hooks), exactly as at a live
+    /// Tab. The scoped raw-pointer bridge that used to lend this
+    /// borrow to the completer is retired with the rest of the
+    /// thread-local machinery.
     pub fn completion_probe(&mut self, input: &str, cursor_pos: usize) -> Vec<String> {
         self.load_user_compdefs();
         // niubash#831: the refresh runs even on one-shot shells —
@@ -3833,20 +3832,12 @@ impl Shell {
         // the host faces must not silently vanish from exactly
         // the surface agents diagnose completion through. (The
         // engine-owned candidates come from the live view the
-        // scoped bridge below serves, not from this refresh.)
+        // attempt serves, not from this refresh.)
         self.sync_completion_state();
         let state = self.completion_state.clone();
-        // Lend this shell to the completer through the scoped bridge
-        // for the duration of the call: candidate generation re-enters
-        // the engine through the bridge (compspec gate, `Session::
-        // complete`, compdef hooks), exactly as at a live Tab. When an
-        // Rc bridge is already installed on this thread it wins inside
-        // `with_completion_bridge` and the scoped lend is inert.
-        let _bridge = ScopedCompletionBridge::install(self as *mut Shell);
         let mut completer = NiubashCompleter::new(state);
         let cursor_pos = cursor_pos.min(input.len());
-        completer
-            .complete(input, cursor_pos)
+        self.drive_completion(&mut completer, input, cursor_pos)
             .into_iter()
             .map(|suggestion| suggestion.value)
             .collect()
@@ -7972,8 +7963,22 @@ niu_git_comp() {
         assert_eq!(shell.compdefs[0].0, "git");
         assert_eq!(shell.compdefs[0].1, "niu_git_comp");
 
-        let candidates =
-            shell.run_compdef_function("niu_git_comp", &["git".to_string(), "co".to_string()], 1);
+        // GAP-7 (niubash#863): the compdef call runs through one
+        // completion attempt's function face (the retired
+        // `Shell::run_compdef_function`'s guard form), and the
+        // result channel is unset once the attempt has dropped —
+        // the driver-side cleanup `Shell::drive_completion`
+        // performs for the pipeline.
+        let candidates = {
+            let mut attempt = shell.session_mut().begin_completion_attempt();
+            crate::completion::completer::run_compdef_through_attempt(
+                &mut attempt,
+                "niu_git_comp",
+                &["git".to_string(), "co".to_string()],
+                1,
+            )
+        };
+        shell.session_mut().variables().unset("NIU_COMP_RESULT");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, "w:git co|c:1");
         assert_eq!(candidates[0].1, None);
@@ -11507,18 +11512,21 @@ mod invocation_name_tests {
     }
 
     /// niubash#831: the library probe surface and the REPL completer
-    /// surface agree over a compspec matrix — same bridge, same
-    /// compdefs, same state. The `-F` leg is the #828 shape: the hook
-    /// yields an empty COMPREPLY, so both surfaces must return zero
-    /// candidates even though a matching file sits in the cwd (the
-    /// pre-fix probe had no bridge, `has_compspec` collapsed to false,
-    /// and the path fallback served the file the REPL suppressed).
+    /// surface agree over a compspec matrix — same attempt drivers,
+    /// same compdefs, same state. The `-F` leg is the #828 shape: the
+    /// hook yields an empty COMPREPLY, so both surfaces must return
+    /// zero candidates even though a matching file sits in the cwd
+    /// (the pre-fix probe had no engine source, `has_compspec`
+    /// collapsed to false, and the path fallback served the file the
+    /// REPL suppressed). GAP-7 (niubash#863): the REPL surface is a
+    /// completer carrying the shell handle; the probe drives its own
+    /// attempt from `&mut Shell` — two drivers, one guard contract.
     #[test]
     fn issue831_completion_probe_matches_repl_completer() {
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        use super::{install_completion_bridge, uninstall_completion_bridge, NiubashCompleter};
+        use super::NiubashCompleter;
 
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
@@ -11558,15 +11566,27 @@ T831_PROBE_VAR=hello
         shell.load_user_compdefs();
 
         let shell = Rc::new(RefCell::new(shell));
-        install_completion_bridge(&shell);
         shell.borrow().update_completion_state();
-        let repl_values = |input: &str| -> Vec<String> {
-            let mut completer = NiubashCompleter::new(shell.borrow().completion_state.clone());
-            completer
-                .complete(input, input.len())
-                .into_iter()
-                .map(|suggestion| suggestion.value)
-                .collect()
+        let repl: Vec<Vec<String>> = {
+            let repl_values = |input: &str| -> Vec<String> {
+                let mut completer = NiubashCompleter::with_shell(
+                    shell.borrow().completion_state.clone(),
+                    shell.clone(),
+                );
+                completer
+                    .complete(input, input.len())
+                    .into_iter()
+                    .map(|suggestion| suggestion.value)
+                    .collect()
+            };
+            let matrix = [
+                "t831word a",
+                "t831dyn al",
+                "t831def ",
+                "echo $T831_PROBE_V",
+                "t831wo",
+            ];
+            matrix.iter().map(|input| repl_values(input)).collect()
         };
         let matrix = [
             "t831word a",
@@ -11575,10 +11595,8 @@ T831_PROBE_VAR=hello
             "echo $T831_PROBE_V",
             "t831wo",
         ];
-        let repl: Vec<Vec<String>> = matrix.iter().map(|input| repl_values(input)).collect();
-        uninstall_completion_bridge();
         let mut shell = Rc::try_unwrap(shell)
-            .unwrap_or_else(|_| panic!("bridge uninstalled; shell Rc must be unique"))
+            .unwrap_or_else(|_| panic!("completers dropped; shell Rc must be unique"))
             .into_inner();
         // Prove the probe (re)loads compdefs itself: without the fix
         // this reset leaves the compdef leg with no function to run.
@@ -11612,67 +11630,308 @@ T831_PROBE_VAR=hello
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    /// GAP-4 (niubash#863): what a completer invoked INSIDE a
-    /// scoped-bridge call observes. The scoped bridge refuses
-    /// re-entrant bridge use (the ACTIVE flag), so a nested
-    /// completer's bridge-dependent faces (compspec gate, glob,
-    /// engine completion) get `None`.
-    ///
-    /// Pre-migration probe (run on master 70c2df82 before this
-    /// lane's edits): the nested completer DID serve variable and
-    /// function candidates — from the last synced snapshot, the
-    /// one read the bridge refusal did not gate. With the snapshot
-    /// retired, the nested completer's engine-owned inputs are
-    /// empty, consistent with every other bridge-dependent face in
-    /// that shape. This pin asserts the post-migration shape; the
-    /// lane REPORT carries the pre-migration evidence and flags
-    /// the shape for captain adjudication.
+    /// GAP-7 (niubash#863): the host's completion reads route
+    /// through the attempt guard, on every driver surface. The
+    /// values below are steered purely by session state defined
+    /// AFTER the last state sync (and, for the control, never
+    /// synced at all): a variable, a function, a `-W` compspec and
+    /// a compdef must all serve through (a) the editor flavor
+    /// (completer carrying the shell handle), (b) the probe
+    /// surface, and (c) an explicitly opened attempt — while a
+    /// shell-less completer over the same shared state serves
+    /// none of them, proving the candidates come from the guard
+    /// and not from a shadow source.
     #[test]
-    fn gap4_reentry_nested_completer_has_no_engine_source() {
-        use super::{with_completion_bridge, NiubashCompleter, ScopedCompletionBridge};
+    fn gap7_host_reads_route_through_the_attempt_guard() {
+        use super::NiubashCompleter;
+        use std::cell::RefCell;
+        use std::rc::Rc;
 
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
         shell
-            .execute_interactive_line("GAP4REENTRY_VAR=present")
+            .execute_script(
+                r#"
+GAP7_ROUTE_VAR=present
+gap7routefn() { true; }
+complete -W 'gap7wordone gap7wordtwo' gap7cmd
+gap7comp() { NIU_COMP_RESULT="gap7defone"; }
+NIU_COMPDEFS="gap7def:gap7comp"
+"#,
+            )
             .unwrap();
-        shell
-            .execute_interactive_line("gap4reentryfn() { true; }")
-            .unwrap();
-        shell.update_completion_state();
+        shell.load_user_compdefs();
+        // Deliberately NO update_completion_state after the
+        // definitions: whatever serves these candidates read the
+        // live session, not the shared state's snapshot fields.
         let state = shell.completion_state.clone();
-        let _bridge = ScopedCompletionBridge::install(&raw mut shell);
-        let (var_hit, fn_hit) = with_completion_bridge(|_shell| {
-            let mut completer = NiubashCompleter::new(state.clone());
-            let var_hit = completer
-                .complete("$GAP4REENTRY_VA", "$GAP4REENTRY_VA".len())
-                .iter()
-                .any(|s| s.value == "$GAP4REENTRY_VAR");
-            let fn_hit = completer
-                .complete("gap4reentryf", "gap4reentryf".len())
-                .iter()
-                .any(|s| s.value == "gap4reentryfn");
-            (var_hit, fn_hit)
-        })
-        .expect("the outer bridge call must run");
+
+        let var_line = "echo $GAP7_ROUTE_VA";
+        let fn_line = "gap7routef";
+        let spec_line = "gap7cmd gap7wordo";
+        let def_line = "gap7def ";
+
+        // (a) The editor flavor.
+        let shell = Rc::new(RefCell::new(shell));
+        let mut editor_completer = NiubashCompleter::with_shell(state.clone(), shell.clone());
+        let editor_var = editor_completer.complete(var_line, var_line.len());
         assert!(
-            !var_hit,
-            "post-GAP-4: a nested completer under a refused bridge has no env source"
+            editor_var.iter().any(|s| s.value == "$GAP7_ROUTE_VAR"),
+            "editor flavor must serve the session variable through the guard: {editor_var:?}"
+        );
+        let editor_fn = editor_completer.complete(fn_line, fn_line.len());
+        assert!(
+            editor_fn.iter().any(|s| s.value == "gap7routefn"),
+            "editor flavor must serve the session function through the guard: {editor_fn:?}"
+        );
+        let editor_spec = editor_completer.complete(spec_line, spec_line.len());
+        assert!(
+            editor_spec.iter().any(|s| s.value == "gap7wordone"),
+            "editor flavor must serve the compspec through the guard: {editor_spec:?}"
+        );
+        let editor_def = editor_completer.complete(def_line, def_line.len());
+        assert!(
+            editor_def.iter().any(|s| s.value == "gap7defone"),
+            "editor flavor must serve the compdef through the guard: {editor_def:?}"
+        );
+        drop(editor_completer);
+        let mut shell = Rc::try_unwrap(shell)
+            .unwrap_or_else(|_| panic!("editor completer dropped; shell Rc must be unique"))
+            .into_inner();
+
+        // (b) The probe surface.
+        assert!(
+            shell
+                .completion_probe(var_line, var_line.len())
+                .contains(&"$GAP7_ROUTE_VAR".to_string()),
+            "probe must serve the session variable through the guard"
         );
         assert!(
-            !fn_hit,
-            "post-GAP-4: a nested completer under a refused bridge has no function source"
+            shell
+                .completion_probe(spec_line, spec_line.len())
+                .contains(&"gap7wordone".to_string()),
+            "probe must serve the compspec through the guard"
+        );
+        assert!(
+            shell
+                .completion_probe(def_line, def_line.len())
+                .contains(&"gap7defone".to_string()),
+            "probe must serve the compdef through the guard"
+        );
+
+        // (c) An explicitly opened attempt.
+        let faces = shell.completion_host_faces();
+        let mut attempt = shell.session_mut().begin_completion_attempt();
+        let mut driven = NiubashCompleter::new(state.clone());
+        let attempt_fn = driven.complete_with_attempt(&mut attempt, &faces, fn_line, fn_line.len());
+        assert!(
+            attempt_fn.iter().any(|s| s.value == "gap7routefn"),
+            "explicit attempt must serve the session function: {attempt_fn:?}"
+        );
+        let _ = attempt;
+
+        // Control: no shell, no candidates.
+        let mut bare = NiubashCompleter::new(state);
+        assert!(
+            !bare
+                .complete(var_line, var_line.len())
+                .iter()
+                .any(|s| s.value == "$GAP7_ROUTE_VAR"),
+            "a shell-less completer must not invent the session variable"
+        );
+        assert!(
+            !bare
+                .complete(fn_line, fn_line.len())
+                .iter()
+                .any(|s| s.value == "gap7routefn"),
+            "a shell-less completer must not invent the session function"
+        );
+    }
+
+    /// GAP-7 (niubash#863): a completer invoked INSIDE an open
+    /// attempt — nested in a compspec function's execution — reads
+    /// LIVE state at every depth. This is the exact inverse of the
+    /// retired GAP-4 pin (`gap4_reentry_nested_completer_has_no_
+    /// engine_source`): under the scoped bridge the nested
+    /// completer's engine faces were refused (the ACTIVE flag) and
+    /// both hits were false; through the guard, a nested completer
+    /// driven on the SAME attempt observes the side effects the
+    /// outer attempt's compspec function just landed — a function
+    /// it defined and a variable it set.
+    #[test]
+    fn gap7_nested_completion_inside_compspec_attempt_reads_live() {
+        use super::NiubashCompleter;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_script(
+                r#"
+gap7_outer() {
+    gap7_inner_fn() { true; }
+    GAP7_NESTED_VAR=present
+    COMPREPLY=(seed)
+}
+complete -F gap7_outer gap7cmd
+"#,
+            )
+            .unwrap();
+        let state = shell.completion_state.clone();
+        let faces = shell.completion_host_faces();
+        let mut attempt = shell.session_mut().begin_completion_attempt();
+
+        // The outer leg: the compspec function executes through
+        // the guard and lands its side effects in the session.
+        let outcome = attempt.complete_detailed("gap7cmd ", "gap7cmd ".len());
+        assert!(
+            outcome.candidates.iter().any(|c| c.text == "seed"),
+            "the compspec function must run through the guard: {:?}",
+            outcome
+                .candidates
+                .iter()
+                .map(|c| &c.text)
+                .collect::<Vec<_>>()
+        );
+
+        // The nested leg: a completer driven on the SAME attempt
+        // sees the just-defined function and variable — live, at
+        // depth, where the GAP-4 shape observed nothing.
+        let mut nested = NiubashCompleter::new(state);
+        let fn_hit = nested
+            .complete_with_attempt(&mut attempt, &faces, "gap7_inner_f", "gap7_inner_f".len())
+            .iter()
+            .any(|s| s.value == "gap7_inner_fn");
+        assert!(
+            fn_hit,
+            "nested completer must serve the function the compspec just defined"
+        );
+        let var_hit = nested
+            .complete_with_attempt(
+                &mut attempt,
+                &faces,
+                "$GAP7_NESTED_VA",
+                "$GAP7_NESTED_VA".len(),
+            )
+            .iter()
+            .any(|s| s.value == "$GAP7_NESTED_VAR");
+        assert!(
+            var_hit,
+            "nested completer must serve the variable the compspec just set"
+        );
+    }
+
+    /// GAP-7 (niubash#863): the widget-callback nesting — a
+    /// function invoked through the open attempt's function face
+    /// under the widget env contract (the guard form of
+    /// `Shell::run_widget_function`'s call) lands state that a
+    /// completer nested in the same attempt reads live.
+    #[test]
+    fn gap7_nested_completion_inside_widget_callback_reads_live() {
+        use super::NiubashCompleter;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_script(
+                r#"
+gap7_widget() {
+    gap7_widget_fn() { true; }
+    GAP7_WIDGET_VAR=present
+    NIU_WIDGET_RESULT=""
+}
+"#,
+            )
+            .unwrap();
+        let state = shell.completion_state.clone();
+        let faces = shell.completion_host_faces();
+        let mut attempt = shell.session_mut().begin_completion_attempt();
+
+        // The widget callback executes through the guard, under
+        // the same temporary env the host's widget driver passes.
+        attempt
+            .call_function_with_env(
+                "gap7_widget",
+                std::iter::empty::<String>(),
+                [("NIU_WIDGET_BUFFER", "gap7"), ("NIU_WIDGET_CURSOR", "4")],
+            )
+            .expect("the widget callback must run through the guard");
+
+        let mut nested = NiubashCompleter::new(state);
+        let fn_hit = nested
+            .complete_with_attempt(&mut attempt, &faces, "gap7_widget_f", "gap7_widget_f".len())
+            .iter()
+            .any(|s| s.value == "gap7_widget_fn");
+        assert!(
+            fn_hit,
+            "nested completer must serve the function the widget callback defined"
+        );
+        let var_hit = nested
+            .complete_with_attempt(
+                &mut attempt,
+                &faces,
+                "$GAP7_WIDGET_VA",
+                "$GAP7_WIDGET_VA".len(),
+            )
+            .iter()
+            .any(|s| s.value == "$GAP7_WIDGET_VAR");
+        assert!(
+            var_hit,
+            "nested completer must serve the variable the widget callback set"
+        );
+    }
+
+    /// GAP-7 (niubash#863): the highlighter consulted under an
+    /// open attempt — the third nesting the GAP-4 adjudication
+    /// recorded dark (its bridge read was refused re-entrantly, so
+    /// the probe fell back to the process env and a session
+    /// function rendered unknown). Driven on the attempt's live
+    /// view, a function defined inside the attempt resolves as a
+    /// known command; the view captured before the definition
+    /// does not contain it.
+    #[test]
+    fn gap7_highlighter_under_an_open_attempt_reads_live() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_script("gap7hl_setup() { gap7_highlighted_fn() { true; }; }")
+            .unwrap();
+        let state = shell.completion_state.clone();
+        let highlighter =
+            crate::syntax_highlighting::NiubashSyntaxHighlighter::new_with_commands_and_state(
+                &crate::config::SyntaxHighlightConfig::default(),
+                std::iter::empty::<String>(),
+                state.clone(),
+            );
+
+        let mut attempt = shell.session_mut().begin_completion_attempt();
+        let view_before = attempt.session().completion_view();
+        assert!(
+            !highlighter.known_command_name_with_view("gap7_highlighted_fn", &view_before, &state),
+            "the pre-definition view must not contain the function"
+        );
+        attempt
+            .call_function_with_env(
+                "gap7hl_setup",
+                std::iter::empty::<String>(),
+                std::iter::empty::<(&str, &str)>(),
+            )
+            .expect("the defining function must run through the guard");
+        let view_live = attempt.session().completion_view();
+        assert!(
+            highlighter.known_command_name_with_view("gap7_highlighted_fn", &view_live, &state),
+            "the highlighter must resolve a function defined inside the attempt, live"
         );
     }
 
     /// niubash#831: on a one-shot shell the probe forces the host
     /// refresh past the `one_shot` early return — variable and
     /// function candidates exist on the probe surface even though
-    /// no REPL will ever read the state. (GAP-4, niubash#863: the
+    /// no REPL will ever read the state. (GAP-7, niubash#863: the
     /// candidates themselves now come from the live completion
-    /// view the probe's scoped bridge serves; the forced refresh
-    /// still carries the host faces.)
+    /// view the probe's attempt serves; the forced refresh still
+    /// carries the host faces.)
     #[test]
     fn issue831_one_shot_probe_snapshots_state() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -11841,7 +12100,7 @@ T831_PROBE_VAR=hello
             // Both `/tmp` host reads follow the session TMPDIR
             // through the Session face.
             assert_eq!(shell.session().resolve_shell_path("/tmp"), session_tmp);
-            assert_eq!(shell.capture_completion_inputs().tmp_base, session_tmp);
+            assert_eq!(shell.completion_host_faces().tmp_base, session_tmp);
             shell.update_completion_state();
             let state = shell.completion_state.lock().unwrap();
             assert_eq!(state.tmp_base, session_tmp);
@@ -11859,7 +12118,7 @@ T831_PROBE_VAR=hello
                 std::path::PathBuf::from("/tmp")
             );
             assert_eq!(
-                shell.capture_completion_inputs().tmp_base,
+                shell.completion_host_faces().tmp_base,
                 std::path::PathBuf::from("/tmp")
             );
             shell.update_completion_state();
