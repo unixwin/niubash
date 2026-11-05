@@ -329,14 +329,6 @@ pub struct Shell {
     pub rc_file: Option<PathBuf>,
     // --noediting: disable readline-style line editing in the REPL.
     pub no_editing: bool,
-    // niubash#863 GAP-12 host-lane blocker: the Session retains the
-    // applied invocation for `finish_startup`, but this clone
-    // survives ONLY for `enter_interactive`'s read of the
-    // invocation's `shopt_flags` (`expand_aliases` REPL default).
-    // No Session face exposes the retained invocation's shopt
-    // flags yet; this field deletes when the engine lands one.
-    // See REPORT.md.
-    startup_invocation: Option<rubash::invocation::ShellInvocation>,
     // rubash#2129 (niu companion): this session's login classification,
     // owned by the host and derived ONLY from this process's own
     // invocation — the argv[0] `-` seed recorded at construction, the
@@ -957,7 +949,6 @@ impl Shell {
             no_profile: false,
             rc_file: None,
             no_editing: false,
-            startup_invocation: None,
             own_login_shell,
             respawned_child,
             invoked_as_rbash,
@@ -1264,16 +1255,13 @@ impl Shell {
         // expand_aliases on so ~/.niubashrc aliases expand without a
         // user shopt line. Non-interactive entry points never call
         // this, keeping the GNU off default for scripts and -c.
+        // niubash#863 GAP-12 follow-up (rubash#2848): the retained
+        // invocation's explicit flag, read through the Session face —
+        // Some(true/false) is the invocation's word, None (silent or
+        // no apply) falls back to GNU's interactive default (on).
         let expand_aliases = self
-            .startup_invocation
-            .as_ref()
-            .and_then(|invocation| {
-                invocation
-                    .shopt_flags
-                    .iter()
-                    .rev()
-                    .find_map(|(name, enabled)| (name == "expand_aliases").then_some(*enabled))
-            })
+            .session()
+            .applied_invocation_shopt_flag("expand_aliases")
             .unwrap_or(true);
         self.session_mut()
             .options()
@@ -1716,19 +1704,10 @@ impl Shell {
         if invocation.login {
             self.own_login_shell = true;
         }
-        // GAP-12 host-lane blocker (reported, not bridged): the
-        // Session retains the invocation for `finish_startup`, but
-        // `enter_interactive` still reads the invocation's
-        // `shopt_flags` for the `expand_aliases` REPL default
-        // (explicit flag wins, else GNU's interactive default on),
-        // and no Session face exposes the retained invocation's
-        // shopt flags — the engine's apply already wrote the
-        // explicit value into the option store, so only the
-        // explicit-vs-silent distinction is missing, and the store
-        // cannot carry it (one bit). This host clone survives
-        // ONLY for that read until the engine lands a read face
-        // for the applied shopt flags; see REPORT.md.
-        self.startup_invocation = Some(invocation.clone());
+        // The Session retains the invocation (see the apply face
+        // above); `enter_interactive` reads its explicit shopt
+        // flags through `Session::applied_invocation_shopt_flag`
+        // (rubash#2848) — no host clone is kept.
         Ok(())
     }
 
@@ -11642,7 +11621,6 @@ complete -F _envtooldyn_hook envtooldyn
             no_profile: false,
             rc_file: None,
             no_editing: false,
-            startup_invocation: None,
             own_login_shell: false,
             respawned_child: false,
             invoked_as_rbash: false,
