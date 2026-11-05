@@ -467,11 +467,17 @@ impl PathCompleter {
             if !name_matches(&query.prefix, &entry.name, behavior) {
                 continue;
             }
-            let is_dir = entry.kind == ListedKind::Directory;
-            if directories_only && !is_dir {
+            if entry.name.starts_with('.') && !query.prefix.starts_with('.') {
                 continue;
             }
-            if entry.name.starts_with('.') && !query.prefix.starts_with('.') {
+            // A dirent reports a symlink as a symlink, never as a
+            // directory; `cd` must still offer links that point at one.
+            // Only stat the link when the command needs directories.
+            let is_dir = entry.kind == ListedKind::Directory
+                || (directories_only
+                    && entry.kind == ListedKind::Symlink
+                    && fs::metadata(base_dir.join(&entry.name)).is_ok_and(|md| md.is_dir()));
+            if directories_only && !is_dir {
                 continue;
             }
 
@@ -484,13 +490,17 @@ impl PathCompleter {
                 file_colors
                     .and_then(|colors| colors.style_for(entry.kind.candidate_kind(), &entry.name))
             };
-            completions.push(PathCandidate::new(
+            let mut candidate = PathCandidate::new(
                 entry.kind,
                 &query.display_prefix,
                 &entry.name,
                 query.quote,
                 style,
-            ));
+            );
+            if is_dir && entry.kind == ListedKind::Symlink {
+                candidate.mark_directory(&query.display_prefix, query.quote);
+            }
+            completions.push(candidate);
         }
 
         if completions.is_empty() {
@@ -638,6 +648,14 @@ struct PathCandidate {
 }
 
 impl PathCandidate {
+    /// A symlink that resolves to a directory completes like one: sorted
+    /// among directories, with a trailing `/`. Its dirent kind (and so
+    /// its symlink styling) is unchanged.
+    fn mark_directory(&mut self, display_prefix: &str, quote: Option<char>) {
+        self.is_dir = true;
+        self.completion = format_shell_path(&format!("{display_prefix}{}/", self.name), quote);
+    }
+
     fn new(
         kind: ListedKind,
         display_prefix: &str,
