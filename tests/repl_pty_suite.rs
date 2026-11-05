@@ -36,7 +36,7 @@
 //! Run: `NIU_INTERACTIVE_TESTS=1 cargo test --test repl_pty_suite --locked -- --nocapture`
 
 // Each platform compiles a different subset of the harness surface.
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 #[path = "interactive/driver.rs"]
 mod driver;
