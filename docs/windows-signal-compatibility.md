@@ -13,7 +13,7 @@ status of each signal.
 | trapusr1 | - | ❌ Not available | Windows message queue |
 | trapusr2 | - | ❌ Not available | Windows message queue |
 | trappipe | Broken pipe detection | ⚠️ Partial | Check os error 232 |
-| trapterm | Exit path | ⚠️ Partial | finish_with_exit_trap |
+| trapterm | Exit path | ⚠️ Partial | finish_exit_trap (engine finish guard) |
 | trapchld | Job Object API | ⚠️ Partial | Job Object + GetExitCodeProcess |
 | trapdebug | Programmatic only | ⚠️ Manual | RUST_LOG=debug |
 | traperr | Programmatic only | ⚠️ Manual | Call run_trap_hooks on failure |
@@ -48,7 +48,7 @@ The run_exit_trap() function can check for this and dispatch trappipe hooks.
 
 ### trapterm (⚠️ Partial)
 
-No SIGTERM equivalent. Exit hooks fire via finish_with_exit_trap() on REPL exit.
+No SIGTERM equivalent. Exit hooks fire via Shell::finish_exit_trap (the engine finish guard's trap step) on REPL exit.
 
 ### trapchld (⚠️ Partial)
 
