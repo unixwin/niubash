@@ -491,7 +491,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         .unwrap_or(std::time::Duration::from_millis(DEFAULT_KEYSEQ_TIMEOUT_MS));
 
     let mut editor = Reedline::create()
-        .with_validator(Box::new(ReplValidator))
+        .with_validator(Box::new(ReplValidator::new(shell.clone())))
         .with_completer(Box::new(engine_completer))
         .with_history(Box::new(history))
         .with_history_exclusion_prefix(history_exclusion_prefix(
@@ -5903,14 +5903,38 @@ fn parse_control_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
 /// a pasted or typed `cmd \` / unclosed quote / open `if..fi` block stays
 /// editable — arrows move between lines — until the last line closes it.
 /// The REPL-side `PendingReplInput` collector remains as a fallback.
-struct ReplValidator;
+struct ReplValidator {
+    /// GAP-9 (niubash#863): the editor flavor's handle on the
+    /// REPL's shell — the completeness verdict is the engine's
+    /// own, read through it (see `validate`).
+    shell: crate::shell::EditorShellHandle,
+}
+
+impl ReplValidator {
+    fn new(shell: Rc<RefCell<Shell>>) -> Self {
+        Self {
+            shell: crate::shell::EditorShellHandle::new(shell),
+        }
+    }
+}
 
 impl Validator for ReplValidator {
     fn validate(&self, line: &str) -> ValidationResult {
-        if is_repl_input_complete(line) {
-            ValidationResult::Complete
-        } else {
+        // GAP-9 (niubash#863): the verdict is the engine's
+        // completeness face — `Session::needs_more_input` in the
+        // session's posix mode — read through the handle as a
+        // plain `&self` read (captain adjudication Q-H: NOT
+        // routed through `begin_completion_attempt`). The host's
+        // private completeness scanner (the H4 mini-parser) is
+        // retired: the reader that will consume the line is the
+        // one asked whether it is finished.
+        let needs_more = self
+            .shell
+            .with_shell_mut(|shell| shell.session().needs_more_input(line));
+        if needs_more {
             ValidationResult::Incomplete
+        } else {
+            ValidationResult::Complete
         }
     }
 }
@@ -5943,8 +5967,11 @@ impl PendingReplInput {
         self.lines.join("\n")
     }
 
-    fn is_complete(&self) -> bool {
-        is_repl_input_complete(&self.script())
+    fn is_complete(&self, session: &rubash::api::Session) -> bool {
+        // GAP-9 (niubash#863): the same engine completeness face
+        // the reedline validator reads — `Session::needs_more_input`
+        // over the gathered script.
+        !session.needs_more_input(&self.script())
     }
 
     fn is_multiline(&self) -> bool {
@@ -6008,591 +6035,11 @@ impl Prompt for ContinuationPrompt {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ReplToken {
-    Word(String),
-    Operator(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlockClose {
-    Fi,
-    Done,
-    Brace,
-    Paren,
-    FunctionBody,
-    /// niubash#482: an open `case` split by phase so the gather knows when
-    /// a `)` is a legal pattern-list terminator versus a stray close —
-    /// GNU reports `syntax error near unexpected token `)'' for the
-    /// latter the moment it is read, instead of waiting for the opener.
-    /// `case` seen, operand word pending.
-    CaseOperand,
-    /// Operand read, `in` pending.
-    CaseExpectIn,
-    /// Inside the pattern region, no pattern word yet (`)` here is a
-    /// syntax error in GNU).
-    CasePatternOpen,
-    /// Inside the pattern region after at least one pattern word — `)`
-    /// legally ends the pattern list.
-    CasePattern,
-    /// Inside a clause body; `;;`/`;&`/`;;;&` return to CasePatternOpen.
-    CaseBody,
-}
-
-impl BlockClose {
-    /// Any open-`case` frame variant — the `esac` closer matches all of
-    /// them (GNU's `esac` closes from pattern or body position).
-    fn is_case(self) -> bool {
-        matches!(
-            self,
-            BlockClose::CaseOperand
-                | BlockClose::CaseExpectIn
-                | BlockClose::CasePatternOpen
-                | BlockClose::CasePattern
-                | BlockClose::CaseBody
-        )
-    }
-}
-
-#[derive(Debug, Default)]
-struct ReplInputScan {
-    tokens: Vec<ReplToken>,
-    open_quote: Option<char>,
-    trailing_backslash: bool,
-}
-
-pub fn is_script_input_complete(input: &str) -> bool {
-    is_repl_input_complete(input)
-}
-
-fn is_repl_input_complete(input: &str) -> bool {
-    let scan = scan_repl_input(input);
-    if scan.open_quote.is_some() || scan.trailing_backslash {
-        return false;
-    }
-    if !heredoc_input_complete(input) {
-        return false;
-    }
-
-    let mut stack = Vec::new();
-    let mut command_position = true;
-    let mut trailing_list_operator = false;
-    let mut index = 0;
-
-    while index < scan.tokens.len() {
-        match &scan.tokens[index] {
-            ReplToken::Operator(operator) => {
-                match operator.as_str() {
-                    ";" | "\n" => {
-                        command_position = true;
-                        trailing_list_operator = false;
-                    }
-                    "|" => {
-                        // Inside a case pattern list `|` separates
-                        // alternatives rather than opening a pipeline.
-                        if matches!(
-                            stack.last(),
-                            Some(BlockClose::CasePatternOpen | BlockClose::CasePattern)
-                        ) {
-                            *stack.last_mut().expect("top checked") = BlockClose::CasePatternOpen;
-                        } else {
-                            command_position = true;
-                            trailing_list_operator = true;
-                        }
-                    }
-                    "&&" | "||" => {
-                        command_position = true;
-                        trailing_list_operator = true;
-                    }
-                    "(" => {
-                        stack.push(BlockClose::Paren);
-                        command_position = true;
-                        trailing_list_operator = false;
-                    }
-                    ")" => {
-                        match stack.last() {
-                            Some(BlockClose::Paren) => {
-                                stack.pop();
-                                // A `(a|b)` pattern list close also ends
-                                // the case pattern — the clause body
-                                // follows.
-                                if matches!(
-                                    stack.last(),
-                                    Some(BlockClose::CasePatternOpen | BlockClose::CasePattern)
-                                ) {
-                                    *stack.last_mut().expect("top checked") = BlockClose::CaseBody;
-                                }
-                            }
-                            // `a)` legally ends a case pattern list.
-                            Some(BlockClose::CasePattern) => {
-                                *stack.last_mut().expect("top checked") = BlockClose::CaseBody;
-                            }
-                            _ => {
-                                // niubash#482: a `)` closing nothing is
-                                // GNU's `syntax error near unexpected
-                                // token `)'' — the group is abandoned NOW,
-                                // not when the opener eventually closes
-                                // (GNU never waits: `{ echo c\n)' errors
-                                // and drops back to PS1). Reporting the
-                                // buffer complete submits it so the
-                                // engine's armed parse prints the
-                                // diagnostic instead of PS2-wedging.
-                                return true;
-                            }
-                        }
-                        command_position = false;
-                        trailing_list_operator = false;
-                    }
-                    ";;" | ";&" | ";;;&" => {
-                        // Legal after a case clause body (the next pattern
-                        // follows) or inside an arithmetic `( (` frame;
-                        // anywhere else GNU reports a syntax error at
-                        // the token — same terminal verdict as `)`.
-                        match stack.last() {
-                            Some(BlockClose::CaseBody) => {
-                                *stack.last_mut().expect("top checked") =
-                                    BlockClose::CasePatternOpen;
-                            }
-                            Some(BlockClose::Paren) => {}
-                            _ => return true,
-                        }
-                        command_position = true;
-                        trailing_list_operator = false;
-                    }
-                    _ => {}
-                }
-                index += 1;
-            }
-            ReplToken::Word(word) => {
-                trailing_list_operator = false;
-
-                // Words in case-pattern position are pattern text, never
-                // closers (`fi)`, `esac)`, `in` all name patterns).
-                // `esac` straight after `in`/`;;` is GNU's empty-case
-                // close (is_case_end_keyword), not a pattern.
-                match stack.last() {
-                    Some(BlockClose::CasePatternOpen) if word != "esac" => {
-                        *stack.last_mut().expect("top checked") = BlockClose::CasePattern;
-                        command_position = false;
-                        index += 1;
-                        continue;
-                    }
-                    Some(BlockClose::CasePattern) => {
-                        command_position = false;
-                        index += 1;
-                        continue;
-                    }
-                    Some(BlockClose::CaseOperand) => {
-                        *stack.last_mut().expect("top checked") = BlockClose::CaseExpectIn;
-                        // The operand is consumed below as an ordinary
-                        // word (`in` is legal operand text too).
-                    }
-                    _ => {}
-                }
-
-                if command_position && is_function_header(&scan.tokens, index) {
-                    stack.push(BlockClose::FunctionBody);
-                    command_position = false;
-                    index += 3;
-                    continue;
-                }
-
-                match word.as_str() {
-                    "if" if command_position => {
-                        stack.push(BlockClose::Fi);
-                        command_position = false;
-                    }
-                    "for" | "while" | "until" | "select" if command_position => {
-                        stack.push(BlockClose::Done);
-                        command_position = false;
-                    }
-                    "case" if command_position => {
-                        stack.push(BlockClose::CaseOperand);
-                        command_position = false;
-                    }
-                    "in" if stack.last() == Some(&BlockClose::CaseExpectIn) => {
-                        *stack.last_mut().expect("top checked") = BlockClose::CasePatternOpen;
-                        command_position = false;
-                    }
-                    "fi" | "done" if command_position => {
-                        let want = if word == "fi" {
-                            BlockClose::Fi
-                        } else {
-                            BlockClose::Done
-                        };
-                        if stack.last() == Some(&want) {
-                            stack.pop();
-                        } else if matches!(
-                            stack.last(),
-                            Some(
-                                BlockClose::Fi
-                                    | BlockClose::Done
-                                    | BlockClose::Brace
-                                    | BlockClose::FunctionBody
-                            )
-                        ) {
-                            // Same foreign-closer family as `)`: GNU's
-                            // reader abandons the group at the token.
-                            // Under `(`/case frames these are legal words
-                            // (arithmetic text, patterns) — leave them be.
-                            return true;
-                        }
-                        command_position = false;
-                    }
-                    "esac" if command_position => {
-                        if stack.last().is_some_and(|top| top.is_case()) {
-                            stack.pop();
-                        } else if matches!(
-                            stack.last(),
-                            Some(
-                                BlockClose::Fi
-                                    | BlockClose::Done
-                                    | BlockClose::Brace
-                                    | BlockClose::FunctionBody
-                            )
-                        ) {
-                            return true;
-                        }
-                        command_position = false;
-                    }
-                    "{" => {
-                        if stack.last() == Some(&BlockClose::FunctionBody) {
-                            stack.pop();
-                        }
-                        stack.push(BlockClose::Brace);
-                        command_position = true;
-                    }
-                    "}" => {
-                        if stack.last() == Some(&BlockClose::Brace) {
-                            stack.pop();
-                        } else if matches!(
-                            stack.last(),
-                            Some(
-                                BlockClose::Fi
-                                    | BlockClose::Done
-                                    | BlockClose::Brace
-                                    | BlockClose::FunctionBody
-                            )
-                        ) {
-                            return true;
-                        }
-                        command_position = false;
-                    }
-                    "then" | "do" | "else" => {
-                        command_position = true;
-                    }
-                    "elif" => {
-                        command_position = false;
-                    }
-                    _ => {
-                        command_position = false;
-                    }
-                }
-                index += 1;
-            }
-        }
-    }
-
-    stack.is_empty() && !trailing_list_operator
-}
-
-fn heredoc_input_complete(input: &str) -> bool {
-    if !input.contains("<<") {
-        return true;
-    }
-    rubash::lexer::tokenize(input)
-        .into_iter()
-        .all(|token| !is_unterminated_heredoc_body_token(&token))
-}
-
-// Whether a token is a here-doc body that did not yet reach its delimiter.
-// rubash marks such bodies with a leading \x1f (and, for quoted here-docs,
-// the __RUBASH_HD1__ marker before it). This mirrors rubash's own
-// command_has_unterminated_heredoc check without depending on a private
-// lexer helper that is not part of the published API.
-fn is_unterminated_heredoc_body_token(token: &rubash::Token) -> bool {
-    use rubash::TokenKind;
-    if token.kind != TokenKind::HereDocBody {
-        return false;
-    }
-    const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
-    let body = token
-        .value
-        .strip_prefix(QUOTED_HEREDOC_MARKER)
-        .unwrap_or(&token.value);
-    body.starts_with('')
-}
-
-/// Pending here-doc body skip state for the REPL input scanner.
-///
-/// GNU bash gathers here-doc bodies at line granularity while lexing: the
-/// body starts after the newline of the operator line and everything up to
-/// the delimiter line is opaque data. The completeness scanner must mirror
-/// that, otherwise body text poisons the quote and block tracking
-/// (`x; if y` inside a body would push a phantom `fi` block and the pasted
-/// script would never submit).
-struct ReplHeredocSkip {
-    delimiter: String,
-    strip_tabs: bool,
-    /// False while still scanning the operator line (delimiters, comments,
-    /// and quotes on that line are ordinary syntax); true inside the body.
-    in_body: bool,
-}
-
-fn scan_repl_input(input: &str) -> ReplInputScan {
-    let chars: Vec<char> = input.chars().collect();
-    let mut scan = ReplInputScan {
-        trailing_backslash: has_unescaped_trailing_backslash(input),
-        ..ReplInputScan::default()
-    };
-    let mut word = String::new();
-    let mut quote = None;
-    let mut index = 0;
-    let mut heredoc_skip: Option<ReplHeredocSkip> = None;
-    let mut heredoc_line = String::new();
-
-    while index < chars.len() {
-        let ch = chars[index];
-
-        if let Some(skip) = &mut heredoc_skip {
-            if skip.in_body {
-                if ch == '\n' {
-                    let candidate = heredoc_line.trim_end_matches('\r');
-                    let stripped = if skip.strip_tabs {
-                        candidate.trim_start_matches('\t')
-                    } else {
-                        candidate
-                    };
-                    if stripped == skip.delimiter {
-                        heredoc_skip = None;
-                    }
-                    heredoc_line.clear();
-                    index += 1;
-                    continue;
-                }
-                heredoc_line.push(ch);
-                index += 1;
-                continue;
-            }
-            // Still on the operator line: fall through to normal scanning.
-            // The first newline switches the state into the body.
-            if ch == '\n' {
-                skip.in_body = true;
-                heredoc_line.clear();
-                index += 1;
-                continue;
-            }
-        }
-
-        if let Some(quote_char) = quote {
-            word.push(ch);
-            if ch == '\\' && quote_char != '\'' {
-                if let Some(next) = chars.get(index + 1) {
-                    word.push(*next);
-                    index += 2;
-                    continue;
-                }
-            }
-            if ch == quote_char {
-                quote = None;
-            }
-            index += 1;
-            continue;
-        }
-
-        match ch {
-            '#' if word.is_empty() => {
-                index = skip_repl_comment(&chars, index);
-            }
-            '<' => {
-                flush_repl_word(&mut scan.tokens, &mut word);
-                if chars.get(index + 1) == Some(&'<') {
-                    if chars.get(index + 2) == Some(&'<') {
-                        // Here-string: `<<< word` takes its payload from the
-                        // following word, not from subsequent lines.
-                        scan.tokens.push(ReplToken::Operator("<<<".to_string()));
-                        index += 3;
-                        continue;
-                    }
-                    let mut cursor = index + 2;
-                    let strip_tabs = chars.get(cursor) == Some(&'-');
-                    if strip_tabs {
-                        cursor += 1;
-                    }
-                    while matches!(chars.get(cursor), Some(c) if *c == ' ' || *c == '\t') {
-                        cursor += 1;
-                    }
-                    let mut delimiter = String::new();
-                    match chars.get(cursor) {
-                        Some(q @ ('"' | '\'')) => {
-                            let quote_char = *q;
-                            cursor += 1;
-                            while let Some(&c) = chars.get(cursor) {
-                                if c == quote_char {
-                                    cursor += 1;
-                                    break;
-                                }
-                                if c == '\\' && quote_char == '"' {
-                                    cursor += 1;
-                                    if let Some(&escaped) = chars.get(cursor) {
-                                        delimiter.push(escaped);
-                                        cursor += 1;
-                                    }
-                                    continue;
-                                }
-                                delimiter.push(c);
-                                cursor += 1;
-                            }
-                        }
-                        _ => {
-                            while let Some(&c) = chars.get(cursor) {
-                                if c.is_ascii_whitespace()
-                                    || matches!(c, ';' | '&' | '|' | '<' | '>' | '(' | ')')
-                                {
-                                    break;
-                                }
-                                if c == '\\' {
-                                    cursor += 1;
-                                    if let Some(&escaped) = chars.get(cursor) {
-                                        delimiter.push(escaped);
-                                        cursor += 1;
-                                    }
-                                    continue;
-                                }
-                                delimiter.push(c);
-                                cursor += 1;
-                            }
-                        }
-                    }
-                    // Sequential gathering, like bash's lexer: bodies of
-                    // multiple heredocs on one operator line are read in
-                    // operator order, so the last operator's delimiter ends
-                    // the combined skip.
-                    heredoc_skip = Some(ReplHeredocSkip {
-                        delimiter,
-                        strip_tabs,
-                        in_body: false,
-                    });
-                    index = cursor;
-                    continue;
-                }
-                word.push('<');
-                index += 1;
-            }
-            '\'' | '"' | '`' => {
-                quote = Some(ch);
-                word.push(ch);
-                index += 1;
-            }
-            '\\' => {
-                word.push(ch);
-                if let Some(next) = chars.get(index + 1) {
-                    word.push(*next);
-                    index += 2;
-                } else {
-                    index += 1;
-                }
-            }
-            '\r' => {
-                flush_repl_word(&mut scan.tokens, &mut word);
-                index += 1;
-            }
-            '\n' => {
-                flush_repl_word(&mut scan.tokens, &mut word);
-                scan.tokens.push(ReplToken::Operator("\n".to_string()));
-                index += 1;
-            }
-            ch if ch.is_ascii_whitespace() => {
-                flush_repl_word(&mut scan.tokens, &mut word);
-                index += 1;
-            }
-            ';' => {
-                flush_repl_word(&mut scan.tokens, &mut word);
-                // Case-clause terminators are single operators: only
-                // adjacent bytes form them (`a ;;` is two `;`).
-                if chars.get(index + 1) == Some(&';') {
-                    if chars.get(index + 2) == Some(&'&') {
-                        scan.tokens.push(ReplToken::Operator(";;&".to_string()));
-                        index += 3;
-                    } else {
-                        scan.tokens.push(ReplToken::Operator(";;".to_string()));
-                        index += 2;
-                    }
-                } else if chars.get(index + 1) == Some(&'&') {
-                    scan.tokens.push(ReplToken::Operator(";&".to_string()));
-                    index += 2;
-                } else {
-                    scan.tokens.push(ReplToken::Operator(";".to_string()));
-                    index += 1;
-                }
-            }
-            '(' | ')' => {
-                flush_repl_word(&mut scan.tokens, &mut word);
-                scan.tokens.push(ReplToken::Operator(ch.to_string()));
-                index += 1;
-            }
-            '|' | '&' => {
-                flush_repl_word(&mut scan.tokens, &mut word);
-                if chars.get(index + 1) == Some(&ch) {
-                    scan.tokens.push(ReplToken::Operator(format!("{ch}{ch}")));
-                    index += 2;
-                } else {
-                    scan.tokens.push(ReplToken::Operator(ch.to_string()));
-                    index += 1;
-                }
-            }
-            _ => {
-                word.push(ch);
-                index += 1;
-            }
-        }
-    }
-
-    flush_repl_word(&mut scan.tokens, &mut word);
-    scan.open_quote = quote;
-    scan
-}
-
-fn flush_repl_word(tokens: &mut Vec<ReplToken>, word: &mut String) {
-    if word.is_empty() {
-        return;
-    }
-    tokens.push(ReplToken::Word(std::mem::take(word)));
-}
-
-fn skip_repl_comment(chars: &[char], mut index: usize) -> usize {
-    while index < chars.len() && chars[index] != '\n' {
-        index += 1;
-    }
-    index
-}
-
-fn is_function_header(tokens: &[ReplToken], index: usize) -> bool {
-    let Some(ReplToken::Word(name)) = tokens.get(index) else {
-        return false;
-    };
-    is_shell_identifier(name)
-        && matches!(tokens.get(index + 1), Some(ReplToken::Operator(op)) if op == "(")
-        && matches!(tokens.get(index + 2), Some(ReplToken::Operator(op)) if op == ")")
-}
-
-fn is_shell_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn has_unescaped_trailing_backslash(input: &str) -> bool {
-    let last_line = input
-        .trim_end_matches(['\r', '\n'])
-        .rsplit_once('\n')
-        .map(|(_, line)| line)
-        .unwrap_or_else(|| input.trim_end_matches(['\r', '\n']));
-    let count = last_line.chars().rev().take_while(|ch| *ch == '\\').count();
-    count % 2 == 1
+/// The stdin script driver's gather verdict: the engine's
+/// completeness face, the same one the REPL validator reads
+/// (GAP-9, niubash#863).
+pub fn is_script_input_complete(session: &rubash::api::Session, input: &str) -> bool {
+    !session.needs_more_input(input)
 }
 
 /// Run the interactive REPL.
@@ -7034,7 +6481,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 }
 
                 pending.push(line);
-                if !pending.is_complete() {
+                if !pending.is_complete(shell.borrow().session()) {
                     continue;
                 }
 
@@ -7191,7 +6638,7 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         }
 
         pending.push(line);
-        if !pending.is_complete() {
+        if !pending.is_complete(shell.session()) {
             continue;
         }
 
@@ -7372,47 +6819,65 @@ mod tests {
 
     #[test]
     fn repl_input_complete_tracks_if_blocks() {
-        assert!(!is_repl_input_complete("if [ $HTTP_CODE -eq 200 ]; then"));
-        assert!(!is_repl_input_complete(
+        // GAP-9 (niubash#863): re-pointed at the engine's
+        // completeness face (`Session::needs_more_input`) read
+        // through a live shell; assertions unchanged from the
+        // retired host scanner's pin set.
+        let shell = crate::shell::Shell::new().unwrap();
+        let complete = |input: &str| !shell.session().needs_more_input(input);
+        assert!(!complete("if [ $HTTP_CODE -eq 200 ]; then"));
+        assert!(!complete(
             "if [ $HTTP_CODE -eq 200 ]; then\n  echo OK"
         ));
-        assert!(is_repl_input_complete(
+        assert!(complete(
             "if [ $HTTP_CODE -eq 200 ]; then\n  echo OK\nfi"
         ));
-        assert!(is_repl_input_complete(
+        assert!(complete(
             "if [ $HTTP_CODE -eq 200 ]; then echo OK; fi"
         ));
     }
 
     #[test]
     fn repl_input_complete_tracks_loop_and_case_blocks() {
-        assert!(!is_repl_input_complete("for item in a b; do"));
-        assert!(is_repl_input_complete(
+        // GAP-9 (niubash#863): re-pointed at the engine's
+        // completeness face (`Session::needs_more_input`) read
+        // through a live shell; assertions unchanged from the
+        // retired host scanner's pin set.
+        let shell = crate::shell::Shell::new().unwrap();
+        let complete = |input: &str| !shell.session().needs_more_input(input);
+        assert!(!complete("for item in a b; do"));
+        assert!(complete(
             "for item in a b; do\n  echo $item\ndone"
         ));
 
-        assert!(is_repl_input_complete(
+        assert!(complete(
             "for ((i=0; i<height; i++)); do\n  echo $i\ndone"
         ));
-        assert!(!is_repl_input_complete(
+        assert!(!complete(
             "for ((i=0; i<height; i++); do\n  echo $i\ndone"
         ));
 
-        assert!(!is_repl_input_complete("while true; do"));
-        assert!(is_repl_input_complete("while true; do\n  break\ndone"));
+        assert!(!complete("while true; do"));
+        assert!(complete("while true; do\n  break\ndone"));
 
-        assert!(!is_repl_input_complete("case $x in"));
-        assert!(is_repl_input_complete(
+        assert!(!complete("case $x in"));
+        assert!(complete(
             "case $x in\n  a) echo A ;;\n  *) echo other ;;\nesac"
         ));
     }
 
     #[test]
     fn repl_input_complete_tracks_functions_and_brace_groups() {
-        assert!(!is_repl_input_complete("hello()"));
-        assert!(!is_repl_input_complete("hello() {"));
-        assert!(is_repl_input_complete("hello() {\n  echo hi\n}"));
-        assert!(is_repl_input_complete("{ echo hi; }"));
+        // GAP-9 (niubash#863): re-pointed at the engine's
+        // completeness face (`Session::needs_more_input`) read
+        // through a live shell; assertions unchanged from the
+        // retired host scanner's pin set.
+        let shell = crate::shell::Shell::new().unwrap();
+        let complete = |input: &str| !shell.session().needs_more_input(input);
+        assert!(!complete("hello()"));
+        assert!(!complete("hello() {"));
+        assert!(complete("hello() {\n  echo hi\n}"));
+        assert!(complete("{ echo hi; }"));
     }
 
     #[test]
@@ -7420,7 +6885,12 @@ mod tests {
         // Enter on an unfinished command must not submit: the validator keeps
         // the buffer open so multi-line input stays editable (arrows work
         // across lines) until the last line completes it.
-        let validator = ReplValidator;
+        // GAP-9 (niubash#863): the validator carries the editor
+        // shell handle and reads the engine's completeness face.
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(
+            crate::shell::Shell::new().unwrap(),
+        ));
+        let validator = ReplValidator::new(shell);
         assert!(matches!(
             validator.validate("echo \"unterminated"),
             ValidationResult::Incomplete
@@ -7445,74 +6915,114 @@ mod tests {
 
     #[test]
     fn repl_input_complete_tracks_quotes_and_list_continuations() {
-        assert!(!is_repl_input_complete("echo \"unterminated"));
-        assert!(is_repl_input_complete("echo \"terminated\""));
-        assert!(!is_repl_input_complete("echo one |"));
-        assert!(is_repl_input_complete("echo one |\n  grep one"));
-        assert!(!is_repl_input_complete("echo one \\"));
-        assert!(is_repl_input_complete("echo one \\\n  two"));
+        // GAP-9 (niubash#863): re-pointed at the engine's
+        // completeness face (`Session::needs_more_input`) read
+        // through a live shell; assertions unchanged from the
+        // retired host scanner's pin set.
+        let shell = crate::shell::Shell::new().unwrap();
+        let complete = |input: &str| !shell.session().needs_more_input(input);
+        assert!(!complete("echo \"unterminated"));
+        assert!(complete("echo \"terminated\""));
+        assert!(!complete("echo one |"));
+        assert!(complete("echo one |\n  grep one"));
+        assert!(!complete("echo one \\"));
+        assert!(complete("echo one \\\n  two"));
     }
 
     #[test]
     fn repl_input_complete_tracks_heredoc_delimiters() {
+        // GAP-9 (niubash#863): re-pointed at the engine's
+        // completeness face (`Session::needs_more_input`) read
+        // through a live shell; assertions unchanged from the
+        // retired host scanner's pin set.
+        let shell = crate::shell::Shell::new().unwrap();
+        let complete = |input: &str| !shell.session().needs_more_input(input);
         // The engine treats a lone << operator line as an unterminated
         // here-doc body (bash parse.y gather_here_documents pulls the body
         // from the input stream before executing), so the REPL must keep
         // reading instead of submitting the line alone.
-        assert!(!is_repl_input_complete("cat > out.txt <<'EOF'"));
-        assert!(!is_repl_input_complete("cat > out.txt <<\"EOF\""));
-        assert!(!is_repl_input_complete("cat > out.txt <<EOF"));
-        assert!(!is_repl_input_complete("cat > out.txt <<-EOF"));
-        assert!(!is_repl_input_complete("cat <<A <<'B'\nA-body\nA"));
-        assert!(is_repl_input_complete("cat > out.txt <<'EOF'\nbody A\nEOF"));
-        assert!(is_repl_input_complete("cat > out.txt <<EOF\nbody A\nEOF"));
+        assert!(!complete("cat > out.txt <<'EOF'"));
+        assert!(!complete("cat > out.txt <<\"EOF\""));
+        assert!(!complete("cat > out.txt <<EOF"));
+        assert!(!complete("cat > out.txt <<-EOF"));
+        assert!(!complete("cat <<A <<'B'\nA-body\nA"));
+        assert!(complete("cat > out.txt <<'EOF'\nbody A\nEOF"));
+        assert!(complete("cat > out.txt <<EOF\nbody A\nEOF"));
         // A << inside quotes is not a here-doc operator.
-        assert!(is_repl_input_complete("echo \"<<EOF\""));
+        assert!(complete("echo \"<<EOF\""));
     }
 
     #[test]
     fn repl_input_complete_ignores_heredoc_body_syntax() {
+        // GAP-9 (niubash#863): re-pointed at the engine's
+        // completeness face (`Session::needs_more_input`) read
+        // through a live shell; assertions unchanged from the
+        // retired host scanner's pin set.
+        let shell = crate::shell::Shell::new().unwrap();
+        let complete = |input: &str| !shell.session().needs_more_input(input);
         // Block keywords inside a here-doc body are opaque data (git-summary's
         // usage() body contains `... repos; if omitted, ...`, which used to
         // push a phantom `fi` block and wedge the REPL in continuation mode).
-        assert!(is_repl_input_complete("f() {\ncat <<EOF\nx; if y\nEOF\n}"));
-        assert!(is_repl_input_complete("cat <<EOF\nx; if y\nEOF"));
-        assert!(is_repl_input_complete(
+        assert!(complete("f() {\ncat <<EOF\nx; if y\nEOF\n}"));
+        assert!(complete("cat <<EOF\nx; if y\nEOF"));
+        assert!(complete(
             "cat <<'EOF'\nbody with \"quotes && (parens)\nEOF"
         ));
         // <<- strips leading tabs from the delimiter line only.
-        assert!(is_repl_input_complete(
+        assert!(complete(
             "cat <<-EOF\n\tindented; if x\n\tEOF"
         ));
         // Sequential multi-heredoc gathering.
-        assert!(is_repl_input_complete(
+        assert!(complete(
             "cat <<E1 <<E2\nA; if a\nB; fi b\nE1\nE2"
         ));
         // A here-string is not a heredoc; its payload stays code.
-        assert!(!is_repl_input_complete("cat <<< \"unterminated"));
+        assert!(!complete("cat <<< \"unterminated"));
         // Unterminated bodies still keep the REPL reading.
-        assert!(!is_repl_input_complete("cat <<EOF\nnever closed"));
+        assert!(!complete("cat <<EOF\nnever closed"));
         // A delimiter line with trailing text is body data, not a delimiter.
-        assert!(!is_repl_input_complete(
+        assert!(!complete(
             "cat <<EOF\nbody\nEOF trailing\nmore"
         ));
     }
 
     #[test]
     fn repl_input_complete_ignores_shell_comments() {
-        assert!(is_repl_input_complete("# 11. 条件判断 (if)"));
-        assert!(is_repl_input_complete(
+        // GAP-9 (niubash#863): re-pointed at the engine's
+        // completeness face (`Session::needs_more_input`) read
+        // through a live shell; assertions unchanged from the
+        // retired host scanner's pin set.
+        let shell = crate::shell::Shell::new().unwrap();
+        let complete = |input: &str| !shell.session().needs_more_input(input);
+        assert!(complete("# 11. 条件判断 (if)"));
+        assert!(complete(
             "# case/esac/function() are comments"
         ));
-        assert!(is_repl_input_complete(
+        assert!(complete(
             "# 11. 条件判断 (if)\nprintf \"ok\\n\""
         ));
-        assert!(is_repl_input_complete("echo foo#bar"));
-        assert!(is_repl_input_complete("echo foo # if (comment)"));
-        assert!(!is_repl_input_complete("if true; then\n  # fi in comment"));
-        assert!(is_repl_input_complete(
+        assert!(complete("echo foo#bar"));
+        assert!(complete("echo foo # if (comment)"));
+        assert!(!complete("if true; then\n  # fi in comment"));
+        assert!(complete(
             "if true; then\n  # fi in comment\n  echo ok\nfi"
         ));
+    }
+
+    /// NEW with the GAP-9 host migration (captain adjudication
+    /// Q-C): the posix delta is a deliberate behavior delta of
+    /// this GAP. Completeness is now derived in the session's
+    /// posix mode — the mode of the reader that will consume the
+    /// line. Inside "${...}", a `'` opens a quote in default
+    /// mode (more input) and is literal in posix mode
+    /// (complete); the retired host scanner was posix-blind and
+    /// answered the default-mode verdict under both modes.
+    #[test]
+    fn repl_input_complete_posix_arm_quote_inside_dollar_brace() {
+        let mut shell = crate::shell::Shell::new().unwrap();
+        assert!(shell.session().needs_more_input("echo \"${x'}\""));
+        assert!(shell.execute_script("set -o posix").is_ok());
+        assert!(!shell.session().needs_more_input("echo \"${x'}\""));
     }
 
     #[test]
