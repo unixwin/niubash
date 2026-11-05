@@ -189,9 +189,7 @@ impl CompletionContext {
 
     /// Get the shell word under cursor, including raw span and unescaped value.
     pub fn get_current_shell_word(&self) -> Option<ShellWord> {
-        self.view()
-            .word_at(self.cursor())
-            .map(shell_word_from_span)
+        self.view().word_at(self.cursor()).map(shell_word_from_span)
     }
 
     /// Get the replacement span for the current shell word.
