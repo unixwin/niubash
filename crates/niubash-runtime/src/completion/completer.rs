@@ -370,7 +370,7 @@ impl NiubashCompleter {
     /// niubash#863): the driver owns the guard — the probe surface
     /// and nested-completion drivers — and every engine read and
     /// execution of this call routes through it.
-    pub fn complete_with_attempt(
+    pub(crate) fn complete_with_attempt(
         &mut self,
         attempt: &mut rubash::api::CompletionAttempt<'_>,
         faces: &CompletionHostFaces,
@@ -415,7 +415,7 @@ impl NiubashCompleter {
 
     /// [`Self::complete_specific`] through a caller-opened attempt
     /// (GAP-7, niubash#863); see [`Self::complete_with_attempt`].
-    pub fn complete_specific_with_attempt(
+    pub(crate) fn complete_specific_with_attempt(
         &mut self,
         attempt: &mut rubash::api::CompletionAttempt<'_>,
         faces: &CompletionHostFaces,

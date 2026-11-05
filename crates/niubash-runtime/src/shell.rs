@@ -11729,7 +11729,7 @@ NIU_COMPDEFS="gap7def:gap7comp"
             attempt_fn.iter().any(|s| s.value == "gap7routefn"),
             "explicit attempt must serve the session function: {attempt_fn:?}"
         );
-        drop(attempt);
+        let _ = attempt;
 
         // Control: no shell, no candidates.
         let mut bare = NiubashCompleter::new(state);
