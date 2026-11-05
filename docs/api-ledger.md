@@ -358,6 +358,61 @@
 > §2.3 `begin_completion_attempt` count goes 0 → N
 > when the host lane lands.
 >
+>
+> Addendum (GAP-8 finish-guard record, 2026-11-05,
+> niubash#863 GAP-8): the tier-A finish guard
+> — `Session::begin_finish` opening a `Finish` — is
+> recorded (§2.1 row, §2.3 rows, §4 rows, §6 entries).
+> The guard is the contract replacement for the host's
+> five hand-composed finish funnels and its tier-C
+> trap-step seam reads (`run_exit_trap_with_status` and
+> `close_all_persistent_output_process_substitutions`
+> through `executor_mut`): the host opens one guard per
+> finish from the `&mut Session` it holds, with the
+> route's pending status as a value (the value the
+> one-shot funnel used to inject through
+> `set_last_status` before a consuming `close`), and
+> drives the finish's coarse steps through it
+> (`run_exit_trap`, `final_cwd`,
+> `run_stream_end_duties` with the engine history step
+> gated per route, `finish_all`), interleaving its own
+> duties — the post-trap cwd record, the host-provider
+> history flush, the process exit — between them. The
+> session is NOT consumed, so the interactive route,
+> whose session lives in a shared cell and whose
+> history is the host provider's store, finishes
+> through the same guard. `Session::close` /
+> `close_with_report` are re-based on the guard in
+> the same PR (signatures and `CloseReport`
+> unchanged), and `close_with_report` ENTERS the
+> ledger with this record: it was a pub tier-A-shaped
+> face recorded nowhere — no §2.3 row, no §6 entry
+> — the accretion shape this ledger exists to catch.
+> The re-base also settles the finish order (captain
+> adjudication D1): on the plain path the EXIT trap
+> now runs BEFORE the history write, following GNU
+> `exit_shell` (shell.c:1000-1002 the trap,
+> shell.c:1007-1009 the save; `maybe_save_shell_history`,
+> bashhist.c:488, reads HISTFILE/HISTFILESIZE at the
+> write, so the trap's edits and additions govern the
+> save). The pass as previously composed wrote history
+> first — its steps were modeled on the termsig
+> funnel — which diverged exactly when the pass itself
+> was the first to run the trap (the close and
+> end-of-stream routes; the `exit`-builtin routes had
+> already consumed the trap at dispatch). The termsig
+> sub-order (sig.c:590-667: history first, SIGHUP
+> hangup before the trap, die-by-signal last) is
+> preserved exactly, inside the same pass. The
+> differential (probes A–E against the GNU oracle)
+> and the order pin
+> (`issue863_gap8_finish_order_history_write_observes_post_trap_state`)
+> are recorded with the engine PR. niubash consumes
+> the guard not yet, so the record is staged ahead of
+> the host's adoption, like the GAP-7 record before
+> it; the §2.2 trap-step rows zero out when the host
+> lane lands, and the §2.3 `begin_finish` count goes
+> 0 → N then.
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -540,7 +595,7 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum); plus the `&self` variable read faces `Session::environment_full` / `Session::variable_value` — the niubash#863 GAP-6 full-table snapshot and single-value stored-value probe (recorded staged ahead of host adoption; see the header addendum); plus the completion-attempt guard family `CompletionAttempt` (+ methods `complete` / `complete_detailed` / `call_function_with_env` / `session`), with the opener `Session::begin_completion_attempt` — the niubash#863 GAP-7 reentrancy-aware attempt object replacing the host's thread-local shell lend (recorded staged ahead of host adoption; see the header addendum) |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum); plus the `&self` variable read faces `Session::environment_full` / `Session::variable_value` — the niubash#863 GAP-6 full-table snapshot and single-value stored-value probe (recorded staged ahead of host adoption; see the header addendum); plus the completion-attempt guard family `CompletionAttempt` (+ methods `complete` / `complete_detailed` / `call_function_with_env` / `session`), with the opener `Session::begin_completion_attempt` — the niubash#863 GAP-7 reentrancy-aware attempt object replacing the host's thread-local shell lend (recorded staged ahead of host adoption; see the header addendum); plus the finish guard family `Finish` (+ methods `run_exit_trap` / `final_cwd` / `run_stream_end_duties` / `finish_all`) / `FinishOutcome` / `FinishDuties` / `SessionHistoryWrite`, with the opener `Session::begin_finish` and the report face `Session::close_with_report` — the niubash#863 GAP-8 step-decomposed finish object replacing the host's hand-composed finish funnels (recorded staged ahead of host adoption; see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (0) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
@@ -696,10 +751,12 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::variable_value` | 7 | GAP-6 single-value probe: the stored value of one variable — the `&self` form of the executor's raw table read (`get_env`), deliberately not the `$name` expansion read (`resolved_value` keeps dynamic getters, nameref resolution and the typed-cell layer; the GAP-6 consumer pins record both readings per shape); adopted by the GAP-6 host migration — the 7 lib-code `get_env` seam reads in `&self` host methods (`THIS_SH`, `__RUBASH_POSIX_MODE`, the env-file expansion probe, `PS1`, `NIU_TITLE`, `PWD` twice) move to this face, and the §2.2 `get_env` row retires to 0; the new GAP-6 routing pin reads this face twice from the test module |
 | `Session::begin_completion_attempt` | 3 | GAP-7 guard opener: opens one `CompletionAttempt` per completion attempt from the `&mut Session` the host holds; the guard drives the attempt's execution faces (`complete_detailed`, `call_function_with_env` for the widget/compdef callbacks) and lends `&Session` reads (`session()`) live at every nesting depth. Adopted by the GAP-7 host migration as the attempt object replacing the thread-local lend (one install point, seven reads — see the GAP-7 retirement paragraph in §2.2): the two attempt drivers in `Shell` (`drive_completion` / `drive_completion_specific`, serving the probe surface and, through `EditorShellHandle`, the editor flavor) and the highlighter's short view attempt open this face in production; the GAP-7 pins and the reshaped compdef test open it six more times from test modules |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
+| `Session::begin_finish` | 0 | GAP-8 finish guard opener: opens one `Finish` per finish from the `&mut Session` the host holds, with the route's pending status as a value; the guard's coarse steps (`run_exit_trap` — pending status in, resolved status out; `final_cwd` — the post-trap directory read; `run_stream_end_duties` — the finish's non-trap duties with the engine history step gated per route through `FinishDuties`; `finish_all` — the one-call pass) decompose the one finish implementation around the host's interleaved duties, and `FinishOutcome` reports the finish boundary as values (status / final cwd / trap ran / history written / duties run). Recorded staged ahead of host adoption (the GAP-8 engine record, see the header addendum); `Session::close` / `close_with_report` are already re-based on it engine-side, and the GAP-8 consumer pins open it from test modules |
+| `Session::close_with_report` | 0 | GAP-8 (niubash#863): ENTERS the ledger with this record — a pub tier-A-shaped face recorded nowhere before (the GAP-8 scoping finding). The report form of `Session::close` (rubash#2039): the final status plus the post-trap cwd as a `CloseReport` value; re-based on the `Session::begin_finish` guard's one-call pass in the GAP-8 engine PR (adopt-and-extend, captain adjudication D4). No niubash consumer yet; consumed in-repo by `Session::close` and the issue2039 close pins |
 | `Session::prepare_line` | 1 | REPL history expansion |
 | `Session::complete` / `complete_detailed` / `has_compspec` | 0 / 0 / 1 | GAP-7 (niubash#863): the completion bridge this row used to name is retired — no direct `Session::complete` / `complete_detailed` calls remain; the generation call routes through the completion attempt's `complete_detailed` (counted under `Session::begin_completion_attempt` above) and the compspec gate reads through the guard's `session()` lend. `CompletionOutcome`/`CompletionPolicy` (rubash#2573) reach the host as the guard's outcome, consumed by niubash#837 |
 | `Session::aliases` / `functions` | 1 / 2 | snapshots for completion state |
-| `Session::close` | 1 | the one-shot finish funnel |
+| `Session::close` | 1 | the one-shot finish funnel; GAP-8 (niubash#863): re-based on the `Session::begin_finish` guard's one-call pass (signature unchanged) |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
@@ -766,7 +823,7 @@ to the split core crate without changing its shape.
 | `set_history_provider` + `HistoryProvider` | A | builder-injected capability (trait unchanged) |
 | `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` / `Session::call_function_with_env` + functions view (the env channel landed on the contract surface with rubash#2001; until then this row's env half was carried by the tier-C seam below) |
 | `inherit_process_stdin` | A | builder stream binding |
-| `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome` |
+| `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome`; the finish-path half of `run_exit_trap_with_status` lands as the `Session::begin_finish` guard's trap step (niubash#863 GAP-8 — see the finish guard row below) |
 | `script_driver` run family | A (driver wrappers B) | `Session::run`; thin wrappers stay in the driver crate |
 | `pre_process_interactive_line` + `InteractiveExpansion` | A | `Session::prepare_line` |
 | completeness (`has_unclosed_input_syntax*`, `script_uses_*`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`) | A / B | `Session::needs_more_input`; helpers in `api::syntax` |
@@ -785,6 +842,7 @@ to the split core crate without changing its shape.
 | path-resolution faces (`Session::resolve_shell_path`, `Session::resolve_shell_path_from_env`, `Session::resolve_shell_path_process_entries_from_env`, `Session::shell_pwd_display_path`) | A | the `executor::path` resolver as `Session` consumption faces in `rubash::api`, beside the §5.3 state views: each face delegates to the one resolver through the `Executor` method (or, for the display form, the module function) that already wraps it, so the contract and the shell cannot disagree about a spelling — the ruled path contract (bare `/` is the payload root, Option B, the drive spellings) does not move. They supersede the host's tier-C resolution reads through the §2.2 seam and its direct module-function call when the host lane lands (niubash#863 GAP-5; recorded staged ahead of host adoption; see the header addendum) |
 | variable read faces (`Session::environment_full`, `Session::variable_value`) | A | the `&self` variable reads in `rubash::api`, beside the §5.3 state views: the full table through the one sorted rendering the completion view's `env` component shares (`completion_view::full_env_sorted` over the executor's own snapshot), and the single-value stored read as the `&self` form of the executor's `get_env` — the stored string, not the `$name` expansion read. They supersede the host's remaining tier-C variable reads (the §2.2 full-table snapshots and the `&self` `get_env` probes) when the host lane lands (niubash#863 GAP-6; recorded staged ahead of host adoption; see the header addendum) |
 | completion-attempt guard (`CompletionAttempt`, `Session::begin_completion_attempt`) | A | one completion attempt as an explicit, reentrancy-aware object in `rubash::api`, beside the §5.3 state views: the guard owns the `&mut Session` borrow for the attempt, so the host's completer drives the attempt's execution faces through it (`complete_detailed`, `call_function_with_env` for the widget/compdef callbacks, with the temporary bindings the callback contract already carries) and reads live state through its `&Session` lend (`session()` — the `&self` read faces, never dark under nesting). Nested attempts are repeated calls on the same guard; a second guard cannot exist while one lives, so the aliasing hazard the thread-local's reentrancy flag papered over is a compile error. It supersedes the host's thread-local shell lend (`COMPLETION_BRIDGE`) when the host lane lands (niubash#863 GAP-7; recorded staged ahead of host adoption; see the header addendum). The completion window itself is a depth counter, not a bit, so an inner attempt returning never closes the outer attempt's `compopt` window |
+| finish guard (`Finish`, `Session::begin_finish`) | A | one session finish as an explicit, step-decomposed object in `rubash::api`, beside the §5.3 state views: the guard owns the `&mut Session` borrow for the finish and takes the route's pending status as a value, so the host drives the finish's coarse steps through it (`run_exit_trap` — the pending status in, the resolved status out; `final_cwd` — the post-trap directory read, the value that exists only between the trap and consumption, rubash#668; `run_stream_end_duties` — the history write gated per route, the stream-end job flush, the debugger note, the procsub close, the hangups; `finish_all` — the one-call pass) and interleaves its own duties (the post-trap cwd record, the host-provider history flush, the process exit) between them, reading the finish boundary back as values (`FinishOutcome`: status / final cwd / trap ran / history written / duties run). The session is not consumed, so the interactive route — session in a shared cell, history in the host provider's store — finishes through the same guard the consuming `Session::close` / `close_with_report` are re-based on. Order: the plain path follows GNU `exit_shell` (the EXIT trap before the history save, shell.c:1000-1009; captain adjudication D1); the termsig sub-order (sig.c:590-667) is preserved exactly. It supersedes the host's five hand-composed finish funnels and its tier-C trap-step seam reads when the host lane lands (niubash#863 GAP-8; recorded staged ahead of host adoption; see the header addendum) |
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup; the resolver faces' `Session` consumption forms are tier A — see the path-resolution faces row above — and `find_script_on_path` has no Session form |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
@@ -858,6 +916,9 @@ item rubash::api::CompletionAttempt
 item rubash::api::CompletionOutcome
 item rubash::api::CompletionPolicy
 item rubash::api::CompletionView
+item rubash::api::Finish
+item rubash::api::FinishDuties
+item rubash::api::FinishOutcome
 item rubash::api::Flow
 item rubash::api::InvocationShape
 item rubash::api::PreparedLine
@@ -866,6 +927,7 @@ item rubash::api::RunOptions
 item rubash::api::RunOutcome
 item rubash::api::Session
 item rubash::api::SessionBuilder
+item rubash::api::SessionHistoryWrite
 item rubash::builtins::bind::BindSpecError
 item rubash::builtins::bind::BindingSpec
 item rubash::builtins::bind::DEFAULT_FUNCTION_BINDINGS
@@ -948,6 +1010,8 @@ variant rubash::api::PreparedLine::Discard
 variant rubash::api::PreparedLine::Execute
 variant rubash::api::RespawnSource::EngineChild
 variant rubash::api::RespawnSource::Fresh
+variant rubash::api::SessionHistoryWrite::Run
+variant rubash::api::SessionHistoryWrite::Skip
 variant rubash::builtins::bind::BindingSpec::Function
 variant rubash::builtins::bind::BindingSpec::Macro
 variant rubash::executor::ExecuteError::CommandNotFound
@@ -966,16 +1030,22 @@ method rubash::api::CompletionAttempt::call_function_with_env
 method rubash::api::CompletionAttempt::complete
 method rubash::api::CompletionAttempt::complete_detailed
 method rubash::api::CompletionAttempt::session
+method rubash::api::Finish::final_cwd
+method rubash::api::Finish::finish_all
+method rubash::api::Finish::run_exit_trap
+method rubash::api::Finish::run_stream_end_duties
 method rubash::api::InvocationShape::interactive
 method rubash::api::InvocationShape::login_interactive
 method rubash::api::InvocationShape::new
 method rubash::api::OptionsView::set
 method rubash::api::Session::aliases
 method rubash::api::Session::begin_completion_attempt
+method rubash::api::Session::begin_finish
 method rubash::api::Session::bind_view
 method rubash::api::Session::builder
 method rubash::api::Session::call_function_with_env
 method rubash::api::Session::close
+method rubash::api::Session::close_with_report
 method rubash::api::Session::complete
 method rubash::api::Session::complete_detailed
 method rubash::api::Session::completion_view
