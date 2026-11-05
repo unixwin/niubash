@@ -715,6 +715,20 @@
 > surface. `bind_registry_generation` stays `pub` and keeps
 > its §6 item; `BindEntryView` / `BindKindView` stay `pub`
 > as the public view types.
+> Addendum (B5-11, 2026-11-06,
+> rubash#2856): `Session::has_compspec_at` / `Executor::has_compspec_at`
+> enter the ledger as the position-aware compspec gate (the
+> command-name form `has_compspec` cannot name the `-E` empty line
+> or the `-I` initial word), recorded §6 + §2.3 (staged 0 ahead of
+> the host adoption) + §4 completion row; `has_compspec` stays. The
+> same PR fixes the engine's own blank-line corners the gate
+> exposes: W1 (a whitespace-only line at end-of-line takes
+> `-I`/default, never `-E`), W2 (column 0 ahead of the command
+> name takes `-E`), W3 (an empty line with only `-I` registered
+> resolves to `-I` via the bashline.c post-chain arm) — all pinned
+> at the `complete_line` level (b01-b18 + arm-8 shapes) with the
+> gate asserted alongside. §6 grows 277 → 279 (two items: the
+> `Session` face and the `Executor` face).
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -1231,6 +1245,7 @@ its test-module reads named separately in the row):
 | `Session::initialize_readline` | 1 | GAP-13 (niubash#863): ENTERS the ledger with this record — the inputrc read as a contract face: a pure lift of `Executor::initialize_readline` (GNU bashline.c:451); ordering — after rc, before the first snapshot — is the caller's duty and the face does not enforce it; idempotent by the engine flag; missing files silent. The GAP-13 host adoption landed with niu #921 (merge `9388c9cf`): the engine-bindings load reads inputrc through the face (`shell.rs:3164`, `load_engine_bindings`), so the count is 1 — the staged 0 this row carried until the lane landed is retired by this record; consumed in-repo by the GAP-13 consumer pins (inputrc vars + bindings land in the view; second call is a no-op after a file change) and the U-1 probe (first call with HOME empty poisons the flag — GNU parity, bashline.c:451-456/:646). The host's one production call site (`shell.rs:3145`, `load_engine_bindings`) retired with the host lane (line number now 3164). |
 | `Session::is_known_keymap` | 1 | GAP-13 (niubash#863): ENTERS the ledger with this record — the keymap membership probe as a contract face: plain `KEYMAP_NAMES` membership, no alias folding (folding lives in the register path inside the engine — the `[keymap]` parser's plain membership, niubash#863 GAP-13 Q-F/U-3). The GAP-13 host adoption landed with niu #921 (merge `9388c9cf`): the `[keymap]` parser probes through the face (`repl.rs:5276`, `parse_keymap_bind_rule`), so the count is 1 — the staged 0 this row carried until the lane landed is retired by this record; consumed in-repo by the GAP-13 consumer pins (all eight names true, fake names false) and by the host pin, which calls the face twice from the test module (production count is 1; the two test-module calls are noted, not counted). |
 | `Session::applied_invocation_shopt_flag` | 0 | GAP-12 follow-up (niubash#863, rubash#2848): ENTERS the ledger with this record — the retained invocation's explicit shopt flag as a contract face: the last `-O`/`+O` entry for a name in the invocation applied through `Session::apply_invocation_before_startup`, or `None` when the invocation said nothing about it (and `None` when no invocation was applied). The host needs the explicit-vs-silent distinction the shape read cannot carry: `enter_interactive` arms `expand_aliases` for an interactive session unless the invocation explicitly turned it off (`+O expand_aliases -i` must win over the interactive default; the three GNU oracle arms are pinned in the GAP-13 consumer pins). Recorded staged ahead of the host adoption, so the count is 0; the host follow-up that deletes its `startup_invocation` field rides on this face plus `applied_invocation_shape` |
+| `Session::has_compspec_at` | 0 | B5-11 (niubash#863, rubash#2856): ENTERS the ledger with this record — the position-aware compspec gate: whether a compspec governs completion at `(line, cursor)`, answered with the same split the generation path uses (`split_for_completion` + `resolve_compspec`), so the gate and the candidates cannot disagree. The command-name form `has_compspec` cannot answer it: the `-E` empty line has no command and the `-I` initial word IS the command being completed. Recorded staged ahead of the host adoption, so the count is 0; the host lane rewires its `completer.rs` routing gate onto this face (the `-E`/`-I` gate was unreachable through the name form) |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
@@ -1299,7 +1314,7 @@ to the split core crate without changing its shape.
 | env methods (`get_env`, `set_env`, `unset_env`, `export_env`, `env_vars_snapshot`) | A | `Session::variables()` view; the read side is staged for GAP-6 retirement — the `&self` `get_env` probes move to `Session::variable_value` and the full-table `env_vars_snapshot` reads to `Session::environment_full` (see the header addendum). GAP-12 (niubash#863) corrects this row's "variables view is the target home" claim for the removal half: the removal home is the Session face `Session::remove_env` (a pure lift of `Executor::remove_env`, not the `unset` builtin's leaf on the variables view); the read/write halves stay with the variables view (see the header addendum) |
 | option methods (`set_shell_option`, `set_shopt_option`) | A | `Session::options()` view |
 | `last_exit_code` / `set_last_exit_code` | A | `Session::last_status` + `RunOutcome` |
-| `complete_line` / `complete_line_detailed`, `has_compspec` | A | `Session::complete` / `complete_detailed` + compspec view (the detailed pair carries the CompletionPolicy of rubash#2573). GAP-11 (niubash#863): the detailed pair's candidates carry `Candidate.kind: Option<CandidateKind>` (filesystem four, marked at generation under the generator-classification principle) and the policy carries the `filenames_intent` bit; `Candidate::new` / `described` default kind to `None` (constructor users source-compatible), struct-literal construction of `Candidate` outside the tree breaks on the new field — a 1.5.1 contract change, with no `#[non_exhaustive]` added |
+| `complete_line` / `complete_line_detailed`, `has_compspec` / `has_compspec_at` | A | `Session::complete` / `complete_detailed` + compspec view (the detailed pair carries the CompletionPolicy of rubash#2573). GAP-11 (niubash#863): the detailed pair's candidates carry `Candidate.kind: Option<CandidateKind>` (filesystem four, marked at generation under the generator-classification principle) and the policy carries the `filenames_intent` bit; `Candidate::new` / `described` default kind to `None` (constructor users source-compatible), struct-literal construction of `Candidate` outside the tree breaks on the new field — a 1.5.1 contract change, with no `#[non_exhaustive]` added. B5-11 (rubash#2856): `has_compspec_at` is the position-aware gate — the host's routing gate for the same generation path, true exactly when a compspec resolves for `(line, cursor)` (`-E`/`-D` empty-line arm, `-I` initial-word arm, own spec else `-D` on argument words); `has_compspec` stays as the command-name form |
 | `set_history_provider` + `HistoryProvider` | A | `Session::set_history_provider` — the post-build install face (pure lift of the executor setter, replace-always); builder injection (`SessionBuilder::history_provider`) is the build-time spelling of the same install (trait unchanged) |
 | `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` / `Session::call_function_with_env` + functions view (the env channel landed on the contract surface with rubash#2001; until then this row's env half was carried by the tier-C seam below) |
 | `inherit_process_stdin` | A | the contract method `Session::inherit_process_stdin` (the builder stream binding §4 anticipated — corrected by the GAP-13 recount wave, rubash#2833; the §2.3 row already read it as the contract method) |
@@ -1630,6 +1645,7 @@ method rubash::api::Session::finish_invocation_startup
 method rubash::api::Session::functions
 method rubash::api::Session::glob_filename
 method rubash::api::Session::has_compspec
+method rubash::api::Session::has_compspec_at
 method rubash::api::Session::has_function
 method rubash::api::Session::history_entries
 method rubash::api::Session::inherit_process_stdin
@@ -1693,6 +1709,7 @@ method rubash::executor::Executor::export_env
 method rubash::executor::Executor::find_script_on_path
 method rubash::executor::Executor::get_env
 method rubash::executor::Executor::has_compspec
+method rubash::executor::Executor::has_compspec_at
 method rubash::executor::Executor::has_function
 method rubash::executor::Executor::last_exit_code
 method rubash::executor::Executor::inject_signal
