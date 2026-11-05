@@ -467,11 +467,17 @@ impl PathCompleter {
             if !name_matches(&query.prefix, &entry.name, behavior) {
                 continue;
             }
-            let is_dir = entry.kind == ListedKind::Directory;
-            if directories_only && !is_dir {
+            if entry.name.starts_with('.') && !query.prefix.starts_with('.') {
                 continue;
             }
-            if entry.name.starts_with('.') && !query.prefix.starts_with('.') {
+            // A dirent reports a symlink as a symlink, never as a
+            // directory; `cd` must still offer links that point at one.
+            // Only stat the link when the command needs directories.
+            let is_dir = entry.kind == ListedKind::Directory
+                || (directories_only
+                    && entry.kind == ListedKind::Symlink
+                    && fs::metadata(base_dir.join(&entry.name)).is_ok_and(|md| md.is_dir()));
+            if directories_only && !is_dir {
                 continue;
             }
 
@@ -484,13 +490,17 @@ impl PathCompleter {
                 file_colors
                     .and_then(|colors| colors.style_for(entry.kind.candidate_kind(), &entry.name))
             };
-            completions.push(PathCandidate::new(
+            let mut candidate = PathCandidate::new(
                 entry.kind,
                 &query.display_prefix,
                 &entry.name,
                 query.quote,
                 style,
-            ));
+            );
+            if is_dir && entry.kind == ListedKind::Symlink {
+                candidate.mark_directory(&query.display_prefix, query.quote);
+            }
+            completions.push(candidate);
         }
 
         if completions.is_empty() {
@@ -638,6 +648,14 @@ struct PathCandidate {
 }
 
 impl PathCandidate {
+    /// A symlink that resolves to a directory completes like one: sorted
+    /// among directories, with a trailing `/`. Its dirent kind (and so
+    /// its symlink styling) is unchanged.
+    fn mark_directory(&mut self, display_prefix: &str, quote: Option<char>) {
+        self.is_dir = true;
+        self.completion = format_shell_path(&format!("{display_prefix}{}/", self.name), quote);
+    }
+
     fn new(
         kind: ListedKind,
         display_prefix: &str,
@@ -1379,6 +1397,82 @@ mod glob_completion_tests {
         assert!(glob_completion_matches("[a-c]?", "bx", ci));
         assert!(!glob_completion_matches("[!a-c]?", "bx", ci));
         assert!(glob_completion_matches("literal", "literal.txt", ci));
+    }
+}
+
+/// Regression pin for niubash PR #911 (external contributor):
+/// directories-only completion dropped symlinks that point at
+/// directories. A dirent reports a symlink as a symlink, never as a
+/// directory, so `cd` (and `pushd`) never offered a symlinked folder.
+/// The fix stats the link when directories are wanted and marks a
+/// link-to-directory candidate like a directory (trailing `/`).
+///
+/// Oracle: GNU bash `compgen -d` semantics — in a directory holding
+/// realdir/, realfile, linkdir -> realdir, linkfile -> realfile and
+/// brokenlink -> nonexistent, the directory set is exactly
+/// {linkdir, realdir}; a link to a file and a broken link stay out.
+#[cfg(all(test, unix))]
+mod symlinked_directory_tests {
+    use super::*;
+
+    fn ctx(dir: &Path, input: &str) -> CompletionContext {
+        CompletionContext::new(dir.to_path_buf(), input.to_string(), input.len())
+    }
+
+    fn complete_values(dir: &Path, input: &str) -> Vec<String> {
+        let context = ctx(dir, input);
+        PathCompleter::complete(&context)
+            .unwrap()
+            .map(|result| result.completions)
+            .unwrap_or_default()
+    }
+
+    fn seed_dir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "niubash-symlink-dir-completion-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("realdir")).unwrap();
+        std::fs::write(dir.join("realfile"), "x").unwrap();
+        std::os::unix::fs::symlink("realdir", dir.join("linkdir")).unwrap();
+        std::os::unix::fs::symlink("realfile", dir.join("linkfile")).unwrap();
+        std::os::unix::fs::symlink("nonexistent", dir.join("brokenlink")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cd_offers_symlink_to_directory_with_trailing_slash() {
+        let dir = seed_dir();
+        let mut values = complete_values(&dir, "cd ");
+        values.sort();
+        assert_eq!(
+            values,
+            vec!["linkdir/".to_string(), "realdir/".to_string()],
+            "cd must offer the symlink to a directory, marked like one: {values:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cd_prefix_filters_symlink_to_directory() {
+        let dir = seed_dir();
+        let values = complete_values(&dir, "cd li");
+        assert_eq!(values, vec!["linkdir/".to_string()], "{values:?}");
+
+        // A link to a file is not a directory: no match.
+        let values = complete_values(&dir, "cd linkf");
+        assert!(values.is_empty(), "{values:?}");
+
+        // A broken link resolves to nothing: no match.
+        let values = complete_values(&dir, "cd broken");
+        assert!(values.is_empty(), "{values:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
