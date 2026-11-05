@@ -1713,6 +1713,88 @@ niu_git_comp() {
     }
 
     #[test]
+    fn issue2856_empty_initial_compspec_gate() {
+        // B5-11 (rubash#2856 / niubash#863): the host gate for the
+        // `-E`/`-I` compspecs is `Session::has_compspec_at(line,
+        // cursor)`, and a governing compspec answer suppresses the
+        // cwd/alias/function overlays (ruling Q-C (i)). These shapes
+        // are pinned at the completer layer because the REPL never
+        // consults the completer for a bare TAB on an empty word
+        // (pre-existing editor behavior — the PTY chain drives the
+        // same shapes through M-* instead; see its header note).
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp_dir = unique_temp_dir("niubash-b511-empty-initial");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::create_dir(temp_dir.join("esub")).unwrap();
+        for name in ["eprog", "dprog"] {
+            let path = temp_dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\necho hi\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let complete_with = |registrations: &str, line: &str, cursor: usize| -> Vec<String> {
+            let mut shell = crate::shell::Shell::new().unwrap();
+            // The shell's live pwd drives the host faces (the cwd
+            // overlay reads `executor_pwd_host_path`, not the
+            // completer state's directory), so `cd` into the fixture
+            // dir exactly like the glob test does.
+            assert!(shell
+                .execute_script(&format!("cd {}", temp_dir.display()))
+                .is_ok());
+            assert!(shell.execute_script(registrations).is_ok());
+            let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+            let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+            let mut completer = NiubashCompleter::with_shell(state, shell.clone());
+            completer
+                .complete(line, cursor)
+                .iter()
+                .map(|suggestion| suggestion.value.clone())
+                .collect()
+        };
+
+        // Empty line + only `-E`: the wordlist owns the answer.
+        assert_eq!(
+            complete_with("complete -E -W 'eone etwo'", "", 0),
+            vec!["eone".to_string(), "etwo".to_string()],
+            "empty line + -E must return the -E wordlist with no cwd overlay"
+        );
+        // Whitespace-only at EOL + only `-I` (W1: `-E` does not
+        // trigger here; `-I` does).
+        assert_eq!(
+            complete_with("complete -I -W 'ione itwo'", "   ", 3),
+            vec!["ione".to_string(), "itwo".to_string()],
+            "whitespace-only line at EOL + -I must return the -I wordlist with no cwd overlay"
+        );
+        // Column 0 ahead of the command name + only `-E` (W2: the
+        // empty-line arm, not `-I`).
+        assert_eq!(
+            complete_with("complete -E -W 'eone etwo'", "   ls", 0),
+            vec!["eone".to_string(), "etwo".to_string()],
+            "column 0 ahead of the command name + -E must return the -E wordlist"
+        );
+        // Command word + only `-D` (Q-D guard): the wordlist never
+        // governs; the host's command completion answers.
+        let values = complete_with("complete -D -W 'dalpha dbeta'", "d", 1);
+        assert!(
+            !values.iter().any(|value| value == "dalpha"),
+            "command word + only -D must never offer the -D wordlist, got {values:?}"
+        );
+        assert!(
+            values.iter().any(|value| value.ends_with("dprog")),
+            "command word + only -D must offer host command completion, got {values:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
     fn glob_completion_uses_the_engine_glob_filename() {
         use crate::test_support::PROCESS_STATE_LOCK;
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
