@@ -1362,8 +1362,26 @@ mod glob_completion_tests {
 
     #[test]
     fn extglob_word_completes_matching_files() {
+        // niubash#530 + GAP-9 (niubash#863): the `@(a|b)` word is
+        // one glob pattern only with `extglob` on — the engine
+        // view splits it at `|` when the option is off (see
+        // `test_extglob_pipe_is_not_a_command_separator`), so this
+        // test builds its context from a live session with the
+        // option enabled and restores the process-global gate
+        // before asserting.
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = seed_dir();
-        let values = complete_values(&dir, "ls @(a|b)");
+        let mut shell = crate::shell::Shell::new().unwrap();
+        shell.execute_script("shopt -s extglob").unwrap();
+        let mut context = ctx(&dir, "ls @(a|b)");
+        context.token_view = Some(shell.session().token_view("ls @(a|b)"));
+        shell.execute_script("shopt -u extglob").unwrap();
+        let values = PathCompleter::complete(&context)
+            .unwrap()
+            .map(|result| result.completions)
+            .unwrap_or_default();
         assert!(values.contains(&"alpha.txt".to_string()), "{values:?}");
         assert!(values.contains(&"alpha2.txt".to_string()), "{values:?}");
         assert!(values.contains(&"beta.txt".to_string()), "{values:?}");

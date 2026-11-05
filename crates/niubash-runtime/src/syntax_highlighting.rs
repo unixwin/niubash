@@ -164,12 +164,35 @@ impl NiubashSyntaxHighlighter {
     /// from the session env, so a session TMPDIR assignment moves it
     /// immediately — niubash#627 G2). Highlighters built without
     /// engine state fall back to the process temp dir.
+    /// The backing directory for the session's `/tmp`: the value the
+    /// shell syncs into the shared completion state (engine-resolved
+    /// from the session env, so a session TMPDIR assignment moves it
+    /// immediately — niubash#627 G2). Highlighters built without
+    /// engine state fall back to the process temp dir.
     fn session_tmp_base(&self) -> PathBuf {
         self.completion_state
             .as_ref()
             .and_then(|state| state.lock().ok())
             .map(|state| state.tmp_base.clone())
             .unwrap_or_else(std::env::temp_dir)
+    }
+
+    /// The engine token view of `line` (GAP-9, niubash#863): the
+    /// live session's view when this highlighter carries the
+    /// editor shell — a plain `&self` read through the handle
+    /// (the Q-H shape: never a completion attempt) — the
+    /// stateless oracle's view otherwise. `Session` is
+    /// deliberately `!Send` (rubash pins it with
+    /// `PhantomData<Rc<()>>`), so a shell-less highlighter
+    /// cannot own a fallback session and stay `Send` for
+    /// ruline's `Highlighter`; the oracle is the fallback, the
+    /// same one the completion contexts use.
+    fn token_view(&self, line: &str) -> rubash::api::TokenView {
+        if let Some(handle) = &self.shell {
+            handle.with_shell_mut(|shell| shell.session().token_view(line))
+        } else {
+            crate::completion::stateless_token_view(line)
+        }
     }
 }
 
@@ -183,48 +206,25 @@ impl Highlighter for NiubashSyntaxHighlighter {
             return plain_text(line);
         }
 
-        let tokens = lex(line);
-        if tokens.is_empty() {
+        let view = self.token_view(line);
+        if view.tokens.is_empty() {
             return plain_text(line);
         }
 
         let mut styled = StyledText::new();
         let mut pos = 0;
-        let mut expect_command = true;
-        let mut after_redirection = false;
 
-        for token in tokens {
-            if pos < token.start {
+        for span in &view.tokens {
+            if pos < span.start {
                 styled.push((
                     self.style(SyntaxKind::Default),
-                    line[pos..token.start].to_string(),
+                    line[pos..span.start].to_string(),
                 ));
             }
 
-            let kind = match token.kind {
-                TokenKind::Comment => SyntaxKind::Comment,
-                TokenKind::CommandSeparator => {
-                    expect_command = true;
-                    after_redirection = false;
-                    SyntaxKind::CommandSeparator
-                }
-                TokenKind::Redirection => {
-                    after_redirection = true;
-                    SyntaxKind::Redirection
-                }
-                TokenKind::Word => {
-                    let classified =
-                        classify_word(&token.text, expect_command, after_redirection, self);
-                    if expect_command && classified != SyntaxKind::Assign {
-                        expect_command = false;
-                    }
-                    after_redirection = false;
-                    classified
-                }
-            };
-
-            styled.push((self.style(kind), token.text));
-            pos = token.end;
+            let kind = self.classify_span(span);
+            styled.push((self.style(kind), span.text.clone()));
+            pos = span.end;
         }
 
         if pos < line.len() {
@@ -241,44 +241,73 @@ fn plain_text(line: &str) -> StyledText {
     styled
 }
 
-fn classify_word(
-    word: &str,
-    expect_command: bool,
-    after_redirection: bool,
-    highlighter: &NiubashSyntaxHighlighter,
-) -> SyntaxKind {
-    let unquoted = unquote_word(word);
-
-    if expect_command && is_assignment(&unquoted) {
-        return SyntaxKind::Assign;
+impl NiubashSyntaxHighlighter {
+    /// The style of one engine token span (GAP-9, niubash#863).
+    /// Separators, redirections, comments and here-doc bodies
+    /// map straight off the span kind; word-shaped spans map off
+    /// the engine-folded role — Reserved / Assignment / Builtin
+    /// are the engine's verdicts, not the retired host tables.
+    fn classify_span(&self, span: &rubash::api::TokenSpan) -> SyntaxKind {
+        use rubash::api::{TokenKindView, TokenRole};
+        match span.kind {
+            TokenKindView::Comment => SyntaxKind::Comment,
+            TokenKindView::HereDocBody => SyntaxKind::Default,
+            TokenKindView::RedirectOut
+            | TokenKindView::RedirectIn
+            | TokenKindView::Append
+            | TokenKindView::RedirectErr
+            | TokenKindView::RedirectErrAppend
+            | TokenKindView::HereDoc
+            | TokenKindView::HereString => SyntaxKind::Redirection,
+            kind if kind.is_separator() => SyntaxKind::CommandSeparator,
+            _ => match span.role {
+                TokenRole::Reserved => SyntaxKind::ReservedWord,
+                TokenRole::Assignment => SyntaxKind::Assign,
+                TokenRole::Builtin => SyntaxKind::Builtin,
+                TokenRole::RedirectTarget => {
+                    path_kind(&unquote_word(&span.text), &self.session_tmp_base())
+                        .unwrap_or(SyntaxKind::Default)
+                }
+                TokenRole::Plain => self.classify_plain_word(span),
+            },
+        }
     }
 
-    if expect_command {
-        if is_reserved_word(&unquoted) {
-            return SyntaxKind::ReservedWord;
+    /// A word-shaped span the engine roles `Plain`: the
+    /// command-position chain when the span stands where a
+    /// command word may stand, the argument chain otherwise.
+    /// The span's `command_position` replaces the retired
+    /// scanner's `expect_command` state; the `role` already
+    /// settled the reserved-word / builtin / prefix-assignment
+    /// questions, so this chain only keeps the host-owned
+    /// decisions — REPL-only commands, the known-command probe,
+    /// and the path fallback.
+    fn classify_plain_word(&self, span: &rubash::api::TokenSpan) -> SyntaxKind {
+        if span.command_position {
+            let unquoted = unquote_word(&span.text);
+            // REPL-only commands (`self-update`, `update-niubash`,
+            // `logout`) never resolve on PATH, but the interactive
+            // shell accepts them, so color them like builtins
+            // instead of unknown tokens (niu#260).
+            if crate::repl::is_repl_reserved_command(&unquoted) {
+                return SyntaxKind::Builtin;
+            }
+            if self.is_known_command(&unquoted) {
+                return SyntaxKind::Command;
+            }
+            if let Some(path_kind) = path_kind(&unquoted, &self.session_tmp_base()) {
+                return path_kind;
+            }
+            return SyntaxKind::UnknownToken;
         }
-        if is_shell_builtin(&unquoted) {
-            return SyntaxKind::Builtin;
-        }
-        // REPL-only commands (`self-update`, `update-niubash`, `logout`) never
-        // resolve on PATH, but the interactive shell accepts them, so color
-        // them like builtins instead of unknown tokens (niu#260).
-        if crate::repl::is_repl_reserved_command(&unquoted) {
-            return SyntaxKind::Builtin;
-        }
-        if highlighter.is_known_command(&unquoted) {
-            return SyntaxKind::Command;
-        }
-        if let Some(path_kind) = path_kind(&unquoted, &highlighter.session_tmp_base()) {
-            return path_kind;
-        }
-        return SyntaxKind::UnknownToken;
+        classify_argument_word(&span.text, &self.session_tmp_base())
     }
+}
 
-    if after_redirection {
-        return path_kind(&unquoted, &highlighter.session_tmp_base())
-            .unwrap_or(SyntaxKind::Default);
-    }
+/// The argument-position chain, unchanged from the retired
+/// scanner's: quotes, command substitution, variables, options,
+/// then a trailing assignment, then the path fallback.
+fn classify_argument_word(word: &str, tmp_base: &Path) -> SyntaxKind {
     if word.starts_with('\'') {
         return SyntaxKind::SingleQuotedArgument;
     }
@@ -297,183 +326,10 @@ fn classify_word(
     if word.starts_with('-') && word.len() > 1 {
         return SyntaxKind::SingleHyphenOption;
     }
-    if is_assignment(&unquoted) {
+    if is_assignment(&unquote_word(word)) {
         return SyntaxKind::Assign;
     }
-    path_kind(&unquoted, &highlighter.session_tmp_base()).unwrap_or(SyntaxKind::Default)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Token {
-    start: usize,
-    end: usize,
-    text: String,
-    kind: TokenKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenKind {
-    Word,
-    CommandSeparator,
-    Redirection,
-    Comment,
-}
-
-fn lex(line: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
-    let mut index = 0;
-
-    while index < line.len() {
-        let ch = next_char(line, index);
-        if ch.is_whitespace() {
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch == '#' && comment_can_start(line, index) {
-            tokens.push(Token {
-                start: index,
-                end: line.len(),
-                text: line[index..].to_string(),
-                kind: TokenKind::Comment,
-            });
-            break;
-        }
-
-        if let Some(end) = command_separator_end(line, index) {
-            tokens.push(Token {
-                start: index,
-                end,
-                text: line[index..end].to_string(),
-                kind: TokenKind::CommandSeparator,
-            });
-            index = end;
-            continue;
-        }
-
-        if let Some(end) = redirection_end(line, index) {
-            tokens.push(Token {
-                start: index,
-                end,
-                text: line[index..end].to_string(),
-                kind: TokenKind::Redirection,
-            });
-            index = end;
-            continue;
-        }
-
-        let end = word_end(line, index);
-        tokens.push(Token {
-            start: index,
-            end,
-            text: line[index..end].to_string(),
-            kind: TokenKind::Word,
-        });
-        index = end;
-    }
-
-    tokens
-}
-
-fn next_char(line: &str, index: usize) -> char {
-    line[index..].chars().next().unwrap()
-}
-
-fn comment_can_start(line: &str, index: usize) -> bool {
-    index == 0
-        || line[..index]
-            .chars()
-            .last()
-            .is_some_and(char::is_whitespace)
-}
-
-fn command_separator_end(line: &str, index: usize) -> Option<usize> {
-    for separator in ["&&", "||", "|", ";"] {
-        if line[index..].starts_with(separator) {
-            return Some(index + separator.len());
-        }
-    }
-    None
-}
-
-fn redirection_end(line: &str, index: usize) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let mut probe = index;
-
-    while probe < line.len() && bytes[probe].is_ascii_digit() {
-        probe += 1;
-    }
-
-    if probe >= line.len() {
-        return None;
-    }
-
-    let ch = next_char(line, probe);
-    if ch != '<' && ch != '>' {
-        return None;
-    }
-
-    probe += ch.len_utf8();
-    while probe < line.len() {
-        let ch = next_char(line, probe);
-        if ch.is_whitespace() || matches!(ch, ';' | '|') {
-            break;
-        }
-        if ch == '<' || ch == '>' || ch == '&' || ch.is_ascii_digit() || ch == '-' {
-            probe += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    Some(probe)
-}
-
-fn word_end(line: &str, start: usize) -> usize {
-    let mut index = start;
-    let mut quote = None;
-    let mut escaped = false;
-
-    while index < line.len() {
-        let ch = next_char(line, index);
-        if escaped {
-            escaped = false;
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch == '\\' {
-            escaped = true;
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if let Some(active) = quote {
-            if ch == active {
-                quote = None;
-            }
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch.is_whitespace()
-            || ch == '#'
-            || command_separator_end(line, index).is_some()
-            || redirection_end(line, index).is_some()
-        {
-            break;
-        }
-
-        index += ch.len_utf8();
-    }
-
-    index
+    path_kind(&unquote_word(word), tmp_base).unwrap_or(SyntaxKind::Default)
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -486,61 +342,6 @@ fn is_assignment(word: &str) -> bool {
         _ => return false,
     }
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn is_reserved_word(word: &str) -> bool {
-    matches!(
-        word,
-        "if" | "then"
-            | "else"
-            | "elif"
-            | "fi"
-            | "for"
-            | "in"
-            | "do"
-            | "done"
-            | "while"
-            | "until"
-            | "case"
-            | "esac"
-            | "function"
-            | "{"
-            | "}"
-    )
-}
-
-fn is_shell_builtin(word: &str) -> bool {
-    matches!(
-        word,
-        "alias"
-            | "bg"
-            | "break"
-            | "cd"
-            | "continue"
-            | "echo"
-            | "eval"
-            | "exec"
-            | "exit"
-            | "export"
-            | "false"
-            | "fg"
-            | "help"
-            | "history"
-            | "jobs"
-            | "pwd"
-            | "read"
-            | "return"
-            | "set"
-            | "setopt"
-            | "shift"
-            | "source"
-            | "test"
-            | "true"
-            | "type"
-            | "unalias"
-            | "unset"
-            | "unsetopt"
-    )
 }
 
 impl NiubashSyntaxHighlighter {
@@ -1042,6 +843,22 @@ mod tests {
         assert_eq!(
             style_for(&styled, "# note"),
             highlighter.style(SyntaxKind::Comment)
+        );
+    }
+
+    #[test]
+    fn highlights_engine_builtins_missing_from_the_old_static_table() {
+        // GAP-9 (niubash#863): the builtin verdict comes from the
+        // engine-folded role now, not the retired host table —
+        // `printf` is an engine builtin the old `is_shell_builtin`
+        // table never listed, so it used to fall through to the
+        // known-command probe (Command) instead of painting
+        // Builtin.
+        let highlighter = NiubashSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
+        let styled = highlighter.highlight("printf '%s\\n' hello", 0);
+        assert_eq!(
+            style_for(&styled, "printf"),
+            highlighter.style(SyntaxKind::Builtin)
         );
     }
 
