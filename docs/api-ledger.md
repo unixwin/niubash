@@ -241,6 +241,34 @@
 > NOT part of the view — the path resolver's face is
 > GAP-5's object.
 >
+> Addendum (GAP-5 path-resolution record, 2026-11-05,
+> niubash#863 GAP-5): the tier-A path-resolution faces —
+> `Session::resolve_shell_path` (the `&self` instance
+> form), `Session::resolve_shell_path_from_env` and
+> `Session::resolve_shell_path_process_entries_from_env`
+> (the associated forms), and
+> `Session::shell_pwd_display_path` (the associated
+> display form) — are recorded (§2.1 row, §2.3 rows,
+> §4 rows, §6 entries). The family is new on the engine
+> side in the same change: each face delegates to the
+> one resolver in `executor::path` through the
+> `Executor` method (or, for the display form, the
+> module function) that already wraps it, so the
+> contract and the engine cannot disagree about a
+> spelling; the ruled path contract (bare `/` is the
+> payload root, Option B, the drive spellings) does
+> not move. Together they supersede the host's tier-C
+> resolution reads (`resolve_shell_path` /
+> `resolve_shell_path_from_env` /
+> `resolve_shell_path_process_entries_from_env`
+> through the §2.2 seam) and its direct call to the
+> `rubash::executor::shell_pwd_display_path` module
+> function. niubash consumes none of them yet, so the
+> record is staged ahead of the host's adoption, like
+> the GAP-4 record before it; the §2.2 resolution rows
+> and the §2.1 `executor` row's `shell_pwd_display_path`
+> count zero out when the host lane lands.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -423,7 +451,7 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum) |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (1) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
@@ -475,6 +503,17 @@ RFC §3.2 top set it cites is pre-migration history).
 Two further non-`Executor` methods are consumed:
 `ShellInvocation::parse` (2) and `WordMetadata::literal` (1).
 
+Staged retirement (niubash#863 GAP-5): the three resolution
+rows above — `resolve_shell_path` (5),
+`resolve_shell_path_from_env` (assoc, 3) and
+`resolve_shell_path_process_entries_from_env` (assoc, 2) —
+and the §2.1 `executor` row's `shell_pwd_display_path` (1)
+are the tier-C forms of the path resolver whose tier-A
+`Session` faces are recorded in §2.3, staged ahead of host
+adoption. These counts zero out when the host lane lands
+and the host's resolution reads move to the Session faces;
+the methods themselves stay `pub` in the engine.
+
 Note what the retained set is made of: the bind registry and the
 design-§3.2 AST routes (`execute_ast`, `execute_command`), the
 classification plumbing of the routes that stay direct
@@ -508,6 +547,10 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::bind_view` | 7 | GAP-3 bind view: the registry snapshot (`BindView` — generation / editing mode / readline variables / removal tombstones / entries with canonical bytes, kind, resolved keymap and GNU dump line); adopted by the GAP-3 host migration — shell binding load/staleness/edit-mode, bind -x lookup, repl dump handlers and keyseq-timeout read the view, and the host's tier-C registry reads plus the `bind_surface.rs` conversion layer are deleted |
 | `Session::completion_view` | 2 | GAP-4 completion view: the completer's live state as one `&self` capture (`CompletionView` — session cwd / the whole variable table in `env_vars_snapshot`'s rendering, attribute pseudo-entries included, sorted by name, with its content fingerprint / function names / open fd numbers); adopted by the GAP-4 host migration — the completer's capture and the highlighter's known-command probe read the view at use time, and the host's `CompletionState` env/function/fd snapshot fields plus their per-line re-synchronization are deleted |
 | `Session::has_function` | 1 | GAP-4b: the `&self` function probe (the executor's own lookup; `StateViews::has_function` is the `&mut`-shaped form); adopted by the GAP-4 host migration — the widget-availability probe reads it live, and the tier-C `executor().has_function(name)` read is deleted |
+| `Session::resolve_shell_path` | 0 | GAP-5 path resolution: the `&self` instance form of the `executor::path` resolver (the executor's own method over the session's live environment); recorded staged ahead of host adoption — the host's tier-C `executor().resolve_shell_path(...)` reads move here when the host lane lands |
+| `Session::resolve_shell_path_from_env` | 0 | GAP-5 associated form: resolution against a caller-supplied environment map, delegating to the same `executor::path` function as the executor's associated form; recorded staged ahead of host adoption |
+| `Session::resolve_shell_path_process_entries_from_env` | 0 | GAP-5 PATH-entry form: one shell PATH entry resolved to its native directories against a caller-supplied environment map, same source as the executor's associated form; recorded staged ahead of host adoption |
+| `Session::shell_pwd_display_path` | 0 | GAP-5 display form: the module function `rubash::executor::shell_pwd_display_path` under a `Session` associated name; recorded staged ahead of host adoption — the host's direct module-function call moves here when the host lane lands |
 | `Session::run_stdin` / `run_interactive_stdin` | 1 / 1 | |
 | `Session::prepare_line` | 1 | REPL history expansion |
 | `Session::complete` / `complete_detailed` / `has_compspec` | 1 / 0 / 1 | completion bridge (complete_detailed + CompletionOutcome/CompletionPolicy: rubash#2573, consumed by niubash#837) |
@@ -595,7 +638,8 @@ to the split core crate without changing its shape.
 | invocation shape (`InvocationShape`, `RespawnSource`, `SessionBuilder::invocation_shape`, `Session::invocation_shape`; the Executor accessors `invocation_interactive` / `invocation_login` / `set_invocation_shape`) | A | construction-time session state in `rubash::api`, beside the session-configuration row: the builder applies the declared shape to the executor's typed invocation state at build — the structured declaration is authoritative for the fields it names, over the environment seeds — and `Session::invocation_shape` reads it back; the Executor accessors are the state's engine-side face, behind which the migrated carrier reads of rubash#2130 sit (recorded staged ahead of host adoption; see the header addendum) |
 | bind view (`BindView`, `BindEntryView`, `BindKindView`, `BindRemovalView`, `Session::bind_view`) | A | the key-binding registry as one owned snapshot in `rubash::api`, beside the §5.3 state views: the capture reads the registry's own stores (generation, editing mode, the readline variable table, entries, removal tombstones) and renders each entry's canonical bytes with the engine's one `keyseq_bytes` decoder and its dump line with the `bind` builtin's own format helpers, so the contract and the shell cannot disagree; it supersedes the host's tier-C registry reads and handwritten re-decoders when the host lane lands (niubash#863 GAP-3; recorded staged ahead of host adoption; see the header addendum) |
 | completion view (`CompletionView`, `Session::completion_view`, `Session::has_function`) | A | the completer's live state as one owned snapshot in `rubash::api`, beside the §5.3 state views: the capture reads the executor's own snapshot functions (session cwd, the full variable table in `env_vars_snapshot`'s rendering with its attribute pseudo-entries, function names, open fd numbers) and derives the env content fingerprint from that rendering, so the contract and the shell cannot disagree; `Session::has_function` is the same executor lookup in `&self` form. It supersedes the host's tier-C completion reads and its per-line re-synchronized snapshot struct when the host lane lands (niubash#863 GAP-4 + GAP-4b; recorded staged ahead of host adoption; see the header addendum). The host's `/tmp` answer (`resolve_shell_path`) is NOT part of this family — the path resolver's face is GAP-5's object |
-| driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup |
+| path-resolution faces (`Session::resolve_shell_path`, `Session::resolve_shell_path_from_env`, `Session::resolve_shell_path_process_entries_from_env`, `Session::shell_pwd_display_path`) | A | the `executor::path` resolver as `Session` consumption faces in `rubash::api`, beside the §5.3 state views: each face delegates to the one resolver through the `Executor` method (or, for the display form, the module function) that already wraps it, so the contract and the shell cannot disagree about a spelling — the ruled path contract (bare `/` is the payload root, Option B, the drive spellings) does not move. They supersede the host's tier-C resolution reads through the §2.2 seam and its direct module-function call when the host lane lands (niubash#863 GAP-5; recorded staged ahead of host adoption; see the header addendum) |
+| driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup; the resolver faces' `Session` consumption forms are tier A — see the path-resolution faces row above — and `find_script_on_path` has no Session form |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
 | tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, the post-build provider install, and the `&self` probe reads the `&mut`-shaped views cannot serve. Added with the migration's companion change; its consumer set is expected to shrink, never grow |
@@ -794,12 +838,16 @@ method rubash::api::Session::invocation_shape
 method rubash::api::Session::last_status
 method rubash::api::Session::options
 method rubash::api::Session::prepare_line
+method rubash::api::Session::resolve_shell_path
+method rubash::api::Session::resolve_shell_path_from_env
+method rubash::api::Session::resolve_shell_path_process_entries_from_env
 method rubash::api::Session::run
 method rubash::api::Session::run_interactive_stdin
 method rubash::api::Session::run_prompt_command
 method rubash::api::Session::run_stdin
 method rubash::api::Session::set_last_status
 method rubash::api::Session::set_positional
+method rubash::api::Session::shell_pwd_display_path
 method rubash::api::Session::take_classification
 method rubash::api::Session::variables
 method rubash::api::SessionBuilder::argv0
