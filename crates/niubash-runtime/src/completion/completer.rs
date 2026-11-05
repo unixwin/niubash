@@ -620,19 +620,21 @@ impl NiubashCompleter {
         // rule). Decide that once, up front: the static definition tables
         // and the path fallback are overlays for commands WITHOUT a
         // compspec, and must not be merged into its candidates.
-        // niubash#830: probe the compspec for the command word of the
-        // cursor's segment, not the first whitespace token of the
-        // whole line — on 'true; git <TAB>' the old probe asked about
-        // "true;", missed git's compspec, and let the static tables
-        // answer with the wrong candidates. `get_command_name` is
-        // quote/extglob-aware and skips grouping openers and
-        // assignment prefixes ('( git ', 'VAR=1 git ').
-        let command_word = context.get_command_name().unwrap_or_default();
-        let has_compspec = !context.is_command_position()
-            && !command_word.is_empty()
-            && engine
-                .as_ref()
-                .is_some_and(|run| run.attempt.session().has_compspec(&command_word));
+        // B5-11 (niubash#863): the gate asks the engine about the
+        // POSITION — `Session::has_compspec_at(input, cursor_pos)` —
+        // not the command name. The `-E` empty line has no command
+        // and the `-I` initial word IS the command being completed,
+        // so the name form (`has_compspec`) cannot answer either;
+        // it also cannot tell `"   "`@0 (empty-line arm, `-E`) from
+        // `"   "`@3 (empty command word, `-I`). The position form
+        // answers with the same split the generation path uses, so
+        // the gate and the candidates cannot disagree (niubash#830's
+        // segment awareness — probe the command word of the cursor's
+        // segment, not the first token of the whole line — lives in
+        // the engine's split now).
+        let has_compspec = engine
+            .as_ref()
+            .is_some_and(|run| run.attempt.session().has_compspec_at(input, cursor_pos));
 
         // Shell-function completions (`NIU_COMPDEFS`): only available
         // while a completion attempt is open on the shell. Skipped
@@ -654,10 +656,35 @@ impl NiubashCompleter {
         // actually run from the command slot qualify — directories and
         // executable files (niubash#671); plain data files are not commands
         // and readline/GNU never offer them here.
-        let cwd_path_suggestions = self.cwd_path_suggestions_at_command_position(&context);
-        let alias_suggestions = self.alias_suggestions_at_command_position(&context, &aliases);
-        let function_suggestions =
-            self.function_suggestions_at_command_position(&context, &functions);
+        //
+        // B5-11 (niubash#863, ruling Q-C (i)): when a compspec governs
+        // the position, its answer REPLACES default completion (GNU
+        // `rl_attempted_completion_over=1`), so the three command-
+        // position overlays — cwd, alias, function — stay out of the
+        // candidate set, exactly like the compdef/plugin/path
+        // suppressions above. The `-o default` / `-o bashdefault`
+        // pass-through is NOT the host's job to re-add: the engine's
+        // `complete_detailed` outcome already carries it (rubash
+        // complete.rs: the empty-result fallback runs
+        // `bash_default_candidates` / the filename set inside the
+        // attempt, and `CompletionPolicy.filenames_intent` records
+        // when `-o default` sourced filename candidates), so the host
+        // takes the outcome as the complete answer.
+        let cwd_path_suggestions = if has_compspec {
+            Vec::new()
+        } else {
+            self.cwd_path_suggestions_at_command_position(&context)
+        };
+        let alias_suggestions = if has_compspec {
+            Vec::new()
+        } else {
+            self.alias_suggestions_at_command_position(&context, &aliases)
+        };
+        let function_suggestions = if has_compspec {
+            Vec::new()
+        } else {
+            self.function_suggestions_at_command_position(&context, &functions)
+        };
 
         // Try each plugin in order; only the first non-None result is used.
         // Skipped when a compspec owns the command (GNU precedence).
