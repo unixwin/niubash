@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use nu_ansi_term::{Color, Style};
-use rubash::api::capabilities::CandidateKind;
+use rubash::api::CandidateKind;
 
 /// A parsed `LS_COLORS` table: the special keys plus suffix rules.
 #[derive(Debug, Default)]

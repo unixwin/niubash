@@ -61,7 +61,6 @@ macro_rules! eprintln {
 }
 
 pub mod autosuggest;
-pub mod bind_surface;
 pub mod completion;
 pub mod config;
 pub mod console_guard;

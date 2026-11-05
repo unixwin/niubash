@@ -26,7 +26,7 @@ use reedline::{
     PromptHistorySearch, PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
     Signal, ValidationResult, Validator, Vi,
 };
-use rubash::api::SessionHistoryWrite;
+use rubash::api::{Session, SessionHistoryWrite};
 
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";
@@ -5195,9 +5195,12 @@ fn completion_event() -> ReedlineEvent {
 /// register a binding (`-m`, `-x`). The binding spec itself goes through
 /// the engine's own parsers — the same functions the `bind` builtin
 /// dispatches to — so a rule means exactly what the same text means at
-/// the shell prompt; there is no second grammar. Failures carry the
-/// reason verbatim: `niu config migrate` refuses a legacy rule with it
-/// instead of writing an unusable rc line.
+/// the shell prompt; there is no second grammar. The `-m` keymap name is
+/// validated through the Session face (`Session::is_known_keymap`,
+/// niubash#863 GAP-13) — plain membership against the engine's table,
+/// no alias folding. Failures carry the reason verbatim: `niu config
+/// migrate` refuses a legacy rule with it instead of writing an
+/// unusable rc line.
 /// One parsed `[keymap].bind` rule (niubash#630, K4): the host's
 /// own config-grammar artifact, NOT an engine registry entry —
 /// the keymap stays optional because its resolution happens
@@ -5215,7 +5218,10 @@ pub(crate) struct KeymapBindRule {
     pub keymap: Option<String>,
 }
 
-pub(crate) fn parse_keymap_bind_rule(spec: &str) -> Result<KeymapBindRule, String> {
+pub(crate) fn parse_keymap_bind_rule(
+    session: &Session,
+    spec: &str,
+) -> Result<KeymapBindRule, String> {
     use rubash::api::BindKindView;
     let mut rest = spec.trim();
     if rest.is_empty() {
@@ -5267,7 +5273,7 @@ pub(crate) fn parse_keymap_bind_rule(spec: &str) -> Result<KeymapBindRule, Strin
         break;
     }
     if let Some(name) = &keymap {
-        if !crate::bind_surface::is_known_keymap(name) {
+        if !session.is_known_keymap(name) {
             return Err(rubash::builtins::bind::format_invalid_keymap(name));
         }
     }
@@ -10311,10 +10317,14 @@ mod tests {
     // builtin's own argument strings — plain, macro, -x and -m forms —
     // through the engine's parsers (no second grammar), and refuses
     // everything that cannot register a binding, with the reason.
+    // niubash#863 GAP-13: the `-m` name check rides the Session face,
+    // so the test builds one session and passes it in.
     #[test]
     fn issue630_keymap_bind_rule_parser_forms() {
         use rubash::api::BindKindView as BindKind;
-        let entry = parse_keymap_bind_rule(r#""\C-g": redisplay"#).expect("function form");
+        let session = Session::builder().build().expect("test session builds");
+        let entry =
+            parse_keymap_bind_rule(&session, r#""\C-g": redisplay"#).expect("function form");
         assert_eq!(entry.keyseq, r"\C-g");
         assert_eq!(
             entry.kind,
@@ -10324,7 +10334,7 @@ mod tests {
         );
         assert_eq!(entry.keymap, None);
 
-        let entry = parse_keymap_bind_rule(r#""\C-g": "ins-text""#).expect("macro form");
+        let entry = parse_keymap_bind_rule(&session, r#""\C-g": "ins-text""#).expect("macro form");
         assert_eq!(
             entry.kind,
             BindKind::Macro {
@@ -10332,7 +10342,7 @@ mod tests {
             }
         );
 
-        let entry = parse_keymap_bind_rule(r#"-x "\C-t": my-cmd"#).expect("-x form");
+        let entry = parse_keymap_bind_rule(&session, r#"-x "\C-t": my-cmd"#).expect("-x form");
         assert_eq!(entry.keyseq, r"\C-t");
         assert_eq!(
             entry.kind,
@@ -10341,10 +10351,11 @@ mod tests {
             }
         );
 
-        let entry = parse_keymap_bind_rule(r#"-m vi-insert "\C-g": redisplay"#).expect("-m form");
+        let entry =
+            parse_keymap_bind_rule(&session, r#"-m vi-insert "\C-g": redisplay"#).expect("-m form");
         assert_eq!(entry.keymap.as_deref(), Some("vi-insert"));
 
-        let entry = parse_keymap_bind_rule(r#"-m emacs-standard -x "\C-r": hist-widget"#)
+        let entry = parse_keymap_bind_rule(&session, r#"-m emacs-standard -x "\C-r": hist-widget"#)
             .expect("-m + -x form");
         assert_eq!(entry.keymap.as_deref(), Some("emacs-standard"));
         assert_eq!(
@@ -10367,7 +10378,7 @@ mod tests {
             ("set completion-ignore-case on", "readline variables"),
             (r#""\C-g""#, "no key sequence terminator"),
         ] {
-            let err = parse_keymap_bind_rule(spec).expect_err("must refuse");
+            let err = parse_keymap_bind_rule(&session, spec).expect_err("must refuse");
             assert!(
                 err.contains(needle),
                 "spec {spec:?} refused with {err:?}, expected a mention of {needle:?}"

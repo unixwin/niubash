@@ -7,12 +7,17 @@ license = "MIT"
 description = "Runtime crate for niubash: rubash-backed shell REPL on Windows"
 
 [features]
-# The gated Tier C internals surface (1.5.0 PLAN row 11, M-3):
-# the engine bind registry is consumed only through
-# `src/bind_surface.rs`, behind this feature. The default build
-# enables it (the editor mirrors runtime `bind` entries); a
-# `--no-default-features` build compiles and runs without any
-# Tier C reference, on the built-in keybindings alone.
+# GAP-13 (niubash#863) retired the gated Tier C internals surface
+# (1.5.0 PLAN row 11, M-3): `src/bind_surface.rs` is deleted, and a
+# census of this feature's tenants finds ZERO remaining — no
+# production or test code in this crate references `internals`
+# anymore. The feature is kept as a no-op so a `--no-default-features`
+# build keeps building; the tier-A bind faces (`Session::
+# register_binding` / `initialize_readline` / `is_known_keymap`) are
+# NOT behind it and work identically in both builds — that is the
+# point of the contract: the proof scope of the `--no-default-features`
+# build is now that the faces work without the gate, not that the
+# crate compiles without the Tier C surface.
 default = ["internals"]
 internals = []
 
