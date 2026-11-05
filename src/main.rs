@@ -1446,7 +1446,7 @@ fn run_stdin_script() -> anyhow::Result<()> {
         }
         pending.push(line.to_string());
         let script = pending.join("\n");
-        if !niubash_runtime::repl::is_script_input_complete(&script) {
+        if !niubash_runtime::repl::is_script_input_complete(shell.session(), &script) {
             continue;
         }
 

@@ -461,6 +461,14 @@ impl NiubashCompleter {
             cursor_pos,
             behavior,
         );
+        // GAP-9 (niubash#863): the context's lexical methods read
+        // the token view of the attempt's session (derived in its
+        // posix mode); a session-less call leaves the field unset
+        // and the methods derive the view from the completion
+        // module's stateless oracle instead.
+        if let Some(run) = engine.as_ref() {
+            context.token_view = Some(run.attempt.session().token_view(input));
+        }
         context.open_fds = open_fds;
         context.tmp_base = tmp_base;
         context.file_colors = Some(crate::completion::FileColors::from_env_vars(&env_vars));
@@ -536,7 +544,7 @@ impl NiubashCompleter {
             };
 
         match result {
-            Some(result) => self.format_completions(result, input, cursor_pos),
+            Some(result) => self.format_completions_for(result, &context),
             None => Vec::new(),
         }
     }
@@ -570,6 +578,14 @@ impl NiubashCompleter {
             cursor_pos,
             behavior,
         );
+        // GAP-9 (niubash#863): the context's lexical methods read
+        // the token view of the attempt's session (derived in its
+        // posix mode); a session-less call leaves the field unset
+        // and the methods derive the view from the completion
+        // module's stateless oracle instead.
+        if let Some(run) = engine.as_ref() {
+            context.token_view = Some(run.attempt.session().token_view(input));
+        }
         context.open_fds = open_fds;
         context.tmp_base = tmp_base;
         // niubash#747: lend the query the session's listing cache.
@@ -580,7 +596,9 @@ impl NiubashCompleter {
         let word_start = context
             .current_word_span()
             .map(|(start, _)| start)
-            .unwrap_or_else(|| floor_char_boundary(input, cursor_pos.min(input.len())));
+            .unwrap_or_else(|| {
+                crate::completion::floor_char_boundary(input, cursor_pos.min(input.len()))
+            });
         let line_stem = input[..word_start].to_string();
         context.dir_cache = Some(DirCacheHandle::with_shared(
             dir_cache,
@@ -624,7 +642,7 @@ impl NiubashCompleter {
         // silently wrong candidate lists.
         if !has_compspec {
             if let Some(result) = compdef_suggestions(&context, engine.as_mut()) {
-                all_suggestions.extend(self.format_completions(result, input, cursor_pos));
+                all_suggestions.extend(self.format_completions_for(result, &context));
             }
         }
 
@@ -646,7 +664,7 @@ impl NiubashCompleter {
         for plugin in plugins.iter().filter(|_| !has_compspec) {
             if let Some(result) = plugin.complete(&context) {
                 // Found a result, format it
-                let formatted = self.format_completions(result, input, cursor_pos);
+                let formatted = self.format_completions_for(result, &context);
                 all_suggestions.extend(formatted);
             }
         }
@@ -674,12 +692,12 @@ impl NiubashCompleter {
         if all_suggestions.is_empty() {
             if context.is_variable_completion() {
                 if let Ok(Some(result)) = VariableCompleter::complete(&context, &env_vars) {
-                    return self.format_completions(result, input, cursor_pos);
+                    return self.format_completions_for(result, &context);
                 }
             }
             if context.is_path_completion() && !has_compspec {
                 if let Ok(Some(result)) = PathCompleter::complete(&context) {
-                    all_suggestions.extend(self.format_completions(result, input, cursor_pos));
+                    all_suggestions.extend(self.format_completions_for(result, &context));
                 }
             }
         }
@@ -713,7 +731,7 @@ impl NiubashCompleter {
                             .unzip();
                         let mut result = CompletionResult::with_descriptions(texts, descriptions);
                         result.suppress_append = outcome.policy.suppress_append;
-                        all_suggestions.extend(self.format_completions(result, input, cursor_pos));
+                        all_suggestions.extend(self.format_completions_for(result, &context));
                     }
                 }
             }
@@ -923,17 +941,21 @@ impl NiubashCompleter {
             })
             .collect()
     }
-    fn format_completions(
+    /// The only shaping entry (GAP-9, niubash#863): the span is a
+    /// token-view derivation read from the pipeline's own context,
+    /// which carries the attempt session's view — a fresh context
+    /// here would re-derive it from the stateless oracle and could
+    /// disagree with the context that produced the candidates
+    /// (posix mode).
+    fn format_completions_for(
         &self,
         result: CompletionResult,
-        input: &str,
-        cursor_pos: usize,
+        context: &CompletionContext,
     ) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
-        let span_context = CompletionContext::new(PathBuf::new(), input.to_string(), cursor_pos);
-        let (span_start, span_end) = span_context
+        let (span_start, span_end) = context
             .current_word_span()
-            .unwrap_or((cursor_pos, cursor_pos));
+            .unwrap_or((context.cursor_pos, context.cursor_pos));
 
         for (i, completion) in result.completions.iter().enumerate() {
             let description = result.descriptions.get(i).and_then(|d| d.as_deref());
@@ -1105,19 +1127,18 @@ pub(crate) fn run_compdef_through_attempt(
 /// call's COMP_WORDS/COMP_CWORD inputs). Moved here from the retired
 /// completion::runtime module — this file is their only consumer.
 fn command_words_before_cursor(context: &CompletionContext) -> Option<Vec<String>> {
-    let pos = context.cursor_pos.min(context.input.len());
-    let pos = floor_char_boundary(&context.input, pos);
-    let before_cursor = &context.input[..pos];
-    // niubash#836: find the segment start with the completion module's
-    // quote/extglob-aware separator scan — a raw `rfind` over
-    // `[';', '|', '&', '\n']` treats a quoted `|`/`;` as a command
-    // boundary, so `mycmd "a|b" <TAB>` looked the compdef up under the
-    // fragment `b"` instead of `mycmd`.
-    let start = crate::completion::last_command_separator(before_cursor)
-        .map(|idx| crate::completion::ceil_char_boundary(before_cursor, idx + 1))
-        .unwrap_or(0);
-    let segment = before_cursor[start..].trim_start();
-    let words = split_shell_words(segment);
+    // GAP-9 (niubash#863): the words are the token view's segment
+    // derivation — the segment after the last top-level separator,
+    // each word's dequoted value, from the one grammar. This
+    // retires both the completer's private splitter and its
+    // separator rescan: niubash#836's quoted-separator shapes
+    // (`mycmd "a|b" <TAB>`) are the lexer's own verdicts now.
+    let words: Vec<String> = context
+        .view()
+        .segment_words_before(context.cursor())
+        .into_iter()
+        .map(|span| span.value.clone())
+        .collect();
     (!words.is_empty()).then_some(words)
 }
 
@@ -1135,49 +1156,6 @@ fn comp_cword(context: &CompletionContext) -> usize {
     } else {
         words.len().saturating_sub(1)
     }
-}
-
-fn split_shell_words(input: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-
-    for ch in input.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if !single => escaped = true,
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            ch if ch.is_whitespace() && !single && !double => {
-                if !current.is_empty() {
-                    words.push(current.clone());
-                    current.clear();
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
-}
-
-fn floor_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut p = pos;
-    while p > 0 && !s.is_char_boundary(p) {
-        p -= 1;
-    }
-    p
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1552,7 +1530,13 @@ niu_git_comp() {
             vec![Some("First".to_string())],
         );
         result.suppress_append = true;
-        let suggestions = completer.format_completions(result, "cmd al", 6);
+        // GAP-9 (niubash#863): the retired `format_completions`
+        // fresh-context wrapper is gone — the span now reads from
+        // the pipeline's own context, so the test builds the same
+        // context the wrapper used to build and calls
+        // `format_completions_for` directly.
+        let context = CompletionContext::new(PathBuf::new(), "cmd al".to_string(), 6);
+        let suggestions = completer.format_completions_for(result, &context);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].description.as_deref(), Some("First"));
         assert!(!suggestions[0].append_whitespace);
@@ -1562,7 +1546,7 @@ niu_git_comp() {
             vec!["alpha".to_string()],
             vec![Some("First".to_string())],
         );
-        let suggestions = completer.format_completions(result, "cmd al", 6);
+        let suggestions = completer.format_completions_for(result, &context);
         assert!(suggestions[0].append_whitespace);
     }
 
