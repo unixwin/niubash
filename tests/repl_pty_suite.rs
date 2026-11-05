@@ -851,7 +851,9 @@ fn kill_session_members(sid: u32) {
             };
             // Fields after the parenthesised comm: state ppid pgrp
             // session ... — session is index 3 of the remainder.
-            let Some(rest) = stat.rsplit(") ").next() else { continue };
+            let Some(rest) = stat.rsplit(") ").next() else {
+                continue;
+            };
             let fields: Vec<&str> = rest.split_whitespace().collect();
             if fields.get(3).and_then(|f| f.parse::<u32>().ok()) == Some(sid) {
                 victims.push(pid);
