@@ -191,7 +191,7 @@ impl CompletionContext {
     pub fn get_current_shell_word(&self) -> Option<ShellWord> {
         self.view()
             .word_at(self.cursor())
-            .map(|span| shell_word_from_span(span))
+            .map(shell_word_from_span)
     }
 
     /// Get the replacement span for the current shell word.
