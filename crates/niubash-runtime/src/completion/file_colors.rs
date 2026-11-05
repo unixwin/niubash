@@ -16,16 +16,7 @@
 use std::collections::HashMap;
 
 use nu_ansi_term::{Color, Style};
-
-/// What kind of filesystem object a completion candidate names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CandidateKind {
-    Directory,
-    Symlink,
-    Executable,
-    /// Any other filesystem entry — colored by suffix rule or `fi`.
-    File,
-}
+use rubash::api::capabilities::CandidateKind;
 
 /// A parsed `LS_COLORS` table: the special keys plus suffix rules.
 #[derive(Debug, Default)]
