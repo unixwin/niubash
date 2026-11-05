@@ -3757,7 +3757,7 @@ impl Shell {
     /// `Session::completion_view`. What remains is host-owned:
     /// the resolved behavior (niubash#840), the alias names, the
     /// `/tmp` base (niubash#627 G2), and the host-spelled current
-    /// directory (the bridge-less fallback's read).
+    /// directory (the attempt-less fallback's read).
     pub fn update_completion_state(&self) {
         // One-shot shells have no REPL that reads completion state;
         // the refresh would be pure startup overhead.
