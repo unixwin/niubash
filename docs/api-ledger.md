@@ -489,6 +489,44 @@
 > interior words with their own spans, positions and
 > roles; command substitutions remain unprojected
 > (word-shaped units, captain-ruled).
+> Addendum (GAP-10 history-provider install record, 2026-11-05,
+> niubash#863 GAP-10): the post-build history-provider
+> install is a contract face — `Session::set_history_provider`,
+> a pure lift of the executor setter (replace-always,
+> unguarded; install-once remains the host's guard) —
+> recorded (§2.3 row staged 0, §2.2 retained row retired
+> 1 → 0, §4 rows, §6 entry). The ruling (captain
+> adjudication Q-A → A2) closes retained-seam row 13, the
+> last assembly-class member of the retained tier-C census:
+> the recorded exception — the install reached through the
+> seam, because a construction-time provider would exist on
+> script routes too — is rewritten: builder injection
+> exists (`SessionBuilder::history_provider`) and niubash's
+> non-adoption of it stands with its route-discipline
+> reason; the post-build install home is now the Session
+> face. The same record carries the R-A5 semantics-division
+> table (Q-C): the two history planes — the engine's
+> `SessionHistory` on provider-free routes, the installed
+> provider's store on interactive routes — divide the
+> numbering base, stifle, timestamps, session rules,
+> record filters, file format, the `-a`/`-w`/`-r`/`-n`
+> faces, `last_line_added`, and HISTFILE retarget between
+> them; the table is written in full in the
+> `src/history.rs` module doc beside the trait and
+> annotated on §4's history row, and its `history_base` /
+> `last_line_added` rows rest on probes U-2/U-3 against
+> GNU 5.3.20 (byte-identical listings: stifle numbering
+> continuity under a small HISTSIZE, and both fc
+> current-line arms). Q-D: `Session::history_entries` /
+> `Session::set_history_entries` — tier-A faces recorded
+> nowhere — ENTER the ledger with this record (§2.3 rows
+> staged 0, §6 entries). Q-B: “one store” is ruled per
+> plane (the host pair already converged under
+> niubash#773/#774); list convergence is recorded as an
+> input to Stage-2 project ③ scoping, not GAP-10 work.
+> niubash consumes the new face not yet; the host lane
+> adopts it, and the GAP-10 host migration completes the
+> §2.2 retirement in substance.
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -709,7 +747,7 @@ RFC §3.2 top set it cites is pre-migration history).
 | `alias_expansion_enabled` | 4 | `set_shopt_option` | 2 |
 | `take_parse_error` | 4 | `has_compspec` | 2 |
 | `execute_ast` | 4 | `bind_registry_snapshot` | 1 |
-| `resolve_shell_path_from_env` (assoc) | 0 | `set_history_provider` | 1 |
+| `resolve_shell_path_from_env` (assoc) | 0 | `set_history_provider` | 0 |
 | `bind_registry_generation` | 2 | `run_bind_x_command` | 1 |
 | `resolve_shell_path_process_entries_from_env` (assoc) | 0 | `has_function` | 1 |
 | `take_signal_discard_pending` | 2 | `env_vars` | 0 |
@@ -826,6 +864,22 @@ recorded ordering delta. The retained-set note below
 names "the exit-trap funnel the REPL finish composes by
 hand" — that entry is the funnel retired here.
 
+Retirement recorded (niubash#863 GAP-10): the post-build
+history-provider install leaves the retained set. The
+install is a contract face now — `Session::set_history_provider`,
+a pure lift of the executor setter (replace-always,
+unguarded; the host's install-once guard remains the
+discipline of record, host-side) — so retained-seam
+row 13 closes and the row above reads 0 with this record;
+the host lane's re-point of its one call site (interactive
+entry, through the face instead of `executor_mut()`)
+completes the retirement in substance. Builder injection
+(`SessionBuilder::history_provider`) exists and stands;
+niubash's non-adoption of it is recorded in §2.3 with its
+route-discipline reason. The retained-set note below
+names “the post-build history-provider install” — that
+entry is the install retired here.
+
 Note what the retained set is made of: the bind registry and the
 design-§3.2 AST routes (`execute_ast`, `execute_command`), the
 classification plumbing of the routes that stay direct
@@ -845,6 +899,10 @@ named: the full-table snapshots moved to
 `Session::variable_value`; the `env_vars` / `env_vars_snapshot`
 rows and the `get_env` row read 0 (see the retirement
 paragraph above).
+GAP-10 (niubash#863) retired the install this note named:
+the post-build history-provider install is the
+`Session::set_history_provider` contract face (see the
+retirement paragraph above).
 
 ### 2.3 `Session` faces niubash calls (Ledger v4 census)
 
@@ -881,13 +939,20 @@ The migrated consumption, same counting rule (occurrences across
 | `Session::close` | 0 | GAP-8 (niubash#863): re-based on the `Session::begin_finish` guard's one-call pass engine-side (signature unchanged); the host's one-shot funnel used to be this row's one consumer and now opens the guard directly (see the GAP-8 retirement paragraph in §2.2), so the host count reads 0 — the host no longer consumes a session to finish it |
 | `Session::token_view` | 4 | GAP-9 (niubash#863): the lexer projected onto caller-fed text — a flat `TokenView` span stream (absolute byte spans, projected kinds, dequoted values built from the raw slices, command positions and roles folded at projection time from the lexer's stamps and the engine's builtin table, comment spans synthesized from inter-token text), tokenized in the session's posix mode. The contract replacement for the host editor's two private tokenizers and its direct tier-B lexer reads. Adopted by the GAP-9 host migration — the completer's two attempt pipelines (`complete_specific_with_engine`, `complete_input`) capture the attempt session's view into the context, the stateless oracle session reads it for session-less contexts (the tokenize source the highlighter's shell-less instances share), and the highlighter's live arm reads the editor shell's session view; the REPL validator's direct tier-B `tokenize` read is deleted with the H4 retirement, so the §2.1 `lexer` row's `tokenize` count retires 2 → 1. The two extglob pins read the face from test modules (the extglob-on session view and the oracle view) |
 | `Session::needs_more_input` | 3 | GAP-9 (niubash#863): ENTERS the ledger with this record — the §6.5 completeness face (`stdin_source_needs_more_posix` as a session query, in the session's posix mode) has had its §4 target home since the RFC but was recorded nowhere (the GAP-9 scoping finding). Adopted by the GAP-9 host migration — the REPL validator reads it through the editor shell handle (a plain `&self` read, never a completion attempt), `PendingReplInput::is_complete` reads it for the validator's pending input, and `is_script_input_complete` reads it for the script-input check; the host's `scan_repl_input` walk plus its heredoc arm, token walk and `__RUBASH_HD1__` marker sniff are deleted. Verdict parity with the host's scanner walk is pinned over the adjudicated corpus in the GAP-9 consumer pins (the Q-B differential stands at 66 of 66 AGREE since the round-2 adjudication classified both divergence classes DIVERGE — engine reader governs — and fixed the face; see the header addendum). The repl completeness pins read the face from the test module |
+| `Session::set_history_provider` | 0 | GAP-10 (niubash#863): ENTERS the ledger with this record — the post-build history-provider install as a contract face: a pure lift of the executor setter (replace-always, unguarded), the tier-A home of the install the interactive single-stream discipline used to reach through the tier-C seam (the §2.2 `set_history_provider` row retires 1 → 0 with this record; retained-seam row 13 closes). Recorded staged ahead of the GAP-10 host adoption, so the count is 0 (niubash installs through the seam today); consumed in-repo by the GAP-10 consumer pins (install reaches the history builtin and history expansion under provider precedence; second install replaces the first; the no-provider default is unchanged). Builder injection (`SessionBuilder::history_provider`) is the build-time spelling of the same install; the face's lifecycle is the setter's — command-substitution executors cloned before a re-install keep the handle they cloned with |
+| `Session::history_entries` / `set_history_entries` | 0 / 0 | GAP-10 Q-D (niubash#863): ENTER the ledger with this record — tier-A faces over the engine's `SessionHistory` list (the script plane), recorded nowhere before (the GAP-8 `close_with_report` debt class). No niubash consumer; the faces are the script plane's list spelled as a contract, distinct from the provider plane the install face above serves |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
-the `HistoryProvider` is **not** builder-injected — it is
-installed at interactive entry through the seam, preserving the
-host's single-stream history discipline (a construction-time
-provider would exist on script routes too). `SessionEvents` is
+the `HistoryProvider` is **not** builder-injected by
+niubash — builder injection exists
+(`SessionBuilder::history_provider`), and niubash's
+non-adoption of it stands: a construction-time provider
+would exist on script routes too, breaking the host's
+single-stream history discipline. The post-build install
+home is the Session face, `Session::set_history_provider`
+(GAP-10, niubash#863): niubash installs at interactive
+entry through the face, preserving the same discipline. `SessionEvents` is
 not injected (no host consumer; the host's hooks are host-side
 by charter). The builder's process-exit role is left at its
 default (library role): niubash's exit semantics are the host
@@ -932,8 +997,9 @@ consumer-file against this ledger; until a consumer file migrates,
 its §6 symbols stay frozen exactly as recorded. Ledger v4 status:
 the migration has landed on niubash's migration branch — §2.3 is
 its census, §2.2 the retained seam set, and §2.3's closing notes
-record the deliberate non-adoptions (builder-injected history
-provider, `SessionEvents`, `source_startup_files` / `RcPolicy`). The workspace
+record the deliberate non-adoptions (niubash's non-adoption
+of the builder's history-provider injection, `SessionEvents`,
+`source_startup_files` / `RcPolicy`). The workspace
 split (PLAN row 4) remains post-release: it moves `rubash::api`
 to the split core crate without changing its shape.
 
@@ -944,7 +1010,7 @@ to the split core crate without changing its shape.
 | option methods (`set_shell_option`, `set_shopt_option`) | A | `Session::options()` view |
 | `last_exit_code` / `set_last_exit_code` | A | `Session::last_status` + `RunOutcome` |
 | `complete_line` / `complete_line_detailed`, `has_compspec` | A | `Session::complete` / `complete_detailed` + compspec view (the detailed pair carries the CompletionPolicy of rubash#2573) |
-| `set_history_provider` + `HistoryProvider` | A | builder-injected capability (trait unchanged) |
+| `set_history_provider` + `HistoryProvider` | A | `Session::set_history_provider` — the post-build install face (pure lift of the executor setter, replace-always); builder injection (`SessionBuilder::history_provider`) is the build-time spelling of the same install (trait unchanged) |
 | `call_function_with_env`, `has_function`, `functions_snapshot` | A | `Session::call_function` / `Session::call_function_with_env` + functions view (the env channel landed on the contract surface with rubash#2001; until then this row's env half was carried by the tier-C seam below) |
 | `inherit_process_stdin` | A | builder stream binding |
 | `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome`; the finish-path half of `run_exit_trap_with_status` lands as the `Session::begin_finish` guard's trap step (niubash#863 GAP-8 — see the finish guard row below) |
@@ -967,14 +1033,48 @@ to the split core crate without changing its shape.
 | variable read faces (`Session::environment_full`, `Session::variable_value`) | A | the `&self` variable reads in `rubash::api`, beside the §5.3 state views: the full table through the one sorted rendering the completion view's `env` component shares (`completion_view::full_env_sorted` over the executor's own snapshot), and the single-value stored read as the `&self` form of the executor's `get_env` — the stored string, not the `$name` expansion read. They supersede the host's remaining tier-C variable reads (the §2.2 full-table snapshots and the `&self` `get_env` probes) when the host lane lands (niubash#863 GAP-6; recorded staged ahead of host adoption; see the header addendum) |
 | completion-attempt guard (`CompletionAttempt`, `Session::begin_completion_attempt`) | A | one completion attempt as an explicit, reentrancy-aware object in `rubash::api`, beside the §5.3 state views: the guard owns the `&mut Session` borrow for the attempt, so the host's completer drives the attempt's execution faces through it (`complete_detailed`, `call_function_with_env` for the widget/compdef callbacks, with the temporary bindings the callback contract already carries) and reads live state through its `&Session` lend (`session()` — the `&self` read faces, never dark under nesting). Nested attempts are repeated calls on the same guard; a second guard cannot exist while one lives, so the aliasing hazard the thread-local's reentrancy flag papered over is a compile error. It supersedes the host's thread-local shell lend (`COMPLETION_BRIDGE`) when the host lane lands (niubash#863 GAP-7; recorded staged ahead of host adoption; see the header addendum). The completion window itself is a depth counter, not a bit, so an inner attempt returning never closes the outer attempt's `compopt` window |
 | finish guard (`Finish`, `Session::begin_finish`) | A | one session finish as an explicit, step-decomposed object in `rubash::api`, beside the §5.3 state views: the guard owns the `&mut Session` borrow for the finish and takes the route's pending status as a value, so the host drives the finish's coarse steps through it (`run_exit_trap` — the pending status in, the resolved status out; `final_cwd` — the post-trap directory read, the value that exists only between the trap and consumption, rubash#668; `run_stream_end_duties` — the history write gated per route, the stream-end job flush, the debugger note, the procsub close, the hangups; `finish_all` — the one-call pass) and interleaves its own duties (the post-trap cwd record, the host-provider history flush, the process exit) between them, reading the finish boundary back as values (`FinishOutcome`: status / final cwd / trap ran / history written / duties run). The session is not consumed, so the interactive route — session in a shared cell, history in the host provider's store — finishes through the same guard the consuming `Session::close` / `close_with_report` are re-based on. Order: the plain path follows GNU `exit_shell` (the EXIT trap before the history save, shell.c:1000-1009; captain adjudication D1); the termsig sub-order (sig.c:590-667) is preserved exactly. It supersedes the host's five hand-composed finish funnels and its tier-C trap-step seam reads when the host lane lands (niubash#863 GAP-8; recorded staged ahead of host adoption; see the header addendum) |
+| history provider install face (`Session::set_history_provider`) | A | the post-build history-provider install as a `Session` setter in `rubash::api`, beside the §5.3 state views: a pure lift of the executor setter (replace-always, unguarded — install-once remains the host's guard), so the interactive single-stream discipline installs through the contract instead of the tier-C seam; builder injection is the same install at build time. It supersedes the host's seam install when the host lane lands (niubash#863 GAP-10; recorded staged ahead of host adoption; see the header addendum) |
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup; the resolver faces' `Session` consumption forms are tier A — see the path-resolution faces row above — and `find_script_on_path` has no Session form |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
-| tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, the post-build provider install, and the `&self` probe reads the `&mut`-shaped views cannot serve. Added with the migration's companion change; its consumer set is expected to shrink, never grow |
+| tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, and the `&self` probe reads the `&mut`-shaped views cannot serve. (The post-build provider install left this set with GAP-10: it is the `Session::set_history_provider` face.) Added with the migration's companion change; its consumer set is expected to shrink, never grow |
 | debugger front doors (`run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) | B | driver-layer front doors at the crate root — the design's §10 forms of the one debug session; they stay driver surface, not `Session` methods, and move with the driver layer at the split |
 | `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers; plus the `InputrcEnv` / `parse_inputrc_with_env` inputrc reader pair; plus `READLINE_FUNCTIONS` and the `format_macro_plain` / `format_variable_plain` plain-form formatters, recorded in the 2026-11-01 backfill) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature — except the inputrc reader pair, which niubash-runtime's config module consumes directly at startup, and the 2026-11-01 trio, which niubash-runtime's readline_commands / repl modules consume directly for the host funmap and the dump-macros / dump-variables faces (see the §2 row) |
 | `history_expand` engine (`HistChars`, `HistCtx`, `HistEngineState`, `HistLookup`, `history_expand`) | B | stays in the `history_expand` module in-tree — the engine's own history faces and the host's readline `history-expand-line` face drive the same engine (recorded in the 2026-11-01 backfill) |
 | `expand::tilde` (`tilde::expand_word_prefix`) | B | stays in the `expand::tilde` module in-tree — the engine's expansion faces and the host's readline `tilde-expand` command share the one tilde expander (recorded in the 2026-11-01 backfill) |
+
+History division (R-A5, niubash#863 GAP-10 annotation on the
+history row above): GNU has one history list; this contract
+has two planes, switched by provider presence, and the
+semantics divide per row — numbering base: the engine list
+advances its `base` under stifle (history.c:389-404,
+675-698), a provider that stifles its store must advance
+its `history_base` face the same way (the trait default 1
+is the unstifled value, rubash#2007); stifle: capacity on
+the engine list, the host's capacity/view discipline on
+its store; timestamps: the list's parallel stamps vs the
+provider's `entry_timestamps` channel (the engine's
+dispatch-time stamp ledger stands in for an empty
+channel); session rules: the engine's append-vs-write
+accounting (bashhist.c:488, 440-441) on its plane, the
+ruled GNU session model (read once, isolation, `-n`/`-r`)
+as the host store's discipline on its plane, with the
+session-end flush a host duty whose order the GAP-8
+finish guard pins; record filters: the bashhist.c gates
+on the engine recording path, HISTCONTROL/HISTIGNORE
+under the host's settings snapshot before entries reach
+its store; file format: `#<epoch>` stamp lines on
+timestamped writes, with plain faces kept for stores
+that cannot carry them (niubash#646); the
+`-a`/`-w`/`-r`/`-n` faces: one builtin over the plane's
+list; `last_line_added`: the list's flag vs the
+provider's save-at-accept report (bashhist.c:174, :764,
+:961; fc.def:328-335); HISTFILE retarget: a host
+file-placement duty (niubash#661), no contract face. The
+table is written in full in the `src/history.rs` module
+doc beside the trait; its `history_base` /
+`last_line_added` rows rest on the GAP-10 probes U-2/U-3
+against GNU 5.3.20 (byte-identical).
 
 ## 5. The canary: how the freeze is enforced
 
@@ -1210,6 +1310,7 @@ method rubash::api::Session::expand_prompt
 method rubash::api::Session::functions
 method rubash::api::Session::has_compspec
 method rubash::api::Session::has_function
+method rubash::api::Session::history_entries
 method rubash::api::Session::inherit_process_stdin
 method rubash::api::Session::invocation_shape
 method rubash::api::Session::last_status
@@ -1223,6 +1324,8 @@ method rubash::api::Session::run
 method rubash::api::Session::run_interactive_stdin
 method rubash::api::Session::run_prompt_command
 method rubash::api::Session::run_stdin
+method rubash::api::Session::set_history_entries
+method rubash::api::Session::set_history_provider
 method rubash::api::Session::set_last_status
 method rubash::api::Session::set_positional
 method rubash::api::Session::shell_pwd_display_path
