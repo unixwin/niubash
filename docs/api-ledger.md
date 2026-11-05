@@ -699,6 +699,22 @@
 > internal demotion in the engine has not landed (the
 > symbols stay `pub`); it is a separate engine follow-up,
 > not a precondition for this record.
+> Addendum (Q-E demotion lands, 2026-11-06,
+> rubash#2853): the engine follow-up the cleanup addendum
+> left open has landed — `pub mod bind_registry` /
+> `BindEntry` / `BindKind` / `KEYMAP_NAMES` are `pub(crate)`
+> now (the `shell` module itself stays `pub`; only its
+> `bind_registry` child demotes, since `shell` still exports
+> `ShellState` / `Variable` / `VariableStore` and friends).
+> `Executor::bind_registry_snapshot` demotes with them (its
+> public signature leaks the demoted `BindEntry`; E0446
+> forces the demotion), so its §6 item leaves the ledger:
+> §6 shrinks 278 → 277. The §2.2 `bind_registry_snapshot`
+> row stays at 0 — permanently now, not drift — and the §4
+> snapshots row no longer lists it as riding the gated bind
+> surface. `bind_registry_generation` stays `pub` and keeps
+> its §6 item; `BindEntryView` / `BindKindView` stay `pub`
+> as the public view types.
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -1310,7 +1326,7 @@ to the split core crate without changing its shape.
 | history provider install face (`Session::set_history_provider`) | A | the post-build history-provider install as a `Session` setter in `rubash::api`, beside the §5.3 state views: a pure lift of the executor setter (replace-always, unguarded — install-once remains the host's guard), so the interactive single-stream discipline installs through the contract instead of the tier-C seam; builder injection is the same install at build time. It supersedes the host's seam install when the host lane lands (niubash#863 GAP-10; recorded staged ahead of host adoption; see the header addendum) |
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup; the resolver faces' `Session` consumption forms are tier A — see the path-resolution faces row above — and `find_script_on_path` has no Session form |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
-| snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_snapshot` / `bind_registry_generation` ride the gated bind surface (§4's bind row), not this one |
+| snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_generation` rides the gated bind surface (§4's bind row), not this one; `bind_registry_snapshot` was demoted to crate-internal with #2853 and rides no surface (see header addendum) |
 | tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, and the `&self` probe reads the `&mut`-shaped views cannot serve. (The post-build provider install left this set with GAP-10: it is the `Session::set_history_provider` face.) (The post-build invocation faces left this set with GAP-12: the apply/read pair plus the removal and login companions are `Session` faces now.) Added with the migration's companion change; its consumer set is expected to shrink, never grow |
 | debugger front doors (`run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) | B | driver-layer front doors at the crate root — the design's §10 forms of the one debug session; they stay driver surface, not `Session` methods, and move with the driver layer at the split |
 | `builtins::bind` spec helpers (`BindingSpec`, `BindSpecError`, the `parse_*` / `format_*` / `strip_*` helpers; plus the `InputrcEnv` / `parse_inputrc_with_env` inputrc reader pair; plus `READLINE_FUNCTIONS` and the `format_macro_plain` / `format_variable_plain` plain-form formatters, recorded in the 2026-11-01 backfill) | C | ride the gated bind surface with the `shell::bind_registry` row above: consumed only inside niubash's `bind_surface.rs` behind its `internals` feature — except the inputrc reader pair, which niubash-runtime's config module consumes directly at startup, and the 2026-11-01 trio, which niubash-runtime's readline_commands / repl modules consume directly for the host funmap and the dump-macros / dump-variables faces (see the §2 row) |
@@ -1666,7 +1682,6 @@ method rubash::api::VariablesView::unset
 method rubash::executor::Executor::alias_expansion_enabled
 method rubash::executor::Executor::bind_readline_variable
 method rubash::executor::Executor::bind_registry_generation
-method rubash::executor::Executor::bind_registry_snapshot
 method rubash::executor::Executor::builtin_command_names
 method rubash::executor::Executor::call_function_with_env
 method rubash::executor::Executor::close_all_persistent_output_process_substitutions
