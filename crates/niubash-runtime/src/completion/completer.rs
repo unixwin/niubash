@@ -74,24 +74,22 @@ impl CommandProbe {
     }
 }
 
-/// State shared with completer
+/// State shared with completer: the host-owned faces only. The
+/// engine-owned inputs (variable table, function names, open
+/// fds) are NOT mirrored here — since GAP-4 (niubash#863) the
+/// completer captures them live from `Session::completion_view`.
+/// What remains is host-owned: the fallback directory and `/tmp`
+/// base, the resolved behavior, the plugin table, the probe
+/// memo, and the alias names (host alias map is their source).
 pub struct CompletionState {
     pub current_dir: PathBuf,
-    pub env_vars: HashMap<String, String>,
     pub aliases: HashSet<String>,
-    pub functions: HashSet<String>,
-    /// The session's open fd numbers, synced from the engine's fd
-    /// table by `Shell::update_completion_state`. The path
-    /// completer's dynamic tier lists these under `/dev/fd/`
-    /// (niubash#627).
-    pub open_fds: Vec<u32>,
     /// The backing directory for the session's `/tmp`, resolved by
     /// the engine from the session env (session TMPDIR wins) and
-    /// synced by `Shell::update_completion_state`. The path
-    /// completer and the syntax highlighter root `/tmp` spellings
-    /// here so both follow a session `TMPDIR` assignment immediately
-    /// (niubash#627 G2). Starts at the process temp dir, the pre-sync
-    /// fallback.
+    /// refreshed by `Shell::update_completion_state`; the path
+    /// completer and the highlighter root `/tmp` spellings here
+    /// (niubash#627 G2). Starts at the process temp dir, the
+    /// pre-sync fallback. The resolver face is GAP-5's object.
     pub tmp_base: PathBuf,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
@@ -102,18 +100,6 @@ pub struct CompletionState {
     /// kept so the external plugin can be rebuilt when bundle definitions
     /// change without losing user overrides.
     completion_dirs: Vec<PathBuf>,
-    /// niubash#594: fingerprint of the engine's live env map that
-    /// `env_vars` was snapshotted from. `Shell::update_completion_state`
-    /// compares it against the current live map and skips the re-clone
-    /// when unchanged. 0 = no snapshot yet / invalidated by another
-    /// writer, which forces a rebuild on the next update.
-    pub snapshot_env_fingerprint: u64,
-    /// niubash#594: the sorted engine function names `functions` was
-    /// built from, kept so the next update can skip the rebuild when
-    /// the name set is unchanged.
-    pub snapshot_function_names: Vec<String>,
-    /// niubash#594: the sorted alias names `aliases` was built from.
-    pub snapshot_alias_names: Vec<String>,
     /// niubash#747: session-scoped directory-listing cache shared by
     /// every query this state serves. Each query borrows it through a
     /// `DirCacheHandle` stamped with the query's session key, so the
@@ -127,18 +113,12 @@ impl CompletionState {
     pub fn new(current_dir: PathBuf) -> Self {
         Self {
             current_dir,
-            env_vars: HashMap::new(),
             aliases: HashSet::new(),
-            functions: HashSet::new(),
-            open_fds: Vec::new(),
             tmp_base: std::env::temp_dir(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
             command_probe: CommandProbe::default(),
             completion_dirs: Vec::new(),
-            snapshot_env_fingerprint: 0,
-            snapshot_function_names: Vec::new(),
-            snapshot_alias_names: Vec::new(),
             dir_cache: Arc::new(Mutex::new(DirListingCache::default())),
         }
     }
@@ -257,6 +237,36 @@ pub enum SpecificCompletion {
     Glob,
 }
 
+/// One live capture of everything a completion call reads, taken
+/// through the completion bridge (GAP-4, niubash#863): the
+/// engine's `CompletionView` plus the host-spelled faces
+/// (directory, `/tmp` base, behavior, aliases). Produced by
+/// `Shell::capture_completion_inputs`.
+pub(crate) struct CompletionCapture {
+    pub view: rubash::api::CompletionView,
+    pub current_dir: PathBuf,
+    pub tmp_base: PathBuf,
+    pub behavior: CompletionBehavior,
+    pub aliases: HashSet<String>,
+}
+
+/// The inputs of one completion call. Without a bridge the
+/// engine-owned inputs are empty — what the bridge-dependent
+/// faces already observed in that shape, now extended to the
+/// variable / function / fd faces the retired snapshot used to
+/// keep serving there (GAP-4, niubash#863).
+struct CompletionInputs {
+    current_dir: PathBuf,
+    env_vars: HashMap<String, String>,
+    aliases: HashSet<String>,
+    functions: HashSet<String>,
+    open_fds: Vec<u32>,
+    tmp_base: PathBuf,
+    behavior: CompletionBehavior,
+    plugins: Vec<Arc<dyn CompletionPlugin>>,
+    dir_cache: Arc<Mutex<DirListingCache>>,
+}
+
 /// Custom completer for WinSH
 pub struct NiubashCompleter {
     state: Arc<Mutex<CompletionState>>,
@@ -268,18 +278,36 @@ impl NiubashCompleter {
         Self { state }
     }
 
-    /// Update state
-    pub fn update_state(&self, current_dir: PathBuf, env_vars: HashMap<String, String>) {
-        // niubash#833: recover a poisoned state lock instead of
-        // silently dropping the update.
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.current_dir = current_dir;
-        state.env_vars = env_vars;
-        // niubash#594: this write bypasses the fingerprint gate, so
-        // invalidate it — the next `update_completion_state` rebuilds
-        // the env snapshot from the engine instead of trusting a
-        // fingerprint that no longer describes `env_vars`.
-        state.snapshot_env_fingerprint = 0;
+    /// Assemble the inputs of one completion call: host-owned
+    /// faces from the shared state (niubash#833 poison recovery),
+    /// engine-owned faces from a live bridge capture.
+    fn capture_inputs(&self) -> CompletionInputs {
+        let mut inputs = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            CompletionInputs {
+                current_dir: state.current_dir.clone(),
+                env_vars: HashMap::new(),
+                aliases: state.aliases.clone(),
+                functions: HashSet::new(),
+                open_fds: Vec::new(),
+                tmp_base: state.tmp_base.clone(),
+                behavior: state.behavior,
+                plugins: state.plugins.clone(),
+                dir_cache: state.dir_cache.clone(),
+            }
+        };
+        if let Some(capture) =
+            crate::shell::with_completion_bridge(|shell| shell.capture_completion_inputs())
+        {
+            inputs.current_dir = capture.current_dir;
+            inputs.env_vars = capture.view.env.into_iter().collect();
+            inputs.aliases = capture.aliases;
+            inputs.functions = capture.view.functions.into_iter().collect();
+            inputs.open_fds = capture.view.open_fds;
+            inputs.tmp_base = capture.tmp_base;
+            inputs.behavior = capture.behavior;
+        }
+        inputs
     }
 
     /// Return plain suggestions for internal probes and tests.
@@ -312,21 +340,21 @@ impl NiubashCompleter {
         input: &str,
         cursor_pos: usize,
     ) -> Vec<Suggestion> {
-        // niubash#833: a poisoned state lock must not zero out every
-        // candidate — recover the guard and read the snapshot.
-        let (current_dir, env_vars, aliases, functions, open_fds, tmp_base, behavior, dir_cache) = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            (
-                state.current_dir.clone(),
-                state.env_vars.clone(),
-                state.aliases.clone(),
-                state.functions.clone(),
-                state.open_fds.clone(),
-                state.tmp_base.clone(),
-                state.behavior,
-                state.dir_cache.clone(),
-            )
-        };
+        // GAP-4 (niubash#863): the engine-owned inputs are captured
+        // live through the bridge, not read from a per-line snapshot;
+        // the host-owned faces come from the shared state (with
+        // niubash#833 poison recovery, as before).
+        let CompletionInputs {
+            current_dir,
+            env_vars,
+            aliases,
+            functions,
+            open_fds,
+            tmp_base,
+            behavior,
+            dir_cache,
+            ..
+        } = self.capture_inputs();
 
         let cursor_pos = cursor_pos.min(input.len());
         let mut context = CompletionContext::with_behavior(
@@ -417,7 +445,10 @@ impl NiubashCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (
+        // GAP-4 (niubash#863): live capture through the bridge, as
+        // in `complete_specific` (niubash#833 poison recovery for
+        // the host-owned faces lives in `capture_inputs`).
+        let CompletionInputs {
             current_dir,
             env_vars,
             aliases,
@@ -427,21 +458,7 @@ impl NiubashCompleter {
             behavior,
             plugins,
             dir_cache,
-        ) = {
-            // niubash#833: poison recovery, as in `complete_specific`.
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            (
-                state.current_dir.clone(),
-                state.env_vars.clone(),
-                state.aliases.clone(),
-                state.functions.clone(),
-                state.open_fds.clone(),
-                state.tmp_base.clone(),
-                state.behavior,
-                state.plugins.clone(),
-                state.dir_cache.clone(),
-            )
-        };
+        } = self.capture_inputs();
 
         let mut context = CompletionContext::with_behavior(
             current_dir.clone(),
@@ -1655,13 +1672,26 @@ niu_git_comp() {
         std::fs::create_dir_all(&temp_dir).unwrap();
         std::fs::write(temp_dir.join("spec-file-alpha.txt"), "x").unwrap();
         let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
-        {
-            let mut state = state.lock().unwrap();
-            state.aliases.insert("niu_specific_command".to_string());
-            state
-                .env_vars
-                .insert("NIU_SPECIFIC_VAR".to_string(), "1".to_string());
-        }
+        // GAP-4 (niubash#863): the alias, variable and directory
+        // all reach the completer from one live shell through the
+        // bridge (aliases from the host map the capture reads,
+        // variables from the engine view, the directory from the
+        // host-spelled capture) — so this pin composes them on a
+        // real shell, the same shape production completes in,
+        // instead of planting them in state fields.
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+        let mut shell = crate::shell::Shell::new().unwrap();
+        let cd = format!("cd {}", temp_dir.to_string_lossy().replace('\\', "/"));
+        assert!(shell.execute_interactive_line(&cd).is_ok());
+        assert!(shell
+            .execute_interactive_line("alias niu_specific_command='echo niu'")
+            .is_ok());
+        assert!(shell.execute_script("NIU_SPECIFIC_VAR=1").is_ok());
+        let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+        crate::shell::install_completion_bridge(&shell);
         let mut completer = NiubashCompleter::new(state);
 
         // complete-command ignores the cursor's argument position:
@@ -1697,6 +1727,7 @@ niu_git_comp() {
             "filename mode must complete the file: {files:?}"
         );
 
+        crate::shell::uninstall_completion_bridge();
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 

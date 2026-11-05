@@ -15,7 +15,6 @@
 //! (command.rs) are pinned by in-crate unit tests of the same name,
 //! since those mutexes are not reachable from this API surface.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -73,18 +72,49 @@ fn issue833_poisoned_state_still_completes_specific() {
 }
 
 #[test]
-fn issue833_poisoned_state_update_state_still_applies() {
-    let state = poisoned_state();
-    let completer = NiubashCompleter::new(state.clone());
-    let mut env = HashMap::new();
-    env.insert("ISSUE833_MARKER".to_string(), "1".to_string());
-    completer.update_state(PathBuf::from("/issue833/dir"), env);
+fn issue833_poisoned_state_still_completes_filenames() {
+    // GAP-4 (niubash#863): this pin used to assert that
+    // `NiubashCompleter::update_state` — the seam that wrote a
+    // caller-supplied env snapshot into the state — still applied
+    // on a poisoned lock. That seam retired with the snapshot it
+    // fed: the completer now captures the engine's live view
+    // through the bridge, and there is no env snapshot left to
+    // update. The surviving #833 contract on this surface is the
+    // one the other two pins assert for commands, extended to the
+    // host-carried faces: a poisoned state lock must not zero out
+    // filename candidates built from the state's directory either.
+    let dir =
+        std::env::temp_dir().join(format!("niubash-issue833-filename-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("issue833file.txt"), "x").unwrap();
 
-    let s = state.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(s.current_dir, PathBuf::from("/issue833/dir"));
-    assert_eq!(
-        s.env_vars.get("ISSUE833_MARKER").map(String::as_str),
-        Some("1"),
-        "update_state must not be silently dropped on a poisoned lock"
+    let state = Arc::new(Mutex::new(CompletionState::new(dir.clone())));
+    {
+        let mut s = state.lock().unwrap();
+        s.load_completion_dirs(&[]);
+    }
+    let poison = state.clone();
+    let handle = std::thread::spawn(move || {
+        let _guard = poison.lock().unwrap();
+        panic!("issue833: deliberate completion_state poison");
+    });
+    assert!(handle.join().is_err());
+    assert!(state.lock().is_err());
+
+    let mut completer = NiubashCompleter::new(state);
+    let values: Vec<String> = completer
+        .complete_specific(
+            SpecificCompletion::Filename,
+            "cat issue833f",
+            "cat issue833f".len(),
+        )
+        .into_iter()
+        .map(|s| s.value)
+        .collect();
+    assert!(
+        values.iter().any(|v| v == "issue833file.txt"),
+        "filename completion must survive a poisoned state lock, got {values:?}"
     );
+
+    let _ = std::fs::remove_dir_all(dir);
 }

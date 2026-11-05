@@ -17,6 +17,7 @@ pub mod sources;
 pub mod variables;
 pub mod winuxcmd_assets;
 
+pub(crate) use completer::CompletionCapture;
 pub use completer::{CommandProbe, CompletionState, NiubashCompleter, SpecificCompletion};
 pub use file_colors::{CandidateKind, FileColors};
 
@@ -68,20 +69,21 @@ pub struct CompletionContext {
     pub cursor_pos: usize,
     /// User-configurable matching behavior.
     pub behavior: CompletionBehavior,
-    /// The session's open fd numbers at snapshot time, from the
-    /// engine's fd table (`Executor::open_fds`) via `CompletionState`.
-    /// The path completer's dynamic tier lists these under `/dev/fd/`
-    /// (niubash#627).
+    /// The session's open fd numbers at capture time, from the
+    /// engine's `Session::completion_view` (GAP-4, niubash#863;
+    /// niubash#627). The path completer's dynamic tier lists these
+    /// under `/dev/fd/`.
     pub open_fds: Vec<u32>,
-    /// The backing directory for the session's `/tmp` at snapshot
+    /// The backing directory for the session's `/tmp` at capture
     /// time, resolved by the engine from the session env (session
-    /// TMPDIR wins) via `CompletionState`. The path completer's
-    /// logical resolver roots `/tmp` spellings here (niubash#627 G2).
-    /// Contexts built without session state keep the process temp
-    /// dir — the fallback for the stateless case only.
+    /// TMPDIR wins) through the resolver face (GAP-5's object;
+    /// niubash#627 G2). The path completer's logical resolver
+    /// roots `/tmp` spellings here. Contexts built without session
+    /// state keep the process temp dir — the fallback for the
+    /// stateless case only.
     pub tmp_base: PathBuf,
     /// The session's parsed `LS_COLORS` table (niubash#743), resolved
-    /// by the completer from `CompletionState::env_vars` (process-env
+    /// by the completer from the captured session env (process-env
     /// fallback, GNU defaults when unset). Filesystem producers
     /// (`path`, the cwd command-slot overlay) paint candidates through
     /// it; `None` leaves candidates unstyled.
@@ -92,8 +94,8 @@ pub struct CompletionContext {
     /// session's re-queries. Contexts built outside the completer
     /// keep `None` and enumerate uncached, exactly as before.
     pub dir_cache: Option<crate::completion::path::DirCacheHandle>,
-    /// The session's `PATH` at snapshot time, from
-    /// `CompletionState::env_vars` (niubash#839). Producers that must
+    /// The session's `PATH` at capture time, from the captured
+    /// session env (niubash#839). Producers that must
     /// resolve a tool the way the SESSION would — the dynamic
     /// completion fingerprint in `external.rs` — probe this value,
     /// not the process `PATH`: a tool that exists only on the session
