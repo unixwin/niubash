@@ -1014,9 +1014,9 @@ impl Shell {
         let command_name = cmd.words.first()?;
         let is_this_shell = matches!(command_name.as_str(), "$THIS_SH" | "${THIS_SH}")
             || self
-                .executor()
-                .get_env("THIS_SH")
-                .is_some_and(|this_sh| same_shell_dir(this_sh, command_name));
+                .session()
+                .variable_value("THIS_SH")
+                .is_some_and(|this_sh| same_shell_dir(&this_sh, command_name));
         if !is_this_shell {
             return None;
         }
@@ -1831,8 +1831,8 @@ impl Shell {
         // process env, so a value exported before launch is mirrored
         // (unchanged), never deleted by this reconciliation.
         let segment_values: Vec<(String, String)> = self
-            .executor()
-            .env_vars()
+            .session()
+            .environment_full()
             .iter()
             .filter(|(name, _)| name.starts_with("NIU_SEGMENT_"))
             .map(|(name, value)| (name.clone(), value.clone()))
@@ -2367,7 +2367,10 @@ impl Shell {
     /// before startup files run: invoked as sh/ash (Shell::new),
     /// `--posix`, and `-o posix` (ShellInvocation::apply_to_executor).
     fn posix_mode_active(&self) -> bool {
-        self.executor().get_env("__RUBASH_POSIX_MODE") == Some("1")
+        self.session()
+            .variable_value("__RUBASH_POSIX_MODE")
+            .as_deref()
+            == Some("1")
     }
 
     /// GNU shell.c:1103 execute_env_file: an unset or empty variable sources
@@ -2554,9 +2557,8 @@ impl Shell {
     fn expand_env_file_value(&self, raw: &str) -> String {
         let after_tilde = self.expand_env_file_tilde_user(raw);
         expand_env_file_params(&after_tilde, |name| {
-            self.executor()
-                .get_env(name)
-                .map(str::to_owned)
+            self.session()
+                .variable_value(name)
                 .or_else(|| std::env::var(name).ok())
                 .unwrap_or_default()
         })
@@ -2634,7 +2636,7 @@ impl Shell {
     /// `run_precmd_hooks` runs the hook before syncing, the claim is already
     /// visible when the backend is chosen.
     fn prompt_slot_claimed(&self) -> bool {
-        match self.executor().get_env("PS1") {
+        match self.session().variable_value("PS1") {
             Some(value) if !value.is_empty() => {
                 // niubash#672: the host-seeded GNU default is not a
                 // claim while the variable still holds the seeded
@@ -2957,14 +2959,13 @@ impl Shell {
     /// then the current `PWD` path, then a plain dot. Title hooks may use this
     /// value to write a terminal title via OSC escape sequences.
     fn resolve_title_value(&self) -> String {
-        if let Some(title) = self.executor().get_env("NIU_TITLE") {
+        if let Some(title) = self.session().variable_value("NIU_TITLE") {
             if !title.is_empty() {
                 return title.to_string();
             }
         }
-        self.executor()
-            .get_env("PWD")
-            .map(str::to_owned)
+        self.session()
+            .variable_value("PWD")
             .unwrap_or_else(|| ".".to_string())
     }
 
@@ -3873,8 +3874,8 @@ impl Shell {
     }
 
     fn executor_pwd_host_path(&self) -> Option<PathBuf> {
-        let pwd = self.executor().get_env("PWD")?;
-        let host_path = self.session().resolve_shell_path(pwd);
+        let pwd = self.session().variable_value("PWD")?;
+        let host_path = self.session().resolve_shell_path(&pwd);
         host_path.is_dir().then_some(host_path)
     }
 
@@ -3906,7 +3907,7 @@ impl Shell {
         let Some(path) = self.session_mut().variables().resolved_value("PATH") else {
             return;
         };
-        let env = self.executor_mut().env_vars_snapshot();
+        let env: HashMap<String, String> = self.session().environment_full().into_iter().collect();
         let process_path = process_path_from_shell_path_list(&path, Some(&env));
         std::env::set_var("PATH", &process_path);
         if cfg!(windows) && process_path != path {
@@ -11865,5 +11866,57 @@ T831_PROBE_VAR=hello
             let state = shell.completion_state.lock().unwrap();
             assert_eq!(state.tmp_base, std::path::PathBuf::from("/tmp"));
         }
+    }
+
+    /// GAP-6: the `&self` host probes and the full-table reads route
+    /// through the Session faces (`variable_value` /
+    /// `environment_full`), not through the tier-C executor seam.
+    /// Every value below is steered purely by session assignments
+    /// the process environment never carried: the probes must see
+    /// them while `std::env` does not.
+    #[test]
+    fn gap6_host_reads_route_through_the_session_faces() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shell = test_shell(HookConfig::default());
+        shell
+            .execute_interactive_line("unset __RUBASH_POSIX_MODE")
+            .unwrap();
+        assert!(!shell.posix_mode_active());
+        shell
+            .execute_interactive_line("__RUBASH_POSIX_MODE=1")
+            .unwrap();
+        assert!(shell.posix_mode_active());
+        shell
+            .execute_interactive_line("PS1='GAP6-PROBE> '")
+            .unwrap();
+        assert!(shell.prompt_slot_claimed());
+        shell.execute_interactive_line("PS1=''").unwrap();
+        assert!(!shell.prompt_slot_claimed());
+        shell
+            .execute_interactive_line("NIU_TITLE=GAP6-TITLE")
+            .unwrap();
+        assert_eq!(shell.resolve_title_value(), "GAP6-TITLE");
+        shell
+            .execute_interactive_line("NIU_GAP6_PROBE_VAR=gap6-probe")
+            .unwrap();
+        assert_eq!(
+            shell.session().variable_value("NIU_GAP6_PROBE_VAR"),
+            Some("gap6-probe".to_string())
+        );
+        assert!(shell
+            .session()
+            .environment_full()
+            .iter()
+            .any(|(name, value)| name == "NIU_GAP6_PROBE_VAR" && value == "gap6-probe"));
+        assert_eq!(
+            shell.session().variable_value("NIU_GAP6_DEFINITELY_UNSET"),
+            None
+        );
+        // The process environment never carried the novel probe var:
+        // the probes read live session state, not the process env.
+        // (`__RUBASH_POSIX_MODE` is deliberately NOT asserted here:
+        // it is a builder-seeded exported var, and exported session
+        // vars mirror into the process env by design.)
+        assert!(std::env::var("NIU_GAP6_PROBE_VAR").is_err());
     }
 }
