@@ -56,15 +56,26 @@ jobs:
           | Latest release | ${release} |
           EOF
 
-      - name: Commit if changed
+      - name: Open/update PR with refreshed stats
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git add docs/repo-stats.md
           if git diff --cached --quiet -- docs/repo-stats.md; then
             echo "stats unchanged; nothing to commit"
             exit 0
           fi
+          # master is protected (PR-required), so the bot pushes a branch and
+          # merges its own PR instead of pushing master directly.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/repo-stats.md
+          git checkout -b bot/repo-stats
           git commit -m "docs: refresh repo-stats snapshot"
-          git push origin master
+          git push -f origin bot/repo-stats
+          pr_url=$(gh pr create --title "docs: refresh repo-stats snapshot" \
+            --body "Automated weekly refresh of \`docs/repo-stats.md\` (repo-stats workflow)." \
+            --head bot/repo-stats 2>/dev/null || true)
+          pr=${pr_url:-$(gh pr list --head bot/repo-stats --state open --json number --jq '.[0].number')}
+          gh pr merge "$pr" --merge --auto || \
+            gh pr merge "$pr" --merge || \
+            echo "PR $pr left open for manual merge"
