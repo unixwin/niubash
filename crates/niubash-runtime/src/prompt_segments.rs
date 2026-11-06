@@ -181,12 +181,17 @@ fn preset_colour(preset: SegmentPreset, segment: &SegmentId) -> SegmentColour {
 /// prompt falls back to computing at render time. `dir_memo` is the
 /// calling prompt's Dir memo (audit item A2), the same per-pass shape
 /// for the one other segment that touches the file system; `None`
-/// (direct callers in tests) computes uncached.
+/// (direct callers in tests) computes uncached. `jobs_stamp` is the
+/// calling prompt's per-pass background-job count (rubash#2859),
+/// stamped from the Session by `Shell::prompt_for_display`; `None`
+/// (an unstamped prompt) renders no BackgroundJobs segment — the
+/// count has no render-time source.
 fn render_content(
     segment: &SegmentId,
     config: &SegmentPromptConfig,
     vcs_stamp: Option<&VcsPassStamp>,
     dir_memo: Option<&DirMemoCell>,
+    jobs_stamp: Option<usize>,
 ) -> Option<String> {
     match segment {
         SegmentId::Dir => {
@@ -220,18 +225,20 @@ fn render_content(
             Some(format!("{}@{}", user, host))
         }
         SegmentId::BackgroundJobs => {
-            // niubash#846: this arm used to read `NIU_BACKGROUND_JOBS`
-            // from the process env — an orphan read with no writer
-            // anywhere in the product, so the segment was permanently
-            // empty while pretending to be data-driven. There is
-            // still no honest producer to wire: the engine's job
-            // table is crate-private in rubash and the Session
-            // contract exposes no job-count accessor, and a hardcoded
-            // or guessed count would be fake data. The read is
-            // deleted; the segment renders nothing until a real
-            // Session jobs channel exists (residual in the #846
-            // report).
-            None
+            // rubash#2859 (the niubash#846 residual, closed): the
+            // count is this pass's stamp — `Shell::prompt_for_display`
+            // reads `Session::background_job_count()` (the engine's
+            // job table, dead jobs cleaned up at read time) and
+            // stamps the pass's clone with it. An unstamped prompt
+            // has no honest value and renders nothing, and a stamped
+            // zero renders nothing either (the segment means "jobs
+            // are running"). The `NIU_BACKGROUND_JOBS` env read
+            // #846 deleted stays deleted: a hand-set process value
+            // is not shell data.
+            match jobs_stamp {
+                Some(count) if count > 0 => Some(format!("{count}&")),
+                _ => None,
+            }
         }
         SegmentId::CommandExecutionTime => {
             // niubash#846: `NIU_CMD_EXEC_TIME_MS` now has a real
@@ -473,6 +480,15 @@ pub struct SegmentPrompt {
     /// pass reuse the shortened cwd instead of re-canonicalizing home
     /// per repaint.
     dir_memo: DirMemoCell,
+    /// The per-pass background-job count (rubash#2859), tri-state
+    /// like the Vcs stamp: `None` = unstamped (the shell's resident
+    /// prompt; renders no BackgroundJobs segment); `Some(n)` =
+    /// stamped by `Shell::prompt_for_display` from
+    /// `Session::background_job_count()` for one pass, and this
+    /// clone's renders read the stamp. The resident prompt in
+    /// `Shell` is never stamped, so a stamp physically cannot
+    /// outlive the pass that stamped it.
+    jobs_stamp: Option<usize>,
 }
 
 impl SegmentPrompt {
@@ -482,6 +498,7 @@ impl SegmentPrompt {
             vcs_stamp: None,
             vcs_live: None,
             dir_memo: Arc::new(Mutex::new(None)),
+            jobs_stamp: None,
         }
     }
 
@@ -496,6 +513,26 @@ impl SegmentPrompt {
             .iter()
             .chain(self.config.right_elements.iter())
             .any(|element| *element == SegmentId::Vcs)
+    }
+
+    /// Whether this prompt's configuration draws the BackgroundJobs
+    /// segment on either side (rubash#2859: the per-pass Session
+    /// job-count read only runs for prompts that can show it). The
+    /// production caller is the stamp in `Shell::prompt_for_display`.
+    pub(crate) fn config_has_background_jobs(&self) -> bool {
+        self.config
+            .left_elements
+            .iter()
+            .chain(self.config.right_elements.iter())
+            .any(|element| *element == SegmentId::BackgroundJobs)
+    }
+
+    /// Stamp this prompt (a per-pass clone) with the background-job
+    /// count its pass read from the Session (rubash#2859). Called
+    /// exactly once per pass by `Shell::prompt_for_display`, after
+    /// the precmd hooks have run.
+    pub(crate) fn stamp_jobs(&mut self, count: usize) {
+        self.jobs_stamp = Some(count);
     }
 
     /// Stamp this prompt (a per-pass clone) with the Vcs value its pass
@@ -577,9 +614,13 @@ impl SegmentPrompt {
             if *element == SegmentId::Newline {
                 break;
             }
-            if let Some(content) =
-                render_content(element, &self.config, stamp.as_ref(), Some(&self.dir_memo))
-            {
+            if let Some(content) = render_content(
+                element,
+                &self.config,
+                stamp.as_ref(),
+                Some(&self.dir_memo),
+                self.jobs_stamp,
+            ) {
                 let (fg, bg) = self.colour_for(element, &content);
                 segments.push(RenderedSegment { content, fg, bg });
             }
@@ -621,9 +662,13 @@ impl SegmentPrompt {
                 current = Vec::new();
                 continue;
             }
-            if let Some(content) =
-                render_content(element, &self.config, stamp.as_ref(), Some(&self.dir_memo))
-            {
+            if let Some(content) = render_content(
+                element,
+                &self.config,
+                stamp.as_ref(),
+                Some(&self.dir_memo),
+                self.jobs_stamp,
+            ) {
                 let (fg, bg) = self.colour_for(element, &content);
                 current.push(RenderedSegment { content, fg, bg });
             }
@@ -852,13 +897,13 @@ mod tests {
         let canon_b = canonical_home.join("proj-b");
 
         std::env::set_current_dir(&canon_a).unwrap();
-        let first = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
-        let again = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        let first = render_content(&SegmentId::Dir, &cfg, None, Some(&cell), None).unwrap();
+        let again = render_content(&SegmentId::Dir, &cfg, None, Some(&cell), None).unwrap();
         std::env::set_current_dir(&canon_b).unwrap();
-        let moved = render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap();
+        let moved = render_content(&SegmentId::Dir, &cfg, None, Some(&cell), None).unwrap();
         let foreign = {
             let _home2 = EnvGuard::set("HOME", &other_home.to_string_lossy());
-            render_content(&SegmentId::Dir, &cfg, None, Some(&cell)).unwrap()
+            render_content(&SegmentId::Dir, &cfg, None, Some(&cell), None).unwrap()
         };
         std::env::set_current_dir(previous).unwrap();
 
@@ -897,7 +942,7 @@ mod tests {
     #[test]
     fn time_content_renders_hhmm() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg, None, None);
+        let content = render_content(&SegmentId::Time, &cfg, None, None, None);
         assert!(content.is_some());
         let s = content.unwrap();
         assert_eq!(s.len(), 5);
@@ -907,7 +952,7 @@ mod tests {
     #[test]
     fn time_segment_renders_system_local_clock() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Time, &cfg, None, None).unwrap();
+        let content = render_content(&SegmentId::Time, &cfg, None, None, None).unwrap();
         let expected = format_local_time();
         if content != expected {
             let expected = format_local_time();
@@ -918,7 +963,7 @@ mod tests {
     #[test]
     fn prompt_char_is_symbol() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::PromptChar, &cfg, None, None);
+        let content = render_content(&SegmentId::PromptChar, &cfg, None, None, None);
         assert_eq!(content.as_deref(), Some("\u{276f}"));
     }
 
@@ -929,7 +974,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::remove_var("NIU_LAST_EXIT_CODE");
-        let content = render_content(&SegmentId::Status, &cfg, None, None);
+        let content = render_content(&SegmentId::Status, &cfg, None, None, None);
         assert!(content.is_none());
     }
 
@@ -938,7 +983,7 @@ mod tests {
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = default_cfg();
         std::env::set_var("NIU_LAST_EXIT_CODE", "1");
-        let content = render_content(&SegmentId::Status, &cfg, None, None);
+        let content = render_content(&SegmentId::Status, &cfg, None, None, None);
         assert!(content.is_some());
         assert!(content.unwrap().contains("1"));
         std::env::remove_var("NIU_LAST_EXIT_CODE");
@@ -947,25 +992,54 @@ mod tests {
     #[test]
     fn newline_renders_empty() {
         let cfg = default_cfg();
-        let content = render_content(&SegmentId::Newline, &cfg, None, None);
+        let content = render_content(&SegmentId::Newline, &cfg, None, None, None);
         assert_eq!(content, Some(String::new()));
     }
 
-    /// niubash#846: the BackgroundJobs segment's env read is deleted —
-    /// `NIU_BACKGROUND_JOBS` has no producer anywhere and the Session
-    /// contract exposes no job count, so even a hand-set process value
-    /// must NOT be rendered as if it were shell data.
+    /// rubash#2859 (flips the niubash#846 pin): the BackgroundJobs
+    /// segment renders the count the pass stamped from the Session —
+    /// a real background job shows, a killed-and-reaped one
+    /// disappears — and the `NIU_BACKGROUND_JOBS` env read #846
+    /// deleted stays deleted: a hand-set process value alone still
+    /// produces nothing, because the segment's only input now is the
+    /// stamp, and an unstamped prompt has no stamp.
     #[test]
-    fn issue846_background_jobs_segment_has_no_fake_producer() {
+    fn issue2859_background_jobs_segment_renders_real_session_count() {
+        use rubash::api::{RunOptions, Session};
         let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env_restore = crate::test_support::ProcessEnvRestore::new(&["NIU_BACKGROUND_JOBS"]);
         let cfg = default_cfg();
+        // Env fiction alone: no stamp → no segment.
         std::env::set_var("NIU_BACKGROUND_JOBS", "3");
-        let content = render_content(&SegmentId::BackgroundJobs, &cfg, None, None);
+        let content = render_content(&SegmentId::BackgroundJobs, &cfg, None, None, None);
         assert!(
             content.is_none(),
-            "no honest producer → no segment, not env fiction"
+            "no stamp → no segment, not env fiction: {content:?}"
         );
+        std::env::remove_var("NIU_BACKGROUND_JOBS");
+
+        // A real Session holding a real background job: the count the
+        // production stamp reads renders as the segment.
+        let mut session = Session::builder().build().expect("session builds");
+        let outcome = session
+            .run("sleep 30 &", &RunOptions::new())
+            .expect("background run");
+        assert_eq!(outcome.status, 0);
+        let count = session.background_job_count();
+        assert_eq!(count, 1, "one running background job counts");
+        let content = render_content(&SegmentId::BackgroundJobs, &cfg, None, None, Some(count));
+        assert_eq!(content.as_deref(), Some("1&"));
+
+        // Kill + reap it: the count leaves with the job, and a
+        // stamped zero renders no segment.
+        let outcome = session
+            .run("kill %1 2>/dev/null; wait 2>/dev/null", &RunOptions::new())
+            .expect("cleanup run");
+        assert_eq!(outcome.status, 0);
+        let count = session.background_job_count();
+        assert_eq!(count, 0, "killed + reaped job leaves the count");
+        let content = render_content(&SegmentId::BackgroundJobs, &cfg, None, None, Some(count));
+        assert!(content.is_none(), "zero jobs → no segment: {content:?}");
     }
 
     /// niubash#846: the Custom segment reads the process-env value the
@@ -978,7 +1052,13 @@ mod tests {
         let _env_restore = crate::test_support::ProcessEnvRestore::new(&["NIU_SEGMENT_T846"]);
         let cfg = default_cfg();
         std::env::set_var("NIU_SEGMENT_T846", "segval");
-        let content = render_content(&SegmentId::Custom("t846".to_string()), &cfg, None, None);
+        let content = render_content(
+            &SegmentId::Custom("t846".to_string()),
+            &cfg,
+            None,
+            None,
+            None,
+        );
         assert_eq!(content.as_deref(), Some("segval"));
     }
 
@@ -990,7 +1070,7 @@ mod tests {
         let _env_restore = crate::test_support::ProcessEnvRestore::new(&["NIU_CMD_EXEC_TIME_MS"]);
         let cfg = default_cfg();
         std::env::set_var("NIU_CMD_EXEC_TIME_MS", "42");
-        let content = render_content(&SegmentId::CommandExecutionTime, &cfg, None, None);
+        let content = render_content(&SegmentId::CommandExecutionTime, &cfg, None, None, None);
         assert_eq!(content.as_deref(), Some("42ms"));
     }
 

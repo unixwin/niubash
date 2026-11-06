@@ -2690,7 +2690,10 @@ impl Shell {
     /// this pass's Vcs value (niubash#592, S2): the value is read from
     /// the cross-pass segment cache in this call — which the REPL
     /// makes after `run_precmd_hooks` — and the pass's repaints
-    /// re-read the stamp instead of touching the cache again. Since
+    /// re-read the stamp instead of touching the cache again. The
+    /// same clone is stamped with this pass's background-job count
+    /// (rubash#2859), read from the Session in this call when the
+    /// configuration draws the BackgroundJobs segment. Since
     /// niubash#787 both faces carry the stamp as a live cell: a
     /// refresh landing mid-pass re-stamps the cell, and the host
     /// requests one editor repaint so the segment reaches an idle
@@ -2725,9 +2728,7 @@ impl Shell {
             }
             self.prompt = PromptBackend::Bash(prompt);
         }
-        let prompt = self.prompt.clone();
-        #[cfg(windows)]
-        let mut prompt = prompt;
+        let mut prompt = self.prompt.clone();
         #[cfg(windows)]
         if let PromptBackend::Segments(adapter) = &mut prompt {
             if adapter.inner.config_has_vcs() {
@@ -2737,6 +2738,19 @@ impl Shell {
                 let value = crate::git_prompt::branch_segment(&cwd);
                 let worktree = crate::git_prompt_cache::find_worktree(&cwd);
                 adapter.inner.stamp_vcs(seq, value, worktree);
+            }
+        }
+        if let PromptBackend::Segments(adapter) = &mut prompt {
+            if adapter.inner.config_has_background_jobs() {
+                // rubash#2859: stamp this pass's background-job
+                // count from the Session — the read runs the
+                // engine's dead-job cleanup at prompt time (GNU
+                // jobs.c:1303), and the stamped count is the
+                // BackgroundJobs segment's only input (the
+                // NIU_BACKGROUND_JOBS env read niubash#846 deleted
+                // stays deleted).
+                let count = self.session_mut().background_job_count();
+                adapter.inner.stamp_jobs(count);
             }
         }
         prompt
@@ -10209,6 +10223,83 @@ complete -F _envtooldyn_hook envtooldyn
     #[cfg(windows)]
     fn render_left_of(prompt: &PromptBackend) -> String {
         reedline::Prompt::render_prompt_left(prompt).into_owned()
+    }
+
+    /// rubash#2859 host adoption chain: a Shell whose prompt draws
+    /// the BackgroundJobs segment renders the count the Session
+    /// reports, through the production per-pass path
+    /// (`execute_interactive_line` mutates the job table,
+    /// `prompt_for_display` stamps the pass's clone from
+    /// `Session::background_job_count()`, the prompt renders the
+    /// stamp). A background job shows; killed + waited (reaped) it
+    /// disappears; a stopped job counts (the state the foreground
+    /// ^Z stop lands in — the flip itself is engine behavior, pinned
+    /// by the r70 slice-4 PTY pins); a disowned job leaves.
+    #[test]
+    fn issue2859_background_jobs_segment_follows_session_jobs() {
+        let mut shell = test_shell(HookConfig::default());
+        shell.prompt = PromptBackend::Segments(SegmentPromptAdapter::new(SegmentPrompt::new(
+            SegmentPromptConfig {
+                left_elements: vec![SegmentId::BackgroundJobs, SegmentId::PromptChar],
+                right_elements: Vec::new(),
+                separator: " ".to_string(),
+                prompt_symbol: "$".to_string(),
+                preset: None,
+            },
+        )));
+        let render = |shell: &mut Shell| {
+            reedline::Prompt::render_prompt_left(&shell.prompt_for_display()).into_owned()
+        };
+        // No jobs: no segment.
+        assert!(
+            !render(&mut shell).contains("1&"),
+            "no jobs → no BackgroundJobs segment"
+        );
+        // A real background job shows on the next pass.
+        shell
+            .execute_interactive_line("sleep 30 &")
+            .expect("bg line");
+        assert!(
+            render(&mut shell).contains("1&"),
+            "one running background job → segment shows 1&"
+        );
+        // Kill + wait (the reap): the segment leaves with the job.
+        shell
+            .execute_interactive_line("kill %1 2>/dev/null; wait 2>/dev/null")
+            .expect("cleanup line");
+        assert!(
+            !render(&mut shell).contains("1&"),
+            "killed + reaped job → no segment"
+        );
+        // A stopped background job counts (Q-B (a): Stopped is in
+        // the counted set, the same set a ^Z-stopped foreground job
+        // lands in once the stop flips it to background).
+        shell
+            .execute_interactive_line("sleep 5 &")
+            .expect("bg line");
+        shell
+            .execute_interactive_line("kill -STOP %1")
+            .expect("stop line");
+        // The intervening builtin is the observation event that
+        // applies the deferred Stopped mark (rubash#1494).
+        shell.execute_interactive_line(":").expect("observe line");
+        assert!(
+            render(&mut shell).contains("1&"),
+            "stopped background job → segment shows 1&"
+        );
+        // Resume + disown: the job leaves the table and the segment.
+        // (The disowned `sleep 5` is running again and exits on its
+        // own within seconds; nothing is left stopped or tracked.)
+        shell
+            .execute_interactive_line("kill -CONT %1")
+            .expect("cont line");
+        shell
+            .execute_interactive_line("disown")
+            .expect("disown line");
+        assert!(
+            !render(&mut shell).contains("1&"),
+            "disowned job → no segment"
+        );
     }
 
     /// niubash#842: on every platform (this pin is deliberately NOT
