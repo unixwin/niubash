@@ -72,13 +72,16 @@ jobs:
           # merges its own PR instead of pushing master directly.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b bot/repo-stats
+          # Unique branch per run: a merged PR keeps gh from creating a new
+          # one off the same head ("has diverged from local branch").
+          branch="bot/repo-stats-${{ github.run_id }}"
+          git checkout -b "$branch"
           git commit -m "docs: refresh repo-stats snapshot"
-          git push -f origin bot/repo-stats
+          git push origin "$branch"
           pr_url=$(gh pr create --title "docs: refresh repo-stats snapshot" \
             --body "Automated weekly refresh of \`docs/repo-stats.md\` (repo-stats workflow)." \
-            --head bot/repo-stats 2>/dev/null || true)
-          pr=${pr_url:-$(gh pr list --head bot/repo-stats --state open --json number --jq '.[0].number')}
+            --head "$branch" 2>/dev/null || true)
+          pr=${pr_url:-$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')}
           gh pr merge "$pr" --merge --auto || \
-            gh pr merge "$pr" --merge || \
+            gh pr merge "$pr" --merge --delete-branch || \
             echo "PR $pr left open for manual merge"
