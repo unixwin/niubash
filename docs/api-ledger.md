@@ -729,6 +729,18 @@
 > at the `complete_line` level (b01-b18 + arm-8 shapes) with the
 > gate asserted alongside. §6 grows 277 → 279 (two items: the
 > `Session` face and the `Executor` face).
+> Addendum (jobs face, 2026-11-06,
+> rubash#2859): `Session::background_job_count` /
+> `Executor::background_job_count` enter the ledger as the
+> background-jobs count face: table entries with `background ==
+> true` and state in {Running, Stopped} after the
+> `cleanup_dead_jobs` liveness pass — exactly the set bare
+> `jobs` lists (GNU builtins/jobs.def:83 `list_all_jobs`,
+> jobs.c:2254-2257) — recorded §6 + §2.3 (staged 0 ahead of the
+> host adoption, which replaces the `BackgroundJobs` prompt
+> segment's `NIU_BACKGROUND_JOBS` read; `JobCandidate` stays
+> engine-internal). §6 grows 279 → 281 (two items: the
+> `Session` face and the `Executor` face).
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -1246,6 +1258,7 @@ its test-module reads named separately in the row):
 | `Session::is_known_keymap` | 1 | GAP-13 (niubash#863): ENTERS the ledger with this record — the keymap membership probe as a contract face: plain `KEYMAP_NAMES` membership, no alias folding (folding lives in the register path inside the engine — the `[keymap]` parser's plain membership, niubash#863 GAP-13 Q-F/U-3). The GAP-13 host adoption landed with niu #921 (merge `9388c9cf`): the `[keymap]` parser probes through the face (`repl.rs:5276`, `parse_keymap_bind_rule`), so the count is 1 — the staged 0 this row carried until the lane landed is retired by this record; consumed in-repo by the GAP-13 consumer pins (all eight names true, fake names false) and by the host pin, which calls the face twice from the test module (production count is 1; the two test-module calls are noted, not counted). |
 | `Session::applied_invocation_shopt_flag` | 0 | GAP-12 follow-up (niubash#863, rubash#2848): ENTERS the ledger with this record — the retained invocation's explicit shopt flag as a contract face: the last `-O`/`+O` entry for a name in the invocation applied through `Session::apply_invocation_before_startup`, or `None` when the invocation said nothing about it (and `None` when no invocation was applied). The host needs the explicit-vs-silent distinction the shape read cannot carry: `enter_interactive` arms `expand_aliases` for an interactive session unless the invocation explicitly turned it off (`+O expand_aliases -i` must win over the interactive default; the three GNU oracle arms are pinned in the GAP-13 consumer pins). Recorded staged ahead of the host adoption, so the count is 0; the host follow-up that deletes its `startup_invocation` field rides on this face plus `applied_invocation_shape` |
 | `Session::has_compspec_at` | 1 | B5-11 (niubash#863, rubash#2856): ENTERS the ledger with this record — the position-aware compspec gate: whether a compspec governs completion at `(line, cursor)`, answered with the same split the generation path uses (`split_for_completion` + `resolve_compspec`), so the gate and the candidates cannot disagree. The command-name form `has_compspec` cannot answer it: the `-E` empty line has no command and the `-I` initial word IS the command being completed. Adopted by the B5-11 host migration (niu #926, merge `d4879b4b`): the `completer.rs` routing gate reads this face (the `-E`/`-I` gate was unreachable through the name form), so the count is 1 — the gate's single production call |
+| `Session::background_job_count` | 0 | GAP queue (niubash#863, rubash#2859): ENTERS the ledger with this record — the background-jobs count as a contract face: the number of table entries with `background == true` and state in {Running, Stopped} after the `cleanup_dead_jobs` liveness pass, exactly the set bare `jobs` lists (GNU builtins/jobs.def:83 `list_all_jobs`, jobs.c:2254-2257). A ^Z-stopped foreground job counts (the stop path flips it to `background = true`); process-substitution children are not table entries and never count; a completed job never counts. Recorded staged ahead of the host adoption, so the count is 0; the host prompt segment (`BackgroundJobs`) reads through this face instead of its `NIU_BACKGROUND_JOBS` environment variable, which had no honest producer (niu #846 residual). Consumed in-repo by the #2859 consumer pins (one/two Running, reaped, disowned, Stopped, procsub) |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
@@ -1625,6 +1638,7 @@ method rubash::api::Session::aliases
 method rubash::api::Session::applied_invocation_shape
 method rubash::api::Session::applied_invocation_shopt_flag
 method rubash::api::Session::apply_invocation_before_startup
+method rubash::api::Session::background_job_count
 method rubash::api::Session::begin_completion_attempt
 method rubash::api::Session::begin_finish
 method rubash::api::Session::bind_view
@@ -1696,6 +1710,7 @@ method rubash::api::VariablesView::resolved_value
 method rubash::api::VariablesView::set
 method rubash::api::VariablesView::unset
 method rubash::executor::Executor::alias_expansion_enabled
+method rubash::executor::Executor::background_job_count
 method rubash::executor::Executor::bind_readline_variable
 method rubash::executor::Executor::bind_registry_generation
 method rubash::executor::Executor::builtin_command_names

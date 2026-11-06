@@ -220,6 +220,43 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 如果 niu 帮你省掉了一台虚拟机、一段被改坏的引号、一个被 PowerShell 吃掉的参数，[给仓库点个 Star](https://github.com/unixwin/niubash)，转告下一位开发者。★
 
+## 贡献者
+
+<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+[![All Contributors](https://img.shields.io/badge/all_contributors-12-orange.svg?style=flat-square)](#contributors)
+<!-- ALL-CONTRIBUTORS-BADGE:END -->
+
+感谢每一位共建 niubash 的贡献者——issue、修复、插件、移植贡献，以及上游引擎的工作 ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/caomengxuan666"><img src="https://avatars.githubusercontent.com/u/114896873?v=4&size=100" width="100px" height="100px" alt="caomengxuan666"/><br /><sub><b>caomengxuan666</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=caomengxuan666" title="Code">💻</a> <a href="#maintenance-caomengxuan666" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/a-rookie-of-C-language"><img src="https://avatars.githubusercontent.com/u/186315048?v=4&size=100" width="100px" height="100px" alt="a-rookie-of-C-language"/><br /><sub><b>a-rookie-of-C-language</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=a-rookie-of-C-language" title="Code">💻</a> <a href="#maintenance-a-rookie-of-C-language" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/devin-ai-integration"><img src="https://avatars.githubusercontent.com/u/158243242?v=4&size=100" width="100px" height="100px" alt="devin-ai-integration[bot]"/><br /><sub><b>devin-ai-integration[bot]</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=devin-ai-integration[bot]" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/daiaji"><img src="https://avatars.githubusercontent.com/u/25875791?v=4&size=100" width="100px" height="100px" alt="daiaji"/><br /><sub><b>daiaji</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=daiaji" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cognition-team"><img src="https://avatars.githubusercontent.com/u/167951170?v=4&size=100" width="100px" height="100px" alt="cognition-team"/><br /><sub><b>cognition-team</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=cognition-team" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Uarz"><img src="https://avatars.githubusercontent.com/u/149165079?v=4&size=100" width="100px" height="100px" alt="Uarz"/><br /><sub><b>Uarz</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=Uarz" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Catapult291"><img src="https://avatars.githubusercontent.com/u/200960228?v=4&size=100" width="100px" height="100px" alt="Catapult291"/><br /><sub><b>Catapult291</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=Catapult291" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Yuren0312"><img src="https://avatars.githubusercontent.com/u/168316868?v=4&size=100" width="100px" height="100px" alt="Yuren0312"/><br /><sub><b>Yuren0312</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=Yuren0312" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/jhermelink"><img src="https://avatars.githubusercontent.com/u/32125320?v=4&size=100" width="100px" height="100px" alt="jhermelink"/><br /><sub><b>jhermelink</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=jhermelink" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/x2410516039"><img src="https://avatars.githubusercontent.com/u/234159335?v=4&size=100" width="100px" height="100px" alt="x2410516039"/><br /><sub><b>x2410516039</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=x2410516039" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cmx"><img src="https://avatars.githubusercontent.com/u/42783691?v=4&size=100" width="100px" height="100px" alt="cmx"/><br /><sub><b>cmx</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=cmx" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/github-actions"><img src="https://avatars.githubusercontent.com/u/41898282?v=4&size=100" width="100px" height="100px" alt="github-actions[bot]"/><br /><sub><b>github-actions[bot]</b></sub></a><br /><a href="#tool-github-actions[bot]" title="Tools">🔧</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
 ## 许可证
 
 MIT，详见 [LICENSE](LICENSE)。
