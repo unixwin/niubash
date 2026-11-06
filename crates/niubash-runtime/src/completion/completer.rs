@@ -1718,10 +1718,10 @@ niu_git_comp() {
         // `-E`/`-I` compspecs is `Session::has_compspec_at(line,
         // cursor)`, and a governing compspec answer suppresses the
         // cwd/alias/function overlays (ruling Q-C (i)). These shapes
-        // are pinned at the completer layer because the REPL never
-        // consults the completer for a bare TAB on an empty word
-        // (pre-existing editor behavior — the PTY chain drives the
-        // same shapes through M-* instead; see its header note).
+        // are pinned at the completer layer because the PTY chain
+        // drives the same shapes through TAB (niubash#927: a bare TAB
+        // on an empty word reaches the completer exactly like a
+        // non-empty word).
         use crate::test_support::PROCESS_STATE_LOCK;
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);

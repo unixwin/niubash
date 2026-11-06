@@ -4,8 +4,9 @@
 //! * select interaction (the default since niubash#742): TAB #1 puts
 //!   the FIRST candidate into the line and highlights it in the grid
 //!   (niubash#778); further TABs cycle; Esc rolls back.
-//! * bare TAB (blank line before the cursor): inserts a four-space
-//!   indent instead of opening the command-position grid (#742).
+//! * bare TAB (blank line before the cursor): completes the empty
+//!   word exactly like a non-empty word (niubash#927, superseding
+//!   #742's four-space indent).
 //! * large candidate sets keep a multi-column grid even with a long
 //!   outlier name (#741, packed zsh-style layout).
 //! * filesystem candidates paint through LS_COLORS (#743).
@@ -114,37 +115,32 @@ fn issue742_pty_select_esc_rolls_back_the_pick() {
     s.expect_prompt();
 }
 
-/// Bare TAB on an empty line inserts a four-space indent and never
-/// opens the command-position grid.
+/// Bare TAB on an empty line completes the empty word (niubash#927,
+/// superseding #742's four-space indent): with `-E` registered the
+/// first TAB offers the wordlist and the second cycles through it.
 #[test]
-fn issue742_pty_bare_tab_inserts_indent() {
-    if !require_pty_or_skip("issue742_pty_bare_tab_inserts_indent") {
+fn issue927_pty_bare_tab_completes_empty_word() {
+    if !require_pty_or_skip("issue927_pty_bare_tab_completes_empty_word") {
         return;
     }
-    let mut s = NiuSession::spawn("bare-tab-742");
+    let mut s = NiuSession::spawn("bare-tab-927");
     s.wait_ready();
+    s.send_line("complete -E -W 'eone etwo'");
+    s.expect_prompt();
     s.send(TAB);
+    // TAB #1: the -E wordlist is offered (candidate 0 spliced, grid up).
+    s.expect("eone");
+    s.send(TAB);
+    // TAB #2: the session cycles to the second candidate.
+    s.expect("etwo");
+    // Esc rolls the line back to the pre-completion snapshot (empty).
+    s.send(ESC);
     std::thread::sleep(SETTLE);
-    s.send("echo bare-ok");
     s.send("\r");
+    s.expect_prompt();
+    s.send_line("echo bare-ok");
     s.expect("bare-ok");
     s.expect_prompt();
-    let transcript = s.transcript();
-    // The painted input line carries the indent straight after the
-    // prompt's reset code (reset + four spaces + `echo` — the driver's
-    // transcript escapes ESC to `<ESC>`). SGR reset has two byte
-    // spellings, `ESC[m` and `ESC[0m`, with identical meaning; the
-    // stream a test sees depends on the hosting layer — ConPTY
-    // normalizes the sequences it forwards (the spelling this pin was
-    // authored against), while a Unix pty carries the painter's own
-    // `ESC[0m` bytes. Canonicalize the spelling before matching so
-    // the pin asserts the behavior (indent directly after the reset),
-    // not one platform's byte form (niubash#753).
-    let canonical = transcript.replace("<ESC>[0m", "<ESC>[m");
-    assert!(
-        canonical.contains("<ESC>[m    "),
-        "the TAB must have left a four-space indent in the line:\n{transcript}"
-    );
 }
 
 /// niubash#741: a candidate set with one very long name keeps a

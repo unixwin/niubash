@@ -1628,19 +1628,16 @@ fn repl_pty_bind_inputrc_rc_runtime_removal_chain() {
 // engine-side plus by the existing default-fallback chain above,
 // not re-pinned here.)
 //
-// Trigger: links 1–3 drive completion with M-* (`insert-completions`,
-// ESC `*`), link 4 with TAB. A bare TAB on an empty word does NOT
-// reach the completer in the current REPL: it inserts a literal tab
-// (`P1> ` + spaces, no menu) — verified identical on the base build
-// (completer.rs restored to 5629253a, same frames on all three
-// shapes), so it is pre-existing REPL/menu-layer behavior, NOT this
-// PR's gate, and outside B5-11's scope (recorded in the lane REPORT
-// for the captain; the gate itself is lib-proven by the
-// `issue2856_empty_initial_compspec_gate` pins in completer.rs).
-// M-* reaches the same completer and inserts ALL of its candidates,
-// so the wordlist + no-overlay assertions still discriminate the
-// gate exactly: with the old name-form gate the completer returns
-// the cwd overlay instead of the wordlist, and M-* inserts that.
+// Trigger: all four links drive completion with TAB (niubash#927:
+// a bare TAB on an empty word reaches the completer exactly like a
+// non-empty word — TAB #1 splices the first candidate into the line
+// and opens the grid, so the wordlist + no-overlay assertions still
+// discriminate the gate exactly: with the old name-form gate the
+// completer returns the cwd overlay instead of the wordlist, and TAB
+// splices that. Before #927 links 1–3 drove through M-*
+// (`insert-completions`) because a bare TAB inserted a literal tab
+// and never reached the completer; the M-* shape is no longer
+// needed here now that TAB reaches the completer on empty words.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1649,7 +1646,6 @@ fn repl_pty_completion_empty_initial_compspec_chain() {
         return;
     }
     let mut s = ReplSession::spawn("b511", "");
-    const META_STAR: &str = "\u{1b}*";
     // Cwd fixtures the overlays would offer if not suppressed: a
     // directory and two executables (plain data files never qualify
     // at command position, niubash#671, so they would prove nothing).
@@ -1664,13 +1660,12 @@ fn repl_pty_completion_empty_initial_compspec_chain() {
         }
     }
 
-    // Link 1 — empty line + only `-E`, driven by M-* (see the header
-    // note: bare TAB on an empty word never reaches the completer).
+    // Link 1 — empty line + only `-E`, driven by TAB (niubash#927).
     s.send_line("complete -E -W 'eone etwo'");
     s.expect_prompt();
     settle();
     s.drain();
-    s.send(META_STAR);
+    s.send(TAB);
     std::thread::sleep(Duration::from_millis(500));
     let f = s.frame();
     assert!(
@@ -1693,7 +1688,7 @@ fn repl_pty_completion_empty_initial_compspec_chain() {
     settle();
     s.send("   ");
     s.drain();
-    s.send(META_STAR);
+    s.send(TAB);
     std::thread::sleep(Duration::from_millis(500));
     let f = s.frame();
     assert!(
@@ -1719,7 +1714,7 @@ fn repl_pty_completion_empty_initial_compspec_chain() {
         s.send(LEFT);
     }
     s.drain();
-    s.send(META_STAR);
+    s.send(TAB);
     std::thread::sleep(Duration::from_millis(500));
     let f = s.frame();
     assert!(
