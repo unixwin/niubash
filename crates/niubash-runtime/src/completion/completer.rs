@@ -1728,26 +1728,9 @@ niu_git_comp() {
 
         let temp_dir = unique_temp_dir("niubash-b511-empty-initial");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        std::fs::create_dir(temp_dir.join("esub")).unwrap();
-        for name in ["eprog", "dprog"] {
-            let path = temp_dir.join(name);
-            std::fs::write(&path, "#!/bin/sh\necho hi\n").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-        }
 
         let complete_with = |registrations: &str, line: &str, cursor: usize| -> Vec<String> {
             let mut shell = crate::shell::Shell::new().unwrap();
-            // The shell's live pwd drives the host faces (the cwd
-            // overlay reads `executor_pwd_host_path`, not the
-            // completer state's directory), so `cd` into the fixture
-            // dir exactly like the glob test does.
-            assert!(shell
-                .execute_script(&format!("cd {}", temp_dir.display()))
-                .is_ok());
             assert!(shell.execute_script(registrations).is_ok());
             let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
             let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
@@ -1780,8 +1763,18 @@ niu_git_comp() {
             "column 0 ahead of the command name + -E must return the -E wordlist"
         );
         // Command word + only `-D` (Q-D guard): the wordlist never
-        // governs; the host's command completion answers.
-        let values = complete_with("complete -D -W 'dalpha dbeta'", "d", 1);
+        // governs; the host's command completion answers. The
+        // command-word answer is pinned on the in-memory alias
+        // overlay, not on PATH or the process cwd: the TAB path has
+        // no PATH-command source (CommandCompleter is reachable
+        // only via `complete_specific(Command)`), and a
+        // cwd-dependent shape races with other tests in the
+        // parallel lib run (CI red on #926).
+        let values = complete_with(
+            "complete -D -W 'dalpha dbeta'\nalias dprog='echo hi'",
+            "d",
+            1,
+        );
         assert!(
             !values.iter().any(|value| value == "dalpha"),
             "command word + only -D must never offer the -D wordlist, got {values:?}"
