@@ -58,7 +58,8 @@ jobs:
 
       - name: Commit if changed
         run: |
-          if git diff --quiet -- docs/repo-stats.md; then
+          git add docs/repo-stats.md
+          if git diff --cached --quiet -- docs/repo-stats.md; then
             echo "stats unchanged; nothing to commit"
             exit 0
           fi
