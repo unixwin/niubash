@@ -4447,13 +4447,23 @@ impl Shell {
             // contract's line-offset route inside run() — the
             // classification populates the same unwind verdict on
             // that route, so the routes agree on the record.
+            //
+            // niubash#950: the fold also takes the classification's
+            // parse-error bit. A syntax error produces no unwind
+            // verdict, and run() has already drained the executor
+            // pendings, so without this term nothing records the
+            // stop and the batch feeder reads past a mid-stream
+            // syntax error, exiting 0 where GNU stops with 2. The
+            // unclosed/stray arms fold the same parse-error term
+            // (theirs beside `exit_jump_raw`; this arm's verdict
+            // vocabulary is the unwind pair, so the term joins it).
             let mut options = RunOptions::default();
             options.line_offset = line_offset;
             let outcome = self
                 .session_mut()
                 .run(&script, &options)
                 .map_err(|error| anyhow::anyhow!("session run failed: {error:?}"))?;
-            if outcome.classification.unwind.is_some() {
+            if outcome.classification.unwind.is_some() || outcome.classification.parse_error {
                 self.script_exit_jump = true;
                 self.note_session_exit_jump(outcome.status);
             }
