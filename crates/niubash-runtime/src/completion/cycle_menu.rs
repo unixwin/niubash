@@ -604,21 +604,6 @@ impl CycleSession {
 /// menu and the edit-mode wrapper.
 pub type SharedCycleSession = Arc<Mutex<CycleSession>>;
 
-/// niubash#742: what a bare TAB (nothing completable — an empty or
-/// whitespace-only line before the cursor) inserts. zsh's shape is a
-/// literal TAB/indent; four spaces is the indentation the editor can
-/// render deterministically.
-const BARE_TAB_INDENT: &str = "    ";
-
-/// Whether the buffer before the cursor is empty or whitespace only —
-/// the bare-TAB shape where completion has nothing to offer and the
-/// key means "indent" (niubash#742).
-fn buffer_before_cursor_is_blank(editor: &Editor) -> bool {
-    let buffer = editor.get_buffer();
-    let cursor = editor.line_buffer().insertion_point().min(buffer.len());
-    buffer[..cursor].trim().is_empty()
-}
-
 /// The edit batch that puts `buffer` on the line with the cursor at
 /// `cursor`: clear, insert, reposition. This is the whole-buffer
 /// replacement shape the widget outcome path already uses — a
@@ -1008,9 +993,9 @@ impl CycleMenu {
         self.has_selection = false;
         self.scroll_top.set(0);
         // The grid is gone — stand the autosuggest hinter back up.
-        // Sessions that end without a Deactivate event (empty answers,
-        // the bare-TAB indent) would otherwise leave the ghost
-        // suppressed for the rest of the line.
+        // Sessions that end without a Deactivate event (empty answers)
+        // would otherwise leave the ghost suppressed for the rest of
+        // the line.
         if let Some(menu_open) = &self.menu_open {
             menu_open.store(false, Ordering::Relaxed);
         }
@@ -1027,20 +1012,14 @@ impl CycleMenu {
     /// then begin the session over whatever the query produced. No
     /// candidates: the TAB was inert, the menu closes at once.
     ///
-    /// niubash#742: a TAB whose buffer is empty or whitespace-only
-    /// before the cursor is an *indent* key, not a completion request
-    /// — zsh's shape splices a four-space indent where niubash used to
-    /// open the command-position grid on an empty line.
+    /// niubash#927: an empty or whitespace-only buffer before the
+    /// cursor completes exactly like any other word — the completer
+    /// is consulted with the empty word (GNU: an empty-line TAB lists
+    /// the `-E` wordlist, a whitespace-only line at EOL takes `-I`).
+    /// This supersedes niubash#742's bare-TAB indent, which spliced a
+    /// four-space indent here and never reached the completer.
     fn apply_activate(&mut self, editor: &mut Editor, completer: &mut dyn Completer) {
         if self.session_begun {
-            return;
-        }
-        if buffer_before_cursor_is_blank(editor) {
-            editor.edit_buffer(
-                |buffer| buffer.insert_str(BARE_TAB_INDENT),
-                UndoBehavior::CreateUndoPoint,
-            );
-            self.end_session();
             return;
         }
         self.activation_pending = true;
@@ -2041,31 +2020,35 @@ mod tests {
     }
 
     #[test]
-    fn issue742_bare_tab_inserts_indent_and_never_opens_the_grid() {
-        // An empty line: TAB is an indent key (zsh's shape), the
-        // command-position grid never opens and no session begins.
+    fn issue927_tab_on_empty_word_completes() {
+        // niubash#927 (supersedes #742's bare-TAB indent): TAB on an
+        // empty word queries the completer exactly like a non-empty
+        // word — the first candidate is spliced and the session opens.
         let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
         let (mut menu, session) = menu_with_session();
         let mut editor = editor_with("");
         activate(&mut menu, &mut editor, &mut completer);
-        assert_eq!(editor.get_buffer(), "    ");
-        assert!(!menu.is_active());
-        assert!(!session.lock().unwrap().open);
+        assert_eq!(editor.get_buffer(), "checkout");
+        assert!(menu.is_active());
+        assert!(session.lock().unwrap().open);
+        assert_eq!(menu.get_values().len(), 2);
 
-        // A whitespace-only prefix indents further (re-indent case).
+        // A whitespace-only prefix completes the same way (the empty
+        // word after the spaces is the completed word).
         let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
         let (mut menu, session) = menu_with_session();
         let mut editor = editor_with("  ");
         activate(&mut menu, &mut editor, &mut completer);
-        assert_eq!(editor.get_buffer(), "      ");
-        assert!(!menu.is_active());
-        assert!(!session.lock().unwrap().open);
+        assert_eq!(editor.get_buffer(), "  checkout");
+        assert!(menu.is_active());
+        assert!(session.lock().unwrap().open);
+        assert_eq!(menu.get_values().len(), 2);
     }
 
     #[test]
     fn issue742_tab_on_a_line_with_content_still_completes() {
-        // The indent rule is scoped to the blank-prefix case: `git ch`
-        // still opens the candidate session.
+        // `git ch` opens the candidate session (niubash#927: the
+        // blank-prefix case completes the same way now).
         let mut completer = PrefixCompleter::new(&["checkout", "cherry"]);
         let (mut menu, _session) = menu_with_session();
         let mut editor = editor_with("git ch");

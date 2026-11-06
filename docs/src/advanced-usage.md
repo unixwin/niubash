@@ -209,7 +209,7 @@ the line) and **presentation** (how candidates are painted). The defaults are
   Left/Right move one column with zsh edge wrap; Enter accepts the pick and
   closes the menu (a second Enter runs it); Esc
   rolls back. A lone candidate completes outright, and bare TAB on a blank
-  line inserts a four-space indent.
+  line completes the empty word exactly like any other word.
 - `insert` — the two-step common-prefix contract: TAB #1 completes the common
   prefix and stops, TAB #2 opens the menu. Enter commits the highlighted
   candidate without running it; Esc keeps the inserted text.
