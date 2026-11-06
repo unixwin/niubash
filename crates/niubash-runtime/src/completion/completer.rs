@@ -620,19 +620,21 @@ impl NiubashCompleter {
         // rule). Decide that once, up front: the static definition tables
         // and the path fallback are overlays for commands WITHOUT a
         // compspec, and must not be merged into its candidates.
-        // niubash#830: probe the compspec for the command word of the
-        // cursor's segment, not the first whitespace token of the
-        // whole line — on 'true; git <TAB>' the old probe asked about
-        // "true;", missed git's compspec, and let the static tables
-        // answer with the wrong candidates. `get_command_name` is
-        // quote/extglob-aware and skips grouping openers and
-        // assignment prefixes ('( git ', 'VAR=1 git ').
-        let command_word = context.get_command_name().unwrap_or_default();
-        let has_compspec = !context.is_command_position()
-            && !command_word.is_empty()
-            && engine
-                .as_ref()
-                .is_some_and(|run| run.attempt.session().has_compspec(&command_word));
+        // B5-11 (niubash#863): the gate asks the engine about the
+        // POSITION — `Session::has_compspec_at(input, cursor_pos)` —
+        // not the command name. The `-E` empty line has no command
+        // and the `-I` initial word IS the command being completed,
+        // so the name form (`has_compspec`) cannot answer either;
+        // it also cannot tell `"   "`@0 (empty-line arm, `-E`) from
+        // `"   "`@3 (empty command word, `-I`). The position form
+        // answers with the same split the generation path uses, so
+        // the gate and the candidates cannot disagree (niubash#830's
+        // segment awareness — probe the command word of the cursor's
+        // segment, not the first token of the whole line — lives in
+        // the engine's split now).
+        let has_compspec = engine
+            .as_ref()
+            .is_some_and(|run| run.attempt.session().has_compspec_at(input, cursor_pos));
 
         // Shell-function completions (`NIU_COMPDEFS`): only available
         // while a completion attempt is open on the shell. Skipped
@@ -654,10 +656,35 @@ impl NiubashCompleter {
         // actually run from the command slot qualify — directories and
         // executable files (niubash#671); plain data files are not commands
         // and readline/GNU never offer them here.
-        let cwd_path_suggestions = self.cwd_path_suggestions_at_command_position(&context);
-        let alias_suggestions = self.alias_suggestions_at_command_position(&context, &aliases);
-        let function_suggestions =
-            self.function_suggestions_at_command_position(&context, &functions);
+        //
+        // B5-11 (niubash#863, ruling Q-C (i)): when a compspec governs
+        // the position, its answer REPLACES default completion (GNU
+        // `rl_attempted_completion_over=1`), so the three command-
+        // position overlays — cwd, alias, function — stay out of the
+        // candidate set, exactly like the compdef/plugin/path
+        // suppressions above. The `-o default` / `-o bashdefault`
+        // pass-through is NOT the host's job to re-add: the engine's
+        // `complete_detailed` outcome already carries it (rubash
+        // complete.rs: the empty-result fallback runs
+        // `bash_default_candidates` / the filename set inside the
+        // attempt, and `CompletionPolicy.filenames_intent` records
+        // when `-o default` sourced filename candidates), so the host
+        // takes the outcome as the complete answer.
+        let cwd_path_suggestions = if has_compspec {
+            Vec::new()
+        } else {
+            self.cwd_path_suggestions_at_command_position(&context)
+        };
+        let alias_suggestions = if has_compspec {
+            Vec::new()
+        } else {
+            self.alias_suggestions_at_command_position(&context, &aliases)
+        };
+        let function_suggestions = if has_compspec {
+            Vec::new()
+        } else {
+            self.function_suggestions_at_command_position(&context, &functions)
+        };
 
         // Try each plugin in order; only the first non-None result is used.
         // Skipped when a compspec owns the command (GNU precedence).
@@ -1683,6 +1710,81 @@ niu_git_comp() {
                 .collect::<Vec<_>>(),
             vec!["zzz"]
         );
+    }
+
+    #[test]
+    fn issue2856_empty_initial_compspec_gate() {
+        // B5-11 (rubash#2856 / niubash#863): the host gate for the
+        // `-E`/`-I` compspecs is `Session::has_compspec_at(line,
+        // cursor)`, and a governing compspec answer suppresses the
+        // cwd/alias/function overlays (ruling Q-C (i)). These shapes
+        // are pinned at the completer layer because the REPL never
+        // consults the completer for a bare TAB on an empty word
+        // (pre-existing editor behavior — the PTY chain drives the
+        // same shapes through M-* instead; see its header note).
+        use crate::test_support::PROCESS_STATE_LOCK;
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["PATH", "PATHEXT"]);
+
+        let temp_dir = unique_temp_dir("niubash-b511-empty-initial");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let complete_with = |registrations: &str, line: &str, cursor: usize| -> Vec<String> {
+            let mut shell = crate::shell::Shell::new().unwrap();
+            assert!(shell.execute_script(registrations).is_ok());
+            let shell = std::rc::Rc::new(std::cell::RefCell::new(shell));
+            let state = Arc::new(Mutex::new(CompletionState::new(temp_dir.clone())));
+            let mut completer = NiubashCompleter::with_shell(state, shell.clone());
+            completer
+                .complete(line, cursor)
+                .iter()
+                .map(|suggestion| suggestion.value.clone())
+                .collect()
+        };
+
+        // Empty line + only `-E`: the wordlist owns the answer.
+        assert_eq!(
+            complete_with("complete -E -W 'eone etwo'", "", 0),
+            vec!["eone".to_string(), "etwo".to_string()],
+            "empty line + -E must return the -E wordlist with no cwd overlay"
+        );
+        // Whitespace-only at EOL + only `-I` (W1: `-E` does not
+        // trigger here; `-I` does).
+        assert_eq!(
+            complete_with("complete -I -W 'ione itwo'", "   ", 3),
+            vec!["ione".to_string(), "itwo".to_string()],
+            "whitespace-only line at EOL + -I must return the -I wordlist with no cwd overlay"
+        );
+        // Column 0 ahead of the command name + only `-E` (W2: the
+        // empty-line arm, not `-I`).
+        assert_eq!(
+            complete_with("complete -E -W 'eone etwo'", "   ls", 0),
+            vec!["eone".to_string(), "etwo".to_string()],
+            "column 0 ahead of the command name + -E must return the -E wordlist"
+        );
+        // Command word + only `-D` (Q-D guard): the wordlist never
+        // governs; the host's command completion answers. The
+        // command-word answer is pinned on the in-memory alias
+        // overlay, not on PATH or the process cwd: the TAB path has
+        // no PATH-command source (CommandCompleter is reachable
+        // only via `complete_specific(Command)`), and a
+        // cwd-dependent shape races with other tests in the
+        // parallel lib run (CI red on #926).
+        let values = complete_with(
+            "complete -D -W 'dalpha dbeta'\nalias dprog='echo hi'",
+            "d",
+            1,
+        );
+        assert!(
+            !values.iter().any(|value| value == "dalpha"),
+            "command word + only -D must never offer the -D wordlist, got {values:?}"
+        );
+        assert!(
+            values.iter().any(|value| value.ends_with("dprog")),
+            "command word + only -D must offer host command completion, got {values:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

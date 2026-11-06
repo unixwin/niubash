@@ -1598,3 +1598,166 @@ fn repl_pty_bind_inputrc_rc_runtime_removal_chain() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------------------------------------------------------------------------
+// Chain 13 — `complete -E` / `-I` host gate (niubash#863 B5-11):
+// the empty line and the command word reach the engine's compspecs
+// through `Session::has_compspec_at`, and the governing answer
+// suppresses the cwd/alias/function overlays (ruling Q-C (i): the
+// compspec answer replaces default completion). Each link registers
+// exactly the spec it proves, then removes it, so a leftover
+// registration cannot carry the next link:
+//
+// 1. empty line + only `-E` -> `eone`/`etwo`, no cwd overlay
+//    (`./esub/`, `./eprog`, `./dprog` would all match the empty
+//    word if the overlays ran — the overlay the gate must suppress
+//    is visible, not vacuous).
+// 2. whitespace-only line, cursor at EOL + only `-I` -> `ione`/
+//    `itwo` (W1: `-E` does not trigger here; `-I` does).
+// 3. column 0 ahead of the command name (`"   ls"`, cursor 0) +
+//    only `-E` -> `eone`/`etwo` (W2: the empty-line arm, not `-I`).
+// 4. command word + only `-D` -> host command completion
+//    (`./dprog`), never the `-D` wordlist (`dalpha`) — the Q-D
+//    guard shape: `-D` never governs the command word.
+//
+// The rc carries no `bind` line and no compspec registration, so
+// nothing masks the host gate: the gate is the only trigger for the
+// `-E`/`-I` answers. (The `-o default` / `-o bashdefault`
+// pass-through is the engine's own outcome — rubash complete.rs
+// runs the fallback inside `complete_detailed` — and is pinned
+// engine-side plus by the existing default-fallback chain above,
+// not re-pinned here.)
+//
+// Trigger: links 1–3 drive completion with M-* (`insert-completions`,
+// ESC `*`), link 4 with TAB. A bare TAB on an empty word does NOT
+// reach the completer in the current REPL: it inserts a literal tab
+// (`P1> ` + spaces, no menu) — verified identical on the base build
+// (completer.rs restored to 5629253a, same frames on all three
+// shapes), so it is pre-existing REPL/menu-layer behavior, NOT this
+// PR's gate, and outside B5-11's scope (recorded in the lane REPORT
+// for the captain; the gate itself is lib-proven by the
+// `issue2856_empty_initial_compspec_gate` pins in completer.rs).
+// M-* reaches the same completer and inserts ALL of its candidates,
+// so the wordlist + no-overlay assertions still discriminate the
+// gate exactly: with the old name-form gate the completer returns
+// the cwd overlay instead of the wordlist, and M-* inserts that.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn repl_pty_completion_empty_initial_compspec_chain() {
+    if !require_pty_or_skip("repl_pty_completion_empty_initial_compspec_chain") {
+        return;
+    }
+    let mut s = ReplSession::spawn("b511", "");
+    const META_STAR: &str = "\u{1b}*";
+    // Cwd fixtures the overlays would offer if not suppressed: a
+    // directory and two executables (plain data files never qualify
+    // at command position, niubash#671, so they would prove nothing).
+    std::fs::create_dir(s.start().join("esub")).unwrap();
+    for name in ["eprog", "dprog"] {
+        let path = s.start().join(name);
+        std::fs::write(&path, "#!/bin/sh\necho hi\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    // Link 1 — empty line + only `-E`, driven by M-* (see the header
+    // note: bare TAB on an empty word never reaches the completer).
+    s.send_line("complete -E -W 'eone etwo'");
+    s.expect_prompt();
+    settle();
+    s.drain();
+    s.send(META_STAR);
+    std::thread::sleep(Duration::from_millis(500));
+    let f = s.frame();
+    assert!(
+        f.contains("eone")
+            && f.contains("etwo")
+            && !f.contains("./esub/")
+            && !f.contains("./eprog")
+            && !f.contains("./dprog"),
+        "empty line + -E must offer the -E wordlist with no cwd overlay\nframe:\n{f}"
+    );
+    s.send(CTRL_C);
+    s.expect_prompt();
+    settle();
+
+    // Link 2 — whitespace-only line, cursor at EOL + only `-I`.
+    s.send_line("complete -r -E");
+    s.expect_prompt();
+    s.send_line("complete -I -W 'ione itwo'");
+    s.expect_prompt();
+    settle();
+    s.send("   ");
+    s.drain();
+    s.send(META_STAR);
+    std::thread::sleep(Duration::from_millis(500));
+    let f = s.frame();
+    assert!(
+        f.contains("ione")
+            && f.contains("itwo")
+            && !f.contains("./esub/")
+            && !f.contains("./eprog"),
+        "whitespace-only line at EOL + -I must offer the -I wordlist with no cwd overlay\nframe:\n{f}"
+    );
+    s.send(CTRL_C);
+    s.expect_prompt();
+    settle();
+
+    // Link 3 — column 0 ahead of the command name + only `-E`.
+    s.send_line("complete -r -I");
+    s.expect_prompt();
+    s.send_line("complete -E -W 'eone etwo'");
+    s.expect_prompt();
+    settle();
+    s.send("   ls");
+    s.drain();
+    for _ in 0..5 {
+        s.send(LEFT);
+    }
+    s.drain();
+    s.send(META_STAR);
+    std::thread::sleep(Duration::from_millis(500));
+    let f = s.frame();
+    assert!(
+        f.contains("eone")
+            && f.contains("etwo")
+            && !f.contains("./esub/")
+            && !f.contains("./eprog"),
+        "column 0 ahead of the command name + -E must offer the -E wordlist with no cwd overlay\nframe:\n{f}"
+    );
+    s.send(CTRL_C);
+    s.expect_prompt();
+    settle();
+
+    // Link 4 — command word + only `-D`: host command completion,
+    // never the `-D` wordlist.
+    s.send_line("complete -r -E");
+    s.expect_prompt();
+    s.send_line("complete -D -W 'dalpha dbeta'");
+    s.expect_prompt();
+    settle();
+    s.send("d");
+    s.drain();
+    s.send(TAB);
+    let f = s.frame();
+    assert!(
+        !f.contains("dalpha") && f.contains("dprog"),
+        "command word + only -D must take host command completion, never the -D wordlist\nframe:\n{f}"
+    );
+    s.send(CTRL_C);
+    s.expect_prompt();
+    settle();
+
+    assert_eq!(s.exit_niu(0), 0);
+    #[cfg(unix)]
+    assert_eq!(
+        s.exit_carrier(),
+        0,
+        "carrier must exit cleanly\n{}",
+        s.transcript()
+    );
+}

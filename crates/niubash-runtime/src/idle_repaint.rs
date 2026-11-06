@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn issue787_landing_restamps_the_cell_and_fires_once() {
-        let _guard = PROCESS_STATE_LOCK.lock().unwrap();
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-cell-repo");
         let cell = Arc::new(LiveVcsCell::new(None));
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn issue787_landing_for_another_worktree_is_ignored() {
-        let _guard = PROCESS_STATE_LOCK.lock().unwrap();
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-other-repo");
         let cell = Arc::new(LiveVcsCell::new(None));
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn issue787_landing_without_a_pass_is_ignored() {
-        let _guard = PROCESS_STATE_LOCK.lock().unwrap();
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-nopass-repo");
         let cell = Arc::new(LiveVcsCell::new(None));
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn issue787_open_menu_defers_the_repaint_but_keeps_the_value() {
-        let _guard = PROCESS_STATE_LOCK.lock().unwrap();
+        let _guard = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         end_pass();
         let worktree = PathBuf::from("/tmp/issue787-menu-repo");
         let cell = Arc::new(LiveVcsCell::new(None));
