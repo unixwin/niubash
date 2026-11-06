@@ -4507,8 +4507,8 @@ impl Shell {
         // Interactive keeps the default parse: its reader-batch route above
         // already hands semicolon/paren-bearing input to the engine, and its
         // diagnostics take the interactive shape. When the armed parse trips,
-        // skip the host execution entirely and let the engine's group-wise
-        // driver run the input — that reproduces GNU's read-parse-execute
+        // skip the host execution entirely and hand the input to the Session
+        // contract's run — its routes reproduce GNU's read-parse-execute
         // split byte-for-byte (a `;`+newline-terminated list before the stray
         // token still runs, then the diagnostic aborts with status 2), which
         // a whole-string parse-then-execute cannot. Same admission shape as
@@ -4532,18 +4532,41 @@ impl Shell {
                     .iter()
                     .any(Self::command_has_parse_error_marker)
             {
-                let code = rubash::script_driver::run_source_with_line_offset(
-                    self.executor_mut(),
-                    &script,
-                    false,
-                    line_offset,
-                    None,
-                    None,
-                );
+                // 1.5.1 migration, completed by the GAP remainder
+                // (rubash#2860): this arm was the host's last direct
+                // script_driver call — it now follows the arms above
+                // into Session::run. The contract's line route is the
+                // same driver this arm used to call; the grouped
+                // route the contract picks for history/alias-bearing
+                // input renders the same GNU line-unit behavior
+                // (shape-by-shape against GNU 5.3.20 in the #2860
+                // lane: earlier lines run, the offending line's own
+                // commands never do, the echo is the verbatim line).
+                // The stop fold is the unclosed arm's, for the same
+                // reason: run() drains the executor pendings into
+                // the outcome, so the batch feeder's stop facts no
+                // longer surface through take_classification — the
+                // raw exit jump and the parse error fold into the
+                // host jump record here, and that pair is this arm's
+                // whole feeder stop set. The migration's engine half
+                // is rubash#2860's diagnostic-text fix: Session::run
+                // hands the driver the input text, never the source
+                // name, so the offending line echoes verbatim for
+                // named sources too — this session's argv0 seed (the
+                // script name) included.
+                let mut options = RunOptions::default();
+                options.line_offset = line_offset;
+                let outcome = self
+                    .session_mut()
+                    .run(&script, &options)
+                    .map_err(|error| anyhow::anyhow!("session run failed: {error:?}"))?;
+                if outcome.classification.exit_jump_raw || outcome.classification.parse_error {
+                    self.script_exit_jump = true;
+                }
                 self.sync_process_cwd_from_executor_pwd();
                 self.sync_process_path_from_executor_path();
                 self.sync_alias_mirror_from_executor();
-                return Ok(code);
+                return Ok(outcome.status);
             }
             armed
         };

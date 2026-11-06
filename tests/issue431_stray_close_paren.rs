@@ -20,8 +20,11 @@
 //! so the guard's `__RUBASH_PARSE_ERROR__` node never existed and the host
 //! executed the parsed prefix. The fix arms the same guard for the
 //! non-interactive fast path (with the source text, for GNU's verbatim line
-//! echo) and falls through to the engine's group-wise driver when it trips,
-//! which reproduces GNU's read-parse-execute split byte-for-byte.
+//! echo) and hands the input to the engine when it trips, which reproduces
+//! GNU's read-parse-execute split byte-for-byte. Since rubash#2860 the
+//! hand-off target is the Session contract's `run` — the arm was the host's
+//! last direct `script_driver` call; the migration's own pins live in
+//! `tests/issue2860_stray_close_session_run.rs`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
