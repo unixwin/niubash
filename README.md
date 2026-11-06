@@ -223,11 +223,38 @@ If niu saved you a Linux VM, a mangled quote, or an argument PowerShell ate, [st
 
 ## Contributors
 
-Thanks to everyone building niubash — issues, fixes, plugins, and engine work upstream:
+<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+[![All Contributors](https://img.shields.io/badge/all_contributors-12-orange.svg?style=flat-square)](#contributors)
+<!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-<a href="https://github.com/unixwin/niubash/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=unixwin/niubash" alt="niubash contributors" />
-</a>
+Thanks to everyone building niubash — issues, fixes, plugins, adapted work, and engine work upstream ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/caomengxuan666"><img src="https://avatars.githubusercontent.com/u/114896873?v=4?s=100" width="100px;" alt="caomengxuan666"/><br /><sub><b>caomengxuan666</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=caomengxuan666" title="Code">💻</a> <a href="https://github.com/unixwin/niubash/commits?author=caomengxuan666" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/a-rookie-of-C-language"><img src="https://avatars.githubusercontent.com/u/186315048?v=4?s=100" width="100px;" alt="a-rookie-of-C-language"/><br /><sub><b>a-rookie-of-C-language</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=a-rookie-of-C-language" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/devin-ai-integration"><img src="https://avatars.githubusercontent.com/u/158243242?v=4?s=100" width="100px;" alt="devin-ai-integration[bot]"/><br /><sub><b>devin-ai-integration[bot]</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=devin-ai-integration[bot]" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/daiaji"><img src="https://avatars.githubusercontent.com/u/25875791?v=4?s=100" width="100px;" alt="daiaji"/><br /><sub><b>daiaji</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=daiaji" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cognition-team"><img src="https://avatars.githubusercontent.com/u/167951170?v=4?s=100" width="100px;" alt="cognition-team"/><br /><sub><b>cognition-team</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=cognition-team" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Uarz"><img src="https://avatars.githubusercontent.com/u/149165079?v=4?s=100" width="100px;" alt="Uarz"/><br /><sub><b>Uarz</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=Uarz" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Catapult291"><img src="https://avatars.githubusercontent.com/u/200960228?v=4?s=100" width="100px;" alt="Catapult291"/><br /><sub><b>Catapult291</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=Catapult291" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Yuren0312"><img src="https://avatars.githubusercontent.com/u/168316868?v=4?s=100" width="100px;" alt="Yuren0312"/><br /><sub><b>Yuren0312</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=Yuren0312" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/jhermelink"><img src="https://avatars.githubusercontent.com/u/32125320?v=4?s=100" width="100px;" alt="jhermelink"/><br /><sub><b>jhermelink</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=jhermelink" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/x2410516039"><img src="https://avatars.githubusercontent.com/u/234159335?v=4?s=100" width="100px;" alt="x2410516039"/><br /><sub><b>x2410516039</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=x2410516039" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/cmx"><img src="https://avatars.githubusercontent.com/u/42783691?v=4?s=100" width="100px;" alt="cmx"/><br /><sub><b>cmx</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=cmx" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/github-actions"><img src="https://avatars.githubusercontent.com/u/41898282?v=4?s=100" width="100px;" alt="github-actions[bot]"/><br /><sub><b>github-actions[bot]</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=github-actions[bot]" title="Tool">🔧</a></td>
+    </tr>
+  </tbody>
+</table>
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+<!-- ALL-CONTRIBUTORS-LIST:END -->
 
 ## License
 
