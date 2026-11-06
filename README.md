@@ -221,6 +221,14 @@ On the engine side, 1.5.0 lands the **embeddable engine API** ([rubash#595](http
 
 If niu saved you a Linux VM, a mangled quote, or an argument PowerShell ate, [star the repo](https://github.com/unixwin/niubash) and tell a developer. ★
 
+## Contributors
+
+Thanks to everyone building niubash — issues, fixes, plugins, and engine work upstream:
+
+<a href="https://github.com/unixwin/niubash/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=unixwin/niubash" alt="niubash contributors" />
+</a>
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

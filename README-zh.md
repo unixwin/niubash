@@ -220,6 +220,14 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 
 如果 niu 帮你省掉了一台虚拟机、一段被改坏的引号、一个被 PowerShell 吃掉的参数，[给仓库点个 Star](https://github.com/unixwin/niubash)，转告下一位开发者。★
 
+## 贡献者
+
+感谢每一位共建 niubash 的贡献者——issue、修复、插件，以及上游引擎的工作：
+
+<a href="https://github.com/unixwin/niubash/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=unixwin/niubash" alt="niubash 贡献者" />
+</a>
+
 ## 许可证
 
 MIT，详见 [LICENSE](LICENSE)。
