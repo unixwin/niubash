@@ -92,9 +92,8 @@ fn issue950_tracked_arm_parse_error_stops_the_stream() {
 fn issue950_tracked_arm_parse_error_stops_after_a_clean_tracked_batch() {
     // A clean tracked batch first (the alias fires, `hi` prints),
     // then the same bad batch: the stream still stops at it.
-    let (out, err, rc) = stdout_text(
-        b"shopt -s expand_aliases; alias x='echo hi'\nx\nx; echo )bad\necho after\n",
-    );
+    let (out, err, rc) =
+        stdout_text(b"shopt -s expand_aliases; alias x='echo hi'\nx\nx; echo )bad\necho after\n");
     assert_eq!(rc, 2, "stdout: {out:?} stderr: {err:?}");
     assert_eq!(
         out.matches("hi").count(),
