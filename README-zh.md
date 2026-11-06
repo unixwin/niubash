@@ -50,7 +50,17 @@ Windows（winget，**1.5.0**）：
 winget install --id Unixwin.Niubash
 ```
 
-Windows（安装器）：去 [Releases](https://github.com/unixwin/niubash/releases) 下载 `niubash-v*-win-*-setup.exe` 双击——不要管理员权限，PATH 和 Windows Terminal 配置自动配好。要便携版就拿 `.7z`——捆绑的 git/awk 载荷硬链接原样保留，体积最小；`.tar.gz` 也行（`tar -xf niubash-v*-win-x64.tar.gz`，Windows 10+ 自带）。别用 `.zip`：它存不了硬链接，载荷被重复存放，包大得多，只留给除 zip 什么都不认的工具链。
+Windows（安装器）：去 [Releases](https://github.com/unixwin/niubash/releases) 下载 `niubash-v*-win-*-setup.exe` 双击——不要管理员权限，PATH 和 Windows Terminal 配置自动配好。要便携版就拿 `.tar.gz`（`tar -xf niubash-v*-win-x64.tar.gz`，Windows 10+ 自带）——解包时还原捆绑 git/awk 载荷的硬链接，解出来的目录和 `wpm` 安装一样小。`.7z` 下载最小（solid 压缩），但它存的是重复载荷内容而非链接，解出来体积更大。`.zip` 只留给除 zip 什么都不认的工具链：它存不了硬链接，载荷被重复存放，包大得多。
+
+Linux（apt，x86_64 / aarch64；Ubuntu 22.04+、Debian 12+）：
+
+```sh
+curl -fsSL https://unixwin.github.io/apt/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/niubash-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/niubash-archive-keyring.gpg] https://unixwin.github.io/apt stable main" | sudo tee /etc/apt/sources.list.d/niubash.list
+sudo apt update && sudo apt install niubash
+```
+
+归档自动跟随发布（发布后数小时内收录；`gh workflow run build-apt -R unixwin/apt` 可立即触发）。只装 `/usr/bin/niu`，不动系统 bash 和 coreutils。
 
 Linux（x86_64、aarch64；glibc 2.35+）与 macOS（aarch64、x86_64）：拿便携 tarball，解包即跑：
 
@@ -190,7 +200,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 | 平台 | 状态 | 发布形态 |
 |---|---|---|
 | Windows x64 / ARM64 | 已发布；每次发布过烟测门禁 | 安装器 `.exe` + 便携 `.tar.gz`/`.7z`/`.zip`，Unix 命令随包 |
-| Linux x86_64 / aarch64（glibc 2.35+） | 已发布；每次发布过烟测门禁 | 便携 `.tar.gz`，用系统自带工具 |
+| Linux x86_64 / aarch64（glibc 2.35+） | 已发布；每次发布过烟测门禁 | apt 仓（`stable`）、便携 `.tar.gz`，用系统自带工具 |
 | macOS aarch64 / x86_64 | 已发布；每次发布过烟测门禁 | 便携 `.tar.gz`，用系统自带工具 |
 | Android aarch64 / armv7 | v1.4.3 起随 release 发货；在真机上运行（Termux），CI 自动烟测腿尚未接上 | NDK 链接 `.zip` release 资产 |
 | OpenHarmony（`aarch64-unknown-linux-ohos`） | 仅 CI check，未发布 | CI 保持可编译，未在真机运行 |
