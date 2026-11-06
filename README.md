@@ -50,7 +50,17 @@ Windows via winget (**1.5.0**):
 winget install --id Unixwin.Niubash
 ```
 
-Windows via installer: grab `niubash-v*-win-*-setup.exe` from [Releases](https://github.com/unixwin/niubash/releases) and run it — no admin rights; PATH and a Windows Terminal profile are set up for you. Prefer portable? Take the `.7z` — it preserves the bundled git/awk payload's hardlinks, so it stays small. The `.tar.gz` works too (`tar -xf niubash-v*-win-x64.tar.gz`, built into Windows 10+). Avoid the `.zip`: it cannot represent hardlinks, so the payload is stored duplicated and the archive is much larger — it stays only for tooling that speaks nothing but zip.
+Windows via installer: grab `niubash-v*-win-*-setup.exe` from [Releases](https://github.com/unixwin/niubash/releases) and run it — no admin rights; PATH and a Windows Terminal profile are set up for you. Prefer portable? Take the `.tar.gz` (`tar -xf niubash-v*-win-x64.tar.gz`, built into Windows 10+) — it restores the bundled git/awk payload's hardlinks on unpack, so the extracted tree stays as small as a `wpm` install. The `.7z` is the smallest download (solid compression), but it stores the duplicated payload content rather than links, so the extracted tree is larger. The `.zip` stays only for tooling that speaks nothing but zip: it cannot represent hardlinks, so the payload is stored duplicated and the archive is much larger.
+
+Linux via apt (x86_64, aarch64; Ubuntu 22.04+, Debian 12+):
+
+```sh
+curl -fsSL https://unixwin.github.io/apt/KEY.gpg | sudo gpg --dearmor -o /usr/share/keyrings/niubash-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/niubash-archive-keyring.gpg] https://unixwin.github.io/apt stable main" | sudo tee /etc/apt/sources.list.d/niubash.list
+sudo apt update && sudo apt install niubash
+```
+
+The archive follows releases automatically (picked up within hours of a release; `gh workflow run build-apt -R unixwin/apt` triggers the pickup immediately). It installs `/usr/bin/niu` only — your system bash and coreutils stay untouched.
 
 Linux (x86_64, aarch64; glibc 2.35+) and macOS (aarch64, x86_64): take the portable tarball, untar, run:
 
@@ -191,7 +201,7 @@ Every number below comes from one published protocol — the 2026-10-25 baseline
 | Platform | Status | Ships as |
 |---|---|---|
 | Windows x64 / ARM64 | Released; smoke-gated every release | installer `.exe` + portable `.tar.gz`/`.7z`/`.zip`, Unix commands bundled |
-| Linux x86_64 / aarch64 (glibc 2.35+) | Released; smoke-gated every release | portable `.tar.gz`, uses system tools |
+| Linux x86_64 / aarch64 (glibc 2.35+) | Released; smoke-gated every release | apt repo (`stable`), portable `.tar.gz`, uses system tools |
 | macOS aarch64 / x86_64 | Released; smoke-gated every release | portable `.tar.gz`, uses system tools |
 | Android aarch64 / armv7 | Shipped since v1.4.3; runs on real devices (Termux), release smoke gate not yet wired in CI | NDK-linked `.zip` release asset |
 | OpenHarmony (`aarch64-unknown-linux-ohos`) | CI check only, no release | kept compiling by CI, never run on a device |
