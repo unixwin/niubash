@@ -59,7 +59,9 @@ jobs:
 
       - name: Open/update PR with refreshed stats
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Org policy forbids the default GITHUB_TOKEN from creating PRs;
+          # a BOT_TOKEN secret (maintainer PAT) takes over when present.
+          GH_TOKEN: ${{ secrets.BOT_TOKEN || github.token }}
         run: |
           git add docs/repo-stats.md
           if git diff --cached --quiet -- docs/repo-stats.md; then

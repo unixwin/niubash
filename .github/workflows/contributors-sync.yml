@@ -36,7 +36,9 @@ jobs:
 
       - name: Open/update PR with regenerated table
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Org policy forbids the default GITHUB_TOKEN from creating PRs;
+          # a BOT_TOKEN secret (maintainer PAT) takes over when present.
+          GH_TOKEN: ${{ secrets.BOT_TOKEN || github.token }}
         run: |
           git add -A
           if git diff --cached --quiet; then
