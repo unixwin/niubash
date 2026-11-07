@@ -926,6 +926,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
             // startup files (deep-audit A4-01): the REPL route asserts
             // it in enter_interactive, this route must assert it here.
             shell.default_histfile_if_unset();
+            // niubash#956: same for the interactive histexpand
+            // default — the one-shot routes never pass through
+            // enter_interactive, so `$-` missed `H` here.
+            shell.assert_interactive_histexpand_default();
             if let Some(status) = shell.run_interactive_startup_rc() {
                 finish_startup_exit(&mut shell, status);
             }
@@ -994,6 +998,10 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         if invocation.interactive {
             // Same HISTFILE default as the -c route (deep-audit A4-01).
             shell.default_histfile_if_unset();
+            // niubash#956: same for the interactive histexpand
+            // default — this route never passes through
+            // enter_interactive either, so `$-` missed `H` here.
+            shell.assert_interactive_histexpand_default();
             if let Some(status) = shell.run_interactive_startup_rc() {
                 finish_startup_exit(&mut shell, status);
             }
