@@ -1114,6 +1114,32 @@ impl Shell {
         }
     }
 
+    /// Assert GNU's interactive histexpand default for a one-shot
+    /// interactive route (`-i -c`, `-i script`).
+    ///
+    /// GNU shell.c:1839 `init_interactive` sets `histexp_flag =
+    /// history_expansion` (HISTEXPAND_DEFAULT, on) and shell.c:1866
+    /// `init_interactive_script` carries the same interactive default
+    /// for the one-shot forms — `bash -i -c 'echo $-'` shows `hiBHc`
+    /// exactly like the REPL forms. The REPL entry asserts it in
+    /// `enter_interactive`; these routes never pass through there, so
+    /// they showed `hiB`/`hiBc` (niubash#956). Call this BEFORE the
+    /// startup rc runs, so a user's own `set +H` in the rc still wins
+    /// (same ordering argument as `enter_interactive`). An explicit
+    /// startup transport value (`+H`/`-H`, `-o`/`+o histexpand` ->
+    /// `__RUBASH_SETOPT_histexpand`) is the user's word and stands
+    /// (GNU: `bash +H -i -c 'echo $-'` -> `hiBc`).
+    pub fn assert_interactive_histexpand_default(&mut self) {
+        if self
+            .session_mut()
+            .variables()
+            .resolved_value("__RUBASH_SETOPT_histexpand")
+            .is_none()
+        {
+            self.session_mut().options().set("histexpand", true);
+        }
+    }
+
     pub fn enter_interactive(&mut self) {
         self.interactive = true;
         if self.history_provider.is_none() {
