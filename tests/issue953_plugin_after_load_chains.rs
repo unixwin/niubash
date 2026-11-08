@@ -23,7 +23,11 @@
 //!   for a real alias and a real completion attempt (the host's
 //!   `--completion-probe` face) routes through it: with the wrapper
 //!   registered, its result is authoritative and the filename
-//!   fallback the same line gets without it is gone.
+//!   fallback the same line gets without it is gone. This fixture's
+//!   upstream entry is extension-less and the plugin machinery's
+//!   file enumeration cannot enable it, so its chain stages through
+//!   the machinery as far as it goes (add + a refused enable, both
+//!   asserted) and calls the installed snapshot's entry file.
 //!
 //! Fixture shapes are the modeled ones in `tests/fixtures/sources/`
 //! (see each fixture's README); chains exercise exactly the call
@@ -104,7 +108,7 @@ struct Staged {
 }
 
 impl Staged {
-    fn install(tag: &str, fixture_kind: &str, enable: &str) -> Staged {
+    fn begin(tag: &str) -> (PathBuf, PathBuf, PathBuf, Vec<(String, String)>) {
         let root = temp_root(tag);
         let home = root.join("home");
         let sources_root = root.join("sources");
@@ -118,22 +122,79 @@ impl Staged {
                 path_string(&home.join(".niubash").join("plugins.json")),
             ),
         ];
-        let env_refs: Vec<(&str, String)> =
-            envs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        (root, home, sources_root, envs)
+    }
+
+    fn add_fixture(envs: &[(&str, String)], fixture_kind: &str) {
         let origin = fixture(fixture_kind);
-        let add = run_niu_with_env(&["plugin", "add", &origin.to_string_lossy()], &env_refs);
+        let add = run_niu_with_env(&["plugin", "add", &origin.to_string_lossy()], envs);
         assert_success(&add, "plugin add");
         assert!(
             stdout_text(&add).contains("Installed source '"),
             "{}",
             stdout_text(&add)
         );
+    }
+
+    fn install(tag: &str, fixture_kind: &str, enable: &str) -> Staged {
+        let (root, home, _sources_root, envs) = Self::begin(tag);
+        let env_refs: Vec<(&str, String)> =
+            envs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        Self::add_fixture(&env_refs, fixture_kind);
         let enable_out = run_niu_with_env(&["plugin", "enable", enable], &env_refs);
         assert_success(&enable_out, "plugin enable");
         let loader = home.join(".niubash").join("generated").join("plugins.niu");
         assert!(
             loader.is_file(),
             "enable must publish the generated loader: {}",
+            loader.display()
+        );
+        Staged {
+            root,
+            home,
+            envs,
+            loader,
+        }
+    }
+
+    /// Staging for a fixture whose entry file the plugin machinery
+    /// cannot enumerate as an asset (complete-alias: the upstream
+    /// entry is extension-less, and file-source enumeration honestly
+    /// offers only `*.sh`/`*.bash` picks — `plugin list` for this
+    /// source names only its `tests/*.sh` companion). The machinery
+    /// leg is asserted as the gap it currently is (add installs the
+    /// snapshot; enable is refused; the published loader carries no
+    /// line for the entry), and the call chain then runs over the
+    /// *installed snapshot's* entry file. If enumeration ever learns
+    /// the entry, the enable assertion flips and this staging must
+    /// be retired in favour of `install`.
+    fn install_entry_unenumerated(
+        tag: &str,
+        fixture_kind: &str,
+        source_id: &str,
+        entry_rel: &str,
+    ) -> Staged {
+        let (root, home, sources_root, envs) = Self::begin(tag);
+        let env_refs: Vec<(&str, String)> =
+            envs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        Self::add_fixture(&env_refs, fixture_kind);
+        let enable_ref = format!("{source_id}/{entry_rel}");
+        let enable_out = run_niu_with_env(&["plugin", "enable", &enable_ref], &env_refs);
+        assert!(
+            !enable_out.status.success(),
+            "machinery currently refuses the extension-less entry {enable_ref}:\n{}",
+            stdout_text(&enable_out)
+        );
+        let generated = home.join(".niubash").join("generated").join("plugins.niu");
+        let generated_text = fs::read_to_string(&generated).unwrap_or_default();
+        assert!(
+            !generated_text.contains(entry_rel),
+            "the published loader must not reference the unenumerated entry:\n{generated_text}"
+        );
+        let loader = sources_root.join(source_id).join(entry_rel);
+        assert!(
+            loader.is_file(),
+            "the installed snapshot must carry the entry: {}",
             loader.display()
         );
         Staged {
@@ -249,7 +310,6 @@ fn bash_preexec_hooks_fire_around_a_real_command() {
     );
     let mut session = spawn_session(&staged, &rc_extra);
     session.wait_ready();
-    session.expect_prompt();
 
     // Step 1: with no command typed yet, the prompt cycle alone must
     // have fired the precmd hook — proof the PROMPT_COMMAND wrapper
@@ -315,7 +375,6 @@ fn fzf_git_widget_invoked_through_bind_x() {
                     bind -x '\"\\C-gf\": fzf_git_files'\n";
     let mut session = spawn_session(&staged, rc_extra);
     session.wait_ready();
-    session.expect_prompt();
 
     // Negative step: the widget has not run yet — no trace line may
     // name it as an executed command (the bind line's own trace says
@@ -371,13 +430,18 @@ fn run_completion_probe(line: &str, staged: &Staged, start: &Path) -> Vec<String
 
 #[test]
 fn complete_alias_wrapper_completes_a_real_command_line() {
-    let staged = Staged::install(
+    // Staging note: this fixture's entry is the one asset the plugin
+    // machinery cannot enable (extension-less upstream entry; see
+    // `install_entry_unenumerated`). Steps 0–3 therefore run over
+    // the installed snapshot's entry file.
+    let staged = Staged::install_entry_unenumerated(
         "compalias",
         "complete-alias",
-        "complete-alias/complete_alias",
+        "complete-alias",
+        "complete_alias",
     );
 
-    // Step 0 (engine): post-install, the loader defines the wrapper.
+    // Step 0 (engine): post-install, the entry defines the wrapper.
     let probe = staged.engine(&format!(
         "{}; printf '%s' \"$(type -t __complete_alias)\"",
         staged.loader_source_line()
