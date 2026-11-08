@@ -546,9 +546,47 @@ fn interactive_alias_defaults_and_explicit_disable_reach_command_mode() {
             .unwrap();
         assert_success(&output, &format!("{arguments:?}"));
         assert_eq!(normalize_text(&output.stdout), expected, "{arguments:?}");
-        assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+        assert_no_unexpected_stderr(&output, &arguments);
     }
     let _ = std::fs::remove_dir_all(temp);
+}
+
+/// niubash#960: an interactive shell with no controlling terminal prints
+/// GNU's two `initialize_job_control` diagnostics to stderr — bash-5.3
+/// jobs.c:4844 `cannot set terminal process group (%d)` and jobs.c:4858
+/// `no job control in this shell` — via the rubash#2948
+/// `establish_interactive_job_control` funnel, which prints the same two
+/// lines with the host's shell name. GNU prints the identical pair for
+/// `bash -i -c ...` with piped stdio, so the lines are environment
+/// diagnostics, not product output. Whether they appear depends on the
+/// ambient controlling terminal (`/dev/tty` opens under a developer's
+/// terminal, so a local run stays silent while CI prints them), so they
+/// are allowed but never required. Everything else on stderr is still a
+/// failure, and a non-interactive `-c` run must stay completely silent.
+fn is_no_tty_job_control_warning(line: &str) -> bool {
+    if line == "niu: no job control in this shell" {
+        return true;
+    }
+    let Some(rest) = line.strip_prefix("niu: cannot set terminal process group (") else {
+        return false;
+    };
+    let Some(pid) = rest.strip_suffix("): Inappropriate ioctl for device") else {
+        return false;
+    };
+    !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn assert_no_unexpected_stderr(output: &Output, arguments: &[&str]) {
+    let stderr = normalize_text(&output.stderr);
+    let interactive = arguments.contains(&"-i");
+    let unexpected: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !(interactive && is_no_tty_job_control_warning(line)))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "{arguments:?}: unexpected stderr: {unexpected:?} (full stderr: {stderr:?})"
+    );
 }
 
 #[test]
