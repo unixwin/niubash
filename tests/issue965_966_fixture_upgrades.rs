@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use driver::{require_pty_or_skip, NiuSession, CTRL_C, DEFAULT_TIMEOUT};
+use driver::{require_pty_or_skip, NiuSession, DEFAULT_TIMEOUT};
 
 fn niu_binary() -> PathBuf {
     driver::niu_binary()
@@ -442,9 +442,18 @@ fn fzf_git_widget_key_press_lists_candidates() {
     session.expect("XTRACE966 fzf_git_files");
     session.expect("zebra.txt");
 
-    // The session survives the widget: the line can be discarded and
-    // the shell still answers.
-    session.send(CTRL_C);
+    // Synchronize on the widget finishing: the prompt repaints only
+    // after the bind -x command returns, so this expect cannot land
+    // mid-widget (an earlier revision sent Ctrl-C the moment the list
+    // printed and aborted the widget before its READLINE_LINE
+    // assignment ran). The repaint carries the replaced line.
+    session.expect_prompt();
+
+    // The widget's READLINE_LINE assignment must have reached the
+    // editor: submitting the line runs the first candidate, not the
+    // typed "zz" — the xtrace of the submitted command proves it.
+    session.send("\r");
+    session.expect("XTRACE966 alpha.txt");
     session.expect_prompt();
     session.send_line("exit");
     assert_eq!(session.wait_exit(), 0, "{}", session.transcript());
