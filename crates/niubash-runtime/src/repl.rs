@@ -10277,6 +10277,113 @@ mod tests {
         assert_eq!(sequences, vec![chord]);
     }
 
+    // niubash#843(g): a layer that rebinds a slot to the IDENTICAL
+    // event still wrote last, so the registry stack must record the
+    // write — a before/after value diff cannot see it, and
+    // `niu help keys` kept crediting the earlier layer.
+    #[test]
+    fn issue843_identical_rebind_records_the_later_layer() {
+        use crate::keymap_registry::{
+            entries_from_stacks, KeymapMode, KeymapSource, UserBindingVia,
+        };
+        let ctrl_r = (KeyModifiers::CONTROL, KeyCode::Char('r'));
+        let defaults = default_emacs_keybindings();
+        let default_event = defaults
+            .find_binding(ctrl_r.0, ctrl_r.1)
+            .expect("Ctrl-R is a reedline default");
+        assert_eq!(default_event, ReedlineEvent::SearchHistory);
+        let user = KeymapSource::User {
+            via: UserBindingVia::NiuBindkeys,
+        };
+        let stack_of = |stacks: &crate::keymap_registry::KeymapStacks| {
+            stacks
+                .iter()
+                .find(|((modifiers, code), _)| (*modifiers, *code) == ctrl_r)
+                .map(|(_, stack)| stack.clone())
+                .expect("Ctrl-R keeps a registry stack")
+        };
+
+        // Cell 1: the script layer rebinds the default's slot to the
+        // identical event — attribution must move to the script layer.
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::Script, |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, default_event.clone());
+        });
+        let (keybindings, stacks) = builder.finish();
+        assert_eq!(
+            keybindings.find_binding(ctrl_r.0, ctrl_r.1),
+            Some(default_event.clone())
+        );
+        let stack = stack_of(&stacks);
+        assert_eq!(
+            stack.last().map(|(source, _)| source),
+            Some(&KeymapSource::Script),
+            "an identical-event rebind is still a write: {stack:?}"
+        );
+        let entries = entries_from_stacks(KeymapMode::Emacs, stacks, &[]);
+        let attributed: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.source == KeymapSource::Script)
+            .collect();
+        assert_eq!(attributed.len(), 1, "exactly the rebound slot moves");
+        assert_eq!(attributed[0].shadowed, None);
+
+        // Cell 2: the host baseline moves the slot to a different
+        // event, then the user layer rebinds THAT event identically —
+        // the user layer wins, and the shadowed report still names
+        // the default layer (the nearest lower DIFFERENT event).
+        let other_event = ReedlineEvent::CtrlC;
+        assert_ne!(other_event, default_event);
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::HostBaseline, |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, other_event.clone());
+        });
+        builder.layer(user.clone(), |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, other_event.clone());
+        });
+        let (_, stacks) = builder.finish();
+        let stack = stack_of(&stacks);
+        assert_eq!(
+            stack.last().map(|(source, _)| source),
+            Some(&user),
+            "the identical rebind of the new event is the last write: {stack:?}"
+        );
+        let entries = entries_from_stacks(KeymapMode::Emacs, stacks, &[]);
+        let attributed: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.source == user)
+            .collect();
+        assert_eq!(attributed.len(), 1);
+        assert_eq!(attributed[0].shadowed, Some(KeymapSource::Default));
+
+        // Cell 3 (control): a value-changing rebind with no identical
+        // rewrite keeps the changing layer's attribution.
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::HostBaseline, |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, other_event.clone());
+        });
+        let (_, stacks) = builder.finish();
+        let stack = stack_of(&stacks);
+        assert_eq!(
+            stack.last().map(|(source, _)| source),
+            Some(&KeymapSource::HostBaseline)
+        );
+
+        // Cell 4 (control, #843(e) interplay): a removal clears the
+        // stack, and a later layer rebinding even the ORIGINAL event
+        // starts a fresh stack owned by that layer alone.
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::Script, |keybindings| {
+            keybindings.remove_binding(ctrl_r.0, ctrl_r.1);
+        });
+        builder.layer(user.clone(), |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, default_event.clone());
+        });
+        let (_, stacks) = builder.finish();
+        let stack = stack_of(&stacks);
+        assert_eq!(stack, vec![(user, default_event)]);
+    }
+
     #[test]
     fn k3_script_macro_decodes_keystrokes() {
         use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
