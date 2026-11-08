@@ -96,7 +96,6 @@ fn fixture(kind: &str) -> PathBuf {
 /// the real user home.
 struct Sandbox {
     home: PathBuf,
-    sources_root: PathBuf,
 }
 
 impl Sandbox {
@@ -120,7 +119,7 @@ impl Sandbox {
                     .into_owned(),
             ),
         ];
-        (Sandbox { home, sources_root }, envs)
+        (Sandbox { home }, envs)
     }
 }
 
@@ -247,10 +246,12 @@ fn wild_bare_source_enable_still_refuses_to_guess() {
     let combined = format!("{}{}", stdout_text(&enable), stderr_text(&enable));
     assert!(combined.contains("pick one"), "{combined}");
     assert!(combined.contains("complete_alias"), "{combined}");
+    // The loader always carries its header block, so "nothing sourced"
+    // means: no entry line names the asset.
+    let loader = loader_of(&sandbox);
     assert!(
-        loader_of(&sandbox).is_empty(),
-        "nothing sourced yet: {}",
-        loader_of(&sandbox)
+        !loader.contains("complete_alias"),
+        "nothing sourced yet: {loader}"
     );
 
     let _ = fs::remove_dir_all(&sandbox.home.parent().unwrap());
