@@ -187,10 +187,7 @@ impl Staged {
     /// Source line for an entry file straight from the installed
     /// tree (the #968 workaround: no generated loader covers it).
     fn entry_source_line(&self, rel: &str) -> String {
-        format!(
-            ". \"{}\"",
-            path_string(&self.sources_root.join(rel))
-        )
+        format!(". \"{}\"", path_string(&self.sources_root.join(rel)))
     }
 }
 
