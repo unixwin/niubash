@@ -239,7 +239,7 @@ fn make_git_repo(tag: &str) -> PathBuf {
             String::from_utf8_lossy(&out.stderr)
         );
     };
-    run(&["init", "-q", "-c", "init.defaultBranch=main"]);
+    run(&["-c", "init.defaultBranch=main", "init", "-q"]);
     for name in ["alpha.txt", "beta.txt", "zebra.txt"] {
         fs::write(repo.join(name), format!("{name}\n")).unwrap();
     }

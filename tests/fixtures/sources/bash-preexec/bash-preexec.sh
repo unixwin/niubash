@@ -14,10 +14,20 @@ preexec_functions=()
 precmd_functions=()
 
 __bp_run_preexec() {
+  # Re-entry guard (upstream shape): the DEBUG trap fires for every
+  # command, including commands a hook itself runs; without it a hook
+  # that runs a command would re-enter the runner. GNU suppresses
+  # DEBUG inside the handler, so the guard is defense-in-depth on
+  # engines that do not.
+  if [ -n "${__bp_in_preexec:-}" ]; then
+    return 0
+  fi
+  __bp_in_preexec=1
   local __bp_fn
   for __bp_fn in ${preexec_functions[@]-}; do
     "$__bp_fn"
   done
+  __bp_in_preexec=
 }
 
 __bp_run_precmd() {
@@ -33,3 +43,10 @@ fi
 bash_preexec_imported="imported"
 
 PROMPT_COMMAND="__bp_run_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+
+# Load-time preexec wiring (upstream shape): the DEBUG trap is the
+# calling path that fires `preexec_functions` before each command.
+# Installed here, at load, so a plainly loaded plugin is fully wired —
+# no hand-installed trap in the rc. The `bash_preexec_imported` guard
+# above keeps a second sourcing from reinstalling it.
+trap '__bp_run_preexec' DEBUG
