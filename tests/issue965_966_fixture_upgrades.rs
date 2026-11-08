@@ -24,6 +24,14 @@
 //! step-3 "no fallback" assertion), so the #953 chains need a
 //! follow-up adjustment after #964 merges — listed in the lane
 //! REPORT, not done here.
+//!
+//! One staging split: the complete-alias chains source the entry file
+//! straight from the installed tree instead of going through the
+//! generated loader — a path-added source is wild, and the wild
+//! adapter cannot enable an extension-less entry file (niubash#968).
+//! The install step itself still runs through the real `plugin add`
+//! machinery; full plugin-machinery coverage for complete-alias
+//! belongs to the #953 chain once #968 is fixed.
 
 #[path = "interactive/driver.rs"]
 mod driver;
@@ -97,10 +105,36 @@ struct Staged {
     home: PathBuf,
     envs: Vec<(String, String)>,
     loader: PathBuf,
+    sources_root: PathBuf,
 }
 
 impl Staged {
     fn install(tag: &str, fixture_kind: &str, enable: &str) -> Staged {
+        let staged = Self::install_add_only(tag, fixture_kind);
+        let env_refs = staged.env_refs();
+        let enable_out = run_niu_with_env(&["plugin", "enable", enable], &env_refs);
+        assert_success(&enable_out, "plugin enable");
+        let loader = staged
+            .home
+            .join(".niubash")
+            .join("generated")
+            .join("plugins.niu");
+        assert!(
+            loader.is_file(),
+            "enable must publish the generated loader: {}",
+            loader.display()
+        );
+        Staged { loader, ..staged }
+    }
+
+    /// Install only (`plugin add`, no enable): for fixtures whose
+    /// entry file the wild adapter cannot see. complete-alias's entry
+    /// is extension-less, so `plugin enable
+    /// complete-alias/complete_alias` fails on a path-added source
+    /// (niubash#968 — the recipe spelling only works for
+    /// catalog-driven adds); those chains source the entry file
+    /// directly from the installed tree instead.
+    fn install_add_only(tag: &str, fixture_kind: &str) -> Staged {
         let root = temp_root(tag);
         let home = root.join("home");
         let sources_root = root.join("sources");
@@ -124,19 +158,12 @@ impl Staged {
             "{}",
             stdout_text(&add)
         );
-        let enable_out = run_niu_with_env(&["plugin", "enable", enable], &env_refs);
-        assert_success(&enable_out, "plugin enable");
-        let loader = home.join(".niubash").join("generated").join("plugins.niu");
-        assert!(
-            loader.is_file(),
-            "enable must publish the generated loader: {}",
-            loader.display()
-        );
         Staged {
             root,
             home,
             envs,
-            loader,
+            loader: PathBuf::new(),
+            sources_root,
         }
     }
 
@@ -155,6 +182,15 @@ impl Staged {
 
     fn loader_source_line(&self) -> String {
         format!(". \"{}\"", path_string(&self.loader))
+    }
+
+    /// Source line for an entry file straight from the installed
+    /// tree (the #968 workaround: no generated loader covers it).
+    fn entry_source_line(&self, rel: &str) -> String {
+        format!(
+            ". \"{}\"",
+            path_string(&self.sources_root.join(rel))
+        )
     }
 }
 
@@ -284,8 +320,10 @@ fn bash_preexec_installs_its_debug_trap_at_load() {
         path_string(&state)
     );
     let mut session = spawn_session(&staged, &rc_extra);
+    // wait_ready already consumes the startup prompt paint (the
+    // session paints P1> exactly once at startup); a second
+    // expect_prompt here would wait for a prompt that never comes.
     session.wait_ready();
-    session.expect_prompt();
 
     // Step 1: with no command typed yet, the prompt cycle alone must
     // have fired the precmd hook — proof the PROMPT_COMMAND wrapper
@@ -391,8 +429,9 @@ fn fzf_git_widget_key_press_lists_candidates() {
                     set -x\n\
                     bind -x '\"\\C-gf\": fzf_git_files'\n";
     let mut session = spawn_session(&staged, rc_extra);
+    // wait_ready already consumes the startup prompt paint; see the
+    // #965 chain above.
     session.wait_ready();
-    session.expect_prompt();
 
     // Move into the repo, then press the chord: the widget must print
     // the deterministic candidate list into the transcript.
@@ -443,16 +482,17 @@ fn run_completion_probe(line: &str, staged: &Staged, start: &Path) -> Vec<String
 
 #[test]
 fn complete_alias_delegates_filename_completion() {
-    let staged = Staged::install(
-        "compalias966",
-        "complete-alias",
-        "complete-alias/complete_alias",
-    );
+    // Add-only staging: the entry file is extension-less, so the
+    // wild adapter cannot enable it (niubash#968); the chain sources
+    // the entry straight from the installed tree instead. The
+    // install step itself still goes through the real machinery.
+    let staged = Staged::install_add_only("compalias966", "complete-alias");
+    let entry = staged.entry_source_line("complete-alias/complete_alias");
 
-    // Step 0 (engine): post-install, the loader defines the wrapper.
+    // Step 0 (engine): sourcing the installed entry defines the wrapper.
     let probe = staged.engine(&format!(
         "{}; printf '%s' \"$(type -t __complete_alias)\"",
-        staged.loader_source_line()
+        entry
     ));
     assert_success(&probe, "engine wrapper probe");
     assert_eq!(stdout_text(&probe).trim_end(), "function");
@@ -470,7 +510,7 @@ fn complete_alias_delegates_filename_completion() {
     // the #953 stub chain proved absent must now be offered.
     let rc_wrapped = format!(
         "{}\nalias ll='ls -l'\ncomplete -F __complete_alias ll\n",
-        staged.loader_source_line()
+        entry
     );
     fs::write(staged.home.join(".niubashrc"), &rc_wrapped).unwrap();
     let wrapped = run_completion_probe("ll zeb", &staged, &start);
@@ -488,11 +528,9 @@ fn complete_alias_delegates_filename_completion() {
 
 #[test]
 fn complete_alias_delegates_to_expanded_command_compspec() {
-    let staged = Staged::install(
-        "compalias966b",
-        "complete-alias",
-        "complete-alias/complete_alias",
-    );
+    // Add-only staging, as above (niubash#968).
+    let staged = Staged::install_add_only("compalias966b", "complete-alias");
+    let entry = staged.entry_source_line("complete-alias/complete_alias");
 
     // The expanded command has its own -F compspec returning a
     // distinctive candidate; the wrapper must call that function
@@ -504,7 +542,7 @@ fn complete_alias_delegates_to_expanded_command_compspec() {
 
     let rc_wrapped = format!(
         "{}\n_mycomp() {{ COMPREPLY=(delegated953); }}\ncomplete -F _mycomp realcmd\nalias al='realcmd'\ncomplete -F __complete_alias al\n",
-        staged.loader_source_line()
+        entry
     );
     fs::write(staged.home.join(".niubashrc"), &rc_wrapped).unwrap();
     let wrapped = run_completion_probe("al x", &staged, &start);
