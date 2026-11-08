@@ -203,12 +203,21 @@ fn gate_path_dirs() -> Vec<PathBuf> {
 }
 
 fn spawn_session(staged: &Staged, rc_extra: &str) -> NiuSession {
+    spawn_session_env(staged, rc_extra, &[])
+}
+
+fn spawn_session_env(
+    staged: &Staged,
+    rc_extra: &str,
+    extra_env: &[(String, String)],
+) -> NiuSession {
     let rc = format!("{}{}", driver::default_rc(), rc_extra);
-    let extra_env: Vec<(String, String)> = staged.envs.clone();
+    let mut all_env: Vec<(String, String)> = staged.envs.clone();
+    all_env.extend(extra_env.iter().cloned());
     NiuSession::spawn_shared_home(
         &staged.root,
         &rc,
-        &extra_env,
+        &all_env,
         &gate_path_dirs(),
         (100, 30),
         DEFAULT_TIMEOUT,
@@ -351,6 +360,36 @@ fn bash_preexec_installs_its_debug_trap_at_load() {
 
     session.send_line("exit");
     assert_eq!(session.wait_exit(), 0, "{}", session.transcript());
+
+    // Step 3 (no-rc boot leg, #964 review): a second session boots
+    // with no extra rc — only the driver's default PS1/PS2 lines —
+    // so the rc contributes nothing to the wiring. A precmd mark
+    // still needs a hook to exist (precmd_functions starts empty),
+    // so the leg registers the marker hook interactively after boot;
+    // the next prompt cycle must then run it through the plugin's
+    // own PROMPT_COMMAND wrapper, installed by the generated loader
+    // before any rc. Without the plugin the state file would stay
+    // empty. (A separate state file keeps this leg independent of
+    // the marker session's marks.)
+    let state2 = staged.root.join("bp965-state-norc.txt");
+    let mut session2 =
+        spawn_session_env(&staged, "", &[("BP965_STATE".into(), path_string(&state2))]);
+    session2.wait_ready();
+    session2.send_line("bp965_precmd_mark() { printf 'precmd\\n' >> \"$BP965_STATE\"; }");
+    session2.send_line("precmd_functions+=(bp965_precmd_mark)");
+    // The append line's own prompt cycle must run the hook.
+    let after2 = poll_state(
+        &state2,
+        |l| l.iter().any(|x| x == "precmd"),
+        DEFAULT_TIMEOUT,
+    );
+    assert!(
+        after2.iter().any(|x| x == "precmd"),
+        "precmd hook must fire on a no-extra-rc boot once registered: state={after2:?}\n{}",
+        session2.transcript()
+    );
+    session2.send_line("exit");
+    assert_eq!(session2.wait_exit(), 0, "{}", session2.transcript());
 }
 
 // ---------------------------------------------------------------------
