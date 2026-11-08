@@ -391,10 +391,13 @@ fn fzf_git_widget_invoked_through_bind_x() {
     session.send("\u{7}f");
     session.expect("XTRACE953 fzf_git_files");
 
-    // The session survives the widget: the line can be discarded and
-    // the shell still answers.
+    // The session survives the widget: interrupt the line, clear
+    // whatever the editor restored into the buffer (the widget path
+    // hands the pre-chord text back, so an explicit discard is what
+    // guarantees a clean line), and the shell still answers.
     session.send(CTRL_C);
     session.expect_prompt();
+    session.send("\u{15}");
     session.send_line("exit");
     assert_eq!(session.wait_exit(), 0, "{}", session.transcript());
 }
