@@ -99,7 +99,6 @@ fn path_string(path: &Path) -> String {
 struct Staged {
     root: PathBuf,
     home: PathBuf,
-    sources_root: PathBuf,
     envs: Vec<(String, String)>,
     loader: PathBuf,
 }
@@ -140,7 +139,6 @@ impl Staged {
         Staged {
             root,
             home,
-            sources_root,
             envs,
             loader,
         }
