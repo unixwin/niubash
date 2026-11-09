@@ -5,12 +5,70 @@
 # completion hook, no side effects at source time.
 __complete_alias_imported=1
 
+# Delegation core (niubash#966): resolve the alias, then complete the
+# expansion instead of the alias name. Called with the -F protocol
+# arguments: $1 = alias name, $2 = word being completed,
+# $3 = previous word. Fills COMPREPLY; empty on anything it cannot
+# resolve. Only -F compspecs are delegated; anything else falls back
+# to filename completion of the word being completed.
 __compcomplete_aliashook() {
-  # Upstream defers to bash-completion's loader for the expanded command.
-  return 0
+  local alias_name cur prev
+  alias_name="$1"
+  cur="$2"
+  prev="$3"
+
+  # `alias ll` prints `alias ll='ls -l'`; strip the name and the
+  # surrounding single quotes to recover the expansion.
+  local raw expansion
+  raw="$(alias "$alias_name" 2>/dev/null)" || return 0
+  expansion="${raw#*=}"
+  expansion="${expansion#\'}"
+  expansion="${expansion%\'}"
+  if [ -z "$expansion" ]; then
+    return 0
+  fi
+
+  # Split the expansion into words; the first is the expanded command.
+  local -a expansion_words
+  expansion_words=( $expansion )
+  local expanded_cmd
+  expanded_cmd="${expansion_words[0]}"
+  if [ -z "$expanded_cmd" ]; then
+    return 0
+  fi
+
+  # If the expanded command has its own -F compspec, delegate to it:
+  # rewrite COMP_WORDS/COMP_CWORD onto the expanded line and invoke
+  # the function with the completion protocol arguments. The function
+  # fills COMPREPLY itself, exactly as a live completion would see.
+  local spec funcname
+  spec="$(complete -p "$expanded_cmd" 2>/dev/null)"
+  case "$spec" in
+    *"-F "*)
+      funcname="${spec#*-F }"
+      funcname="${funcname%% *}"
+      ;;
+  esac
+  if [ -n "${funcname:-}" ] && [ "$(type -t "$funcname" 2>/dev/null)" = "function" ]; then
+    local -a new_words
+    local new_cword
+    new_words=( "${expansion_words[@]}" "${COMP_WORDS[@]:1}" )
+    new_cword=$(( COMP_CWORD + ${#expansion_words[@]} - 1 ))
+    COMP_WORDS=( "${new_words[@]}" )
+    COMP_CWORD="$new_cword"
+    "$funcname" "$expanded_cmd" "$cur" "${new_words[$(( new_cword - 1 ))]}"
+    return 0
+  fi
+
+  # No -F compspec for the expanded command: filename completion.
+  COMPREPLY=( $(compgen -f -- "$cur") )
 }
 
+# -F entry point: $1 = alias, $2 = word being completed,
+# $3 = previous word. Registration stays manual, as upstream:
+# `complete -F __complete_alias <alias>` per alias — sourcing this
+# file must not rewrite global completion state for sessions that
+# merely load the plugin.
 __complete_alias() {
-  # Upstream completes the alias's expansion, not the alias name.
-  return 0
+  __compcomplete_aliashook "$1" "$2" "$3"
 }
