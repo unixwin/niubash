@@ -16,6 +16,12 @@
 //! lane REPORT. The classification + handler-state legs are unit
 //! pins in ctrl_c.rs; the fallback-flush leg is a unit pin in
 //! history.rs.
+//!
+//! Unix-only: the chain cell drives the session leader by SIGHUP,
+//! which has no Windows `libc` spelling (`kill`/`SIGHUP` do not
+//! exist in the Windows `libc` crate). Windows coverage is the
+//! ConPTY MANUAL item plus the ctrl_c/history unit pins.
+#![cfg(unix)]
 
 #[path = "interactive/driver.rs"]
 mod driver;
