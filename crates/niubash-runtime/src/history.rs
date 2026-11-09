@@ -195,6 +195,13 @@ impl RubashHistoryProvider {
         self.inner.flush_at_session_end();
     }
 
+    /// Session-end flush handle (niubash#971): the same write as a
+    /// handle the Windows console-close path can run off the REPL
+    /// thread (see `ctrl_c`).
+    pub(crate) fn session_end_flush_handle(&self) -> SessionEndFlushHandle {
+        self.inner.session_end_flush_handle()
+    }
+
     /// Move the session's backing file to `new_path` (niubash#661: a
     /// mid-session `export HISTFILE=...`). See
     /// [`LiveFileBackedHistory::retarget`].
@@ -2107,300 +2114,21 @@ impl LiveFileBackedHistory {
     /// Best-effort like every history-file write: a failure warns once and
     /// never reaches stderr (`-c` one-shot stderr stays byte-stable).
     pub(crate) fn flush_at_session_end(&mut self) {
-        let capacity = self.capacity;
-        // Clone the ledger handle before taking the state lock (see save).
-        let ledger = Arc::clone(&self.ledger);
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        let state = &mut *state;
-        let Some(path) = state.path.clone() else {
-            // Degraded memory-only session: no backing file to reconcile,
-            // and none must be created.
-            return;
-        };
-        // niubash#773: the list below is this session's own — it is NOT
-        // re-read from the file here. The reconcile further down reads
-        // the file directly for its removal and truncation passes, so
-        // lines another shell appended survive without ever entering
-        // this session's list.
-        let entries: Vec<String> = match state
-            .history
-            .search(SearchQuery::all_that_contain_rev(String::new()))
-        {
-            Ok(items) => items
-                .into_iter()
-                .rev()
-                .map(|item| item.command_line)
-                .collect(),
-            Err(error) => {
-                warn_io_failure(state, "history list read at session end failed", error);
-                return;
-            }
-        };
-        // Snapshot the ledger without holding its lock across file I/O.
-        let (unsynced, cleared, cleared_base, base_lines) = match ledger.lock() {
-            Ok(ledger) => (
-                ledger
-                    .pending
-                    .iter()
-                    .filter(|p| !p.synced)
-                    .map(|p| p.text.clone())
-                    .collect::<Vec<String>>(),
-                ledger.cleared.clone(),
-                ledger.cleared_base.clone(),
-                ledger.base_lines,
-            ),
-            Err(_) => (Vec::new(), Vec::new(), Vec::new(), 0),
-        };
-        // niubash#646: the session-end write consults the final
-        // histappend/HISTFILESIZE values — the host refreshed the
-        // settings cell once more after the EXIT trap ran, so values
-        // the trap itself set are the ones that govern the write.
-        // niubash#734: the HISTTIMEFORMAT arming bit rides the same
-        // final snapshot and governs step (a)'s write shape.
-        let (histappend, histfilesize, histtimeformat_armed) = state
-            .settings
-            .lock()
-            .map(|settings| {
-                (
-                    settings.histappend,
-                    settings.histfilesize,
-                    settings.histtimeformat_armed,
-                )
-            })
-            .unwrap_or((false, None, false));
-        if entries.is_empty() && cleared.is_empty() && cleared_base.is_empty() {
-            // Only an existing file needs truncating; a session without
-            // history must not create an empty one. (Pinned by
-            // session_end_write_carries_a_cleared_list_to_the_file: a
-            // cleared list with nothing pending truncates, exactly as
-            // before.) When either cleared set is non-empty the file
-            // is reconciled by removal below instead — truncating
-            // would delete seeds and foreign lines, which
-            // session_end_write_never_rolls_back_foreign_file_lines
-            // forbids.
-            if !path.exists() {
-                return;
-            }
-            if let Err(error) = std::fs::write(&path, "") {
-                warn_io_failure(state, "history file truncate at session end failed", error);
-                return;
-            }
-            if let Ok(mut ledger) = ledger.lock() {
-                ledger.reset(0);
-            }
-            return;
+        flush_history_at_session_end(self.capacity, &self.state, &self.ledger);
+    }
+
+    /// Session-end history flush handle (niubash#971): the same write
+    /// the funnel runs, as cloned `Arc` state the Windows console-close
+    /// path can run off the REPL thread (see `ctrl_c`). The flush only
+    /// touches `Arc<Mutex<…>>` state, so it is safe to run from the
+    /// console handler thread when the main thread never reaches the
+    /// session-end funnel (bounded fallback; see the #971 REPORT §4).
+    pub(crate) fn session_end_flush_handle(&self) -> SessionEndFlushHandle {
+        SessionEndFlushHandle {
+            capacity: self.capacity,
+            state: Arc::clone(&self.state),
+            ledger: Arc::clone(&self.ledger),
         }
-        // niubash#569: reconcile the file with this session's ledger.
-        // (a) Append the session's unwritten entries (niubash#773:
-        // recording never wrote them, so in the common case this is
-        // the session's only write; it is also the read-only-recovery
-        // leg — a save that succeeded in memory while the file was
-        // unwritable lands here when the file is writable again).
-        // Write them THROUGH the store, not by raw appends: the
-        // store's unwritten entries (their unset on-disk flags) are
-        // exactly those lines, and its flush advances that accounting
-        // as it writes them, so no later write can place the same
-        // lines a second time — the duplication
-        // session_end_write_appends_missing_entries_without_duplicates
-        // catches where the read-only leg behaves (Windows CI; the
-        // local uid-0 artifact masks the leg and hides this one).
-        let mut appended_ok = unsynced.is_empty();
-        let mut file_changed = false;
-        if !unsynced.is_empty() {
-            match state.history.flush(&path, histtimeformat_armed) {
-                Ok(()) => {
-                    appended_ok = true;
-                    file_changed = true;
-                }
-                Err(error) => {
-                    warn_io_failure(state, "history file append at session end failed", error);
-                }
-            }
-        }
-        // (b) Remove exactly the lines this session cleared. The
-        // session's own lines (`cleared`) go as a forward subsequence
-        // from the ledger base: lines before the base predate the
-        // session, and lines committed by -a/-w left the pending set
-        // before -c, so both survive. The base lines the session
-        // cleared (`cleared_base`, niubash#642) go as a second pass
-        // confined to the base window — the file's first `base_lines`
-        // lines, where the base sat at startup; the first pass removes
-        // nothing before the base, so the window is intact — and a
-        // foreign line appended later is never eaten, even when it
-        // shares the cleared text.
-        //
-        // With histappend on, GNU's exit write takes the append branch
-        // (bashhist.c maybe_save_shell_history + force_append_history)
-        // and `history -c` has already zeroed the session-line counter
-        // (bash_clear_history): only post-clear lines are appended and
-        // the base lines stay. An earlier write face (`-a`/`-w`, an
-        // erasedups rewrite) may have written the cleared own lines to
-        // the file mid-session, so the first pass still runs in append
-        // mode — it is what makes the end state match GNU's (the
-        // niubash#569 grid: seeds plus post-clear lines).
-        // Only the base pass is append-mode-exempt: removing cleared
-        // base lines is #642's stronger-than-GNU contract, and it
-        // belongs to the overwrite-flavored default mode.
-        let mut removed_ok = cleared.is_empty() && (histappend || cleared_base.is_empty());
-        if !removed_ok {
-            // niubash#622: the reconcile's removal pass reads the raw
-            // file; tallied as a reconcile read (see the accounting
-            // block at the top of this file).
-            let read_started = std::time::Instant::now();
-            let contents = std::fs::read_to_string(&path);
-            note_history_reconcile_read(&path, read_started.elapsed());
-            match contents {
-                Ok(contents) => {
-                    let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
-                    let total = file_lines.len();
-                    // niubash#733: removal runs on entry+stamp units,
-                    // not raw lines — a `#<epoch>` line is the
-                    // FOLLOWING entry's timestamp (histfile.c:140
-                    // HIST_TIMESTAMP_START), so removing an entry by
-                    // raw text alone would orphan its stamp onto the
-                    // next surviving entry. The ledger's base stays a
-                    // raw line count; translate its boundary into unit
-                    // coordinates on this file (the first pass removes
-                    // nothing before the base, so the boundary is the
-                    // same for the second pass's window).
-                    let units = group_history_file_units(file_lines);
-                    let base_units = units_within_raw_prefix(&units, base_lines);
-                    let mut kept = units;
-                    if !cleared.is_empty() {
-                        kept = remove_cleared_units(kept, &cleared, base_units);
-                    }
-                    if !histappend && !cleared_base.is_empty() {
-                        let window = base_units.min(kept.len());
-                        let tail: Vec<HistoryFileUnit> = kept.drain(window..).collect();
-                        let mut prefix = remove_cleared_units(kept, &cleared_base, 0);
-                        prefix.extend(tail);
-                        kept = prefix;
-                    }
-                    let kept_lines: Vec<String> = kept
-                        .into_iter()
-                        .flat_map(HistoryFileUnit::into_lines)
-                        .collect();
-                    let removed = total - kept_lines.len();
-                    if removed > 0 {
-                        let rewritten = if kept_lines.is_empty() {
-                            String::new()
-                        } else {
-                            kept_lines.join("\n") + "\n"
-                        };
-                        match std::fs::write(&path, rewritten) {
-                            Ok(()) => {
-                                removed_ok = true;
-                                file_changed = true;
-                            }
-                            Err(error) => {
-                                warn_io_failure(
-                                    state,
-                                    "history file clear at session end failed",
-                                    error,
-                                );
-                            }
-                        }
-                    } else {
-                        // Nothing to remove: the cleared lines are already
-                        // gone (another session rewrote the file, or -w
-                        // already truncated it). Nothing to reconcile.
-                        removed_ok = true;
-                    }
-                }
-                Err(error) => {
-                    warn_io_failure(state, "history file read at session end failed", error);
-                }
-            }
-        }
-        // (c) niubash#646: HISTFILESIZE truncates the file to its last
-        // lines once the write settles — bashhist.c's
-        // maybe_save_shell_history ends with sv_histsize(
-        // "HISTFILESIZE"), and histfile.c applies it to the file tail.
-        if let Some(limit) = histfilesize {
-            // niubash#622: the truncation pass reads the raw file
-            // (GNU's history_truncate_file reads it too, histfile.c);
-            // tallied as a reconcile read.
-            let read_started = std::time::Instant::now();
-            let contents = std::fs::read_to_string(&path);
-            note_history_reconcile_read(&path, read_started.elapsed());
-            match contents {
-                Ok(contents) => {
-                    let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
-                    // niubash#733: HISTFILESIZE counts ENTRIES, not raw
-                    // lines — GNU's history_truncate_file decrements
-                    // its counter only at a newline whose next line
-                    // does not start a timestamp (histfile.c:636) and
-                    // starts the kept tail at the first kept entry's
-                    // stamp line (histfile.c:651). Group into
-                    // entry+stamp units and keep the last `limit`
-                    // entry-carrying units, whole.
-                    let units = group_history_file_units(file_lines);
-                    let entries = units.iter().filter(|unit| unit.entry.is_some()).count();
-                    if entries > limit {
-                        let mut to_skip = entries - limit;
-                        let mut cut = units.len();
-                        for (index, unit) in units.iter().enumerate() {
-                            if unit.entry.is_none() {
-                                continue;
-                            }
-                            if to_skip == 0 {
-                                cut = index;
-                                break;
-                            }
-                            to_skip -= 1;
-                        }
-                        let kept_lines: Vec<String> = units
-                            .into_iter()
-                            .skip(cut)
-                            .flat_map(HistoryFileUnit::into_lines)
-                            .collect();
-                        let rewritten = if kept_lines.is_empty() {
-                            String::new()
-                        } else {
-                            kept_lines.join("\n") + "\n"
-                        };
-                        match std::fs::write(&path, rewritten) {
-                            Ok(()) => {
-                                file_changed = true;
-                            }
-                            Err(error) => {
-                                warn_io_failure(
-                                    state,
-                                    "history file size truncation at session end failed",
-                                    error,
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    warn_io_failure(
-                        state,
-                        "history file read for size truncation at session end failed",
-                        error,
-                    );
-                }
-            }
-        }
-        if file_changed {
-            // Rebuild the reader from the reconciled file so its
-            // in-memory list matches the file (step (b) may have removed
-            // lines the reader still holds). The rebuilt store's
-            // on-disk accounting covers its whole list — step (a)
-            // flushed it, or there was nothing pending — so no later
-            // write can re-place those lines. The rebuild cannot
-            // resurrect cleared lines — they are already gone from the
-            // file — and seeds reappearing in memory are committed file
-            // lines, harmless at session end.
-            if let Ok(history) = HistoryStore::load_from_file(capacity, &path) {
-                state.history = history;
-            }
-        }
-        if let Ok(mut ledger) = ledger.lock() {
-            ledger.settle(appended_ok, removed_ok, count_file_lines(&path));
-        };
     }
 
     /// Save one entry without the niubash#646 record filters. Only
@@ -3266,6 +2994,338 @@ impl SessionLedger {
         }
         self.base_lines = base_lines;
     }
+}
+
+/// niubash#971: the session-end history flush as a handle the
+/// Windows console-close path can run off the REPL thread (see
+/// `ctrl_c`). The flush only touches `Arc<Mutex<...>>` state, so
+/// it is safe to run from the console handler thread when the main
+/// thread never reaches the session-end funnel (bounded fallback;
+/// see the #971 REPORT section 4).
+pub(crate) struct SessionEndFlushHandle {
+    capacity: usize,
+    state: Arc<Mutex<HistoryState>>,
+    ledger: Arc<Mutex<SessionLedger>>,
+}
+
+impl SessionEndFlushHandle {
+    /// Run the session-end flush: the identical write
+    /// [`LiveFileBackedHistory::flush_at_session_end`] performs.
+    /// Best-effort like every history-file write: never fails,
+    /// never reaches stderr. A second flush after the first is a
+    /// no-op (the unsynced set is empty, the cleared sets are
+    /// empty, and a non-empty list is never truncated), so a
+    /// handler-thread fallback racing the main thread funnel flush
+    /// is harmless.
+    pub(crate) fn flush(&self) {
+        flush_history_at_session_end(self.capacity, &self.state, &self.ledger);
+    }
+}
+
+/// The session-end history flush, factored out of
+/// [`LiveFileBackedHistory::flush_at_session_end`] so the
+/// console-close fallback (niubash#971) can run the identical write
+/// from the handler thread against cloned `Arc` state. Takes only
+/// what the write needs: the list capacity and the shared
+/// state/ledger cells.
+fn flush_history_at_session_end(
+    capacity: usize,
+    state: &Arc<Mutex<HistoryState>>,
+    ledger: &Arc<Mutex<SessionLedger>>,
+) {
+    // Clone the ledger handle before taking the state lock (see save).
+    let ledger = Arc::clone(ledger);
+    let Ok(mut state) = state.lock() else {
+        return;
+    };
+    let state = &mut *state;
+    let Some(path) = state.path.clone() else {
+        // Degraded memory-only session: no backing file to reconcile,
+        // and none must be created.
+        return;
+    };
+    // niubash#773: the list below is this session's own — it is NOT
+    // re-read from the file here. The reconcile further down reads
+    // the file directly for its removal and truncation passes, so
+    // lines another shell appended survive without ever entering
+    // this session's list.
+    let entries: Vec<String> = match state
+        .history
+        .search(SearchQuery::all_that_contain_rev(String::new()))
+    {
+        Ok(items) => items
+            .into_iter()
+            .rev()
+            .map(|item| item.command_line)
+            .collect(),
+        Err(error) => {
+            warn_io_failure(state, "history list read at session end failed", error);
+            return;
+        }
+    };
+    // Snapshot the ledger without holding its lock across file I/O.
+    let (unsynced, cleared, cleared_base, base_lines) = match ledger.lock() {
+        Ok(ledger) => (
+            ledger
+                .pending
+                .iter()
+                .filter(|p| !p.synced)
+                .map(|p| p.text.clone())
+                .collect::<Vec<String>>(),
+            ledger.cleared.clone(),
+            ledger.cleared_base.clone(),
+            ledger.base_lines,
+        ),
+        Err(_) => (Vec::new(), Vec::new(), Vec::new(), 0),
+    };
+    // niubash#646: the session-end write consults the final
+    // histappend/HISTFILESIZE values — the host refreshed the
+    // settings cell once more after the EXIT trap ran, so values
+    // the trap itself set are the ones that govern the write.
+    // niubash#734: the HISTTIMEFORMAT arming bit rides the same
+    // final snapshot and governs step (a)'s write shape.
+    let (histappend, histfilesize, histtimeformat_armed) = state
+        .settings
+        .lock()
+        .map(|settings| {
+            (
+                settings.histappend,
+                settings.histfilesize,
+                settings.histtimeformat_armed,
+            )
+        })
+        .unwrap_or((false, None, false));
+    if entries.is_empty() && cleared.is_empty() && cleared_base.is_empty() {
+        // Only an existing file needs truncating; a session without
+        // history must not create an empty one. (Pinned by
+        // session_end_write_carries_a_cleared_list_to_the_file: a
+        // cleared list with nothing pending truncates, exactly as
+        // before.) When either cleared set is non-empty the file
+        // is reconciled by removal below instead — truncating
+        // would delete seeds and foreign lines, which
+        // session_end_write_never_rolls_back_foreign_file_lines
+        // forbids.
+        if !path.exists() {
+            return;
+        }
+        if let Err(error) = std::fs::write(&path, "") {
+            warn_io_failure(state, "history file truncate at session end failed", error);
+            return;
+        }
+        if let Ok(mut ledger) = ledger.lock() {
+            ledger.reset(0);
+        }
+        return;
+    }
+    // niubash#569: reconcile the file with this session's ledger.
+    // (a) Append the session's unwritten entries (niubash#773:
+    // recording never wrote them, so in the common case this is
+    // the session's only write; it is also the read-only-recovery
+    // leg — a save that succeeded in memory while the file was
+    // unwritable lands here when the file is writable again).
+    // Write them THROUGH the store, not by raw appends: the
+    // store's unwritten entries (their unset on-disk flags) are
+    // exactly those lines, and its flush advances that accounting
+    // as it writes them, so no later write can place the same
+    // lines a second time — the duplication
+    // session_end_write_appends_missing_entries_without_duplicates
+    // catches where the read-only leg behaves (Windows CI; the
+    // local uid-0 artifact masks the leg and hides this one).
+    let mut appended_ok = unsynced.is_empty();
+    let mut file_changed = false;
+    if !unsynced.is_empty() {
+        match state.history.flush(&path, histtimeformat_armed) {
+            Ok(()) => {
+                appended_ok = true;
+                file_changed = true;
+            }
+            Err(error) => {
+                warn_io_failure(state, "history file append at session end failed", error);
+            }
+        }
+    }
+    // (b) Remove exactly the lines this session cleared. The
+    // session's own lines (`cleared`) go as a forward subsequence
+    // from the ledger base: lines before the base predate the
+    // session, and lines committed by -a/-w left the pending set
+    // before -c, so both survive. The base lines the session
+    // cleared (`cleared_base`, niubash#642) go as a second pass
+    // confined to the base window — the file's first `base_lines`
+    // lines, where the base sat at startup; the first pass removes
+    // nothing before the base, so the window is intact — and a
+    // foreign line appended later is never eaten, even when it
+    // shares the cleared text.
+    //
+    // With histappend on, GNU's exit write takes the append branch
+    // (bashhist.c maybe_save_shell_history + force_append_history)
+    // and `history -c` has already zeroed the session-line counter
+    // (bash_clear_history): only post-clear lines are appended and
+    // the base lines stay. An earlier write face (`-a`/`-w`, an
+    // erasedups rewrite) may have written the cleared own lines to
+    // the file mid-session, so the first pass still runs in append
+    // mode — it is what makes the end state match GNU's (the
+    // niubash#569 grid: seeds plus post-clear lines).
+    // Only the base pass is append-mode-exempt: removing cleared
+    // base lines is #642's stronger-than-GNU contract, and it
+    // belongs to the overwrite-flavored default mode.
+    let mut removed_ok = cleared.is_empty() && (histappend || cleared_base.is_empty());
+    if !removed_ok {
+        // niubash#622: the reconcile's removal pass reads the raw
+        // file; tallied as a reconcile read (see the accounting
+        // block at the top of this file).
+        let read_started = std::time::Instant::now();
+        let contents = std::fs::read_to_string(&path);
+        note_history_reconcile_read(&path, read_started.elapsed());
+        match contents {
+            Ok(contents) => {
+                let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
+                let total = file_lines.len();
+                // niubash#733: removal runs on entry+stamp units,
+                // not raw lines — a `#<epoch>` line is the
+                // FOLLOWING entry's timestamp (histfile.c:140
+                // HIST_TIMESTAMP_START), so removing an entry by
+                // raw text alone would orphan its stamp onto the
+                // next surviving entry. The ledger's base stays a
+                // raw line count; translate its boundary into unit
+                // coordinates on this file (the first pass removes
+                // nothing before the base, so the boundary is the
+                // same for the second pass's window).
+                let units = group_history_file_units(file_lines);
+                let base_units = units_within_raw_prefix(&units, base_lines);
+                let mut kept = units;
+                if !cleared.is_empty() {
+                    kept = remove_cleared_units(kept, &cleared, base_units);
+                }
+                if !histappend && !cleared_base.is_empty() {
+                    let window = base_units.min(kept.len());
+                    let tail: Vec<HistoryFileUnit> = kept.drain(window..).collect();
+                    let mut prefix = remove_cleared_units(kept, &cleared_base, 0);
+                    prefix.extend(tail);
+                    kept = prefix;
+                }
+                let kept_lines: Vec<String> = kept
+                    .into_iter()
+                    .flat_map(HistoryFileUnit::into_lines)
+                    .collect();
+                let removed = total - kept_lines.len();
+                if removed > 0 {
+                    let rewritten = if kept_lines.is_empty() {
+                        String::new()
+                    } else {
+                        kept_lines.join("\n") + "\n"
+                    };
+                    match std::fs::write(&path, rewritten) {
+                        Ok(()) => {
+                            removed_ok = true;
+                            file_changed = true;
+                        }
+                        Err(error) => {
+                            warn_io_failure(
+                                state,
+                                "history file clear at session end failed",
+                                error,
+                            );
+                        }
+                    }
+                } else {
+                    // Nothing to remove: the cleared lines are already
+                    // gone (another session rewrote the file, or -w
+                    // already truncated it). Nothing to reconcile.
+                    removed_ok = true;
+                }
+            }
+            Err(error) => {
+                warn_io_failure(state, "history file read at session end failed", error);
+            }
+        }
+    }
+    // (c) niubash#646: HISTFILESIZE truncates the file to its last
+    // lines once the write settles — bashhist.c's
+    // maybe_save_shell_history ends with sv_histsize(
+    // "HISTFILESIZE"), and histfile.c applies it to the file tail.
+    if let Some(limit) = histfilesize {
+        // niubash#622: the truncation pass reads the raw file
+        // (GNU's history_truncate_file reads it too, histfile.c);
+        // tallied as a reconcile read.
+        let read_started = std::time::Instant::now();
+        let contents = std::fs::read_to_string(&path);
+        note_history_reconcile_read(&path, read_started.elapsed());
+        match contents {
+            Ok(contents) => {
+                let file_lines: Vec<String> = contents.lines().map(|l| l.to_string()).collect();
+                // niubash#733: HISTFILESIZE counts ENTRIES, not raw
+                // lines — GNU's history_truncate_file decrements
+                // its counter only at a newline whose next line
+                // does not start a timestamp (histfile.c:636) and
+                // starts the kept tail at the first kept entry's
+                // stamp line (histfile.c:651). Group into
+                // entry+stamp units and keep the last `limit`
+                // entry-carrying units, whole.
+                let units = group_history_file_units(file_lines);
+                let entries = units.iter().filter(|unit| unit.entry.is_some()).count();
+                if entries > limit {
+                    let mut to_skip = entries - limit;
+                    let mut cut = units.len();
+                    for (index, unit) in units.iter().enumerate() {
+                        if unit.entry.is_none() {
+                            continue;
+                        }
+                        if to_skip == 0 {
+                            cut = index;
+                            break;
+                        }
+                        to_skip -= 1;
+                    }
+                    let kept_lines: Vec<String> = units
+                        .into_iter()
+                        .skip(cut)
+                        .flat_map(HistoryFileUnit::into_lines)
+                        .collect();
+                    let rewritten = if kept_lines.is_empty() {
+                        String::new()
+                    } else {
+                        kept_lines.join("\n") + "\n"
+                    };
+                    match std::fs::write(&path, rewritten) {
+                        Ok(()) => {
+                            file_changed = true;
+                        }
+                        Err(error) => {
+                            warn_io_failure(
+                                state,
+                                "history file size truncation at session end failed",
+                                error,
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                warn_io_failure(
+                    state,
+                    "history file read for size truncation at session end failed",
+                    error,
+                );
+            }
+        }
+    }
+    if file_changed {
+        // Rebuild the reader from the reconciled file so its
+        // in-memory list matches the file (step (b) may have removed
+        // lines the reader still holds). The rebuilt store's
+        // on-disk accounting covers its whole list — step (a)
+        // flushed it, or there was nothing pending — so no later
+        // write can re-place those lines. The rebuild cannot
+        // resurrect cleared lines — they are already gone from the
+        // file — and seeds reappearing in memory are committed file
+        // lines, harmless at session end.
+        if let Ok(history) = HistoryStore::load_from_file(capacity, &path) {
+            state.history = history;
+        }
+    }
+    if let Ok(mut ledger) = ledger.lock() {
+        ledger.settle(appended_ok, removed_ok, count_file_lines(&path));
+    };
 }
 
 impl History for LiveFileBackedHistory {
@@ -4424,6 +4484,48 @@ mod tests {
             "echo synced\necho lost\n",
             "the session-end append restores only the missing entry"
         );
+    }
+
+    #[test]
+    fn issue971_session_end_flush_handle_writes_without_the_repl_thread() {
+        // niubash#971: the console-close fallback runs the session-end
+        // flush from the handler thread, without the provider or the
+        // REPL thread — the handle carries the same write over cloned
+        // `Arc` state. The editor twin records the typed line; the
+        // handle lands it in the file; a second flush (and the
+        // provider's own Drop at the end) must not duplicate it.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history");
+        std::fs::write(&path, "seed\n").unwrap();
+
+        let provider = RubashHistoryProvider::with_file(100, path.clone());
+        let mut editor = LiveFileBackedHistory::with_shared_state(
+            100,
+            provider.shared_state(),
+            provider.ledger(),
+        );
+        editor
+            .save(HistoryItem::from_command_line("echo CLOSE_MARKER"))
+            .unwrap();
+        // Mid-session the file still holds only the seed (#773:
+        // recording never writes).
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "seed\n");
+
+        let handle = provider.session_end_flush_handle();
+        handle.flush();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("echo CLOSE_MARKER"),
+            "the handler-thread flush lands the session line: {contents:?}"
+        );
+
+        // A second flush is a no-op — and so is the provider's own
+        // Drop below, which re-runs the funnel flush after the handle.
+        handle.flush();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        drop(editor);
+        drop(provider);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
     }
 
     #[test]
