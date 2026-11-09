@@ -3002,6 +3002,11 @@ impl SessionLedger {
 /// it is safe to run from the console handler thread when the main
 /// thread never reaches the session-end funnel (bounded fallback;
 /// see the #971 REPORT section 4).
+///
+/// Off Windows the handle is constructed and passed to the no-op
+/// registration stub but never flushed (there is no console handler),
+/// so the fields and `flush` are dead there by design.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct SessionEndFlushHandle {
     capacity: usize,
     state: Arc<Mutex<HistoryState>>,
@@ -3017,6 +3022,7 @@ impl SessionEndFlushHandle {
     /// empty, and a non-empty list is never truncated), so a
     /// handler-thread fallback racing the main thread funnel flush
     /// is harmless.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn flush(&self) {
         flush_history_at_session_end(self.capacity, &self.state, &self.ledger);
     }

@@ -102,6 +102,7 @@ use windows_sys::Win32::System::Console::{
 /// Win32 console control event codes, for the pure classifier below.
 /// On Windows these resolve to the `windows_sys` names imported above.
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 const CTRL_C_EVENT: u32 = 1;
 #[cfg(not(windows))]
 const CTRL_CLOSE_EVENT: u32 = 3;
