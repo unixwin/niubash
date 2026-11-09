@@ -274,7 +274,7 @@ static CLOSE_FLUSH_HANDLE: Mutex<Option<Arc<crate::history::SessionEndFlushHandl
 /// niubash#971: register the session-end flush handle (see
 /// [`CLOSE_FLUSH_HANDLE`]).
 #[cfg(windows)]
-pub fn register_console_close_flush(handle: Arc<crate::history::SessionEndFlushHandle>) {
+pub(crate) fn register_console_close_flush(handle: Arc<crate::history::SessionEndFlushHandle>) {
     if let Ok(mut slot) = CLOSE_FLUSH_HANDLE.lock() {
         *slot = Some(handle);
     }
@@ -283,7 +283,7 @@ pub fn register_console_close_flush(handle: Arc<crate::history::SessionEndFlushH
 /// Unix: no console control handler exists, so there is nothing to
 /// register; the call site stays uniform.
 #[cfg(not(windows))]
-pub fn register_console_close_flush(_handle: Arc<crate::history::SessionEndFlushHandle>) {}
+pub(crate) fn register_console_close_flush(_handle: Arc<crate::history::SessionEndFlushHandle>) {}
 
 /// niubash#971: a console close/logoff/shutdown event arrived. Wake or
 /// abort the main thread, then wait (bounded) for its session-end
