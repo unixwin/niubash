@@ -23,10 +23,21 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use niubash_runtime::completion::{CompletionState, NiubashCompleter};
 use niubash_runtime::shell::Shell;
+
+/// The engine's host write path mirrors `COMP_WORDBREAKS` into the
+/// process environment, and a `Shell` created afterwards imports
+/// the process environment — so these pins must not run
+/// concurrently inside one test process (the same hazard the
+/// in-crate tests serialize with `PROCESS_STATE_LOCK`).
+static ISSUE918_LOCK: Mutex<()> = Mutex::new(());
+
+fn serialized() -> MutexGuard<'static, ()> {
+    ISSUE918_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 const WORDLIST_SCRIPT: &str = r#"
 complete -W 'C:/tmp/issue918/plain.txt C:/tmp/issue918/other.txt' mycmd
@@ -74,6 +85,7 @@ fn session_value(shell: &Rc<RefCell<Shell>>, name: &str) -> Option<String> {
 /// which prefixes none of the candidates, so the user got `[]`.
 #[test]
 fn issue918_drive_word_serves_full_path_candidates() {
+    let _lock = serialized();
     let (_handle, mut completer) = completer_for(shell_with(WORDLIST_SCRIPT));
     let values = complete_values(&mut completer, "mycmd C:/tmp/issue918/pl");
     assert_eq!(
@@ -83,15 +95,26 @@ fn issue918_drive_word_serves_full_path_candidates() {
     );
 }
 
-/// The backslash spelling of the same drive word.
+/// The backslash spelling of the same drive word: the completion
+/// function must be handed the whole word, exactly as typed.
+/// (Wordlist prefix filtering is literal, so this spelling is
+/// pinned through the function's own view, not a `/`-spelled
+/// wordlist.)
 #[test]
 fn issue918_drive_word_backslash_spelling() {
-    let (_handle, mut completer) = completer_for(shell_with(WORDLIST_SCRIPT));
+    let _lock = serialized();
+    let (handle, mut completer) = completer_for(shell_with(PROBE_FN_SCRIPT));
     let values = complete_values(&mut completer, "mycmd C:\\tmp\\issue918\\pl");
+    assert_eq!(values, vec!["hit".to_string()]);
     assert_eq!(
-        values,
-        vec!["C:/tmp/issue918/plain.txt".to_string()],
-        "the backslash drive spelling must complete whole too"
+        session_value(&handle, "NIU918_CUR").as_deref(),
+        Some("C:\\tmp\\issue918\\pl"),
+        "the backslash drive spelling must reach the function whole"
+    );
+    assert_eq!(
+        session_value(&handle, "NIU918_WORDS").as_deref(),
+        Some("mycmd C:\\tmp\\issue918\\pl"),
+        "COMP_WORDS must carry the backslash drive word whole"
     );
 }
 
@@ -100,6 +123,7 @@ fn issue918_drive_word_backslash_spelling() {
 /// exactly as the host's own token view spells it.
 #[test]
 fn issue918_completion_function_sees_the_whole_drive_word() {
+    let _lock = serialized();
     let (handle, mut completer) = completer_for(shell_with(PROBE_FN_SCRIPT));
     let values = complete_values(&mut completer, "mycmd C:/tmp/issue918/pl");
     assert_eq!(values, vec!["hit".to_string()]);
@@ -126,10 +150,9 @@ fn issue918_completion_function_sees_the_whole_drive_word() {
 /// is back verbatim.
 #[test]
 fn issue918_wordbreaks_scoped_to_the_attempt_and_restored() {
+    let _lock = serialized();
     let mut shell = shell_with(PROBE_FN_SCRIPT);
-    shell
-        .execute_script("COMP_WORDBREAKS=' :XY'")
-        .unwrap();
+    shell.execute_script("COMP_WORDBREAKS=' :XY'").unwrap();
     let (handle, mut completer) = completer_for(shell);
     let _ = complete_values(&mut completer, "mycmd C:/tmp/issue918/pl");
     assert_eq!(
@@ -149,6 +172,7 @@ fn issue918_wordbreaks_scoped_to_the_attempt_and_restored() {
 /// does not rewrite wordbreak semantics for the session.
 #[test]
 fn issue918_non_drive_colon_word_still_splits() {
+    let _lock = serialized();
     let (handle, mut completer) = completer_for(shell_with(PROBE_FN_SCRIPT));
     let _ = complete_values(&mut completer, "mycmd ab:cd/pl");
     assert_eq!(
@@ -167,6 +191,7 @@ fn issue918_non_drive_colon_word_still_splits() {
 /// untouched (the colon stays in place for the whole attempt).
 #[test]
 fn issue918_plain_word_leaves_wordbreaks_alone() {
+    let _lock = serialized();
     let (handle, mut completer) = completer_for(shell_with(PROBE_FN_SCRIPT));
     let _ = complete_values(&mut completer, "mycmd /tmp/issue918/pl");
     assert_eq!(
@@ -184,6 +209,7 @@ fn issue918_plain_word_leaves_wordbreaks_alone() {
 /// same completion machinery reached through the probe surface.
 #[test]
 fn issue918_completion_probe_sees_the_whole_drive_word() {
+    let _lock = serialized();
     let mut shell = shell_with(PROBE_FN_SCRIPT);
     let line = "mycmd C:/tmp/issue918/pl";
     let values = shell.completion_probe(line, line.len());
@@ -197,10 +223,7 @@ fn issue918_completion_probe_sees_the_whole_drive_word() {
         Some("C:/tmp/issue918/pl"),
         "the probe's attempt must hand the function the whole drive word"
     );
-    let breaks = shell
-        .session()
-        .variable_value("COMP_WORDBREAKS")
-        .unwrap();
+    let breaks = shell.session().variable_value("COMP_WORDBREAKS").unwrap();
     assert!(
         breaks.contains(':'),
         "the probe must restore the default wordbreaks, got {breaks:?}"
