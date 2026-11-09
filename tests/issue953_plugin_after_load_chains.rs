@@ -21,9 +21,10 @@
 //!   makes the widget's execution observable in the transcript.
 //! * complete-alias — the plugin's completion wrapper is registered
 //!   for a real alias and a real completion attempt (the host's
-//!   `--completion-probe` face) routes through it: with the wrapper
-//!   registered, its result is authoritative and the filename
-//!   fallback the same line gets without it is gone. This fixture's
+//!   `--completion-probe` face) routes through it: the wrapper
+//!   resolves the alias and delegates to the expanded command's own
+//!   completion, so the attempt's candidates are the delegation's
+//!   product. This fixture's
 //!   upstream entry is extension-less and the plugin machinery's
 //!   file enumeration cannot enable it, so its chain stages through
 //!   the machinery as far as it goes (add + a refused enable, both
@@ -353,12 +354,18 @@ fn fzf_git_widget_invoked_through_bind_x() {
     let staged = Staged::install("fzfgit", "fzf-git.sh", "fzf-git.sh/fzf-git.sh");
 
     // Step 0 (engine): post-install the widget function is defined
-    // and runs (the fixture's widget body is upstream's entry point
-    // shape; here it must at least execute and return success).
+    // and runs. Since the #966 fixture upgrade the widget prints
+    // its candidate list (`git ls-files` of the cwd), so the call
+    // runs in a scratch dir outside any repo: the candidate set is
+    // empty there, the widget prints nothing, and the exact stdout
+    // below stays a pure defined-and-executes check.
+    let widget_cwd = staged.root.join("widget-cwd");
+    fs::create_dir_all(&widget_cwd).unwrap();
     let probe = staged.engine(&format!(
-        "{}; printf '%s|%s' \"$fzf_git_fixture_imported\" \"$(type -t fzf_git_files)\"; \
+        "{}; cd \"{}\"; printf '%s|%s' \"$fzf_git_fixture_imported\" \"$(type -t fzf_git_files)\"; \
          fzf_git_files; printf '|%s' \"$?\"",
-        staged.loader_source_line()
+        staged.loader_source_line(),
+        path_string(&widget_cwd)
     ));
     assert_success(&probe, "engine widget probe");
     assert_eq!(
@@ -485,8 +492,13 @@ fn complete_alias_wrapper_completes_a_real_command_line() {
     );
 
     // Step 3: the same completion attempt now routes through the
-    // wrapper — its result is authoritative, so the filename
-    // fallback from step 1 is gone.
+    // wrapper. Since the #966 fixture upgrade the wrapper resolves
+    // the alias to its expansion (`ls -l`) and delegates to the
+    // expanded command's completion — filename completion of the
+    // word being completed — so the delegation legitimately offers
+    // the matching candidate (the step-1 fallback's absence proved
+    // routing only while the wrapper was an empty stub), and
+    // nothing the word does not match may appear.
     let rc_wrapped = format!(
         "{}\nalias ll='ls -l'\ncomplete -F __complete_alias ll\n",
         staged.loader_source_line()
@@ -494,12 +506,12 @@ fn complete_alias_wrapper_completes_a_real_command_line() {
     fs::write(staged.home.join(".niubashrc"), &rc_wrapped).unwrap();
     let wrapped = run_completion_probe("ll zeb", &staged, &start);
     assert!(
-        !wrapped.iter().any(|c| c == "zebra953.txt"),
-        "the wrapper's result must replace the filename fallback: {wrapped:?}"
+        wrapped.iter().any(|c| c == "zebra953.txt"),
+        "the wrapper must delegate to the expanded command's candidates: {wrapped:?}"
     );
     assert!(
         !wrapped.iter().any(|c| c == "notes953.txt"),
-        "no fallback candidate may leak through the wrapper: {wrapped:?}"
+        "the delegated result stays filtered by the word being completed: {wrapped:?}"
     );
 
     let _ = fs::remove_dir_all(&staged.root);
