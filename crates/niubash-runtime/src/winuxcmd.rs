@@ -133,7 +133,7 @@ fn find_winuxcmd_on_path(checked: &mut Vec<String>) -> Option<PathBuf> {
 /// semantics, same as `where.exe`), first exact-name file wins. Pure
 /// filesystem checks, so it is safe on a console-less host where a spawn
 /// would claim a hidden session console (niubash#451/#462).
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn find_file_in_path_dirs(file_name: &str) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
@@ -478,7 +478,7 @@ fn path_with_dirs_prepended_impl(
     parts.join(&path_list_separator().to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn path_with_dir_prepended(current_path: &str, dir: &str) -> String {
     let mut parts: Vec<String> = current_path
         .split(path_list_separator())
@@ -508,7 +508,7 @@ fn is_winuxcmd_installation_entry(entry: &str) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn path_starts_with_dir(current_path: &str, dir: &str) -> bool {
     current_path
         .split(path_list_separator())
@@ -517,7 +517,7 @@ fn path_starts_with_dir(current_path: &str, dir: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn path_entries_equal(left: &str, right: &str) -> bool {
     comparable_path_entry(left) == comparable_path_entry(right)
 }
