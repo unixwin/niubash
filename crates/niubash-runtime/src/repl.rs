@@ -365,6 +365,36 @@ fn dispatch_repl_hangup(shell: &Rc<RefCell<Shell>>) {
     }
 }
 
+/// niubash#988: end the line-editor session for a taken exit jump,
+/// routing an untrapped hangup death the engine recorded during the
+/// line's execution through the hangup finish instead of the plain
+/// one. A SIGHUP that lands while a submitted line runs is drained
+/// at the next engine boundary; the untrapped termsig adjudication
+/// records the death and unwinds with 128+SIGHUP, arming the jump
+/// this helper's callers just took. The plain finish's two-guard
+/// composition drops the termsig mark with its first guard and
+/// resolves the exit to the interrupted line's own status — the
+/// shape measured on the base (exit 0 after an interrupted loop,
+/// exit 3 after a command ending 3, where GNU dies by the signal
+/// regardless of the command's status). The peek is exact, the same
+/// one the fallback loop makes (#985): the mark is set only by the
+/// termsig adjudication that armed this jump, no finish has run
+/// since, and the finish remains the mark's sole consumer (the host
+/// only peeks). A trapped or ignored hangup records no mark, so
+/// those jumps keep the plain route.
+#[cfg(unix)]
+fn end_editor_session_for_jump(shell: &Rc<RefCell<Shell>>, status: i32) -> ! {
+    if shell.borrow().executor().hangup_death_pending() {
+        end_repl_session_on_hangup(&mut shell.borrow_mut(), status);
+    }
+    end_repl_session(&mut shell.borrow_mut(), status)
+}
+
+#[cfg(not(unix))]
+fn end_editor_session_for_jump(shell: &Rc<RefCell<Shell>>, status: i32) -> ! {
+    end_repl_session(&mut shell.borrow_mut(), status)
+}
+
 pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline> {
     let shell_ref = shell.borrow();
     // Infallible since niubash#134: a history file that cannot be opened
@@ -6660,9 +6690,12 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                         // `borrow_mut()` temporary would still be alive in the
                         // body, and `end_repl_session`'s own `borrow_mut()`
                         // would panic on the second mutable borrow.
+                        // niubash#988: same hangup routing as the submitted-
+                        // line arm — a hangup drained during the widget
+                        // line's execution dies by the signal.
                         let jump = shell.borrow_mut().take_session_exit_jump();
                         if let Some(status) = jump {
-                            end_repl_session(&mut shell.borrow_mut(), status);
+                            end_editor_session_for_jump(&shell, status);
                         }
                     }
                     SentinelOutcome::Accept(None) => {}
@@ -6748,9 +6781,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 // the scrutinee's `borrow_mut()` temporary is dropped before
                 // end_repl_session borrows again (an `if let` would hold it
                 // through the body and panic with `RefCell already borrowed`).
+                // niubash#988: the jump can also be the 128+SIGHUP unwind
+                // of an untrapped hangup drained during this line's
+                // execution — that death goes through the hangup finish,
+                // not this plain one (see end_editor_session_for_jump).
                 let jump = shell.borrow_mut().take_session_exit_jump();
                 if let Some(status) = jump {
-                    end_repl_session(&mut shell.borrow_mut(), status);
+                    end_editor_session_for_jump(&shell, status);
                 }
             }
             Ok(Signal::CtrlD) => {
