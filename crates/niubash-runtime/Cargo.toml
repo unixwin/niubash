@@ -71,6 +71,12 @@ crossterm29 = { package = "crossterm", version = "0.29", default-features = fals
 # engine's kernel-signal backend (libc::raise) — a delivery through the
 # engine's own disposition, not a host signal registration.
 libc = "0.2"
+# niubash#974: the SIGHUP doorbell registers ONE extra action in
+# signal-hook's registry (the same registry the engine's backend
+# composes in) whose whole body sets an AtomicBool for the line
+# editor's break signal. It queues nothing and dispatches nothing —
+# see src/ctrl_c.rs for the contract reasoning.
+signal-hook = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # The prompt's git segment runs the user's own git through one bounded,
