@@ -314,19 +314,13 @@ fn issue985_eof_ends_session_with_history_and_trap() {
     let (mut session, home) = spawn_seeded("eof", "");
     type_marker_and_settle(&mut session, "EOF_MARKER");
     // Plain EOF (Ctrl-D's driver shape): the session ends through the
-    // plain finish with the last command's status, the history file
-    // is written and the EXIT trap runs. Control cell: green before
-    // and after the hangup fix.
-    //
-    // The typed line itself is NOT asserted here: on the base the
-    // fallback's plain finish writes only the session's synced
-    // entries, and the just-executed line reaches them at the NEXT
-    // prompt's sync — which an EOF end never runs — so the base
-    // loses it (measured; the hangup route's flush syncs first,
-    // which is why the hangup cells above can assert the typed
-    // line). That EOF history gap is an adjacent plain-finish
-    // defect outside this issue's hangup scope; it is recorded in
-    // the lane report for the captain rather than pinned here.
+    // plain finish with the last command's status, the history is
+    // flushed (seed lines and the typed line) and the EXIT trap
+    // runs. Control cell for the hangup shapes: its death-form,
+    // status and trap assertions are green before and after; the
+    // typed-line assertion also passes once the loop records its
+    // accepted lines (on the base nothing recorded them, so the
+    // assertion was red there together with the hangup cells).
     session.close_input();
     let status = session.wait_status();
     assert!(
@@ -338,6 +332,10 @@ fn issue985_eof_ends_session_with_history_and_trap() {
     assert!(
         history.contains("seedA") && history.contains("seedB"),
         "the EOF flush kept the seeded base lines: {history:?}"
+    );
+    assert!(
+        history.contains("echo EOF_MARKER"),
+        "the EOF exit flushed the session's typed line: {history:?}"
     );
     let trapmark = std::fs::read_to_string(home.join("trapmark.txt"))
         .expect("trap mark file exists after the session ends");
