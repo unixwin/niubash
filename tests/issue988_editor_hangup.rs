@@ -223,11 +223,15 @@ fn issue988_trapped_hangup_during_execution_runs_trap_and_session_survives() {
     // a routing that mistook a trapped delivery for the untrapped
     // death would kill the session here. The loop is shorter than
     // the defect cells' (which the drain aborts): this one runs to
-    // completion, so it must fit the driver's prompt timeout even
-    // on a loaded host; if a fast host finishes it before the
-    // hangup lands, the cell degrades to the parked trapped shape
-    // and the same assertions hold.
-    session.send_line("i988=0; while (( i988 < 5000 )); do (( i988 += 1 )); done");
+    // completion; if a fast host finishes it before the hangup
+    // lands, the cell degrades to the parked trapped shape and the
+    // same assertions hold. No prompt expectation between the trap
+    // wait and the marker line: the editor repaints the prompt in
+    // place while the line runs, so a prompt match can fire on a
+    // repaint while the loop still owns the terminal — the marker
+    // line is typed as typeahead instead and its output is the
+    // completion witness.
+    session.send_line("i988=0; while (( i988 < 2000 )); do (( i988 += 1 )); done");
     std::thread::sleep(Duration::from_millis(600));
     send_hangup(pid);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -244,7 +248,6 @@ fn issue988_trapped_hangup_during_execution_runs_trap_and_session_survives() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-    session.expect_prompt();
     session.send_line("echo STILL_ALIVE_$((3*3))");
     session.expect("STILL_ALIVE_9");
     session.send_line("exit");
@@ -263,11 +266,11 @@ fn issue988_ignored_hangup_during_execution_leaves_session_alive() {
     let (mut session, home) = spawn_seeded("ignored", "trap '' HUP");
     let pid = shell_pid(&mut session, &home);
     // Short loop, as in the trapped control: it runs to completion
-    // under the ignored delivery.
-    session.send_line("i988=0; while (( i988 < 5000 )); do (( i988 += 1 )); done");
+    // under the ignored delivery, and the marker line rides in as
+    // typeahead (no prompt expectation — see the trapped cell).
+    session.send_line("i988=0; while (( i988 < 2000 )); do (( i988 += 1 )); done");
     std::thread::sleep(Duration::from_millis(600));
     send_hangup(pid);
-    session.expect_prompt();
     session.send_line("echo STILL_ALIVE_$((4*4))");
     session.expect("STILL_ALIVE_16");
     session.send_line("exit");
