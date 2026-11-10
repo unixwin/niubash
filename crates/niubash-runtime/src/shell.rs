@@ -4262,6 +4262,31 @@ impl Shell {
         }
     }
 
+    /// niubash#985: record one accepted interactive submission into
+    /// the shared history (the provider's list) — the save-at-accept
+    /// the engine's dispatch contract expects from the host reader
+    /// (rubash's `pre_process_interactive_line` observes the host's
+    /// add; the line-editor path gets it from reedline's accept).
+    /// The `--noediting` fallback loop has no editor to perform it,
+    /// so it calls this at its own accept points; without it a
+    /// fallback session's lines reach neither the `history` list,
+    /// nor history expansion, nor the session-end write (measured:
+    /// a `--noediting` session's `history` showed only the entries
+    /// loaded at startup). Recording is memory-only (niubash#773):
+    /// the entry reaches the file at a write face. No provider
+    /// (non-interactive entry) is a no-op.
+    pub fn record_accepted_history_line(&mut self, line: &str) {
+        let Some(handle) = self.history_provider.as_ref() else {
+            return;
+        };
+        use rubash::history::HistoryProvider;
+        let provider = handle.clone();
+        let borrowed = provider.try_borrow_mut();
+        if let Ok(mut provider) = borrowed {
+            let _ = provider.append(line.to_string());
+        }
+    }
+
     /// The history ledger shared with the provider instance, if
     /// interactive entry installed one (niubash#569). The editor history
     /// instance adopts it so provider-side -c/-a/-w and the session-end
