@@ -1842,6 +1842,16 @@ in-tree consumer tests; niubash names none of it yet.
 The same change's per-flag setter
 `SessionBuilder::interactive` is recorded in §6 with
 the family, pairing `SessionBuilder::login_shell` (v4).
+Record, 2026-11-10: the return contract of
+`Executor::run_bind_x_command` (§2.2) widens:
+`BindXRunOutcome` gains `interrupted: bool` — the widget
+unit's signal-discard verdict, recorded by the engine at
+the unwind-capture point (niubash#977 engine half; the GNU
+shape is jobs.c:3316 ADDINTERRUPT discarding the list).
+The host half consumes the flag to discard the edit line
+after a widget-window Ctrl+C and syncs the niubash mirror
+of this ledger in the same change; no symbol appears,
+vanishes, or moves tiers.
 Ledger v1, 2026-10-25. Update rule: any change to the consumed
 surface (a symbol appears, vanishes, or moves tiers) updates this
 file — both copies — in the same change that causes it, with the
