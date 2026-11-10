@@ -741,6 +741,35 @@
 > segment's `NIU_BACKGROUND_JOBS` read; `JobCandidate` stays
 > engine-internal). §6 grows 279 → 281 (two items: the
 > `Session` face and the `Executor` face).
+> Addendum (expansion-error discard classification face, 2026-11-10,
+> rubash#2794): `RunClassification` grows the
+> `expansion_error_discard` field — the FATAL word-expansion
+> class's interactive DISCARD verdict (`${var:?}`,
+> subst.c:10416-10418; nounset unbound, subst.c:11032-11034;
+> arithmetic nounset, expr.c:1208-1216) that the run's fate
+> alone (status 1, Completed) could not express: the unit was
+> dropped and the session lives, where the same error
+> non-interactively is a fatal exit jump. The executor notes
+> the verdict at its raise points and the drivers carry it
+> per unit beside the signal discard; the session layer
+> reports it and does not recompute it. The struct rides
+> inside `RunOutcome`'s recorded entry and stays unlisted as
+> its own §6 symbol, so no §6 entry is added and no census
+> count moves; recorded staged ahead of host adoption,
+> consumed in-repo by the rubash#2794 consumer pins. This
+> addendum is the record, in both copies, per the update
+> rule.
+> Addendum (expansion-error discard coverage completion, 2026-11-10,
+> rubash#2794): the captain-review census completed the
+> raise-point set — the bare-arithmetic fast entry, the
+> assignment-only arithmetic nounset consumer, and the
+> `[[ ]]` arithmetic-comparison nounset trap now note the
+> verdict at their own DISCARD arms as well (the census ran
+> by full enumeration of the discard predicate's call sites
+> plus producer/consumer tracing of the nounset latches).
+> No face change: same field, same per-unit carry, no §6
+> entry added and no census count moves.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -1222,7 +1251,7 @@ its test-module reads named separately in the row):
 | `Session::inherit_process_stdin` | 5 | the contract method, not the builder stream binding §4 anticipated |
 | `Session::expand_prompt` / `run_prompt_command` | 4 / 1 | |
 | `Session::run` | 3 | the tracked script arm and, since GAP-2 (rubash#2800 / niubash#898), the unclosed arm — both fold their stop facts from the outcome classification; since the GAP-queue remainder (rubash#2860 / niubash#949) the stray-close arm runs through this face too — the host's last direct `script_driver` call retired — and folds the same way |
-| `Session::take_classification` | 2 | GAP-2 drain: the stdin feeder stop rule and the PROMPT_COMMAND tail read; returns the classification values (`exit_jump_raw` / `parse_error` / signal discard) drained from the executor pendings |
+| `Session::take_classification` | 2 | GAP-2 drain: the stdin feeder stop rule and the PROMPT_COMMAND tail read; returns the classification values (`exit_jump_raw` / `parse_error` / signal discard / expansion-error discard) drained from the executor pendings |
 | `Session::bind_view` | 7 | GAP-3 bind view: the registry snapshot (`BindView` — generation / editing mode / readline variables / removal tombstones / entries with canonical bytes, kind, resolved keymap and GNU dump line); adopted by the GAP-3 host migration — shell binding load/staleness/edit-mode, bind -x lookup, repl dump handlers and keyseq-timeout read the view, and the host's tier-C registry reads plus the `bind_surface.rs` conversion layer are deleted |
 | `Session::completion_view` | 2 | GAP-4 completion view: the completer's live state as one `&self` capture (`CompletionView` — session cwd / the whole variable table in `env_vars_snapshot`'s rendering, attribute pseudo-entries included, sorted by name, with its content fingerprint / function names / open fd numbers); adopted by the GAP-4 host migration — the completer's capture and the highlighter's known-command probe read the view at use time, and the host's `CompletionState` env/function/fd snapshot fields plus their per-line re-synchronization are deleted |
 | `Session::has_function` | 1 | GAP-4b: the `&self` function probe (the executor's own lookup; `StateViews::has_function` is the `&mut`-shaped form); adopted by the GAP-4 host migration — the widget-availability probe reads it live, and the tier-C `executor().has_function(name)` read is deleted |
