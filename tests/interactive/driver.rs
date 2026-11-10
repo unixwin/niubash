@@ -837,6 +837,18 @@ impl NiuSession {
         self.output.contains(needle)
     }
 
+    /// Close the session's input side (niubash#974, the window form's
+    /// local half): the writer is swapped for a sink, so nothing more
+    /// can be typed into the session. The driver keeps a master reader
+    /// clone alive in its output pump, so this cannot reproduce a full
+    /// kernel master-side close; the cells that use it deliver the
+    /// hangup with an explicit SIGHUP — the same signal the kernel
+    /// delivers to the foreground process group when a real terminal's
+    /// master side closes.
+    pub fn close_input(&mut self) {
+        *self.writer.lock().unwrap() = Box::new(std::io::sink());
+    }
+
     /// Resize the pseudo terminal mid-session.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.master
@@ -881,6 +893,33 @@ impl NiuSession {
     /// Working directory of the session (fresh per session).
     pub fn start(&self) -> &Path {
         &self.start
+    }
+
+    /// Wait for the process to end and return the full exit status:
+    /// the exit code AND, when the process died by a signal, the
+    /// signal's name (niubash#974: a hangup death must read as a
+    /// signal death — `wait_exit`'s bare code reports 1 for it, the
+    /// same value as a plain `exit 1`).
+    pub fn wait_status(&mut self) -> portable_pty::ExitStatus {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            let exited = self
+                .child
+                .lock()
+                .unwrap()
+                .try_wait()
+                .unwrap_or_else(|e| panic!("wait for niu exit failed: {e}"));
+            if let Some(status) = exited {
+                return status;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "session did not exit after the exit request\n{}",
+                    self.transcript()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Everything captured since session start (matched windows + drained
