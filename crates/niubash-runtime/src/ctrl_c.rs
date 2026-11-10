@@ -474,9 +474,7 @@ pub fn queue_prompt_sigint(handler_already_queued: bool) {
 // dispatch on the main thread.
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 /// The doorbell flag: set by the SIGHUP registry action, shared with
 /// every line editor the REPL builds (reedline's `with_break_signal`
