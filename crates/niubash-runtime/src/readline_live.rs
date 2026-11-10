@@ -1323,8 +1323,8 @@ fn mode_for_target(target: NativeKeymapTarget) -> KeymapMode {
 /// Apply the flat plugin layer to a host keymap.  Called from the editor
 /// build's script layer, before the user's `NIU_BINDKEYS` layer, so a user
 /// binding still wins like GNU's last-write rule.
-pub(crate) fn add_plugin_keybindings(
-    keybindings: &mut reedline::Keybindings,
+pub(crate) fn add_plugin_keybindings<S: crate::repl::KeybindingSink + ?Sized>(
+    keybindings: &mut S,
     target: NativeKeymapTarget,
 ) {
     for unbind in plugin_flat_unbinds(target) {

@@ -469,6 +469,20 @@ fn resolve_history_path(
     home_dir.join(".niubash_history")
 }
 
+/// niubash#918: the scoped drive-letter wordbreak repair for one
+/// completion attempt, installed by
+/// `Shell::install_drive_wordbreak_scope` and consumed by
+/// `Shell::restore_drive_wordbreak_scope`.
+struct DriveWordbreakScope {
+    /// The session's `COMP_WORDBREAKS` before the attempt;
+    /// `None` when the variable was unbound (the engine then
+    /// falls back to its compiled-in default).
+    original: Option<String>,
+    /// The value installed for the attempt's duration: the
+    /// effective breaks with the colon removed.
+    scoped: String,
+}
+
 impl Shell {
     /// The live engine session (the 1.5.0 Session contract).
     pub fn session(&self) -> &Session {
@@ -3749,6 +3763,74 @@ impl Shell {
         }
     }
 
+    /// niubash#918: when the word under the cursor is a Windows
+    /// drive-letter word (`C:/...`, `C:\...`, drive-relative `C:x`),
+    /// the default `COMP_WORDBREAKS` — which contains `:` (GNU
+    /// bashline.c:313) — makes the engine's completion split cut
+    /// the word at the drive colon, so the current word becomes the
+    /// post-drive fragment and the real path completes to nothing
+    /// (the engine side of this face is rubash#2846). Drive letters
+    /// are a host platform shape, not a GNU one, so the host
+    /// repairs the split for exactly one attempt: the colon leaves
+    /// `COMP_WORDBREAKS` while the attempt runs — the governing
+    /// compspec, its function and the candidate generation all stay
+    /// the engine's — and the user's value is restored verbatim
+    /// when the attempt ends. Any other word shape returns `None`
+    /// and the session value is never touched.
+    fn install_drive_wordbreak_scope(
+        &mut self,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Option<DriveWordbreakScope> {
+        let cursor_pos = cursor_pos.min(input.len());
+        let word = self
+            .session()
+            .token_view(input)
+            .word_at(cursor_pos)
+            .map(|span| span.value.clone())?;
+        let bytes = word.as_bytes();
+        if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+            return None;
+        }
+        let original = self.session().variable_value("COMP_WORDBREAKS");
+        // Unbound means the engine falls back to the default set
+        // (bashline.c:313, bound at startup by the engine's init);
+        // spell it here so the scoped value is that set minus the
+        // colon, and restoration unbinds again.
+        let effective = original
+            .clone()
+            .unwrap_or_else(|| " \t\n\"'@><=;|&(:".to_string());
+        if !effective.contains(':') {
+            return None;
+        }
+        let scoped: String = effective.chars().filter(|ch| *ch != ':').collect();
+        self.session_mut()
+            .variables()
+            .set("COMP_WORDBREAKS", &scoped);
+        Some(DriveWordbreakScope { original, scoped })
+    }
+
+    /// Restore the `COMP_WORDBREAKS` an attempt's drive scope
+    /// replaced — but only when the value is still the scoped one:
+    /// a completion function that deliberately rebound the variable
+    /// during the attempt keeps its own binding.
+    fn restore_drive_wordbreak_scope(&mut self, scope: DriveWordbreakScope) {
+        let current = self.session().variable_value("COMP_WORDBREAKS");
+        if current.as_deref() != Some(scope.scoped.as_str()) {
+            return;
+        }
+        match &scope.original {
+            Some(original) => {
+                self.session_mut()
+                    .variables()
+                    .set("COMP_WORDBREAKS", original);
+            }
+            None => {
+                self.session_mut().variables().unset("COMP_WORDBREAKS");
+            }
+        }
+    }
+
     /// GAP-7 (niubash#863): drive one ordinary completion through
     /// a single completion attempt on this shell — capture the
     /// host faces, open the guard, run the completer through it,
@@ -3766,10 +3848,14 @@ impl Shell {
         cursor_pos: usize,
     ) -> Vec<reedline::Suggestion> {
         let faces = self.completion_host_faces();
+        let drive_scope = self.install_drive_wordbreak_scope(input, cursor_pos);
         let suggestions = {
             let mut attempt = self.session_mut().begin_completion_attempt();
             completer.complete_with_attempt(&mut attempt, &faces, input, cursor_pos)
         };
+        if let Some(scope) = drive_scope {
+            self.restore_drive_wordbreak_scope(scope);
+        }
         self.session_mut().variables().unset("NIU_COMP_RESULT");
         suggestions
     }
@@ -3785,10 +3871,14 @@ impl Shell {
         cursor_pos: usize,
     ) -> Vec<reedline::Suggestion> {
         let faces = self.completion_host_faces();
+        let drive_scope = self.install_drive_wordbreak_scope(input, cursor_pos);
         let suggestions = {
             let mut attempt = self.session_mut().begin_completion_attempt();
             completer.complete_specific_with_attempt(&mut attempt, &faces, mode, input, cursor_pos)
         };
+        if let Some(scope) = drive_scope {
+            self.restore_drive_wordbreak_scope(scope);
+        }
         self.session_mut().variables().unset("NIU_COMP_RESULT");
         suggestions
     }

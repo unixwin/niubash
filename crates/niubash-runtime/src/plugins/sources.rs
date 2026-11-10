@@ -1271,12 +1271,13 @@ fn fetch_source_to_staging(request: &SourceInstallRequest) -> anyhow::Result<Fet
             }
             // §14.6.1 base layer: any known manager first, then the open
             // file-source fallback (a tree with at least one sourceable
-            // *.sh/*.bash — candidates are enumerated honestly at enable
-            // time, never guessed here).
+            // *.sh/*.bash file or extension-less shebang script —
+            // candidates are enumerated honestly at enable time, never
+            // guessed here).
             None => detect_for_install(&staging).ok_or_else(|| {
                 anyhow!(
                     "no supported plugin manager detected in '{}' and no sourceable \
-                     *.sh/*.bash files either; {}",
+                     *.sh/*.bash files or extension-less shebang scripts either; {}",
                     origin,
                     supported_adapters_hint()
                 )
