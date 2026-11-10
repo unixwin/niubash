@@ -1517,6 +1517,76 @@ impl Shell {
         self.sync_alias_mirror_from_executor();
     }
 
+    /// niubash#974: run the engine's pending-signal dispatch for a
+    /// prompt hangup. A SIGHUP delivered while the prompt was parked in
+    /// the editor sits in the engine's queue with no command boundary
+    /// to drain it; the doorbell (`ctrl_c::install_hangup_doorbell`)
+    /// made the editor return, and this method gives the executor the
+    /// same single boundary poll `dispatch_prompt_interrupt` gives a
+    /// prompt Ctrl+C — an empty program, so nothing executes and only
+    /// the tail poll of `execute_ast` runs. The engine adjudicates:
+    /// a trapped HUP runs its action now (the session continues), an
+    /// ignored one drops, and an untrapped one records the termsig
+    /// death and unwinds as `ExitCode(128 + SIGHUP)`, which the
+    /// classification below arms as the session exit jump (it is NOT
+    /// the DISCARD class — `take_signal_discard_pending` stays down
+    /// for a termsig, rubash#2233). Unlike the SIGINT path there is
+    /// no status seeding or forcing: GNU gives a prompt hangup no
+    /// synthetic `$?`, the trap (if any) observes the live status,
+    /// and the death's own 129 reaches the finish through the jump.
+    pub fn dispatch_prompt_hangup(&mut self) {
+        self.session_exit_jump = None;
+        let ast = rubash::parser::Ast {
+            commands: Vec::new(),
+        };
+        match self.executor_mut().execute_ast(&ast) {
+            Ok(()) => {}
+            Err(rubash::executor::ExecuteError::ExitCode(code)) => {
+                self.session_mut().set_last_status(code);
+                self.note_exit_code_unwind(code);
+            }
+            Err(rubash::executor::ExecuteError::SigintUnwind) => {
+                self.session_mut().set_last_status(130);
+            }
+            Err(_) => {}
+        }
+        self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
+        self.sync_alias_mirror_from_executor();
+    }
+
+    /// niubash#974: the session finish for an adjudicated hangup
+    /// death, composed on ONE finish guard so the termsig mark the
+    /// trap step takes is still on the pass when the duties step
+    /// resolves it — the two-guard composition of
+    /// [`Shell::finish_exit_trap`] + [`Shell::finish_stream_end_duties`]
+    /// drops the mark with the first guard and would exit 129 instead
+    /// of dying by the signal. The caller (the REPL's hangup route)
+    /// runs the host history flush BEFORE this call: on a termsig
+    /// death GNU saves history first (sig.c:613-618
+    /// `maybe_save_shell_history` at the head of `termsig_handler`),
+    /// the reverse of the plain `exit_shell` order. Inside the pass
+    /// the engine keeps its own termsig order: hangup of the jobs,
+    /// then the EXIT trap (with the death's trap-entry status), then
+    /// the stream-end duties, whose tail restores `SIG_DFL` and
+    /// re-raises the hangup (`die_by_signal`, sig.c:649-667
+    /// `kill_shell`) — so on the death this function does not return
+    /// at all. It returns the resolved status for the shapes that are
+    /// not a signal death (a HUP trap action that itself exited: the
+    /// jump came from the trap, no mark is pending, and the exit is
+    /// the trap's plain status). The engine history write is gated
+    /// `Skip`: the route's store is the host provider's, flushed by
+    /// the caller (niubash#642).
+    pub fn finish_session_on_hangup(&mut self, status: i32) -> i32 {
+        self.run_zshexit_hooks();
+        let mut finish = self.session_mut().begin_finish(status);
+        let code = finish.run_exit_trap();
+        finish.run_stream_end_duties(FinishDuties {
+            history: SessionHistoryWrite::Skip,
+        });
+        code
+    }
+
     fn execute_line_with_options(
         &mut self,
         line: &str,
@@ -4192,6 +4262,31 @@ impl Shell {
         }
     }
 
+    /// niubash#985: record one accepted interactive submission into
+    /// the shared history (the provider's list) — the save-at-accept
+    /// the engine's dispatch contract expects from the host reader
+    /// (rubash's `pre_process_interactive_line` observes the host's
+    /// add; the line-editor path gets it from reedline's accept).
+    /// The `--noediting` fallback loop has no editor to perform it,
+    /// so it calls this at its own accept points; without it a
+    /// fallback session's lines reach neither the `history` list,
+    /// nor history expansion, nor the session-end write (measured:
+    /// a `--noediting` session's `history` showed only the entries
+    /// loaded at startup). Recording is memory-only (niubash#773):
+    /// the entry reaches the file at a write face. No provider
+    /// (non-interactive entry) is a no-op.
+    pub fn record_accepted_history_line(&mut self, line: &str) {
+        let Some(handle) = self.history_provider.as_ref() else {
+            return;
+        };
+        use rubash::history::HistoryProvider;
+        let provider = handle.clone();
+        let borrowed = provider.try_borrow_mut();
+        if let Ok(mut provider) = borrowed {
+            let _ = provider.append(line.to_string());
+        }
+    }
+
     /// The history ledger shared with the provider instance, if
     /// interactive entry installed one (niubash#569). The editor history
     /// instance adopts it so provider-side -c/-a/-w and the session-end
@@ -4224,6 +4319,20 @@ impl Shell {
             .as_ref()
             .and_then(|provider| provider.try_borrow().ok())
             .map(|provider| provider.shared_state())
+    }
+
+    /// The session-end flush handle (niubash#971), if interactive entry
+    /// installed a provider: the same write the session-end funnel
+    /// performs, as cloned `Arc` state the Windows console-close path
+    /// can run off the REPL thread (see `ctrl_c`). `None` when no
+    /// provider is installed.
+    pub(crate) fn session_end_flush_handle(
+        &self,
+    ) -> Option<Arc<crate::history::SessionEndFlushHandle>> {
+        self.history_provider
+            .as_ref()
+            .and_then(|provider| provider.try_borrow().ok())
+            .map(|provider| Arc::new(provider.session_end_flush_handle()))
     }
 
     /// Refresh the shared HIST* settings cell from the executor's
@@ -11959,7 +12068,9 @@ complete -F _envtooldyn_hook envtooldyn
 
 #[cfg(test)]
 mod invocation_name_tests {
-    use super::tests::{test_shell, unique_temp_dir, CwdGuard};
+    #[cfg(windows)]
+    use super::tests::unique_temp_dir;
+    use super::tests::{test_shell, CwdGuard};
     use super::{default_script_name_from, HookConfig};
     use crate::test_support::PROCESS_STATE_LOCK;
 
@@ -12650,6 +12761,7 @@ gap7_widget() {
     fn gap5_host_path_reads_route_through_the_session_face() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut shell = test_shell(HookConfig::default());
+        #[cfg(windows)]
         let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
 
         #[cfg(windows)]

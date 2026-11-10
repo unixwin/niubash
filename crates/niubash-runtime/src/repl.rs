@@ -249,6 +249,18 @@ fn repl_exit_status(line: &str) -> Option<i32> {
 /// `exit_shell`), persist session history (a hard exit skips the history
 /// provider's `Drop`), and leave with the trap's status as the process code.
 fn end_repl_session(shell: &mut Shell, status: i32) -> ! {
+    let code = finish_repl_session(shell, status);
+    flush_repl_output();
+    std::process::exit(code);
+}
+
+/// The shared session-end steps (GNU `exit_shell`): EXIT trap,
+/// stream-end duties, HIST* refresh, history flush. Returns the
+/// process code. `end_repl_session` adds the output flush +
+/// `process::exit`; the console-close path adds the output flush +
+/// the completion signal and parks for the system termination instead
+/// (niubash#971).
+fn finish_repl_session(shell: &mut Shell, status: i32) -> i32 {
     let code = shell.finish_exit_trap(status);
     // niubash#863 GAP-8: the finish's remaining stream-end duties,
     // with the engine session-history write gated OFF — this route's
@@ -264,7 +276,24 @@ fn end_repl_session(shell: &mut Shell, status: i32) -> ! {
     // the write itself (bashhist.c maybe_save_shell_history).
     shell.refresh_history_settings();
     shell.flush_session_history();
+    code
+}
+
+/// niubash#971: end the session on a console close/logoff/shutdown
+/// event. Runs the same session-end steps as `end_repl_session`,
+/// then signals the console handler that the flush landed and parks
+/// until the system terminates the process — the exit stays
+/// 0xC000013A (STATUS_CONTROL_C_EXIT), the code the host reports for
+/// a closed console, matching GNU's death-by-SIGHUP. If the process
+/// is somehow still alive after the park bound (the handler already
+/// returned), exit through the normal funnel so a console-less
+/// process never hangs.
+fn end_repl_session_on_console_close(shell: &mut Shell) -> ! {
+    let status = shell.last_exit_code();
+    let code = finish_repl_session(shell, status);
     flush_repl_output();
+    crate::ctrl_c::notify_console_close_flush_done();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     std::process::exit(code);
 }
 
@@ -296,6 +325,46 @@ pub fn spawn_self_update(args: &[String]) -> Option<i32> {
 ///
 /// The shell is shared through the same `Rc<RefCell<Shell>>` bridge the REPL
 /// uses, so the completer can run shell-function completions in the engine.
+/// niubash#974: hand a doorbell-waked prompt read to the engine's hangup
+/// dispatch and end the session when the dispatch armed the exit jump.
+/// The death itself is composed by
+/// [`Shell::finish_session_on_hangup`]: this route only sequences the
+/// host duties around it — the history flush lands BEFORE the finish,
+/// because on a termsig death GNU saves history at the head of the
+/// handler (sig.c:613-618), ahead of the hangup and the EXIT trap; the
+/// finish then hangs up the jobs, runs the trap, and dies by the
+/// signal inside its duties step, so the lines after it are the plain
+/// fallback for a jump that was not a signal death (a HUP trap action
+/// that itself exited).
+#[cfg(unix)]
+fn end_repl_session_on_hangup(shell: &mut Shell, status: i32) -> ! {
+    shell.refresh_history_settings();
+    shell.flush_session_history();
+    let code = shell.finish_session_on_hangup(status);
+    flush_repl_output();
+    std::process::exit(code);
+}
+
+/// niubash#974: the REPL half of a prompt hangup — run the engine's
+/// boundary dispatch for the delivery the doorbell reported, then, if
+/// the adjudication armed the session exit jump (the untrapped termsig
+/// death, or a HUP trap action that itself exited), end the session
+/// through the hangup finish. A trapped hangup whose action returns
+/// arms no jump: the session simply continues, and an editor that was
+/// suspended by the break resumes its buffer on the next read.
+#[cfg(unix)]
+fn dispatch_repl_hangup(shell: &Rc<RefCell<Shell>>) {
+    shell.borrow_mut().dispatch_prompt_hangup();
+    // Take into a `let` first: an `if let` scrutinee's `borrow_mut()`
+    // temporary would still be alive in the body, and the session-end
+    // call's own `borrow_mut()` would panic on the second borrow (the
+    // widget arm's R1 note).
+    let jump = shell.borrow_mut().take_session_exit_jump();
+    if let Some(status) = jump {
+        end_repl_session_on_hangup(&mut shell.borrow_mut(), status);
+    }
+}
+
 pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline> {
     let shell_ref = shell.borrow();
     // Infallible since niubash#134: a history file that cannot be opened
@@ -613,6 +682,17 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         repaint_cycle_session,
     );
     crate::idle_repaint::ensure_cache_observer();
+
+    // niubash#974: attach the SIGHUP doorbell to every editor build, so
+    // a hangup delivered while this read is parked returns
+    // `Signal::ExternalBreak` (the editor polls while a break signal is
+    // attached) instead of leaving the read parked on a dead tty. The
+    // flag is the process-wide cell `ctrl_c` registers its
+    // signal-hook action on; rebuilds re-attach the same cell.
+    #[cfg(unix)]
+    {
+        editor = editor.with_break_signal(crate::ctrl_c::hangup_doorbell());
+    }
 
     Ok(editor)
 }
@@ -6223,6 +6303,15 @@ fn consume_abi_control(line_editor: &mut Reedline) -> Option<String> {
 /// `read_line`: the prompt is cloned out each iteration.
 pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     let shell = Rc::new(RefCell::new(shell));
+    // niubash#971: register the session-end flush handle so a console
+    // close/logoff/shutdown can land the history even if the main
+    // thread never reaches the session-end funnel (bounded
+    // handler-thread fallback). The provider was installed by
+    // `enter_interactive` before this call; no-op off Windows and
+    // when no provider is installed.
+    if let Some(handle) = shell.borrow().session_end_flush_handle() {
+        crate::ctrl_c::register_console_close_flush(handle);
+    }
     // Snapshot the console modes before anything (wizard, rc files, external
     // commands) can change them. Restored before every prompt: a child that
     // exits with a broken console (e.g. ssh.exe on a failed auth) must not
@@ -6267,6 +6356,16 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         // history write runs on this path too (it used to skip it).
         end_repl_session(&mut shell.borrow_mut(), status);
     }
+    // niubash#974 / #985: arm the SIGHUP doorbell before the first
+    // prompt read of EITHER loop (unix): from here on a hangup
+    // delivery also rings the break flag, so a parked read returns
+    // and the loop can run the engine's prompt dispatch. It used to
+    // be installed on the line-editor path only, below the
+    // `no_editing` early return — the `--noediting` fallback loop
+    // therefore never had a doorbell to wake its blocking read
+    // (niubash#985). Registration is once per process.
+    #[cfg(unix)]
+    crate::ctrl_c::install_hangup_doorbell();
     let no_editing = shell.borrow().no_editing;
     if no_editing {
         typeahead.disarm_and_reinject();
@@ -6302,7 +6401,22 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     let mut pending = PendingReplInput::default();
 
     loop {
+        // niubash#971: a console close/logoff/shutdown event requests
+        // the session end; the handler waits (bounded) for this funnel.
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(&mut shell.borrow_mut());
+        }
         crate::console_guard::restore(&console_baseline);
+        // niubash#974: a hangup that landed while a command owned the
+        // terminal (or in the sliver before this iteration's read) rang
+        // the doorbell without an editor to break; give the delivery
+        // its prompt dispatch before the next prompt is drawn — an
+        // untrapped hangup ends the session here instead of parking
+        // in the read below with the note already queued.
+        #[cfg(unix)]
+        if crate::ctrl_c::take_hangup_doorbell() {
+            dispatch_repl_hangup(&shell);
+        }
         // niubash#799: fold the live console size into $COLUMNS/$LINES
         // before every prompt — the jobs.c `wait_for` face of GNU's
         // checkwinsize re-read (the resize may also have landed while a
@@ -6383,6 +6497,9 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         if shell.borrow_mut().take_history_redirect() {
             line_editor = build_line_editor(&shell)?;
         }
+        // niubash#971: mark the prompt read so the console-close
+        // handler knows a wake record will reach reedline.
+        crate::ctrl_c::set_prompt_read_active(true);
         let signal = if pending.is_empty() {
             drain_pending_notices();
             // niubash#180: a finished `niu setup` run (a child process)
@@ -6479,6 +6596,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 None => line_editor.read_line(&prompt),
             }
         };
+        crate::ctrl_c::set_prompt_read_active(false);
+        // niubash#971: the close may have arrived while the line was
+        // being typed or while a foreground command ran — a submitted
+        // line must not execute after it; end the session instead.
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(&mut shell.borrow_mut());
+        }
         // niubash#799: a resize that arrived while the read was on screen
         // must be in the variables before the accepted line executes —
         // GNU binds it at `shell_getc`'s CHECK_WINCH (parse.y:2484), i.e.
@@ -6683,6 +6807,22 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 }
                 continue;
             }
+            Ok(Signal::ExternalBreak(_buffer)) => {
+                // niubash#974: the read returned early because the
+                // hangup doorbell rang while it was parked (the editor
+                // consumed the flag itself when it broke). Hand the
+                // queued delivery to the engine's prompt dispatch: a
+                // trapped HUP runs its action and the session goes on
+                // — the editor kept the suspended edit state, so the
+                // next read resumes the buffer and point — while an
+                // untrapped one ends the session by the signal through
+                // the hangup finish. No `finish_abandoned`: like the
+                // host-command suspension above, the line is not
+                // abandoned, it resumes if the session does.
+                #[cfg(unix)]
+                dispatch_repl_hangup(&shell);
+                continue;
+            }
             Ok(_) => {
                 crate::readline_live::finish_abandoned();
                 continue;
@@ -6706,17 +6846,169 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // has no break left, so it is the function's tail.
 }
 
+/// niubash#985: the `--noediting` fallback loop's half of a prompt
+/// hangup — the same adjudication `dispatch_repl_hangup` runs for
+/// the line-editor loop, on the fallback's bare `&mut Shell`: run
+/// the engine's boundary dispatch, then end the session through the
+/// hangup finish when the dispatch armed the exit jump. A trapped
+/// hangup whose action returns arms no jump and the loop goes on.
+/// The trailing peek covers a death the engine noted during the
+/// last command's execution without an unwind for the REPL to
+/// consume (its drain recorded the verdict at a wait boundary):
+/// the engine's own reader ends its loop on the same peek
+/// (script_driver's reader boundary check), the mark's only
+/// consumer is a finish, and the hangup finish resolves the trap's
+/// entry status from the death's own capture — the status seeded
+/// here only shapes that finish's non-signal fallback.
+#[cfg(unix)]
+fn dispatch_fallback_hangup(shell: &mut Shell) {
+    shell.dispatch_prompt_hangup();
+    if let Some(status) = shell.take_session_exit_jump() {
+        end_repl_session_on_hangup(shell, status);
+    }
+    if shell.executor().hangup_death_pending() {
+        let status = shell.last_exit_code();
+        end_repl_session_on_hangup(shell, status);
+    }
+}
+
+/// niubash#985: one line read for the `--noediting` fallback loop.
+#[cfg(unix)]
+enum FallbackLine {
+    /// A complete (or EOF-terminated) line, terminators not yet
+    /// trimmed.
+    Line(String),
+    /// stdin reached end of input with nothing pending.
+    Eof,
+    /// The SIGHUP doorbell rang while the read was parked; the
+    /// caller runs the prompt hangup dispatch and reads again.
+    Hangup,
+}
+
+/// niubash#985: byte state for the fallback loop's stdin reader
+/// (unix). The blocking `StdinLock::read_line` it replaces retries
+/// silently on EINTR, so a queued SIGHUP could never surface at a
+/// parked prompt; this reader polls fd 0 in slices (the same
+/// 100 ms cadence as the line editor's break polling) and reports
+/// the doorbell between slices. Bytes the kernel handed over past
+/// a line boundary — and a partial line the doorbell interrupted —
+/// stay buffered here, the fallback shape of the editor's
+/// suspended edit buffer: a trapped hangup resumes the read with
+/// the partial line intact.
+#[cfg(unix)]
+#[derive(Default)]
+struct FallbackStdin {
+    pending: Vec<u8>,
+    at_eof: bool,
+}
+
+#[cfg(unix)]
+impl FallbackStdin {
+    fn read_line(&mut self) -> std::io::Result<FallbackLine> {
+        use std::os::unix::io::AsRawFd;
+        let fd = std::io::stdin().as_raw_fd();
+        loop {
+            // The doorbell outranks buffered input, as GNU's
+            // termsig handling preempts a parked read rather than
+            // waiting for the line to complete. The flag is only
+            // peeked here — the loop's dispatch takes it. A flag
+            // left over from a delivery the last command's own
+            // drain already adjudicated costs one dispatch poll
+            // and the read resumes with the buffer intact.
+            if crate::ctrl_c::hangup_doorbell().load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(FallbackLine::Hangup);
+            }
+            if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+                let bytes: Vec<u8> = self.pending.drain(..=end).collect();
+                return Ok(FallbackLine::Line(decode_fallback_line(bytes)?));
+            }
+            if self.at_eof {
+                if self.pending.is_empty() {
+                    return Ok(FallbackLine::Eof);
+                }
+                let bytes = std::mem::take(&mut self.pending);
+                return Ok(FallbackLine::Line(decode_fallback_line(bytes)?));
+            }
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let rc = unsafe { libc::poll(&mut pfd, 1, 100) };
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            if rc == 0 {
+                continue;
+            }
+            // Readable (or POLLHUP/POLLERR — the read itself
+            // reports which): take what the kernel has; line
+            // assembly happens at the top of the loop.
+            let mut chunk = [0u8; 4096];
+            let n = unsafe { libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            if n == 0 {
+                self.at_eof = true;
+                continue;
+            }
+            self.pending.extend_from_slice(&chunk[..n as usize]);
+        }
+    }
+}
+
+/// `BufRead::read_line`'s UTF-8 contract for the fallback reader:
+/// a line that is not valid UTF-8 is an InvalidData error, exactly
+/// as the std read reported it.
+#[cfg(unix)]
+fn decode_fallback_line(bytes: Vec<u8>) -> std::io::Result<String> {
+    String::from_utf8(bytes).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("stream did not contain valid UTF-8: {err}"),
+        )
+    })
+}
+
 /// `--noediting` fallback: read plain input lines with no
 /// readline-style editing, matching GNU bash when invoked with --noediting.
 /// The prompt is rendered through the same PromptBackend so the visual style
 /// is preserved; control characters and completion are unavailable.
 fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
     use std::io::BufRead;
     let console_baseline = crate::console_guard::capture();
+    #[cfg(not(unix))]
     let stdin = std::io::stdin();
     let mut pending = PendingReplInput::default();
+    // niubash#985: the fallback reader's byte state lives for the
+    // whole session (see FallbackStdin).
+    #[cfg(unix)]
+    let mut fallback_stdin = FallbackStdin::default();
     loop {
+        // niubash#971: a console close/logoff/shutdown event requests
+        // the session end; the handler waits (bounded) for this funnel.
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(shell);
+        }
         crate::console_guard::restore(&console_baseline);
+        // niubash#985: same loop-top hangup dispatch as the
+        // line-editor loop — a hangup that landed while a command
+        // owned the terminal rang the doorbell with no parked read
+        // to break; adjudicate it before the next prompt is drawn.
+        #[cfg(unix)]
+        if crate::ctrl_c::take_hangup_doorbell() {
+            dispatch_fallback_hangup(shell);
+        }
         // niubash#799: same winsize fold as the line-editor loop — the
         // no-editing reader still expands `$COLUMNS`/`$LINES` per line.
         shell.refresh_winsize_variables();
@@ -6740,10 +7032,41 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         print!("{prompt}");
         let _ = std::io::stdout().flush();
 
-        let mut line = String::new();
-        let read = stdin.lock().read_line(&mut line)?;
-        if read == 0 {
-            break;
+        let line: String;
+        #[cfg(unix)]
+        {
+            match fallback_stdin.read_line()? {
+                FallbackLine::Line(text) => line = text,
+                FallbackLine::Eof => break,
+                FallbackLine::Hangup => {
+                    // niubash#985: the doorbell rang while the read
+                    // was parked; the engine's queue holds the
+                    // delivery. Take the flag and run the same prompt
+                    // dispatch the line-editor loop runs; a trapped
+                    // or ignored hangup arms no jump and the read
+                    // simply resumes (the reader kept the partial
+                    // line buffered).
+                    let _ = crate::ctrl_c::take_hangup_doorbell();
+                    dispatch_fallback_hangup(shell);
+                    continue;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let mut text = String::new();
+            let read = stdin.lock().read_line(&mut text)?;
+            if read == 0 {
+                break;
+            }
+            line = text;
+        }
+        // niubash#971: same close check as the line-editor loop (no
+        // wake record here: the blocking std read is not woken by one,
+        // and an injected record could surface as input — the
+        // handler-thread fallback flush covers the history).
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(shell);
         }
         let line = line.trim_end_matches(['\r', '\n']);
         if pending.is_empty() && line.trim().is_empty() {
@@ -6751,6 +7074,10 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         }
         if pending.is_empty() {
             if let Some(status) = repl_exit_status(line) {
+                // niubash#985: an accepted line is recorded before
+                // the session ends on it, as on the line-editor path
+                // (reedline records at accept, ahead of execution).
+                shell.record_accepted_history_line(line);
                 end_repl_session(shell, status);
             }
         }
@@ -6762,6 +7089,10 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
 
         let is_multiline = pending.is_multiline();
         let script = pending.take();
+        // niubash#985: save-at-accept — the fallback has no editor
+        // to record the submission, so the loop does it itself,
+        // before execution (see Shell::record_accepted_history_line).
+        shell.record_accepted_history_line(&script);
         if is_multiline {
             let _ = shell.execute_interactive_script(&script);
         } else {
@@ -6770,6 +7101,20 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         flush_repl_output();
         // niubash R1: same exit-jump consumption as the line-editor loop.
         if let Some(status) = shell.take_session_exit_jump() {
+            // niubash#985: when the jump is the engine's untrapped
+            // hangup termsig (its 128+SIGHUP unwind), the death must
+            // go through the hangup finish — the plain finish's
+            // two-guard composition drops the termsig mark with its
+            // first guard, resolves the finish to the interrupted
+            // line's own status, and exits plainly instead of dying
+            // by the signal. The peek is exact: the mark is set only
+            // by the termsig adjudication that armed this jump, no
+            // finish has run since, and the finish remains the
+            // mark's sole consumer (the host never takes it).
+            #[cfg(unix)]
+            if shell.executor().hangup_death_pending() {
+                end_repl_session_on_hangup(shell, status);
+            }
             end_repl_session(shell, status);
         }
     }
@@ -10769,6 +11114,7 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
     fn lf() -> ReedlineRawEvent {
         paste_key(
             crossterm29::event::KeyCode::Enter,
@@ -10778,6 +11124,7 @@ mod tests {
 
     /// The LF partner as the raw console event the scripted queue holds
     /// (`Event::Key`, not the reedline wrapper `lf()` produces).
+    #[cfg(windows)]
     fn lf_key_event() -> crossterm29::event::Event {
         crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
             crossterm29::event::KeyCode::Enter,
@@ -11052,6 +11399,7 @@ mod tests {
     /// read loop does after a probe requeued to the stream's head
     /// (niubash#806: the body-evidence key rides the same queue the
     /// probes read, so the driver pops it exactly as the live loop would).
+    #[cfg(windows)]
     fn dispatch_queued(
         detector: &mut PasteChunkEditMode,
         queue: &std::sync::Arc<std::sync::Mutex<VecDeque<crossterm29::event::Event>>>,
@@ -11265,6 +11613,7 @@ mod tests {
     /// loop pops the queue front and dispatches it, exactly what reedline's
     /// read loop does against the live console queue (and what it does
     /// with a key a probe requeued to the stream's head, niubash#806).
+    #[cfg(windows)]
     fn feed_paste_burst(input: &str) -> String {
         let (mut detector, queue) = paste_detector_and_queue(Vec::new());
         let mut reassembled = String::new();
