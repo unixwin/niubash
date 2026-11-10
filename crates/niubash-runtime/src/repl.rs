@@ -5397,22 +5397,19 @@ pub(crate) fn parse_keymap_bind_rule(
         );
     }
     let parsed = rubash::builtins::bind::parse_positional_binding(rest).map_err(reason)?;
-    // The wildcard arm below is unreachable against rubash master (only
-    // Function/Macro exist until #2993 lands) — allow the lint for that
-    // window; the allow is inert once `BindingSpec::Keymap` exists.
-    #[allow(unreachable_patterns)]
     let kind = match parsed.spec {
         rubash::builtins::bind::BindingSpec::Function { name } => BindKindView::Function { name },
         rubash::builtins::bind::BindingSpec::Macro { text } => BindKindView::Macro { text },
-        // Interim (rubash#2993): the engine adds `BindingSpec::Keymap` — a
-        // key bound to a whole keymap (GNU bind.c:1845 ISKMAP). The host
-        // contract has no keymap-valued view kind yet (GAP-13 Q-E kept the
-        // view a 1:1 mirror), so render it the way the engine's own view
-        // does — as the `prefix-meta` function name. A wildcard, not an
-        // explicit arm, so this compiles against rubash master both before
-        // and after #2993 lands; the follow-up refines it to an explicit
-        // arm with a keymap-valued view kind + ledger rows.
-        _ => BindKindView::Function {
+        // `BindingSpec::Keymap` (rubash#2993): a key bound to a whole
+        // keymap (GNU bind.c:1845 ISKMAP). This explicit arm consumes it
+        // per the engine's current view contract: `BindKindView` has no
+        // keymap variant, so render it the way the engine's own view
+        // layer does in `BindView::capture` (rubash `src/api/bind.rs`)
+        // — as the `prefix-meta` function name. A keymap-valued
+        // `BindKindView` variant and its ledger rows are still the
+        // rubash#3013 engine half; this arm upgrades with that contract
+        // change when it lands.
+        rubash::builtins::bind::BindingSpec::Keymap { .. } => BindKindView::Function {
             name: "prefix-meta".to_string(),
         },
     };
@@ -10623,14 +10620,13 @@ mod tests {
 
     #[test]
     fn keymap_bind_rule_prefix_meta_renders_as_function() {
-        // Interim rendering for rubash#2993: `prefix-meta` binds the key to
-        // a whole keymap (GNU bind.c:1845 ISKMAP), which the host contract
-        // cannot yet value — until the follow-up adds a keymap-valued view
-        // kind, the rule renders as the `prefix-meta` function name, the
-        // same rendering the engine's own view layer chose. On rubash
-        // master this rides the old `Function` spec; once #2993 lands it
-        // rides the wildcard arm above — the test pins the rendering on
-        // both sides of the landing.
+        // Rendering for `BindingSpec::Keymap` (rubash#2993): `prefix-meta`
+        // binds the key to a whole keymap (GNU bind.c:1845 ISKMAP), which
+        // the host contract cannot yet value — until rubash#3013 adds a
+        // keymap-valued view kind, the rule renders as the `prefix-meta`
+        // function name, the same rendering the engine's own view layer
+        // chose. This rides the explicit `BindingSpec::Keymap` arm in
+        // `parse_keymap_bind_rule` — the test pins that rendering.
         use rubash::api::BindKindView as BindKind;
         let session = Session::builder().build().expect("test session builds");
         let entry =
