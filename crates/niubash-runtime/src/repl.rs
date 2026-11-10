@@ -10773,6 +10773,7 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
     fn lf() -> ReedlineRawEvent {
         paste_key(
             crossterm29::event::KeyCode::Enter,
@@ -10782,6 +10783,7 @@ mod tests {
 
     /// The LF partner as the raw console event the scripted queue holds
     /// (`Event::Key`, not the reedline wrapper `lf()` produces).
+    #[cfg(windows)]
     fn lf_key_event() -> crossterm29::event::Event {
         crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
             crossterm29::event::KeyCode::Enter,
@@ -11056,6 +11058,7 @@ mod tests {
     /// read loop does after a probe requeued to the stream's head
     /// (niubash#806: the body-evidence key rides the same queue the
     /// probes read, so the driver pops it exactly as the live loop would).
+    #[cfg(windows)]
     fn dispatch_queued(
         detector: &mut PasteChunkEditMode,
         queue: &std::sync::Arc<std::sync::Mutex<VecDeque<crossterm29::event::Event>>>,
@@ -11269,6 +11272,7 @@ mod tests {
     /// loop pops the queue front and dispatches it, exactly what reedline's
     /// read loop does against the live console queue (and what it does
     /// with a key a probe requeued to the stream's head, niubash#806).
+    #[cfg(windows)]
     fn feed_paste_burst(input: &str) -> String {
         let (mut detector, queue) = paste_detector_and_queue(Vec::new());
         let mut reassembled = String::new();

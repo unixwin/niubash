@@ -475,14 +475,14 @@ mod tests {
     fn test_link(source: &Path, link: &Path) -> std::io::Result<()> {
         match std::fs::hard_link(source, link) {
             Ok(()) => Ok(()),
-            Err(hardlink_error) => {
+            Err(_hardlink_error) => {
                 #[cfg(unix)]
                 {
                     std::os::unix::fs::symlink(source, link)
                 }
                 #[cfg(not(unix))]
                 {
-                    Err(hardlink_error)
+                    Err(_hardlink_error)
                 }
             }
         }

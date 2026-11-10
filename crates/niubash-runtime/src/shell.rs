@@ -11959,7 +11959,9 @@ complete -F _envtooldyn_hook envtooldyn
 
 #[cfg(test)]
 mod invocation_name_tests {
-    use super::tests::{test_shell, unique_temp_dir, CwdGuard};
+    #[cfg(windows)]
+    use super::tests::unique_temp_dir;
+    use super::tests::{test_shell, CwdGuard};
     use super::{default_script_name_from, HookConfig};
     use crate::test_support::PROCESS_STATE_LOCK;
 
@@ -12650,6 +12652,7 @@ gap7_widget() {
     fn gap5_host_path_reads_route_through_the_session_face() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut shell = test_shell(HookConfig::default());
+        #[cfg(windows)]
         let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
 
         #[cfg(windows)]
