@@ -4226,6 +4226,20 @@ impl Shell {
             .map(|provider| provider.shared_state())
     }
 
+    /// The session-end flush handle (niubash#971), if interactive entry
+    /// installed a provider: the same write the session-end funnel
+    /// performs, as cloned `Arc` state the Windows console-close path
+    /// can run off the REPL thread (see `ctrl_c`). `None` when no
+    /// provider is installed.
+    pub(crate) fn session_end_flush_handle(
+        &self,
+    ) -> Option<Arc<crate::history::SessionEndFlushHandle>> {
+        self.history_provider
+            .as_ref()
+            .and_then(|provider| provider.try_borrow().ok())
+            .map(|provider| Arc::new(provider.session_end_flush_handle()))
+    }
+
     /// Refresh the shared HIST* settings cell from the executor's
     /// current state (niubash#646).
     ///

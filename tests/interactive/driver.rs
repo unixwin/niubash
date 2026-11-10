@@ -873,6 +873,12 @@ impl NiuSession {
         }
     }
 
+    /// The spawned shell's process id, for signal-based cells
+    /// (niubash#971: the SIGHUP probe drives the shell by signal).
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.lock().unwrap().process_id()
+    }
+
     /// Home directory of the sandbox (fresh per session).
     pub fn home(&self) -> &Path {
         &self.home
