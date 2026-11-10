@@ -64,6 +64,28 @@
 //! host's only unix reaction point is reedline's `Signal::CtrlC` — while
 //! the prompt owns the tty in raw mode no kernel SIGINT is generated at
 //! all (the `0x03` byte is read as a keystroke).
+//!
+//! niubash#974: SIGHUP is the one gap in that settlement. A hangup (tab
+//! close: kernel SIGHUP plus a dead pty, or a bare `kill -HUP`) reaches
+//! the engine's queue correctly, but at the prompt nothing ever runs a
+//! command boundary, and the parked `read_line` returns neither for the
+//! queued note nor for the dead tty — the session hung forever and lost
+//! its whole history and its EXIT trap. The repair is a DOORBELL, not a
+//! handler: one extra signal-hook-registry action for SIGHUP whose whole
+//! body stores `true` into an `AtomicBool` shared with the line editor
+//! (reedline's `with_break_signal`). It is deliberately NOT one of the
+//! two prohibited registrations above: it replaces nothing (the
+//! registry composes it alongside the engine's own action), it never
+//! touches the engine queue (no take, no requeue), and it dispatches no
+//! trap logic — its only consumer is the editor's input loop, which
+//! returns `Signal::ExternalBreak` so the REPL can hand the delivery to
+//! the engine's own boundary dispatch (`Shell::dispatch_prompt_hangup`)
+//! on the main thread. Adjudication — trapped action, ignore, or the
+//! untrapped termsig death — stays the engine's alone, exactly as for a
+//! delivery drained by a submitted line. The registration is scoped to
+//! the interactive REPL (`install_hangup_doorbell`, called from
+//! `run_repl`): script routes never register, so their SIGHUP keeps the
+//! plain kernel default disposition.
 
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -171,6 +193,74 @@ pub fn queue_prompt_sigint(handler_already_queued: bool) {
             libc::raise(libc::SIGINT);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// niubash#974: the SIGHUP doorbell (unix). See the module header for why
+// a flag-only registry action is not the prohibited second handler: it
+// queues nothing, dispatches nothing, and exists only to make the
+// parked editor return so the REPL can run the engine's own boundary
+// dispatch on the main thread.
+
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::{Arc, OnceLock};
+
+/// The doorbell flag: set by the SIGHUP registry action, shared with
+/// every line editor the REPL builds (reedline's `with_break_signal`
+/// swaps it inside its input loop and returns
+/// `Signal::ExternalBreak`). One flag per process, created on first
+/// use so the editor built before registration and the action
+/// registered at `run_repl` entry name the same cell.
+#[cfg(unix)]
+static HANGUP_DOORBELL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// The shared SIGHUP doorbell flag (niubash#974).
+#[cfg(unix)]
+pub fn hangup_doorbell() -> Arc<AtomicBool> {
+    HANGUP_DOORBELL
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
+
+/// Take the doorbell flag (niubash#974): `true` when a SIGHUP delivery
+/// rang it since the last take. The REPL checks it at the top of every
+/// prompt iteration — a hangup that landed while a command owned the
+/// terminal (where the engine's in-run boundaries already adjudicated
+/// it) or in the sliver before a read is dispatched there, not left
+/// for the editor's next cycle.
+#[cfg(unix)]
+pub fn take_hangup_doorbell() -> bool {
+    hangup_doorbell().swap(false, Ordering::SeqCst)
+}
+
+/// Register the SIGHUP doorbell action (niubash#974). Called once from
+/// `run_repl` entry; interactive sessions only — script routes never
+/// call it, so their SIGHUP disposition stays the kernel default. The
+/// action composes inside signal-hook's registry next to the engine's
+/// own: deliveries still queue in the engine untouched, and a SIGHUP
+/// the user trapped or ignored is adjudicated by the engine's dispatch
+/// (ignore flips the disposition to SIG_IGN, so the registry action
+/// stops firing at all). Registration failure leaves the flag
+/// unsettable — the session keeps the pre-#974 behavior rather than
+/// failing to start.
+#[cfg(unix)]
+pub fn install_hangup_doorbell() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        let flag = hangup_doorbell();
+        // SAFETY: the action only stores into an `AtomicBool` — an
+        // async-signal-safe operation — and captures nothing else.
+        let registered = unsafe {
+            signal_hook::low_level::register(libc::SIGHUP, move || {
+                flag.store(true, Ordering::SeqCst);
+            })
+        };
+        if let Err(error) = registered {
+            log::debug!("ctrl_c: SIGHUP doorbell registration failed: {error}");
+        }
+    });
 }
 
 /// niubash#669: does a console input record describe a Ctrl+C key press?

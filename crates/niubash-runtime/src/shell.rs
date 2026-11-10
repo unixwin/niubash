@@ -1517,6 +1517,76 @@ impl Shell {
         self.sync_alias_mirror_from_executor();
     }
 
+    /// niubash#974: run the engine's pending-signal dispatch for a
+    /// prompt hangup. A SIGHUP delivered while the prompt was parked in
+    /// the editor sits in the engine's queue with no command boundary
+    /// to drain it; the doorbell (`ctrl_c::install_hangup_doorbell`)
+    /// made the editor return, and this method gives the executor the
+    /// same single boundary poll `dispatch_prompt_interrupt` gives a
+    /// prompt Ctrl+C — an empty program, so nothing executes and only
+    /// the tail poll of `execute_ast` runs. The engine adjudicates:
+    /// a trapped HUP runs its action now (the session continues), an
+    /// ignored one drops, and an untrapped one records the termsig
+    /// death and unwinds as `ExitCode(128 + SIGHUP)`, which the
+    /// classification below arms as the session exit jump (it is NOT
+    /// the DISCARD class — `take_signal_discard_pending` stays down
+    /// for a termsig, rubash#2233). Unlike the SIGINT path there is
+    /// no status seeding or forcing: GNU gives a prompt hangup no
+    /// synthetic `$?`, the trap (if any) observes the live status,
+    /// and the death's own 129 reaches the finish through the jump.
+    pub fn dispatch_prompt_hangup(&mut self) {
+        self.session_exit_jump = None;
+        let ast = rubash::parser::Ast {
+            commands: Vec::new(),
+        };
+        match self.executor_mut().execute_ast(&ast) {
+            Ok(()) => {}
+            Err(rubash::executor::ExecuteError::ExitCode(code)) => {
+                self.session_mut().set_last_status(code);
+                self.note_exit_code_unwind(code);
+            }
+            Err(rubash::executor::ExecuteError::SigintUnwind) => {
+                self.session_mut().set_last_status(130);
+            }
+            Err(_) => {}
+        }
+        self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
+        self.sync_alias_mirror_from_executor();
+    }
+
+    /// niubash#974: the session finish for an adjudicated hangup
+    /// death, composed on ONE finish guard so the termsig mark the
+    /// trap step takes is still on the pass when the duties step
+    /// resolves it — the two-guard composition of
+    /// [`Shell::finish_exit_trap`] + [`Shell::finish_stream_end_duties`]
+    /// drops the mark with the first guard and would exit 129 instead
+    /// of dying by the signal. The caller (the REPL's hangup route)
+    /// runs the host history flush BEFORE this call: on a termsig
+    /// death GNU saves history first (sig.c:613-618
+    /// `maybe_save_shell_history` at the head of `termsig_handler`),
+    /// the reverse of the plain `exit_shell` order. Inside the pass
+    /// the engine keeps its own termsig order: hangup of the jobs,
+    /// then the EXIT trap (with the death's trap-entry status), then
+    /// the stream-end duties, whose tail restores `SIG_DFL` and
+    /// re-raises the hangup (`die_by_signal`, sig.c:649-667
+    /// `kill_shell`) — so on the death this function does not return
+    /// at all. It returns the resolved status for the shapes that are
+    /// not a signal death (a HUP trap action that itself exited: the
+    /// jump came from the trap, no mark is pending, and the exit is
+    /// the trap's plain status). The engine history write is gated
+    /// `Skip`: the route's store is the host provider's, flushed by
+    /// the caller (niubash#642).
+    pub fn finish_session_on_hangup(&mut self, status: i32) -> i32 {
+        self.run_zshexit_hooks();
+        let mut finish = self.session_mut().begin_finish(status);
+        let code = finish.run_exit_trap();
+        finish.run_stream_end_duties(FinishDuties {
+            history: SessionHistoryWrite::Skip,
+        });
+        code
+    }
+
     fn execute_line_with_options(
         &mut self,
         line: &str,

@@ -296,6 +296,46 @@ pub fn spawn_self_update(args: &[String]) -> Option<i32> {
 ///
 /// The shell is shared through the same `Rc<RefCell<Shell>>` bridge the REPL
 /// uses, so the completer can run shell-function completions in the engine.
+/// niubash#974: hand a doorbell-waked prompt read to the engine's hangup
+/// dispatch and end the session when the dispatch armed the exit jump.
+/// The death itself is composed by
+/// [`Shell::finish_session_on_hangup`]: this route only sequences the
+/// host duties around it — the history flush lands BEFORE the finish,
+/// because on a termsig death GNU saves history at the head of the
+/// handler (sig.c:613-618), ahead of the hangup and the EXIT trap; the
+/// finish then hangs up the jobs, runs the trap, and dies by the
+/// signal inside its duties step, so the lines after it are the plain
+/// fallback for a jump that was not a signal death (a HUP trap action
+/// that itself exited).
+#[cfg(unix)]
+fn end_repl_session_on_hangup(shell: &mut Shell, status: i32) -> ! {
+    shell.refresh_history_settings();
+    shell.flush_session_history();
+    let code = shell.finish_session_on_hangup(status);
+    flush_repl_output();
+    std::process::exit(code);
+}
+
+/// niubash#974: the REPL half of a prompt hangup — run the engine's
+/// boundary dispatch for the delivery the doorbell reported, then, if
+/// the adjudication armed the session exit jump (the untrapped termsig
+/// death, or a HUP trap action that itself exited), end the session
+/// through the hangup finish. A trapped hangup whose action returns
+/// arms no jump: the session simply continues, and an editor that was
+/// suspended by the break resumes its buffer on the next read.
+#[cfg(unix)]
+fn dispatch_repl_hangup(shell: &Rc<RefCell<Shell>>) {
+    shell.borrow_mut().dispatch_prompt_hangup();
+    // Take into a `let` first: an `if let` scrutinee's `borrow_mut()`
+    // temporary would still be alive in the body, and the session-end
+    // call's own `borrow_mut()` would panic on the second borrow (the
+    // widget arm's R1 note).
+    let jump = shell.borrow_mut().take_session_exit_jump();
+    if let Some(status) = jump {
+        end_repl_session_on_hangup(&mut shell.borrow_mut(), status);
+    }
+}
+
 pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline> {
     let shell_ref = shell.borrow();
     // Infallible since niubash#134: a history file that cannot be opened
@@ -613,6 +653,17 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
         repaint_cycle_session,
     );
     crate::idle_repaint::ensure_cache_observer();
+
+    // niubash#974: attach the SIGHUP doorbell to every editor build, so
+    // a hangup delivered while this read is parked returns
+    // `Signal::ExternalBreak` (the editor polls while a break signal is
+    // attached) instead of leaving the read parked on a dead tty. The
+    // flag is the process-wide cell `ctrl_c` registers its
+    // signal-hook action on; rebuilds re-attach the same cell.
+    #[cfg(unix)]
+    {
+        editor = editor.with_break_signal(crate::ctrl_c::hangup_doorbell());
+    }
 
     Ok(editor)
 }
@@ -6286,6 +6337,12 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     if let Some(notice) = crate::config::legacy_config_notice() {
         eprintln!("{notice}");
     }
+    // niubash#974: arm the SIGHUP doorbell before the first prompt read
+    // (unix): from here on a hangup delivery also rings the editor's
+    // break flag, so a parked read returns and the loop can run the
+    // engine's prompt dispatch. Registration is once per process.
+    #[cfg(unix)]
+    crate::ctrl_c::install_hangup_doorbell();
     shell.borrow_mut().load_user_widget_bindings();
     shell.borrow_mut().load_user_compdefs();
     shell.borrow_mut().load_engine_bindings();
@@ -6306,6 +6363,16 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
 
     loop {
         crate::console_guard::restore(&console_baseline);
+        // niubash#974: a hangup that landed while a command owned the
+        // terminal (or in the sliver before this iteration's read) rang
+        // the doorbell without an editor to break; give the delivery
+        // its prompt dispatch before the next prompt is drawn — an
+        // untrapped hangup ends the session here instead of parking
+        // in the read below with the note already queued.
+        #[cfg(unix)]
+        if crate::ctrl_c::take_hangup_doorbell() {
+            dispatch_repl_hangup(&shell);
+        }
         // niubash#799: fold the live console size into $COLUMNS/$LINES
         // before every prompt — the jobs.c `wait_for` face of GNU's
         // checkwinsize re-read (the resize may also have landed while a
@@ -6684,6 +6751,22 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 if let Some(status) = jump {
                     end_repl_session(&mut shell.borrow_mut(), status);
                 }
+                continue;
+            }
+            Ok(Signal::ExternalBreak(_buffer)) => {
+                // niubash#974: the read returned early because the
+                // hangup doorbell rang while it was parked (the editor
+                // consumed the flag itself when it broke). Hand the
+                // queued delivery to the engine's prompt dispatch: a
+                // trapped HUP runs its action and the session goes on
+                // — the editor kept the suspended edit state, so the
+                // next read resumes the buffer and point — while an
+                // untrapped one ends the session by the signal through
+                // the hangup finish. No `finish_abandoned`: like the
+                // host-command suspension above, the line is not
+                // abandoned, it resumes if the session does.
+                #[cfg(unix)]
+                dispatch_repl_hangup(&shell);
                 continue;
             }
             Ok(_) => {
