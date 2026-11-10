@@ -192,6 +192,36 @@ lane failure outside this script.  The loadable-builtin probe expects a
 dynamically linkable niu (not `crt-static`/musl-static), matching
 `build.rs`'s export gate.
 
+## Manual-run list
+
+Some ecosystem faces cannot be chained in automation — live TUI
+interaction, live-session rendering, network-heavy installs. Per the
+2026-11-06 ruling (manual local runs are acceptable coverage when
+recorded), those faces sit on one recorded list with a named procedure
+per face and a run log: the list lives in the ecosuite warehouse as
+`MANUAL-RUNS.md` (warehouse-local git, `ecosuite` commit `483c2bb`), and
+covers:
+
+- fzf: the real junegunn/fzf `shell/key-bindings.bash` /
+  `shell/completion.bash` (never vendored or sourced by any harness) + live
+  fzf TUI interaction (Ctrl-R / Ctrl-T / Alt-C / `**` completion).
+- ble.sh (pin v0.4.0-devel3): multiline editing + completion rendering in a
+  live session (`ble-attach` is unreliable in automation).
+- oh-my-niu bundle: end-to-end exercise from an installed location + the
+  theme-gallery visual pass.
+- nvm (pin v0.40.8): `test/slow` + `test/installation_iojs` (real-network
+  runs; never run on any shell so far).
+
+The named procedures for the fzf face (M1) and the oh-my-niu face (M3)
+are defined in that document on top of this repository's scripts —
+`scripts/readline-plugin-probes/run.sh`,
+`scripts/run-realworld-with-niubash.sh`, and `tests/smoke.rs`. The fzf
+probes in this harness drive a deterministic stand-in, not fzf's own
+scripts, so they do not cover M1 by themselves. A manual pass counts as
+coverage only when it is logged in `MANUAL-RUNS.md` (date, operator,
+binary/version, result). As of the list's creation (2026-11-08), no
+manual runs are recorded yet for any of the four faces.
+
 ## Adding a probe
 
 1. Put deterministic fixtures under `fixtures/` and take paths as arguments.
