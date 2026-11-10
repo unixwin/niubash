@@ -502,9 +502,15 @@ impl super::sources::PluginSourceAdapter for FileSourceAdapter {
 const WILD_CANDIDATE_CAP: usize = 256;
 
 /// Enumerate every `*.sh` / `*.bash` file under `root` (skipping `.git`),
-/// shallowest paths first, each tagged for honest presentation. Nothing is
-/// filtered out — `install.sh` and test scripts are *listed with a tag*,
-/// never silently hidden and never guessed to be "the" entry (§14.6.1).
+/// plus extension-less entry files (a regular file with no suffix whose
+/// first bytes are a shebang — niubash#968: upstream entry files such as
+/// `complete_alias` carry no suffix, and the shebang is what marks them
+/// as executable script entries rather than data/README files; the Unix
+/// executable bit is deliberately NOT consulted, it is meaningless on
+/// Windows and the fixture itself is mode 644), shallowest paths first,
+/// each tagged for honest presentation. Nothing is filtered out —
+/// `install.sh` and test scripts are *listed with a tag*, never silently
+/// hidden and never guessed to be "the" entry (§14.6.1).
 pub fn enumerate_wild_candidates(root: &Path) -> Vec<SourceAsset> {
     let mut files: Vec<(usize, String)> = Vec::new(); // (depth, posix rel path)
     collect_shell_files(root, root, 0, &mut files);
@@ -594,13 +600,35 @@ fn collect_shell_files(root: &Path, dir: &Path, depth: usize, out: &mut Vec<(usi
             collect_shell_files(root, &path, depth + 1, out);
         } else if path.is_file() {
             let extension = path.extension().and_then(|e| e.to_str());
-            if extension == Some("sh") || extension == Some("bash") {
+            let shell_suffix = extension == Some("sh") || extension == Some("bash");
+            if shell_suffix || is_extensionless_entry(&path, &name) {
                 if let Ok(relative) = path.strip_prefix(root) {
                     out.push((depth, relative.to_string_lossy().replace('\\', "/")));
                 }
             }
         }
     }
+}
+
+/// An extension-less entry file (niubash#968): a visible regular file
+/// with no suffix whose first two bytes are a shebang (`#!`). The shebang
+/// is the mechanism — it is what distinguishes a script entry from a
+/// data file, a README, or a test script that merely happens to have no
+/// suffix. Only the first two bytes are read, so a large suffix-less
+/// data file costs nothing to reject. Dotfiles are never entries.
+fn is_extensionless_entry(path: &Path, name: &str) -> bool {
+    if name.starts_with('.') {
+        return false;
+    }
+    if path.extension().is_some_and(|ext| !ext.is_empty()) {
+        return false;
+    }
+    use std::io::Read;
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 2];
+    matches!(file.read_exact(&mut head), Ok(())) && head == *b"#!"
 }
 
 /// Enumerate `<dir>/<name>/<name><suffix>` (directory-shaped assets).

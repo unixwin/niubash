@@ -1627,12 +1627,92 @@ fn read_command_name() -> Option<String> {
     result
 }
 
+/// The write face of a keymap-building pass (niubash#843(g)). Every
+/// pass that builds the editor keymap writes through this sink:
+/// `Keybindings` itself implements it as a plain pass-through, and
+/// [`LayeredKeymap`] interposes a recording sink ([`LayerWrites`])
+/// so a layer's writes are observed directly instead of being
+/// inferred from a before/after value diff — the diff cannot see a
+/// rebind to the IDENTICAL event, which is why the registry used to
+/// keep crediting the earlier layer for such a slot.
+pub(crate) trait KeybindingSink {
+    fn add_binding(&mut self, modifier: KeyModifiers, key_code: KeyCode, event: ReedlineEvent);
+    fn remove_binding(
+        &mut self,
+        modifier: KeyModifiers,
+        key_code: KeyCode,
+    ) -> Option<ReedlineEvent>;
+}
+
+impl KeybindingSink for Keybindings {
+    fn add_binding(&mut self, modifier: KeyModifiers, key_code: KeyCode, event: ReedlineEvent) {
+        Keybindings::add_binding(self, modifier, key_code, event);
+    }
+
+    fn remove_binding(
+        &mut self,
+        modifier: KeyModifiers,
+        key_code: KeyCode,
+    ) -> Option<ReedlineEvent> {
+        Keybindings::remove_binding(self, modifier, key_code)
+    }
+}
+
+/// One write performed during a [`LayeredKeymap::layer`] pass, in
+/// the order the pass performed it.
+enum LayerWrite {
+    Add(KeyModifiers, KeyCode, ReedlineEvent),
+    Remove(KeyModifiers, KeyCode),
+}
+
+/// The recording [`KeybindingSink`] a layer pass writes through:
+/// every write lands on the real map and is appended to the op
+/// stream the layer folds into the registry stacks when it ends.
+struct LayerWrites<'a> {
+    map: &'a mut Keybindings,
+    writes: Vec<LayerWrite>,
+}
+
+impl LayerWrites<'_> {
+    fn add_binding(&mut self, modifier: KeyModifiers, key_code: KeyCode, event: ReedlineEvent) {
+        self.map.add_binding(modifier, key_code, event.clone());
+        self.writes.push(LayerWrite::Add(modifier, key_code, event));
+    }
+
+    fn remove_binding(
+        &mut self,
+        modifier: KeyModifiers,
+        key_code: KeyCode,
+    ) -> Option<ReedlineEvent> {
+        let removed = self.map.remove_binding(modifier, key_code);
+        if removed.is_some() {
+            self.writes.push(LayerWrite::Remove(modifier, key_code));
+        }
+        removed
+    }
+}
+
+impl KeybindingSink for LayerWrites<'_> {
+    fn add_binding(&mut self, modifier: KeyModifiers, key_code: KeyCode, event: ReedlineEvent) {
+        LayerWrites::add_binding(self, modifier, key_code, event);
+    }
+
+    fn remove_binding(
+        &mut self,
+        modifier: KeyModifiers,
+        key_code: KeyCode,
+    ) -> Option<ReedlineEvent> {
+        LayerWrites::remove_binding(self, modifier, key_code)
+    }
+}
+
 /// One editor keymap under construction, remembering which registry
 /// layer last wrote each slot (niubash#630). The layer closures are the
 /// same `add_*_keybindings` passes the editor was always built with;
-/// the wrapper only observes their effects, diffing the map around
-/// each pass so the registry can attribute every slot's winner (and
-/// the layer it shadowed) without the passes changing shape.
+/// the wrapper only observes their effects, running each pass against
+/// a recording [`KeybindingSink`] so the registry can attribute every
+/// slot's winner (and the layer it shadowed) without the passes
+/// changing shape.
 struct LayeredKeymap {
     keybindings: Keybindings,
     // Keyed by the (modifiers, key code) pair: reedline 0.52 does not
@@ -1664,39 +1744,50 @@ impl LayeredKeymap {
     fn layer<R>(
         &mut self,
         source: crate::keymap_registry::KeymapSource,
-        apply: impl FnOnce(&mut Keybindings) -> R,
+        apply: impl FnOnce(&mut LayerWrites<'_>) -> R,
     ) -> R {
-        let before = self.keybindings.bindings.clone();
-        let out = apply(&mut self.keybindings);
-        for (combo, event) in &self.keybindings.bindings {
-            if before.get(combo) != Some(event) {
-                self.stacks
-                    .entry((combo.modifier, combo.key_code))
-                    .or_default()
-                    .push((source.clone(), event.clone()));
+        let (out, writes) = {
+            let mut sink = LayerWrites {
+                map: &mut self.keybindings,
+                writes: Vec::new(),
+            };
+            let out = apply(&mut sink);
+            (out, sink.writes)
+        };
+        // Fold the pass's writes into the registry stacks in the
+        // order they happened. A slot written several times in one
+        // pass earns ONE entry, holding the pass's final event for
+        // it; a removal clears the slot's whole stack
+        // (niubash#843(e): the plugin layer's `rl_unbind_key`
+        // removals run inside the script layer, and the registry
+        // must stop listing the key as bound), and a write after a
+        // same-pass removal starts a fresh stack. Because the
+        // writes are recorded rather than diffed, a rebind to the
+        // identical event is recorded too (niubash#843(g)).
+        let mut final_writes: Vec<((KeyModifiers, KeyCode), ReedlineEvent)> = Vec::new();
+        for write in writes {
+            match write {
+                LayerWrite::Add(modifier, key_code, event) => {
+                    if let Some(position) = final_writes
+                        .iter()
+                        .position(|(slot, _)| *slot == (modifier, key_code))
+                    {
+                        final_writes.remove(position);
+                    }
+                    final_writes.push(((modifier, key_code), event));
+                }
+                LayerWrite::Remove(modifier, key_code) => {
+                    final_writes.retain(|(slot, _)| *slot != (modifier, key_code));
+                    self.stacks.remove(&(modifier, key_code));
+                }
             }
         }
-        // niubash#843(e): a layer can also REMOVE a slot (the plugin
-        // layer's `rl_unbind_key` removals run inside the script
-        // layer). A removal leaves no trace in the loop above — the
-        // combo is simply absent afterwards — so without this sweep
-        // the registry kept listing the key as bound by its earlier
-        // layer while the editor had it unbound. A removed slot
-        // loses its whole stack; a later layer re-binding it starts
-        // a fresh one.
-        for combo in before.keys() {
-            if !self.keybindings.bindings.contains_key(combo) {
-                self.stacks.remove(&(combo.modifier, combo.key_code));
-            }
+        for (slot, event) in final_writes {
+            self.stacks
+                .entry(slot)
+                .or_default()
+                .push((source.clone(), event));
         }
-        // Residual (niubash#843(g), cosmetic): a layer that rebinds
-        // a slot to the IDENTICAL event leaves no observable trace
-        // in this before/after diff, so the stack keeps the earlier
-        // writer as the slot's attribution even though the later
-        // layer wrote last. reedline's Keybindings exposes no write
-        // counter to diff against, and the misattribution only shows
-        // in `niu help keys`' source column for exact-duplicate
-        // rebinds — documented here rather than papered over.
         out
     }
 
@@ -3397,7 +3488,10 @@ fn note_unusable_bind(
 ///
 /// Unlike bundle bindkeys these bypass the native-widget pack gate: writing
 /// the variable is the explicit opt-in. Bindings apply to every keymap.
-fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[NativeWidgetBinding]) {
+fn add_user_widget_keybindings<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
+    bindings: &[NativeWidgetBinding],
+) {
     for binding in bindings {
         let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
             eprintln!(
@@ -3428,8 +3522,8 @@ fn add_user_widget_keybindings(keybindings: &mut Keybindings, bindings: &[Native
 /// This coarse view is retained for the #612 test surface; production
 /// builds go through [`add_engine_bind_keybindings_recorded`].
 #[cfg(test)]
-fn add_engine_bind_keybindings(
-    keybindings: &mut Keybindings,
+fn add_engine_bind_keybindings<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
     target: NativeKeymapTarget,
     entries: &[rubash::api::BindEntryView],
 ) -> Vec<UnusableBind> {
@@ -3450,8 +3544,8 @@ fn add_engine_bind_keybindings(
 /// its own positions (base 0); the `[keymap]` user rules resolve
 /// right behind it (base = the snapshot's length), so a user rule's
 /// trigger can never run an engine entry's command.
-fn add_engine_bind_keybindings_recorded(
-    keybindings: &mut Keybindings,
+fn add_engine_bind_keybindings_recorded<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
     target: NativeKeymapTarget,
     entries: &[rubash::api::BindEntryView],
     index_base: usize,
@@ -3939,8 +4033,8 @@ fn control_byte_key_code(byte: char) -> Option<KeyCode> {
     }
 }
 
-fn add_menu_keybindings(
-    keybindings: &mut Keybindings,
+fn add_menu_keybindings<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
     completion_interaction: CompletionInteraction,
 ) {
     // niubash#631: TAB's shape follows the interaction axis. Under
@@ -3987,7 +4081,7 @@ fn add_menu_keybindings(
 /// niubash#207): the PasteSystem edit command only exists under that feature,
 /// and android has no system clipboard to paste from.
 #[cfg(not(target_os = "android"))]
-fn add_system_clipboard_keybindings(keybindings: &mut Keybindings) {
+fn add_system_clipboard_keybindings<S: KeybindingSink + ?Sized>(keybindings: &mut S) {
     keybindings.add_binding(
         KeyModifiers::CONTROL,
         KeyCode::Char('v'),
@@ -3996,7 +4090,7 @@ fn add_system_clipboard_keybindings(keybindings: &mut Keybindings) {
 }
 
 #[cfg(target_os = "android")]
-fn add_system_clipboard_keybindings(_keybindings: &mut Keybindings) {}
+fn add_system_clipboard_keybindings<S: KeybindingSink + ?Sized>(_keybindings: &mut S) {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeKeymapTarget {
@@ -4005,8 +4099,8 @@ pub(crate) enum NativeKeymapTarget {
     ViNormal,
 }
 
-fn add_native_widget_keybindings(
-    keybindings: &mut Keybindings,
+fn add_native_widget_keybindings<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
     _target: NativeKeymapTarget,
     config: &NativeWidgetConfig,
     _bindings: &[NativeWidgetBinding],
@@ -4085,8 +4179,8 @@ fn bundle_keymap_filter_drop(
 /// malformed key silently where the `NIU_BINDKEYS` user path
 /// eprintln!s — now it does both (the same diagnostic, plus the
 /// registry record the reminder pass and `niu help keys` read).
-fn apply_bundle_widget_binding(
-    keybindings: &mut Keybindings,
+fn apply_bundle_widget_binding<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
     target: NativeKeymapTarget,
     binding: &NativeWidgetBinding,
 ) -> Option<crate::keymap_registry::DroppedBind> {
@@ -4136,7 +4230,10 @@ fn unknown_native_widget_presets(presets: &[String]) -> Vec<&str> {
         .collect()
 }
 
-fn add_native_widget_preset_keybindings(keybindings: &mut Keybindings, presets: &[String]) {
+fn add_native_widget_preset_keybindings<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
+    presets: &[String],
+) {
     // niubash#843: an unknown preset name (a typo in
     // NIU_NATIVE_WIDGETS) used to disable the pack silently — warn
     // per name, the way other binding diagnostics do.
@@ -4509,7 +4606,10 @@ fn gnu_name_is_delivered(name: &str) -> bool {
 /// emacs keymap — GNU's defaults live in the emacs keymap; the vi
 /// keymaps carry their own spellings. Multi-key entries ride the
 /// chord layer instead (see [`gnu_default_chord_bindings`]).
-fn add_gnu_command_default_keybindings(keybindings: &mut Keybindings, target: NativeKeymapTarget) {
+fn add_gnu_command_default_keybindings<S: KeybindingSink + ?Sized>(
+    keybindings: &mut S,
+    target: NativeKeymapTarget,
+) {
     if target != NativeKeymapTarget::Emacs {
         return;
     }
@@ -10342,6 +10442,113 @@ mod tests {
         assert_eq!(sequences, vec![chord]);
     }
 
+    // niubash#843(g): a layer that rebinds a slot to the IDENTICAL
+    // event still wrote last, so the registry stack must record the
+    // write — a before/after value diff cannot see it, and
+    // `niu help keys` kept crediting the earlier layer.
+    #[test]
+    fn issue843_identical_rebind_records_the_later_layer() {
+        use crate::keymap_registry::{
+            entries_from_stacks, KeymapMode, KeymapSource, UserBindingVia,
+        };
+        let ctrl_r = (KeyModifiers::CONTROL, KeyCode::Char('r'));
+        let defaults = default_emacs_keybindings();
+        let default_event = defaults
+            .find_binding(ctrl_r.0, ctrl_r.1)
+            .expect("Ctrl-R is a reedline default");
+        assert_eq!(default_event, ReedlineEvent::SearchHistory);
+        let user = KeymapSource::User {
+            via: UserBindingVia::NiuBindkeys,
+        };
+        let stack_of = |stacks: &crate::keymap_registry::KeymapStacks| {
+            stacks
+                .iter()
+                .find(|((modifiers, code), _)| (*modifiers, *code) == ctrl_r)
+                .map(|(_, stack)| stack.clone())
+                .expect("Ctrl-R keeps a registry stack")
+        };
+
+        // Cell 1: the script layer rebinds the default's slot to the
+        // identical event — attribution must move to the script layer.
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::Script, |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, default_event.clone());
+        });
+        let (keybindings, stacks) = builder.finish();
+        assert_eq!(
+            keybindings.find_binding(ctrl_r.0, ctrl_r.1),
+            Some(default_event.clone())
+        );
+        let stack = stack_of(&stacks);
+        assert_eq!(
+            stack.last().map(|(source, _)| source),
+            Some(&KeymapSource::Script),
+            "an identical-event rebind is still a write: {stack:?}"
+        );
+        let entries = entries_from_stacks(KeymapMode::Emacs, stacks, &[]);
+        let attributed: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.source == KeymapSource::Script)
+            .collect();
+        assert_eq!(attributed.len(), 1, "exactly the rebound slot moves");
+        assert_eq!(attributed[0].shadowed, None);
+
+        // Cell 2: the host baseline moves the slot to a different
+        // event, then the user layer rebinds THAT event identically —
+        // the user layer wins, and the shadowed report still names
+        // the default layer (the nearest lower DIFFERENT event).
+        let other_event = ReedlineEvent::CtrlC;
+        assert_ne!(other_event, default_event);
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::HostBaseline, |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, other_event.clone());
+        });
+        builder.layer(user.clone(), |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, other_event.clone());
+        });
+        let (_, stacks) = builder.finish();
+        let stack = stack_of(&stacks);
+        assert_eq!(
+            stack.last().map(|(source, _)| source),
+            Some(&user),
+            "the identical rebind of the new event is the last write: {stack:?}"
+        );
+        let entries = entries_from_stacks(KeymapMode::Emacs, stacks, &[]);
+        let attributed: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.source == user)
+            .collect();
+        assert_eq!(attributed.len(), 1);
+        assert_eq!(attributed[0].shadowed, Some(KeymapSource::Default));
+
+        // Cell 3 (control): a value-changing rebind with no identical
+        // rewrite keeps the changing layer's attribution.
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::HostBaseline, |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, other_event.clone());
+        });
+        let (_, stacks) = builder.finish();
+        let stack = stack_of(&stacks);
+        assert_eq!(
+            stack.last().map(|(source, _)| source),
+            Some(&KeymapSource::HostBaseline)
+        );
+
+        // Cell 4 (control, #843(e) interplay): a removal clears the
+        // stack, and a later layer rebinding even the ORIGINAL event
+        // starts a fresh stack owned by that layer alone.
+        let mut builder = LayeredKeymap::new(defaults.clone());
+        builder.layer(KeymapSource::Script, |keybindings| {
+            keybindings.remove_binding(ctrl_r.0, ctrl_r.1);
+        });
+        builder.layer(user.clone(), |keybindings| {
+            keybindings.add_binding(ctrl_r.0, ctrl_r.1, default_event.clone());
+        });
+        let (_, stacks) = builder.finish();
+        let stack = stack_of(&stacks);
+        assert_eq!(stack, vec![(user, default_event)]);
+    }
+
     #[test]
     fn k3_script_macro_decodes_keystrokes() {
         use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
@@ -10631,6 +10838,7 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
     fn lf() -> ReedlineRawEvent {
         paste_key(
             crossterm29::event::KeyCode::Enter,
@@ -10640,6 +10848,7 @@ mod tests {
 
     /// The LF partner as the raw console event the scripted queue holds
     /// (`Event::Key`, not the reedline wrapper `lf()` produces).
+    #[cfg(windows)]
     fn lf_key_event() -> crossterm29::event::Event {
         crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
             crossterm29::event::KeyCode::Enter,
@@ -10914,6 +11123,7 @@ mod tests {
     /// read loop does after a probe requeued to the stream's head
     /// (niubash#806: the body-evidence key rides the same queue the
     /// probes read, so the driver pops it exactly as the live loop would).
+    #[cfg(windows)]
     fn dispatch_queued(
         detector: &mut PasteChunkEditMode,
         queue: &std::sync::Arc<std::sync::Mutex<VecDeque<crossterm29::event::Event>>>,
@@ -11127,6 +11337,7 @@ mod tests {
     /// loop pops the queue front and dispatches it, exactly what reedline's
     /// read loop does against the live console queue (and what it does
     /// with a key a probe requeued to the stream's head, niubash#806).
+    #[cfg(windows)]
     fn feed_paste_burst(input: &str) -> String {
         let (mut detector, queue) = paste_detector_and_queue(Vec::new());
         let mut reassembled = String::new();
