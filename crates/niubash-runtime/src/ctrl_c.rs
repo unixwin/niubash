@@ -101,11 +101,17 @@ use windows_sys::Win32::System::Console::{
 
 /// Win32 console control event codes, for the pure classifier below.
 /// On Windows these resolve to the `windows_sys` names imported above.
+/// Off Windows the shadows carry the same real Win32 values —
+/// verified against the vendored `windows_sys` 0.59.0 and 0.61.2
+/// sources (`Windows::Win32::System::Console`): CTRL_C_EVENT = 0,
+/// CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2, CTRL_LOGOFF_EVENT = 5,
+/// CTRL_SHUTDOWN_EVENT = 6 — so the classification table the unit
+/// tests pin off Windows is the Windows table itself.
 #[cfg(not(windows))]
 #[cfg_attr(not(windows), allow(dead_code))]
-const CTRL_C_EVENT: u32 = 1;
+const CTRL_C_EVENT: u32 = 0;
 #[cfg(not(windows))]
-const CTRL_CLOSE_EVENT: u32 = 3;
+const CTRL_CLOSE_EVENT: u32 = 2;
 #[cfg(not(windows))]
 const CTRL_LOGOFF_EVENT: u32 = 5;
 #[cfg(not(windows))]
@@ -865,6 +871,21 @@ mod ctrl_c_record_tests {
             classify_console_control_event, ConsoleControlAction::*, CTRL_CLOSE_EVENT,
             CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
         };
+        // The named codes carry the real Win32 values on both
+        // platforms (the windows_sys names on Windows, the shadow
+        // constants above off it): CLOSE = 2, LOGOFF = 5,
+        // SHUTDOWN = 6.
+        assert_eq!(CTRL_CLOSE_EVENT, 2);
+        assert_eq!(CTRL_LOGOFF_EVENT, 5);
+        assert_eq!(CTRL_SHUTDOWN_EVENT, 6);
+        // Literal event codes as well, so the classification table
+        // is pinned even if a name could drift: 2/5/6 request the
+        // session end. (2 is CTRL_CLOSE_EVENT — an earlier draft
+        // of this test asserted it kept going under a wrong
+        // BREAK = 2 label; on Windows that assertion is false.)
+        assert_eq!(classify_console_control_event(2), RequestSessionEnd);
+        assert_eq!(classify_console_control_event(5), RequestSessionEnd);
+        assert_eq!(classify_console_control_event(6), RequestSessionEnd);
         assert_eq!(
             classify_console_control_event(CTRL_CLOSE_EVENT),
             RequestSessionEnd
@@ -882,10 +903,18 @@ mod ctrl_c_record_tests {
     #[test]
     fn issue971_ctrl_c_break_and_unknown_keep_going() {
         use super::{classify_console_control_event, ConsoleControlAction::*, CTRL_C_EVENT};
+        // CTRL_C_EVENT is really 0, on both platforms (shadow
+        // constants above; windows_sys names on Windows). The
+        // handler intercepts C before the classifier runs, and the
+        // classifier itself never requests a session end for it.
+        assert_eq!(CTRL_C_EVENT, 0);
         assert_eq!(classify_console_control_event(CTRL_C_EVENT), KeepGoing);
-        // CTRL_BREAK_EVENT = 2: out of scope for #971, unchanged.
-        assert_eq!(classify_console_control_event(2), KeepGoing);
         assert_eq!(classify_console_control_event(0), KeepGoing);
+        // CTRL_BREAK_EVENT = 1: out of scope for #971, unchanged.
+        assert_eq!(classify_console_control_event(1), KeepGoing);
+        // 3 names no Win32 console event; unknown codes pass
+        // through to the default handler, unchanged.
+        assert_eq!(classify_console_control_event(3), KeepGoing);
         assert_eq!(classify_console_control_event(7), KeepGoing);
         assert_eq!(classify_console_control_event(u32::MAX), KeepGoing);
     }
