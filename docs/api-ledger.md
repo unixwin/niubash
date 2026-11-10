@@ -770,6 +770,21 @@
 > No face change: same field, same per-unit carry, no §6
 > entry added and no census count moves.
 >
+> Addendum (BindingSpec::Keymap census backfill, 2026-11-11,
+> niubash#961): the `BindingSpec::Keymap` variant — a key bound
+> to a whole keymap (GNU bind.c:1845 ISKMAP), rendered by the
+> engine's own view layer as the `prefix-meta` function name —
+> is recorded (§2 row, §6 entry) after §5's completeness check
+> flagged it as consumed-but-unrecorded — niubash#961's explicit
+> Keymap arm in niubash-runtime's repl `parse_keymap_bind_rule`
+> matches the variant and renders it as `BindKindView::Function
+> { name: "prefix-meta" }`, but no census ever registered the
+> variant. The completeness red this raised on the pairing job
+> (and on master itself, once niubash#961 merged) is what
+> surfaced the gap. A keymap-valued `BindKindView` variant and
+> its ledger rows are still the rubash#3013 engine half; this
+> arm upgrades with that contract change when it lands.
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -956,7 +971,7 @@ the 1.5.0 tiers exist to fix.
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (0) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
-| `builtins::bind` | `BindingSpec` + variants `Function`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `format_macro_plain`, `format_variable_plain`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `READLINE_FUNCTIONS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface. The `READLINE_FUNCTIONS` table and the `format_macro_plain` / `format_variable_plain` plain-form formatters (recorded in the 2026-11-01 backfill, see header addendum) are a further exception: niubash's host readline layer calls them directly — the funmap in niubash-runtime's readline_commands module reads the table, and the repl's dump-macros / dump-variables faces format through the pair, over data the gated bind surface loads |
+| `builtins::bind` | `BindingSpec` + variants `Function`, `Keymap`, `Macro`, `BindSpecError`, `format_invalid_keymap`, `format_macro_plain`, `format_variable_plain`, `parse_positional_binding`, `parse_unix_command_spec`, `strip_set_keyword`, `DEFAULT_FUNCTION_BINDINGS`, `READLINE_FUNCTIONS`, `InputrcEnv`, `parse_inputrc_with_env` — the bind builtin's spec-parsing helpers plus the default binding table niubash's bind surface mirrors, consumed inside niubash's gated bind surface (helpers missed by the v2 census, recorded in v3; `DEFAULT_FUNCTION_BINDINGS` recorded in the 2026-10-30 backfill, see header addendum). The `InputrcEnv` / `parse_inputrc_with_env` pair (recorded in the 2026-10-30 inputrc backfill, see header addendum) is the exception to the consumption site: niubash's startup inputrc reader (niubash-runtime's config module) calls it directly, not through the gated bind surface. The `READLINE_FUNCTIONS` table and the `format_macro_plain` / `format_variable_plain` plain-form formatters (recorded in the 2026-11-01 backfill, see header addendum) are a further exception: niubash's host readline layer calls them directly — the funmap in niubash-runtime's readline_commands module reads the table, and the repl's dump-macros / dump-variables faces format through the pair, over data the gated bind surface loads. The `Keymap` variant (recorded in the 2026-11-11 backfill, see header addendum) is a further exception: niubash-runtime's repl `parse_keymap_bind_rule` matches it explicitly and renders it as the `prefix-meta` function name, until rubash#3013 adds a keymap-valued view kind |
 | `history` | `HistoryProvider` (7) — trait impl + `SharedHistoryProvider` injection; the one true capability trait today; plus the `SessionHistory::size_limit` associated helper (recorded in v3) |
 | `history_expand` | `HistChars::default` (1), `HistCtx` (1), `HistEngineState::default` (1), `HistLookup` (1), `history_expand` (1) — the history-expansion engine niubash's host readline layer drives directly for its `history-expand-line` face and the first stage of `shell_expand_line`: niubash-runtime's readline_commands module implements `HistLookup` over the session entries, builds the `HistChars` / `HistCtx` context from the session's `histchars` value and posix mode, and calls `history_expand` over a fresh `HistEngineState` (recorded in the 2026-11-01 backfill; see §0 — the `::default` tokens are recorded under their types in §6) |
 | `expand::tilde` | `tilde::expand_word_prefix` (1) — the tilde-prefix expander niubash's host `tilde-expand` readline command applies to the word at point over the session environment; consumed in niubash-runtime's repl module under the defining-module spelling `expand::tilde::tilde::expand_word_prefix`, which is the spelling §6 records (recorded in the 2026-11-01 backfill; see §0) |
@@ -1646,6 +1661,7 @@ variant rubash::api::TokenRole::Plain
 variant rubash::api::TokenRole::RedirectTarget
 variant rubash::api::TokenRole::Reserved
 variant rubash::builtins::bind::BindingSpec::Function
+variant rubash::builtins::bind::BindingSpec::Keymap
 variant rubash::builtins::bind::BindingSpec::Macro
 variant rubash::executor::ExecuteError::CommandNotFound
 variant rubash::executor::ExecuteError::ExitCode
@@ -1842,6 +1858,16 @@ in-tree consumer tests; niubash names none of it yet.
 The same change's per-flag setter
 `SessionBuilder::interactive` is recorded in §6 with
 the family, pairing `SessionBuilder::login_shell` (v4).
+Record, 2026-11-10: the return contract of
+`Executor::run_bind_x_command` (§2.2) widens:
+`BindXRunOutcome` gains `interrupted: bool` — the widget
+unit's signal-discard verdict, recorded by the engine at
+the unwind-capture point (niubash#977 engine half; the GNU
+shape is jobs.c:3316 ADDINTERRUPT discarding the list).
+The host half consumes the flag to discard the edit line
+after a widget-window Ctrl+C and syncs the niubash mirror
+of this ledger in the same change; no symbol appears,
+vanishes, or moves tiers.
 Ledger v1, 2026-10-25. Update rule: any change to the consumed
 surface (a symbol appears, vanishes, or moves tiers) updates this
 file — both copies — in the same change that causes it, with the
