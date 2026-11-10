@@ -4296,6 +4296,20 @@ impl Shell {
             .map(|provider| provider.shared_state())
     }
 
+    /// The session-end flush handle (niubash#971), if interactive entry
+    /// installed a provider: the same write the session-end funnel
+    /// performs, as cloned `Arc` state the Windows console-close path
+    /// can run off the REPL thread (see `ctrl_c`). `None` when no
+    /// provider is installed.
+    pub(crate) fn session_end_flush_handle(
+        &self,
+    ) -> Option<Arc<crate::history::SessionEndFlushHandle>> {
+        self.history_provider
+            .as_ref()
+            .and_then(|provider| provider.try_borrow().ok())
+            .map(|provider| Arc::new(provider.session_end_flush_handle()))
+    }
+
     /// Refresh the shared HIST* settings cell from the executor's
     /// current state (niubash#646).
     ///
@@ -12029,7 +12043,9 @@ complete -F _envtooldyn_hook envtooldyn
 
 #[cfg(test)]
 mod invocation_name_tests {
-    use super::tests::{test_shell, unique_temp_dir, CwdGuard};
+    #[cfg(windows)]
+    use super::tests::unique_temp_dir;
+    use super::tests::{test_shell, CwdGuard};
     use super::{default_script_name_from, HookConfig};
     use crate::test_support::PROCESS_STATE_LOCK;
 
@@ -12720,6 +12736,7 @@ gap7_widget() {
     fn gap5_host_path_reads_route_through_the_session_face() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut shell = test_shell(HookConfig::default());
+        #[cfg(windows)]
         let slash = |dir: &std::path::Path| dir.to_string_lossy().replace('\\', "/");
 
         #[cfg(windows)]

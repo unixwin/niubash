@@ -43,6 +43,28 @@
 //! silent under raw mode; see
 //! [`queued_ctrl_c_earns_synthesized_delivery`].
 //!
+//! niubash#971: the same handler must also answer console close /
+//! logoff / shutdown events (`CTRL_CLOSE_EVENT` and kin), which the
+//! old code passed through (`return 0`) so the default handler called
+//! `ExitProcess` and the session-end funnel — EXIT trap plus the
+//! history flush — never ran: closing a Windows Terminal tab lost the
+//! whole session's history. GNU saves history on SIGHUP for exactly
+//! this shape (bash 5.3 sig.c `termsig_handler`: "the history will
+//! not be saved when an interactive shell is running in a terminal
+//! window that gets closed with the `close' button") and then runs
+//! the EXIT trap before dying by the signal. The handler therefore
+//! requests a main-thread session end ([`ConsoleCloseState`]) and
+//! waits, bounded, for the flush to land; a prompt-blocked REPL is
+//! woken by injecting one Ctrl+C key record into the console input
+//! queue (reedline reads it as `Signal::CtrlC`, and the post-read
+//! close check diverts to the funnel), a foreground execution is
+//! aborted through the engine mailbox note instead, and a main thread
+//! that never gets there is covered by a handler-thread fallback
+//! flush of the registered [`crate::history::SessionEndFlushHandle`]
+//! (the flush only touches `Arc<Mutex<...>>` state). The handler never
+//! runs shell code itself, and the process still dies by the system
+//! termination (`0xC000013A`), matching GNU's death-by-SIGHUP.
+//!
 //! Unix: the ENGINE owns the kernel signal surface. `Executor` init calls
 //! `register_signal_mailbox` (rubash `src/executor/init.rs`) ->
 //! `kernel_signals::install()` (rubash `src/builtins/kill.rs`), which
@@ -87,14 +109,35 @@
 //! `run_repl`): script routes never register, so their SIGHUP keeps the
 //! plain kernel default disposition.
 
-#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[cfg(windows)]
 static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(windows)]
-use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
+use windows_sys::Win32::System::Console::{
+    SetConsoleCtrlHandler, WriteConsoleInputW, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT,
+    CTRL_SHUTDOWN_EVENT, INPUT_RECORD, KEY_EVENT,
+};
+
+/// Win32 console control event codes, for the pure classifier below.
+/// On Windows these resolve to the `windows_sys` names imported above.
+/// Off Windows the shadows carry the same real Win32 values —
+/// verified against the vendored `windows_sys` 0.59.0 and 0.61.2
+/// sources (`Windows::Win32::System::Console`): CTRL_C_EVENT = 0,
+/// CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2, CTRL_LOGOFF_EVENT = 5,
+/// CTRL_SHUTDOWN_EVENT = 6 — so the classification table the unit
+/// tests pin off Windows is the Windows table itself.
+#[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
+const CTRL_C_EVENT: u32 = 0;
+#[cfg(not(windows))]
+const CTRL_CLOSE_EVENT: u32 = 2;
+#[cfg(not(windows))]
+const CTRL_LOGOFF_EVENT: u32 = 5;
+#[cfg(not(windows))]
+const CTRL_SHUTDOWN_EVENT: u32 = 6;
 
 #[cfg(windows)]
 unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
@@ -117,7 +160,235 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         rubash::script_driver::inject_console_ctrl_c();
         return 1; // handled — don't terminate the shell
     }
+    if classify_console_control_event(ctrl_type) == ConsoleControlAction::RequestSessionEnd {
+        // niubash#971: close/logoff/shutdown — request the main-thread
+        // session end (history flush + EXIT trap) and wait, bounded,
+        // for the flush to land; the system terminates the process
+        // after this handler returns, so the exit code stays
+        // 0xC000013A.
+        handle_console_close();
+        return 1; // handled — the funnel (or the fallback flush) ran
+    }
     0 // pass through for other signals
+}
+
+/// niubash#971: what a console control event asks the host to do.
+/// Pure over the event code so the table is testable off Windows; the
+/// Windows handler passes the raw `ctrl_type` through, and the codes
+/// are the Win32 values (windows_sys names them the same).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsoleControlAction {
+    /// Keep the current behavior: Ctrl+C keeps its handler path, and
+    /// Ctrl+Break / unknown events pass through to the default handler.
+    KeepGoing,
+    /// A console close/logoff/shutdown event: end the session through
+    /// the session-end funnel (GNU's SIGHUP shape).
+    RequestSessionEnd,
+}
+
+// On non-Windows the only consumer is this module's unit tests (the
+// handler itself is Windows-only); keep the cross-check
+// `-D warnings` line green there.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn classify_console_control_event(ctrl_type: u32) -> ConsoleControlAction {
+    match ctrl_type {
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            ConsoleControlAction::RequestSessionEnd
+        }
+        _ => ConsoleControlAction::KeepGoing,
+    }
+}
+
+/// niubash#971: the console-close request + completion state, shared
+/// between the console handler thread and the REPL main thread. The
+/// handler only ever sets the request and waits for completion; the
+/// main thread only ever reads the request and signals completion
+/// after the session-end flush — no lock is taken on the hot path,
+/// and the completion wait is bounded (see [`CLOSE_FLUSH_WAIT_MS`]).
+pub(crate) struct ConsoleCloseState {
+    requested: AtomicBool,
+    done: Mutex<bool>,
+    done_cv: Condvar,
+}
+
+impl ConsoleCloseState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            done: Mutex::new(false),
+            done_cv: Condvar::new(),
+        }
+    }
+
+    /// Mark a close requested; returns true only on the first call,
+    /// so a second event (close followed by logoff) never re-injects
+    /// a wake record or a second mailbox note.
+    #[cfg(any(windows, test))]
+    pub(crate) fn request(&self) -> bool {
+        !self.requested.swap(true, Ordering::SeqCst)
+    }
+
+    pub(crate) fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    /// Signal that the session-end flush landed.
+    pub(crate) fn notify_done(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        *done = true;
+        self.done_cv.notify_all();
+    }
+
+    /// Wait up to `timeout` for the flush-done signal.
+    #[cfg(any(windows, test))]
+    pub(crate) fn wait_done(&self, timeout: std::time::Duration) -> bool {
+        let done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        if *done {
+            return true;
+        }
+        let (done, _) = self
+            .done_cv
+            .wait_timeout(done, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        *done
+    }
+}
+
+/// The process-wide close state (niubash#971).
+static CONSOLE_CLOSE: ConsoleCloseState = ConsoleCloseState::new();
+
+/// Whether the REPL main thread is blocked in `read_line` (niubash#971).
+/// The handler injects its wake record only while this is set: during
+/// foreground execution the console input queue belongs to the command,
+/// and an injected record would either be consumed as the command's
+/// input or mistaken by the ForegroundWatch for a skipped delivery
+/// (#669/#724).
+static AT_PROMPT: AtomicBool = AtomicBool::new(false);
+
+/// niubash#971: has a console close/logoff/shutdown event requested the
+/// session end? Read by the REPL loop (top + after every read) on all
+/// platforms; only ever set on Windows.
+pub(crate) fn console_close_requested() -> bool {
+    CONSOLE_CLOSE.is_requested()
+}
+
+/// niubash#971: the session-end flush landed (called by the REPL close
+/// path after the flush, before parking for the system termination).
+pub(crate) fn notify_console_close_flush_done() {
+    CONSOLE_CLOSE.notify_done();
+}
+
+/// niubash#971: record whether the REPL is blocked in `read_line`.
+/// Set immediately before the read, cleared immediately after it
+/// returns — the handler's wake-record gate.
+pub(crate) fn set_prompt_read_active(active: bool) {
+    AT_PROMPT.store(active, Ordering::SeqCst);
+}
+
+/// How long the close handler waits for the main thread's session-end
+/// flush before falling back to a handler-thread flush (niubash#971).
+/// The system gives a close handler on the order of 5s before
+/// terminating the process, so the bound stays inside that window.
+#[cfg(windows)]
+const CLOSE_FLUSH_WAIT_MS: u64 = 4_000;
+
+/// niubash#971: the session-end flush handle the console-close path
+/// falls back to when the main thread never reaches the session-end
+/// funnel. Registered once at interactive entry (run_repl), after the
+/// history provider is installed.
+#[cfg(windows)]
+static CLOSE_FLUSH_HANDLE: Mutex<Option<Arc<crate::history::SessionEndFlushHandle>>> =
+    Mutex::new(None);
+
+/// niubash#971: register the session-end flush handle (see
+/// [`CLOSE_FLUSH_HANDLE`]).
+#[cfg(windows)]
+pub(crate) fn register_console_close_flush(handle: Arc<crate::history::SessionEndFlushHandle>) {
+    if let Ok(mut slot) = CLOSE_FLUSH_HANDLE.lock() {
+        *slot = Some(handle);
+    }
+}
+
+/// Unix: no console control handler exists, so there is nothing to
+/// register; the call site stays uniform.
+#[cfg(not(windows))]
+pub(crate) fn register_console_close_flush(_handle: Arc<crate::history::SessionEndFlushHandle>) {}
+
+/// niubash#971: a console close/logoff/shutdown event arrived. Wake or
+/// abort the main thread, then wait (bounded) for its session-end
+/// flush; if it never lands, flush the history from this thread.
+///
+/// Runs on the console handler thread: it never touches the `Shell`
+/// (an `Rc<RefCell<...>>` the main thread owns), never runs shell code,
+/// and never takes a lock the main thread could be holding across a
+/// wait — the only locks are the close state's own completion cell
+/// and the flush handle slot.
+#[cfg(windows)]
+fn handle_console_close() {
+    // First arrival only: wake the prompt or abort the foreground wait.
+    if CONSOLE_CLOSE.request() {
+        if AT_PROMPT.load(Ordering::SeqCst) {
+            inject_prompt_wake_record();
+        } else {
+            // The main thread is running a foreground command: abort
+            // its engine waits through the mailbox note (the same note
+            // the Ctrl+C handler injects — the wait slices consume it,
+            // so nothing stays queued for the EXIT trap's first
+            // boundary). The foreground child itself receives the
+            // close event directly and dies by default.
+            rubash::script_driver::inject_console_ctrl_c();
+        }
+    }
+    if CONSOLE_CLOSE.wait_done(std::time::Duration::from_millis(CLOSE_FLUSH_WAIT_MS)) {
+        return;
+    }
+    // The main thread never got there (stuck foreground command, slow
+    // EXIT trap): land the history from this thread, then return and
+    // let the system terminate the process.
+    flush_session_history_from_handler_thread();
+}
+
+/// niubash#971: wake a prompt-blocked `read_line` by injecting one
+/// Ctrl+C key record (ETX unit, LEFT_CTRL_PRESSED) into the console
+/// input queue. Reedline reads it as `Signal::CtrlC`, and the REPL's
+/// post-read close check diverts to the session-end funnel instead of
+/// the interrupt arm. Best-effort: without a console stdin there is
+/// nothing to wake, and the fallback flush covers the history.
+#[cfg(windows)]
+fn inject_prompt_wake_record() {
+    let Some(handle) = crate::typeahead_guard::stdin_console_handle() else {
+        return;
+    };
+    let mut record: INPUT_RECORD = unsafe { std::mem::zeroed() };
+    record.EventType = KEY_EVENT as u16;
+    unsafe {
+        let key = &mut record.Event.KeyEvent;
+        key.bKeyDown = 1;
+        key.wRepeatCount = 1;
+        key.wVirtualKeyCode = 0x43; // 'C'
+        key.wVirtualScanCode = 0x2E;
+        key.uChar.UnicodeChar = 0x03;
+        key.dwControlKeyState = 0x0008; // LEFT_CTRL_PRESSED
+    }
+    unsafe {
+        let mut written = 0u32;
+        WriteConsoleInputW(handle.0, &record, 1, &mut written);
+    }
+}
+
+/// niubash#971: land the session history from the handler thread
+/// (fallback when the main thread's session-end flush never lands
+/// inside the bounded wait). The handle's flush only touches
+/// `Arc<Mutex<...>>` state: it serializes against a main-thread flush
+/// on the state lock, and a second flush after the first is a no-op,
+/// so racing the funnel is harmless. Best-effort: no handle (or a
+/// poisoned slot) simply means nothing to flush.
+#[cfg(windows)]
+fn flush_session_history_from_handler_thread() {
+    let handle = CLOSE_FLUSH_HANDLE.lock().ok().and_then(|slot| slot.clone());
+    if let Some(handle) = handle {
+        handle.flush();
+    }
 }
 
 /// Install the Ctrl+C handler. Call once at startup.
@@ -682,5 +953,89 @@ mod ctrl_c_record_tests {
         assert!(!super::queued_ctrl_c_earns_synthesized_delivery(
             false, false
         ));
+    }
+
+    #[test]
+    fn issue971_close_logoff_shutdown_request_session_end() {
+        use super::{
+            classify_console_control_event, ConsoleControlAction::*, CTRL_CLOSE_EVENT,
+            CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+        };
+        // The named codes carry the real Win32 values on both
+        // platforms (the windows_sys names on Windows, the shadow
+        // constants above off it): CLOSE = 2, LOGOFF = 5,
+        // SHUTDOWN = 6.
+        assert_eq!(CTRL_CLOSE_EVENT, 2);
+        assert_eq!(CTRL_LOGOFF_EVENT, 5);
+        assert_eq!(CTRL_SHUTDOWN_EVENT, 6);
+        // Literal event codes as well, so the classification table
+        // is pinned even if a name could drift: 2/5/6 request the
+        // session end. (2 is CTRL_CLOSE_EVENT — an earlier draft
+        // of this test asserted it kept going under a wrong
+        // BREAK = 2 label; on Windows that assertion is false.)
+        assert_eq!(classify_console_control_event(2), RequestSessionEnd);
+        assert_eq!(classify_console_control_event(5), RequestSessionEnd);
+        assert_eq!(classify_console_control_event(6), RequestSessionEnd);
+        assert_eq!(
+            classify_console_control_event(CTRL_CLOSE_EVENT),
+            RequestSessionEnd
+        );
+        assert_eq!(
+            classify_console_control_event(CTRL_LOGOFF_EVENT),
+            RequestSessionEnd
+        );
+        assert_eq!(
+            classify_console_control_event(CTRL_SHUTDOWN_EVENT),
+            RequestSessionEnd
+        );
+    }
+
+    #[test]
+    fn issue971_ctrl_c_break_and_unknown_keep_going() {
+        use super::{classify_console_control_event, ConsoleControlAction::*, CTRL_C_EVENT};
+        // CTRL_C_EVENT is really 0, on both platforms (shadow
+        // constants above; windows_sys names on Windows). The
+        // handler intercepts C before the classifier runs, and the
+        // classifier itself never requests a session end for it.
+        assert_eq!(CTRL_C_EVENT, 0);
+        assert_eq!(classify_console_control_event(CTRL_C_EVENT), KeepGoing);
+        assert_eq!(classify_console_control_event(0), KeepGoing);
+        // CTRL_BREAK_EVENT = 1: out of scope for #971, unchanged.
+        assert_eq!(classify_console_control_event(1), KeepGoing);
+        // 3 names no Win32 console event; unknown codes pass
+        // through to the default handler, unchanged.
+        assert_eq!(classify_console_control_event(3), KeepGoing);
+        assert_eq!(classify_console_control_event(7), KeepGoing);
+        assert_eq!(classify_console_control_event(u32::MAX), KeepGoing);
+    }
+
+    #[test]
+    fn issue971_close_state_request_is_one_shot_and_waitable() {
+        use super::ConsoleCloseState;
+        use std::time::Duration;
+        let state = ConsoleCloseState::new();
+        assert!(!state.is_requested());
+        // A wait with nothing requested times out instead of hanging.
+        assert!(!state.wait_done(Duration::from_millis(1)));
+        // The first request wins; a second event does not re-arm.
+        assert!(state.request());
+        assert!(!state.request());
+        assert!(state.is_requested());
+        // Completion unblocks a waiter immediately.
+        let state = std::sync::Arc::new(state);
+        let waiter = std::sync::Arc::clone(&state);
+        let done = std::thread::spawn(move || waiter.wait_done(Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(10));
+        state.notify_done();
+        assert!(done.join().unwrap());
+        assert!(state.wait_done(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn issue971_session_end_flush_handle_is_send_and_sync() {
+        // The handler thread runs the fallback flush off the REPL
+        // thread, so the handle must cross threads.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<crate::history::SessionEndFlushHandle>();
     }
 }

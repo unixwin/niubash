@@ -249,6 +249,18 @@ fn repl_exit_status(line: &str) -> Option<i32> {
 /// `exit_shell`), persist session history (a hard exit skips the history
 /// provider's `Drop`), and leave with the trap's status as the process code.
 fn end_repl_session(shell: &mut Shell, status: i32) -> ! {
+    let code = finish_repl_session(shell, status);
+    flush_repl_output();
+    std::process::exit(code);
+}
+
+/// The shared session-end steps (GNU `exit_shell`): EXIT trap,
+/// stream-end duties, HIST* refresh, history flush. Returns the
+/// process code. `end_repl_session` adds the output flush +
+/// `process::exit`; the console-close path adds the output flush +
+/// the completion signal and parks for the system termination instead
+/// (niubash#971).
+fn finish_repl_session(shell: &mut Shell, status: i32) -> i32 {
     let code = shell.finish_exit_trap(status);
     // niubash#863 GAP-8: the finish's remaining stream-end duties,
     // with the engine session-history write gated OFF — this route's
@@ -264,7 +276,24 @@ fn end_repl_session(shell: &mut Shell, status: i32) -> ! {
     // the write itself (bashhist.c maybe_save_shell_history).
     shell.refresh_history_settings();
     shell.flush_session_history();
+    code
+}
+
+/// niubash#971: end the session on a console close/logoff/shutdown
+/// event. Runs the same session-end steps as `end_repl_session`,
+/// then signals the console handler that the flush landed and parks
+/// until the system terminates the process — the exit stays
+/// 0xC000013A (STATUS_CONTROL_C_EXIT), the code the host reports for
+/// a closed console, matching GNU's death-by-SIGHUP. If the process
+/// is somehow still alive after the park bound (the handler already
+/// returned), exit through the normal funnel so a console-less
+/// process never hangs.
+fn end_repl_session_on_console_close(shell: &mut Shell) -> ! {
+    let status = shell.last_exit_code();
+    let code = finish_repl_session(shell, status);
     flush_repl_output();
+    crate::ctrl_c::notify_console_close_flush_done();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
     std::process::exit(code);
 }
 
@@ -6277,6 +6306,15 @@ fn consume_abi_control(line_editor: &mut Reedline) -> Option<String> {
 /// `read_line`: the prompt is cloned out each iteration.
 pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     let shell = Rc::new(RefCell::new(shell));
+    // niubash#971: register the session-end flush handle so a console
+    // close/logoff/shutdown can land the history even if the main
+    // thread never reaches the session-end funnel (bounded
+    // handler-thread fallback). The provider was installed by
+    // `enter_interactive` before this call; no-op off Windows and
+    // when no provider is installed.
+    if let Some(handle) = shell.borrow().session_end_flush_handle() {
+        crate::ctrl_c::register_console_close_flush(handle);
+    }
     // Snapshot the console modes before anything (wizard, rc files, external
     // commands) can change them. Restored before every prompt: a child that
     // exits with a broken console (e.g. ssh.exe on a failed auth) must not
@@ -6362,6 +6400,11 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     let mut pending = PendingReplInput::default();
 
     loop {
+        // niubash#971: a console close/logoff/shutdown event requests
+        // the session end; the handler waits (bounded) for this funnel.
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(&mut shell.borrow_mut());
+        }
         crate::console_guard::restore(&console_baseline);
         // niubash#974: a hangup that landed while a command owned the
         // terminal (or in the sliver before this iteration's read) rang
@@ -6453,6 +6496,9 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         if shell.borrow_mut().take_history_redirect() {
             line_editor = build_line_editor(&shell)?;
         }
+        // niubash#971: mark the prompt read so the console-close
+        // handler knows a wake record will reach reedline.
+        crate::ctrl_c::set_prompt_read_active(true);
         let signal = if pending.is_empty() {
             drain_pending_notices();
             // niubash#180: a finished `niu setup` run (a child process)
@@ -6549,6 +6595,13 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 None => line_editor.read_line(&prompt),
             }
         };
+        crate::ctrl_c::set_prompt_read_active(false);
+        // niubash#971: the close may have arrived while the line was
+        // being typed or while a foreground command ran — a submitted
+        // line must not execute after it; end the session instead.
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(&mut shell.borrow_mut());
+        }
         // niubash#799: a resize that arrived while the read was on screen
         // must be in the variables before the accepted line executes —
         // GNU binds it at `shell_getc`'s CHECK_WINCH (parse.y:2484), i.e.
@@ -6802,6 +6855,11 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut pending = PendingReplInput::default();
     loop {
+        // niubash#971: a console close/logoff/shutdown event requests
+        // the session end; the handler waits (bounded) for this funnel.
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(shell);
+        }
         crate::console_guard::restore(&console_baseline);
         // niubash#799: same winsize fold as the line-editor loop — the
         // no-editing reader still expands `$COLUMNS`/`$LINES` per line.
@@ -6830,6 +6888,13 @@ fn run_repl_without_line_editor(shell: &mut Shell) -> anyhow::Result<()> {
         let read = stdin.lock().read_line(&mut line)?;
         if read == 0 {
             break;
+        }
+        // niubash#971: same close check as the line-editor loop (no
+        // wake record here: the blocking std read is not woken by one,
+        // and an injected record could surface as input — the
+        // handler-thread fallback flush covers the history).
+        if crate::ctrl_c::console_close_requested() {
+            end_repl_session_on_console_close(shell);
         }
         let line = line.trim_end_matches(['\r', '\n']);
         if pending.is_empty() && line.trim().is_empty() {
@@ -10856,6 +10921,7 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
     fn lf() -> ReedlineRawEvent {
         paste_key(
             crossterm29::event::KeyCode::Enter,
@@ -10865,6 +10931,7 @@ mod tests {
 
     /// The LF partner as the raw console event the scripted queue holds
     /// (`Event::Key`, not the reedline wrapper `lf()` produces).
+    #[cfg(windows)]
     fn lf_key_event() -> crossterm29::event::Event {
         crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
             crossterm29::event::KeyCode::Enter,
@@ -11139,6 +11206,7 @@ mod tests {
     /// read loop does after a probe requeued to the stream's head
     /// (niubash#806: the body-evidence key rides the same queue the
     /// probes read, so the driver pops it exactly as the live loop would).
+    #[cfg(windows)]
     fn dispatch_queued(
         detector: &mut PasteChunkEditMode,
         queue: &std::sync::Arc<std::sync::Mutex<VecDeque<crossterm29::event::Event>>>,
@@ -11352,6 +11420,7 @@ mod tests {
     /// loop pops the queue front and dispatches it, exactly what reedline's
     /// read loop does against the live console queue (and what it does
     /// with a key a probe requeued to the stream's head, niubash#806).
+    #[cfg(windows)]
     fn feed_paste_burst(input: &str) -> String {
         let (mut detector, queue) = paste_detector_and_queue(Vec::new());
         let mut reassembled = String::new();
