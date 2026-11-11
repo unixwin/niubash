@@ -895,6 +895,13 @@ enum SentinelOutcome {
     /// The widget ran and resumed editing (bind -x always lands here —
     /// GNU returns to the edit line, bashline.c:4701-4706).
     Resumed,
+    /// niubash#977: the `bind -x` widget was unwound by an UNTRAPPED
+    /// SIGINT while the tty was in cooked mode — the engine reports
+    /// it on `BindXRunOutcome::interrupted`. The caller discards the
+    /// edit line (the prompt-Ctrl-C shape, minus the synthetic
+    /// redelivery) and settles `$?` = 1. Discard outranks Accept: a
+    /// widget that never finished has no buffer worth submitting.
+    Interrupted,
     /// The widget produced a buffer to submit (`NIU_WIDGET_ACCEPT=1`);
     /// `None` keeps the buffer as it stood.
     Accept(Option<String>),
@@ -939,6 +946,12 @@ fn run_host_sentinel(
                 .borrow_mut()
                 .run_bind_x_command(bindx.index, &editor_buffer, editor_cursor);
         crate::readline_live::dispatch_state_end();
+        if outcome.interrupted {
+            // niubash#977: the widget never finished — its line/point
+            // read-back is moot, the caller discards the edit line
+            // instead of applying the outcome.
+            return SentinelOutcome::Interrupted;
+        }
         apply_widget_outcome(line_editor, &outcome);
         // The host's READLINE_* read-back wins unless a plugin touched the
         // exported ABI too; then the plugin's mutation is the newer one.
@@ -1539,10 +1552,17 @@ fn dispatch_named_event(
         }
         Some(ReedlineEvent::Multiple(events)) => {
             for event in events {
-                if let SentinelOutcome::Accept(line) =
-                    dispatch_named_event(shell, line_editor, Some(event))
-                {
-                    return SentinelOutcome::Accept(line);
+                match dispatch_named_event(shell, line_editor, Some(event)) {
+                    SentinelOutcome::Accept(line) => {
+                        return SentinelOutcome::Accept(line);
+                    }
+                    // niubash#977: a widget interrupted inside the
+                    // batch aborts the batch the same way an accept
+                    // ends it — the caller discards the line.
+                    SentinelOutcome::Interrupted => {
+                        return SentinelOutcome::Interrupted;
+                    }
+                    _ => {}
                 }
             }
             SentinelOutcome::Resumed
@@ -6670,6 +6690,39 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                     // niubash#834: the drop was already surfaced by
                     // the runner; just redraw like a resumed widget.
                     SentinelOutcome::DeadWidget => flush_repl_output(),
+                    // niubash#977: the bind -x widget was unwound by
+                    // an untrapped SIGINT while the tty was in cooked
+                    // mode (read_line had returned, raw mode off) —
+                    // the ^C byte never reached the editor, so no
+                    // CtrlC arm ran. Mirror that arm, minus the
+                    // synthetic redelivery: the kernel SIGINT really
+                    // arrived and the engine already drained it, so
+                    // raising another would risk running a trapped
+                    // INT twice. The line is cleared (reedline never
+                    // saw the Ctrl-C, so the buffer is still intact)
+                    // and `$?` settles to 1, not 130.
+                    SentinelOutcome::Interrupted => {
+                        crate::readline_live::finish_abandoned();
+                        line_editor.run_edit_commands(&[EditCommand::Clear]);
+                        // The tty already echoed the ^C in cooked mode
+                        // (ECHOCTL); only the newline is the host's to
+                        // print — another `^C` would double it. (GNU's
+                        // own during-widget shape shows no host-printed
+                        // ^C either: the oracle probe prints `\r\nP1> `
+                        // with no `^C` in it.)
+                        println!();
+                        shell.borrow_mut().dispatch_widget_interrupt();
+                        flush_repl_output();
+                        pending.clear();
+                        // A trap action that itself exits ends the
+                        // session with its status, like a submitted
+                        // line's top-level exit (niubash R1).
+                        let jump = shell.borrow_mut().take_session_exit_jump();
+                        if let Some(status) = jump {
+                            end_repl_session(&mut shell.borrow_mut(), status);
+                        }
+                        continue;
+                    }
                     SentinelOutcome::Accept(Some(buffer)) => {
                         // A widget that accepts from a host-command
                         // keypress submits its buffer as ordinary input.
@@ -6723,6 +6776,15 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                         // host-command path — surfaced by the runner,
                         // never executed as an ordinary line.
                         SentinelOutcome::DeadWidget => {
+                            flush_repl_output();
+                            continue;
+                        }
+                        // niubash#977: the sentinel ran a widget that
+                        // was interrupted — same as Resumed here: the
+                        // submitted line was the sentinel payload
+                        // itself, so there is no partial line to
+                        // discard; the line is consumed, not executed.
+                        SentinelOutcome::Interrupted => {
                             flush_repl_output();
                             continue;
                         }

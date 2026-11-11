@@ -69,6 +69,13 @@ pub struct WidgetOutcome {
     pub cursor: Option<usize>,
     /// Submit the buffer after applying the outcome.
     pub accept: bool,
+    /// niubash#977: true when this run was unwound by an UNTRAPPED
+    /// SIGINT — the engine's `BindXRunOutcome::interrupted` verdict,
+    /// passed through. The REPL discards the edit line when it is
+    /// true (and settles `$?` = 1). Only the `bind -x` route sets
+    /// it; widget functions have no discard record on their route
+    /// and always leave it false.
+    pub interrupted: bool,
 }
 
 /// GAP-7 (niubash#863): the editor callbacks' handle on the REPL's
@@ -1511,6 +1518,53 @@ impl Shell {
         // not a trap ran and whatever the trap's own last status was.
         if self.session_exit_jump.is_none() {
             self.session_mut().set_last_status(130);
+        }
+        self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
+        self.sync_alias_mirror_from_executor();
+    }
+
+    /// niubash#977: settle an untrapped-SIGINT widget interrupt. The
+    /// mirror of [`Shell::dispatch_prompt_interrupt`] for the discard
+    /// the engine reports on `BindXRunOutcome::interrupted`, with one
+    /// cell different: GNU settles this shape to `$?` = 1, not 130
+    /// (eval.c:111, the DISCARD arm of `parse_and_execute`: a discard
+    /// whose status was 0 becomes EXECUTION_FAILURE; the engine keeps
+    /// the 130 discard verdict internally and the host settles the
+    /// prompt-visible status). The empty-program boundary poll is the
+    /// same shape as the prompt path's — an empty AST, so nothing
+    /// executes and only the tail poll of `execute_ast` runs, letting
+    /// any still-pending trap action run exactly once (an INT trap
+    /// cannot be pending here: `interrupted` is true only when the
+    /// SIGINT was untrapped). No synthetic redelivery: the kernel
+    /// SIGINT really arrived and the engine already drained it, so
+    /// raising another would risk running a trapped INT twice.
+    pub fn dispatch_widget_interrupt(&mut self) {
+        self.session_exit_jump = None;
+        // The trap (and the post-interrupt state) observes 1, as for a
+        // command discarded by SIGINT; the engine's dispatch preserves
+        // this value into the action (`saved_exit` in
+        // run_pending_signal_traps).
+        self.session_mut().set_last_status(1);
+        let ast = rubash::parser::Ast {
+            commands: Vec::new(),
+        };
+        match self.executor_mut().execute_ast(&ast) {
+            Ok(()) => {}
+            Err(rubash::executor::ExecuteError::ExitCode(code)) => {
+                self.session_mut().set_last_status(code);
+                self.note_exit_code_unwind(code);
+            }
+            Err(rubash::executor::ExecuteError::SigintUnwind) => {
+                self.session_mut().set_last_status(130);
+            }
+            Err(_) => {}
+        }
+        // GNU leaves `$?` = 1 after an untrapped widget interrupt
+        // whether or not a trap ran and whatever the trap's own last
+        // status was.
+        if self.session_exit_jump.is_none() {
+            self.session_mut().set_last_status(1);
         }
         self.sync_process_cwd_from_executor_pwd();
         self.sync_process_path_from_executor_path();
@@ -3360,10 +3414,19 @@ impl Shell {
             .executor_mut()
             .run_bind_x_command(&command, buffer, old_point, old_point);
 
+        // niubash#977: the engine's untrapped-SIGINT verdict travels
+        // with the outcome even when the widget left no line behind
+        // (an interrupted widget never sets READLINE_LINE) — take it
+        // before the early return below.
+        let interrupted = outcome.interrupted;
+
         // Read-back semantics (bashline.c:4692-4703).
         let Some(new_line) = outcome.line else {
             // Command unset READLINE_LINE: keep the editor as it stood.
-            return WidgetOutcome::default();
+            return WidgetOutcome {
+                interrupted,
+                ..Default::default()
+            };
         };
         let line_changed = new_line != buffer;
         let base = if line_changed { &new_line } else { buffer };
@@ -3377,6 +3440,7 @@ impl Shell {
             buffer: line_changed.then_some(new_line),
             cursor: Some(cursor_byte),
             accept: false,
+            interrupted,
         }
     }
 
@@ -3626,6 +3690,13 @@ impl Shell {
             buffer: result,
             cursor: cursor_result,
             accept: accept.as_deref() == Some("1"),
+            // niubash#977: the widget-function route runs through
+            // `call_function_with_env`, not the bind-x driver, so no
+            // discard record is consumed here and the flag stays
+            // false. (Whether that route needs its own surfacing is
+            // a separate question for the captain, not this PR: the
+            // engine flag lives on the bind-x outcome only.)
+            interrupted: false,
         }
     }
 
