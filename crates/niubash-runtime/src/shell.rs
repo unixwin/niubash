@@ -623,6 +623,10 @@ impl Shell {
         crate::startup_trace::tick("winuxcmd selected");
         let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
         publish_process_shell_root(shell_root.as_deref());
+        // niubash#993 §11: mirror `ComSpec` under the canonical `COMSPEC`
+        // spelling before the session is built, so the engine imports it as
+        // a shell variable (see publish_comspec_canonical).
+        let comspec_mirrored = publish_comspec_canonical();
         crate::startup_trace::tick("shell root prepared");
 
         // 3. Build rubash Executor after host path selection.
@@ -745,6 +749,15 @@ impl Shell {
         // attribute, the same shape.)
         if let Ok(exe) = std::env::current_exe() {
             builder = builder.env("BASH", exe.to_string_lossy().replace('\\', "/"));
+        }
+        // niubash#993 §11: the mirror above renamed the process-env entry to
+        // `COMSPEC`, so the engine import no longer sees `ComSpec`; keep the
+        // old spelling alive in-shell under the same value. (A builder seed
+        // carries no export attribute — children still receive `ComSpec`
+        // through the engine's required-windows-child-environment pair, and
+        // `COMSPEC` through the export the import gave it.)
+        if let Some(comspec) = &comspec_mirrored {
+            builder = builder.env("ComSpec", comspec.as_str());
         }
         // P1 spawn takeover: leave the engine's external-file builtins (cat,
         // /bin/cat, mkdir, ...) at the rubash default (enabled) so script
@@ -6435,6 +6448,47 @@ fn publish_process_shell_root(root: Option<&Path>) {
     std::env::set_var("NIU_ROOT", root);
 }
 
+/// niubash#993 §11: publish `COMSPEC` under its canonical spelling.
+///
+/// Windows spells the command-processor variable `ComSpec` in the process
+/// environment, and the shell's variable table is case-sensitive, so `$COMSPEC`
+/// — the spelling scripts and Makefiles read (node-gyp, autotools
+/// `configure`, npm-era tooling) — came out unset while `$ComSpec` worked.
+/// The process env block holds only one spelling per name (a case-insensitive
+/// key), so the mirror renames the entry: after this call the block spells it
+/// `COMSPEC`, which the engine then imports as an exported `$COMSPEC`.
+/// The return carries the mirrored value so the caller can keep the old
+/// spelling alive in-shell too (see the `ComSpec` builder seed below):
+/// without it `$ComSpec` would go unset the moment the block entry is
+/// renamed. An already-present `COMSPEC` (explicitly set by the user or a
+/// parent) always wins and is never overwritten; an absent or empty `ComSpec`
+/// is a no-op. The check is spelling-exact over the enumerated block:
+/// `std::env::var_os("COMSPEC")` cannot be used here, because the lookup
+/// itself is case-insensitive and returns `Some` while only `ComSpec` exists.
+fn publish_comspec_canonical() -> Option<String> {
+    let mut comspec: Option<String> = None;
+    let mut has_canonical = false;
+    for (name, value) in std::env::vars_os() {
+        let Ok(name) = name.into_string() else {
+            continue;
+        };
+        if name == "COMSPEC" {
+            has_canonical = true;
+        } else if name == "ComSpec" {
+            comspec = value.into_string().ok();
+        }
+    }
+    if has_canonical {
+        return None;
+    }
+    let value = comspec?;
+    if value.is_empty() {
+        return None;
+    }
+    std::env::set_var("COMSPEC", &value);
+    Some(value)
+}
+
 fn is_slash_drive_path(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 2
@@ -9566,6 +9620,46 @@ complete -F _envtooldyn_hook envtooldyn
         assert_eq!(std::env::var_os("NIU_ROOT").map(PathBuf::from), Some(root));
 
         let _ = std::fs::remove_dir_all(other);
+    }
+
+    #[test]
+    fn comspec_is_published_under_its_canonical_spelling() {
+        // Mutates the process env (COMSPEC/ComSpec): serialize with every
+        // other env-touching test (Windows env races — wt61).
+        // Declaration order matters on Windows: the block holds one
+        // case-insensitive entry, so the mixed-case guard must drop last to
+        // restore the original `ComSpec` spelling (guards drop in reverse
+        // declaration order).
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _mixed_guard = EnvVarGuard::unset("ComSpec");
+        let _canonical_guard = EnvVarGuard::unset("COMSPEC");
+
+        // No ComSpec at all: nothing is published.
+        assert_eq!(publish_comspec_canonical(), None);
+        assert!(std::env::var_os("COMSPEC").is_none());
+
+        // A mixed-case ComSpec is mirrored under the canonical spelling,
+        // and the mirror reports the value it published.
+        let _comspec_guard = EnvVarGuard::set_value("ComSpec", r"C:\fake-993\cmd.exe");
+        assert_eq!(
+            publish_comspec_canonical().as_deref(),
+            Some(r"C:\fake-993\cmd.exe")
+        );
+        assert_eq!(
+            std::env::var_os("COMSPEC").map(|v| v.to_string_lossy().into_owned()),
+            Some(r"C:\fake-993\cmd.exe".to_string())
+        );
+
+        // A second publish is a no-op: the canonical spelling is present.
+        assert_eq!(publish_comspec_canonical(), None);
+
+        // An explicitly set COMSPEC always wins and is never overwritten.
+        let _explicit_guard = EnvVarGuard::set_value("COMSPEC", r"C:\explicit-993\cmd.exe");
+        assert_eq!(publish_comspec_canonical(), None);
+        assert_eq!(
+            std::env::var_os("COMSPEC").map(|v| v.to_string_lossy().into_owned()),
+            Some(r"C:\explicit-993\cmd.exe".to_string())
+        );
     }
 
     #[test]

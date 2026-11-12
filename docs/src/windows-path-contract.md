@@ -191,6 +191,24 @@ The dispatcher is only a fallback when a command is absent from the real tree.
 It must not implement Rubash builtins such as `cd`, `export`, `set`, `read`,
 `jobs`, or `trap`.
 
+## Launcher Precedence (PATHEXT before POSIX)
+
+When a directory on `PATH` holds both spellings of a tool — the POSIX
+launcher `bin/tool` and the Windows launcher `bin/tool.bat` / `bin/tool.cmd`
+(the standard pair SDKMAN candidates, Gradle, and Maven ship) — a bare name
+resolves to the **`.bat` / `.cmd` launcher**, not the POSIX script
+(niubash#993 §12). `command -v gradle` reports the `.bat` path; `type -a`
+lists both spellings. Git Bash resolves the same pair to the POSIX script,
+so the two shells run different launcher code for the same tool: different
+`JAVA_HOME` probing and `GRADLE_OPTS`/`JAVA_OPTS` quoting through `cmd.exe`,
+and a different `JAVA_HOME` string for the same JDK when the launcher derives
+it (the `.bat` reports the `C:/…` form, the POSIX script the `/c/…` form).
+The `.bat` wins deliberately: it needs no `$0`/`dirname` resolution, so the
+`$0`-of-PATH-resolved-scripts failure class cannot reach the launcher — that
+is why Gradle and Maven work here at all. The installation selection is
+unaffected (both shells pick the same SDKMAN candidate or install dir); only
+the launcher spelling differs.
+
 ## Special Paths
 
 `~` is `USERPROFILE`, the same directory used by PowerShell. Windows paths
