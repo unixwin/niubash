@@ -93,7 +93,7 @@ $ niu -c 'echo $BASH_VERSION'
 
 **Git Bash** 官网自称是「a BASH emulation used to run Git from the command line」——为跑 Git 而设的模拟。代价是结构性的：`echo >/dev/tty` 等控制台设备重定向在它的 MSYS 层直接 `Invalid argument` 失败，niubash 与 GNU 一致；它捆绑的 bash 停在 5.2 系，5.3 的 `${ cmd; }` 无 fork 命令替换不存在；它的提示符每一帧都跑 `__git_ps1`——一个 git 进程；niu 的 git 段每遍至多问一次你自己的 git——一条有界的 `status --porcelain=v2 --branch` 查询（2 秒超时）——同遍重绘复用结果、不再重复 spawn（仓内稳态实测：1.0 次 spawn/遍、p50 26 ms/遍；Windows 同机口径）；真实安装的 Git for Windows 约 440 MB 外加 20 MB 模拟 DLL，niu 约 16 MB、零 DLL（项目自测口径，截至 2026-10-25）。
 
-**MSYS2** 的官方文档自承：参数只要像 Unix 路径，传给原生程序前就会被自动改写，而且「并不完美」——会命中根本不是路径的参数、或不是路径列表的参数。niubash 的翻译面刻意收窄：引号参数永不改写，唯一设备翻译是精确 token `/dev/null` → `nul`；每次被发现的过度翻译都立公开 issue 并固化回归。
+**MSYS2** 的官方文档自承：参数只要像 Unix 路径，传给原生程序前就会被自动改写，而且「并不完美」——会命中根本不是路径的参数、或不是路径列表的参数。niubash 的翻译面刻意收窄：引号参数与不带引号的参数一样，只要拼出路径就会被翻译（`'/c/Windows'` 到原生子进程是 `C:\Windows`，而 `--prefix=/c/x` 这样的 `name=value` 形式原样保留），唯一设备翻译是精确 token `/dev/null` → `nul`；每次被发现的过度翻译都立公开 issue 并固化回归。
 
 **Cygwin** 官网自承其核心是一个提供 POSIX API 功能的 DLL，并明说应用必须从源码重编才能在它的世界里运行。模拟层是它的官方定义。niubash 是原生构建，没有模拟 DLL。
 
@@ -103,7 +103,7 @@ $ niu -c 'echo $BASH_VERSION'
 | --- | --- | --- |
 | 引擎 | Rust 原生重实现的 bash 语义（[rubash](https://github.com/unixwin/rubash)）；无模拟层 | GNU Bash 移植到 MSYS2 POSIX 模拟运行时之上 |
 | Bash 语言层级 | **GNU Bash 5.3** 语义——含 5.3 独有的无 fork 命令替换 `${ cmd; }`（[rubash#195](https://github.com/unixwin/rubash/issues/195)） | GNU Bash **5.2**（Git for Windows 捆绑版本） |
-| 路径处理 | Windows 路径即原生表示；参数翻译是确定性的成文契约——引号参数永不改写，不靠猜 | 对参数的启发式路径转换，官方逃生舱是 `MSYS_NO_PATHCONV` |
+| 路径处理 | Windows 路径即原生表示；参数翻译是确定性的成文契约——无论是否带引号，路径形参数都会翻译，`name=value` 形式原样保留，不靠猜 | 对参数的启发式路径转换，官方逃生舱是 `MSYS_NO_PATHCONV` |
 | `git` | 用 MSVC 构建的 git-for-windows 真 C 源码（[niu-git](https://github.com/unixwin/niu-git)）——就是二进制本体；无 MSYS 运行时、无启动器跳板 | 经 MSYS 运行时启动的 `git` |
 | 提示符 git 段 | 你自己的 git，每遍至多一次（有界 porcelain 查询）；同遍重绘复用结果 | 每个提示符都跑 `__git_ps1`——spawn 一个 git 进程 |
 | 子壳 | 进程内——`( )` 与 `$( )` 不创建进程 | `fork()` 模拟 |
