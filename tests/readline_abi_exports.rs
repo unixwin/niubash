@@ -3,7 +3,7 @@
 //!
 //! `build.rs` publishes the whole ruline `readline-abi` C surface from the
 //! `niu` executable (`-rdynamic` on ELF, `-export_dynamic` on Mach-O, a
-//! generated `.def` on MSVC, `--export-all-symbols` on MinGW) so `dlopen`ed
+//! generated `.def` on MSVC and on MinGW) so `dlopen`ed
 //! bash loadable builtins (`enable -f`) resolve `rl_*` / `history_*` against
 //! the live editor. This test inspects the *dynamic* symbol table of the
 //! binary Cargo just built for this integration test and fails if any entry
