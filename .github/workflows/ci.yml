@@ -349,11 +349,9 @@ jobs:
   # purpose: the gate is the link and the export table, not the release
   # profile (which the MSVC release legs cover).
   #
-  # The job also documents a second, unrelated break in the same path: the
-  # build.rs icon step needs an `rc.exe` and produces a `.res` that GNU ld
-  # cannot consume, so a plain cross-build from a non-Windows host fails
-  # before it ever reaches the link. The rc.exe shim below works around that
-  # for this gate; the underlying fix belongs in build.rs (niubash#1006).
+  # The build.rs icon step targets windres/COFF for `*-windows-gnu`
+  # (niubash#1006) -- x86_64-w64-mingw32-windres below is what compiles
+  # niubash.rc into the object GNU ld accepts.
   windows-gnu-link:
     name: windows-gnu-link (x86_64-pc-windows-gnu)
     runs-on: ubuntu-latest
@@ -381,43 +379,12 @@ jobs:
       # in signal-hook's `extended-siginfo` build script (the musl/Android
       # legs provision their C compilers the same way);
       # `x86_64-w64-mingw32-objdump`, which reads the PE export table in the
-      # audit below; and `x86_64-w64-mingw32-windres`, which backs the
-      # rc.exe shim further down.
+      # audit below; and `x86_64-w64-mingw32-windres`, the resource compiler
+      # build.rs uses for the `*-windows-gnu` icon object (niubash#1006).
       - name: Install the MinGW-w64 toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
-
-      # build.rs embeds the niu.exe icon for every windows target: it looks
-      # for `rc.exe` / `llvm-rc.exe` by that exact name, runs it with MSVC
-      # rc syntax (`/nologo /fo<out> <in>.rc`), and passes the result to the
-      # linker. That works on Windows (rc.exe from the SDK). On a non-Windows
-      # host the step panics ("could not find rc.exe or llvm-rc.exe"), and
-      # even with a resource compiler present GNU ld rejects the MSVC `.res`
-      # format ("file format not recognized") -- so the icon step fails
-      # before the link this gate exists to test. This shim answers the same
-      # MSVC-style call with a COFF object, which ld accepts. It is
-      # scaffolding for the cross-host gap, not a fix for it: drop it once
-      # build.rs emits a COFF object for target_env = "gnu" (niubash#1006).
-      - name: Provide an rc.exe shim for the build.rs icon step
-        run: |
-          sudo tee /usr/local/bin/rc.exe >/dev/null <<'SH'
-          #!/bin/sh
-          # build.rs calls `rc.exe /nologo /fo<out> <in>.rc`. MSVC link.exe
-          # takes the .res it would write; GNU ld does not, so emit a COFF
-          # object instead, which both ld and lld accept.
-          out=
-          in=
-          for arg in "$@"; do
-            case "$arg" in
-              /nologo) ;;
-              /fo*) out=${arg#/fo} ;;
-              *) in=$arg ;;
-            esac
-          done
-          exec x86_64-w64-mingw32-windres -i "$in" -O coff -o "$out"
-          SH
-          sudo chmod +x /usr/local/bin/rc.exe
 
       - name: cargo build --target x86_64-pc-windows-gnu --bin niu
         run: cargo build --locked --target x86_64-pc-windows-gnu --bin niu

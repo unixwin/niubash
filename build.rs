@@ -499,11 +499,30 @@ fn embed_windows_icon() {
     let assets_dir = manifest_dir.join("assets");
     let rc_file = assets_dir.join("niubash.rc");
     let icon_file = assets_dir.join("niubash-icon.ico");
-    let out_file = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("niubash.res");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
 
     println!("cargo:rerun-if-changed={}", rc_file.display());
     println!("cargo:rerun-if-changed={}", icon_file.display());
+    println!("cargo:rerun-if-env-changed=NIU_NO_ICON");
 
+    // niubash#1006: documented opt-out for hosts that cannot run any
+    // resource compiler at all. The binary is fully functional without
+    // the icon -- it only loses the .rsrc section.
+    if env::var_os("NIU_NO_ICON").is_some() {
+        println!("cargo:warning=NIU_NO_ICON is set; niu.exe is built without the embedded icon");
+        return;
+    }
+
+    // niubash#1006: the resource format is decided by the TARGET's linker,
+    // not the host. MSVC `link.exe` takes the `.res` that rc.exe writes;
+    // GNU ld/lld (`*-pc-windows-gnu` targets) reject that format and need a
+    // COFF object from a windres-family tool instead.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+        embed_icon_coff(&assets_dir, &rc_file, &out_dir);
+        return;
+    }
+
+    let out_file = out_dir.join("niubash.res");
     let rc_exe = find_resource_compiler().unwrap_or_else(|| {
         panic!(
             "could not find rc.exe or llvm-rc.exe; install the Windows SDK or LLVM resource compiler to embed niu.exe icon"
@@ -524,9 +543,103 @@ fn embed_windows_icon() {
 
     println!("cargo:rustc-link-arg-bin=niu={}", out_file.display());
 
+    /// Compile `niubash.rc` into a COFF object for a `*-pc-windows-gnu`
+    /// target and hand it to GNU ld. Three spellings of the same tool
+    /// family are probed, each with its own way of naming the output
+    /// machine:
+    ///
+    /// - `<triplet>-w64-mingw32-windres` — the MinGW-w64 cross tool; its
+    ///   configured default target already matches the Rust target, so no
+    ///   `--target` is needed.
+    /// - `llvm-windres` (and the `llvm-windres-<ver>` names Linux distros
+    ///   ship) — takes an LLVM architecture name (`--target=aarch64`).
+    /// - bare `windres` — e.g. an MSYS2 or distro binutils build, which
+    ///   may default to a non-PE format; gets an explicit BFD target
+    ///   (`--target=pe-x86-64`).
+    fn embed_icon_coff(assets_dir: &Path, rc_file: &Path, out_dir: &Path) {
+        let target = env::var("TARGET").unwrap_or_default();
+        let (mingw_prefix, bfd_target, llvm_arch) = if target.starts_with("aarch64") {
+            ("aarch64-w64-mingw32-", "pe-aarch64-little", "aarch64")
+        } else if target.starts_with("i686")
+            || target.starts_with("i586")
+            || target.starts_with("i386")
+        {
+            ("i686-w64-mingw32-", "pe-i386", "i386")
+        } else {
+            ("x86_64-w64-mingw32-", "pe-x86-64", "x86_64")
+        };
+
+        let (compiler, mut args) = find_in_path(&format!("{mingw_prefix}windres"))
+            .map(|path| (path, Vec::new()))
+            .or_else(|| {
+                find_llvm_windres().map(|path| (path, vec![format!("--target={llvm_arch}")]))
+            })
+            .or_else(|| {
+                find_in_path("windres").map(|path| (path, vec![format!("--target={bfd_target}")]))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "could not find a windres-compatible resource compiler \
+                     (tried {mingw_prefix}windres, llvm-windres*, windres); \
+                     install binutils-mingw-w64 or LLVM, or set NIU_NO_ICON=1 \
+                     to build without the niu.exe icon"
+                )
+            });
+
+        args.extend([
+            "-i".to_string(),
+            rc_file
+                .file_name()
+                .expect("resource file name")
+                .to_string_lossy()
+                .into_owned(),
+            "-O".to_string(),
+            "coff".to_string(),
+        ]);
+        let out_file = out_dir.join("niubash-icon-coff.o");
+        args.extend(["-o".to_string(), out_file.display().to_string()]);
+
+        let status = Command::new(&compiler)
+            .current_dir(assets_dir)
+            .args(&args)
+            .status()
+            .unwrap_or_else(|err| panic!("failed to run {}: {err}", compiler.display()));
+        if !status.success() {
+            panic!("{} failed with status {status}", compiler.display());
+        }
+        println!("cargo:rustc-link-arg-bin=niu={}", out_file.display());
+    }
+
+    /// `llvm-windres` on Debian/Ubuntu is `llvm-windres-<ver>` on PATH, or
+    /// lives unversioned elsewhere. Accept the unversioned name first, then
+    /// the highest-suffixed one on PATH.
+    fn find_llvm_windres() -> Option<PathBuf> {
+        if let Some(path) = find_in_path("llvm-windres") {
+            return Some(path);
+        }
+        let path = std::env::var_os("PATH")?;
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        for dir in std::env::split_paths(&path) {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                if file_name.to_string_lossy().starts_with("llvm-windres-")
+                    && entry.path().is_file()
+                {
+                    candidates.push(entry.path());
+                }
+            }
+        }
+        candidates.sort();
+        candidates.pop()
+    }
+
     fn find_resource_compiler() -> Option<PathBuf> {
         find_in_path("rc.exe")
             .or_else(|| find_in_path("llvm-rc.exe"))
+            .or_else(|| find_in_path("llvm-rc"))
             .or_else(find_windows_sdk_rc)
     }
 
