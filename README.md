@@ -50,6 +50,12 @@ Windows via winget (**1.5.0**):
 winget install --id Unixwin.Niubash
 ```
 
+Windows via Scoop (**1.5.0**, portable zip, `niu` shimmed onto PATH; `scoop update niubash` follows releases): the Extras-bucket submission ([ScoopInstaller/Extras#19334](https://github.com/ScoopInstaller/Extras/pull/19334)) is in review — once it merges, `scoop bucket add extras` then `scoop install niubash`. Until then, install from the in-repo reference manifest:
+
+```powershell
+scoop install https://raw.githubusercontent.com/unixwin/niubash/master/installer/scoop/niubash.json
+```
+
 Windows via installer: grab `niubash-v*-win-*-setup.exe` from [Releases](https://github.com/unixwin/niubash/releases) and run it — no admin rights; PATH and a Windows Terminal profile are set up for you. Prefer portable? Take the `.tar.gz` (`tar -xf niubash-v*-win-x64.tar.gz`, built into Windows 10+) — it restores the bundled git/awk payload's hardlinks on unpack, so the extracted tree stays as small as a `wpm` install. The `.7z` is the smallest download (solid compression), but it stores the duplicated payload content rather than links, so the extracted tree is larger. The `.zip` stays only for tooling that speaks nothing but zip: it cannot represent hardlinks, so the payload is stored duplicated and the archive is much larger.
 
 Linux via apt (x86_64, aarch64; Ubuntu 22.04+, Debian 12+):

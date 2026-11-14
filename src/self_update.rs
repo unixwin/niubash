@@ -83,11 +83,58 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-pub fn run(args: &[String]) -> Result<()> {
-    run_with_packaged(args, niubash_runtime::msix::is_packaged())
+/// A package manager that owns this install's files and therefore its
+/// updates. Self-update replaces the install by running the Inno Setup
+/// installer with `/DIR=<this install>`; on a managed install that would
+/// write an Inno-registered tree (uninstaller, PATH entry, Windows Terminal
+/// profile) into a directory the manager tracks by version, so self-update
+/// steps aside and names the manager's own update verb instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalManager {
+    /// MSIX / Microsoft Store (niubash#495): the package root is read-only.
+    Store,
+    /// Scoop (niubash#997): the app directory carries Scoop's install receipt.
+    Scoop,
 }
 
-fn run_with_packaged(args: &[String], store_managed: bool) -> Result<()> {
+fn external_manager() -> Option<ExternalManager> {
+    if niubash_runtime::msix::is_packaged() {
+        Some(ExternalManager::Store)
+    } else if scoop_managed() {
+        Some(ExternalManager::Scoop)
+    } else {
+        None
+    }
+}
+
+/// Scoop writes its install receipt into every app version directory it
+/// installs, and reads it back to enumerate and update installed apps:
+/// `scoop-install.json` (current Scoop, `lib/manifest.ps1` save_install_info)
+/// or `install.json` (older releases; both names are read by
+/// `libexec/scoop-list.ps1` and `lib/versions.ps1`). The niubash zip ships
+/// neither name, so the receipt next to `niu.exe` is Scoop's ownership mark.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_scoop_install_root(root: &Path) -> bool {
+    ["scoop-install.json", "install.json"]
+        .iter()
+        .any(|receipt| root.join(receipt).is_file())
+}
+
+#[cfg(windows)]
+fn scoop_managed() -> bool {
+    active_install_dir().is_some_and(|root| is_scoop_install_root(&root))
+}
+
+#[cfg(not(windows))]
+fn scoop_managed() -> bool {
+    false
+}
+
+pub fn run(args: &[String]) -> Result<()> {
+    run_with_manager(args, external_manager())
+}
+
+fn run_with_manager(args: &[String], manager: Option<ExternalManager>) -> Result<()> {
     if args
         .iter()
         .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
@@ -99,8 +146,9 @@ fn run_with_packaged(args: &[String], store_managed: bool) -> Result<()> {
     // niubash#495: an MSIX install is serviced by the Microsoft Store —
     // overwriting the packaged exe would fail against the read-only
     // package root, so self-update is a no-op that points at the Store.
-    if store_managed {
-        println!("{}", store_managed_notice());
+    // niubash#997: a Scoop install is serviced by `scoop update` the same way.
+    if let Some(manager) = manager {
+        println!("{}", managed_notice(manager));
         return Ok(());
     }
 
@@ -166,26 +214,34 @@ fn self_update_supported() -> bool {
     true
 }
 
-/// The no-op message a Store-managed install prints instead of updating
-/// (niubash#495): the package is serviced by the Store, never by an
-/// in-place exe overwrite against the read-only package root.
-fn store_managed_notice() -> String {
-    format!(
-        "Niubash {} is managed by the Microsoft Store — update it from the Store; \
-         self-update does not apply to this install.",
-        env!("CARGO_PKG_VERSION")
-    )
+/// The no-op message a managed install prints instead of updating: a Store
+/// package is serviced by the Store, never by an in-place exe overwrite
+/// against the read-only package root (niubash#495); a Scoop app by
+/// `scoop update` (niubash#997).
+fn managed_notice(manager: ExternalManager) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match manager {
+        ExternalManager::Store => format!(
+            "Niubash {version} is managed by the Microsoft Store — update it from the Store; \
+             self-update does not apply to this install."
+        ),
+        ExternalManager::Scoop => format!(
+            "Niubash {version} is managed by Scoop — update it with `scoop update niubash`; \
+             self-update does not apply to this install."
+        ),
+    }
 }
 
 pub fn maybe_print_update_hint() {
     // No self-update channel exists off Windows yet (ledger N5): skip the
     // background check instead of spawning a thread that can only fail.
-    // Store-managed installs are also skipped (niubash#495): the Store
-    // ships their updates, so a "run self-update" hint is wrong there.
-    if niubash_runtime::msix::is_packaged()
-        || !self_update_supported()
+    // Managed installs are also skipped: the Store (niubash#495) or Scoop
+    // (niubash#997) ships their updates, so a "run self-update" hint is
+    // wrong there.
+    if !self_update_supported()
         || update_check_disabled()
         || !update_check_due()
+        || external_manager().is_some()
     {
         return;
     }
@@ -1053,24 +1109,55 @@ mod tests {
     /// even an unknown one.
     #[test]
     fn store_managed_install_noops_before_any_network() {
-        for args in [
-            vec![],
-            vec!["--check".to_string()],
-            vec!["--dry-run".to_string()],
-            vec!["--force".to_string()],
-            vec!["--bogus-option".to_string()],
-        ] {
-            run_with_packaged(&args, true).unwrap();
+        for manager in [ExternalManager::Store, ExternalManager::Scoop] {
+            for args in [
+                vec![],
+                vec!["--check".to_string()],
+                vec!["--dry-run".to_string()],
+                vec!["--force".to_string()],
+                vec!["--bogus-option".to_string()],
+            ] {
+                run_with_manager(&args, Some(manager)).unwrap();
+            }
         }
     }
 
-    /// The no-op message is the contract users see: it names the Store as
-    /// the update channel and the self-update verb that does not apply.
+    /// The no-op message is the contract users see: it names the manager's
+    /// update channel and the self-update verb that does not apply.
     #[test]
     fn store_managed_notice_points_at_the_store() {
-        let notice = store_managed_notice();
+        let notice = managed_notice(ExternalManager::Store);
         assert!(notice.contains("Store"), "{notice}");
         assert!(notice.contains("self-update"), "{notice}");
+    }
+
+    #[test]
+    fn scoop_managed_notice_points_at_scoop_update() {
+        let notice = managed_notice(ExternalManager::Scoop);
+        assert!(notice.contains("scoop update niubash"), "{notice}");
+        assert!(notice.contains("self-update"), "{notice}");
+    }
+
+    /// niubash#997: Scoop's install receipt (either spelling) next to
+    /// `niu.exe` marks the install as Scoop-owned; the shipped zip layout
+    /// alone (niu.exe + winuxcmd/) does not.
+    #[test]
+    fn scoop_receipt_marks_the_install_root() {
+        let root = std::env::temp_dir().join(format!(
+            "niubash-self-update-scoop-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("winuxcmd")).unwrap();
+        std::fs::write(root.join("niu.exe"), b"MZ").unwrap();
+        assert!(!is_scoop_install_root(&root));
+        for receipt in ["scoop-install.json", "install.json"] {
+            std::fs::write(root.join(receipt), b"{\"architecture\": \"64bit\"}").unwrap();
+            assert!(is_scoop_install_root(&root), "{receipt}");
+            std::fs::remove_file(root.join(receipt)).unwrap();
+        }
+        assert!(!is_scoop_install_root(&root));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

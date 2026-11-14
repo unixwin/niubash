@@ -22,6 +22,46 @@ merge, `winget upgrade --id Unixwin.Niubash` will follow new versions.
 The setup.exe and portable archives above always carry the newest
 build.
 
+## Scoop
+
+Scoop installs the portable `niubash-win-<arch>.zip` (x64 and arm64) and
+shims `niu.exe` onto PATH; the bundled `winuxcmd` tree stays inside the
+Scoop app directory and resolves relative to `niu.exe`. The manifest is
+submitted to the Extras bucket
+([ScoopInstaller/Extras#19334](https://github.com/ScoopInstaller/Extras/pull/19334),
+in review). Once it merges:
+
+```pwsh
+scoop bucket add extras
+scoop install niubash
+scoop update niubash
+```
+
+Until then, install straight from the in-repo reference manifest
+(`installer/scoop/niubash.json`, the same content as the Extras submission):
+
+```pwsh
+scoop install https://raw.githubusercontent.com/unixwin/niubash/master/installer/scoop/niubash.json
+```
+
+The manifest carries `checkver` (GitHub releases) and `autoupdate`
+templates over the stable asset names, so the bucket follows each release
+without a hand edit; the hashes come from the release's asset digests,
+which equal the `SHA256SUMS` sidecar. `tests/issue997_scoop_manifest.rs`
+ties those templates to the names `release.yml` publishes and the archive
+layout `scripts/package-release.ps1` stages, so a packaging rename fails CI
+instead of breaking `scoop update`.
+
+A Scoop install is updated by Scoop. Self-update normally reruns the
+setup.exe installer with `/DIR=<this install>`, which would write an
+Inno-registered tree (uninstaller, PATH entry, Windows Terminal profile)
+into the directory Scoop tracks by version. So when Scoop's install receipt
+(`scoop-install.json`, or `install.json` from older Scoop) sits next to
+`niu.exe`, `niu --self-update` / `self-update` print
+`... managed by Scoop — update it with scoop update niubash` and exit 0,
+and the daily update reminder stays quiet — the same step-aside a Microsoft
+Store install gets.
+
 Linux (x86_64, aarch64) and macOS (aarch64, x86_64) ship as portable
 `.tar.gz` archives that use the system's own tools — untar and run `niu`.
 
