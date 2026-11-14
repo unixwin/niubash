@@ -216,7 +216,7 @@ only (the `bash` binary re-execs niu and never hosts an editor):
 | ELF (Linux, Android/Termux, musl) | `-rdynamic` (`--export-dynamic`) | Adds global definitions to the dynamic symbol table so `dlopen` resolves them. |
 | Mach-O (macOS) | `-Wl,-export_dynamic` | ld64's documented "main executable may load a plug-in" switch; `-rdynamic` is not an ld64 option. |
 | Windows MSVC | `/DEF:<generated .def>` | link.exe exports nothing by default; a curated `EXPORTS` list is the MSVC equivalent and avoids publishing every Rust internal. |
-| Windows MinGW | `-Wl,--export-all-symbols` | MinGW ld's host-to-plugin export switch. |
+| Windows MinGW | `<generated .def>` | GNU ld/lld take the same curated `EXPORTS` list as a link input; `--export-all-symbols` was dropped in niubash#999 after the export table passed the PE 16-bit ordinal limit (65535). |
 
 A static ELF build (the `*-unknown-linux-musl` default) has no dynamic symbol
 table and cannot load shared objects, so `build.rs` skips export setup for

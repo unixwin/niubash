@@ -14,7 +14,9 @@
 #
 # Exit 0: all symbols present (or the Windows check skipped for lack of
 # dumpbin). Exit 1: at least one symbol is missing. Exit 2: no binary / no
-# symbol list to inspect.
+# symbol list to inspect. On a cross-built MinGW PE the export table is
+# read with x86_64-w64-mingw32-objdump, and the total export count must
+# stay below the PE 16-bit ordinal limit (65535, niubash#999).
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -53,6 +55,7 @@ if [ "$total" -eq 0 ]; then
     exit 2
 fi
 
+pe_exports=
 case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*)
         if ! command -v dumpbin >/dev/null 2>&1; then
@@ -68,9 +71,21 @@ case "$(uname -s)" in
         listing=$(nm -gU "$binary")
         ;;
     *)
-        # ELF: dynamic symbol table only. Prefer GNU/LLVM nm; fall back to
-        # readelf for hosts whose nm lacks -D.
-        if command -v nm >/dev/null 2>&1 &&
+        # Cross-built MinGW PE (niubash#999): a PE has no ELF dynamic
+        # symbol table, so `nm -D` finds nothing. Read the PE export
+        # table with the MinGW objdump when it is available, restricted
+        # to the export names so the audit sees exactly what a plugin
+        # would resolve.
+        if [ "$(head -c 2 "$binary" | od -An -tx1 | tr -d ' \n')" = "4d5a" ]; then
+            if command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1; then
+                listing=$(x86_64-w64-mingw32-objdump -p "$binary" |
+                    awk '/\[Ordinal\/Name Pointer\] Table/{flag=1;next} flag && /^[[:space:]]*\[/{print $3;next} flag{exit}')
+                pe_exports=$(printf '%s\n' "$listing" | awk 'NF' | wc -l | tr -d ' ')
+            else
+                echo "SKIP: $binary is a Windows PE but x86_64-w64-mingw32-objdump is not on PATH; install gcc-mingw-w64-x86-64 to audit $binary" >&2
+                exit 0
+            fi
+        elif command -v nm >/dev/null 2>&1 &&
             listing=$(nm -D --defined-only "$binary" 2>/dev/null); then
             :
         else
@@ -104,5 +119,17 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
-echo "ok: $total readline ABI symbols exported from $binary"
+# niubash#999: a PE export ordinal is 16 bits. The total export count
+# must stay below 65535 or the MinGW link dies with
+# `export ordinal too large`.
+if [ -n "${pe_exports:-}" ] && [ "$pe_exports" -ge 65535 ]; then
+    echo "error: $binary exports $pe_exports symbols, at or above the PE 16-bit export-ordinal limit (65535); the MinGW link cannot represent them (niubash#999)" >&2
+    exit 1
+fi
+
+if [ -n "${pe_exports:-}" ]; then
+    echo "ok: $total readline ABI symbols exported from $binary ($pe_exports total PE exports)"
+else
+    echo "ok: $total readline ABI symbols exported from $binary"
+fi
 exit 0
