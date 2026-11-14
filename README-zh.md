@@ -50,6 +50,12 @@ Windows（winget，**1.5.0**）：
 winget install --id Unixwin.Niubash
 ```
 
+Windows（Scoop，**1.5.0**，便携 zip，`niu` 由 scoop shim 上 PATH；`scoop update niubash` 跟随发行版）：Extras 仓库的提交（[ScoopInstaller/Extras#19334](https://github.com/ScoopInstaller/Extras/pull/19334)）正在审核，合并后即可 `scoop bucket add extras` 再 `scoop install niubash`。合并前可直接用仓内参考 manifest 安装：
+
+```powershell
+scoop install https://raw.githubusercontent.com/unixwin/niubash/master/installer/scoop/niubash.json
+```
+
 Windows（安装器）：去 [Releases](https://github.com/unixwin/niubash/releases) 下载 `niubash-v*-win-*-setup.exe` 双击——不要管理员权限，PATH 和 Windows Terminal 配置自动配好。要便携版就拿 `.tar.gz`（`tar -xf niubash-v*-win-x64.tar.gz`，Windows 10+ 自带）——解包时还原捆绑 git/awk 载荷的硬链接，解出来的目录和 `wpm` 安装一样小。`.7z` 下载最小（solid 压缩），但它存的是重复载荷内容而非链接，解出来体积更大。`.zip` 只留给除 zip 什么都不认的工具链：它存不了硬链接，载荷被重复存放，包大得多。
 
 Linux（apt，x86_64 / aarch64；Ubuntu 22.04+、Debian 12+）：

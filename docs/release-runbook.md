@@ -127,8 +127,13 @@ the extractor sample and compare block shape).
 2. winget: upgrade the open manifest PR to vX.Y.Z in place
    (InstallerSha256 straight from `SHA256SUMS`; winget convention wants
    the latest version on the same PR).
-3. Store material (docs/store/) — self-update must be compiled out for
+3. Scoop: refresh `installer/scoop/niubash.json` to vX.Y.Z (version,
+   both URLs and extract_dirs, both hashes straight from `SHA256SUMS`).
+   The Extras bucket copy (ScoopInstaller/Extras#19334 while in review)
+   follows on its own through `checkver`/`autoupdate`; only check that its
+   excavator picked the tag up.
+4. Store material (docs/store/) — self-update must be compiled out for
    a store build (MS Store certification rejects it).
-4. UX fleet (five lanes: first-contact / Git-Bash migrant / visual /
+5. UX fleet (five lanes: first-contact / Git-Bash migrant / visual /
    docs / feel) — run against the real installed release.
-5. Fold this run's lessons back into this runbook.
+6. Fold this run's lessons back into this runbook.
