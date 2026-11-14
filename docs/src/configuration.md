@@ -47,12 +47,30 @@ read from readline, not from any niu setting.
 | TAB interaction | `NIU_COMPLETION_INTERACTION` | `insert`, `cycle`, `select` | `select` |
 | Command-not-found hint | `NIU_COMMAND_NOT_FOUND_HINT` | `off`, `wpm` | `off` |
 | Personal-rc policy | `NIU_RC_POLICY` | `primary-only`, `bashrc-fallback` | `primary-only` |
+| Floor prompt backend | `NIU_PROMPT_STYLE` | `gitbash`, `template`, `segments` | `gitbash` on Windows, `template` elsewhere |
+| Segment preset | `NIU_PROMPT_SEGMENT_PRESET` | `lean`, `classic`, `rainbow`, `pure`, `robbyrussell` | `classic` |
+| Left / right segments | `NIU_PROMPT_LEFT_ELEMENTS`, `NIU_PROMPT_RIGHT_ELEMENTS` | space- or comma-separated: `dir`, `status`, `time`, `promptchar`, `osicon`, `context`, `backgroundjobs`, `cmdexectime`, `newline`, `git` | the preset's order |
 
 Example — put these in `~/.niubashrc`:
 
 ```bash
 export NIU_COMPLETION_STYLE=ide
 export NIU_COMPLETION_INTERACTION=insert
+```
+
+The `NIU_PROMPT_*` knobs pick the **floor** prompt: the native prompt
+Niubash draws while nothing claims the prompt slot. A non-empty `PS1`
+(your own rc, an oh-my-bash theme, `starship init bash`) is a claim and
+always wins; unsetting it brings the selected floor back. The selection
+is re-read after the rc and after every interactive line, so an
+interactive `export NIU_PROMPT_STYLE=segments` takes effect from the next
+prompt and `unset NIU_PROMPT_STYLE` restores the factory floor:
+
+```bash
+# ~/.niubashrc
+export NIU_PROMPT_STYLE=segments
+export NIU_PROMPT_SEGMENT_PRESET=lean
+export NIU_PROMPT_LEFT_ELEMENTS='dir git backgroundjobs promptchar'
 ```
 
 `NIU_RC_POLICY` is read **before** any rc is sourced (it decides which

@@ -203,6 +203,11 @@ pub struct Shell {
     /// — the allow keeps the -D warnings unix lanes clean.
     #[cfg_attr(not(windows), allow(dead_code))]
     gitbash_prompt_active: bool,
+    /// niubash#947: the raw NIU_PROMPT_* selection the floor prompt was
+    /// last built from. `sync_niu_environment_from_engine` rebuilds the
+    /// floor only when the mirrored selection differs, so an unchanged
+    /// rc costs one comparison per line and an invalid value warns once.
+    prompt_selection: crate::config::PromptSelection,
     /// niubash#592 (S2): sequence number of the most recent prompt pass
     /// whose clone `prompt_for_display` stamped with a computed Vcs
     /// value. Incremented only alongside a stamp; the number is
@@ -390,6 +395,72 @@ pub struct Shell {
     // the history provider and managed aliases still stay (both pinned by
     // contract tests for -c).
     pub one_shot: bool,
+}
+
+/// Build the product floor prompt (design §14.5) from the resolved shell
+/// configuration, returning the backend and whether it is the Windows
+/// factory "Git Bash compatible" face (which `prompt_for_display`
+/// re-renders from the cwd every pass). niubash#947: shared by
+/// construction and by the post-rc / per-line re-resolution in
+/// `sync_niu_environment_from_engine`, so `export NIU_PROMPT_STYLE=...`
+/// selects the same backend in both places.
+fn build_floor_prompt(shell: &crate::config::ShellConfig) -> (PromptBackend, bool) {
+    // The template engine is the default backend off-Windows; the segment
+    // engine is selected with NIU_PROMPT_STYLE=segments.
+    // Factory default (owner adjudication 2026-10-12): on Windows an
+    // unstyled shell renders the built-in "Git Bash compatible" prompt
+    // (src/git_prompt.rs — green user@host, yellow cwd, cyan branch,
+    // no git child process). Explicit styles win; PS1/theme claims
+    // still displace it per prompt (see prompt_for_display).
+    #[cfg(windows)]
+    let factory_style = "gitbash";
+    #[cfg(not(windows))]
+    let factory_style = "template";
+    let prompt_style = shell.prompt_style.as_deref().unwrap_or(factory_style);
+    let gitbash_prompt_active = cfg!(windows) && prompt_style == "gitbash";
+    let prompt = if prompt_style == "gitbash" {
+        #[cfg(windows)]
+        {
+            PromptBackend::Bash(BashPrompt::new(
+                crate::git_prompt::render(
+                    &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                ),
+                String::new(),
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            // A config that names "gitbash" off-Windows falls back to the
+            // template floor: the theme is a Windows-only surface (owner
+            // adjudication) and src/git_prompt.rs does not compile there.
+            PromptBackend::Template(NiubashPrompt::new(None, None))
+        }
+    } else if prompt_style == "segments" {
+        let preset_name = shell.segment_preset.as_deref().unwrap_or("classic");
+        let preset = SegmentPreset::from_name(preset_name).unwrap_or(SegmentPreset::Classic);
+        let mut seg_config = SegmentPromptConfig::from_preset(preset, &shell.prompt_symbol);
+        if let Some(ref left) = shell.left_prompt_elements {
+            seg_config.left_elements = left
+                .iter()
+                .filter_map(|s| SegmentId::from_name(s))
+                .collect();
+        }
+        if let Some(ref right) = shell.right_prompt_elements {
+            seg_config.right_elements = right
+                .iter()
+                .filter_map(|s| SegmentId::from_name(s))
+                .collect();
+        }
+        PromptBackend::Segments(SegmentPromptAdapter::new(SegmentPrompt::new(seg_config)))
+    } else {
+        PromptBackend::Template(NiubashPrompt::new_with_symbol(
+            shell.prompt_format.clone(),
+            shell.right_prompt_format.clone(),
+            shell.prompt_indicators.clone(),
+            shell.prompt_symbol.clone(),
+        ))
+    };
+    (prompt, gitbash_prompt_active)
 }
 
 pub struct StdinCurrentShellChild {
@@ -822,75 +893,31 @@ impl Shell {
 
         crate::startup_trace::tick("aliases");
 
-        // 6. Prompt + theme. The template engine is the default backend;
-        // the segment engine stays available for explicit configs. One-shot
-        // shells never render a prompt: use the cheapest backend instead of
+        // 6. Prompt + theme (see `build_floor_prompt`). One-shot shells
+        // never render a prompt: use the cheapest backend instead of
         // compiling the template or the segment engine.
-        // Factory default (owner adjudication 2026-10-12): on Windows an
-        // unstyled shell renders the built-in "Git Bash compatible" prompt
-        // (src/git_prompt.rs — green user@host, yellow cwd, cyan branch,
-        // no git child process). Explicit styles win; PS1/theme claims
-        // still displace it per prompt (see prompt_for_display).
-        #[cfg(windows)]
-        let factory_style = "gitbash";
-        #[cfg(not(windows))]
-        let factory_style = "template";
-        let prompt_style = config
-            .shell
-            .prompt_style
-            .as_deref()
-            .unwrap_or(factory_style);
-        let prompt: PromptBackend = if one_shot {
+        // niubash#947: the floor backend is selectable through the
+        // NIU_PROMPT_* knobs (config::PromptSelection). One-shot shells
+        // never read them: they render no prompt, and an invalid value
+        // must not print a diagnostic into a `niu -c` run.
+        let prompt_selection = if one_shot {
+            crate::config::PromptSelection::default()
+        } else {
+            crate::config::PromptSelection::from_env()
+        };
+        let mut shell_config = config.shell.clone();
+        prompt_selection.apply_to(&mut shell_config);
+        let (prompt, gitbash_prompt_active) = if one_shot {
             // One-shot shells never render a prompt. Keep the backend
             // terminal-free: BashPrompt::new probes terminal width during
             // construction and can spawn `tput` twice on non-tty Unix
             // invocations (niubash#351).
-            PromptBackend::Template(NiubashPrompt::new(Some(String::new()), None))
-        } else if prompt_style == "gitbash" {
-            #[cfg(windows)]
-            {
-                PromptBackend::Bash(BashPrompt::new(
-                    crate::git_prompt::render(
-                        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-                    ),
-                    String::new(),
-                ))
-            }
-            #[cfg(not(windows))]
-            {
-                // A config that names "gitbash" off-Windows falls back to the
-                // template floor: the theme is a Windows-only surface (owner
-                // adjudication) and src/git_prompt.rs does not compile there.
-                PromptBackend::Template(NiubashPrompt::new(None, None))
-            }
-        } else if prompt_style == "segments" {
-            let preset_name = config.shell.segment_preset.as_deref().unwrap_or("classic");
-            let preset = SegmentPreset::from_name(preset_name).unwrap_or(SegmentPreset::Classic);
-            let mut seg_config =
-                SegmentPromptConfig::from_preset(preset, &config.shell.prompt_symbol);
-            if let Some(ref left) = config.shell.left_prompt_elements {
-                seg_config.left_elements = left
-                    .iter()
-                    .filter_map(|s| SegmentId::from_name(s))
-                    .collect();
-            }
-            if let Some(ref right) = config.shell.right_prompt_elements {
-                seg_config.right_elements = right
-                    .iter()
-                    .filter_map(|s| SegmentId::from_name(s))
-                    .collect();
-            }
-            PromptBackend::Segments(SegmentPromptAdapter::new(SegmentPrompt::new(seg_config)))
+            (
+                PromptBackend::Template(NiubashPrompt::new(Some(String::new()), None)),
+                false,
+            )
         } else {
-            let prompt_format = config.shell.prompt_format.clone();
-            let right_prompt_format = config.shell.right_prompt_format.clone();
-            let template_prompt = NiubashPrompt::new_with_symbol(
-                prompt_format,
-                right_prompt_format,
-                config.shell.prompt_indicators.clone(),
-                config.shell.prompt_symbol.clone(),
-            );
-            PromptBackend::Template(template_prompt)
+            build_floor_prompt(&shell_config)
         };
 
         crate::startup_trace::tick("prompt backend");
@@ -922,13 +949,13 @@ impl Shell {
 
         let native_widgets = config.native_widgets.clone();
 
-        let gitbash_prompt_active = cfg!(windows) && !one_shot && prompt_style == "gitbash";
         let mut shell = Self {
             session: Some(session),
             completion_state,
             completion_behavior: config.completion_behavior,
             prompt: prompt.clone(),
             gitbash_prompt_active,
+            prompt_selection,
             vcs_pass_seq: 0,
             ps1_seeded_default: false,
             floor_prompt: prompt,
@@ -2003,6 +2030,24 @@ impl Shell {
                 std::env::remove_var(&name);
             }
         }
+        // niubash#947: the floor-prompt selection family. Unlike the
+        // fixed list above it reconciles removals (an `unset
+        // NIU_PROMPT_STYLE` restores the factory floor), the same rule
+        // as the NIU_SEGMENT_ family: the session env starts as a
+        // superset of the inherited process env, so a value exported
+        // before launch is mirrored unchanged, never deleted here.
+        for name in crate::config::PROMPT_SELECTION_ENVS {
+            match self
+                .session_mut()
+                .variables()
+                .resolved_value(name)
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        self.refresh_floor_prompt_selection();
         self.menu_config = self.menu_config.with_env_overrides();
         self.command_not_found_hint = crate::config::resolve_command_not_found_hint();
         self.autosuggest = self.autosuggest.clone().with_env_overrides();
@@ -2011,6 +2056,31 @@ impl Shell {
         // sibling settings; `update_completion_state` carries it into
         // the shared state from here.
         self.completion_behavior = load_config().completion_behavior;
+    }
+
+    /// niubash#947: rebuild the product floor prompt when the mirrored
+    /// NIU_PROMPT_* selection changed since it was last built. The new
+    /// floor renders at once unless a PS1 claim owns the slot — a claim
+    /// still wins (design §14.5); releasing it later restores the newly
+    /// selected floor through `sync_bash_prompt_from_env`. One-shot
+    /// shells never render a prompt and keep their placeholder.
+    fn refresh_floor_prompt_selection(&mut self) {
+        if self.one_shot {
+            return;
+        }
+        let selection = crate::config::PromptSelection::from_env();
+        if selection == self.prompt_selection {
+            return;
+        }
+        let mut shell_config = load_config().shell;
+        selection.apply_to(&mut shell_config);
+        self.prompt_selection = selection;
+        let (floor, gitbash_prompt_active) = build_floor_prompt(&shell_config);
+        self.gitbash_prompt_active = gitbash_prompt_active;
+        if !self.prompt_slot_claimed() {
+            self.prompt = floor.clone();
+        }
+        self.floor_prompt = floor;
     }
 
     /// niubash#180 session side: a finished `niu setup` run (a child
@@ -10704,6 +10774,131 @@ complete -F _envtooldyn_hook envtooldyn
         );
     }
 
+    /// niubash#947: the segments backend is reachable from the shipped
+    /// product surface. A `~/.niubashrc` that exports the NIU_PROMPT_*
+    /// knobs selects the segment floor through the real startup path
+    /// (`Shell::new` → `run_startup_rc` → env sync), and the segment it
+    /// configures renders its producer (BackgroundJobs ← the Session's
+    /// `background_job_count`, rubash#2859) on the production
+    /// `prompt_for_display` pass.
+    #[test]
+    fn issue947_rc_export_selects_the_segments_floor_prompt() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut names = vec!["PS1"];
+        names.extend_from_slice(crate::config::PROMPT_SELECTION_ENVS);
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&names);
+        for name in &names {
+            std::env::remove_var(name);
+        }
+        let temp = unique_temp_dir("niubash-issue947-rc");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            "export NIU_PROMPT_STYLE=segments\n\
+             export NIU_PROMPT_SEGMENT_PRESET=lean\n\
+             export NIU_PROMPT_LEFT_ELEMENTS='backgroundjobs promptchar'\n",
+        )
+        .unwrap();
+
+        let mut shell = Shell::new().unwrap();
+        assert!(
+            !matches!(shell.prompt, PromptBackend::Segments(_)),
+            "no selection before the rc runs"
+        );
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        assert!(
+            matches!(shell.prompt, PromptBackend::Segments(_)),
+            "the rc's NIU_PROMPT_STYLE=segments must select the segment prompt"
+        );
+        assert!(matches!(shell.floor_prompt, PromptBackend::Segments(_)));
+        assert!(!shell.gitbash_prompt_active);
+
+        let render = |shell: &mut Shell| {
+            reedline::Prompt::render_prompt_left(&shell.prompt_for_display()).into_owned()
+        };
+        assert!(!render(&mut shell).contains("1&"), "no jobs → no segment");
+        shell
+            .execute_interactive_line("sleep 30 &")
+            .expect("bg line");
+        assert!(
+            render(&mut shell).contains("1&"),
+            "the configured BackgroundJobs segment renders in the selected backend"
+        );
+        shell
+            .execute_interactive_line("kill %1 2>/dev/null; wait 2>/dev/null")
+            .expect("cleanup line");
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// niubash#947: an interactive export switches the floor from the
+    /// next prompt; a PS1 claim still owns the slot (design §14.5) and
+    /// releasing it restores the newly selected floor; `unset` returns
+    /// to the factory floor.
+    #[test]
+    fn issue947_interactive_selection_respects_ps1_claims_and_unset() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut names = vec!["PS1"];
+        names.extend_from_slice(crate::config::PROMPT_SELECTION_ENVS);
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&names);
+        for name in &names {
+            std::env::remove_var(name);
+        }
+        let mut shell = test_shell(HookConfig::default());
+        shell.execute_interactive_line("unset PS1").unwrap();
+
+        shell
+            .execute_interactive_line("export NIU_PROMPT_STYLE=segments")
+            .unwrap();
+        assert!(matches!(shell.prompt, PromptBackend::Segments(_)));
+        assert_eq!(std::env::var("NIU_PROMPT_STYLE").as_deref(), Ok("segments"));
+
+        // A claim displaces the floor; a style change under the claim
+        // only rebuilds the floor.
+        shell.execute_interactive_line("PS1='claimed> '").unwrap();
+        shell.sync_bash_prompt_from_env();
+        assert!(matches!(shell.prompt, PromptBackend::Bash(_)));
+        shell
+            .execute_interactive_line("NIU_PROMPT_STYLE=template")
+            .unwrap();
+        assert!(matches!(shell.prompt, PromptBackend::Bash(_)));
+        assert!(matches!(shell.floor_prompt, PromptBackend::Template(_)));
+        shell
+            .execute_interactive_line("NIU_PROMPT_STYLE=segments")
+            .unwrap();
+        assert!(matches!(shell.floor_prompt, PromptBackend::Segments(_)));
+        shell.execute_interactive_line("unset PS1").unwrap();
+        shell.sync_bash_prompt_from_env();
+        assert!(
+            matches!(shell.prompt, PromptBackend::Segments(_)),
+            "releasing the claim restores the selected floor"
+        );
+
+        // Unset: the factory floor returns (gitbash on Windows, the
+        // template elsewhere) and the process env is reconciled.
+        shell
+            .execute_interactive_line("unset NIU_PROMPT_STYLE")
+            .unwrap();
+        assert!(std::env::var_os("NIU_PROMPT_STYLE").is_none());
+        assert!(!matches!(shell.prompt, PromptBackend::Segments(_)));
+        assert_eq!(shell.gitbash_prompt_active, cfg!(windows));
+    }
+
+    /// niubash#947: one-shot shells never consult the prompt selection
+    /// (no prompt, no diagnostics in a `niu -c` run).
+    #[test]
+    fn issue947_one_shot_shell_ignores_prompt_selection() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env_restore = crate::test_support::ProcessEnvRestore::new(&["NIU_PROMPT_STYLE"]);
+        std::env::set_var("NIU_PROMPT_STYLE", "segments");
+        let mut shell = Shell::new_one_shot().expect("one-shot shell");
+        assert!(matches!(shell.prompt, PromptBackend::Template(_)));
+        shell.sync_niu_environment_from_engine();
+        assert!(matches!(shell.prompt, PromptBackend::Template(_)));
+    }
+
     /// niubash#846: an interactive `export` lands in the session env
     /// only — the per-line re-sync must mirror it into the process
     /// env channels the prompt readers consult, in the SAME session:
@@ -12000,6 +12195,7 @@ complete -F _envtooldyn_hook envtooldyn
             completion_behavior: CompletionBehavior::default(),
             prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),
             gitbash_prompt_active: false,
+            prompt_selection: crate::config::PromptSelection::default(),
             vcs_pass_seq: 0,
             ps1_seeded_default: false,
             floor_prompt: PromptBackend::Template(NiubashPrompt::new(None, None)),

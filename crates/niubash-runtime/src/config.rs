@@ -603,6 +603,107 @@ pub fn resolve_rc_policy() -> RcPolicy {
     resolve_rc_policy_with_source().0
 }
 
+/// The environment variables that select the native floor prompt backend
+/// (niubash#947). Like every niu-proprietary knob they are exported from
+/// `~/.niubashrc` (or the terminal environment); the host mirrors them from
+/// the session after the rc and after every interactive line
+/// (`Shell::sync_niu_environment_from_engine`), so the selection takes
+/// effect in the session that assigned it. The selected backend is the
+/// *floor*: a non-empty PS1 claim (user rc, oh-my-bash theme, starship)
+/// still owns the prompt slot (design §14.5).
+pub const PROMPT_STYLE_ENV: &str = "NIU_PROMPT_STYLE";
+pub const PROMPT_SEGMENT_PRESET_ENV: &str = "NIU_PROMPT_SEGMENT_PRESET";
+pub const PROMPT_LEFT_ELEMENTS_ENV: &str = "NIU_PROMPT_LEFT_ELEMENTS";
+pub const PROMPT_RIGHT_ELEMENTS_ENV: &str = "NIU_PROMPT_RIGHT_ELEMENTS";
+
+/// Every prompt-selection variable, in one list for the session mirror.
+pub const PROMPT_SELECTION_ENVS: &[&str] = &[
+    PROMPT_STYLE_ENV,
+    PROMPT_SEGMENT_PRESET_ENV,
+    PROMPT_LEFT_ELEMENTS_ENV,
+    PROMPT_RIGHT_ELEMENTS_ENV,
+];
+
+/// The recognized `NIU_PROMPT_STYLE` values. `gitbash` is the Windows
+/// factory default (off-Windows it falls back to the template floor);
+/// `template` is the legacy template prompt; `segments` is the p10k-style
+/// segment engine.
+pub const PROMPT_STYLES: &[&str] = &["template", "segments", "gitbash"];
+
+/// The raw prompt-selection knobs, read from the process environment.
+/// Kept raw so a session can cheaply tell whether the selection changed
+/// since the floor prompt was last built (the comparison runs after every
+/// interactive line; the diagnostics for invalid values print only when
+/// the raw text changes, never once per line).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptSelection {
+    pub style: Option<String>,
+    pub segment_preset: Option<String>,
+    pub left_elements: Option<String>,
+    pub right_elements: Option<String>,
+}
+
+impl PromptSelection {
+    pub fn from_env() -> Self {
+        Self {
+            style: env_value(PROMPT_STYLE_ENV),
+            segment_preset: env_value(PROMPT_SEGMENT_PRESET_ENV),
+            left_elements: env_value(PROMPT_LEFT_ELEMENTS_ENV),
+            right_elements: env_value(PROMPT_RIGHT_ELEMENTS_ENV),
+        }
+    }
+
+    /// Fold the selection into a [`ShellConfig`]. An invalid value prints
+    /// one diagnostic and leaves the built-in default in place (the same
+    /// fail-soft rule as every other niu knob: a config issue never breaks
+    /// the prompt). Unknown segment names are reported and dropped.
+    pub fn apply_to(&self, shell: &mut ShellConfig) {
+        if let Some(value) = &self.style {
+            let normalized = value.trim().to_ascii_lowercase();
+            if PROMPT_STYLES.contains(&normalized.as_str()) {
+                shell.prompt_style = Some(normalized);
+            } else {
+                eprintln!(
+                    "niubash: {PROMPT_STYLE_ENV} must be one of: {}",
+                    PROMPT_STYLES.join(", ")
+                );
+            }
+        }
+        if let Some(value) = &self.segment_preset {
+            match crate::prompt_segments::SegmentPreset::from_name(value) {
+                Some(_) => shell.segment_preset = Some(value.trim().to_ascii_lowercase()),
+                None => eprintln!(
+                    "niubash: {PROMPT_SEGMENT_PRESET_ENV} must be one of: {}",
+                    crate::prompt_segments::SegmentPreset::names().join(", ")
+                ),
+            }
+        }
+        if let Some(value) = &self.left_elements {
+            shell.left_prompt_elements =
+                Some(parse_segment_elements(PROMPT_LEFT_ELEMENTS_ENV, value));
+        }
+        if let Some(value) = &self.right_elements {
+            shell.right_prompt_elements =
+                Some(parse_segment_elements(PROMPT_RIGHT_ELEMENTS_ENV, value));
+        }
+    }
+}
+
+/// Split a `NIU_PROMPT_{LEFT,RIGHT}_ELEMENTS` value (whitespace- or
+/// comma-separated, optionally wrapped in `( )` like the other array-ish
+/// knobs) into the known segment names, reporting unknown ones.
+fn parse_segment_elements(env_name: &str, value: &str) -> Vec<String> {
+    let mut known = Vec::new();
+    for name in parse_arrayish_value(value) {
+        if crate::prompt_segments::SegmentId::from_name(&name).is_some() {
+            known.push(name);
+        } else {
+            eprintln!("niubash: {env_name}: unknown prompt segment '{name}'");
+        }
+    }
+    known
+}
+
 /// The readline inputrc path: `$INPUTRC` when set and non-empty, else
 /// `~/.inputrc`. Mirrors the engine's `initialize_readline` resolution.
 pub fn inputrc_path() -> Option<PathBuf> {
@@ -1272,6 +1373,65 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn issue947_prompt_selection_applies_valid_values() {
+        let selection = PromptSelection {
+            style: Some(" Segments ".to_string()),
+            segment_preset: Some("LEAN".to_string()),
+            left_elements: Some("(dir, git backgroundjobs)".to_string()),
+            right_elements: Some("time".to_string()),
+        };
+        let mut shell = ShellConfig::default();
+        selection.apply_to(&mut shell);
+        assert_eq!(shell.prompt_style.as_deref(), Some("segments"));
+        assert_eq!(shell.segment_preset.as_deref(), Some("lean"));
+        assert_eq!(
+            shell.left_prompt_elements,
+            Some(vec![
+                "dir".to_string(),
+                "git".to_string(),
+                "backgroundjobs".to_string()
+            ])
+        );
+        assert_eq!(shell.right_prompt_elements, Some(vec!["time".to_string()]));
+    }
+
+    #[test]
+    fn issue947_prompt_selection_rejects_invalid_values_softly() {
+        let selection = PromptSelection {
+            style: Some("powerline".to_string()),
+            segment_preset: Some("nope".to_string()),
+            left_elements: Some("dir bogus".to_string()),
+            right_elements: None,
+        };
+        let mut shell = ShellConfig::default();
+        selection.apply_to(&mut shell);
+        assert_eq!(shell.prompt_style, None, "invalid style keeps the default");
+        assert_eq!(
+            shell.segment_preset, None,
+            "invalid preset keeps the default"
+        );
+        assert_eq!(shell.left_prompt_elements, Some(vec!["dir".to_string()]));
+        assert_eq!(shell.right_prompt_elements, None);
+    }
+
+    #[test]
+    fn issue947_prompt_selection_reads_the_niu_prompt_env_family() {
+        let _guard = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvRestore::capture(PROMPT_SELECTION_ENVS);
+        for name in PROMPT_SELECTION_ENVS {
+            std::env::remove_var(name);
+        }
+        assert_eq!(PromptSelection::from_env(), PromptSelection::default());
+        std::env::set_var(PROMPT_STYLE_ENV, "segments");
+        std::env::set_var(PROMPT_SEGMENT_PRESET_ENV, "  ");
+        let selection = PromptSelection::from_env();
+        assert_eq!(selection.style.as_deref(), Some("segments"));
+        assert_eq!(selection.segment_preset, None, "blank values are unset");
     }
 
     #[test]
