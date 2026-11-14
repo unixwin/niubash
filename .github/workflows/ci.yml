@@ -330,6 +330,132 @@ jobs:
           fi
 
 
+  # Windows-GNU link gate (niubash#999). No `runs-on` leg above produces a
+  # MinGW PE: the Windows jobs build x86_64-pc-windows-msvc, so the
+  # `x86_64-pc-windows-gnu` target -- the one cross-compiler users link from
+  # Linux/WSL -- had no CI coverage at all. That is exactly where #999 lived:
+  # `-Wl,--export-all-symbols` published every global symbol, the binary
+  # crossed the PE 16-bit export-ordinal limit, and the final link died with
+  # `export ordinal too large: 87895`. niubash#1000 replaced that switch with
+  # the curated `.def` link input and taught
+  # scripts/check-readline-abi-exports.sh to read a MinGW PE export table and
+  # reject a total export count >= 65535; both were verified by hand only.
+  #
+  # This job links the real niu.exe for that target and then makes the
+  # audit's PE path fail-hard. The script exits 0 with a `SKIP:` note when
+  # x86_64-w64-mingw32-objdump is missing, so the step captures the output
+  # and fails on any SKIP and on any run that never reports a PE export
+  # count -- the guard cannot silently become a no-op. Debug profile on
+  # purpose: the gate is the link and the export table, not the release
+  # profile (which the MSVC release legs cover).
+  #
+  # The job also documents a second, unrelated break in the same path: the
+  # build.rs icon step needs an `rc.exe` and produces a `.res` that GNU ld
+  # cannot consume, so a plain cross-build from a non-Windows host fails
+  # before it ever reaches the link. The rc.exe shim below works around that
+  # for this gate; the underlying fix belongs in build.rs (niubash#1006).
+  windows-gnu-link:
+    name: windows-gnu-link (x86_64-pc-windows-gnu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # Same as the other jobs: no `cargo update -p rubash` under the
+      # [patch] override -- the sibling clone is already latest master and
+      # the subtree re-resolution breaks windows-sys feature resolution.
+
+      - name: Add the x86_64-pc-windows-gnu target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      # gcc-mingw-w64-x86-64 brings three things this gate needs:
+      # `x86_64-w64-mingw32-gcc`, which cc-rs uses for the target C compile
+      # in signal-hook's `extended-siginfo` build script (the musl/Android
+      # legs provision their C compilers the same way);
+      # `x86_64-w64-mingw32-objdump`, which reads the PE export table in the
+      # audit below; and `x86_64-w64-mingw32-windres`, which backs the
+      # rc.exe shim further down.
+      - name: Install the MinGW-w64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      # build.rs embeds the niu.exe icon for every windows target: it looks
+      # for `rc.exe` / `llvm-rc.exe` by that exact name, runs it with MSVC
+      # rc syntax (`/nologo /fo<out> <in>.rc`), and passes the result to the
+      # linker. That works on Windows (rc.exe from the SDK). On a non-Windows
+      # host the step panics ("could not find rc.exe or llvm-rc.exe"), and
+      # even with a resource compiler present GNU ld rejects the MSVC `.res`
+      # format ("file format not recognized") -- so the icon step fails
+      # before the link this gate exists to test. This shim answers the same
+      # MSVC-style call with a COFF object, which ld accepts. It is
+      # scaffolding for the cross-host gap, not a fix for it: drop it once
+      # build.rs emits a COFF object for target_env = "gnu" (niubash#1006).
+      - name: Provide an rc.exe shim for the build.rs icon step
+        run: |
+          sudo tee /usr/local/bin/rc.exe >/dev/null <<'SH'
+          #!/bin/sh
+          # build.rs calls `rc.exe /nologo /fo<out> <in>.rc`. MSVC link.exe
+          # takes the .res it would write; GNU ld does not, so emit a COFF
+          # object instead, which both ld and lld accept.
+          out=
+          in=
+          for arg in "$@"; do
+            case "$arg" in
+              /nologo) ;;
+              /fo*) out=${arg#/fo} ;;
+              *) in=$arg ;;
+            esac
+          done
+          exec x86_64-w64-mingw32-windres -i "$in" -O coff -o "$out"
+          SH
+          sudo chmod +x /usr/local/bin/rc.exe
+
+      - name: cargo build --target x86_64-pc-windows-gnu --bin niu
+        run: cargo build --locked --target x86_64-pc-windows-gnu --bin niu
+
+      # niubash#999/#1000: the build.rs `.def` link must both export the
+      # curated readline ABI and keep the export table under the PE 16-bit
+      # ordinal limit (65535). The audit is the gate, so a SKIP (missing
+      # objdump) is a failure here, not a pass.
+      - name: Audit the PE export table (readline ABI + ordinal limit)
+        run: |
+          set -euo pipefail
+          bin="target/x86_64-pc-windows-gnu/debug/niu.exe"
+          if [ ! -f "$bin" ]; then
+            echo "error: $bin not found; the link step produced no MinGW PE" >&2
+            exit 1
+          fi
+          log="$RUNNER_TEMP/readline-abi-audit.log"
+          if ! sh scripts/check-readline-abi-exports.sh "$bin" >"$log" 2>&1; then
+            cat "$log"
+            echo "error: the readline ABI export audit rejected $bin" >&2
+            exit 1
+          fi
+          cat "$log"
+          if grep -q 'SKIP' "$log"; then
+            echo "error: the audit SKIPPED instead of reading the PE export table; this gate must not be vacuous:" >&2
+            grep 'SKIP' "$log" >&2
+            exit 1
+          fi
+          # The `(N total PE exports)` suffix is emitted only from the MinGW
+          # objdump branch, so its absence means the audit silently fell back
+          # to a path that never looked at the export table. The >= 65535
+          # threshold itself belongs to the script (it already exits 1), so
+          # this step does not second-guess the count.
+          if ! grep -q 'total PE exports' "$log"; then
+            echo "error: the audit reported no PE export count; the MinGW object-dump path never ran:" >&2
+            exit 1
+          fi
+
   # Per-asset timing budget trend (owner directive 2026-10-04): nightly run
   # of the same gate the release enforces (scripts/perf/asset-timing.py over
   # every theme/plugin asset of the pinned trusted sources). Records the

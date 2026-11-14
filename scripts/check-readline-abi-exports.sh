@@ -78,8 +78,16 @@ case "$(uname -s)" in
         # would resolve.
         if [ "$(head -c 2 "$binary" | od -An -tx1 | tr -d ' \n')" = "4d5a" ]; then
             if command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1; then
+                # binutils 2.45 (what current Ubuntu runners ship) changed this
+                # dump: the table header gained a `-- Ordinal Base N` suffix, the
+                # printer added an `Ordinal   Hint Name` column row, and every
+                # entry grew a `+base[ N]` column -- `[   0] name` became
+                # `[   0] +base[   1]  0000 name`, so the name is no longer
+                # field 3. `$NF` is the name in both layouts, and ending the
+                # table only on a non-indented line keeps the new (indented)
+                # column-header row from being mistaken for the end.
                 listing=$(x86_64-w64-mingw32-objdump -p "$binary" |
-                    awk '/\[Ordinal\/Name Pointer\] Table/{flag=1;next} flag && /^[[:space:]]*\[/{print $3;next} flag{exit}')
+                    awk '/\[Ordinal\/Name Pointer\] Table/{flag=1;next} flag && /^[[:space:]]*\[/{print $NF;next} flag && !/^[[:space:]]/{exit}')
                 pe_exports=$(printf '%s\n' "$listing" | awk 'NF' | wc -l | tr -d ' ')
             else
                 echo "SKIP: $binary is a Windows PE but x86_64-w64-mingw32-objdump is not on PATH; install gcc-mingw-w64-x86-64 to audit $binary" >&2
