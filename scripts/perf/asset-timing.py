@@ -18,8 +18,12 @@ plugin file where individually sourceable):
                 aliases=() / plugins=() / completions=() for oh-my-bash;
                 BASH_IT_THEME / an enabled/ entry for bash-it). Echo
                 sentinels bracket the window: @@NIU-PERF-T0@@ is printed
-                immediately before the loader line, and a PROMPT_COMMAND
-                sentinel right before the first prompt renders.
+                immediately before the loader line, and PROMPT_COMMAND is
+                bracketed by @@NIU-PERF-PROMPT-START@@ (dispatch) and
+                @@NIU-PERF-PROMPT@@ (render complete). The START marker
+                survives a prompt command that aborts mid-run (e.g. an
+                unset `${var?}` — GNU skips the rest of the list), which
+                previously read as a fake timeout (unixwin/niubash#879).
   first_prompt  ConPTY session: rc load (the bootstrap line) -> first prompt
                 rendered on the emulated screen. Anchored at the rc's T0
                 sentinel, not at process spawn — the winpty/ConPTY transport
@@ -75,8 +79,19 @@ REPO = Path(__file__).resolve().parents[2]
 # Sentinel strings must be unique enough that no theme/plugin output can
 # collide with them.
 SENT_PROMPT = "@@NIU-PERF-PROMPT@@"
+# Printed at the very start of PROMPT_COMMAND, BEFORE the asset's prompt
+# function. SENT_PROMPT is appended after it: a prompt command that aborts
+# mid-run (e.g. an unset `${var?}` — GNU-conformant behavior that also skips
+# the remaining list entries, verified against bash 5.1) swallows only the
+# trailing sentinel, so a real prompt hang still lacks a START marker while
+# an aborted render is timed at dispatch. unixwin/niubash#879.
+SENT_PROMPT_START = "@@NIU-PERF-PROMPT-START@@"
 SENT_T0 = "@@NIU-PERF-T0@@"
 SENT_SRC = "@@NIU-PERF-SRC@@"
+# Once PROMPT_COMMAND has dispatched, a healthy render closes the window
+# with the trailing sentinel well inside this grace; anything longer means
+# the prompt aborted (or hung) rather than rendered slowly.
+PROMPT_END_GRACE_S = 1.0
 
 PHASES = ("source_wall", "first_prompt", "rerender")
 EXIT_GRACE_S = 3.0
@@ -207,8 +222,13 @@ def build_rc(asset: Asset, omb: Path | None, bashit_root: Path | None,
         f"printf '{SENT_SRC} %s %s %s\\n' \"$__perf_t0\" \"$__perf_t1\" \"$__perf_src_rc\"",
         "__perf_decl=$(declare -p PROMPT_COMMAND 2>/dev/null)",
         "case \"$__perf_decl\" in",
-        f"  'declare -a'*) PROMPT_COMMAND+=(\"printf '%s\\\\n' '{SENT_PROMPT}'\") ;;",
-        f"  *) PROMPT_COMMAND=\"${{PROMPT_COMMAND:+${{PROMPT_COMMAND}}; }}printf '%s\\\\n' '{SENT_PROMPT}'\" ;;",
+        # Bracket the asset's prompt function with sentinels. The START
+        # marker goes first so a GNU-conformant abort inside the prompt
+        # (`${var?}` on an unset variable skips the rest of the list) can
+        # never swallow the only observable; the END marker then separates
+        # "prompt aborted/hung" (START seen, END missing) from "rendered".
+        f"  'declare -a'*) PROMPT_COMMAND=(\"printf '%s\\\\n' '{SENT_PROMPT_START}'\" \"${{PROMPT_COMMAND[@]}}\" \"printf '%s\\\\n' '{SENT_PROMPT}'\") ;;",
+        f"  *) PROMPT_COMMAND=\"printf '%s\\\\n' '{SENT_PROMPT_START}'${{PROMPT_COMMAND:+; ${{PROMPT_COMMAND}}}}; printf '%s\\\\n' '{SENT_PROMPT}'\" ;;",
         "esac",
     ]
     return "\n".join(lines) + "\n"
@@ -308,6 +328,7 @@ def measure_source_wall(niu: Path, rc: Path, cwd: Path, env: dict,
     status: 'ok' | 'timeout' | 'error'."""
     t0_seen: list[float] = []
     prompt_seen: list[float] = []
+    prompt_start_seen: list[float] = []
     src_line: list[str] = []
     err_buf: list[str] = []
 
@@ -318,6 +339,8 @@ def measure_source_wall(niu: Path, rc: Path, cwd: Path, env: dict,
                 now = time.perf_counter()
                 if SENT_T0 in line and not t0_seen:
                     t0_seen.append(now)
+                if SENT_PROMPT_START in line and not prompt_start_seen:
+                    prompt_start_seen.append(now)
                 if SENT_PROMPT in line and not prompt_seen:
                     prompt_seen.append(now)
                 if line.startswith(SENT_SRC):
@@ -340,7 +363,11 @@ def measure_source_wall(niu: Path, rc: Path, cwd: Path, env: dict,
     while time.monotonic() < deadline and not (t0_seen and prompt_seen):
         if proc.poll() is not None:
             break  # died early; drain and evaluate below
+        if prompt_start_seen and (time.monotonic()
+                                  - prompt_start_seen[0]) > PROMPT_END_GRACE_S:
+            break  # prompt dispatched but never re-emitted the END sentinel
         time.sleep(0.002)
+    exited = False
     try:
         if prompt_seen:
             # Let the first prompt finish rendering before asking the shell
@@ -355,6 +382,7 @@ def measure_source_wall(niu: Path, rc: Path, cwd: Path, env: dict,
                 pass
         try:
             proc.wait(timeout=EXIT_GRACE_S)
+            exited = True
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=EXIT_GRACE_S)
@@ -374,6 +402,25 @@ def measure_source_wall(niu: Path, rc: Path, cwd: Path, env: dict,
 
     if not (t0_seen and prompt_seen):
         tail = "".join(err_buf)[-300:].strip().replace("\n", " | ")
+        if t0_seen and prompt_start_seen and exited:
+            # unixwin/niubash#879: the prompt dispatched but the trailing
+            # sentinel never re-emitted, and the shell still answered the
+            # exit probe — the prompt command aborted mid-run (e.g. a
+            # `${var?}` on an unset variable; GNU skips the rest of the
+            # list), it did not hang. Measure t0 -> dispatch and attach the
+            # stderr tail so the real error stays visible. NOT 'error':
+            # the asset is measured, not failed.
+            return (prompt_start_seen[0] - t0_seen[0]) * 1000.0, loader_ms, \
+                "ok", (
+                f"prompt sentinel not re-emitted (prompt command aborted "
+                f"mid-render); window measured to dispatch; "
+                f"stderr tail: {tail or '<empty>'}")
+        if t0_seen and prompt_start_seen:
+            # START seen but no END and the exit probe was ignored: the
+            # prompt render itself is still busy — a real render hang.
+            return None, loader_ms, "timeout", (
+                f"prompt dispatched but render never completed and the "
+                f"session ignored exit; stderr tail: {tail or '<empty>'}")
         return None, loader_ms, "timeout", (
             f"sentinel window did not close within {timeout_s}s; "
             f"stderr tail: {tail or '<empty>'}")
@@ -424,7 +471,11 @@ class ConptySession:
 
     def sentinel_count(self) -> int:
         disp, _, _ = self.snapshot()
-        return sum(line.count(SENT_PROMPT) for line in disp)
+        # Both markers count: a prompt that aborts mid-render still emits
+        # the START sentinel, so an aborted render is distinguishable from
+        # a hung one only by the missing END marker — see SENT_PROMPT_START.
+        return sum(line.count(SENT_PROMPT) + line.count(SENT_PROMPT_START)
+                   for line in disp)
 
     def write(self, data: str):
         try:
@@ -505,7 +556,8 @@ def measure_conpty(niu: Path, rc: Path, cwd: Path, env: dict, cols: int, rows: i
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             disp, last_change, now = sess.snapshot()
-            if any(SENT_PROMPT in line for line in disp) and (now - last_change) >= settle_s:
+            if any(SENT_PROMPT in line or SENT_PROMPT_START in line
+                   for line in disp) and (now - last_change) >= settle_s:
                 first_ms = (last_change - t0_at) * 1000.0
                 fp_status = "ok"
                 break
@@ -526,7 +578,8 @@ def measure_conpty(niu: Path, rc: Path, cwd: Path, env: dict, cols: int, rows: i
             disp, last_change, now = sess.snapshot()
             changed = last_change > enter_at
             counted = sess.sentinel_count() > count_before or any(
-                SENT_PROMPT in line for line in disp)
+                SENT_PROMPT in line or SENT_PROMPT_START in line
+                for line in disp)
             if changed and counted and (now - last_change) >= settle_s:
                 rerender_ms = (last_change - enter_at) * 1000.0
                 rr_status = "ok"
@@ -630,7 +683,7 @@ def measure_asset(asset: Asset, args, niu: Path, rc_path: Path, fixture: Path,
         phases["source_wall"]["status"] = status
         if status == "ok":
             phases["source_wall"]["samples_ms"].append(sw)
-        else:
+        if detail:
             phases["source_wall"]["errors"].append(detail)
         if loader is not None:
             phases["source_wall"].setdefault(
