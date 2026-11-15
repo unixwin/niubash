@@ -12,8 +12,13 @@
 //! - §12 `.bat`/`.cmd` launcher precedence: the PATHEXT-before-POSIX rule
 //!   was undocumented; it is now stated in the Windows Path Contract and
 //!   pinned here.
+//! - §2 `cmd //c`: the MSYS `//x` escape is deliberately not folded
+//!   (tracker #996 ruling — an intentional divergence, not a bug), so
+//!   `cmd //c` opens an interactive session where `cmd /c` works as
+//!   typed. The contract, the platform deltas, and both READMEs state
+//!   the rule and the hang-shaped failure mode; pinned here.
 //!
-//! Everything else in #993 (§1 `set -u` + `${X:=v}`, §2 `cmd //c`, §4
+//! Everything else in #993 (§1 `set -u` + `${X:=v}`, §4
 //! `command -v` for emulated commands, §5 `/dev` devices, §6 `pwd -W`,
 //! §7 realpath/readlink spelling, §9 ssh paths, §3 permission model, §10
 //! tool provenance, S1–S11) lives in rubash or WinuxCmd, or needs a
@@ -121,6 +126,47 @@ fn readme_zh_no_longer_claims_quoted_arguments_are_never_rewritten() {
         text.contains("只要拼出路径就会被翻译"),
         "the corrected wording must state the measured rule"
     );
+}
+
+/// §2: the Windows Path Contract must state that the MSYS `//x` escape
+/// is not folded — `cmd //c` hands cmd.exe an interactive session (a
+/// hang, not an error), and `cmd /c` is the spelling that works.
+#[test]
+fn path_contract_documents_cmd_double_slash_not_folded() {
+    let text = read_doc("docs/src/windows-path-contract.md");
+    assert!(
+        text.contains("escape spelling `//x` is not folded"),
+        "the contract must state that the MSYS //x escape is not folded"
+    );
+    assert!(
+        text.contains("interactive session"),
+        "the contract must pin the failure mode — a hang, not an error"
+    );
+    assert!(
+        text.contains("`cmd /c \"echo hi\"`\n  works as written"),
+        "the contract must name the spelling that works as written"
+    );
+}
+
+/// §2 (migration surface): both READMEs must carry the `cmd //c`
+/// hang guidance for Git Bash migrants.
+#[test]
+fn readmes_document_cmd_double_slash_hang() {
+    for doc in ["README.md", "README-zh.md"] {
+        let text = read_doc(doc);
+        assert!(
+            text.contains("cmd //c"),
+            "{doc} must name the MSYS escape spelling that hangs"
+        );
+        assert!(
+            text.contains("cmd /c"),
+            "{doc} must name the spelling that works"
+        );
+        assert!(
+            !text.contains("//c is folded") && !text.contains("折叠 //"),
+            "{doc} must not claim that // is folded"
+        );
+    }
 }
 
 /// §12: the Windows Path Contract must state the PATHEXT-before-POSIX

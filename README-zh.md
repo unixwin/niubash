@@ -220,6 +220,7 @@ niu 的语言语义就是 rubash 引擎的语义，门禁靠机械手段、不�
 - **niu 跑得了真 Bash 脚本吗？** 跑得了。rubash 引擎以 GNU Bash 官方上游测试套件作门禁，记录在[兼容性矩阵](docs/src/rubash-bash-compat-matrix.md)。
 - **不止于 Git Bash 兼容。** 控制台设备重定向在连 Git Bash 都失败的地方照常工作：`echo >/dev/tty`、`exec 3<>/dev/tty`、`test -e /dev/tty` 全部与 GNU 一致——引擎把 `/dev/tty` 映射到控制台，并把 `CON` 拆成 `CONIN$`/`CONOUT$` 两半，绕开 Windows 对 `CON` 的设备打开限制（`CON` 上拒绝 `FILE_APPEND_DATA` 与读写打开）。`git`/`ssh` 的 askpass 提示靠的正是这个。（引擎侧线索：[rubash#1312](https://github.com/unixwin/rubash/issues/1312)、[rubash#1314](https://github.com/unixwin/rubash/issues/1314)、[niubash#519](https://github.com/unixwin/niubash/issues/519)。）
 - **现在能在 Android 或鸿蒙上装 niu 吗？** Android 能：v1.4.3 起 release 自带 `.zip`，真机（Termux aarch64/armv7）可运行。鸿蒙还不能：CI 能编译，但没有可安装产物。
+- **从 Git Bash 迁来的脚本里 `cmd //c` 为什么停在提示符？** `//` 是 MSYS 自家参数改写的转义拼写，niu 没有这层改写：双斜杠原样到达 cmd.exe，`//c` 不是 cmd 认识的开关，cmd 于是开一个交互会话——失败形态是挂起，不是报错。写 `cmd /c` 即可——这个在 MSYS 下反而脆弱的拼写，在 niu 下原样可用（[路径契约](docs/src/windows-path-contract.md)）。
 
 ## 已知限制，明说
 

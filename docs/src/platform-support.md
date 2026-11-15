@@ -476,6 +476,13 @@ documentation — not bugs to fix):
   Bash's 177th entry is a Git-for-Windows patch artifact, not GNU.
   `shopt` likewise rejects `completion_strip_exe`, a
   Cygwin/Git-for-Windows extension upstream bash has no option for.
+- `cmd //c` is the MSYS escape spelling, and niu does not fold `//`:
+  cmd.exe receives the literal `//c`, does not recognise it as a
+  switch, and opens an interactive session — the failure mode is a
+  hang (a prompt on stdin), not an error (niubash#993 §2). Write
+  `cmd /c`, which works as typed: under Git Bash the bare `/c` is the
+  fragile form (MSYS rewrites it to `C:/`), which is exactly why the
+  `//c` escape exists there.
 
 ## Calling PowerShell from niu
 
