@@ -668,7 +668,12 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
                 keyseq_timeout,
             )
             .with_quote_sequences(standby_layer_parts.quote_sequences),
-        ));
+        ))
+        // The engine-side deadline driver for `has_pending_sequence`/
+        // `flush_pending_sequence` above: readline's `keyseq-timeout`,
+        // same value the chord layer reads (niubash#731 obs ①). `0`
+        // is inert here — `has_pending_sequence` never arms for it.
+        .with_keyseq_timeout(keyseq_timeout);
 
     if shell_ref.autosuggest.history_strategy_enabled() {
         editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(
@@ -5195,6 +5200,44 @@ impl EditMode for ChordEditMode {
     fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
         self.inner.handle_mode_specific_event(event)
     }
+
+    /// The parked prefix is a half-typed sequence (niubash#731, the
+    /// #704 review's chord observation ①): the engine polls it with
+    /// the keyseq deadline and flushes it on idle — GNU's timed read
+    /// inside `_rl_dispatch_subseq` (readline.c), which used to fire
+    /// here only when the next key arrived. `keyseq-timeout 0` is
+    /// GNU's wait-forever spelling: no deadline may ever run, so the
+    /// engine's timer stays off for it.
+    fn has_pending_sequence(&self) -> bool {
+        !self.pending.is_empty() && self.keyseq_timeout != Duration::ZERO
+    }
+
+    /// A sequence abandoned across prompts (break, Ctrl-C, submit)
+    /// belongs to the `read_line` that parked it — the engine resets
+    /// before each read so a stranded `C-x` cannot leak in.
+    fn reset_pending_sequence(&mut self) {
+        self.pending.clear();
+        self.pending_since = None;
+    }
+
+    /// The idle flush: replay the parked units through the inner
+    /// machine — the same events the late-key timeout check in
+    /// `dispatch` produces for a prefix that outlived its window.
+    fn flush_pending_sequence(&mut self) -> ReedlineEvent {
+        let mut events = Vec::new();
+        for parked in std::mem::take(&mut self.pending) {
+            push_event(
+                &mut events,
+                self.forward(ReedlineRawEvent::try_from(parked).expect("parked key")),
+            );
+        }
+        self.pending_since = None;
+        match events.len() {
+            0 => ReedlineEvent::None,
+            1 => events.pop().expect("one event"),
+            _ => ReedlineEvent::Multiple(events),
+        }
+    }
 }
 
 impl ChordEditMode {
@@ -9150,6 +9193,120 @@ mod tests {
         assert_eq!(
             mode.parse_event(chord_test_key(Code::Char('b'), Mods::NONE)),
             edit_event(EditCommand::InsertString("TRIPLE".to_string()))
+        );
+    }
+
+    /// niubash#731 (the #704 review's chord observation ①): the parked
+    /// prefix declares itself through `has_pending_sequence`, so the
+    /// engine's own deadline poll flushes it on idle — GNU's timed
+    /// read inside `_rl_dispatch_subseq` fires with no partner key.
+    /// The flush replays the parked units through the inner machine:
+    /// a lone `C-x` delivers its own binding once the window passes.
+    #[test]
+    fn issue731_chord_prefix_flushes_on_idle_via_engine_deadline() {
+        use crossterm29::event::KeyCode as Code;
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            Code::Char('x'),
+            edit_event(EditCommand::InsertString("SINGLE".to_string())),
+        );
+        let inner = Emacs::new(keybindings);
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, Code::Char('x')),
+                (KeyModifiers::NONE, Code::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(Code::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Pending
+        );
+        // The park reports itself so the engine can poll with the
+        // deadline; GNU needs no partner to time the sequence out.
+        assert!(mode.has_pending_sequence());
+        // The deadline firing replays the parked prefix — the C-x's
+        // own binding lands, exactly the late-key flush — and nothing
+        // is left pending for the next prompt.
+        assert_eq!(
+            mode.flush_pending_sequence(),
+            edit_event(EditCommand::InsertString("SINGLE".to_string()))
+        );
+        assert!(!mode.has_pending_sequence());
+        // A second flush is inert.
+        assert_eq!(mode.flush_pending_sequence(), ReedlineEvent::None);
+    }
+
+    /// niubash#731: `keyseq-timeout 0` is GNU's wait-forever spelling —
+    /// a parked prefix must never arm the engine's deadline, or the
+    /// prefix would flush after a literal zero-length wait.
+    #[test]
+    fn issue731_chord_zero_timeout_never_arms_deadline() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Pending
+        );
+        assert!(
+            !mode.has_pending_sequence(),
+            "keyseq-timeout 0 waits forever: the deadline must stay off"
+        );
+    }
+
+    /// niubash#731: a sequence abandoned mid-read must not leak into
+    /// the next prompt — `reset_pending_sequence` drops the parked
+    /// prefix wholesale.
+    #[test]
+    fn issue731_chord_reset_drops_abandoned_prefix() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::NONE, KeyCode::Char('z')),
+            ],
+            event: edit_event(EditCommand::InsertString("QUICK".to_string())),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Pending
+        );
+        mode.reset_pending_sequence();
+        assert!(!mode.has_pending_sequence());
+        assert_eq!(mode.flush_pending_sequence(), ReedlineEvent::None);
+        // The next key starts fresh — `z` alone is no chord completion.
+        assert_ne!(
+            mode.parse_event(chord_test_key(KeyCode::Char('z'), KeyModifiers::NONE)),
+            edit_event(EditCommand::InsertString("QUICK".to_string())),
+            "a reset prefix must not complete the chord"
         );
     }
 
