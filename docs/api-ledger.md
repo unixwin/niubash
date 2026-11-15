@@ -785,6 +785,19 @@
 > its ledger rows are still the rubash#3013 engine half; this
 > arm upgrades with that contract change when it lands.
 >
+> Addendum (Session::cwd census backfill, 2026-11-16,
+> niubash#1020): the `Session::cwd` read face — the session's
+> working directory as a `&self` read (`Executor::session_cwd`
+> under a `Session` name) — is recorded (§2.3 row, §6 entry)
+> after §5.5's Session-method census flagged it as
+> consumed-but-unrecorded: niubash#1020's `spell-correct-word`
+> readline command reads the session cwd to spell-correct the
+> word at point (`repl.rs:1953`,
+> `spell_correct_path(&word, session().cwd())`), but no census
+> ever registered the face. The canary red this raised on the
+> pairing job (and on master itself, once niu #1020 merged) is
+> what surfaced the gap. §6 grows 287 → 288 (one item).
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -1304,6 +1317,7 @@ its test-module reads named separately in the row):
 | `Session::has_compspec_at` | 1 | B5-11 (niubash#863, rubash#2856): ENTERS the ledger with this record — the position-aware compspec gate: whether a compspec governs completion at `(line, cursor)`, answered with the same split the generation path uses (`split_for_completion` + `resolve_compspec`), so the gate and the candidates cannot disagree. The command-name form `has_compspec` cannot answer it: the `-E` empty line has no command and the `-I` initial word IS the command being completed. Adopted by the B5-11 host migration (niu #926, merge `d4879b4b`): the `completer.rs` routing gate reads this face (the `-E`/`-I` gate was unreachable through the name form), so the count is 1 — the gate's single production call |
 | `Session::has_special_compspec` | 0 | B5-11 residual (niubash#863, rubash#2738): ENTERS the ledger with this record — the selective special-compspec query: whether the one special slot named by `SpecialCompspecKind` (`Default` = `-D`, `Empty` = `-E`, `Initial` = `-I`) is registered. The name form `has_compspec` ORs the command's own registration and all three slots together, so a host gate cannot open for exactly the governing class — and the `-E`/`-I` positions are the ones with no command name to ask about. A pure registration query like the name form; position governance stays `has_compspec_at`'s answer. Recorded staged ahead of the host adoption (the host gate rewire is the niubash side of B5-11), so the count is 0; consumed in-repo by the rubash#2738 consumer pins |
 | `Session::background_job_count` | 1 | GAP queue (niubash#863, rubash#2859): ENTERS the ledger with this record — the background-jobs count as a contract face: the number of table entries with `background == true` and state in {Running, Stopped} after the `cleanup_dead_jobs` liveness pass, exactly the set bare `jobs` lists (GNU builtins/jobs.def:83 `list_all_jobs`, jobs.c:2254-2257). A ^Z-stopped foreground job counts (the stop path flips it to `background = true`); process-substitution children are not table entries and never count; a completed job never counts. Adopted by the host adoption (niu #946, merge `28720f2f`): the host prompt segment (`BackgroundJobs`) reads through this face — one production call, in `prompt_for_display` — instead of its `NIU_BACKGROUND_JOBS` environment variable, which had no honest producer (niu #846 residual), so the count is 1. Consumed in-repo by the #2859 consumer pins (one/two Running, reaped, disowned, Stopped, procsub) |
+| `Session::cwd` | 1 | Session-method census backfill (niubash#1020, merge `2dd426c5`): ENTERS the ledger with this record — the session cwd as a contract face: the session's working directory as a `&self` read (`Executor::session_cwd` under a `Session` name). The host's `spell-correct-word` readline command (`run_spell_correct_word`, GNU bashline.c `bash_spell_correct_word` → spell.c `dirspell`) reads it to spell-correct the word at point (`repl.rs:1953`, `spell_correct_path(&word, session().cwd())`), so the count is 1 — the face's single production call. Recorded nowhere before — caught by the Session-method census (§5.5) itself, the same blind-spot class as the GAP-13 `environment` face. |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
@@ -1702,6 +1716,7 @@ method rubash::api::Session::close_with_report
 method rubash::api::Session::complete
 method rubash::api::Session::complete_detailed
 method rubash::api::Session::completion_view
+method rubash::api::Session::cwd
 method rubash::api::Session::executor
 method rubash::api::Session::executor_mut
 method rubash::api::Session::environment
