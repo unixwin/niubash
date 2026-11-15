@@ -157,6 +157,22 @@ paths — never both, and never a guess about the child's capabilities:
   tests). A bridge's remote words therefore survive exactly as typed:
   `ssh host cat /var/log/x` and `wsl cat /home/user/file` name the
   remote/guest files the user spelled, never local ones.
+- **The bridge's verbatim rule reaches its local-path operands too, so
+  Windows OpenSSH needs native spellings for them** (niubash#993 §9).
+  `ssh`/`scp`/`sftp`/`ssh-keygen` resolve to the Windows OpenSSH port,
+  which has no MSYS virtual filesystem: `ssh -i /c/Users/x/.ssh/key`,
+  `ssh -F /c/…`, the local side of an `scp`/`sftp` transfer,
+  `ssh-keygen -f /c/…`, and `IdentityFile`/`Include` lines inside
+  `~/.ssh/config` must spell local files in the `C:/…` (or `C:\…`)
+  form. A `/c/…` operand arrives verbatim and fails as
+  `Warning: Identity file /c/… not accessible` — Git Bash survives the
+  same spelling only because its ssh is an MSYS build that resolves
+  `/c/` in-process. Remote-path operands are unaffected: in
+  `scp local.txt host:/tmp/` the remote half still spells the remote
+  tree POSIX-style, which is the namespace that word lives in. (A
+  separate upstream face of the same client family is tracked at
+  [PowerShell/Win32-OpenSSH#2478](https://github.com/PowerShell/Win32-OpenSSH/issues/2478),
+  the `ssh -t` pty branch.)
 
 The boundary is structural rather than a rename of the "MSYS NO CONV"
 problem: the shell never asks a child what it can understand. The shipped
