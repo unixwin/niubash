@@ -360,12 +360,27 @@ def measure_source_wall(niu: Path, rc: Path, cwd: Path, env: dict,
     for th in threads:
         th.start()
     deadline = time.monotonic() + timeout_s
+    probe_at: float | None = None
     while time.monotonic() < deadline and not (t0_seen and prompt_seen):
         if proc.poll() is not None:
             break  # died early; drain and evaluate below
-        if prompt_start_seen and (time.monotonic()
-                                  - prompt_start_seen[0]) > PROMPT_END_GRACE_S:
-            break  # prompt dispatched but never re-emitted the END sentinel
+        if (prompt_start_seen and not prompt_seen and probe_at is None
+                and (time.monotonic() - prompt_start_seen[0])
+                > PROMPT_END_GRACE_S):
+            # START landed but END is past the abort grace: probe once —
+            # `exit` reaches a live read immediately (prompt aborted),
+            # while a still-running render (slow or hung) only queues it.
+            # The loop keeps watching for END until `deadline` instead of
+            # breaking here, so a render inside (grace, timeout_s) still
+            # measures ok rather than flipping to timeout (niubash#879
+            # audit F2: END's window used to collapse to grace+EXIT_GRACE).
+            try:
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.write(b"exit\n")
+                    proc.stdin.flush()
+            except OSError:
+                pass
+            probe_at = time.monotonic()
         time.sleep(0.002)
     exited = False
     try:
@@ -373,15 +388,21 @@ def measure_source_wall(niu: Path, rc: Path, cwd: Path, env: dict,
             # Let the first prompt finish rendering before asking the shell
             # to exit, so the measured window closes naturally.
             time.sleep(0.08)
-        if proc.stdin and not proc.stdin.closed:
-            try:
-                proc.stdin.write(b"exit\n")
-                proc.stdin.flush()
-                proc.stdin.close()
-            except OSError:
-                pass
+        if probe_at is None:
+            if proc.stdin and not proc.stdin.closed:
+                try:
+                    proc.stdin.write(b"exit\n")
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            probe_at = time.monotonic()
         try:
-            proc.wait(timeout=EXIT_GRACE_S)
+            # `exited` means the exit probe was answered within its grace
+            # of being written — an aborted prompt is already at a live
+            # read and answers immediately; a busy one does not.
+            proc.wait(timeout=max(0.0, probe_at + EXIT_GRACE_S
+                                  - time.monotonic()))
             exited = True
         except subprocess.TimeoutExpired:
             proc.kill()
@@ -490,6 +511,30 @@ class ConptySession:
             # already mark a dead session's measurement error/timeout.
             pass
 
+    def probe_live(self, grace_s: float) -> bool:
+        """Liveness probe for a screen-frozen session — the ConPTY
+        equivalent of measure_source_wall's exit probe. ConPTY only
+        sees the screen: a shell back at its line editor echoes a
+        typed byte (the repaint bumps `last_change`), while a prompt
+        still running — slow render or hang — never repaints. The
+        probe byte is always followed by DEL so the pair reads as a
+        no-op even when it was queued behind a still-running render;
+        the edit buffer stays empty for the next phase."""
+        _disp, prev_change, _now = self.snapshot()
+        self.write("x")
+        deadline = time.monotonic() + grace_s
+        live = False
+        while time.monotonic() < deadline:
+            _disp, last_change, _now = self.snapshot()
+            if last_change > prev_change:
+                live = True
+                break
+            if not self.proc.isalive():
+                break
+            time.sleep(0.005)
+        self.write("\x7f")
+        return live
+
     def close(self):
         self.alive = False
         try:
@@ -553,19 +598,49 @@ def measure_conpty(niu: Path, rc: Path, cwd: Path, env: dict, cols: int, rows: i
     # Phase: first prompt rendered.
     if t0_at is not None:
         fp_status = "timeout"
+        probed_dead = False
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             disp, last_change, now = sess.snapshot()
-            if any(SENT_PROMPT in line or SENT_PROMPT_START in line
-                   for line in disp) and (now - last_change) >= settle_s:
+            if any(SENT_PROMPT in line for line in disp) \
+                    and (now - last_change) >= settle_s:
                 first_ms = (last_change - t0_at) * 1000.0
                 fp_status = "ok"
                 break
+            if (not probed_dead
+                    and not any(SENT_PROMPT in line for line in disp)
+                    and any(SENT_PROMPT_START in line for line in disp)
+                    and (now - last_change) >= settle_s):
+                # START on screen but END missing and the screen has
+                # settled: START alone is NOT a completion signal —
+                # ConPTY cannot see whether the prompt aborted (shell
+                # back at a live line editor) or is still running
+                # behind a frozen screen (slow render or hang), so
+                # probe liveness directly (niubash#879 audit F1: the
+                # sentinel-swallow read START as completion and made
+                # a real render hang report ok).
+                if sess.probe_live(PROMPT_END_GRACE_S):
+                    first_ms = (last_change - t0_at) * 1000.0
+                    fp_status = "ok"
+                    detail = ("prompt sentinel not re-emitted (prompt "
+                              "command aborted mid-render); window "
+                              "measured to dispatch")
+                    break
+                # Not live — but a slow render may still land END, so
+                # keep watching until `deadline` instead of judging
+                # timeout here (same (grace, timeout_s) recovery as
+                # the pipes phase).
+                probed_dead = True
             if not sess.proc.isalive():
                 fp_status = "error"
                 detail = "session exited before first prompt"
                 break
             time.sleep(0.005)
+        if probed_dead and fp_status == "timeout":
+            detail = ("prompt emitted START but never completed and the "
+                      "session ignored the liveness probe")
+        elif fp_status == "timeout" and not detail:
+            detail = f"first prompt not seen within {timeout_s}s"
 
     # Phase: ENTER -> next prompt.
     if first_ms is not None:
@@ -574,21 +649,36 @@ def measure_conpty(niu: Path, rc: Path, cwd: Path, env: dict, cols: int, rows: i
         sess.write("\r")
         deadline = time.monotonic() + timeout_s
         rr_status = "timeout"
+        rr_probed_dead = False
         while time.monotonic() < deadline:
             disp, last_change, now = sess.snapshot()
             changed = last_change > enter_at
-            counted = sess.sentinel_count() > count_before or any(
-                SENT_PROMPT in line or SENT_PROMPT_START in line
-                for line in disp)
-            if changed and counted and (now - last_change) >= settle_s:
+            end_seen = any(SENT_PROMPT in line for line in disp)
+            counted = sess.sentinel_count() > count_before or end_seen
+            if changed and end_seen and (now - last_change) >= settle_s:
                 rerender_ms = (last_change - enter_at) * 1000.0
                 rr_status = "ok"
                 break
+            if (not rr_probed_dead and changed and counted and not end_seen
+                    and (now - last_change) >= settle_s):
+                # Same START-only discrimination as first_prompt.
+                if sess.probe_live(PROMPT_END_GRACE_S):
+                    rerender_ms = (last_change - enter_at) * 1000.0
+                    rr_status = "ok"
+                    detail = detail or (
+                        "prompt sentinel not re-emitted (prompt command "
+                        "aborted mid-render); window measured to dispatch")
+                    break
+                rr_probed_dead = True
             if not sess.proc.isalive():
                 rr_status = "error"
                 detail = detail or "session exited before re-render"
                 break
             time.sleep(0.005)
+        if rr_probed_dead and rr_status == "timeout":
+            detail = detail or (
+                "prompt emitted START but never completed and the "
+                "session ignored the liveness probe")
 
     sess.write("exit\r")
     grace = time.monotonic() + EXIT_GRACE_S
