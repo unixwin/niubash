@@ -203,6 +203,51 @@ fn pty_k3_chord_keyseq_timeout_flushes_on_idle() {
     s.wait_exit();
 }
 
+/// Host-channel widening (K3 WP3): the emacs_ctlx defaults bashline.c
+/// binds (`C-x C-v` display-shell-version, `M-C-t`
+/// shell-transpose-words — bashline.c:533/:635) ride the readline
+/// host channel, so an UNCONFIGURED prompt answers them. The version
+/// banner is the engine's own `show_shell_version` text; the
+/// transpose swaps the two shellwords around point.
+#[test]
+fn pty_k3_host_channel_delivers_gnu_ctlx_and_meta_defaults() {
+    if !require_pty_or_skip("pty_k3_host_channel_delivers_gnu_ctlx_and_meta_defaults") {
+        return;
+    }
+    let mut s = spawn_k3("hostchan", "");
+    s.wait_ready();
+    s.expect_absent("not applied", Duration::from_secs(2));
+
+    // C-x C-v → display-shell-version: the GNU banner line prints.
+    s.send("\u{18}\u{16}");
+    std::thread::sleep(Duration::from_millis(900));
+    let screen = normalize_screen(&s.drain_screen());
+    assert!(
+        screen.contains("GNU bash, version"),
+        "C-x C-v must print the GNU version banner through the host channel:\n{screen}"
+    );
+
+    // M-C-t → shell-transpose-words (ESC then Ctrl-T is the wire
+    // shape of Meta-Ctrl-T): "alpha beta" at point-end becomes
+    // "beta alpha".
+    s.send(driver::CTRL_C);
+    s.expect_prompt();
+    s.send("alpha beta");
+    s.send("\u{1b}\u{14}");
+    std::thread::sleep(Duration::from_millis(700));
+    let screen = normalize_screen(&s.drain_screen());
+    let tail = screen.rsplit("P1>").next().unwrap_or("");
+    assert!(
+        tail.contains("beta alpha"),
+        "M-C-t must transpose the shellwords (beta alpha):\n{screen}"
+    );
+
+    s.send(driver::CTRL_C);
+    s.expect_prompt();
+    s.send_line("exit");
+    s.wait_exit();
+}
+
 /// `vi-editing-mode` switches into the standby vi machine: after the
 /// bound key, `ESC` lands in vi-normal and `x` deletes the character
 /// under the cursor — a mechanism the emacs machine does not have.

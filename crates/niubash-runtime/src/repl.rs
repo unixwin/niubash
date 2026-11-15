@@ -1096,6 +1096,24 @@ thread_local! {
     /// second press at the same spot lists instead of editing).
     static LAST_SPECIFIC_COMPLETION: std::cell::RefCell<Option<(String, usize, String)>> =
         const { std::cell::RefCell::new(None) };
+    /// The live `dabbrev-expand` expansion: the word span the first
+    /// press rewrote, the prefix it carried, the newest-first match
+    /// list, and the match index showing — a repeat at the same spot
+    /// walks the list toward older entries (niubash#731).
+    static LAST_DABBREV: std::cell::RefCell<Option<DabbrevState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// One live [`LAST_DABBREV`] expansion.
+struct DabbrevState {
+    /// The buffer span the last press rewrote.
+    start: usize,
+    end: usize,
+    /// History tokens carrying the first press's prefix, newest
+    /// first.
+    matches: Vec<String>,
+    /// Which `matches` entry the buffer shows.
+    index: usize,
 }
 
 /// The interactive history as the editor holds it, oldest first —
@@ -1431,6 +1449,192 @@ fn run_readline_command(
                 });
             }
         }
+        // bashline.c:726 display_shell_version: rl_crlf, the
+        // show_shell_version banner, a trailing CR — the engine's own
+        // banner printer carries the GNU text.
+        "display-shell-version" => {
+            print_suspended_output("\r\n");
+            let version = shell
+                .borrow_mut()
+                .session_mut()
+                .variables()
+                .resolved_value("BASH_VERSION");
+            rubash::usage::show_shell_version(version.as_deref());
+            print_suspended_output("\r");
+        }
+        // bashline.c:505-513 bash_possible_*_completions: the
+        // `possible-completions` list with the candidate source pinned
+        // — list on every press, never splice a prefix.
+        "possible-command-completions"
+        | "possible-variable-completions"
+        | "possible-filename-completions"
+        | "possible-hostname-completions"
+        | "possible-username-completions" => {
+            run_possible_completions(shell, line_editor, name);
+        }
+        // bashline.c `bash_glob_expand_word`: pathname-expand the word
+        // at point through the engine and splice the matches back in,
+        // space-joined. `bash_glob_list_expansions` lists them instead.
+        "glob-expand-word" | "glob-list-expansions" => {
+            run_glob_expansion(shell, line_editor, name == "glob-list-expansions");
+        }
+        // complete.c `rl_delete_char_or_list`: at end of line, list
+        // the completions; elsewhere delete the character at point.
+        "delete-char-or-list" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            if cursor >= buffer.len() {
+                let mut completer = NiubashCompleter::with_shell(
+                    shell.borrow().completion_state.clone(),
+                    shell.clone(),
+                );
+                let mut matches: Vec<String> = completer
+                    .complete(&buffer, cursor)
+                    .into_iter()
+                    .map(|suggestion| suggestion.value)
+                    .collect();
+                if matches.is_empty() {
+                    readline_ding();
+                } else {
+                    matches.sort();
+                    matches.dedup();
+                    print_suspended_output(&format!("\n{}\n", matches.join("  ")));
+                }
+            } else {
+                line_editor.run_edit_commands(&[EditCommand::Delete]);
+            }
+        }
+        // bashline.c `alias_expand_line`: the alias stage only.
+        // `history_and_alias_expand_line` runs the history stage first.
+        "alias-expand-line" | "history-and-alias-expand-line" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            if name == "history-and-alias-expand-line" {
+                match editor_history_entries(line_editor) {
+                    Ok(entries) => {
+                        if let Some(expanded) =
+                            shell.borrow_mut().history_expand_line(&buffer, &entries)
+                        {
+                            let aliases = shell.borrow().session().aliases();
+                            let expanded = crate::readline_commands::expand_alias_positions(
+                                &expanded, &aliases,
+                            );
+                            replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("niubash: {name}: history unavailable: {err}");
+                    }
+                }
+            } else {
+                let aliases = shell.borrow().session().aliases();
+                let expanded = crate::readline_commands::expand_alias_positions(&buffer, &aliases);
+                replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+            }
+        }
+        // bashline.c `magic_space` (tcsh_magic_space): history-expand
+        // the line, then insert a space at point — the insert runs
+        // whether or not the expansion changed anything.
+        "magic-space" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            match editor_history_entries(line_editor) {
+                Ok(entries) => {
+                    if let Some(expanded) =
+                        shell.borrow_mut().history_expand_line(&buffer, &entries)
+                    {
+                        replace_line_set_up_new_line(line_editor, &buffer, cursor, expanded);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("niubash: magic-space: history unavailable: {err}");
+                }
+            }
+            line_editor.run_edit_commands(&[EditCommand::InsertString(" ".to_string())]);
+        }
+        // bashline.c `bash_dabbrev_expand`: complete the word at point
+        // to the newest history token carrying its prefix; a repeated
+        // press at the same spot cycles to the next older match.
+        "dabbrev-expand" => {
+            run_dabbrev_expand(line_editor);
+        }
+        // bashline.c:474-478 `bash_*_shellword`: motion and kill by
+        // shell words — whitespace and shell metacharacters delimit.
+        "shell-forward-word" | "shell-backward-word" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let view = shell.borrow().session().token_view(&buffer);
+            let target = if name == "shell-forward-word" {
+                view.tokens
+                    .iter()
+                    .find(|span| span.kind.is_word_shaped() && span.end > cursor)
+                    .map(|span| span.end)
+                    .unwrap_or(buffer.len())
+            } else {
+                view.tokens
+                    .iter()
+                    .rev()
+                    .find(|span| span.kind.is_word_shaped() && span.start < cursor)
+                    .map(|span| span.start)
+                    .unwrap_or(0)
+            };
+            line_editor.run_edit_commands(&[EditCommand::MoveToPosition {
+                position: target,
+                select: false,
+            }]);
+        }
+        "shell-kill-word" | "shell-backward-kill-word" => {
+            let buffer = line_editor.current_buffer_contents().to_string();
+            let cursor = line_editor.current_insertion_point();
+            let view = shell.borrow().session().token_view(&buffer);
+            let (cut_start, cut_end) = if name == "shell-kill-word" {
+                let end = view
+                    .tokens
+                    .iter()
+                    .find(|span| span.kind.is_word_shaped() && span.end > cursor)
+                    .map(|span| span.end)
+                    .unwrap_or(buffer.len());
+                (cursor, end)
+            } else {
+                let start = view
+                    .tokens
+                    .iter()
+                    .rev()
+                    .find(|span| span.kind.is_word_shaped() && span.start < cursor)
+                    .map(|span| span.start)
+                    .unwrap_or(0);
+                (start, cursor)
+            };
+            if cut_end > cut_start {
+                // The kill ring has no range-cut edit: splice the
+                // buffer directly, point at the cut's start (GNU's
+                // rl_kill leaves the kill in the ring — the host has
+                // no ring seam for a spliced span, a documented gap).
+                let mut next = String::with_capacity(buffer.len() - (cut_end - cut_start));
+                next.push_str(&buffer[..cut_start]);
+                next.push_str(&buffer[cut_end..]);
+                line_editor.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(next),
+                    EditCommand::MoveToPosition {
+                        position: cut_start,
+                        select: false,
+                    },
+                ]);
+            }
+        }
+        // bashline.c `bash_transpose_shellwords` (text.c
+        // `rl_transpose_words` over shell words): swap the shellword
+        // before point with the one after it.
+        "shell-transpose-words" => {
+            run_shell_transpose_words(shell, line_editor);
+        }
+        // bashline.c `bash_spell_correct_word` → spell.c `dirspell`:
+        // spell-correct each path component of the word at point,
+        // allowing one edit (insert / delete / change / transpose).
+        "spell-correct-word" => {
+            run_spell_correct_word(shell, line_editor);
+        }
         _ => {
             // niubash#835: a name that lands here rode the readline
             // host channel but has no host implementation — name it
@@ -1515,6 +1719,348 @@ fn run_specific_completion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedlin
             select: false,
         },
     ]);
+}
+
+/// One `possible-*-completions` press (bashline.c:505-513): the same
+/// candidate source as the `complete-*` twin, but GNU lists on every
+/// press — `rl_possible_completions` never splices a common prefix.
+fn run_possible_completions(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline, name: &str) {
+    use crate::completion::SpecificCompletion;
+    let mode = match name {
+        "possible-command-completions" => SpecificCompletion::Command,
+        "possible-variable-completions" => SpecificCompletion::Variable,
+        "possible-hostname-completions" => SpecificCompletion::Hostname,
+        "possible-username-completions" => SpecificCompletion::Username,
+        _ => SpecificCompletion::Filename,
+    };
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    let mut matches: Vec<String> = {
+        let mut completer =
+            NiubashCompleter::with_shell(shell.borrow().completion_state.clone(), shell.clone());
+        completer
+            .complete_specific(mode, &buffer, cursor)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect()
+    };
+    if matches.is_empty() {
+        readline_ding();
+        return;
+    }
+    matches.sort();
+    matches.dedup();
+    print_suspended_output(&format!("\n{}\n", matches.join("  ")));
+}
+
+/// `glob-expand-word` / `glob-list-expansions` (bashline.c
+/// `bash_glob_expand_word` / `bash_glob_list_expansions`): the word at
+/// point through the engine's pathname expansion — spliced back into
+/// the line space-joined, or listed like `possible-completions`.
+fn run_glob_expansion(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline, list_only: bool) {
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
+    let word = &buffer[start..end];
+    let mut matches = shell.borrow().session().glob_filename(word);
+    if matches.is_empty() {
+        readline_ding();
+        return;
+    }
+    if list_only {
+        matches.sort();
+        print_suspended_output(&format!("\n{}\n", matches.join("  ")));
+        return;
+    }
+    let replacement = matches.join(" ");
+    let mut next = String::with_capacity(buffer.len() - (end - start) + replacement.len());
+    next.push_str(&buffer[..start]);
+    next.push_str(&replacement);
+    next.push_str(&buffer[end..]);
+    let position = start + replacement.len();
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(next),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
+}
+
+/// `dabbrev-expand` (bashline.c `bash_dabbrev_expand`): complete the
+/// word at point to the newest history token carrying its prefix — a
+/// repeated press at the same spot cycles to the next older match.
+/// When history is unavailable or nothing matches, GNU dings.
+fn run_dabbrev_expand(line_editor: &mut Reedline) {
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    // A repeat press: the buffer still shows the last inserted match
+    // at the recorded span — walk to the next older one.
+    let continued = LAST_DABBREV.with(|last| {
+        let mut last = last.borrow_mut();
+        match last.as_mut() {
+            Some(state)
+                if cursor == state.end
+                    && buffer[state.start..state.end] == state.matches[state.index] =>
+            {
+                if state.index + 1 < state.matches.len() {
+                    state.index += 1;
+                    let next_match = state.matches[state.index].clone();
+                    let (start, end) = (state.start, state.end);
+                    state.end = start + next_match.len();
+                    Some((start, end, next_match))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    });
+    if let Some((start, end, next_match)) = continued {
+        let mut next = String::with_capacity(buffer.len() - (end - start) + next_match.len());
+        next.push_str(&buffer[..start]);
+        next.push_str(&next_match);
+        next.push_str(&buffer[end..]);
+        let position = start + next_match.len();
+        line_editor.run_edit_commands(&[
+            EditCommand::Clear,
+            EditCommand::InsertString(next),
+            EditCommand::MoveToPosition {
+                position,
+                select: false,
+            },
+        ]);
+        return;
+    }
+    let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
+    let prefix = buffer[start..end].to_string();
+    let entries = match editor_history_entries(line_editor) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!("niubash: dabbrev-expand: history unavailable: {err}");
+            readline_ding();
+            return;
+        }
+    };
+    // Newest first: tokens from the latest entries win — GNU's
+    // dabbrev scans history backward (bashline.c
+    // `history_completion_generator` under `rl_dabbrev_expand`).
+    let mut matches: Vec<String> = Vec::new();
+    for entry in entries.iter().rev() {
+        for token in crate::readline_commands::history_tokens(entry) {
+            if token.len() > prefix.len() && token.starts_with(&prefix) && !matches.contains(&token)
+            {
+                matches.push(token);
+            }
+        }
+    }
+    if matches.is_empty() || prefix.is_empty() {
+        readline_ding();
+        return;
+    }
+    let first = matches[0].clone();
+    LAST_DABBREV.with(|last| {
+        *last.borrow_mut() = Some(DabbrevState {
+            start,
+            end: start + first.len(),
+            matches,
+            index: 0,
+        });
+    });
+    let mut next = String::with_capacity(buffer.len() - (end - start) + first.len());
+    next.push_str(&buffer[..start]);
+    next.push_str(&first);
+    next.push_str(&buffer[end..]);
+    let position = start + first.len();
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(next),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
+}
+
+/// `shell-transpose-words` (bashline.c `bash_transpose_shellwords`):
+/// swap the shellword before point with the one after it — the
+/// shellword spans come from the engine's token view, metacharacters
+/// delimit.
+fn run_shell_transpose_words(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline) {
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    let view = shell.borrow().session().token_view(&buffer);
+    let words: Vec<(usize, usize)> = view
+        .tokens
+        .iter()
+        .filter(|span| span.kind.is_word_shaped())
+        .map(|span| (span.start, span.end))
+        .collect();
+    // GNU rl_transpose_words (text.c): drag the word before point
+    // past the word after point. Point inside or at the end of a
+    // word makes that word the "after" word; point in the gap pairs
+    // the straddling words; at the line edges the two edge words
+    // swap. Fewer than two words dings.
+    let pair = if let Some(i) = words.iter().position(|w| w.0 < cursor && cursor <= w.1) {
+        (i.checked_sub(1), Some(i))
+    } else {
+        (
+            words.iter().rposition(|w| w.1 <= cursor),
+            words.iter().position(|w| w.0 >= cursor),
+        )
+    };
+    let (i1, i2) = match pair {
+        (Some(b), Some(a)) => (b, a),
+        (None, Some(_)) if words.len() >= 2 => (0, 1),
+        (Some(_), None) | (None, None) if words.len() >= 2 => (words.len() - 2, words.len() - 1),
+        _ => {
+            readline_ding();
+            return;
+        }
+    };
+    let (before, after) = (words[i1], words[i2]);
+    let mut next = String::with_capacity(buffer.len());
+    next.push_str(&buffer[..before.0]);
+    next.push_str(&buffer[after.0..after.1]);
+    next.push_str(&buffer[before.1..after.0]);
+    next.push_str(&buffer[before.0..before.1]);
+    next.push_str(&buffer[after.1..]);
+    let position = after.1;
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(next),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
+}
+
+/// `spell-correct-word` (bashline.c `bash_spell_correct_word` →
+/// spell.c `dirspell`): each `/`-separated component of the word at
+/// point that does not exist is replaced by the first directory
+/// entry within one edit (insert, delete, change, transpose).
+fn run_spell_correct_word(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline) {
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
+    let word = buffer[start..end].to_string();
+    if word.is_empty() {
+        readline_ding();
+        return;
+    }
+    let Some(corrected) = spell_correct_path(&word, shell.borrow().session().cwd()) else {
+        readline_ding();
+        return;
+    };
+    if corrected == word {
+        return;
+    }
+    let mut next = String::with_capacity(buffer.len() - (end - start) + corrected.len());
+    next.push_str(&buffer[..start]);
+    next.push_str(&corrected);
+    next.push_str(&buffer[end..]);
+    let position = start + corrected.len();
+    line_editor.run_edit_commands(&[
+        EditCommand::Clear,
+        EditCommand::InsertString(next),
+        EditCommand::MoveToPosition {
+            position,
+            select: false,
+        },
+    ]);
+}
+
+/// spell.c `dirspell`: correct each `/`-separated component of
+/// `word` that does not exist, in place — `None` when any component
+/// cannot be corrected (GNU dings then too). A drive or slash
+/// prefix roots the walk; the filesystem's own case rules answer
+/// "exists" while the distance-1 scan compares names as spelled.
+fn spell_correct_path(word: &str, cwd: &std::path::Path) -> Option<String> {
+    let mut result = String::new();
+    let mut dir = std::path::PathBuf::new();
+    let body = if word.len() >= 2 && word.as_bytes()[1] == b':' {
+        // Drive-rooted ("C:/..."): the prefix is not a correctable
+        // component.
+        dir.push(format!(r"{}:\", &word[..1]));
+        result.push_str(&word[..2]);
+        word[2..].trim_start_matches('/')
+    } else if word.starts_with('/') {
+        dir.push(std::path::MAIN_SEPARATOR_STR);
+        result.push('/');
+        word.trim_start_matches('/')
+    } else {
+        dir.push(cwd);
+        word
+    };
+    for piece in body.split_inclusive('/') {
+        let name = piece.trim_end_matches('/');
+        if name.is_empty() {
+            result.push_str(piece);
+            continue;
+        }
+        let corrected = if dir.join(name).exists() {
+            name.to_string()
+        } else {
+            std::fs::read_dir(&dir)
+                .ok()?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .find(|candidate| edit_distance_within_one(name, candidate))?
+        };
+        result.push_str(&corrected);
+        if piece.ends_with('/') {
+            result.push('/');
+        }
+        dir.push(&corrected);
+    }
+    Some(result)
+}
+
+/// spell.c's distance-1 test: same, one inserted, one deleted, one
+/// changed, or one transposed pair of adjacent characters.
+fn edit_distance_within_one(typed: &str, candidate: &str) -> bool {
+    let a: Vec<char> = typed.chars().collect();
+    let b: Vec<char> = candidate.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    if n == m {
+        if a == b {
+            return true;
+        }
+        let diffs: Vec<usize> = (0..n).filter(|&i| a[i] != b[i]).collect();
+        if diffs.len() == 1 {
+            return true;
+        }
+        // One transposed adjacent pair.
+        diffs.len() == 2
+            && diffs[1] == diffs[0] + 1
+            && a[diffs[0]] == b[diffs[1]]
+            && a[diffs[1]] == b[diffs[0]]
+    } else if n + 1 == m {
+        // One character inserted in the candidate.
+        (0..m).any(|skip| {
+            let dropped: Vec<char> = b
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, c)| *c)
+                .collect();
+            dropped == a
+        })
+    } else if n == m + 1 {
+        (0..n).any(|skip| {
+            let dropped: Vec<char> = a
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, c)| *c)
+                .collect();
+            dropped == b
+        })
+    } else {
+        false
+    }
 }
 
 /// GNU's rl_ding: ring the terminal bell.
@@ -4750,6 +5296,43 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             "{}{}",
             READLINE_HOST_COMMAND_PREFIX, widget
         ))),
+        // niubash#731 host-channel remainder: the names that need the
+        // live session against the suspended editor. `display-shell-version`
+        // (bashline.c:726) prints the banner; the `possible-*-completions`
+        // family (bashline.c:505-513) lists the context-pinned
+        // candidates; `glob-expand-word` (bashline.c `bash_glob_expand_word`)
+        // and `glob-list-expansions` drive the word through the engine's
+        // pathname expansion; `delete-char-or-list` (complete.c
+        // `rl_delete_char_or_list`) lists at end of line and deletes
+        // elsewhere; the alias/history expand pair and `magic-space`
+        // run the pre-edit expansion stages; `dabbrev-expand`
+        // (bashline.c `bash_dabbrev_expand`) completes from the newest
+        // history token; the `shell-*-word` family (bashline.c:474-478)
+        // moves and kills by shell-word spans; `spell-correct-word`
+        // (bashline.c `bash_spell_correct_word` → spell.c) corrects
+        // path components at point.
+        "display-shell-version"
+        | "possible-command-completions"
+        | "possible-variable-completions"
+        | "possible-filename-completions"
+        | "possible-hostname-completions"
+        | "possible-username-completions"
+        | "glob-expand-word"
+        | "glob-list-expansions"
+        | "delete-char-or-list"
+        | "alias-expand-line"
+        | "history-and-alias-expand-line"
+        | "magic-space"
+        | "dabbrev-expand"
+        | "shell-forward-word"
+        | "shell-backward-word"
+        | "shell-kill-word"
+        | "shell-backward-kill-word"
+        | "shell-transpose-words"
+        | "spell-correct-word" => Some(ReedlineEvent::ExecuteHostCommand(format!(
+            "{}{}",
+            READLINE_HOST_COMMAND_PREFIX, widget
+        ))),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -5276,8 +5859,19 @@ impl EditMode for ChordEditMode {
     /// here only when the next key arrived. `keyseq-timeout 0` is
     /// GNU's wait-forever spelling: no deadline may ever run, so the
     /// engine's timer stays off for it.
+    ///
+    /// Only a single parked key may arm: GNU's timed read exists at
+    /// the level whose submap's `ANYOTHERKEY` shadows a function
+    /// (readline.c:1072), which in this flat model is only the first
+    /// key of a sequence — a deeper submap is born nil, so GNU waits
+    /// forever for the third-and-later keys. A parked prefix whose
+    /// `pending_since` was cleared by an inert flush (a pure keymap
+    /// prefix with no shadow, like `C-x`) likewise waits forever, as
+    /// GNU does.
     fn has_pending_sequence(&self) -> bool {
-        !self.pending.is_empty() && self.keyseq_timeout != Duration::ZERO
+        self.pending.len() == 1
+            && self.pending_since.is_some()
+            && self.keyseq_timeout != Duration::ZERO
     }
 
     /// A sequence abandoned across prompts (break, Ctrl-C, submit)
@@ -5292,23 +5886,44 @@ impl EditMode for ChordEditMode {
     /// machine — the same events the late-key timeout check in
     /// `dispatch` produces for a prefix that outlived its window.
     fn flush_pending_sequence(&mut self) -> ReedlineEvent {
-        let mut events = Vec::new();
-        for parked in std::mem::take(&mut self.pending) {
-            push_event(
-                &mut events,
-                self.forward(ReedlineRawEvent::try_from(parked).expect("parked key")),
-            );
-        }
-        self.pending_since = None;
-        match events.len() {
-            0 => ReedlineEvent::None,
-            1 => events.pop().expect("one event"),
-            _ => ReedlineEvent::Multiple(events),
+        match self.replay_pending() {
+            None => ReedlineEvent::None,
+            Some(events) => match events.len() {
+                0 => ReedlineEvent::None,
+                1 => events.into_iter().next().expect("one event"),
+                _ => ReedlineEvent::Multiple(events),
+            },
         }
     }
 }
 
 impl ChordEditMode {
+    /// Replay the parked keys through the inner machine. `Some` with
+    /// the events when every parked key produced one — GNU's timed
+    /// replay, where each level's shadowed function fires. `None`
+    /// when any parked key is unbound: that level's submap shadows
+    /// nothing (`ANYOTHERKEY` nil), so GNU's timed read never armed
+    /// there and the sequence waits forever — the parked keys go
+    /// back, `pending_since` clears, and a late partner still
+    /// completes (readline.c:1067-1077).
+    fn replay_pending(&mut self) -> Option<Vec<ReedlineEvent>> {
+        let parked_keys = std::mem::take(&mut self.pending);
+        let mut events = Vec::with_capacity(parked_keys.len());
+        let mut any_inert = false;
+        for parked in &parked_keys {
+            let event =
+                self.forward(ReedlineRawEvent::try_from(parked.clone()).expect("parked key"));
+            any_inert |= matches!(event, ReedlineEvent::None);
+            push_event(&mut events, event);
+        }
+        self.pending_since = None;
+        if any_inert {
+            self.pending = parked_keys;
+            return None;
+        }
+        Some(events)
+    }
+
     fn dispatch(&mut self, mut raw: crossterm29::event::Event) -> ReedlineEvent {
         let Some(mut key) = chord_key(&raw) else {
             // Non-key traffic (key releases, focus flicker, resize): the
@@ -5433,18 +6048,16 @@ impl ChordEditMode {
         }
         // A prefix older than readline's keyseq-timeout stops being a
         // prefix: replay it on its own, then treat the current key fresh.
-        // `0` is readline's "wait forever" spelling.
+        // `0` is readline's "wait forever" spelling. A replay that hits
+        // an unbound key restores the prefix instead — that level's
+        // submap shadows nothing, so GNU never armed it (readline.c:1072)
+        // and the current key resolves the sequence normally.
         if self.keyseq_timeout != Duration::ZERO
             && self
                 .pending_since
                 .is_some_and(|since| since.elapsed() > self.keyseq_timeout)
         {
-            let mut events = Vec::new();
-            for parked in std::mem::take(&mut self.pending) {
-                let event = self.forward(ReedlineRawEvent::try_from(parked).expect("parked key"));
-                push_event(&mut events, event);
-            }
-            self.pending_since = None;
+            let mut events = self.replay_pending().unwrap_or_default();
             let current = self.dispatch(raw);
             push_event(&mut events, current);
             return match events.len() {
@@ -9463,6 +10076,84 @@ mod tests {
         );
     }
 
+    /// niubash#731 K3 host-channel widening: every GNU name that
+    /// needs the live session (version banner, candidate listing,
+    /// pathname expansion, alias/history expansion stages, dabbrev,
+    /// shellword motion/kill/transpose, dirspell) rides the readline
+    /// host command channel — none may fall to the unknown-widget
+    /// sentinel or pretend a native event.
+    #[test]
+    fn issue731_host_channel_names_route_through_the_sentinel() {
+        for name in [
+            "display-shell-version",
+            "possible-command-completions",
+            "possible-variable-completions",
+            "possible-filename-completions",
+            "possible-hostname-completions",
+            "possible-username-completions",
+            "glob-expand-word",
+            "glob-list-expansions",
+            "delete-char-or-list",
+            "alias-expand-line",
+            "history-and-alias-expand-line",
+            "magic-space",
+            "dabbrev-expand",
+            "shell-forward-word",
+            "shell-backward-word",
+            "shell-kill-word",
+            "shell-backward-kill-word",
+            "shell-transpose-words",
+            "spell-correct-word",
+        ] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+        }
+    }
+
+    /// spell.c's distance-1 test: same spelling, one insertion, one
+    /// deletion, one substitution, one adjacent transposition — two
+    /// edits is too far.
+    #[test]
+    fn issue731_dirspell_distance_one_window() {
+        assert!(edit_distance_within_one("cat", "cat"));
+        assert!(edit_distance_within_one("cat", "cats")); // insert
+        assert!(edit_distance_within_one("cats", "cat")); // delete
+        assert!(edit_distance_within_one("cat", "car")); // change
+        assert!(edit_distance_within_one("cat", "cta")); // transpose
+        assert!(!edit_distance_within_one("cat", "cutlery"));
+        assert!(!edit_distance_within_one("cat", "dog"));
+        assert!(!edit_distance_within_one("cat", "cuty")); // two edits
+    }
+
+    /// dirspell corrects the misspelled component in place and leaves
+    /// the spelled-right ones alone — and declines when nothing is
+    /// within one edit.
+    #[test]
+    fn issue731_dirspell_corrects_only_misspelled_components() {
+        let root = std::env::temp_dir().join(format!("niu-dirspell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("alpha/beta")).expect("stage dirspell tree");
+        let corrected = spell_correct_path("alpa/beta", &root).expect("one-transposition fix");
+        assert_eq!(corrected, "alpha/beta");
+        assert_eq!(
+            spell_correct_path("alpha/beta", &root),
+            Some("alpha/beta".to_string()),
+            "an already-correct word is returned unchanged"
+        );
+        assert_eq!(
+            spell_correct_path("zzzzzz", &root),
+            None,
+            "no candidate within one edit → GNU dings"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
         NativeWidgetBinding {
             widget: widget.to_string(),
@@ -9769,9 +10460,10 @@ mod tests {
                 keymap: "emacs-standard".to_string(),
                 dump: String::new(),
             },
-            // GNU's shell-backward-word default: a host function niu
-            // does not implement, on a chain-shaped keyseq — dropped
-            // with a record, not reported as an actionable failure.
+            // GNU's shell-backward-word default on a chain-shaped
+            // keyseq — host-delivered since the niubash#731 widening,
+            // so it lands on the readline host channel rather than
+            // the dropped record.
             rubash::api::BindEntryView {
                 keyseq: r"\e\C-b".to_string(),
                 bytes: decode_keyseq_bytes(r"\e\C-b").unwrap_or_default(),
@@ -9806,8 +10498,19 @@ mod tests {
             unusable.is_empty(),
             "no ble-shaped bind may be reported unusable: {unusable:?}"
         );
+        assert_eq!(
+            keybindings.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                KeyCode::Char('b')
+            ),
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}shell-backward-word",
+                READLINE_HOST_COMMAND_PREFIX
+            ))),
+            "the delivered host function must land on M-C-b, not drop"
+        );
         let dropped_keyseqs: Vec<&str> = dropped.iter().map(|bind| bind.keyseq.as_str()).collect();
-        assert_eq!(dropped_keyseqs, vec![r"\201", r"\e\C-b"]);
+        assert_eq!(dropped_keyseqs, vec![r"\201"]);
     }
 
     #[test]
