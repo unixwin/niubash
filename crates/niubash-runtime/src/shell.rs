@@ -4675,10 +4675,19 @@ impl Shell {
         line_offset: usize,
         allow_grouped_readers: bool,
     ) -> anyhow::Result<i32> {
-        let script = if interactive_terminal_colors {
-            script
+        // rubash#3605 class B: GNU parse.y's `line_number` increments on
+        // every newline the reader consumes, so leading blank lines still
+        // count for error reporting — `bash -c '\ndo echo x'` reports
+        // line 2, not line 1. trim() dropped those lines without charging
+        // `line_offset`, shifting every diagnostic down by the skipped
+        // blanks (alias7.sub reported line 6 for a `do` on physical
+        // line 7). Keep the trim but credit the removed leading newlines.
+        let (script, line_offset) = if interactive_terminal_colors {
+            (script, line_offset)
         } else {
-            script.trim()
+            let head = script.len() - script.trim_start().len();
+            let head_newlines = script[..head].bytes().filter(|byte| *byte == b'\n').count();
+            (script.trim(), line_offset + head_newlines)
         };
         if script.is_empty() {
             return Ok(0);
