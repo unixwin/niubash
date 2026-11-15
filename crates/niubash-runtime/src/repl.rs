@@ -1206,6 +1206,37 @@ fn replace_line_set_up_new_line(
     ]);
 }
 
+/// `rl_tilde_expand` shared by `tilde-expand` and `vi-tilde-expand`
+/// (vi_mode.c:414): expand the tilde at the start of the
+/// whitespace-delimited word at point; point lands just past the
+/// replacement, as `_rl_replace_text` (text.c:194) leaves it.
+fn tilde_expand_at_point(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline) {
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    if let Some((start, end)) = crate::readline_commands::tilde_word_span(&buffer, cursor) {
+        let word = &buffer[start..end];
+        let env: std::collections::HashMap<String, String> =
+            shell.borrow().session().environment().into_iter().collect();
+        if let Some(expanded) = rubash::expand::tilde::tilde::expand_word_prefix(word, &env) {
+            if expanded != word {
+                let mut next = String::with_capacity(buffer.len() - (end - start) + expanded.len());
+                next.push_str(&buffer[..start]);
+                next.push_str(&expanded);
+                next.push_str(&buffer[end..]);
+                let position = start + expanded.len();
+                line_editor.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(next),
+                    EditCommand::MoveToPosition {
+                        position,
+                        select: false,
+                    },
+                ]);
+            }
+        }
+    }
+}
+
 /// Perform one host readline command (see
 /// [`READLINE_HOST_COMMAND_PREFIX`]) against the suspended editor
 /// and the live session.
@@ -1268,33 +1299,53 @@ fn run_readline_command(
         // expand the tilde at the start of the whitespace-delimited
         // word at point; point lands just past the replacement, as
         // _rl_replace_text (text.c:194) leaves it.
-        "tilde-expand" => {
+        "tilde-expand" => tilde_expand_at_point(shell, line_editor),
+        // vi_mode.c:414 rl_vi_tilde_expand (niubash#731): the same
+        // expansion, then `rl_vi_start_inserting` — enter vi insert
+        // mode against the suspended editor through the ruline
+        // `switch_edit_mode` host face.
+        "vi-tilde-expand" => {
+            tilde_expand_at_point(shell, line_editor);
+            line_editor.switch_edit_mode(PromptEditMode::Vi(PromptViMode::Insert));
+        }
+        // util.c:134 rl_tty_status: `#if defined (TIOCSTAT)` issues
+        // the tty status ioctl — a BSDism with no Windows surface —
+        // and `#else` dings. Niubash takes the #else branch.
+        "tty-status" => readline_ding(),
+        // complete.c:3070 rl_export_completions →
+        // rl_complete_internal('$') → _rl_export_completions
+        // (complete.c:3057): print the match count (matches[0], the
+        // common prefix, is element zero of GNU's array — possibly
+        // empty), the completed text, the start:end span, then one
+        // match per line. `count > 1` would clear the line; the
+        // host channel carries no explicit-arg context, so the
+        // no-count face is delivered.
+        "export-completions" => {
             let buffer = line_editor.current_buffer_contents().to_string();
             let cursor = line_editor.current_insertion_point();
-            if let Some((start, end)) = crate::readline_commands::tilde_word_span(&buffer, cursor) {
-                let word = &buffer[start..end];
-                let env: std::collections::HashMap<String, String> =
-                    shell.borrow().session().environment().into_iter().collect();
-                if let Some(expanded) = rubash::expand::tilde::tilde::expand_word_prefix(word, &env)
-                {
-                    if expanded != word {
-                        let mut next =
-                            String::with_capacity(buffer.len() - (end - start) + expanded.len());
-                        next.push_str(&buffer[..start]);
-                        next.push_str(&expanded);
-                        next.push_str(&buffer[end..]);
-                        let position = start + expanded.len();
-                        line_editor.run_edit_commands(&[
-                            EditCommand::Clear,
-                            EditCommand::InsertString(next),
-                            EditCommand::MoveToPosition {
-                                position,
-                                select: false,
-                            },
-                        ]);
-                    }
-                }
+            let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
+            let text = &buffer[start..end];
+            let mut matches: Vec<String> = {
+                let mut completer = NiubashCompleter::with_shell(
+                    shell.borrow().completion_state.clone(),
+                    shell.clone(),
+                );
+                completer
+                    .complete(&buffer, cursor)
+                    .into_iter()
+                    .map(|suggestion| suggestion.value)
+                    .collect()
+            };
+            matches.sort();
+            matches.dedup();
+            let mut out = format!("{}\n{}\n{}:{}\n", matches.len() + 1, text, start, end);
+            out.push_str(&crate::readline_commands::common_prefix(&matches));
+            out.push('\n');
+            for m in &matches {
+                out.push_str(m);
+                out.push('\n');
             }
+            print_suspended_output(&format!("\n{}", out));
         }
         // lib/readline/text.c:2358 rl_execute_named_command
         // (niubash#766): read a command name in the minibuffer and
@@ -5432,6 +5483,37 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // arrives through `WithArg` when the name is bound to a digit
         // argument terminator.
         "fetch-history" => Some(ReedlineEvent::FetchHistory { count: None }),
+        // niubash#731 batch 2 — the byte/input-layer faces on the
+        // pinned ruline (text.c): `rl_forward_byte`/`rl_backward_byte`
+        // step by grapheme-edge-safe byte landings;
+        // `rl_rubout_or_delete` picks backspace-at-end vs delete by
+        // cursor position; `rl_arrow_keys`/`rl_skip_csi_sequence`
+        // consume follow-on input through ruline's pending-consumer
+        // seam.
+        "forward-byte" => Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+            Direction::Forward,
+        )))),
+        "backward-byte" => Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+            Direction::Backward,
+        )))),
+        "forward-backward-delete-char" => Some(edit_event(EditCommand::RuboutOrDelete)),
+        "arrow-key-prefix" => Some(ReedlineEvent::ArrowKeyPrefix),
+        "skip-csi-sequence" => Some(ReedlineEvent::SkipCsiSequence),
+        // `rl_forward_search_history` (isearch.c:141): the same
+        // isearch machine, direction forward.
+        "forward-search-history" => Some(ReedlineEvent::ForwardSearchHistory),
+        // The three host-channel names of batch 2: `tty-status`
+        // (util.c:134, #else rl_ding — no TIOCSTAT on Windows),
+        // `export-completions` (complete.c:3070, prints the match
+        // array), `vi-tilde-expand` (vi_mode.c:414, tilde-expand then
+        // rl_vi_start_inserting). All need the suspended editor /
+        // session, so they ride the readline host-command channel.
+        "tty-status" | "export-completions" | "vi-tilde-expand" => {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, widget
+            )))
+        }
         // `rl_vi_complete` / `bash_vi_complete` (vi_mode.c:1590 /
         // bashline.c) and `rl_old_menu_complete` (complete.c:2176) all
         // run the completion engine — the same `complete` arm.
@@ -8804,7 +8886,10 @@ mod tests {
     /// bridge to *report* it, then excludes exactly this list.
     const EDITOR_CONSUMED_GNU_DEFAULTS: &[&str] = &["\\e[200~"];
 
-    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s"];
+    /// niubash#731 batch 2: empty — `\C-s` was the last documented
+    /// gap; `forward-search-history` now delivers through ruline's
+    /// direction-aware isearch.
+    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &[];
 
     /// niubash#768: identity pin for the engine table the gate below
     /// mirrors. The table is owned by rubash
@@ -10035,6 +10120,62 @@ mod tests {
             "vi-append-mode",
             "fetch-history",
             "vi-eof-maybe",
+        ] {
+            assert!(gnu_name_is_delivered(name), "{name} must be delivered");
+        }
+    }
+
+    /// niubash#731 batch 2: the byte/input-layer names deliver the
+    /// ruline faces, `forward-search-history` opens a forward
+    /// isearch, and the three session names ride the host channel.
+    #[test]
+    fn issue731_batch2_names_deliver() {
+        assert_eq!(
+            native_widget_event("forward-byte"),
+            Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+                Direction::Forward
+            ))))
+        );
+        assert_eq!(
+            native_widget_event("backward-byte"),
+            Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+                Direction::Backward
+            ))))
+        );
+        assert_eq!(
+            native_widget_event("forward-backward-delete-char"),
+            Some(edit_event(EditCommand::RuboutOrDelete))
+        );
+        assert_eq!(
+            native_widget_event("arrow-key-prefix"),
+            Some(ReedlineEvent::ArrowKeyPrefix)
+        );
+        assert_eq!(
+            native_widget_event("skip-csi-sequence"),
+            Some(ReedlineEvent::SkipCsiSequence)
+        );
+        assert_eq!(
+            native_widget_event("forward-search-history"),
+            Some(ReedlineEvent::ForwardSearchHistory)
+        );
+        for name in ["tty-status", "export-completions", "vi-tilde-expand"] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+            assert!(gnu_name_is_delivered(name), "{name} must be delivered");
+        }
+        for name in [
+            "forward-byte",
+            "backward-byte",
+            "forward-backward-delete-char",
+            "arrow-key-prefix",
+            "skip-csi-sequence",
+            "forward-search-history",
         ] {
             assert!(gnu_name_is_delivered(name), "{name} must be delivered");
         }
