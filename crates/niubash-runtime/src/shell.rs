@@ -4682,12 +4682,23 @@ impl Shell {
         // `line_offset`, shifting every diagnostic down by the skipped
         // blanks (alias7.sub reported line 6 for a `do` on physical
         // line 7). Keep the trim but credit the removed leading newlines.
+        //
+        // Only the LEADING edge may be trimmed: GNU keeps trailing
+        // whitespace, and a script-final `\<newline>` is a line
+        // continuation that joins with end-of-input (parse.y:2842
+        // shell_getc — the `\<newline>` pair is elided and the read
+        // continues past the physical line end; parse.y:2739-2743 keeps
+        // only a backslash sitting at bare EOF), so `echo AAA\`+`\n`
+        // prints `AAA` while the unterminated `echo AAA\` keeps the
+        // backslash and prints `AAA\`. trim() erased the final newline
+        // and turned the first form into the second (run-parser
+        // parser1.sub).
         let (script, line_offset) = if interactive_terminal_colors {
             (script, line_offset)
         } else {
             let head = script.len() - script.trim_start().len();
             let head_newlines = script[..head].bytes().filter(|byte| *byte == b'\n').count();
-            (script.trim(), line_offset + head_newlines)
+            (script.trim_start(), line_offset + head_newlines)
         };
         if script.is_empty() {
             return Ok(0);
