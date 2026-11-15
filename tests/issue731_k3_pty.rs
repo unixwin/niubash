@@ -21,6 +21,11 @@
 //! `spawn_shared_home`.
 //!
 //! Run: `NIU_INTERACTIVE_TESTS=1 cargo test --test issue731_k3_pty --locked -- --nocapture`
+//! CI home: the unix cross-check interactive gate (ci.yml) runs this
+//! stem under `NIU_INTERACTIVE_TESTS=1` next to `issue827_pty_gate`;
+//! on Windows it stays a manual gate — the ConPTY-rendered prompt
+//! carries no literal `P1> ` space, which is why the driver needle
+//! is the space-free `P1>` (niubash#1011 audit).
 
 #[path = "interactive/driver.rs"]
 mod driver;
@@ -167,8 +172,8 @@ fn pty_k3_vi_editing_mode_switches_machines() {
     std::thread::sleep(Duration::from_millis(600));
     let screen = normalize_screen(&s.drain_screen());
     // Assert on the LAST repaint: scrollback still shows the `zzabc`
-    // first paint, so judge the buffer row after the final `P1> `.
-    let tail = screen.rsplit("P1> ").next().unwrap_or("");
+    // first paint, so judge the buffer row after the final `P1>`.
+    let tail = screen.rsplit("P1>").next().unwrap_or("");
     assert!(
         tail.contains("zzab") && !tail.contains("zzabc"),
         "vi-editing-mode must activate the vi machine (x deleted 'c'):\n{screen}"
