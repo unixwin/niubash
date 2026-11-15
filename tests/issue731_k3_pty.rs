@@ -11,6 +11,9 @@
 //! * `vi-editing-mode` — the bound key maps to
 //!   `ReedlineEvent::SwitchMode`: the standby vi machine takes over and
 //!   `ESC x` deletes under vi-normal semantics.
+//! * `history-search-backward` — the bound key maps to
+//!   `ReedlineEvent::HistorySearch { anchored: true }`: a typed prefix
+//!   filters the recall instead of stepping back one entry.
 //!
 //! Each check also asserts the boot screen carries no "key bindings …
 //! not applied" notice for its bind (the registry's actionable-warning
@@ -226,6 +229,46 @@ fn pty_k3_vi_editing_mode_switches_machines() {
     assert!(
         tail.contains("zzab") && !tail.contains("zzabc"),
         "vi-editing-mode must activate the vi machine (x deleted 'c'):\n{screen}"
+    );
+
+    s.send(driver::CTRL_C);
+    s.expect_prompt();
+    s.send_line("exit");
+    s.wait_exit();
+}
+
+/// `history-search-backward` is GNU's anchored prefix search (search.c
+/// `rl_history_search_backward`), not a plain Up: with `uni` typed,
+/// the bound key must land on the newest history entry STARTING with
+/// `uni` and skip the more recent entry that does not match.
+#[test]
+fn pty_k3_history_search_backward_is_anchored() {
+    if !require_pty_or_skip("pty_k3_history_search_backward_is_anchored") {
+        return;
+    }
+    let mut s = spawn_k3("hsearch", "bind '\"\\C-q\": history-search-backward'\n");
+    s.wait_ready();
+    s.expect_absent("not applied", Duration::from_secs(2));
+
+    // Seed history: a matching entry, then a newer non-matching one a
+    // plain `Up` would have recalled.
+    s.send_line("unique731alpha");
+    s.expect_prompt();
+    s.send_line("zzdifferent731");
+    s.expect_prompt();
+
+    s.send("uni");
+    s.send("\u{11}"); // C-q → HistorySearch{Backward, anchored}
+    std::thread::sleep(Duration::from_millis(800));
+    let screen = normalize_screen(&s.drain_screen());
+    let tail = screen.rsplit("P1>").next().unwrap_or("");
+    assert!(
+        tail.contains("unique731alpha"),
+        "anchored history-search must land on the prefix match:\n{screen}"
+    );
+    assert!(
+        !tail.contains("zzdifferent731"),
+        "a plain Up would have recalled the non-matching latest entry:\n{screen}"
     );
 
     s.send(driver::CTRL_C);

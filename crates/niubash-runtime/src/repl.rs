@@ -4424,17 +4424,39 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             ReedlineEvent::Enter,
         ])),
         "autosuggest-partial-accept" => Some(ReedlineEvent::HistoryHintWordComplete),
-        // GNU's own spellings of the substring-search pair
-        // (`history-substring-search-backward`/`-forward`, funmap.c)
-        // ride the same arms as the zsh spellings (niubash#731).
-        "history-substring-search-up"
-        | "history-substring-search-backward"
-        | "history-search-backward"
-        | "up-line-or-history" => Some(ReedlineEvent::Up),
-        "history-substring-search-down"
-        | "history-substring-search-forward"
-        | "history-search-forward"
-        | "down-line-or-history" => Some(ReedlineEvent::Down),
+        // GNU's anchored history-search pair (search.c
+        // `rl_history_search_backward`/`rl_history_search_forward`):
+        // the buffer's line-start..point span is the needle, matched
+        // against the START of each entry. The fork's `HistorySearch`
+        // is that exact machine (`_rl_history_search_len` reinit
+        // included); the old `Up`/`Down` stand-ins ignored the needle
+        // entirely (niubash#731).
+        "history-search-backward" => Some(ReedlineEvent::HistorySearch {
+            direction: Direction::Backward,
+            anchored: true,
+        }),
+        "history-search-forward" => Some(ReedlineEvent::HistorySearch {
+            direction: Direction::Forward,
+            anchored: true,
+        }),
+        // GNU's substring-search pair (`history-substring-search-*`,
+        // funmap.c) matches the needle anywhere in the entry — the
+        // same machine with `anchored` off. The zsh spellings ride
+        // the same arms.
+        "history-substring-search-up" | "history-substring-search-backward" => {
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Backward,
+                anchored: false,
+            })
+        }
+        "history-substring-search-down" | "history-substring-search-forward" => {
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Forward,
+                anchored: false,
+            })
+        }
+        "up-line-or-history" => Some(ReedlineEvent::Up),
+        "down-line-or-history" => Some(ReedlineEvent::Down),
         "accept-line" => Some(ReedlineEvent::Enter),
         "beginning-of-line" => Some(edit_event(EditCommand::MoveToLineStart { select: false })),
         "end-of-line" => Some(edit_event(EditCommand::MoveToLineEnd { select: false })),
@@ -4519,6 +4541,17 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             Some(edit_event(EditCommand::CutFromLineStart))
         }
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
+        // GNU `kill-region` (kill.c `rl_kill_region`): cut the
+        // mark..point span into the kill ring, and its copy twin
+        // `copy-region-as-kill` (`rl_copy_region_as_kill`) — the fork
+        // delivers both edits (niubash#731).
+        "kill-region" => Some(edit_event(EditCommand::KillRegion)),
+        "copy-region-as-kill" => Some(edit_event(EditCommand::CopyRegionAsKill)),
+        // GNU `copy-backward-word` / `copy-forward-word` (kill.c
+        // `rl_copy_backward_word` / `rl_copy_forward_word`): push the
+        // word into the kill ring without cutting it.
+        "copy-backward-word" => Some(edit_event(EditCommand::CopyWordLeft)),
+        "copy-forward-word" => Some(edit_event(EditCommand::CopyWordRight)),
         // niubash#850: `Yank`, not `PasteCutBufferBefore` — the
         // editor's YankPop gates on the last edit being Yank/YankPop,
         // so the paste-before variant made every later yank-pop
@@ -4568,6 +4601,10 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "start-kbd-macro" => Some(ReedlineEvent::StartKbdMacro),
         "end-kbd-macro" => Some(ReedlineEvent::EndKbdMacro),
         "call-last-kbd-macro" => Some(ReedlineEvent::CallLastKbdMacro),
+        // GNU `print-last-kbd-macro` (macro.c `rl_print_last_kbd_macro`
+        // → `_rl_untranslate_macro_value`): print the last recording
+        // as a bindable keyseq spelling.
+        "print-last-kbd-macro" => Some(ReedlineEvent::PrintLastKbdMacro),
         // GNU `character-search` (C-]) / `character-search-backward`
         // (M-C-]): the next key is the search target.
         "character-search" => Some(ReedlineEvent::CharSearch {
@@ -4588,6 +4625,37 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             prompt_char: ':',
             pattern: false,
         }),
+        // GNU's again pair (search.c `noninc_forward_search_again` /
+        // `noninc_reverse_search_again`): repeat the last
+        // non-incremental search with its saved string — no new
+        // minibuffer read.
+        "non-incremental-forward-search-history-again" => {
+            Some(ReedlineEvent::NonIncrementalSearchAgain {
+                direction: Direction::Forward,
+            })
+        }
+        "non-incremental-reverse-search-history-again" => {
+            Some(ReedlineEvent::NonIncrementalSearchAgain {
+                direction: Direction::Backward,
+            })
+        }
+        // GNU `next-screen-line` / `previous-screen-line` (text.c
+        // `rl_next_screen_line` / `rl_previous_screen_line`): move one
+        // display row, keeping the goal column. `MoveLineDown` /
+        // `MoveLineUp` is the deliverable mirror — exact for
+        // newline-separated lines; the wrap-row case (a long line
+        // split by the terminal, not the buffer) has no editor event
+        // and stays a documented gap (niubash#731).
+        "next-screen-line" => Some(edit_event(EditCommand::MoveLineDown { select: false })),
+        "previous-screen-line" => Some(edit_event(EditCommand::MoveLineUp { select: false })),
+        // GNU `paste-from-clipboard` (text.c `rl_paste_from_clipboard`):
+        // insert the system clipboard's text at point. `PasteSystem`
+        // only exists under reedline's `system_clipboard` feature,
+        // which android lacks (niubash#207) — there the name keeps
+        // the shell-function sentinel, honest for a target with no
+        // system clipboard.
+        #[cfg(not(target_os = "android"))]
+        "paste-from-clipboard" => Some(edit_event(EditCommand::PasteSystem)),
         // GNU `yank-last-arg` (M-.): `None` is GNU's `'$'` — the last
         // argument. `yank-nth-arg` defaults to argument 1; explicit
         // counts reach the editor through `WithArg`.
@@ -7800,13 +7868,22 @@ mod tests {
             &bindings,
         );
 
+        // The substring-search widgets now deliver the real GNU search
+        // (`HistorySearch`, anchored off): an empty buffer still walks
+        // history like Up/Down did, a typed prefix filters it.
         assert_eq!(
             keybindings.find_binding(KeyModifiers::NONE, KeyCode::Up),
-            Some(ReedlineEvent::Up)
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Backward,
+                anchored: false,
+            })
         );
         assert_eq!(
             keybindings.find_binding(KeyModifiers::NONE, KeyCode::Down),
-            Some(ReedlineEvent::Down)
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Forward,
+                anchored: false,
+            })
         );
     }
 
@@ -7872,20 +7949,42 @@ mod tests {
 
     #[test]
     fn native_widget_maps_bash_history_navigation_aliases() {
-        for widget in [
-            "history-substring-search-up",
-            "history-search-backward",
-            "up-line-or-history",
-            "previous-history",
-        ] {
+        // GNU's real history-search widgets deliver the `HistorySearch`
+        // machine — anchored for `history-search-*`, substring for
+        // `history-substring-search-*` — instead of plain traversal.
+        assert_eq!(
+            native_widget_event("history-search-backward"),
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Backward,
+                anchored: true,
+            })
+        );
+        assert_eq!(
+            native_widget_event("history-search-forward"),
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Forward,
+                anchored: true,
+            })
+        );
+        assert_eq!(
+            native_widget_event("history-substring-search-up"),
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Backward,
+                anchored: false,
+            })
+        );
+        assert_eq!(
+            native_widget_event("history-substring-search-down"),
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Forward,
+                anchored: false,
+            })
+        );
+        // The plain traversal spellings keep `Up`/`Down`.
+        for widget in ["up-line-or-history", "previous-history"] {
             assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Up));
         }
-        for widget in [
-            "history-substring-search-down",
-            "history-search-forward",
-            "down-line-or-history",
-            "next-history",
-        ] {
+        for widget in ["down-line-or-history", "next-history"] {
             assert_eq!(native_widget_event(widget), Some(ReedlineEvent::Down));
         }
     }
@@ -8948,11 +9047,17 @@ mod tests {
         }
         assert_eq!(
             native_widget_event("history-substring-search-backward"),
-            Some(ReedlineEvent::Up)
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Backward,
+                anchored: false,
+            })
         );
         assert_eq!(
             native_widget_event("history-substring-search-forward"),
-            Some(ReedlineEvent::Down)
+            Some(ReedlineEvent::HistorySearch {
+                direction: Direction::Forward,
+                anchored: false,
+            })
         );
         // The fork's descending-gap batch delivered `set-mark`,
         // `possible-completions`, `insert-completions` and the
@@ -8995,6 +9100,54 @@ mod tests {
                 "{}abort",
                 READLINE_HOST_COMMAND_PREFIX
             )))
+        );
+        // The #731 classifier residual the fork already expresses:
+        // the region/word copy set, the macro print, the non-incremental
+        // again pair, the screen-line moves, and the clipboard paste.
+        assert_eq!(
+            native_widget_event("kill-region"),
+            Some(edit_event(EditCommand::KillRegion))
+        );
+        assert_eq!(
+            native_widget_event("copy-region-as-kill"),
+            Some(edit_event(EditCommand::CopyRegionAsKill))
+        );
+        assert_eq!(
+            native_widget_event("copy-backward-word"),
+            Some(edit_event(EditCommand::CopyWordLeft))
+        );
+        assert_eq!(
+            native_widget_event("copy-forward-word"),
+            Some(edit_event(EditCommand::CopyWordRight))
+        );
+        assert_eq!(
+            native_widget_event("print-last-kbd-macro"),
+            Some(ReedlineEvent::PrintLastKbdMacro)
+        );
+        assert_eq!(
+            native_widget_event("non-incremental-forward-search-history-again"),
+            Some(ReedlineEvent::NonIncrementalSearchAgain {
+                direction: Direction::Forward,
+            })
+        );
+        assert_eq!(
+            native_widget_event("non-incremental-reverse-search-history-again"),
+            Some(ReedlineEvent::NonIncrementalSearchAgain {
+                direction: Direction::Backward,
+            })
+        );
+        assert_eq!(
+            native_widget_event("next-screen-line"),
+            Some(edit_event(EditCommand::MoveLineDown { select: false }))
+        );
+        assert_eq!(
+            native_widget_event("previous-screen-line"),
+            Some(edit_event(EditCommand::MoveLineUp { select: false }))
+        );
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(
+            native_widget_event("paste-from-clipboard"),
+            Some(edit_event(EditCommand::PasteSystem))
         );
     }
 
