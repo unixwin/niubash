@@ -130,6 +130,21 @@ paths — never both, and never a guess about the child's capabilities:
   `windows_cmd_switches_are_not_mapped_into_shell_root` test) and applies to
   `cmd.exe` alone: a native program that is not `cmd` receives `/d/repo` as
   `D:\repo`.
+- **The MSYS escape spelling `//x` is not folded anywhere, `cmd`
+  included** (niubash#993 §2). `//` is MSYS2's own quoting convention:
+  its runtime rewrites a leading `//x` into `/x` precisely because its
+  own argument conversion would otherwise mangle `/x` into a drive
+  path. niu has no such conversion to escape, so a doubled slash
+  reaches the child as typed. `cmd //c "echo hi"` therefore hands
+  cmd.exe the literal word `//c`, which cmd does not recognise as a
+  switch, and cmd opens an **interactive session** — the failure mode
+  is a prompt waiting on stdin (a hang in a script, a stray prompt in
+  a terminal), not an error message and not a nonzero exit. The
+  correct spelling is the one MSYS made fragile: `cmd /c "echo hi"`
+  works as written, because the cmd.exe exemption above already keeps
+  `/c` verbatim. A targeted `//x` → `/x` fold for single-letter
+  switches of command processors (the gash PR #11 approach) remains
+  an open option; nothing is folded today.
 - **Namespace bridges stand outside the translation boundary entirely:
   `wsl` and the OpenSSH client family (`ssh`, `scp`, `sftp`).** Their
   arguments are not paths on this machine at all — they are interpreted
