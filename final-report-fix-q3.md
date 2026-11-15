@@ -11,10 +11,10 @@ yields 60 + `bash-vi-complete` + `vi-edit-and-execute-command`).
 | unixwin/ruline | https://github.com/unixwin/ruline/pull/63 | **merged** (a68ff11) |
 | unixwin/niubash | https://github.com/unixwin/niubash/pull/1022 | **merged** |
 | unixwin/ruline | https://github.com/unixwin/ruline/pull/64 | **merged** (52f3449) |
-| unixwin/niubash | https://github.com/unixwin/niubash/pull/1024 | open (CI) |
+| unixwin/niubash | https://github.com/unixwin/niubash/pull/1024 | **merged** (7bcbfd1) |
 
-Issue #731 updated with `[WIN-AGENT-FIX]` batch ledgers; stays open
-until the residual names land.
+Issue #731 updated with `[WIN-AGENT-FIX]` batch ledgers; all names landed,
+issue closed.
 
 ## Batch 1 landed (~50 names)
 
@@ -65,7 +65,7 @@ default bind table mirrors.
 ## Residual
 
 None — all 62 authoritative residual names are delivered across the two
-repos. Issue #731 can be closed once PR 1024 merges.
+repos. Issue #731 closed on merge of PR 1024; final ledger posted.
 
 ## Verification
 
