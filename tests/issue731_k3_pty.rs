@@ -151,6 +151,55 @@ fn pty_k3_redraw_current_line_repaints_identically() {
     s.wait_exit();
 }
 
+/// Chord observation ① (the #704 review's idle-flush note, carried
+/// here as K3 scope item 4): GNU's `keyseq-timeout` fires on its own —
+/// a parked chord prefix replays through the inner machine after the
+/// window with no partner key (readline.c `_rl_dispatch_subseq`, whose
+/// `_rl_input_queued` wait returns the shadowed function). A letter
+/// chord proves it end to end: `bind '"zx": kill-whole-line'` parks
+/// `z` for the window, then the plain `z` self-inserts by itself —
+/// and `z`+`x` inside the window still completes the bound command.
+#[test]
+fn pty_k3_chord_keyseq_timeout_flushes_on_idle() {
+    if !require_pty_or_skip("pty_k3_chord_keyseq_timeout_flushes_on_idle") {
+        return;
+    }
+    let mut s = spawn_k3("chordidle", "bind '\"zx\": kill-whole-line'\n");
+    s.wait_ready();
+    s.expect_absent("not applied", Duration::from_secs(2));
+
+    // Lone `z`: after ~`keyseq-timeout` of idle the prefix expires and
+    // the letter self-inserts — under the old next-key flush the screen
+    // stayed bare until a second key was pressed.
+    s.send("z");
+    std::thread::sleep(Duration::from_millis(1200));
+    let screen = normalize_screen(&s.drain_screen());
+    let tail = screen.rsplit("P1>").next().unwrap_or("");
+    assert!(
+        tail.contains('z'),
+        "idle keyseq-timeout must flush the parked 'z' into the buffer:\n{screen}"
+    );
+
+    // `z`+`x` inside the window still completes the chord — the typed
+    // text dies with the line.
+    s.send(driver::CTRL_C);
+    s.expect_prompt();
+    s.send("victim");
+    s.send("zx");
+    std::thread::sleep(Duration::from_millis(800));
+    let screen = normalize_screen(&s.drain_screen());
+    let tail = screen.rsplit("P1>").next().unwrap_or("");
+    assert!(
+        !tail.contains("victim"),
+        "z+x inside the window must complete the chord (kill-whole-line):\n{screen}"
+    );
+
+    s.send(driver::CTRL_C);
+    s.expect_prompt();
+    s.send_line("exit");
+    s.wait_exit();
+}
+
 /// `vi-editing-mode` switches into the standby vi machine: after the
 /// bound key, `ESC` lands in vi-normal and `x` deletes the character
 /// under the cursor — a mechanism the emacs machine does not have.
