@@ -322,16 +322,27 @@ EOF
 
   # THIS_SH is invoked directly by the test scripts and its basename leaks
   # into expected output (type.tests: `hash -p /tmp/$SHBASE $SHBASE`
-  # expects `/tmp/bash`). Point it at a thin `bash`-named launcher so the
+  # expects `/tmp/bash`). Point it at a `bash`-named launcher so the
   # suite sees the same name GNU produced the fixtures with.
+  #
+  # Prefer a real symlink to the shell binary over a launcher script:
+  # a launcher exec replaces argv[0] with the resolved binary path,
+  # and worse, a `. ${THIS_SH}` (execscript.tests sources the shell
+  # itself to check the binary-file refusal) would SOURCE the text
+  # wrapper and exec the real binary mid-test, ending the run early.
+  # With a symlink the child sees argv[0] as invoked (the GNU
+  # dollar_vars[0]-verbatim error prolog) and `. ${THIS_SH}` hits the
+  # binary check with status 126 exactly like GNU's own THIS_SH.
   this_sh="$workdir/bash"
-  cat >"$this_sh" <<EOF
+  if ! ln -sf "$SHELL_BIN" "$this_sh" 2>/dev/null; then
+    cat >"$this_sh" <<EOF
 #!/usr/bin/env bash
 export HOME="$test_home"
 export TMPDIR="$tmpdir"
 exec "$SHELL_BIN" "\$@"
 EOF
-  chmod +x "$this_sh"
+    chmod +x "$this_sh"
+  fi
 
   set +e
   (

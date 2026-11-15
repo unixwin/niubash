@@ -62,7 +62,10 @@ fn dump_strings_missing_file_is_127_with_diagnostic() {
     assert_eq!(code, 127, "stderr was: {stderr}");
     assert_eq!(
         stderr_line(&stderr),
-        format!("niu: {name}: No such file or directory")
+        format!(
+            "{}: {name}: No such file or directory",
+            niu_binary().display()
+        )
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -76,7 +79,10 @@ fn dump_po_strings_missing_file_is_127_with_diagnostic() {
     assert_eq!(code, 127, "stderr was: {stderr}");
     assert_eq!(
         stderr_line(&stderr),
-        format!("niu: {name}: No such file or directory")
+        format!(
+            "{}: {name}: No such file or directory",
+            niu_binary().display()
+        )
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -90,7 +96,10 @@ fn pretty_print_missing_file_is_127_with_diagnostic() {
     assert_eq!(code, 127, "stderr was: {stderr}");
     assert_eq!(
         stderr_line(&stderr),
-        format!("niu: {name}: No such file or directory")
+        format!(
+            "{}: {name}: No such file or directory",
+            niu_binary().display()
+        )
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -101,7 +110,10 @@ fn dump_strings_directory_is_126_with_diagnostic() {
     let name = dir.to_string_lossy().into_owned();
     let (_stdout, stderr, code) = run(&["--dump-strings", &name]);
     assert_eq!(code, 126, "stderr was: {stderr}");
-    assert_eq!(stderr_line(&stderr), format!("niu: {name}: Is a directory"));
+    assert_eq!(
+        stderr_line(&stderr),
+        format!("{name}: {name}: Is a directory")
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -111,7 +123,10 @@ fn pretty_print_directory_is_126_with_diagnostic() {
     let name = dir.to_string_lossy().into_owned();
     let (_stdout, stderr, code) = run(&["--pretty-print", &name]);
     assert_eq!(code, 126, "stderr was: {stderr}");
-    assert_eq!(stderr_line(&stderr), format!("niu: {name}: Is a directory"));
+    assert_eq!(
+        stderr_line(&stderr),
+        format!("{name}: {name}: Is a directory")
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
