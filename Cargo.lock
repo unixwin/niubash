@@ -931,7 +931,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "readline-abi"
 version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=a68ff11f859d5e364bdc7d96ae90b553c7378720#a68ff11f859d5e364bdc7d96ae90b553c7378720"
+source = "git+https://github.com/unixwin/ruline?rev=52f344979d42c2e403a41cd98f0d966450f25bde#52f344979d42c2e403a41cd98f0d966450f25bde"
 dependencies = [
  "libc",
  "reedline",
@@ -960,7 +960,7 @@ dependencies = [
 [[package]]
 name = "reedline"
 version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=a68ff11f859d5e364bdc7d96ae90b553c7378720#a68ff11f859d5e364bdc7d96ae90b553c7378720"
+source = "git+https://github.com/unixwin/ruline?rev=52f344979d42c2e403a41cd98f0d966450f25bde#52f344979d42c2e403a41cd98f0d966450f25bde"
 dependencies = [
  "arboard",
  "crossterm 0.29.0",
