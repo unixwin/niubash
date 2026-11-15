@@ -510,9 +510,20 @@ fn default_script_name_from(raw: Option<String>) -> String {
     // every face; shell.c:1258-1299 keys rbash off it). Everything else
     // stays the plain-niu default.
     if matches!(unmarked, "sh" | "ash" | "bash" | "rbash") {
-        stem.to_string()
-    } else {
+        return stem.to_string();
+    }
+    // GNU shell.c:1797-1799 set_shell_name binds dollar_vars[0] to
+    // argv[0]'s basename VERBATIM — the name is not filtered to known
+    // faces — so `exec -a ohio-state bash -c 'echo $0'` prints
+    // `ohio-state` (exec5.sub). Strip only the leading '-' login mark
+    // the same way (shell.c keys login_shell off it before binding).
+    // niubash#3605: the previous "niu" fallback made every
+    // non-face argv[0] report $0 = niu.
+    let name = basename.strip_prefix('-').unwrap_or(basename);
+    if name.is_empty() {
         "niu".to_string()
+    } else {
+        name.to_string()
     }
 }
 
