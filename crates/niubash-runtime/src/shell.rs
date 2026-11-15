@@ -623,10 +623,6 @@ impl Shell {
         crate::startup_trace::tick("winuxcmd selected");
         let shell_root = prepare_shell_root(selected_winuxcmd_path.as_deref())?;
         publish_process_shell_root(shell_root.as_deref());
-        // niubash#993 §11: mirror `ComSpec` under the canonical `COMSPEC`
-        // spelling before the session is built, so the engine imports it as
-        // a shell variable (see publish_comspec_canonical).
-        let comspec_mirrored = publish_comspec_canonical();
         crate::startup_trace::tick("shell root prepared");
 
         // 3. Build rubash Executor after host path selection.
@@ -749,15 +745,6 @@ impl Shell {
         // attribute, the same shape.)
         if let Ok(exe) = std::env::current_exe() {
             builder = builder.env("BASH", exe.to_string_lossy().replace('\\', "/"));
-        }
-        // niubash#993 §11: the mirror above renamed the process-env entry to
-        // `COMSPEC`, so the engine import no longer sees `ComSpec`; keep the
-        // old spelling alive in-shell under the same value. (A builder seed
-        // carries no export attribute — children still receive `ComSpec`
-        // through the engine's required-windows-child-environment pair, and
-        // `COMSPEC` through the export the import gave it.)
-        if let Some(comspec) = &comspec_mirrored {
-            builder = builder.env("ComSpec", comspec.as_str());
         }
         // P1 spawn takeover: leave the engine's external-file builtins (cat,
         // /bin/cat, mkdir, ...) at the rubash default (enabled) so script
@@ -6314,6 +6301,13 @@ fn normalize_executor_home_env(session: &mut Session, home_dir: &Path) {
 }
 
 fn ensure_windows_profile_env(session: &mut Session, home_dir: &Path) {
+    // niubash#993 §11: the COMSPEC mirror rides this seam because it is
+    // the same class as the variables below — a Windows profile
+    // variable the session must carry. It is deliberately NOT inside
+    // the cfg!(windows) gate: on a case-sensitive unix env block a
+    // `ComSpec` entry coexists with the seeded `COMSPEC`, and the
+    // in-shell result is identical.
+    mirror_comspec_canonical(session);
     if !cfg!(windows) {
         return;
     }
@@ -6448,24 +6442,25 @@ fn publish_process_shell_root(root: Option<&Path>) {
     std::env::set_var("NIU_ROOT", root);
 }
 
-/// niubash#993 §11: publish `COMSPEC` under its canonical spelling.
+/// niubash#993 §11: the value a `COMSPEC` mirror should carry.
 ///
-/// Windows spells the command-processor variable `ComSpec` in the process
-/// environment, and the shell's variable table is case-sensitive, so `$COMSPEC`
-/// — the spelling scripts and Makefiles read (node-gyp, autotools
-/// `configure`, npm-era tooling) — came out unset while `$ComSpec` worked.
-/// The process env block holds only one spelling per name (a case-insensitive
-/// key), so the mirror renames the entry: after this call the block spells it
-/// `COMSPEC`, which the engine then imports as an exported `$COMSPEC`.
-/// The return carries the mirrored value so the caller can keep the old
-/// spelling alive in-shell too (see the `ComSpec` builder seed below):
-/// without it `$ComSpec` would go unset the moment the block entry is
-/// renamed. An already-present `COMSPEC` (explicitly set by the user or a
-/// parent) always wins and is never overwritten; an absent or empty `ComSpec`
-/// is a no-op. The check is spelling-exact over the enumerated block:
-/// `std::env::var_os("COMSPEC")` cannot be used here, because the lookup
-/// itself is case-insensitive and returns `Some` while only `ComSpec` exists.
-fn publish_comspec_canonical() -> Option<String> {
+/// Windows spells the command-processor variable `ComSpec` in the
+/// process environment block, and the shell's variable table is
+/// case-sensitive, so `$COMSPEC` — the spelling scripts and Makefiles
+/// read (node-gyp, autotools `configure`, npm-era tooling) — came out
+/// unset while `$ComSpec` worked. The mirror cannot go through
+/// `std::env::set_var`: SetEnvironmentVariableW keys the block
+/// case-insensitively and keeps the FIRST spelling, so writing
+/// `COMSPEC` only updates the `ComSpec` entry's value and the
+/// canonical spelling never exists (unixwin/niubash#998 audit). The
+/// seed therefore bypasses the process env entirely and writes the
+/// session variable directly (see `mirror_comspec_canonical`). A real
+/// `COMSPEC` block entry (explicitly set by the user or a parent)
+/// makes the mirror a no-op; an absent or empty `ComSpec` has nothing
+/// to mirror. The check is spelling-exact over the enumerated block:
+/// `std::env::var_os("COMSPEC")` is itself case-insensitive on Windows
+/// and cannot distinguish the entries.
+fn comspec_mirror_value() -> Option<String> {
     let mut comspec: Option<String> = None;
     let mut has_canonical = false;
     for (name, value) in std::env::vars_os() {
@@ -6481,12 +6476,22 @@ fn publish_comspec_canonical() -> Option<String> {
     if has_canonical {
         return None;
     }
-    let value = comspec?;
-    if value.is_empty() {
-        return None;
+    comspec.filter(|value| !value.is_empty())
+}
+
+/// niubash#993 §11: seed `$COMSPEC` under its canonical spelling.
+///
+/// The session — not the process env — carries the mirror: `$COMSPEC`
+/// reads in-shell exported, the same face an env import would have
+/// given it, while `$ComSpec` stays imported from the untouched block
+/// under the same value. Children still receive `ComSpec` through the
+/// engine's required-windows-child-environment pair. The
+/// missing-or-empty gate inside `set_executor_env_if_missing_or_empty`
+/// is what lets an explicit `COMSPEC` always win.
+fn mirror_comspec_canonical(session: &mut Session) {
+    if let Some(value) = comspec_mirror_value() {
+        set_executor_env_if_missing_or_empty(session, "COMSPEC", &value);
     }
-    std::env::set_var("COMSPEC", &value);
-    Some(value)
 }
 
 fn is_slash_drive_path(value: &str) -> bool {
@@ -9634,31 +9639,53 @@ complete -F _envtooldyn_hook envtooldyn
         let _mixed_guard = EnvVarGuard::unset("ComSpec");
         let _canonical_guard = EnvVarGuard::unset("COMSPEC");
 
-        // No ComSpec at all: nothing is published.
-        assert_eq!(publish_comspec_canonical(), None);
-        assert!(std::env::var_os("COMSPEC").is_none());
+        // No ComSpec at all: nothing is mirrored.
+        assert_eq!(comspec_mirror_value(), None);
 
-        // A mixed-case ComSpec is mirrored under the canonical spelling,
-        // and the mirror reports the value it published.
+        // An explicit canonical COMSPEC always wins. It must be written
+        // while no entry exists: on Windows the env block keeps the
+        // FIRST spelling for a name, so a `set_var("COMSPEC")` issued
+        // after a `ComSpec` entry only updates that entry's value and
+        // the canonical spelling never materializes — the very trap the
+        // retired env-rename design fell into.
+        {
+            let _explicit = EnvVarGuard::set_value("COMSPEC", r"C:\explicit-993\cmd.exe");
+            assert_eq!(comspec_mirror_value(), None);
+            let mut session = Session::builder().build().expect("test session builds");
+            mirror_comspec_canonical(&mut session);
+            assert_eq!(
+                session.variables().resolved_value("COMSPEC").as_deref(),
+                Some(r"C:\explicit-993\cmd.exe")
+            );
+        }
+
+        // A mixed-case ComSpec supplies the mirror's value. The process
+        // env is never mutated — SetEnvironmentVariableW keeps the first
+        // spelling, so the session carries the mirror instead.
         let _comspec_guard = EnvVarGuard::set_value("ComSpec", r"C:\fake-993\cmd.exe");
         assert_eq!(
-            publish_comspec_canonical().as_deref(),
+            comspec_mirror_value().as_deref(),
+            Some(r"C:\fake-993\cmd.exe")
+        );
+
+        // The session seed gives `$COMSPEC` the import face — exported —
+        // while `$ComSpec` stays imported under the same value.
+        let mut session = Session::builder().build().expect("test session builds");
+        mirror_comspec_canonical(&mut session);
+        assert_eq!(
+            session.variables().resolved_value("COMSPEC").as_deref(),
             Some(r"C:\fake-993\cmd.exe")
         );
         assert_eq!(
-            std::env::var_os("COMSPEC").map(|v| v.to_string_lossy().into_owned()),
-            Some(r"C:\fake-993\cmd.exe".to_string())
+            session.variables().resolved_value("ComSpec").as_deref(),
+            Some(r"C:\fake-993\cmd.exe")
         );
-
-        // A second publish is a no-op: the canonical spelling is present.
-        assert_eq!(publish_comspec_canonical(), None);
-
-        // An explicitly set COMSPEC always wins and is never overwritten.
-        let _explicit_guard = EnvVarGuard::set_value("COMSPEC", r"C:\explicit-993\cmd.exe");
-        assert_eq!(publish_comspec_canonical(), None);
-        assert_eq!(
-            std::env::var_os("COMSPEC").map(|v| v.to_string_lossy().into_owned()),
-            Some(r"C:\explicit-993\cmd.exe".to_string())
+        assert!(
+            session
+                .environment()
+                .iter()
+                .any(|(name, value)| name == "COMSPEC" && value == r"C:\fake-993\cmd.exe"),
+            "the mirrored COMSPEC must be exported, the face an env import carries"
         );
     }
 
