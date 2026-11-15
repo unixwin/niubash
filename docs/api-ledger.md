@@ -1447,8 +1447,11 @@ Two halves, by design — a fast tripwire and an authoritative compile:
    stdlib-only): parses §6's symbol block and verifies every recorded
    symbol still exists in the rubash tree. Runs in rubash CI
    (`.github/workflows/niu-canary.yml`, job `ledger`) and can be run
-   by hand: `python3 scripts/check-api-ledger.py`. It proves presence
-   by declaration patterns only — a tripwire, not a type checker.
+   by hand: `python3 scripts/check-api-ledger.py`. Since #3556 it
+   proves presence by real export-path resolution (a consumer must
+   be able to name each `rubash::...` path through `pub mod` steps
+   and `pub use` re-exports, `#[path]` honoured) — still a tripwire,
+   not a type checker.
 2. **Pairing compile** (same workflow, job `pairing`): checks out
    niubash master beside this tree (the sibling layout niubash's
    `[patch]` expects), and runs `cargo check --workspace --locked`
