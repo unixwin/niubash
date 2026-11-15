@@ -35,6 +35,30 @@ pub const HOST_COMMAND_NAMES: &[&str] = &[
     "complete-command",
     "complete-filename",
     "complete-variable",
+    // bashline.c `alias_expand_line`: only the alias-expansion stage of
+    // `shell_expand_line` against the whole line.
+    "alias-expand-line",
+    // complete.c `rl_delete_char_or_list`: at end of line, list the
+    // completions as `possible-completions` does; elsewhere delete the
+    // character under point.
+    "delete-char-or-list",
+    // bashline.c `bash_dabbrev_expand`: complete the word at point
+    // from the most recent matching history token.
+    "dabbrev-expand",
+    // bashline.c:726 `display_shell_version` → `show_shell_version`:
+    // the version banner on the message line.
+    "display-shell-version",
+    // bashline.c `bash_glob_expand_word` / `bash_glob_list_expansions`:
+    // the word at point through the engine's pathname expansion —
+    // spliced back in, or listed.
+    "glob-expand-word",
+    "glob-list-expansions",
+    // bashline.c `history_and_alias_expand_line`: the history stage,
+    // then alias expansion.
+    "history-and-alias-expand-line",
+    // bashline.c `magic_space` (tcsh_magic_space): history-expand the
+    // line, then insert one space at point.
+    "magic-space",
     // bashline.c:3980/3890/3795 `bash_complete_hostname` /
     // `bash_complete_username` / `bash_brace_completion`: hostnames from
     // /etc/hosts plus gethostname, users from /etc/passwd, and filename
@@ -54,7 +78,26 @@ pub const HOST_COMMAND_NAMES: &[&str] = &[
     // bashline.c:2902 `history_expand_line`: history expansion of the
     // whole line, without shell-expand-line's alias/word stages.
     "history-expand-line",
+    // bashline.c:505-513 `bash_possible_*_completions`: the
+    // `possible-completions` list with the candidate source pinned,
+    // like the complete-* family above it.
+    "possible-command-completions",
+    "possible-filename-completions",
+    "possible-hostname-completions",
+    "possible-username-completions",
+    "possible-variable-completions",
     "re-read-init-file",
+    // bashline.c:474-478 `bash_*_shellword`: motion and kill by shell
+    // words — whitespace and shell metacharacters delimit, not
+    // readline's word-break set.
+    "shell-backward-kill-word",
+    "shell-backward-word",
+    "shell-forward-word",
+    "shell-kill-word",
+    "shell-transpose-words",
+    // bashline.c `bash_spell_correct_word` → spell.c `dirspell`:
+    // spell-correct the path components of the word at point.
+    "spell-correct-word",
     "shell-expand-line",
     "tilde-expand",
 ];
@@ -105,6 +148,24 @@ pub const GNU_DEFAULT_COMMAND_BINDINGS: &[(&str, &str)] = &[
     ("\\M-=", "possible-completions"),
     ("\\M-\\C-i", "dynamic-complete-history"),
     ("\\C-x\\C-r", "re-read-init-file"),
+    // The emacs_ctlx_keymap defaults bashline.c:481-583 binds with
+    // `rl_bind_key_if_unbound_in_map` — every one rides the host
+    // channel now (niubash#731 WP3).
+    ("\\C-x\\C-v", "display-shell-version"),
+    ("\\C-x!", "possible-command-completions"),
+    ("\\C-x$", "possible-variable-completions"),
+    ("\\C-x/", "possible-filename-completions"),
+    ("\\C-x@", "possible-hostname-completions"),
+    ("\\C-x~", "possible-username-completions"),
+    ("\\C-x*", "glob-expand-word"),
+    ("\\C-xg", "glob-list-expansions"),
+    ("\\C-xs", "spell-correct-word"),
+    // bashline.c:632-635: the M-C-* shellword family — `if_unbound`
+    // in GNU; the pinned editor's emacs table binds none of these.
+    ("\\M-\\C-b", "shell-backward-word"),
+    ("\\M-\\C-d", "shell-kill-word"),
+    ("\\M-\\C-f", "shell-forward-word"),
+    ("\\M-\\C-t", "shell-transpose-words"),
 ];
 
 /// Names `repl::native_widget_event` delivers natively that the
