@@ -131,6 +131,14 @@ jobs:
           NIU_INTERACTIVE_TESTS: "1"
         run: cargo test --test issue827_pty_gate --locked
 
+      # niubash#731 K3 / #1011: the PTY-level delivery pins get the
+      # same unix PTY home — they pass on unix PTYs and are a manual
+      # gate on Windows (ConPTY prompt rendering).
+      - name: cargo test --test issue731_k3_pty (interactive PTY gate)
+        env:
+          NIU_INTERACTIVE_TESTS: "1"
+        run: cargo test --test issue731_k3_pty --locked
+
       # TODO(wave-2): unix lib tests are expected to have failures until the
       # unix runtime work (spawn delegation, signal handling, terminal glue)
       # lands. Track the first green run here, then drop continue-on-error.
