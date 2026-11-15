@@ -483,6 +483,16 @@ documentation — not bugs to fix):
   `cmd /c`, which works as typed: under Git Bash the bare `/c` is the
   fragile form (MSYS rewrites it to `C:/`), which is exactly why the
   `//c` escape exists there.
+- `ssh -i /c/…` fails with `Warning: Identity file /c/… not
+  accessible`: niu resolves the Windows OpenSSH port — no MSYS
+  filesystem — and `ssh`/`scp`/`sftp` are namespace bridges whose
+  argv is passed verbatim, so a `/c/…` spelling for a *local* file
+  never reaches one OpenSSH can open (niubash#993 §9). Spell local
+  paths `C:/…` — that covers `-i`, `-F`, the local side of
+  `scp`/`sftp`, `ssh-keygen -f`, and `IdentityFile`/`Include` in
+  `~/.ssh/config`; remote-path operands keep their POSIX spelling by
+  design. Git Bash survives `/c/…` because its ssh is an MSYS build
+  that resolves the prefix in-process.
 
 ## Calling PowerShell from niu
 

@@ -17,10 +17,17 @@
 //!   `cmd //c` opens an interactive session where `cmd /c` works as
 //!   typed. The contract, the platform deltas, and both READMEs state
 //!   the rule and the hang-shaped failure mode; pinned here.
+//! - §9 ssh local paths: `ssh`/`scp`/`sftp`/`ssh-keygen` are namespace
+//!   bridges whose argv passes verbatim, and niu resolves the Windows
+//!   OpenSSH port — so `/c/…` local-path spellings fail with
+//!   "Identity file … not accessible" where Git Bash's MSYS ssh
+//!   resolves them in-process. The `C:/…` rule is now stated in the
+//!   contract and platform deltas (tracker #996 doc ruling); pinned
+//!   here.
 //!
 //! Everything else in #993 (§1 `set -u` + `${X:=v}`, §4
 //! `command -v` for emulated commands, §5 `/dev` devices, §6 `pwd -W`,
-//! §7 realpath/readlink spelling, §9 ssh paths, §3 permission model, §10
+//! §7 realpath/readlink spelling, §3 permission model, §10
 //! tool provenance, S1–S11) lives in rubash or WinuxCmd, or needs a
 //! maintainer decision first; the triage table is in the PR body.
 
@@ -167,6 +174,42 @@ fn readmes_document_cmd_double_slash_hang() {
             "{doc} must not claim that // is folded"
         );
     }
+}
+
+/// §9: the Windows Path Contract must state that the OpenSSH client
+/// family's local-path operands pass verbatim — so `/c/…` spellings
+/// fail against Windows OpenSSH and local files must use the `C:/…`
+/// form.
+#[test]
+fn path_contract_documents_ssh_local_paths_need_native_spelling() {
+    let text = read_doc("docs/src/windows-path-contract.md");
+    assert!(
+        text.contains("ssh -i /c/"),
+        "the contract must name the failing /c/ spelling for ssh local paths"
+    );
+    assert!(
+        text.contains("Identity file /c/"),
+        "the contract must pin the observable failure message"
+    );
+    assert!(
+        text.contains("C:/…"),
+        "the contract must name the native spelling OpenSSH needs"
+    );
+}
+
+/// §9 (platform deltas): the audited drop-in list must carry the ssh
+/// local-path note.
+#[test]
+fn platform_support_documents_ssh_local_paths() {
+    let text = read_doc("docs/src/platform-support.md");
+    assert!(
+        text.contains("ssh -i /c/"),
+        "platform-support must name the failing /c/ spelling"
+    );
+    assert!(
+        text.contains("MSYS build"),
+        "platform-support must explain why Git Bash survives the same spelling"
+    );
 }
 
 /// §12: the Windows Path Contract must state the PATHEXT-before-POSIX
