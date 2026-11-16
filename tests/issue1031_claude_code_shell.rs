@@ -9,6 +9,13 @@
 //! exists, so the legs stage `CLAUDE_CONFIG_DIR` explicitly and neutralise
 //! the parent environment (`CLAUDE_CODE_GIT_BASH_PATH` empty, a fresh
 //! `HOME`/`USERPROFILE`) so no machine state leaks into the verdict.
+//!
+//! niubash#1034 adds the live leg for the one face the classifier unit
+//! test cannot reach: "unset + Git for Windows present" must print ADVICE
+//! on a real machine where Claude Code's probe (1) finds Git Bash. The
+//! live test asserts on the machine's actual state, so it is a real
+//! verdict in both directions — ADVICE where Git for Windows is present
+//! (the GitHub Actions windows-latest runner), INFO where it is absent.
 
 #![cfg(windows)]
 
@@ -60,6 +67,15 @@ fn stage_settings(dir: &PathBuf, value: &str) -> PathBuf {
         format!("{{\"env\": {{\"CLAUDE_CODE_GIT_BASH_PATH\": \"{escaped}\"}}}}"),
     )
     .unwrap();
+    config
+}
+
+/// An empty config dir (niubash#1034): the dir exists so the row is
+/// gated in, but there is no settings.json — the value is unset from
+/// both sources (the helper also clears the process variable).
+fn stage_empty_config(dir: &PathBuf) -> PathBuf {
+    let config = dir.join("claude");
+    std::fs::create_dir_all(&config).unwrap();
     config
 }
 
@@ -169,5 +185,83 @@ fn issue1031_doctor_ok_for_shim_face() {
         stdout.contains("niu ("),
         "shim face not recognised as niu:\n{stdout}"
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// niubash#1034: live verification of the "unset + Git for Windows
+/// present" face. The classifier unit test
+/// (`claude_shell_unset_with_git_for_windows_is_advice`) proves the pure
+/// function; this test proves the live chain on a real Windows machine —
+/// the config dir gates the row in, probe (1) finds the real Git Bash,
+/// and the real `niu doctor` prints ADVICE naming it.
+///
+/// The assertion follows the machine's actual state, so the test is a
+/// real verdict in both directions and never passes vacuously:
+/// - Git for Windows present (the GitHub Actions windows-latest runner,
+///   `C:\Program Files\Git`): the row must be ADVICE — "CLAUDE_CODE_GIT_BASH_PATH
+///   is unset", "Program Files probe wins", and the real Git Bash path
+///   (rendered with forward slashes, as `doctor` prints paths).
+/// - Git for Windows absent (a dev box / X299 without it): the row must
+///   be the INFO face, "no Git for Windows detected".
+/// A broken probe (1) fails the ADVICE branch on windows-latest (the row
+/// would fall through to INFO while this test expects ADVICE); a
+/// false-positive probe fails the INFO branch elsewhere.
+#[test]
+fn issue1034_doctor_live_row_names_real_git_for_windows() {
+    let dir = scratch("live-unset-gfw");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let config = stage_empty_config(&dir);
+    let (ok, stdout) = doctor_with_config(&config, &home);
+    assert!(ok, "niu doctor failed:\n{stdout}");
+    assert!(
+        stdout.contains("claude code shell"),
+        "doctor has no claude code shell row:\n{stdout}"
+    );
+    let git_bash = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|p| p.is_file());
+    match git_bash {
+        Some(path) => {
+            // The row prints paths with forward slashes (`display()`).
+            let shown = path.to_string_lossy().replace('\\', "/");
+            eprintln!("issue1034: Git for Windows found at {}", path.display());
+            assert!(
+                stdout.contains("ADVICE claude code shell"),
+                "unset + Git for Windows did not print ADVICE:\n{stdout}"
+            );
+            assert!(
+                stdout.contains("CLAUDE_CODE_GIT_BASH_PATH is unset"),
+                "unset value not named:\n{stdout}"
+            );
+            assert!(
+                stdout.contains("Program Files probe wins"),
+                "probe (1) win not named:\n{stdout}"
+            );
+            assert!(
+                stdout.contains(shown.as_str()),
+                "real Git Bash path not named:\n{stdout}"
+            );
+            assert!(
+                stdout.contains("set env.CLAUDE_CODE_GIT_BASH_PATH"),
+                "no fix hint:\n{stdout}"
+            );
+        }
+        None => {
+            eprintln!("issue1034: no Git for Windows install found; expecting the INFO face");
+            assert!(
+                stdout.contains("INFO claude code shell"),
+                "absence face did not print INFO:\n{stdout}"
+            );
+            assert!(
+                stdout.contains("no Git for Windows detected"),
+                "absence face not named:\n{stdout}"
+            );
+        }
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
