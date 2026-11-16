@@ -1206,6 +1206,37 @@ fn replace_line_set_up_new_line(
     ]);
 }
 
+/// `rl_tilde_expand` shared by `tilde-expand` and `vi-tilde-expand`
+/// (vi_mode.c:414): expand the tilde at the start of the
+/// whitespace-delimited word at point; point lands just past the
+/// replacement, as `_rl_replace_text` (text.c:194) leaves it.
+fn tilde_expand_at_point(shell: &Rc<RefCell<Shell>>, line_editor: &mut Reedline) {
+    let buffer = line_editor.current_buffer_contents().to_string();
+    let cursor = line_editor.current_insertion_point();
+    if let Some((start, end)) = crate::readline_commands::tilde_word_span(&buffer, cursor) {
+        let word = &buffer[start..end];
+        let env: std::collections::HashMap<String, String> =
+            shell.borrow().session().environment().into_iter().collect();
+        if let Some(expanded) = rubash::expand::tilde::tilde::expand_word_prefix(word, &env) {
+            if expanded != word {
+                let mut next = String::with_capacity(buffer.len() - (end - start) + expanded.len());
+                next.push_str(&buffer[..start]);
+                next.push_str(&expanded);
+                next.push_str(&buffer[end..]);
+                let position = start + expanded.len();
+                line_editor.run_edit_commands(&[
+                    EditCommand::Clear,
+                    EditCommand::InsertString(next),
+                    EditCommand::MoveToPosition {
+                        position,
+                        select: false,
+                    },
+                ]);
+            }
+        }
+    }
+}
+
 /// Perform one host readline command (see
 /// [`READLINE_HOST_COMMAND_PREFIX`]) against the suspended editor
 /// and the live session.
@@ -1268,33 +1299,53 @@ fn run_readline_command(
         // expand the tilde at the start of the whitespace-delimited
         // word at point; point lands just past the replacement, as
         // _rl_replace_text (text.c:194) leaves it.
-        "tilde-expand" => {
+        "tilde-expand" => tilde_expand_at_point(shell, line_editor),
+        // vi_mode.c:414 rl_vi_tilde_expand (niubash#731): the same
+        // expansion, then `rl_vi_start_inserting` — enter vi insert
+        // mode against the suspended editor through the ruline
+        // `switch_edit_mode` host face.
+        "vi-tilde-expand" => {
+            tilde_expand_at_point(shell, line_editor);
+            line_editor.switch_edit_mode(PromptEditMode::Vi(PromptViMode::Insert));
+        }
+        // util.c:134 rl_tty_status: `#if defined (TIOCSTAT)` issues
+        // the tty status ioctl — a BSDism with no Windows surface —
+        // and `#else` dings. Niubash takes the #else branch.
+        "tty-status" => readline_ding(),
+        // complete.c:3070 rl_export_completions →
+        // rl_complete_internal('$') → _rl_export_completions
+        // (complete.c:3057): print the match count (matches[0], the
+        // common prefix, is element zero of GNU's array — possibly
+        // empty), the completed text, the start:end span, then one
+        // match per line. `count > 1` would clear the line; the
+        // host channel carries no explicit-arg context, so the
+        // no-count face is delivered.
+        "export-completions" => {
             let buffer = line_editor.current_buffer_contents().to_string();
             let cursor = line_editor.current_insertion_point();
-            if let Some((start, end)) = crate::readline_commands::tilde_word_span(&buffer, cursor) {
-                let word = &buffer[start..end];
-                let env: std::collections::HashMap<String, String> =
-                    shell.borrow().session().environment().into_iter().collect();
-                if let Some(expanded) = rubash::expand::tilde::tilde::expand_word_prefix(word, &env)
-                {
-                    if expanded != word {
-                        let mut next =
-                            String::with_capacity(buffer.len() - (end - start) + expanded.len());
-                        next.push_str(&buffer[..start]);
-                        next.push_str(&expanded);
-                        next.push_str(&buffer[end..]);
-                        let position = start + expanded.len();
-                        line_editor.run_edit_commands(&[
-                            EditCommand::Clear,
-                            EditCommand::InsertString(next),
-                            EditCommand::MoveToPosition {
-                                position,
-                                select: false,
-                            },
-                        ]);
-                    }
-                }
+            let (start, end) = crate::readline_commands::completion_word_span(&buffer, cursor);
+            let text = &buffer[start..end];
+            let mut matches: Vec<String> = {
+                let mut completer = NiubashCompleter::with_shell(
+                    shell.borrow().completion_state.clone(),
+                    shell.clone(),
+                );
+                completer
+                    .complete(&buffer, cursor)
+                    .into_iter()
+                    .map(|suggestion| suggestion.value)
+                    .collect()
+            };
+            matches.sort();
+            matches.dedup();
+            let mut out = format!("{}\n{}\n{}:{}\n", matches.len() + 1, text, start, end);
+            out.push_str(&crate::readline_commands::common_prefix(&matches));
+            out.push('\n');
+            for m in &matches {
+                out.push_str(m);
+                out.push('\n');
             }
+            print_suspended_output(&format!("\n{}", out));
         }
         // lib/readline/text.c:2358 rl_execute_named_command
         // (niubash#766): read a command name in the minibuffer and
@@ -4338,6 +4389,32 @@ fn add_engine_bind_keybindings_recorded<S: KeybindingSink + ?Sized>(
                             continue;
                         }
                     }
+                } else if vi_bound_char_names(name).is_some() {
+                    // niubash#731: these GNU vi functions act on the
+                    // *pressed* key's own character — `vi-char-search`
+                    // reads f/F/t/T, `vi-search` '/' or '?',
+                    // `vi-search-again` n or N, `vi-arg-digit` the
+                    // digit — so the bound char is the `ViKeys`
+                    // sequence itself, exactly like `self-insert`
+                    // above. A key with no character keeps the
+                    // actionable record.
+                    match key_code {
+                        KeyCode::Char(c)
+                            if !modifiers.contains(KeyModifiers::CONTROL)
+                                && !modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            ReedlineEvent::ViKeys(vec![c])
+                        }
+                        _ => {
+                            note_unusable_bind(
+                                &mut unusable,
+                                &mut dropped,
+                                entry,
+                                UnusableBindReason::Other,
+                            );
+                            continue;
+                        }
+                    }
                 } else {
                     match native_widget_event(name) {
                         // native_widget_event's sentinel fallthrough means
@@ -5333,6 +5410,114 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
             "{}{}",
             READLINE_HOST_COMMAND_PREFIX, widget
         ))),
+        // niubash#731 residual vi faces: the names GNU binds in the vi
+        // keymaps deliver their bound-key sequence through the ruline
+        // `ViKeys` seam — the command grammar then consumes follow-on
+        // characters itself (`f`/`m`/`` ` ``/`r` reads their argument,
+        // `c`/`d`/`y` read their motion), exactly like the GNU function
+        // body calling `_rl_vi_callback_getchar`. Single-key commands
+        // carry one char; the names GNU registers for an operator read
+        // hand the grammar that operator's key.
+        "vi-append-eol" => Some(ReedlineEvent::ViKeys("A".chars().collect())),
+        "vi-append-mode" => Some(ReedlineEvent::ViKeys("a".chars().collect())),
+        "vi-back-to-indent" => Some(ReedlineEvent::ViKeys("^".chars().collect())),
+        "vi-backward-bigword" | "vi-bWord" => Some(ReedlineEvent::ViKeys("B".chars().collect())),
+        "vi-backward-word" | "vi-bword" | "vi-prev-word" => {
+            Some(ReedlineEvent::ViKeys("b".chars().collect()))
+        }
+        "vi-change-case" => Some(ReedlineEvent::ViKeys("~".chars().collect())),
+        "vi-change-char" => Some(ReedlineEvent::ViKeys("s".chars().collect())),
+        "vi-change-to" => Some(ReedlineEvent::ViKeys("c".chars().collect())),
+        "vi-column" => Some(ReedlineEvent::ViKeys("|".chars().collect())),
+        "vi-delete" => Some(ReedlineEvent::ViKeys("x".chars().collect())),
+        "vi-delete-to" => Some(ReedlineEvent::ViKeys("d".chars().collect())),
+        "vi-end-bigword" | "vi-eWord" => Some(ReedlineEvent::ViKeys("E".chars().collect())),
+        "vi-end-word" | "vi-eword" => Some(ReedlineEvent::ViKeys("e".chars().collect())),
+        "vi-fetch-history" => Some(ReedlineEvent::ViKeys("G".chars().collect())),
+        "vi-first-print" => Some(ReedlineEvent::ViKeys("0".chars().collect())),
+        "vi-forward-bigword" | "vi-fWord" | "vi-next-word" => {
+            Some(ReedlineEvent::ViKeys("W".chars().collect()))
+        }
+        "vi-forward-word" | "vi-fword" => Some(ReedlineEvent::ViKeys("w".chars().collect())),
+        "vi-goto-mark" => Some(ReedlineEvent::ViKeys("`".chars().collect())),
+        "vi-insert-beg" => Some(ReedlineEvent::ViKeys("I".chars().collect())),
+        "vi-insertion-mode" => Some(ReedlineEvent::ViKeys("i".chars().collect())),
+        "vi-match" => Some(ReedlineEvent::ViKeys("%".chars().collect())),
+        "vi-overstrike" => Some(ReedlineEvent::ViKeys("R".chars().collect())),
+        "vi-put" => Some(ReedlineEvent::ViKeys("p".chars().collect())),
+        "vi-replace" => Some(ReedlineEvent::ViKeys("r".chars().collect())),
+        "vi-rubout" => Some(ReedlineEvent::ViKeys("X".chars().collect())),
+        "vi-set-mark" => Some(ReedlineEvent::ViKeys("m".chars().collect())),
+        "vi-subst" => Some(ReedlineEvent::ViKeys("S".chars().collect())),
+        "vi-undo" => Some(ReedlineEvent::ViKeys("u".chars().collect())),
+        "vi-yank-to" => Some(ReedlineEvent::ViKeys("y".chars().collect())),
+        // `rl_vi_movement_mode` (vi_mode.c:1247): backspace one char,
+        // then the command keymap — the same repair the vi machine's
+        // own Esc emits when leaving insert.
+        "vi-movement-mode" => Some(ReedlineEvent::Multiple(vec![
+            edit_event(EditCommand::Move(reedline::MotionTarget::Grapheme(
+                Direction::Backward,
+            ))),
+            ReedlineEvent::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
+        ])),
+        // `rl_vi_overstrike_delete` (vi_mode.c:1123): delete backward
+        // while the R session's overwrite flag carries the restore
+        // semantics — the editor's overstrike-aware rubout.
+        "vi-overstrike-delete" => Some(edit_event(EditCommand::Backspace)),
+        // `rl_vi_redo` → rl_redo; `rl_vi_unix_word_rubout` →
+        // rl_unix_word_rubout — plain aliases of the emacs commands.
+        "vi-redo" => Some(edit_event(EditCommand::Redo)),
+        "vi-unix-word-rubout" => Some(edit_event(EditCommand::CutWordLeft)),
+        // `rl_vi_yank_arg` (vi_mode.c:1527) yanks the last argument of
+        // the previous command; `rl_vi_yank_pop` is `yank-pop` under vi.
+        "vi-yank-arg" => Some(ReedlineEvent::YankLastArg { count: None }),
+        "vi-yank-pop" => Some(edit_event(EditCommand::YankPop)),
+        // `rl_vi_edit_and_execute_command` (vi_mode.c:1481) is
+        // `edit-and-execute-command` reached through the vi map.
+        "vi-edit-and-execute-command" => Some(ReedlineEvent::OpenEditor),
+        // `rl_vi_eof_maybe` (vi_mode.c:1414): EOF on an empty line,
+        // delete-char otherwise — the fork's `CtrlD` arm already
+        // carries exactly that contract.
+        "vi-eof-maybe" => Some(ReedlineEvent::CtrlD),
+        // `rl_fetch_history` (misc.c:722): the explicit-arg count
+        // arrives through `WithArg` when the name is bound to a digit
+        // argument terminator.
+        "fetch-history" => Some(ReedlineEvent::FetchHistory { count: None }),
+        // niubash#731 batch 2 — the byte/input-layer faces on the
+        // pinned ruline (text.c): `rl_forward_byte`/`rl_backward_byte`
+        // step by grapheme-edge-safe byte landings;
+        // `rl_rubout_or_delete` picks backspace-at-end vs delete by
+        // cursor position; `rl_arrow_keys`/`rl_skip_csi_sequence`
+        // consume follow-on input through ruline's pending-consumer
+        // seam.
+        "forward-byte" => Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+            Direction::Forward,
+        )))),
+        "backward-byte" => Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+            Direction::Backward,
+        )))),
+        "forward-backward-delete-char" => Some(edit_event(EditCommand::RuboutOrDelete)),
+        "arrow-key-prefix" => Some(ReedlineEvent::ArrowKeyPrefix),
+        "skip-csi-sequence" => Some(ReedlineEvent::SkipCsiSequence),
+        // `rl_forward_search_history` (isearch.c:141): the same
+        // isearch machine, direction forward.
+        "forward-search-history" => Some(ReedlineEvent::ForwardSearchHistory),
+        // The three host-channel names of batch 2: `tty-status`
+        // (util.c:134, #else rl_ding — no TIOCSTAT on Windows),
+        // `export-completions` (complete.c:3070, prints the match
+        // array), `vi-tilde-expand` (vi_mode.c:414, tilde-expand then
+        // rl_vi_start_inserting). All need the suspended editor /
+        // session, so they ride the readline host-command channel.
+        "tty-status" | "export-completions" | "vi-tilde-expand" => {
+            Some(ReedlineEvent::ExecuteHostCommand(format!(
+                "{}{}",
+                READLINE_HOST_COMMAND_PREFIX, widget
+            )))
+        }
+        // `rl_vi_complete` / `bash_vi_complete` (vi_mode.c:1590 /
+        // bashline.c) and `rl_old_menu_complete` (complete.c:2176) all
+        // run the completion engine — the same `complete` arm.
+        "vi-complete" | "bash-vi-complete" | "old-menu-complete" => Some(completion_event()),
         // Unknown widget names become shell-function widgets: the host
         // intercepts the sentinel payload, runs the named function with the
         // editor state, and applies its outcome before resuming the editor.
@@ -5349,12 +5534,38 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
 /// widget sentinel. Only delivered names earn their GNU default
 /// bindings from [`crate::readline_commands::GNU_DEFAULT_COMMAND_BINDINGS`].
 fn gnu_name_is_delivered(name: &str) -> bool {
+    if vi_bound_char_names(name).is_some() {
+        return true;
+    }
     match native_widget_event(name) {
         Some(ReedlineEvent::ExecuteHostCommand(payload)) => {
             !payload.starts_with(WIDGET_HOST_COMMAND_PREFIX)
         }
         Some(_) => true,
         None => false,
+    }
+}
+
+/// The GNU vi names whose semantics read the *bound key's own*
+/// character (niubash#731) — the binding layer lowers them to
+/// [`ReedlineEvent::ViKeys`] of that character, so they are key-
+/// dependent like `self-insert` and never reach
+/// [`native_widget_event`].
+///
+/// - `vi-arg-digit` (vi_mode.c:1429): the bound digit starts —
+///   or extends — the numeric argument; at sequence start `0`
+///   is the column-0 motion, which the ruline command grammar
+///   already implements.
+/// - `vi-char-search` (vi_mode.c:1607): f/F/t/T pick direction and
+///   stop from the bound char.
+/// - `vi-search` (vi_mode.c:1664): `/` vs `?` pick the search
+///   direction.
+/// - `vi-search-again` (vi_mode.c:1707): `n` repeats in the last
+///   direction, `N` reverses it.
+fn vi_bound_char_names(name: &str) -> Option<()> {
+    match name {
+        "vi-arg-digit" | "vi-char-search" | "vi-search" | "vi-search-again" => Some(()),
+        _ => None,
     }
 }
 
@@ -8675,7 +8886,10 @@ mod tests {
     /// bridge to *report* it, then excludes exactly this list.
     const EDITOR_CONSUMED_GNU_DEFAULTS: &[&str] = &["\\e[200~"];
 
-    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &["\\C-s"];
+    /// niubash#731 batch 2: empty — `\C-s` was the last documented
+    /// gap; `forward-search-history` now delivers through ruline's
+    /// direction-aware isearch.
+    const KNOWN_UNMAPPED_GNU_DEFAULTS: &[&str] = &[];
 
     /// niubash#768: identity pin for the engine table the gate below
     /// mirrors. The table is owned by rubash
@@ -9762,6 +9976,209 @@ mod tests {
             native_widget_event("paste-from-clipboard"),
             Some(edit_event(EditCommand::PasteSystem))
         );
+    }
+
+    /// niubash#731 residual vi faces: the funmap names GNU binds in
+    /// the vi keymaps deliver their bound-key sequence through the
+    /// ruline `ViKeys` seam; the bound-key-reading names
+    /// (`vi-char-search`/`vi-search`/`vi-search-again`/`vi-arg-digit`)
+    /// lower to `ViKeys` of the pressed character at bind time.
+    #[test]
+    fn issue731_vi_family_names_deliver_vi_keys() {
+        use rubash::api::{BindEntryView as BindEntry, BindKindView as BindKind};
+        let vi_keys = |s: &str| ReedlineEvent::ViKeys(s.chars().collect());
+        for (name, seq) in [
+            ("vi-append-mode", "a"),
+            ("vi-append-eol", "A"),
+            ("vi-back-to-indent", "^"),
+            ("vi-backward-word", "b"),
+            ("vi-bword", "b"),
+            ("vi-prev-word", "b"),
+            ("vi-backward-bigword", "B"),
+            ("vi-bWord", "B"),
+            ("vi-forward-word", "w"),
+            ("vi-fword", "w"),
+            ("vi-forward-bigword", "W"),
+            ("vi-fWord", "W"),
+            ("vi-next-word", "W"),
+            ("vi-end-word", "e"),
+            ("vi-eword", "e"),
+            ("vi-end-bigword", "E"),
+            ("vi-eWord", "E"),
+            ("vi-change-case", "~"),
+            ("vi-change-char", "s"),
+            ("vi-change-to", "c"),
+            ("vi-column", "|"),
+            ("vi-delete", "x"),
+            ("vi-delete-to", "d"),
+            ("vi-fetch-history", "G"),
+            ("vi-first-print", "0"),
+            ("vi-goto-mark", "`"),
+            ("vi-insert-beg", "I"),
+            ("vi-insertion-mode", "i"),
+            ("vi-match", "%"),
+            ("vi-overstrike", "R"),
+            ("vi-put", "p"),
+            ("vi-replace", "r"),
+            ("vi-rubout", "X"),
+            ("vi-set-mark", "m"),
+            ("vi-subst", "S"),
+            ("vi-undo", "u"),
+            ("vi-yank-to", "y"),
+        ] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(vi_keys(seq)),
+                "{name} must deliver ViKeys({seq:?})"
+            );
+        }
+        assert_eq!(
+            native_widget_event("vi-movement-mode"),
+            Some(ReedlineEvent::Multiple(vec![
+                edit_event(EditCommand::Move(reedline::MotionTarget::Grapheme(
+                    Direction::Backward,
+                ))),
+                ReedlineEvent::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
+            ]))
+        );
+        assert_eq!(
+            native_widget_event("vi-overstrike-delete"),
+            Some(edit_event(EditCommand::Backspace))
+        );
+        assert_eq!(
+            native_widget_event("vi-redo"),
+            Some(edit_event(EditCommand::Redo))
+        );
+        assert_eq!(
+            native_widget_event("vi-unix-word-rubout"),
+            Some(edit_event(EditCommand::CutWordLeft))
+        );
+        assert_eq!(
+            native_widget_event("vi-yank-arg"),
+            Some(ReedlineEvent::YankLastArg { count: None })
+        );
+        assert_eq!(
+            native_widget_event("vi-yank-pop"),
+            Some(edit_event(EditCommand::YankPop))
+        );
+        assert_eq!(
+            native_widget_event("vi-edit-and-execute-command"),
+            Some(ReedlineEvent::OpenEditor)
+        );
+        assert_eq!(
+            native_widget_event("vi-eof-maybe"),
+            Some(ReedlineEvent::CtrlD)
+        );
+        assert_eq!(
+            native_widget_event("fetch-history"),
+            Some(ReedlineEvent::FetchHistory { count: None })
+        );
+        assert_eq!(native_widget_event("vi-complete"), Some(completion_event()));
+        assert_eq!(
+            native_widget_event("bash-vi-complete"),
+            Some(completion_event())
+        );
+        assert_eq!(
+            native_widget_event("old-menu-complete"),
+            Some(completion_event())
+        );
+        // Bound-key names: the pressed char is the injected sequence.
+        let function = |keyseq: &str, name: &str| BindEntry {
+            keyseq: keyseq.to_string(),
+            bytes: decode_keyseq_bytes(keyseq).unwrap_or_default(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: "vi-command".to_string(),
+            dump: String::new(),
+        };
+        let mut keybindings = default_vi_normal_keybindings();
+        let entries = vec![
+            function("f", "vi-char-search"),
+            function("?", "vi-search"),
+            function("N", "vi-search-again"),
+            function("3", "vi-arg-digit"),
+        ];
+        add_engine_bind_keybindings(&mut keybindings, NativeKeymapTarget::ViNormal, &entries);
+        for (c, name) in [
+            ('f', "vi-char-search"),
+            ('?', "vi-search"),
+            ('N', "vi-search-again"),
+            ('3', "vi-arg-digit"),
+        ] {
+            assert_eq!(
+                keybindings.find_binding(KeyModifiers::NONE, KeyCode::Char(c)),
+                Some(vi_keys(&c.to_string())),
+                "{name} bound to {c:?} must inject that char"
+            );
+        }
+        for name in [
+            "vi-char-search",
+            "vi-search",
+            "vi-search-again",
+            "vi-arg-digit",
+            "vi-append-mode",
+            "fetch-history",
+            "vi-eof-maybe",
+        ] {
+            assert!(gnu_name_is_delivered(name), "{name} must be delivered");
+        }
+    }
+
+    /// niubash#731 batch 2: the byte/input-layer names deliver the
+    /// ruline faces, `forward-search-history` opens a forward
+    /// isearch, and the three session names ride the host channel.
+    #[test]
+    fn issue731_batch2_names_deliver() {
+        assert_eq!(
+            native_widget_event("forward-byte"),
+            Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+                Direction::Forward
+            ))))
+        );
+        assert_eq!(
+            native_widget_event("backward-byte"),
+            Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+                Direction::Backward
+            ))))
+        );
+        assert_eq!(
+            native_widget_event("forward-backward-delete-char"),
+            Some(edit_event(EditCommand::RuboutOrDelete))
+        );
+        assert_eq!(
+            native_widget_event("arrow-key-prefix"),
+            Some(ReedlineEvent::ArrowKeyPrefix)
+        );
+        assert_eq!(
+            native_widget_event("skip-csi-sequence"),
+            Some(ReedlineEvent::SkipCsiSequence)
+        );
+        assert_eq!(
+            native_widget_event("forward-search-history"),
+            Some(ReedlineEvent::ForwardSearchHistory)
+        );
+        for name in ["tty-status", "export-completions", "vi-tilde-expand"] {
+            assert_eq!(
+                native_widget_event(name),
+                Some(ReedlineEvent::ExecuteHostCommand(format!(
+                    "{}{}",
+                    READLINE_HOST_COMMAND_PREFIX, name
+                ))),
+                "{name} must ride the readline host channel"
+            );
+            assert!(gnu_name_is_delivered(name), "{name} must be delivered");
+        }
+        for name in [
+            "forward-byte",
+            "backward-byte",
+            "forward-backward-delete-char",
+            "arrow-key-prefix",
+            "skip-csi-sequence",
+            "forward-search-history",
+        ] {
+            assert!(gnu_name_is_delivered(name), "{name} must be delivered");
+        }
     }
 
     /// niubash#731: `self-insert` is key-dependent — the bridge
