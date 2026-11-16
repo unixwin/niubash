@@ -11414,6 +11414,15 @@ complete -F _envtooldyn_hook envtooldyn
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
+        // GNU subst.c:9050 parameter_brace_substring returns NULL before
+        // verify_substring_values evaluates the offset when the parameter
+        // is unset, so the offset's arithmetic assignment never runs for
+        // an unset STARSHIP_START_TIME (rubash#3024 carries the same
+        // short-circuit: an unset variable's offsets are never expanded).
+        // The parameter must be set — even to a sentinel — for the offset
+        // to be evaluated at all; without this preset the PS0 expansion
+        // leaves the variable unset and the assertion below reads None.
+        shell.session_mut().variables().set("STARSHIP_START_TIME", "0");
         shell.session_mut().variables().set(
             "PS0",
             "${STARSHIP_START_TIME:$((STARSHIP_START_TIME=12345,0)):0}",
