@@ -45,7 +45,10 @@ Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it 
 
 - The current session already **is** Niubash. Run commands directly; do not
   nest `niu -c`, and do not route work through `pwsh`, `powershell`,
-  `cmd /c`, `wsl`, or `bash` wrappers.
+  `cmd /c`, `wsl`, or `bash` wrappers. That holds only if the host actually
+  launched niu: check it once per session with `uname -s` — `MSYS_NT` or
+  `MINGW64_NT` means the host silently fell back to Git Bash (niubash#1031),
+  so report the host setting instead of working around it.
 - Write bash syntax normally: functions, arrays, `$(...)`, pipes, heredocs,
   globs. For deep bash-isms (`coproc`, exotic redirects, `mapfile` edge
   cases, `compgen`/`complete`), test the exact form in-session before

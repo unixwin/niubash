@@ -113,7 +113,10 @@ not claimed** by the niubash installer (the niubash#398 ruling: a per-user
 install never writes an admin-walled foreign directory — see
 [the installer contract](installer.md#the-git-bash-slot-is-never-claimed)).
 What hits niu today is the probe's second arm — the `bash.exe` derived from
-the `git` found on `PATH` — plus explicit settings (mechanism 2). Mechanism 4
+the `git` found on `PATH` — plus explicit settings (mechanism 2). But the
+second arm lands on niu **only when Git for Windows is absent**: with it
+installed, probe (1)'s hardcoded directories win and the git on `PATH`
+is never consulted (niubash#1031). Mechanism 4
 is why a bare `bash` cannot be redirected from the user `PATH` alone.
 
 ### What `winuxcmd\bin\bash.exe` actually is
@@ -220,16 +223,27 @@ Interpreting the result:
   skips a `git` sitting in the launch directory or below it, or under
   `node_modules`/`.venv`/`env`.
 - **Set it to niu:** probe (1)'s hardcoded directories are deliberately left
-  unclaimed by the installer (the niubash#398 ruling — see below), so today it
-  is probe (2) that lands on niu: the `git` on `PATH` resolves into
-  `winuxcmd\bin`, whose `bash.exe` is the niu face described above. For
-  explicit control, set `CLAUDE_CODE_GIT_BASH_PATH` in `settings.json` to
-  `...\winuxcmd\bin\bash.exe`.
+  unclaimed by the installer (the niubash#398 ruling — see below), so on a
+  machine **without** Git for Windows it is probe (2) that lands on niu: the
+  `git` on `PATH` resolves into `winuxcmd\bin`, whose `bash.exe` is the niu
+  face described above. With Git for Windows installed, probe (1) wins and
+  only the explicit variable gets niu — set `CLAUDE_CODE_GIT_BASH_PATH` in
+  `settings.json` to `...\winuxcmd\bin\bash.exe`.
 - **Trap:** the variable only accepts a file named `bash.exe`, `sh.exe`, `bash`
   or `sh`. Point it at `git-bash.exe` and it is ignored with a warning. Pointing
   it at `niu.exe` is likewise ignored — but the hardlinked `bash.exe` *is*
   `niu.exe` under an accepted name, so the accepted-name requirement costs
-  nothing now that niubash#377 landed the `argv[0]` dispatch.
+  nothing now that niubash#377 landed the `argv[0]` dispatch. Worse, a value
+  that names **no file at all** is ignored **silently** (no warning): the host
+  falls back to probe (1) and runs Git Bash. An unrendered template token
+  from a config generator (e.g. `@@windows.home@@\...`) is exactly such a
+  value (niubash#1031).
+- **Check which shell the host actually runs:** `niu doctor` has a
+  `claude code shell` row (Windows only, shown when `~/.claude` exists) that
+  names the fallback and the exact path to set. In-session, `uname -s`
+  reports `MSYS_NT`/`MINGW64_NT` under Git Bash and niu's own signature
+  under niu — if the skill's commands assume niu and `uname -s` says
+  otherwise, report the host setting instead of working around it.
 - **History:** this configuration is the one that exposed niubash#379 (a
   visible console window per command through the forwarding launcher). Fixed
   in rubash#668 and shipped in v1.4.2 — if you still see the flash, upgrade.
