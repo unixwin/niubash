@@ -1762,8 +1762,8 @@ mod tests {
         std::fs::write(&niu, b"fake niu bytes").unwrap();
         std::fs::write(&copy, b"fake niu bytes").unwrap();
         std::fs::write(&other, b"different bash bytes!").unwrap();
-        assert!(claude_shell_names_niu(&copy, &[niu.clone()]));
-        assert!(!claude_shell_names_niu(&other, &[niu.clone()]));
+        assert!(claude_shell_names_niu(&copy, &[niu]));
+        assert!(!claude_shell_names_niu(&other, &[niu]));
         assert!(!claude_shell_names_niu(&dir.join("missing.exe"), &[niu]));
         std::fs::remove_dir_all(&dir).ok();
     }
