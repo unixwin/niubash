@@ -43,10 +43,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
-/// Sentinel PS1 written into the deterministic rc file.
-pub const PROMPT1: &str = "P1> ";
-/// Sentinel PS2 (continuation prompt) written into the deterministic rc file.
-pub const PROMPT2: &str = "P2> ";
+/// Match needle for the sentinel PS1 written into the deterministic
+/// rc file (`PS1='P1> '`). The needle drops the trailing space: on
+/// Windows ConPTY the prompt tail is painted via erase+positioning
+/// (`ESC[K`, cursor moves), so the byte stream can carry `P1>` with
+/// no literal space at all — a `P1> ` needle never matches there
+/// (niubash#1011 audit, #731 K3 pins). Unix PTYs do emit the literal
+/// space, and `P1>` still matches it as a prefix.
+pub const PROMPT1: &str = "P1>";
+/// Match needle for the sentinel PS2 (continuation prompt) — same
+/// ConPTY reasoning as [`PROMPT1`].
+pub const PROMPT2: &str = "P2>";
 
 /// Ctrl+C as sent through the pty input pipe.
 pub const CTRL_C: &str = "\u{3}";

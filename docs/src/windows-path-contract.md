@@ -130,6 +130,21 @@ paths — never both, and never a guess about the child's capabilities:
   `windows_cmd_switches_are_not_mapped_into_shell_root` test) and applies to
   `cmd.exe` alone: a native program that is not `cmd` receives `/d/repo` as
   `D:\repo`.
+- **The MSYS escape spelling `//x` is not folded anywhere, `cmd`
+  included** (niubash#993 §2). `//` is MSYS2's own quoting convention:
+  its runtime rewrites a leading `//x` into `/x` precisely because its
+  own argument conversion would otherwise mangle `/x` into a drive
+  path. niu has no such conversion to escape, so a doubled slash
+  reaches the child as typed. `cmd //c "echo hi"` therefore hands
+  cmd.exe the literal word `//c`, which cmd does not recognise as a
+  switch, and cmd opens an **interactive session** — the failure mode
+  is a prompt waiting on stdin (a hang in a script, a stray prompt in
+  a terminal), not an error message and not a nonzero exit. The
+  correct spelling is the one MSYS made fragile: `cmd /c "echo hi"`
+  works as written, because the cmd.exe exemption above already keeps
+  `/c` verbatim. A targeted `//x` → `/x` fold for single-letter
+  switches of command processors (the gash PR #11 approach) remains
+  an open option; nothing is folded today.
 - **Namespace bridges stand outside the translation boundary entirely:
   `wsl` and the OpenSSH client family (`ssh`, `scp`, `sftp`).** Their
   arguments are not paths on this machine at all — they are interpreted
@@ -142,6 +157,22 @@ paths — never both, and never a guess about the child's capabilities:
   tests). A bridge's remote words therefore survive exactly as typed:
   `ssh host cat /var/log/x` and `wsl cat /home/user/file` name the
   remote/guest files the user spelled, never local ones.
+- **The bridge's verbatim rule reaches its local-path operands too, so
+  Windows OpenSSH needs native spellings for them** (niubash#993 §9).
+  `ssh`/`scp`/`sftp`/`ssh-keygen` resolve to the Windows OpenSSH port,
+  which has no MSYS virtual filesystem: `ssh -i /c/Users/x/.ssh/key`,
+  `ssh -F /c/…`, the local side of an `scp`/`sftp` transfer,
+  `ssh-keygen -f /c/…`, and `IdentityFile`/`Include` lines inside
+  `~/.ssh/config` must spell local files in the `C:/…` (or `C:\…`)
+  form. A `/c/…` operand arrives verbatim and fails as
+  `Warning: Identity file /c/… not accessible` — Git Bash survives the
+  same spelling only because its ssh is an MSYS build that resolves
+  `/c/` in-process. Remote-path operands are unaffected: in
+  `scp local.txt host:/tmp/` the remote half still spells the remote
+  tree POSIX-style, which is the namespace that word lives in. (A
+  separate upstream face of the same client family is tracked at
+  [PowerShell/Win32-OpenSSH#2478](https://github.com/PowerShell/Win32-OpenSSH/issues/2478),
+  the `ssh -t` pty branch.)
 
 The boundary is structural rather than a rename of the "MSYS NO CONV"
 problem: the shell never asks a child what it can understand. The shipped
@@ -190,6 +221,24 @@ Rubash. Rubash does not discover another dispatcher from `PATH`.
 The dispatcher is only a fallback when a command is absent from the real tree.
 It must not implement Rubash builtins such as `cd`, `export`, `set`, `read`,
 `jobs`, or `trap`.
+
+## Launcher Precedence (PATHEXT before POSIX)
+
+When a directory on `PATH` holds both spellings of a tool — the POSIX
+launcher `bin/tool` and the Windows launcher `bin/tool.bat` / `bin/tool.cmd`
+(the standard pair SDKMAN candidates, Gradle, and Maven ship) — a bare name
+resolves to the **`.bat` / `.cmd` launcher**, not the POSIX script
+(niubash#993 §12). `command -v gradle` reports the `.bat` path; `type -a`
+lists both spellings. Git Bash resolves the same pair to the POSIX script,
+so the two shells run different launcher code for the same tool: different
+`JAVA_HOME` probing and `GRADLE_OPTS`/`JAVA_OPTS` quoting through `cmd.exe`,
+and a different `JAVA_HOME` string for the same JDK when the launcher derives
+it (the `.bat` reports the `C:/…` form, the POSIX script the `/c/…` form).
+The `.bat` wins deliberately: it needs no `$0`/`dirname` resolution, so the
+`$0`-of-PATH-resolved-scripts failure class cannot reach the launcher — that
+is why Gradle and Maven work here at all. The installation selection is
+unaffected (both shells pick the same SDKMAN candidate or install dir); only
+the launcher spelling differs.
 
 ## Special Paths
 
