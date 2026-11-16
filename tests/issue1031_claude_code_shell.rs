@@ -27,6 +27,21 @@ fn niu_binary() -> PathBuf {
     fallback
 }
 
+/// The built forwarding shim (`src/bin/bash.rs`, niubash#464): a face
+/// whose bytes match neither niu.exe nor any staged payload, recognised
+/// as niu only by the behavior probe.
+fn bash_binary() -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_bash"));
+    if p.exists() {
+        return p;
+    }
+    let mut fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fallback.push("target");
+    fallback.push("debug");
+    fallback.push("bash.exe");
+    fallback
+}
+
 /// A fresh scratch dir per test (pid-unique, so parallel runs cannot
 /// collide). Removed at the end of each test.
 fn scratch(name: &str) -> PathBuf {
@@ -131,6 +146,28 @@ fn issue1031_doctor_hidden_without_config_dir() {
     assert!(
         !stdout.contains("claude code shell"),
         "row printed with no Claude Code config dir:\n{stdout}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn issue1031_doctor_ok_for_shim_face() {
+    let dir = scratch("shim");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // The built shim face: its bytes match neither niu.exe nor any
+    // staged payload, so only the behavior probe can recognise it — it
+    // re-execs niu, which reports itself via $NIU_SHELL.
+    let config = stage_settings(&dir, &bash_binary().to_string_lossy());
+    let (ok, stdout) = doctor_with_config(&config, &home);
+    assert!(ok, "niu doctor failed:\n{stdout}");
+    assert!(
+        stdout.contains("claude code shell"),
+        "doctor has no claude code shell row:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("niu ("),
+        "shim face not recognised as niu:\n{stdout}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

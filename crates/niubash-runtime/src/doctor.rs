@@ -883,8 +883,9 @@ struct ClaudeShellFacts {
     /// (`bash.exe`/`sh.exe`/`bash`/`sh`).
     accepted_name: bool,
     /// The value names niu — the same file or a byte-identical copy of
-    /// `niu.exe`, or a byte copy of the staged forwarding-shim payload
-    /// (which re-execs niu).
+    /// `niu.exe`, a byte copy of the staged forwarding-shim payload
+    /// (which re-execs niu), or a value the behavior probe confirmed
+    /// runs niu.
     names_niu: bool,
     /// Git for Windows is installed, so Claude Code's Program Files
     /// probe (1) runs before the git on PATH.
@@ -1122,6 +1123,61 @@ fn claude_shell_is_shim_face(path: &Path, shim_payload: Option<&Path>) -> bool {
     shim_payload.is_some_and(|payload| same_file_bytes(path, payload))
 }
 
+/// Whether `path` runs niu (niubash#1031): execute it with `-c` printing
+/// `$NIU_SHELL` and see whether it answers with a niu path. Only used
+/// when the static identity checks already failed, so a foreign bash is
+/// probed at most once per doctor run — a shim face from another build
+/// (bytes unlike both niu.exe and the staged payload) is still niu by
+/// behavior. `NIU_SHELL` is scrubbed from the child's environment so an
+/// inherited value cannot fake a niu answer; a hang is killed after the
+/// timeout.
+fn probe_shell_reports_niu(path: &Path) -> bool {
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let child = match std::process::Command::new(path)
+        .arg("-c")
+        .arg("printf '%s' \"$NIU_SHELL\"")
+        .env_remove("NIU_SHELL")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    let probe = std::sync::Arc::clone(&child);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .wait_with_output();
+        let _ = tx.send(output);
+    });
+    let output = match rx.recv_timeout(PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(_) => {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+            }
+            return false;
+        }
+    };
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    !text.is_empty()
+        && std::path::Path::new(text)
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("niu.exe") || n.eq_ignore_ascii_case("niu"))
+}
+
 /// The niu `bash.exe` to suggest (niubash#1031): `bin\bash.exe` beside
 /// the winuxcmd tree of this install.
 fn niu_bash_path() -> Option<PathBuf> {
@@ -1184,11 +1240,20 @@ fn gather_claude_shell_facts(home: &Path) -> Option<ClaudeShellFacts> {
         }
     }
     let niu_bash = niu_bash_path();
-    let names_niu = names_file
+    let mut names_niu = names_file
         && value_path.as_ref().is_some_and(|p| {
             claude_shell_names_niu(p, &niu_binaries)
                 || claude_shell_is_shim_face(p, shim_payload.as_deref())
         });
+    // Last resort: a shim face from another build is byte-unlike both
+    // niu.exe and the staged payload, so ask the value itself — run it
+    // and see whether it reports niu. Only for an existing file under an
+    // accepted name that the static checks did not recognise.
+    if !names_niu && names_file && accepted_name {
+        if let Some(p) = value_path.as_ref() {
+            names_niu = probe_shell_reports_niu(p);
+        }
+    }
     let git_bash = git_for_windows_bash();
     let path_git_bash = path_git_bash();
     let path_git_bash_is_niu = path_git_bash
@@ -1713,6 +1778,24 @@ mod tests {
         assert!(claude_shell_is_shim_face(&face, Some(&payload)));
         assert!(!claude_shell_is_shim_face(&other, Some(&payload)));
         assert!(!claude_shell_is_shim_face(&face, None));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The behavior probe stays quiet on a missing file and on an
+    /// existing file that is not a shell (the positive face — a shim
+    /// reporting niu — is pinned by the integration stem, which owns a
+    /// real built shim).
+    #[test]
+    fn claude_shell_probe_is_quiet_off_shells() {
+        assert!(!probe_shell_reports_niu(Path::new(
+            "C:\\definitely\\not\\here\\bash.exe"
+        )));
+        let dir =
+            std::env::temp_dir().join(format!("niu-doctor-1031-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("bash.exe");
+        std::fs::write(&text, b"not a shell at all").unwrap();
+        assert!(!probe_shell_reports_niu(&text));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
