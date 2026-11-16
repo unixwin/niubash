@@ -883,7 +883,8 @@ struct ClaudeShellFacts {
     /// (`bash.exe`/`sh.exe`/`bash`/`sh`).
     accepted_name: bool,
     /// The value names niu — the same file or a byte-identical copy of
-    /// `niu.exe`.
+    /// `niu.exe`, or a byte copy of the staged forwarding-shim payload
+    /// (which re-execs niu).
     names_niu: bool,
     /// Git for Windows is installed, so Claude Code's Program Files
     /// probe (1) runs before the git on PATH.
@@ -1112,23 +1113,13 @@ fn path_git_bash() -> Option<PathBuf> {
     None
 }
 
-/// The installed `niu.exe` beside a winuxcmd tree (niubash#1031): the
-/// install lays out `<install>\niu.exe` next to `<install>\winuxcmd\...`.
-/// Walks up from the winuxcmd exe and takes the first ancestor holding
-/// both `niu.exe` and a `winuxcmd` child dir. `None` for a dev tree or a
-/// bare winuxcmd on PATH.
-fn installed_niu_exe(winuxcmd_exe: &Path) -> Option<PathBuf> {
-    let mut dir = winuxcmd_exe.parent()?.to_path_buf();
-    for _ in 0..5 {
-        let niu = dir.join("niu.exe");
-        if niu.is_file() && dir.join("winuxcmd").is_dir() {
-            return Some(niu);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-    None
+/// Whether `path` is a niu face via the forwarding shim (niubash#1031):
+/// byte-identical to the staged shim payload of this installation. The
+/// shim re-execs niu, so the session it starts IS niu even though its
+/// bytes differ from niu.exe (niubash#464: faces fall back to a byte copy
+/// of the payload where a hardlink cannot exist).
+fn claude_shell_is_shim_face(path: &Path, shim_payload: Option<&Path>) -> bool {
+    shim_payload.is_some_and(|payload| same_file_bytes(path, payload))
 }
 
 /// The niu `bash.exe` to suggest (niubash#1031): `bin\bash.exe` beside
@@ -1170,6 +1161,9 @@ fn gather_claude_shell_facts(home: &Path) -> Option<ClaudeShellFacts> {
     // niu.exe beside the winuxcmd tree (the installed face — a release
     // install and a debug build of the same source are different bytes,
     // so the running binary alone cannot recognise the installed face).
+    // Plus the staged forwarding-shim payload: where a hardlink cannot
+    // exist the faces are byte copies of it, and the shim re-execs niu,
+    // so a shim face IS niu even though its bytes differ from niu.exe.
     let mut niu_binaries: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         niu_binaries.push(exe);
@@ -1177,16 +1171,24 @@ fn gather_claude_shell_facts(home: &Path) -> Option<ClaudeShellFacts> {
     if let Some(niu) = find_exe_on_path("niu") {
         niu_binaries.push(niu);
     }
+    let mut shim_payload: Option<PathBuf> = None;
     if let Some(exe) = crate::winuxcmd::find_winuxcmd() {
-        if let Some(installed) = installed_niu_exe(&exe) {
+        let install_root = crate::shell_links::find_installation_root(&exe);
+        let installed = install_root.join("niu.exe");
+        if installed.is_file() {
             niu_binaries.push(installed);
+        }
+        let payload = crate::shell_links::shim_payload_path(&install_root);
+        if payload.is_file() {
+            shim_payload = Some(payload);
         }
     }
     let niu_bash = niu_bash_path();
     let names_niu = names_file
-        && value_path
-            .as_ref()
-            .is_some_and(|p| claude_shell_names_niu(p, &niu_binaries));
+        && value_path.as_ref().is_some_and(|p| {
+            claude_shell_names_niu(p, &niu_binaries)
+                || claude_shell_is_shim_face(p, shim_payload.as_deref())
+        });
     let git_bash = git_for_windows_bash();
     let path_git_bash = path_git_bash();
     let path_git_bash_is_niu = path_git_bash
@@ -1696,34 +1698,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The installed niu.exe is found by walking up from the winuxcmd
-    /// exe to the ancestor holding both `niu.exe` and a `winuxcmd` dir;
-    /// a tree missing either stays unrecognised.
+    /// A byte copy of the staged shim payload counts as niu: the shim
+    /// re-execs niu, so the session it starts is niu.
     #[test]
-    fn claude_shell_installed_niu_exe_walks_up_to_the_install() {
-        let dir =
-            std::env::temp_dir().join(format!("niu-doctor-1031-install-{}", std::process::id()));
-        let install = dir.join("Niubash");
-        let winuxcmd_exe = install
-            .join("winuxcmd")
-            .join("usr")
-            .join("bin")
-            .join("winuxcmd.exe");
-        std::fs::create_dir_all(winuxcmd_exe.parent().unwrap()).unwrap();
-        std::fs::write(&winuxcmd_exe, b"fake winuxcmd").unwrap();
-        // No niu.exe yet: no install recognised.
-        assert_eq!(installed_niu_exe(&winuxcmd_exe), None);
-        let niu = install.join("niu.exe");
-        std::fs::write(&niu, b"fake niu").unwrap();
-        assert_eq!(installed_niu_exe(&winuxcmd_exe), Some(niu));
-        // A lone niu.exe without the winuxcmd dir beside it is not an
-        // install either.
-        let bare = dir.join("bare");
-        std::fs::create_dir_all(bare.join("bin")).unwrap();
-        let bare_exe = bare.join("bin").join("winuxcmd.exe");
-        std::fs::write(&bare_exe, b"fake winuxcmd").unwrap();
-        std::fs::write(bare.join("niu.exe"), b"fake niu").unwrap();
-        assert_eq!(installed_niu_exe(&bare_exe), None);
+    fn claude_shell_shim_face_counts_as_niu() {
+        let dir = std::env::temp_dir().join(format!("niu-doctor-1031-shim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = dir.join("niu-shim.exe");
+        let face = dir.join("bash.exe");
+        let other = dir.join("other.exe");
+        std::fs::write(&payload, b"fake shim bytes").unwrap();
+        std::fs::write(&face, b"fake shim bytes").unwrap();
+        std::fs::write(&other, b"something else").unwrap();
+        assert!(claude_shell_is_shim_face(&face, Some(&payload)));
+        assert!(!claude_shell_is_shim_face(&other, Some(&payload)));
+        assert!(!claude_shell_is_shim_face(&face, None));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
