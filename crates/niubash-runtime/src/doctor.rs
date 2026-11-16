@@ -1112,6 +1112,25 @@ fn path_git_bash() -> Option<PathBuf> {
     None
 }
 
+/// The installed `niu.exe` beside a winuxcmd tree (niubash#1031): the
+/// install lays out `<install>\niu.exe` next to `<install>\winuxcmd\...`.
+/// Walks up from the winuxcmd exe and takes the first ancestor holding
+/// both `niu.exe` and a `winuxcmd` child dir. `None` for a dev tree or a
+/// bare winuxcmd on PATH.
+fn installed_niu_exe(winuxcmd_exe: &Path) -> Option<PathBuf> {
+    let mut dir = winuxcmd_exe.parent()?.to_path_buf();
+    for _ in 0..5 {
+        let niu = dir.join("niu.exe");
+        if niu.is_file() && dir.join("winuxcmd").is_dir() {
+            return Some(niu);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+    None
+}
+
 /// The niu `bash.exe` to suggest (niubash#1031): `bin\bash.exe` beside
 /// the winuxcmd tree of this install.
 fn niu_bash_path() -> Option<PathBuf> {
@@ -1147,15 +1166,21 @@ fn gather_claude_shell_facts(home: &Path) -> Option<ClaudeShellFacts> {
             )
         })
     });
-    // Known niu binaries: this process, `niu` on PATH, and the niu.exe
-    // beside the winuxcmd tree is covered by the byte compare against
-    // the current exe (a hardlinked or copied face reads identically).
+    // Known niu binaries: this process, `niu` on PATH, and the installed
+    // niu.exe beside the winuxcmd tree (the installed face — a release
+    // install and a debug build of the same source are different bytes,
+    // so the running binary alone cannot recognise the installed face).
     let mut niu_binaries: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         niu_binaries.push(exe);
     }
     if let Some(niu) = find_exe_on_path("niu") {
         niu_binaries.push(niu);
+    }
+    if let Some(exe) = crate::winuxcmd::find_winuxcmd() {
+        if let Some(installed) = installed_niu_exe(&exe) {
+            niu_binaries.push(installed);
+        }
     }
     let niu_bash = niu_bash_path();
     let names_niu = names_file
@@ -1668,6 +1693,37 @@ mod tests {
         assert!(claude_shell_names_niu(&copy, &[niu.clone()]));
         assert!(!claude_shell_names_niu(&other, &[niu.clone()]));
         assert!(!claude_shell_names_niu(&dir.join("missing.exe"), &[niu]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The installed niu.exe is found by walking up from the winuxcmd
+    /// exe to the ancestor holding both `niu.exe` and a `winuxcmd` dir;
+    /// a tree missing either stays unrecognised.
+    #[test]
+    fn claude_shell_installed_niu_exe_walks_up_to_the_install() {
+        let dir =
+            std::env::temp_dir().join(format!("niu-doctor-1031-install-{}", std::process::id()));
+        let install = dir.join("Niubash");
+        let winuxcmd_exe = install
+            .join("winuxcmd")
+            .join("usr")
+            .join("bin")
+            .join("winuxcmd.exe");
+        std::fs::create_dir_all(winuxcmd_exe.parent().unwrap()).unwrap();
+        std::fs::write(&winuxcmd_exe, b"fake winuxcmd").unwrap();
+        // No niu.exe yet: no install recognised.
+        assert_eq!(installed_niu_exe(&winuxcmd_exe), None);
+        let niu = install.join("niu.exe");
+        std::fs::write(&niu, b"fake niu").unwrap();
+        assert_eq!(installed_niu_exe(&winuxcmd_exe), Some(niu));
+        // A lone niu.exe without the winuxcmd dir beside it is not an
+        // install either.
+        let bare = dir.join("bare");
+        std::fs::create_dir_all(bare.join("bin")).unwrap();
+        let bare_exe = bare.join("bin").join("winuxcmd.exe");
+        std::fs::write(&bare_exe, b"fake winuxcmd").unwrap();
+        std::fs::write(bare.join("niu.exe"), b"fake niu").unwrap();
+        assert_eq!(installed_niu_exe(&bare_exe), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
