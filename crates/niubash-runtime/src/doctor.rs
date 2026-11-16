@@ -1133,7 +1133,7 @@ fn claude_shell_is_shim_face(path: &Path, shim_payload: Option<&Path>) -> bool {
 /// timeout.
 fn probe_shell_reports_niu(path: &Path) -> bool {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-    let child = match std::process::Command::new(path)
+    let mut child = match std::process::Command::new(path)
         .arg("-c")
         .arg("printf '%s' \"$NIU_SHELL\"")
         .env_remove("NIU_SHELL")
@@ -1145,32 +1145,37 @@ fn probe_shell_reports_niu(path: &Path) -> bool {
         Ok(child) => child,
         Err(_) => return false,
     };
-    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
-    let probe = std::sync::Arc::clone(&child);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let output = probe
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .wait_with_output();
-        let _ = tx.send(output);
+    // Drain stdout on its own thread so a chatty value cannot fill the
+    // pipe and stall the child; the caller keeps the handle so a hang
+    // can be killed on timeout.
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout.take() {
+            use std::io::Read;
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
     });
-    let output = match rx.recv_timeout(PROBE_TIMEOUT) {
-        Ok(output) => output,
-        Err(_) => {
-            if let Ok(mut child) = child.lock() {
-                let _ = child.kill();
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            return false;
+            Err(_) => break None,
         }
     };
-    let Ok(output) = output else {
-        return false;
-    };
-    if !output.status.success() {
+    let output = reader.join().unwrap_or_default();
+    if !status.is_some_and(|s| s.success()) {
         return false;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = String::from_utf8_lossy(&output);
     let text = text.trim();
     !text.is_empty()
         && std::path::Path::new(text)
