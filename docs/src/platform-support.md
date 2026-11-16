@@ -456,6 +456,44 @@ One line of orientation: **Git Bash = MSYS2 runtime + GNU bash; niu =
 native engine + compatibility persona.** The labels match so ecosystem
 scripts run; the runtime they name is not present.
 
+Audited drop-in deltas against Git Bash (niubash#993, ruled
+documentation — not bugs to fix):
+
+- `uname -s` reports `MSYS_NT-…`, not Git Bash's `MINGW64_NT-…`: niu is
+  the MSYS-compatible persona, not a MINGW64 impersonation — the
+  `MSYS_NT` label is niu's identity signature in
+  [agent shell detection](agents.md#which-shell-is-my-agent-actually-using).
+  Setting `MSYSTEM=MINGW64` in the environment flips the prefix the same
+  way it does under MSYS2. `uname -r` reports the OS version (`10.0-…`)
+  rather than an MSYS-runtime release because no such runtime exists to
+  version.
+- `git --version` carries a `.niugit` suffix on the bundled niu-git:
+  the string is compiled into the niugit binary at packaging time
+  (upstream of this repo), so there is nothing host-side to change —
+  version parsers that gate on `git version x.y.z…` should parse only
+  up to the first non-numeric suffix segment.
+- `bind -l` lists GNU bash 5.3.20's own 176 readline functions; Git
+  Bash's 177th entry is a Git-for-Windows patch artifact, not GNU.
+  `shopt` likewise rejects `completion_strip_exe`, a
+  Cygwin/Git-for-Windows extension upstream bash has no option for.
+- `cmd //c` is the MSYS escape spelling, and niu does not fold `//`:
+  cmd.exe receives the literal `//c`, does not recognise it as a
+  switch, and opens an interactive session — the failure mode is a
+  hang (a prompt on stdin), not an error (niubash#993 §2). Write
+  `cmd /c`, which works as typed: under Git Bash the bare `/c` is the
+  fragile form (MSYS rewrites it to `C:/`), which is exactly why the
+  `//c` escape exists there.
+- `ssh -i /c/…` fails with `Warning: Identity file /c/… not
+  accessible`: niu resolves the Windows OpenSSH port — no MSYS
+  filesystem — and `ssh`/`scp`/`sftp` are namespace bridges whose
+  argv is passed verbatim, so a `/c/…` spelling for a *local* file
+  never reaches one OpenSSH can open (niubash#993 §9). Spell local
+  paths `C:/…` — that covers `-i`, `-F`, the local side of
+  `scp`/`sftp`, `ssh-keygen -f`, and `IdentityFile`/`Include` in
+  `~/.ssh/config`; remote-path operands keep their POSIX spelling by
+  design. Git Bash survives `/c/…` because its ssh is an MSYS build
+  that resolves the prefix in-process.
+
 ## Calling PowerShell from niu
 
 niu is a full bash, so every command string it runs (through
