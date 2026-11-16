@@ -1263,7 +1263,7 @@ fn find_exe_on_path(name: &str) -> Option<PathBuf> {
 /// (resolves case, `\\?\` prefixes and symlinks), else fall back to a
 /// case-insensitive textual compare (Windows paths are case-insensitive).
 fn same_executable(a: &Path, b: &Path) -> bool {
-    let canon = |p: &PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let (a, b) = (canon(a), canon(b));
     a.to_string_lossy()
         .eq_ignore_ascii_case(&b.to_string_lossy())
