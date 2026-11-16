@@ -1262,7 +1262,7 @@ fn find_exe_on_path(name: &str) -> Option<PathBuf> {
 /// Loose same-file test for the doctor row: canonicalize when possible
 /// (resolves case, `\\?\` prefixes and symlinks), else fall back to a
 /// case-insensitive textual compare (Windows paths are case-insensitive).
-fn same_executable(a: &PathBuf, b: &PathBuf) -> bool {
+fn same_executable(a: &Path, b: &Path) -> bool {
     let canon = |p: &PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
     let (a, b) = (canon(a), canon(b));
     a.to_string_lossy()
