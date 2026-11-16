@@ -45,6 +45,31 @@ msys_path() {
   printf '%s\n' "$path"
 }
 
+# On macOS the BSD userland diverges from the GNU semantics the upstream
+# suite was written against (`realpath -m`, `sed -i`, `find -printf`,
+# `od` column layout, ...). Homebrew installs the GNU tools under
+# opt/<pkg>/libexec/gnubin; prepend the ones that exist so the runners
+# see GNU semantics. On Linux the system tools are already GNU and on
+# Windows the MSYS/Git userland supplies them, so this stays empty there.
+GNU_EXTRA_PATH=""
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  for gnu_prefix in /opt/homebrew /usr/local; do
+    for gnu_pkg in coreutils findutils gnu-sed diffutils gawk; do
+      gnu_dir="$gnu_prefix/opt/$gnu_pkg/libexec/gnubin"
+      if [[ -d "$gnu_dir" ]]; then
+        GNU_EXTRA_PATH="${GNU_EXTRA_PATH:+$GNU_EXTRA_PATH:}$gnu_dir"
+      fi
+    done
+  done
+fi
+
+# `bash` inside the generated wrappers and `bash "./$runner"` below must
+# resolve to the same interpreter that runs this harness: the runner env
+# pins PATH to /usr/bin:/bin, which on macOS is GNU bash 3.2 — it rewrites
+# exported-function env values (heredoc redirects hoisted to the end),
+# corrupting BASH_FUNC_* entries before the shell under test sees them.
+HARNESS_BASH_DIR="$(dirname "$BASH")"
+
 die() {
   echo "$*" >&2
   exit 2
@@ -214,7 +239,7 @@ for runner in "${RUNNERS[@]}"; do
     cat >"$guard_bin/$guarded_cmd" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-PATH="/usr/bin:/bin:\$PATH"
+PATH="${GNU_EXTRA_PATH:+$GNU_EXTRA_PATH:}/usr/bin:/bin:\$PATH"
 normalize_real_path() {
   local path="\${1//\\\\//}"
   if [[ "\$path" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
@@ -268,7 +293,7 @@ EOF
   cat >"$shell_wrapper" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-PATH="$(msys_path "$guard_bin"):/usr/bin:/bin:\$PATH"
+PATH="$(msys_path "$guard_bin")${GNU_EXTRA_PATH:+:$GNU_EXTRA_PATH}:/usr/bin:/bin:\$PATH"
 normalize_real_path() {
   local path="\${1//\\\\//}"
   if [[ "\$path" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
@@ -319,7 +344,7 @@ EOF
       BUILD_DIR="$BASH_UPSTREAM_DIR" \
       BASH_TSTOUT="$tmpdir/bashtst.out" \
       TMPDIR="$tmpdir" \
-      PATH="$(msys_path "$guard_bin"):$(msys_path "$BASH_TEST_DIR"):/usr/bin:/bin" \
+      PATH="$(msys_path "$HARNESS_BASH_DIR"):$(msys_path "$guard_bin"):$(msys_path "$BASH_TEST_DIR")${GNU_EXTRA_PATH:+:$GNU_EXTRA_PATH}:/usr/bin:/bin" \
       bash "./$runner"
   ) >"$log" 2>&1
   status=$?
