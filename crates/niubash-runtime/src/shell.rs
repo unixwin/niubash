@@ -11422,7 +11422,10 @@ complete -F _envtooldyn_hook envtooldyn
         // The parameter must be set — even to a sentinel — for the offset
         // to be evaluated at all; without this preset the PS0 expansion
         // leaves the variable unset and the assertion below reads None.
-        shell.session_mut().variables().set("STARSHIP_START_TIME", "0");
+        shell
+            .session_mut()
+            .variables()
+            .set("STARSHIP_START_TIME", "0");
         shell.session_mut().variables().set(
             "PS0",
             "${STARSHIP_START_TIME:$((STARSHIP_START_TIME=12345,0)):0}",
