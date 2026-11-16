@@ -205,7 +205,11 @@ fn issue1031_doctor_ok_for_shim_face() {
 ///   be the INFO face, "no Git for Windows detected".
 /// A broken probe (1) fails the ADVICE branch on windows-latest (the row
 /// would fall through to INFO while this test expects ADVICE); a
-/// false-positive probe fails the INFO branch elsewhere.
+/// false-positive probe fails the INFO branch elsewhere. On CI the INFO
+/// branch is a hard failure instead: Git for Windows is part of the
+/// runner image, so a CI run that takes INFO would pass vacuously for
+/// the #1034 face — the `GITHUB_ACTIONS` guard below makes a passing CI
+/// run proof that the ADVICE branch ran.
 #[test]
 fn issue1034_doctor_live_row_names_real_git_for_windows() {
     let dir = scratch("live-unset-gfw");
@@ -225,6 +229,13 @@ fn issue1034_doctor_live_row_names_real_git_for_windows() {
     .into_iter()
     .map(PathBuf::from)
     .find(|p| p.is_file());
+    // On CI (GitHub Actions) Git for Windows is part of the runner image,
+    // so the ADVICE branch MUST run there: a CI run that takes the INFO
+    // branch would pass vacuously for the #1034 face, so it fails loudly
+    // instead. Locally the test follows the machine's actual state.
+    let on_ci = std::env::var("GITHUB_ACTIONS")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     match git_bash {
         Some(path) => {
             // The row prints paths with forward slashes (`display()`).
@@ -252,6 +263,10 @@ fn issue1034_doctor_live_row_names_real_git_for_windows() {
             );
         }
         None => {
+            assert!(
+                !on_ci,
+                "issue1034: GITHUB_ACTIONS is set but no Git for Windows install found — probe (1) is broken or the runner moved Git"
+            );
             eprintln!("issue1034: no Git for Windows install found; expecting the INFO face");
             assert!(
                 stdout.contains("INFO claude code shell"),
