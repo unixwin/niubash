@@ -5834,6 +5834,11 @@ fn collect_chord_bindings(
                     }
                 }
             }
+            // A keymap-valued binding (rubash#3013) enters another
+            // readline map on that key; it is not a chord event. The
+            // flat layer mirrors it as the `prefix-meta` function
+            // (readline_live.rs).
+            rubash::api::BindKindView::Keymap { .. } => continue,
         };
         chords.push(ChordBinding { keys, event });
     }

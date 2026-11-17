@@ -1169,6 +1169,14 @@ pub fn sync_host_keymap(
             }
             rubash::api::BindKindView::Execute { .. } => AbiSlot::Function(host_command_pointer()),
             rubash::api::BindKindView::Macro { text } => AbiSlot::Macro(text.as_bytes().to_vec()),
+            // A keymap-valued binding (ISKMAP, lib/readline/bind.c:1845)
+            // has no host ABI slot of its own: mirror it as the function
+            // the engine's dump face renders for that slot
+            // (rl_function_dumper), so the host key still reaches
+            // readline's own keymap dispatch.
+            rubash::api::BindKindView::Keymap { .. } => {
+                AbiSlot::Function(host_function_pointer("prefix-meta"))
+            }
         };
         desired.insert((root, path), Some(value));
     }

@@ -146,6 +146,10 @@ pub enum DroppedKind {
     Execute,
     Function,
     Macro,
+    /// A keymap-valued binding is a key position (`rl_generic_bind`'s
+    /// ISKMAP slot, lib/readline/bind.c:1845-1855) rather than a
+    /// function; rubash#3013's `BindKindView::Keymap` reports it.
+    Keymap,
 }
 
 /// Why a bind could not be mirrored (DESIGN §4/§6.1). The classes are
@@ -285,6 +289,10 @@ impl DroppedBind {
                     "bind '\"<single-key>\": \"{}\"'",
                     self.target_name.as_deref().unwrap_or("")
                 ),
+                DroppedKind::Keymap => format!(
+                    "bind 'Control-v: {}'",
+                    self.target_name.as_deref().unwrap_or("<keymap>")
+                ),
             },
         }
     }
@@ -422,6 +430,9 @@ pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReaso
         }
         rubash::api::BindKindView::Function { name } => (DroppedKind::Function, Some(name.clone())),
         rubash::api::BindKindView::Macro { text } => (DroppedKind::Macro, Some(text.clone())),
+        // A keymap-valued binding names the target map the key enters
+        // (rubash#3013); the fix hint re-binds the key into it.
+        rubash::api::BindKindView::Keymap { name } => (DroppedKind::Keymap, Some(name.clone())),
     };
     DroppedBind {
         keyseq: entry.keyseq.clone(),
