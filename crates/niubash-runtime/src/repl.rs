@@ -4468,6 +4468,7 @@ fn add_engine_bind_keybindings_recorded<S: KeybindingSink + ?Sized>(
             // The wildcard also keeps this consumer compiling against a
             // rubash tree that predates the variant (niubash CI pins
             // rubash master).
+            #[allow(unreachable_patterns)] // only when rubash predates the variant
             _ => {
                 note_unusable_bind(
                     &mut unusable,
@@ -5856,6 +5857,7 @@ fn collect_chord_bindings(
             // function spelling, which took this same dropped record.
             // The wildcard also keeps this consumer compiling against a
             // rubash tree that predates the variant.
+            #[allow(unreachable_patterns)] // only when rubash predates the variant
             _ => {
                 dropped.push(crate::keymap_registry::dropped_bind_for(
                     entry,

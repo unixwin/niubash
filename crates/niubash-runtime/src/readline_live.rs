@@ -1176,6 +1176,7 @@ pub fn sync_host_keymap(
             // slot exists. The wildcard also keeps this consumer
             // compiling against a rubash tree that predates the
             // variant (niubash CI pins rubash master).
+            #[allow(unreachable_patterns)] // only when rubash predates the variant
             _ => AbiSlot::Function(host_function_pointer("prefix-meta")),
         };
         desired.insert((root, path), Some(value));

@@ -426,6 +426,7 @@ pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReaso
         // keep the record the pre-#3013 `prefix-meta` function spelling
         // produced. The wildcard also keeps this consumer compiling
         // against a rubash tree that predates the variant.
+        #[allow(unreachable_patterns)] // only when rubash predates the variant
         _ => (DroppedKind::Function, Some("prefix-meta".to_string())),
     };
     DroppedBind {
