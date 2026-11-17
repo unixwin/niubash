@@ -1169,6 +1169,14 @@ pub fn sync_host_keymap(
             }
             rubash::api::BindKindView::Execute { .. } => AbiSlot::Function(host_command_pointer()),
             rubash::api::BindKindView::Macro { text } => AbiSlot::Macro(text.as_bytes().to_vec()),
+            // rubash#3013: the engine view grew a keymap-valued kind
+            // (GNU bind.c:1845 ISKMAP). The host ABI has no keymap
+            // slot, so keep the pre-#3013 rendering — the
+            // `prefix-meta` function pointer — until a real keymap
+            // slot exists. The wildcard also keeps this consumer
+            // compiling against a rubash tree that predates the
+            // variant (niubash CI pins rubash master).
+            _ => AbiSlot::Function(host_function_pointer("prefix-meta")),
         };
         desired.insert((root, path), Some(value));
     }

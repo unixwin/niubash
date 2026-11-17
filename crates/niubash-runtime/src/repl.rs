@@ -4461,6 +4461,22 @@ fn add_engine_bind_keybindings_recorded<S: KeybindingSink + ?Sized>(
                     }
                 }
             }
+            // rubash#3013: a keymap-valued binding (GNU ISKMAP,
+            // lib/readline/bind.c:1845) has no host widget. Before the
+            // contract grew the kind it arrived as the `prefix-meta`
+            // function spelling, which landed in exactly this record.
+            // The wildcard also keeps this consumer compiling against a
+            // rubash tree that predates the variant (niubash CI pins
+            // rubash master).
+            _ => {
+                note_unusable_bind(
+                    &mut unusable,
+                    &mut dropped,
+                    entry,
+                    UnusableBindReason::Other,
+                );
+                continue;
+            }
         };
         keybindings.add_binding(modifiers, key_code, event);
     }
@@ -5833,6 +5849,19 @@ fn collect_chord_bindings(
                         }
                     }
                 }
+            }
+            // rubash#3013: a keymap-valued binding (GNU ISKMAP,
+            // lib/readline/bind.c:1845) has no chord event here; before
+            // the contract grew the kind it arrived as the `prefix-meta`
+            // function spelling, which took this same dropped record.
+            // The wildcard also keeps this consumer compiling against a
+            // rubash tree that predates the variant.
+            _ => {
+                dropped.push(crate::keymap_registry::dropped_bind_for(
+                    entry,
+                    crate::keymap_registry::dropped_reason(None, &entry.keyseq, &entry.kind),
+                ));
+                continue;
             }
         };
         chords.push(ChordBinding { keys, event });

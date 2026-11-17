@@ -422,6 +422,11 @@ pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReaso
         }
         rubash::api::BindKindView::Function { name } => (DroppedKind::Function, Some(name.clone())),
         rubash::api::BindKindView::Macro { text } => (DroppedKind::Macro, Some(text.clone())),
+        // rubash#3013: keymap-valued entries (GNU ISKMAP, bind.c:1845)
+        // keep the record the pre-#3013 `prefix-meta` function spelling
+        // produced. The wildcard also keeps this consumer compiling
+        // against a rubash tree that predates the variant.
+        _ => (DroppedKind::Function, Some("prefix-meta".to_string())),
     };
     DroppedBind {
         keyseq: entry.keyseq.clone(),
