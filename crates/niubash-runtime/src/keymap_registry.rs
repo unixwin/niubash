@@ -146,6 +146,10 @@ pub enum DroppedKind {
     Execute,
     Function,
     Macro,
+    /// A keymap-valued binding is a key position (`rl_generic_bind`'s
+    /// ISKMAP slot, lib/readline/bind.c:1845-1855) rather than a
+    /// function; rubash#3013's `BindKindView::Keymap` reports it.
+    Keymap,
 }
 
 /// Why a bind could not be mirrored (DESIGN §4/§6.1). The classes are
@@ -285,6 +289,10 @@ impl DroppedBind {
                     "bind '\"<single-key>\": \"{}\"'",
                     self.target_name.as_deref().unwrap_or("")
                 ),
+                DroppedKind::Keymap => format!(
+                    "bind 'Control-v: {}'",
+                    self.target_name.as_deref().unwrap_or("<keymap>")
+                ),
             },
         }
     }
@@ -414,6 +422,25 @@ pub fn dropped_reason(
     }
 }
 
+/// The view kind host delivery dispatches on. A keymap-valued binding
+/// (`rl_generic_bind`'s ISKMAP slot, lib/readline/bind.c:1845) has no
+/// host slot of its own; the engine's dump face renders that slot as the
+/// `prefix-meta` function (rl_function_dumper, rubash `src/api/bind.rs`),
+/// so the host delivers the same event it builds for that name
+/// (rubash#3013).
+pub fn delivery_kind(
+    kind: &rubash::api::BindKindView,
+) -> std::borrow::Cow<'_, rubash::api::BindKindView> {
+    match kind {
+        rubash::api::BindKindView::Keymap { .. } => {
+            std::borrow::Cow::Owned(rubash::api::BindKindView::Function {
+                name: "prefix-meta".to_string(),
+            })
+        }
+        other => std::borrow::Cow::Borrowed(other),
+    }
+}
+
 /// Build a dropped record from an engine bind entry and its reason.
 pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReason) -> DroppedBind {
     let (kind, target_name) = match &entry.kind {
@@ -422,6 +449,9 @@ pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReaso
         }
         rubash::api::BindKindView::Function { name } => (DroppedKind::Function, Some(name.clone())),
         rubash::api::BindKindView::Macro { text } => (DroppedKind::Macro, Some(text.clone())),
+        // A keymap-valued binding names the target map the key enters
+        // (rubash#3013); the fix hint re-binds the key into it.
+        rubash::api::BindKindView::Keymap { name } => (DroppedKind::Keymap, Some(name.clone())),
     };
     DroppedBind {
         keyseq: entry.keyseq.clone(),
