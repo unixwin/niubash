@@ -422,6 +422,25 @@ pub fn dropped_reason(
     }
 }
 
+/// The view kind host delivery dispatches on. A keymap-valued binding
+/// (`rl_generic_bind`'s ISKMAP slot, lib/readline/bind.c:1845) has no
+/// host slot of its own; the engine's dump face renders that slot as the
+/// `prefix-meta` function (rl_function_dumper, rubash `src/api/bind.rs`),
+/// so the host delivers the same event it builds for that name
+/// (rubash#3013).
+pub fn delivery_kind(
+    kind: &rubash::api::BindKindView,
+) -> std::borrow::Cow<'_, rubash::api::BindKindView> {
+    match kind {
+        rubash::api::BindKindView::Keymap { .. } => {
+            std::borrow::Cow::Owned(rubash::api::BindKindView::Function {
+                name: "prefix-meta".to_string(),
+            })
+        }
+        other => std::borrow::Cow::Borrowed(other),
+    }
+}
+
 /// Build a dropped record from an engine bind entry and its reason.
 pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReason) -> DroppedBind {
     let (kind, target_name) = match &entry.kind {
