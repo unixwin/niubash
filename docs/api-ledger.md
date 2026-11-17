@@ -1637,6 +1637,7 @@ variant rubash::TokenKind::Word
 variant rubash::api::BindKindView::Execute
 variant rubash::api::BindKindView::Function
 variant rubash::api::BindKindView::Macro
+variant rubash::api::BindKindView::Keymap
 variant rubash::api::CandidateKind::Directory
 variant rubash::api::CandidateKind::Executable
 variant rubash::api::CandidateKind::File
