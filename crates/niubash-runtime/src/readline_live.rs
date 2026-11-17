@@ -1169,6 +1169,12 @@ pub fn sync_host_keymap(
             }
             rubash::api::BindKindView::Execute { .. } => AbiSlot::Function(host_command_pointer()),
             rubash::api::BindKindView::Macro { text } => AbiSlot::Macro(text.as_bytes().to_vec()),
+            // rubash#3013: named keymaps are not mirrored into the host
+            // readline; keep the pre-#3013 `prefix-meta` function slot
+            // the contract presented for these entries.
+            rubash::api::BindKindView::Keymap { .. } => {
+                AbiSlot::Function(host_function_pointer("prefix-meta"))
+            }
         };
         desired.insert((root, path), Some(value));
     }

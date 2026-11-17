@@ -422,6 +422,12 @@ pub fn dropped_bind_for(entry: &rubash::api::BindEntryView, reason: DroppedReaso
         }
         rubash::api::BindKindView::Function { name } => (DroppedKind::Function, Some(name.clone())),
         rubash::api::BindKindView::Macro { text } => (DroppedKind::Macro, Some(text.clone())),
+        // rubash#3013: the keymap-valued view kind keeps niubash's
+        // pre-#3013 rendering (the `prefix-meta` function name); the
+        // host readline does not mirror named keymaps.
+        rubash::api::BindKindView::Keymap { .. } => {
+            (DroppedKind::Function, Some("prefix-meta".to_string()))
+        }
     };
     DroppedBind {
         keyseq: entry.keyseq.clone(),

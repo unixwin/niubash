@@ -4342,6 +4342,20 @@ fn add_engine_bind_keybindings_recorded<S: KeybindingSink + ?Sized>(
                     edit_event(EditCommand::InsertString(text.clone()))
                 }
             }
+            // rubash#3013: a keymap-valued bind is, at this layer, the
+            // pre-#3013 `prefix-meta` function name — the host readline
+            // does not mirror named keymaps, so the entry keeps the
+            // unknown-function ledger it produced before the view kind
+            // existed.
+            rubash::api::BindKindView::Keymap { .. } => {
+                note_unusable_bind(
+                    &mut unusable,
+                    &mut dropped,
+                    entry,
+                    unusable_function_reason("prefix-meta"),
+                );
+                continue;
+            }
             // A readline function name the editor cannot deliver is
             // skipped; the sentinel fallthrough of native_widget_event is
             // for zsh-style shell-function widgets, which `bind` to a
@@ -5769,6 +5783,16 @@ fn collect_chord_bindings(
             ),
             rubash::api::BindKindView::Macro { text } => {
                 edit_event(EditCommand::InsertString(text.clone()))
+            }
+            // rubash#3013: the chord layer has no keymap-switch event;
+            // keep the pre-#3013 ledger for the `prefix-meta` function
+            // name the contract carried before the view kind existed.
+            rubash::api::BindKindView::Keymap { .. } => {
+                dropped.push(crate::keymap_registry::dropped_bind_for(
+                    entry,
+                    crate::keymap_registry::DroppedReason::UnknownFunction,
+                ));
+                continue;
             }
             rubash::api::BindKindView::Function { name } => {
                 // `quoted-insert` sequences arm the chord layer's
