@@ -66,8 +66,18 @@ jobs:
       - name: cargo build
         run: cargo build --locked
 
+      # niubash#1033: `cargo test` defaults to fail-fast -- the first failing
+      # target aborts the run, so everything queued after it never executes.
+      # build-and-test carries the known issue683 baseline red, which sits
+      # alphabetically before the niubash-runtime package in workspace order,
+      # so the whole runtime lib suite (1102 unit tests, incl. the 14 doctor
+      # classifier tests) never ran in CI -- only the X299 leg covered it.
+      # --no-fail-fast runs every target to completion; the step still fails
+      # if any target fails, so the gate loses nothing and gains full signal.
+      # (The cross-check job's `cargo test --lib` step is unix-only and
+      # informational -- it does not cover windows-latest.)
       - name: cargo test (workspace)
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
       # Skill bundle golden check (niubash#188): the generated regions in
       # skills/niubash/ must match the corpus transcripts + applet inventory,
