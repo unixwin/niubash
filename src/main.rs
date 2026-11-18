@@ -1071,6 +1071,29 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         // which the shell already carries — must therefore run on the piped
         // -i path too (niubash#146), still before the interactive history
         // setup, which shell.c:806-811 runs only after the startup files.
+        // niubash#683: the same job-control default enter_interactive
+        // asserts for the REPL faces applies here — interactive faces
+        // default monitor on so `fg`/`bg` report GNU's interactive
+        // wording `fg: current: no such job` instead of the
+        // non-interactive `no job control` refusal. This route skips
+        // enter_interactive, and the invocation application already ran
+        // the engine's GNU establishment (invocation.rs face C —
+        // jobs.c:4869 makes the letter the probe result, printing the
+        // two diagnostics under a pipe-only session), so the carrier is
+        // already written and cannot say whether the user transported
+        // the option; the argv record can. An explicit `-m`/`+m`/
+        // `-o`/`+o monitor` transport keeps GNU's probe verdict
+        // untouched; only the untransported case gets the product
+        // default. Set BEFORE run_startup_rc so an rc `set ±o monitor`
+        // still wins — the rc is the user's word over both the
+        // establishment and this default.
+        let monitor_transported = invocation
+            .shell_flags
+            .iter()
+            .any(|(name, _)| name == "monitor");
+        if !monitor_transported {
+            shell.session_mut().options().set("monitor", true);
+        }
         if let Some(status) = shell.run_startup_rc() {
             finish_startup_exit(&mut shell, status);
         }
