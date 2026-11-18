@@ -12,7 +12,11 @@ param(
     # (except winuxcmd.exe itself, which is staged from -WinuxCmdPath) and
     # its whole opt\ tree are copied into the package's winuxcmd\ directory,
     # so the shim dispatch (<root>\usr\bin\<cmd>.exe -> <root>\opt\<pkg>\)
-    # resolves inside the shipped layout. Never ships the .wpm state dir.
+    # resolves inside the shipped layout. Its bin\ *.exe — the
+    # package-command hardlinks wpm links into the PATH entry directory
+    # (e.g. git.exe; niubash#1052) — are likewise copied into the package's
+    # winuxcmd\bin, except the two shells, which this script stages from
+    # the shim binaries. Never ships the .wpm state dir.
     [string]$PreinstallRoot,
     [switch]$AllowPathWinuxCmd,
     # niubash#470: skip the staged-tree hardlink alignment and the
@@ -296,7 +300,11 @@ try {
     # The same usr\bin sweep also ships `winuxcmd-shim.exe` (the package-shim
     # forwarder, staged by the release workflow after the wpm installs) so
     # upgrades replace a stale forwarder and runtime `wpm install` can link
-    # new package shims to it (niubash#466/#468).
+    # new package shims to it (niubash#466/#468). The bin\ sweep below is
+    # the niubash#1052 half: `wpm install` links every package command into
+    # the pre-install root's bin\ (the PATH entry directory), and sweeping
+    # only usr\bin shipped a fresh install whose winuxcmd\bin held just the
+    # two shells — no git.exe — against the installer.md contract.
     if ($PreinstallRoot) {
         if (-not (Test-Path -LiteralPath (Join-Path $PreinstallRoot "usr\bin"))) {
             throw "PreinstallRoot has no usr\bin: $PreinstallRoot"
@@ -314,6 +322,36 @@ try {
         }
         else {
             Write-Warning "PreinstallRoot was set but usr\bin has no shims; shipping without pre-installed packages (fail-open)"
+        }
+        # niubash#1052: sweep the pre-install root's bin\ into the staged
+        # winuxcmd\bin. `wpm install` links each package command there
+        # (git.exe, rg.exe, fd.exe, gawk.exe, ...) as hardlinks to the
+        # payload — the PATH entry directory's declared entry set
+        # (docs/src/installer.md, "The PATH Entry Directory Contract").
+        # bash.exe/sh.exe stay authoritative from the shim binaries staged
+        # above, so they are excluded even if a pre-install root ever
+        # carries them; winuxcmd.exe never belongs in bin\ and is excluded
+        # too. Missing or empty bin\ is fail-open with a loud warning, the
+        # same contract as the usr\bin sweep above — the release workflow's
+        # x64 fail-closed gate lives in the pre-install step, not here, and
+        # arm64 legs legitimately ship without some packages. The
+        # Complete-StagedHardlinks pass below re-links these copies back
+        # onto their payload inodes, so the staged bin\ entries are real
+        # hardlinks, not duplicate payload bytes.
+        $preinstallBinLinks = @()
+        $preinstallBinDir = Join-Path $PreinstallRoot "bin"
+        if (Test-Path -LiteralPath $preinstallBinDir) {
+            $preinstallBinLinks = @(Get-ChildItem -LiteralPath $preinstallBinDir -Filter *.exe -File |
+                Where-Object { $_.Name -ne "bash.exe" -and $_.Name -ne "sh.exe" -and $_.Name -ne "winuxcmd.exe" })
+            foreach ($link in $preinstallBinLinks) {
+                Copy-Item -LiteralPath $link.FullName -Destination (Join-Path $stageDir "winuxcmd\bin\$($link.Name)") -Force
+            }
+        }
+        if ($preinstallBinLinks.Count -gt 0) {
+            Write-Host "Pre-installed bin links: $($preinstallBinLinks.Name -join ', ')"
+        }
+        else {
+            Write-Warning "PreinstallRoot was set but bin\ has no package links; winuxcmd\bin ships with the two shells only (fail-open, niubash#1052)"
         }
     }
 
