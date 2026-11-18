@@ -459,6 +459,25 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 /// with the shell's statuses, never a raw `(os error N)` + rc 1
 /// (niubash#406, niubash#547). Refusals exit the process directly, as
 /// both routes always did inline.
+///
+/// The diagnostic prolog follows GNU error.c:90-118 get_name_for_error:
+/// $0 is argv[0] VERBATIM while the operand is still unopened
+/// (shell.c:1797-1799 set_shell_name binds dollar_vars[0] to argv0), so
+/// an open failure (ENOENT/EACCES) reads `<argv0>: <name>: ...`; once the
+/// open has succeeded $0 is the script name, so a directory or binary
+/// refusal reads `<name>: <name>: ...`.
+fn invocation_argv0() -> String {
+    std::env::var("NIU_INVOKED_AS")
+        .ok()
+        .or_else(|| {
+            std::env::args_os()
+                .next()
+                .map(|arg| arg.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "niu".to_string())
+}
+
 fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Result<String> {
     let mut script = script_arg_to_host_path(name);
     if !script.exists() && !name.contains('/') && !name.contains('\\') {
@@ -468,21 +487,25 @@ fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Re
     }
     if !script.exists() {
         // shell.c shell_execve on a name that is neither option,
-        // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
-        eprintln!("niu: {name}: No such file or directory");
+        // builtin, nor file: ENOENT surface, EX_NOTFOUND (127). The open
+        // failed, so $0 is still argv[0] — `bash notthere` answers
+        // `<argv0>: notthere: No such file or directory`.
+        eprintln!("{}: {name}: No such file or directory", invocation_argv0());
         piped_stdout::finish_and_exit(127);
     }
     if script.is_dir() {
         // niubash#547: a directory operand exists but is not an
         // executable script — GNU answers `Is a directory` with
-        // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm).
-        eprintln!("niu: {name}: Is a directory");
+        // EX_NOTFOUND's sibling 126 (shell_execscript EISDIR arm). The
+        // file opened, so $0 is the script name: `bash /` answers
+        // `/: /: Is a directory`.
+        eprintln!("{name}: {name}: Is a directory");
         piped_stdout::finish_and_exit(126);
     }
     let bytes = match std::fs::read(&script) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("niu: {name}: Permission denied");
+            eprintln!("{}: {name}: Permission denied", invocation_argv0());
             piped_stdout::finish_and_exit(126);
         }
         Err(error) => return Err(error.into()),
@@ -494,10 +517,10 @@ fn read_script_operand(shell: &niubash_runtime::Shell, name: &str) -> anyhow::Re
     // (rubash#132). Merging them refused every Latin-1 script with
     // rc 126 while rubash and GNU ran it fine.
     if rubash::script_driver::check_binary_file(&bytes) {
-        // deep-audit A4-06: name the operand like every sibling arm
-        // (and GNU's shell_execve diagnostic) — the bare string left
-        // the user guessing which file was refused.
-        eprintln!("niu: {name}: cannot execute binary file");
+        // GNU shell.c:1685-1692 reports `<shell_name>: <filename>` with
+        // the script name already bound to $0 — `bash /bin/sh` answers
+        // `/bin/sh: /bin/sh: cannot execute binary file`.
+        eprintln!("{name}: {name}: cannot execute binary file");
         piped_stdout::finish_and_exit(126);
     }
     Ok(rubash::script_driver::bytes_to_script_text(&bytes))
@@ -1197,26 +1220,26 @@ fn read_invocation_script_operand(name: &str) -> anyhow::Result<String> {
         }
     }
     if !script.exists() {
-        eprintln!("niu: {name}: No such file or directory");
+        eprintln!("{}: {name}: No such file or directory", invocation_argv0());
         piped_stdout::finish_and_exit(127);
     }
     if script.is_dir() {
-        eprintln!("niu: {name}: Is a directory");
+        eprintln!("{name}: {name}: Is a directory");
         piped_stdout::finish_and_exit(126);
     }
     match std::fs::read(&script) {
         Ok(bytes) => Ok(rubash::script_driver::bytes_to_script_text(&bytes)),
         Err(error) => match error.kind() {
             std::io::ErrorKind::NotFound => {
-                eprintln!("niu: {name}: No such file or directory");
+                eprintln!("{}: {name}: No such file or directory", invocation_argv0());
                 piped_stdout::finish_and_exit(127);
             }
             std::io::ErrorKind::PermissionDenied => {
-                eprintln!("niu: {name}: Permission denied");
+                eprintln!("{}: {name}: Permission denied", invocation_argv0());
                 piped_stdout::finish_and_exit(126);
             }
             std::io::ErrorKind::IsADirectory => {
-                eprintln!("niu: {name}: Is a directory");
+                eprintln!("{name}: {name}: Is a directory");
                 piped_stdout::finish_and_exit(126);
             }
             _ => Err(error.into()),

@@ -4313,7 +4313,7 @@ fn add_engine_bind_keybindings_recorded<S: KeybindingSink + ?Sized>(
             );
             continue;
         };
-        let event = match &entry.kind {
+        let event = match crate::keymap_registry::delivery_kind(&entry.kind).as_ref() {
             rubash::api::BindKindView::Execute { .. } => ReedlineEvent::ExecuteHostCommand(
                 format!("{BINDX_HOST_COMMAND_PREFIX}{}", index_base + index),
             ),
@@ -4460,6 +4460,12 @@ fn add_engine_bind_keybindings_recorded<S: KeybindingSink + ?Sized>(
                         }
                     }
                 }
+            }
+            // `delivery_kind` rewrites Keymap onto
+            // Function(prefix-meta) before this match; the arm only
+            // keeps the match exhaustive over the public enum.
+            rubash::api::BindKindView::Keymap { .. } => {
+                unreachable!("delivery_kind normalizes Keymap to Function(prefix-meta)")
             }
         };
         keybindings.add_binding(modifiers, key_code, event);
@@ -5834,6 +5840,11 @@ fn collect_chord_bindings(
                     }
                 }
             }
+            // A keymap-valued binding (rubash#3013) enters another
+            // readline map on that key; it is not a chord event. The
+            // flat layer mirrors it as the `prefix-meta` function
+            // (readline_live.rs).
+            rubash::api::BindKindView::Keymap { .. } => continue,
         };
         chords.push(ChordBinding { keys, event });
     }
@@ -6466,17 +6477,10 @@ pub(crate) fn parse_keymap_bind_rule(
         rubash::builtins::bind::BindingSpec::Function { name } => BindKindView::Function { name },
         rubash::builtins::bind::BindingSpec::Macro { text } => BindKindView::Macro { text },
         // `BindingSpec::Keymap` (rubash#2993): a key bound to a whole
-        // keymap (GNU bind.c:1845 ISKMAP). This explicit arm consumes it
-        // per the engine's current view contract: `BindKindView` has no
-        // keymap variant, so render it the way the engine's own view
-        // layer does in `BindView::capture` (rubash `src/api/bind.rs`)
-        // — as the `prefix-meta` function name. A keymap-valued
-        // `BindKindView` variant and its ledger rows are still the
-        // rubash#3013 engine half; this arm upgrades with that contract
-        // change when it lands.
-        rubash::builtins::bind::BindingSpec::Keymap { .. } => BindKindView::Function {
-            name: "prefix-meta".to_string(),
-        },
+        // keymap (GNU bind.c:1845 ISKMAP). rubash#3013's
+        // `BindKindView::Keymap` now carries the target map, so the rule
+        // records the real kind instead of the `prefix-meta` shim.
+        rubash::builtins::bind::BindingSpec::Keymap { name } => BindKindView::Keymap { name },
     };
     Ok(KeymapBindRule {
         keyseq: parsed.keyseq,
