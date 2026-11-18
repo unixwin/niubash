@@ -99,7 +99,12 @@ fn explicit_comspec_is_never_overwritten() {
 
 fn read_doc(relative: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    // *.md is not eol=lf-pinned in .gitattributes, so a Windows checkout
+    // materializes docs as CRLF; a wording contract must not depend on the
+    // checkout's line-ending mode.
+    text.replace("\r\n", "\n")
 }
 
 /// §8: the README must not claim quoted arguments are never rewritten —

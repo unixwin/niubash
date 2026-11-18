@@ -922,10 +922,8 @@ mod ctrl_c_record_tests {
     fn foreground_watch_arm_is_inert_without_a_console() {
         // Test processes run with redirected stdin: arming must be a
         // silent no-op and dropping must not hang.
-        let watch = super::ForegroundWatch::arm();
-        drop(watch);
-        let watch = super::ForegroundWatch::arm();
-        drop(watch);
+        let _watch = super::ForegroundWatch::arm();
+        let _watch = super::ForegroundWatch::arm();
     }
 
     #[test]
