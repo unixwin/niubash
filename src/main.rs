@@ -1339,8 +1339,8 @@ fn run_repl_command(flag: &str, leading_options: &[String], rest: &[String]) -> 
         anyhow::bail!("{flag} requires an argument");
     };
     if let Some(self_update_args) = niubash_runtime::repl::self_update_command_args(command) {
-        if let Some(code) = niubash_runtime::repl::spawn_self_update(&self_update_args) {
-            std::process::exit(code);
+        if let Some(handoff) = niubash_runtime::repl::spawn_self_update(&self_update_args) {
+            std::process::exit(handoff.exit_code);
         }
     }
     let mut shell = niubash_runtime::Shell::new()?;

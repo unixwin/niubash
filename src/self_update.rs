@@ -130,17 +130,54 @@ fn scoop_managed() -> bool {
     false
 }
 
-pub fn run(args: &[String]) -> Result<()> {
-    run_with_manager(args, external_manager())
+/// What a `--self-update` run actually did. A REPL-spawned child
+/// ([`niubash_runtime::repl::spawn_self_update`] sets
+/// [`niubash_runtime::repl::SELF_UPDATE_HANDOFF_ENV`]) reports
+/// [`SelfUpdateOutcome::InstallerLaunched`] through
+/// [`niubash_runtime::repl::SELF_UPDATE_HANDOFF_EXIT_CODE`] so the parent
+/// session ends ONLY when niu.exe is actually being replaced — every
+/// other outcome leaves the interactive shell alive (niubash#1013: an
+/// already-current check used to kill the session unconditionally).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfUpdateOutcome {
+    /// The installer was launched; running niu processes will be closed
+    /// and niu.exe replaced.
+    InstallerLaunched,
+    /// Nothing was installed: already current (or a newer local build),
+    /// `--help`, `--check`/`--dry-run`, or a Store/Scoop-managed install.
+    NoInstall,
 }
 
-fn run_with_manager(args: &[String], manager: Option<ExternalManager>) -> Result<()> {
+pub fn run(args: &[String]) -> Result<()> {
+    let outcome = run_with_manager(args, external_manager())?;
+    if let Some(code) = handoff_exit_status(
+        outcome,
+        std::env::var_os(niubash_runtime::repl::SELF_UPDATE_HANDOFF_ENV).is_some(),
+    ) {
+        crate::piped_stdout::finish_and_exit(code);
+    }
+    Ok(())
+}
+
+/// The exit status a `--self-update` child reports under the REPL hand-off
+/// marker: the dedicated verdict code only when the installer actually
+/// launched. `None` keeps the ordinary exit contract — status 0 for a
+/// completed no-op, 1 for a failure — for direct `niu --self-update` runs.
+fn handoff_exit_status(outcome: SelfUpdateOutcome, handoff: bool) -> Option<i32> {
+    (outcome == SelfUpdateOutcome::InstallerLaunched && handoff)
+        .then_some(niubash_runtime::repl::SELF_UPDATE_HANDOFF_EXIT_CODE)
+}
+
+fn run_with_manager(
+    args: &[String],
+    manager: Option<ExternalManager>,
+) -> Result<SelfUpdateOutcome> {
     if args
         .iter()
         .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
     {
         print_self_update_usage();
-        return Ok(());
+        return Ok(SelfUpdateOutcome::NoInstall);
     }
 
     // niubash#495: an MSIX install is serviced by the Microsoft Store —
@@ -149,7 +186,7 @@ fn run_with_manager(args: &[String], manager: Option<ExternalManager>) -> Result
     // niubash#997: a Scoop install is serviced by `scoop update` the same way.
     if let Some(manager) = manager {
         println!("{}", managed_notice(manager));
-        return Ok(());
+        return Ok(SelfUpdateOutcome::NoInstall);
     }
 
     let options = parse_options(args)?;
@@ -157,6 +194,17 @@ fn run_with_manager(args: &[String], manager: Option<ExternalManager>) -> Result
         anyhow::bail!("self-update is not supported on this platform yet");
     }
     let release = resolve_latest_release(&options.repo, HTTP_TIMEOUT_MS)?;
+    run_resolved_update(&options, release)
+}
+
+/// The update decision and execution once the latest release is known.
+/// Split from [`run_with_manager`] so the already-current / newer-local /
+/// `--check` exits are unit-testable without a network round-trip
+/// (niubash#1013).
+fn run_resolved_update(
+    options: &SelfUpdateOptions,
+    release: GitHubRelease,
+) -> Result<SelfUpdateOutcome> {
     let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
 
     if !options.force && !release_is_newer(&release.tag_name, &current_tag) {
@@ -168,7 +216,7 @@ fn run_with_manager(args: &[String], manager: Option<ExternalManager>) -> Result
                 release.tag_name
             );
         }
-        return Ok(());
+        return Ok(SelfUpdateOutcome::NoInstall);
     }
 
     let arch = release_arch();
@@ -185,21 +233,21 @@ fn run_with_manager(args: &[String], manager: Option<ExternalManager>) -> Result
     println!("Installer: {}", asset.name);
 
     if options.check {
-        return Ok(());
+        return Ok(SelfUpdateOutcome::NoInstall);
     }
 
     let installer_path = download_verified_installer(&options.repo, &release.tag_name, &assets)?;
     println!("Downloaded: {}", installer_path.display());
 
     if options.dry_run {
-        return Ok(());
+        return Ok(SelfUpdateOutcome::NoInstall);
     }
 
     validate_installer_payload(&installer_path)?;
     launch_installer(&installer_path)?;
 
     println!("Installer started. Niubash will finish updating after open Niubash sessions close.");
-    Ok(())
+    Ok(SelfUpdateOutcome::InstallerLaunched)
 }
 
 /// Self-update ships as a Windows Inno Setup installer over WinHTTP; there
@@ -1455,6 +1503,82 @@ mod tests {
         assert!(release_is_newer("v0.8.2", "v0.8.1"));
         assert!(!release_is_newer("v0.8.1", "v0.8.1"));
         assert!(!release_is_newer("v0.8.0", "v0.8.1"));
+    }
+
+    #[test]
+    fn handoff_exit_status_only_signals_when_installer_launched_under_handoff() {
+        assert_eq!(
+            handoff_exit_status(SelfUpdateOutcome::InstallerLaunched, true),
+            Some(niubash_runtime::repl::SELF_UPDATE_HANDOFF_EXIT_CODE)
+        );
+        assert_eq!(
+            handoff_exit_status(SelfUpdateOutcome::InstallerLaunched, false),
+            None
+        );
+        assert_eq!(
+            handoff_exit_status(SelfUpdateOutcome::NoInstall, true),
+            None
+        );
+        assert_eq!(
+            handoff_exit_status(SelfUpdateOutcome::NoInstall, false),
+            None
+        );
+    }
+
+    #[test]
+    fn help_and_managed_installs_return_no_install() {
+        assert_eq!(
+            run_with_manager(&["--help".to_string()], None).unwrap(),
+            SelfUpdateOutcome::NoInstall
+        );
+        assert_eq!(
+            run_with_manager(&[], Some(ExternalManager::Scoop)).unwrap(),
+            SelfUpdateOutcome::NoInstall
+        );
+        assert_eq!(
+            run_with_manager(&[], Some(ExternalManager::Store)).unwrap(),
+            SelfUpdateOutcome::NoInstall
+        );
+    }
+
+    #[test]
+    fn already_current_newer_local_and_check_return_no_install() {
+        let base_options = SelfUpdateOptions {
+            repo: DEFAULT_REPO.to_string(),
+            check: false,
+            dry_run: false,
+            force: false,
+        };
+        let current = GitHubRelease {
+            tag_name: format!("v{}", env!("CARGO_PKG_VERSION")),
+            html_url: "https://example.com/current".to_string(),
+        };
+        assert_eq!(
+            run_resolved_update(&base_options, current).unwrap(),
+            SelfUpdateOutcome::NoInstall
+        );
+
+        let older = GitHubRelease {
+            tag_name: "v0.0.1".to_string(),
+            html_url: "https://example.com/older".to_string(),
+        };
+        assert_eq!(
+            run_resolved_update(&base_options, older).unwrap(),
+            SelfUpdateOutcome::NoInstall
+        );
+
+        let check_options = SelfUpdateOptions {
+            check: true,
+            ..base_options
+        };
+        let newer = GitHubRelease {
+            tag_name: "v999.0.0".to_string(),
+            html_url: "https://example.com/newer".to_string(),
+        };
+        assert_eq!(
+            run_resolved_update(&check_options, newer).unwrap(),
+            SelfUpdateOutcome::NoInstall
+        );
     }
 
     fn temp_installer_path(name: &str) -> PathBuf {
