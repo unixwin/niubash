@@ -2101,3 +2101,104 @@ mod tests {
         std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
     }
 }
+
+// Platform-neutral PATH-order tests: this module is NOT Windows-gated
+// (unlike the `tests` module above, which stages .exe payloads and
+// drive-letter paths), so the niubash#1050 nail runs on Linux CI and on
+// the Linux verification legs as well as on Windows.
+#[cfg(test)]
+mod path_order_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
+    }
+
+    /// RAII guard restoring the process-global PATH when the test ends
+    /// (mirrors the Windows-only `tests::SavedPath`: libtest is pinned
+    /// to one thread repo-wide, so no test races this).
+    struct SavedPath(Option<std::ffi::OsString>);
+    impl SavedPath {
+        fn set(dirs: &[PathBuf]) -> Self {
+            let saved = std::env::var_os("PATH");
+            let joined = std::env::join_paths(dirs).unwrap();
+            std::env::set_var("PATH", &joined);
+            SavedPath(saved)
+        }
+    }
+    impl Drop for SavedPath {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.0 {
+                std::env::set_var("PATH", value);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    fn git_file_name() -> &'static str {
+        if cfg!(windows) { "git.exe" } else { "git" }
+    }
+
+    /// niubash#1050 (fail-first nail): a git the user installed and put
+    /// on PATH (scoop shims / Git for Windows) must win over the bundled
+    /// niugit in `<root>\usr\bin`, for the `git` command and for the
+    /// prompt's `git` spawn alike — both resolve through PATH, so the
+    /// ordering decision is the PATH injection's.
+    #[test]
+    fn issue1050_user_git_on_path_wins_over_bundled_git() {
+        let git_name = git_file_name();
+        let root = unique_temp_dir("winuxcmd-1050-root");
+        let bundled_bin = root.join("usr").join("bin");
+        std::fs::create_dir_all(&bundled_bin).unwrap();
+        std::fs::write(bundled_bin.join("winuxcmd.exe"), b"").unwrap();
+        std::fs::write(bundled_bin.join(git_name), b"bundled").unwrap();
+        let user_git_dir = unique_temp_dir("winuxcmd-1050-user-git");
+        std::fs::create_dir_all(&user_git_dir).unwrap();
+        std::fs::write(user_git_dir.join(git_name), b"user").unwrap();
+        let other_dir = unique_temp_dir("winuxcmd-1050-other");
+        std::fs::create_dir_all(&other_dir).unwrap();
+
+        let prev_skip = std::env::var_os("NIU_SKIP_WINUXCMD_ACTIVATION");
+        std::env::set_var("NIU_SKIP_WINUXCMD_ACTIVATION", "1");
+        let _saved = SavedPath::set(&[user_git_dir.clone(), other_dir.clone()]);
+        let result = ensure_on_path_with_override(Some(&root));
+        match prev_skip {
+            Some(value) => std::env::set_var("NIU_SKIP_WINUXCMD_ACTIVATION", value),
+            None => std::env::remove_var("NIU_SKIP_WINUXCMD_ACTIVATION"),
+        }
+        result.unwrap();
+        let path = std::env::var("PATH").unwrap();
+        let first_git = std::env::split_paths(&path)
+            .find(|dir| dir.join(git_name).is_file())
+            .expect("some git must be on PATH after injection");
+        assert_eq!(
+            first_git, user_git_dir,
+            "user git must win over bundled git; PATH={path}"
+        );
+        // The bundled dirs must still be injected ahead of the rest of
+        // the user's PATH: only the user-git directory moves.
+        let parts: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        let bundled_pos = parts
+            .iter()
+            .position(|dir| *dir == bundled_bin)
+            .expect("bundled usr/bin injected");
+        let other_pos = parts
+            .iter()
+            .position(|dir| *dir == other_dir)
+            .expect("other user dir kept");
+        assert!(
+            bundled_pos < other_pos,
+            "bundled dirs stay ahead of the rest of user PATH; PATH={path}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(user_git_dir);
+        let _ = std::fs::remove_dir_all(other_dir);
+    }
+}
