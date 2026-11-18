@@ -507,23 +507,42 @@ fn default_script_name_from(raw: Option<String>) -> String {
     // The four faces the shim forwards (rubash#598): sh/ash key the POSIX
     // contract, bash/rbash only need `$0` to read the invocation name
     // (GNU shell.c set_shell_name binds dollar_vars[0] to argv[0] for
-    // every face; shell.c:1258-1299 keys rbash off it). Everything else
-    // stays the plain-niu default.
+    // every face; shell.c:1258-1299 keys rbash off it). Every other
+    // name binds its basename verbatim below.
     if matches!(unmarked, "sh" | "ash" | "bash" | "rbash") {
         return stem.to_string();
     }
     // GNU shell.c:1797-1799 set_shell_name binds dollar_vars[0] to
     // argv[0]'s basename VERBATIM — the name is not filtered to known
     // faces — so `exec -a ohio-state bash -c 'echo $0'` prints
-    // `ohio-state` (exec5.sub). Strip only the leading '-' login mark
-    // the same way (shell.c keys login_shell off it before binding).
+    // `ohio-state` (exec5.sub). The only bytes dropped are the
+    // Windows `.exe` executable suffix — a platform artifact, not part
+    // of the invoked name (the face path above and the
+    // __RUBASH_SHELL_NAME seed strip it the same way), so `niu.exe`
+    // still reports `niu`. The leading '-' login mark stays in $0
+    // exactly as GNU keeps it: shell.c strips it only from the
+    // shell_name copy that keys login_shell and the face checks,
+    // and niubash's own face contract keeps it too (`-sh` -> `-sh`).
     // niubash#3605: the previous "niu" fallback made every
     // non-face argv[0] report $0 = niu.
-    let name = basename.strip_prefix('-').unwrap_or(basename);
+    let name = strip_exe_suffix(basename);
     if name.is_empty() {
         "niu".to_string()
     } else {
         name.to_string()
+    }
+}
+
+/// The basename minus a trailing `.exe` in any letter case. Windows
+/// argv[0] always carries the executable suffix (`niu.exe`); it is a
+/// platform artifact, not part of the invoked name, so $0 binds
+/// without it while every other byte stays verbatim.
+fn strip_exe_suffix(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    if bytes.len() >= 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
     }
 }
 
@@ -12533,15 +12552,28 @@ mod invocation_name_tests {
     }
 
     #[test]
-    fn plain_niu_and_unknown_stems_keep_the_niu_default() {
-        // A direct niu.exe run (or any stem the shim never forwards) keeps
-        // the historical default byte-for-byte.
+    fn plain_niu_defaults_and_unknown_stems_bind_verbatim() {
+        // A missing name keeps the historical `niu` default; `niu` itself
+        // reports `niu` — the `.exe` suffix is a platform artifact, not
+        // part of the name. Every other non-face argv[0] binds its
+        // basename verbatim (niubash#3605 / rubash exec5.sub), keeping
+        // the leading '-' login mark in $0 exactly as GNU's
+        // dollar_vars[0] keeps argv[0] untouched.
         assert_eq!(default_script_name_from(None), "niu");
         assert_eq!(default_script_name_from(Some("niu".to_string())), "niu");
-        assert_eq!(default_script_name_from(Some("mysh".to_string())), "niu");
+        assert_eq!(default_script_name_from(Some("niu.exe".to_string())), "niu");
+        assert_eq!(default_script_name_from(Some("mysh".to_string())), "mysh");
+        assert_eq!(
+            default_script_name_from(Some("ohio-state".to_string())),
+            "ohio-state"
+        );
+        assert_eq!(
+            default_script_name_from(Some("-custom".to_string())),
+            "-custom"
+        );
         assert_eq!(
             default_script_name_from(Some("C:/x/bin/niubash.exe".to_string())),
-            "niu"
+            "niubash"
         );
     }
 

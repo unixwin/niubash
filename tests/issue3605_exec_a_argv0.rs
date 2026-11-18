@@ -69,6 +69,10 @@ fn exec_a_argv0_binds_dollar0_verbatim() {
 fn plain_argv0_keeps_the_product_name() {
     let stdout = run_with_argv0("niu", &["-c", "echo this is $0"]);
     assert_eq!(stdout, "this is niu\n");
+    // Windows argv[0] carries the `.exe` suffix; it is a platform
+    // artifact and never reaches $0.
+    let stdout = run_with_argv0("niu.exe", &["-c", "echo this is $0"]);
+    assert_eq!(stdout, "this is niu\n");
 }
 
 #[test]
@@ -76,5 +80,8 @@ fn face_argv0_and_login_mark_still_seed() {
     let stdout = run_with_argv0("bash", &["-c", "echo this is $0"]);
     assert_eq!(stdout, "this is bash\n");
     let stdout = run_with_argv0("-custom", &["-c", "echo this is $0"]);
-    assert_eq!(stdout, "this is custom\n", "login '-' mark not stripped");
+    assert_eq!(
+        stdout, "this is -custom\n",
+        "GNU keeps the '-' login mark in $0 (dollar_vars[0] = argv[0] verbatim)"
+    );
 }
