@@ -100,6 +100,66 @@ fn packager_keeps_the_zip_escape_hatch() {
     );
 }
 
+/// niubash#1052 — a fresh 1.5.0 install had no `winuxcmd\bin\git.exe`: the
+/// packager swept the pre-install root's `usr\bin` into the stage but only
+/// hand-placed bash/sh into `winuxcmd\bin`, dropping the PATH entry links
+/// `wpm install` records for every package command (`<root>\bin\<cmd>.exe`,
+/// wpm_guide). `<root>\winuxcmd\bin` is the install's ONLY process-PATH
+/// directory (docs/src/installer.md "The PATH Entry Directory Contract"),
+/// so the omission made every pre-installed package command invisible to
+/// external processes. These pins hold the sweep open: the packager must
+/// copy the pre-install root's bin\*.exe into the staged winuxcmd\bin, must
+/// never clobber its own niu-owned bash/sh faces there, and must say so
+/// loudly when the root carries no bin links at all.
+#[test]
+fn packager_sweeps_preinstall_path_entry_links_into_winuxcmd_bin() {
+    let text = packager();
+    assert!(
+        text.contains(
+            "$preinstallBinLinks = Get-ChildItem -LiteralPath $preinstallBinDir -Filter *.exe"
+        ),
+        "package-release.ps1 must sweep the pre-install root's bin\\*.exe (the \
+         PATH entry links wpm records per package command) into the staged \
+         winuxcmd\\bin; without it a fresh install's only PATH directory \
+         carries no package commands (niubash#1052)"
+    );
+    // The staged destination must be the PATH entry directory, not usr\bin.
+    let sweep = text
+        .find("$preinstallBinLinks = Get-ChildItem -LiteralPath $preinstallBinDir -Filter *.exe")
+        .expect("bin sweep present");
+    let dest = text[sweep..]
+        .find("winuxcmd\\bin\\$($link.Name)")
+        .expect("the sweep must copy into the staged winuxcmd\\bin");
+    assert!(
+        text[sweep..sweep + dest].contains("Join-Path $stageDir"),
+        "the bin sweep must target the staged winuxcmd\\bin directory"
+    );
+    // The packager owns the bash/sh faces in bin\ (staged above the sweep);
+    // the sweep must skip them so a package command can never take over a
+    // shell face name.
+    assert!(
+        text.contains("$_.Name -notin @(\"bash.exe\", \"sh.exe\")"),
+        "the bin sweep must exclude the packager-staged bash/sh faces; they are \
+         niu-owned shell faces, never wpm package commands (niubash#1052)"
+    );
+    // Loud when there is nothing to sweep — the fail-open shape this script
+    // uses everywhere else (cf. the usr\bin no-shims warning).
+    assert!(
+        text.contains("bin\\ has no package command links"),
+        "the packager must warn loudly when the pre-install root carries no \
+         bin\\ links, mirroring the usr\\bin no-shims warning (niubash#1052)"
+    );
+    // The staged release must be verified against the entry-directory
+    // contract in CI, so a packaging regression cannot ship silently.
+    let workflow = release_workflow();
+    assert!(
+        workflow.contains("PATH entry directory contract, niubash#1052"),
+        "release.yml must hard-assert winuxcmd\\bin\\<cmd>.exe for every \
+         installed package command; the entry directory is the only PATH \
+         directory of the install (niubash#1052)"
+    );
+}
+
 #[test]
 fn workflow_verifies_archive_round_trip_before_upload() {
     let text = release_workflow();

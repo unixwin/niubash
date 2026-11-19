@@ -13,6 +13,11 @@ param(
     # its whole opt\ tree are copied into the package's winuxcmd\ directory,
     # so the shim dispatch (<root>\usr\bin\<cmd>.exe -> <root>\opt\<pkg>\)
     # resolves inside the shipped layout. Never ships the .wpm state dir.
+    # niubash#1052: its bin\ *.exe — the PATH entry links wpm creates for
+    # every package command (<root>\bin\<cmd>.exe, wpm_guide "PATH entry
+    # links") — is swept too; the shipped <root>\bin is the only directory
+    # on the process PATH, so a package command missing there is invisible
+    # to every process on the machine.
     [string]$PreinstallRoot,
     [switch]$AllowPathWinuxCmd,
     # niubash#470: skip the staged-tree hardlink alignment and the
@@ -308,6 +313,34 @@ try {
         }
         if (Test-Path -LiteralPath (Join-Path $PreinstallRoot "opt")) {
             Copy-Item -LiteralPath (Join-Path $PreinstallRoot "opt") -Destination (Join-Path $stageDir "winuxcmd\opt") -Recurse -Force
+        }
+        # niubash#1052: sweep the PATH entry links as well. `wpm install`
+        # records every package command as <root>\bin\<cmd>.exe — a hardlink
+        # to the real payload (wpm_guide: "Every command a package declares
+        # also gets <root>/bin/<command>.exe as a hardlink to the real
+        # binary"). The v1.5.0 packager staged only the bash/sh faces into
+        # bin\, so a fresh install's only PATH directory had no git.exe and
+        # external processes could not resolve git at all (the reporter's
+        # bin\git.exe came from a later `wpm install`, not from the package).
+        # The shipped links must be the wpm-made files themselves so
+        # `wpm links rebuild` (which reconciles only .wpm-recorded links,
+        # niubash#468) sees a state it can keep in sync. bash.exe/sh.exe are
+        # excluded: those two bin\ faces are staged by THIS script above and
+        # are niu-owned shell faces, never wpm package commands.
+        $preinstallBinDir = Join-Path $PreinstallRoot "bin"
+        $preinstallBinLinks = @()
+        if (Test-Path -LiteralPath $preinstallBinDir) {
+            $preinstallBinLinks = Get-ChildItem -LiteralPath $preinstallBinDir -Filter *.exe |
+                Where-Object { $_.Name -notin @("bash.exe", "sh.exe") }
+            foreach ($link in $preinstallBinLinks) {
+                Copy-Item -LiteralPath $link.FullName -Destination (Join-Path $stageDir "winuxcmd\bin\$($link.Name)") -Force
+            }
+        }
+        if ($preinstallBinLinks.Count -gt 0) {
+            Write-Host "Pre-installed PATH entry links (winuxcmd\bin): $($preinstallBinLinks.Name -join ', ')"
+        }
+        else {
+            Write-Warning "PreinstallRoot was set but bin\ has no package command links; the package's PATH entry directory ships without package commands (niubash#1052)"
         }
         if ($preinstallShims.Count -gt 0) {
             Write-Host "Pre-installed shims: $($preinstallShims.Name -join ', ')"
