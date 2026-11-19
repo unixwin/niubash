@@ -11,6 +11,7 @@
 - [TAB Completion & Ghost Text](completion.md)
 - [Hooks](hooks.md)
 - [Install & Self-Update](installer.md)
+- [Using Git](using-git.md)
 - [Bash Compatibility Matrix](rubash-bash-compat-matrix.md)
 - [Performance](performance.md)
 - [Built-ins & Fast Paths](builtins.md)
