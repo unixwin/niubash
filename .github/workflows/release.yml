@@ -657,6 +657,17 @@ jobs:
               throw "$name --version failed inside the staged package (exit $LASTEXITCODE)"
             }
             Write-Host "$name --version: $($out | Select-Object -First 1)"
+            # niubash#1052 — the PATH entry directory must carry the command
+            # too: <root>\winuxcmd\bin is the ONLY directory of the install
+            # on the process PATH (docs/src/installer.md "The PATH Entry
+            # Directory Contract"), and wpm records every package command
+            # there as a hardlink. A usr\bin-only command is invisible to
+            # every external process, which is exactly the fresh-install
+            # "no git.exe" report this pins against.
+            $entry = Join-Path $stage "winuxcmd\bin\$name.exe"
+            if (-not (Test-Path -LiteralPath $entry)) {
+              throw "pre-install reported '$packageName' installed but $entry is missing from the staged package (PATH entry directory contract, niubash#1052)"
+            }
           }
           foreach ($package in $manifest.packages) {
             if ($installed -notcontains $package.name) { continue }
