@@ -126,7 +126,7 @@ The bundled commands are **WinuxCmd**: 176 commands plus the 2 internal helpers 
 
 The new Rust shells sell lightness. Of the peers, hush is a Lua-based language that never claimed to replace bash, and Oils/OSH calls itself an "upgrade path from bash", not a drop-in. **brush** claims the drop-in: "Run it as your everyday shell", "Production-ready for most use cases". Measured with a 306-case differential corpus (byte-compared against GNU Bash 5.3.20): its shipped v0.4.0 scores 181/306, and a source build of its latest master commit re-measures at 183/306 — the same failure profile — against rubash's 304/306 on the same ruler. The misses are foundation mechanisms, not edge cases: an alias timing model reversed from GNU's (6 substantive divergences in 20 probes), `printf x y` looping forever and hanging the script in the release (fixed on master), `wait $!` unimplemented in scripts, globstar that does not recurse while listed as "Fully Supported", and nameref `unset` reporting "not yet implemented" — which a real oh-my-bash load trips over. Its Windows support is self-described "Preview", and v0.4.0 ships no Windows binary at all.
 
-Lightweight is no excuse for missing limbs. Complete bash semantics re-implemented path by path without fork, plus cross-platform itself, is what 373,267 net lines (rubash 312,965 + niubash 60,302; tests excluded, the code-size caliber of the rubash README, measured 2026-11-03) buys. An implementation that misses these mechanisms can be neither a bash replacement nor a reliable login shell.
+Lightweight is no excuse for missing limbs. Complete bash semantics re-implemented path by path without fork, plus cross-platform itself, is what 445,221 net lines (rubash 380,217 + niubash 65,004; tests excluded, the code-size caliber of the rubash README, measured 2026-11-20) buys. An implementation that misses these mechanisms can be neither a bash replacement nor a reliable login shell.
 
 ## Built for AI agents
 
@@ -239,10 +239,40 @@ On the engine side, 1.5.0 lands the **embeddable engine API** ([rubash#595](http
 
 If niu saved you a Linux VM, a mangled quote, or an argument PowerShell ate, [star the repo](https://github.com/unixwin/niubash) and tell a developer. ★
 
+## Code size
+
+The net caliber (non-blank lines, tests excluded) is shared with rubash and maintained in [rubash's docs/code-size.md](https://github.com/unixwin/rubash/blob/master/docs/code-size.md): niubash nets 65,004 lines at the last joint measurement (2026-11-20). The table below is the gross caliber — [tokei](https://github.com/XAMPPRocky/tokei) over the whole tree, tests included, refreshed weekly by the readme-stats workflow.
+
+<!-- AUTO:CODE-SIZE:START -->
+| Language | Files | Code lines |
+|---|---:|---:|
+| Rust | 227 | 115,062 |
+| JSON | 24 | 65,372 |
+| Python | 46 | 20,947 |
+| TOML | 184 | 9,449 |
+| Shell | 58 | 2,558 |
+| PowerShell | 10 | 1,252 |
+| C | 1 | 352 |
+| SVG | 22 | 77 |
+| BASH | 12 | 69 |
+| JavaScript | 1 | 66 |
+| Other | 2 | 63 |
+| **Total** | **587** | **215,267** |
+<!-- AUTO:CODE-SIZE:END -->
+
+## Maintainers
+
+| Maintainer | Role |
+|---|---|
+| [@caomengxuan666](https://github.com/caomengxuan666) | Creator and core maintainer |
+| [@arookieofc](https://github.com/arookieofc) | Core maintainer |
+
+Everyone who has landed code is listed under [Contributors](#contributors).
+
 ## Contributors
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-12-orange.svg?style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-13-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 Thanks to everyone building niubash — issues, fixes, plugins, adapted work, and engine work upstream ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
@@ -254,7 +284,7 @@ Thanks to everyone building niubash — issues, fixes, plugins, adapted work, an
   <tbody>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/caomengxuan666"><img src="https://avatars.githubusercontent.com/u/114896873?v=4&size=100" width="100px" height="100px" alt="caomengxuan666"/><br /><sub><b>caomengxuan666</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=caomengxuan666" title="Code">💻</a> <a href="#maintenance-caomengxuan666" title="Maintenance">🚧</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/a-rookie-of-C-language"><img src="https://avatars.githubusercontent.com/u/186315048?v=4&size=100" width="100px" height="100px" alt="a-rookie-of-C-language"/><br /><sub><b>a-rookie-of-C-language</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=a-rookie-of-C-language" title="Code">💻</a> <a href="#maintenance-a-rookie-of-C-language" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc"><img src="https://avatars.githubusercontent.com/u/186315048?v=4&size=100" width="100px" height="100px" alt="arookieofc"/><br /><sub><b>arookieofc</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=arookieofc" title="Code">💻</a> <a href="#maintenance-arookieofc" title="Maintenance">🚧</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/devin-ai-integration"><img src="https://avatars.githubusercontent.com/u/158243242?v=4&size=100" width="100px" height="100px" alt="devin-ai-integration[bot]"/><br /><sub><b>devin-ai-integration[bot]</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=devin-ai-integration[bot]" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/daiaji"><img src="https://avatars.githubusercontent.com/u/25875791?v=4&size=100" width="100px" height="100px" alt="daiaji"/><br /><sub><b>daiaji</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=daiaji" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/cognition-team"><img src="https://avatars.githubusercontent.com/u/167951170?v=4&size=100" width="100px" height="100px" alt="cognition-team"/><br /><sub><b>cognition-team</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=cognition-team" title="Code">💻</a></td>
@@ -267,6 +297,7 @@ Thanks to everyone building niubash — issues, fixes, plugins, adapted work, an
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/x2410516039"><img src="https://avatars.githubusercontent.com/u/234159335?v=4&size=100" width="100px" height="100px" alt="x2410516039"/><br /><sub><b>x2410516039</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=x2410516039" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/cmx"><img src="https://avatars.githubusercontent.com/u/42783691?v=4&size=100" width="100px" height="100px" alt="cmx"/><br /><sub><b>cmx</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=cmx" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/github-actions"><img src="https://avatars.githubusercontent.com/u/41898282?v=4&size=100" width="100px" height="100px" alt="github-actions[bot]"/><br /><sub><b>github-actions[bot]</b></sub></a><br /><a href="#tool-github-actions[bot]" title="Tools">🔧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc-ai"><img src="https://avatars.githubusercontent.com/u/282213208?v=4&size=100" width="100px" height="100px" alt="arookieofc-ai"/><br /><sub><b>arookieofc-ai</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=arookieofc-ai" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
@@ -275,6 +306,22 @@ Thanks to everyone building niubash — issues, fixes, plugins, adapted work, an
 <!-- prettier-ignore-end -->
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
+Commit counts for everyone who has landed code (bots excluded), refreshed weekly by the readme-stats workflow:
+
+<!-- AUTO:CONTRIBUTORS:START -->
+| Contributor | Commits |
+|---|---:|
+| [@caomengxuan666](https://github.com/caomengxuan666) | 1,784 |
+| [@arookieofc](https://github.com/arookieofc) | 35 |
+| [@cognition-team](https://github.com/cognition-team) | 5 |
+| [@Catapult291](https://github.com/Catapult291) | 4 |
+| [@Uarz](https://github.com/Uarz) | 4 |
+| [@daiaji](https://github.com/daiaji) | 4 |
+| [@arookieofc-ai](https://github.com/arookieofc-ai) | 2 |
+| [@Yuren0312](https://github.com/Yuren0312) | 1 |
+| [@jhermelink](https://github.com/jhermelink) | 1 |
+<!-- AUTO:CONTRIBUTORS:END -->
+
 
 ## License
 
