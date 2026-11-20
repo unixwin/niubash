@@ -503,13 +503,16 @@ fn nested_interactive_child_keeps_its_own_rc_branch() {
 fn fzf_shape_interactive_login_startup_terminates() {
     let fixture = Fixture::new("fzf-shape");
     std::fs::write(fixture.home.join(".bash_profile"), ". \"$HOME/.bashrc\"\n").unwrap();
-    std::fs::write(
-        fixture.home.join(".bashrc"),
-        "printf 'x\\n' >> \"$HOME/generations\"\n\
+    // niubash#1057: on Windows the interactive login face reads
+    // ~/.niubashrc — the GNU profile chain is the non-interactive `-c`
+    // face's contract there — so the payload must live in the rc for the
+    // one-generation pin to hold on both platforms. Exactly one of the
+    // two files is ever read per platform.
+    let fzf_payload = "printf 'x\\n' >> \"$HOME/generations\"\n\
          __fzf_orig_completion() { local _l; while IFS= read -r _l; do :; done; }\n\
-         __fzf_orig_completion < <(complete -p unalias kill ssh 2>/dev/null)\n",
-    )
-    .unwrap();
+         __fzf_orig_completion < <(complete -p unalias kill ssh 2>/dev/null)\n";
+    std::fs::write(fixture.home.join(".bashrc"), fzf_payload).unwrap();
+    std::fs::write(fixture.home.join(".niubashrc"), fzf_payload).unwrap();
     let (output, timed_out) = run_niu(
         &["-l", "-i"],
         &fixture.home,

@@ -137,10 +137,18 @@ hello() {
 one-shot REPL command path. It does not run for `niu -c ...`, script files,
 or stdin script execution, so agent and CI surfaces stay deterministic.
 
-On Windows, `~/.niubashrc` is the **only** startup file niu reads.
-Login shells on Linux/macOS additionally read the GNU profile chain
-(`/etc/profile`, then the first of `~/.bash_profile` → `~/.bash_login`
-→ `~/.profile`) before it, exactly as GNU bash does. Pre-rename
+On Windows, `~/.niubashrc` is the **only** startup file niu reads on the
+interactive face. `--login`/`-l` are accepted there but change nothing:
+`niu --login -i` sources exactly what `niu -i` sources — the generated
+plugin loader, then `~/.niubashrc` (`--rcfile` and `NIU_RC_POLICY` apply
+unchanged) — never the GNU profile chain. The login marker still matters
+on two faces: a non-interactive `niu -l -c ...` sources the GNU profile
+chain (`/etc/profile`, then the first of `~/.bash_profile` →
+`~/.bash_login` → `~/.profile`), and POSIX mode (`--posix`, the `sh`/`ash`
+faces) keeps that chain on every platform — a login POSIX shell reads the
+profile chain whether interactive or not. On Linux/macOS, interactive
+login shells additionally read the GNU profile chain before
+`~/.niubashrc`, exactly as GNU bash does. Pre-rename
 legacy rc files and `~/.bashrc` are never sourced directly,
 migrated, or modified — a session that finds no `~/.niubashrc` simply starts
 without one. Plugin enable/disable state, the source registry, and other
