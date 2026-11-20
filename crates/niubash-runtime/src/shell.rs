@@ -2333,7 +2333,29 @@ impl Shell {
         // prompt or command line, like every other startup file
         // (niubash#402).
         let login = self.login_shell_active();
-        if login {
+        // niubash#1057: on Windows the login marker no longer diverts the
+        // ORDINARY interactive face onto the GNU profile chain. The
+        // CHANGELOG's standing contract is "Windows accepts the flags
+        // with unchanged behavior (no login concept)" (since 1.4.0), and
+        // on a bare Windows home none of /etc/profile, ~/.bash_profile,
+        // ~/.bash_login, ~/.profile exists — `niu --login -i` sourced
+        // NOTHING instead of ~/.niubashrc. GNU shell.c:1833's "the login
+        // profile chain replaces the interactive-RC alternative" is
+        // therefore a deliberate product fork here, not a
+        // GNU-alignment gap: this funnel treats `-l`/`--login` exactly
+        // like no flag — generated loader -> ~/.niubashrc (--rcfile and
+        // NIU_RC_POLICY apply unchanged) -> completion -> greeting. The
+        // classification itself is untouched (`shopt login_shell`, the
+        // `-` argv[0] seed), and the non-interactive `-c` funnel keeps
+        // the GNU chain per niubash#399/#587/#602. POSIX mode is the one
+        // face that keeps the chain on Windows: it is the GNU/POSIX-compat
+        // face whose documented contract is GNU-faithful user-file
+        // selection (advanced-usage.md — "a login shell reads the profile
+        // chain"), and it has no rc to divert from ($ENV holds the rc
+        // seat) — so the `if login` tail inside the posix branch below
+        // stays keyed on the raw classification.
+        let login_diverts = login && (!cfg!(windows) || self.posix_mode_active());
+        if login_diverts {
             if repl {
                 self.session_mut().variables().set("NIU_REPL_STARTUP", "1");
             }
@@ -2400,9 +2422,12 @@ impl Shell {
             }
             return None;
         }
-        if login {
+        if login_diverts {
             // The profile chain replaces the rc branch only (shell.c:1833);
             // the env files above are not part of that exchange.
+            // niubash#1057: `login_diverts` is the gate — on Windows the
+            // ordinary face never takes this tail (the rc branch below
+            // runs instead); only posix mode keeps the GNU chain there.
             // niubash#590: the generated plugin loader is niu's own
             // activation plane, not the rc — the docs promise the host
             // sources it with no login exception, and returning here

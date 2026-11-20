@@ -3217,7 +3217,10 @@ fn issue399_login_noprofile_skips_chain_and_nonlogin_ignores_it() {
 /// A login shell sources the profile chain INSTEAD of the rc file and
 /// BASH_ENV, interactive or not (GNU shell.c:1833 — L1/L11 oracles: `-l -i`
 /// sources /etc/profile + the profile, never ~/.bashrc; BASH_ENV stays
-/// unread).
+/// unread). niubash#1057: that exchange is Unix-only — on Windows the
+/// login marker is inert on the interactive face, so `-l -i` sources the
+/// rc exactly like `-i` and the GNU chain stays the non-interactive `-c`
+/// face's contract there.
 #[test]
 fn issue399_login_sources_profile_not_rc_or_bash_env() {
     if !require_pty_or_skip("issue399_login_sources_profile_not_rc_or_bash_env") {
@@ -3232,7 +3235,8 @@ fn issue399_login_sources_profile_not_rc_or_bash_env() {
     );
     let mut s = NiuSession::spawn_shared_home_with_args(
         &root,
-        // The rc content must not run on the login face.
+        // The rc content must not run on the login face — except on
+        // Windows, where #1057 makes the login marker inert there.
         "echo FROM-RC\nPS1='P1> '\nPS2='P2> '\nNIU_DISABLE_DEFAULT_PLUGINS=1\n",
         &["-l", "-i", "-c", "echo AFTER-$((2*6))"],
         &[bash_env],
@@ -3240,10 +3244,17 @@ fn issue399_login_sources_profile_not_rc_or_bash_env() {
         HEAVY_TIMEOUT,
     );
     let _ = profile;
-    s.expect("FROM-BP-12");
-    s.expect("AFTER-12");
-    s.expect_absent("FROM-RC", ABSENT_WINDOW);
-    s.expect_absent("FROM-BASH-ENV", ABSENT_WINDOW);
+    if cfg!(windows) {
+        s.expect("FROM-RC");
+        s.expect("AFTER-12");
+        s.expect_absent("FROM-BP-12", ABSENT_WINDOW);
+        s.expect_absent("FROM-BASH-ENV", ABSENT_WINDOW);
+    } else {
+        s.expect("FROM-BP-12");
+        s.expect("AFTER-12");
+        s.expect_absent("FROM-RC", ABSENT_WINDOW);
+        s.expect_absent("FROM-BASH-ENV", ABSENT_WINDOW);
+    }
     assert_eq!(s.wait_exit(), 0);
 }
 
@@ -3357,6 +3368,10 @@ fn issue399_posix_env_exit_terminates_interactive_command() {
 
 /// The REPL login face: the profile chain replaces the rc, runs before the
 /// first prompt, and a profile `exit` kills the session with its status.
+/// niubash#1057: on Windows the argv0 login marker is inert on this face —
+/// the session reads ~/.niubashrc exactly like a non-login REPL, so the
+/// profile-exit premise does not exist there; the Windows pin is that the
+/// rc runs, the prompt renders, and the session stays alive.
 #[test]
 fn issue399_login_repl_profile_exit_ends_session_before_prompt() {
     if !require_pty_or_skip("issue399_login_repl_profile_exit_ends_session_before_prompt") {
@@ -3373,6 +3388,18 @@ fn issue399_login_repl_profile_exit_ends_session_before_prompt() {
         (120, 30),
         HEAVY_TIMEOUT,
     );
+    if cfg!(windows) {
+        // The rc echoes FROM-RC during startup (wherever it lands against
+        // the banner), then the rc-set PS1 renders the first prompt and
+        // the session accepts commands — the GNU profile chain, staged
+        // above with its `exit 4`, never runs.
+        s.expect("FROM-RC");
+        s.expect_prompt();
+        s.expect_absent("BP-REPL-0", ABSENT_WINDOW);
+        s.send_line("exit");
+        assert_eq!(s.wait_exit(), 0);
+        return;
+    }
     s.expect("Niubash");
     s.expect("BP-REPL-0");
     let code = s.wait_exit();

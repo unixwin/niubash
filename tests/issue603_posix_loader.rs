@@ -11,6 +11,12 @@
 //! | login ordinary   | profile -> loader (#590) |
 //! | non-login ord.   | loader -> rc (#359)      |
 //!
+//! niubash#1057: on Windows the "login ordinary" row collapses to the
+//! non-login row (loader -> rc, profile chain skipped) — the login
+//! marker is inert on the ordinary interactive face there. The posix
+//! rows are unchanged: posix mode keeps the GNU login chain on every
+//! platform.
+//!
 //! Each startup file appends its letter to `$ORDER`, so one probe string
 //! asserts both that the loader ran and where it ran.
 
@@ -129,10 +135,28 @@ fn login_ordinary_keeps_the_590_order() {
     let home = unique_home("login-ordinary", LOADER_BODY);
     let output = run_niu(&home, &["-l", "-i", "-c", PROBE]);
     let stdout = stdout_of(&output);
-    assert!(
-        stdout.contains("order=PL"),
-        "login ordinary: profile -> loader, rc skipped (#590): {stdout}"
-    );
+    if cfg!(windows) {
+        // niubash#1057: on Windows the login marker is inert on the
+        // ordinary interactive face — `-l -i` takes the non-login row:
+        // loader -> rc, no profile chain.
+        assert!(
+            stdout.contains("order=LR"),
+            "Windows login ordinary: loader -> rc, the #1057 face: {stdout}"
+        );
+        assert!(
+            stdout.contains("rc=1"),
+            "Windows login ordinary sources the rc: {stdout}"
+        );
+        assert!(
+            stdout.contains("profile=unset"),
+            "Windows login ordinary skips the profile chain: {stdout}"
+        );
+    } else {
+        assert!(
+            stdout.contains("order=PL"),
+            "login ordinary: profile -> loader, rc skipped (#590): {stdout}"
+        );
+    }
     assert!(
         stdout.contains("env=unset"),
         "ordinary mode never sources $ENV: {stdout}"

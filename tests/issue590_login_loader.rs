@@ -3,6 +3,11 @@
 //! plane, not part of the GNU rc exchange, and the docs state no login
 //! exception. The rc itself stays skipped on login shells (GNU parity:
 //! a login shell reads the profile, not the rc).
+//!
+//! niubash#1057: that parity is a Unix contract — on Windows the login
+//! marker is inert on the interactive face, so `-l -i` sources the rc
+//! exactly like `-i` and the GNU profile chain stays the non-interactive
+//! `-c` face's contract there.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -69,14 +74,28 @@ fn login_interactive_loads_the_loader_but_not_the_rc() {
         stdout.contains("loader=1"),
         "login interactive must load the loader: {stdout}"
     );
-    assert!(
-        stdout.contains("rc=unset"),
-        "login shells still skip the rc (GNU parity): {stdout}"
-    );
-    assert!(
-        stdout.contains("profile=1"),
-        "login shells still source the profile: {stdout}"
-    );
+    if cfg!(windows) {
+        // niubash#1057: on Windows the login marker is inert on the
+        // interactive face — `-l -i` sources the rc exactly like `-i`
+        // and never touches the GNU profile chain.
+        assert!(
+            stdout.contains("rc=1"),
+            "Windows: login interactive sources the rc (#1057): {stdout}"
+        );
+        assert!(
+            stdout.contains("profile=unset"),
+            "Windows: login interactive skips the profile chain (#1057): {stdout}"
+        );
+    } else {
+        assert!(
+            stdout.contains("rc=unset"),
+            "login shells still skip the rc (GNU parity): {stdout}"
+        );
+        assert!(
+            stdout.contains("profile=1"),
+            "login shells still source the profile: {stdout}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&home);
 }
 
