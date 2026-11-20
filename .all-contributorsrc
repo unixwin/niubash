@@ -24,10 +24,10 @@
       ]
     },
     {
-      "login": "a-rookie-of-C-language",
-      "name": "a-rookie-of-C-language",
+      "login": "arookieofc",
+      "name": "arookieofc",
       "avatar_url": "https://avatars.githubusercontent.com/u/186315048?v=4",
-      "profile": "https://github.com/a-rookie-of-C-language",
+      "profile": "https://github.com/arookieofc",
       "contributions": [
         "code",
         "maintenance"
@@ -121,6 +121,15 @@
       "profile": "https://github.com/apps/github-actions",
       "contributions": [
         "tool"
+      ]
+    },
+    {
+      "login": "arookieofc-ai",
+      "name": "arookieofc-ai",
+      "avatar_url": "https://avatars.githubusercontent.com/u/282213208?v=4",
+      "profile": "https://github.com/arookieofc-ai",
+      "contributions": [
+        "code"
       ]
     }
   ]
