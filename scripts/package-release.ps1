@@ -286,6 +286,11 @@ try {
 
     Copy-Item -LiteralPath $niubashExe -Destination (Join-Path $stageDir "niu.exe") -Force
     Copy-Item -LiteralPath $WinuxCmdPath -Destination (Join-Path $stageDir "winuxcmd\usr\bin\winuxcmd.exe") -Force
+    # niubash#1002: ship env.exe alongside bash.exe in both usr\bin and the
+    # PATH entry directory (bin\) so `#!/usr/bin/env bash` git hooks and
+    # scripts resolve `env` out of the box before/without wpm activation.
+    Copy-Item -LiteralPath $WinuxCmdPath -Destination (Join-Path $stageDir "winuxcmd\usr\bin\env.exe") -Force
+    Copy-Item -LiteralPath $WinuxCmdPath -Destination (Join-Path $stageDir "winuxcmd\bin\env.exe") -Force
     Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\bash.exe") -Force
     Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\usr\bin\sh.exe") -Force
     Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\bin\bash.exe") -Force

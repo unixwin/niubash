@@ -5377,7 +5377,14 @@ fn relink_bundled_shims(rest: &[String]) -> anyhow::Result<()> {
     let exe = niubash_runtime::winuxcmd::find_winuxcmd()
         .ok_or_else(|| anyhow::anyhow!("winuxcmd.exe not found; cannot reconcile bundled shims"))?;
     let root = niubash_runtime::winuxcmd::installation_root(&exe);
-    let report = niubash_runtime::winuxcmd::reconcile_bundled_shims(&root, force);
+    let mut report = niubash_runtime::winuxcmd::reconcile_bundled_shims(&root, force);
+    let env_report = niubash_runtime::winuxcmd::reconcile_env_faces(&root, force);
+    report.created.extend(env_report.created);
+    report.already_current.extend(env_report.already_current);
+    report.shimmed.extend(env_report.shimmed);
+    report.backed_up.extend(env_report.backed_up);
+    report.skipped.extend(env_report.skipped);
+    report.failed.extend(env_report.failed);
 
     if !quiet {
         println!(
