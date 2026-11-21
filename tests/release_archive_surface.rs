@@ -260,3 +260,28 @@ fn rejected_placeholder_design_must_not_return() {
         }
     }
 }
+
+/// niubash#1002: `#!/usr/bin/env bash` git hooks and scripts fail with
+/// `no 'env' found on PATH` when the packaged distribution ships `bash.exe`
+/// without `env.exe`. The packager must stage `env.exe` (from `$WinuxCmdPath`)
+/// in both `winuxcmd\usr\bin` and `winuxcmd\bin`, and the release workflow
+/// must verify both faces.
+#[test]
+fn packager_stages_env_exe_alongside_bash_exe() {
+    let text = packager();
+    for dest in ["winuxcmd\\usr\\bin\\env.exe", "winuxcmd\\bin\\env.exe"] {
+        assert!(
+            text.contains(dest),
+            "package-release.ps1 must stage {dest} from $WinuxCmdPath so \
+             #!/usr/bin/env bash git hooks work out of the box (niubash#1002)"
+        );
+    }
+
+    let workflow = release_workflow();
+    assert!(
+        workflow.contains("winuxcmd\\usr\\bin\\env.exe")
+            && workflow.contains("winuxcmd\\bin\\env.exe"),
+        "release.yml must verify winuxcmd\\usr\\bin\\env.exe and \
+         winuxcmd\\bin\\env.exe in the staged release (niubash#1002)"
+    );
+}

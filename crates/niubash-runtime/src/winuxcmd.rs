@@ -712,6 +712,13 @@ fn auto_activate_bundled_winuxcmd(exe: &Path) {
                 shims.failed.len()
             );
         }
+        let env_faces = reconcile_env_faces(&links_root, true);
+        if !env_faces.failed.is_empty() {
+            log::debug!(
+                "env face reconcile left {} name(s) unresolved",
+                env_faces.failed.len()
+            );
+        }
         if has_required_command_links(&link_bin, exe) {
             return;
         }
@@ -808,13 +815,28 @@ fn has_required_command_links(bin_dir: &Path, engine: &Path) -> bool {
     } else {
         engine.to_path_buf()
     };
-    let builtins_ready = ["ls.exe", "cat.exe", "grep.exe", "ln.exe"]
+    let builtins_ready = ["ls.exe", "cat.exe", "grep.exe", "ln.exe", "env.exe"]
         .iter()
         .all(|name| {
             let link = bin_dir.join(name);
             link.is_file() && super::shell_links::same_file(&engine, &link)
         });
-    builtins_ready && bundled_shim_links_current(bin_dir, &engine)
+    let entry_env_ready = match bin_dir
+        .parent()
+        .filter(|usr| usr.file_name().is_some_and(|name| name == "usr"))
+        .and_then(|usr| usr.parent())
+        .map(|root| root.join("bin"))
+        .filter(|entry_bin| entry_bin.is_dir())
+    {
+        Some(entry_bin) => {
+            let entry_env = entry_bin.join("env.exe");
+            entry_env.is_file()
+                && (super::shell_links::same_file(&engine, &entry_env)
+                    || super::shell_links::same_file_bytes(&engine, &entry_env))
+        }
+        None => true,
+    };
+    builtins_ready && entry_env_ready && bundled_shim_links_current(bin_dir, &engine)
 }
 
 /// The bundled-shim half of `has_required_command_links` (niubash#468,
@@ -1207,6 +1229,72 @@ pub fn reconcile_bundled_shims(root: &Path, force: bool) -> crate::shell_links::
                 }
                 Err(error) => report.failed.push((target, error.to_string())),
             }
+        }
+    }
+    report
+}
+
+/// Ensure `env.exe` is materialized as a hardlink (or byte copy on
+/// link-restricted volumes) to `usr\bin\winuxcmd.exe` in both `usr\bin` and,
+/// when present, the `bin` PATH-entry directory (niubash#1002).
+///
+/// Without `env.exe` in `usr\bin` / `bin`, `#!/usr/bin/env bash` git hooks
+/// and scripts fail with `no 'env' found on PATH` in packaged distributions
+/// that ship `bash.exe` before `wpm links rebuild` has run.
+pub fn reconcile_env_faces(root: &Path, force: bool) -> crate::shell_links::ShellLinkReport {
+    let mut report = crate::shell_links::ShellLinkReport::default();
+    let usr_bin = root.join("usr").join("bin");
+    let engine = usr_bin.join("winuxcmd.exe");
+    if !engine.is_file() {
+        return report;
+    }
+
+    let mut targets = vec![usr_bin.join("env.exe")];
+    let entry_bin = root.join("bin");
+    if entry_bin.is_dir() {
+        targets.push(entry_bin.join("env.exe"));
+    }
+
+    for target in targets {
+        if target.is_dir() {
+            report
+                .failed
+                .push((target, "is a directory; refusing to replace".to_string()));
+            continue;
+        }
+        if !target.exists() {
+            match materialize_link(&engine, &target) {
+                Ok(()) => report.created.push(target),
+                Err(error) => report.failed.push((target, error.to_string())),
+            }
+            continue;
+        }
+        if super::shell_links::same_file(&engine, &target) {
+            report.already_current.push(target);
+            continue;
+        }
+        if super::shell_links::same_file_bytes(&engine, &target) {
+            match crate::shell_links::replace_with_link(&engine, &target) {
+                Ok(()) => report.created.push(target),
+                Err(_) => report.already_current.push(target),
+            }
+            continue;
+        }
+        if !force {
+            report.skipped.push((
+                target,
+                "exists and is not the bundled winuxcmd image; pass --force to replace it \
+                 (the old bytes are kept as <name>.bak-<date>)"
+                    .to_string(),
+            ));
+            continue;
+        }
+        match replace_with_link_keeping_backup(&engine, &target) {
+            Ok(backup) => {
+                report.created.push(target);
+                report.backed_up.extend(backup);
+            }
+            Err(error) => report.failed.push((target, error.to_string())),
         }
     }
     report
@@ -1750,13 +1838,13 @@ mod tests {
 
         // Names that are not links to this winuxcmd.exe do not count: an
         // update that left them on the previous image must trigger the rebuild.
-        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
+        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe", "env.exe"] {
             std::fs::write(dir.join(name), b"a different image").unwrap();
         }
         assert!(!has_required_command_links(&dir, &engine));
 
         std::fs::write(dir.join("winuxcmd.exe"), b"the installed engine").unwrap();
-        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
+        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe", "env.exe"] {
             let _ = std::fs::remove_file(dir.join(name));
             std::fs::hard_link(dir.join("winuxcmd.exe"), dir.join(name)).unwrap();
         }
@@ -1766,6 +1854,13 @@ mod tests {
         let stale = dir.join("cat.exe");
         let _ = std::fs::remove_file(&stale);
         std::fs::write(&stale, b"previous image").unwrap();
+        assert!(!has_required_command_links(&dir, &engine));
+
+        // Missing env.exe in usr/bin also triggers activation.
+        let _ = std::fs::remove_file(&stale);
+        std::fs::hard_link(dir.join("winuxcmd.exe"), &stale).unwrap();
+        assert!(has_required_command_links(&dir, &engine));
+        std::fs::remove_file(dir.join("env.exe")).unwrap();
         assert!(!has_required_command_links(&dir, &engine));
 
         let _ = std::fs::remove_dir_all(dir);
@@ -1778,7 +1873,7 @@ mod tests {
         let bin = root.join("usr").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("winuxcmd.exe"), b"the installed engine").unwrap();
-        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
+        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe", "env.exe"] {
             std::fs::hard_link(bin.join("winuxcmd.exe"), bin.join(name)).unwrap();
         }
         if with_gawk_payload {
@@ -2069,7 +2164,7 @@ mod tests {
         // Activation's copy fallback: same bytes, different file identity.
         let copy = links_bin.join("winuxcmd.exe");
         std::fs::copy(&package_engine, &copy).unwrap();
-        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
+        for name in ["ls.exe", "cat.exe", "grep.exe", "ln.exe", "env.exe"] {
             std::fs::hard_link(&copy, links_bin.join(name)).unwrap();
         }
 
@@ -2456,5 +2551,44 @@ mod path_order_tests {
         let promoted = promote_user_git_dir_in_path(&current, &injected_dirs(&stage));
         assert_eq!(split(&promoted)[0], stage.user_git_dir, "PATH={promoted}");
         let _ = std::fs::remove_dir_all(other_tree);
+    }
+
+    #[test]
+    fn issue1002_reconcile_env_faces_provisions_and_heals_env_exe() {
+        let root = unique_temp_dir("winuxcmd-1002-env-faces");
+        let usr_bin = root.join("usr").join("bin");
+        let entry_bin = root.join("bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::create_dir_all(&entry_bin).unwrap();
+        let engine = usr_bin.join("winuxcmd.exe");
+        std::fs::write(&engine, b"the installed engine").unwrap();
+
+        // Creates missing env.exe in both usr/bin and bin.
+        let created = reconcile_env_faces(&root, false);
+        assert_eq!(created.created.len(), 2, "{created:?}");
+        assert!(created.failed.is_empty(), "{created:?}");
+        assert!(crate::shell_links::same_file(
+            &engine,
+            &usr_bin.join("env.exe")
+        ));
+        assert!(crate::shell_links::same_file(
+            &engine,
+            &entry_bin.join("env.exe")
+        ));
+
+        // Stale env.exe is skipped without --force and healed+backed up with --force.
+        let stale = entry_bin.join("env.exe");
+        std::fs::remove_file(&stale).unwrap();
+        std::fs::write(&stale, b"stale env binary").unwrap();
+        let skipped = reconcile_env_faces(&root, false);
+        assert_eq!(skipped.already_current.len(), 1, "{skipped:?}");
+        assert_eq!(skipped.skipped.len(), 1, "{skipped:?}");
+
+        let healed = reconcile_env_faces(&root, true);
+        assert_eq!(healed.created.len(), 1, "{healed:?}");
+        assert_eq!(healed.backed_up.len(), 1, "{healed:?}");
+        assert!(crate::shell_links::same_file(&engine, &stale));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -805,6 +805,28 @@ jobs:
               throw "the niu face no longer prints the product help"
             }
             Write-Host "niu --help: product help OK"
+
+            # niubash#1002: env.exe must ship alongside bash.exe in both
+            # usr\bin and bin\ and execute `env bash -c ...` cleanly.
+            foreach ($envRel in @("winuxcmd\usr\bin\env.exe", "winuxcmd\bin\env.exe")) {
+              $envPath = Join-Path $stage $envRel
+              if (-not (Test-Path -LiteralPath $envPath)) {
+                throw "$envRel is missing from the staged package (niubash#1002)"
+              }
+              $envDir = Split-Path -Path $envPath -Parent
+              $savedPath = $env:PATH
+              try {
+                $env:PATH = "$(Resolve-Path $envDir);$savedPath"
+                $envOut = (& $envPath bash -c 'echo "$0:$1"' _ env-ok 2>&1 | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0 -or $envOut -ne "bash:env-ok") {
+                  throw "$envRel bash -c probe printed '$envOut' (exit $LASTEXITCODE), expected 'bash:env-ok'"
+                }
+              }
+              finally {
+                $env:PATH = $savedPath
+              }
+              Write-Host "${envRel}: env bash -c OK"
+            }
           }
           else {
             # Foreign-arch leg: structural verification only. Fails the job
@@ -813,7 +835,7 @@ jobs:
             # but ship broken), so the gate still pins the package's
             # architecture honestly.
             Write-Host "host arch $($hostArch) cannot execute ${{ matrix.arch }} binaries; running the structural PE-machine face check"
-            foreach ($rel in @("winuxcmd\usr\bin\bash.exe", "winuxcmd\usr\bin\sh.exe", "niu.exe", "winuxcmd\usr\bin\winuxcmd.exe")) {
+            foreach ($rel in @("winuxcmd\usr\bin\bash.exe", "winuxcmd\usr\bin\sh.exe", "winuxcmd\usr\bin\env.exe", "winuxcmd\bin\env.exe", "niu.exe", "winuxcmd\usr\bin\winuxcmd.exe")) {
               $path = Join-Path $stage $rel
               if (-not (Test-Path -LiteralPath $path)) {
                 throw "$rel is missing from the staged package at $path"
