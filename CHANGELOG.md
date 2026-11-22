@@ -10,7 +10,119 @@ All notable changes to Niubash are documented in this file.
 
 - **Deep-audit host fix wave (1.5.1-bound, 2026-11-04)**: seven non-interactive host findings fixed (#886) — including corrupt plugin-spec errors now naming the file and the cause; `$BASH_ARGV0` seed no longer clobbered by host startup and `NIU_COMP_WORDS` no longer duplicated (#887, with the engine-side compspec fixes in rubash #2756); frozen interactive config specs (`NIU_BINDKEYS`/`NIU_COMPDEFS`) re-applied on setup re-run (#891, closing #889/#890). The remaining host finding (#888, exported HISTFILE) is a recorded owner decision. Engine-side counterparts landed in rubash's deep-audit wave (see the rubash changelog).
 - **Windows interactive login shells read `~/.niubashrc` again** (niubash#1057): `--login`/`-l` (and the argv[0] `-` seed) no longer divert the interactive startup face onto the GNU profile chain — `niu --login -i` now sources the generated plugin loader and `~/.niubashrc` exactly like `niu -i` (`--rcfile` and `NIU_RC_POLICY` apply unchanged), restoring the standing contract "Windows accepts the flags with unchanged behavior (no login concept)". GNU shell.c:1833's "the login profile chain replaces the interactive-RC alternative" is a deliberate product fork on this face, not a GNU-alignment gap: on a bare Windows home none of the chain's files exists, so `--login -i` used to source nothing at all. Deliberate side effects: ① a staged GNU profile file (`.bash_profile`/`.bash_login`/`.profile`) no longer runs on the Windows interactive face; ② the #590 expectation flips on Windows — an interactive login shell loads loader + rc and no chain; ③ the non-interactive `-c` face is unchanged — `-l -c` still sources the GNU chain (niubash#399/#587/#602) — and POSIX mode keeps the chain on every platform.
-- **Engine and bundled-commands line rises to 1.5.1**: the rubash pin takes rubash master `67189af0` (v1.5.1 — the 457-issue GNU Bash 5.3.20 differential wave, see the rubash changelog), the ruline pin takes ruline main `4d0aefa8`, and the bundled WinuxCmd line is 1.2.2. Also in this wave: bind -x conhost chord dispatch and READLINE_POINT restore (#1065, closing #1063) and the env.exe distribution fix through the winuxcmd bundle (#1062).
+- **Engine and bundled-commands line rises to 1.5.1**: the rubash pin takes rubash master `67189af0` (v1.5.1 — the 703-issue GNU Bash 5.3.20 differential wave, see the rubash changelog), the ruline pin takes ruline main `4d0aefa8`, and the bundled WinuxCmd line is 1.2.2. Also in this wave: bind -x conhost chord dispatch and READLINE_POINT restore (#1065, closing #1063) and the env.exe distribution fix through the winuxcmd bundle (#1062).
+
+### Full list
+
+All 72 issues closed in the window (2026-11-03 – 11-22), grouped by theme (mechanical classification, one group per issue; titles verbatim):
+
+#### Completion (13)
+
+- #830 has_compspec probe uses first whitespace token of the whole line — compspec silently bypassed on multi-command lines
+- #831 library Shell::completion_probe diverges from the REPL — no bridge, no compdefs, empty state on one-shot shells
+- #832 menu_open stand-down flag wired to only 2 of 6 completion menus — hinter paints over menus and Right accepts the ghost instead of navigating
+- #833 poisoned completion_state lock silently freezes the completion snapshot forever; other lock poisonings go stale or respawn per-TAB
+- #836 compdef_suggestions runs ahead of the compspec gate and merges into compspec-owned commands
+- #838 $ alone completes nothing — variable completer bails on the bare prefix
+- #840 state.behavior is write-once — mid-session NIU_COMPLETION_* changes never reach the completer
+- #841 residue sweep: WINSH_ env var + ~/.winsh cache dir on the live completion path
+- #845 completion cache keys omit inputs — stale values served across args, dirs, TTLs, and binary upgrades
+- #849 setup re-apply re-sources the rc but never re-reads NIU_BINDKEYS/NIU_COMPDEFS — wizard-added declarations silently inert
+- #851 staleness/quoting batch — exec_verdicts chmod-blind, effective_flags wrong token, compdef ignores match mode, pending-input drops non-ASCII, vi maps lose GNU C-x chords
+- #918 [bug] Windows drive-letter words fail through complete_detailed under default COMP_WORDBREAKS (colon split strips the drive)
+- #973 [plugin] complete-alias fixture entry unreachable: extension-less entry files are not enumerated as enable-able assets
+
+#### Interactive editing & display (6)
+
+- #731 [feature] K3 翻译扩围（承 #630 余项）：分类器扩围 + redraw-current-line + quoted-insert 投递臂
+- #866 缩窗后编辑态 prompt 换行堆叠重印：resize→repaint 未原地重绘（niubash-runtime 共享层，1.4.4 与 master 同现）
+- #882 [interactive] Per-keystroke FULL prompt repaint (erase-down + re-render) relies on Sync-2026 — terminals without it flicker on every key
+- #927 [repl] TAB on an empty-word buffer inserts a literal tab instead of completing
+- #974 [bug] unix 关标签页（SIGHUP + PTY 主端关闭）会话挂死不退出，整会话历史与 EXIT trap 丢失
+- #985 run_repl_without_line_editor 降级回路：阻塞 stdin 读不被 SIGHUP 门铃唤醒，未 trap 形得 129 而非信号死
+
+#### Keybindings & widgets (9)
+
+- #834 dropped-binding coverage gaps — chord-layer drops, unknown -m keymaps, bundle widget binds, and NotSentinel all vanish without a registry record
+- #835 menu-complete-backward missing from native_widget_event — binds to a dead key via widget paths
+- #844 \xHH macro escapes decode byte-as-char — non-ASCII bind/macro text double-encodes into mojibake
+- #848 plugin chords silently lose to GNU defaults and engine chords — Script-layer precedence inverted in ChordIndex
+- #850 host-side ruline mappings wrong — yank → PasteCutBufferBefore kills yank-pop; exchange-point-and-mark → wrong EditCommand; insert-comment missing GNU '# '
+- #961 repl：BindingSpec::Keymap 显式臂替换通配臂（rubash #3013 宿主半）
+- #977 Ctrl-C 在 bind -x widget 执行之后不弃行（普通提示符下正常）
+- #1047 [ledger] api-ledger §6 dropped the BindKindView::Keymap variant row (next rubash canary will trip)
+- #1063 bind -x 在 Windows/conhost 上按键不触发，且 widget 内 READLINE_LINE/READLINE_POINT 为空
+
+#### Startup & configuration (6)
+
+- #846 NIU_* env channels orphaned or startup-only — prompt segments permanently empty, interactive export silently ignored
+- #947 Segments prompt backend is unreachable in the shipped product: no config/env/rc/CLI path selects prompt_style "segments"
+- #954 Interactive startup never sources the default ~/.bashrc (only --rcfile works)
+- #1001 [bug] 环境变量值里的 POSIX 路径原样泄漏给原生 exe：FOO=/d/x cmd/python 收到 /d/x（参数位有转换、env 值没有）
+- #1006 build: Linux-host cross build to x86_64-pc-windows-gnu cannot embed the niu.exe icon (build.rs wants rc.exe/llvm-rc.exe and an MSVC .res GNU ld rejects)
+- #1057 [bug][Windows] `--login` skips `~/.niubashrc` and falls back to the GNU profile chain
+
+#### Plugins (4)
+
+- #843 small staleness/diagnostic gaps batch — history-error collapse, stale-dir fallback, state_path cwd leak, preset silence, plugin unbind reach, dead expand loop, layer misattribution
+- #852 fail-quiet/leak batch — unix paste-protection gap, git scratch silent None, plugin loader unreadable≡absent, preserve_std_handles partial failure, terminal size fallback
+- #889 [A4-08] Plugin source registry accepts duplicate ids; remove deletes one record at a time
+- #968 plugin enable cannot see extension-less entry files of path-added (wild) sources
+
+#### History (5)
+
+- #888 [A4-02] Exported HISTFILE is ignored as the REPL backing file (decision: seed vs #571/#661 doctrine)
+- #890 [A4-09] History flush recursively creates a nonexistent HOME tree
+- #950 stdin feeder: tracked (history/alias) arm does not stop on a parse error — reads past the batch and exits 0
+- #956 $- lacks H (histexpand) in interactive -c/script forms; the stdin REPL form carries it
+- #971 关闭 Windows Terminal 标签页时，本次会话历史不写入 `~/.niubash_history`
+
+#### Git & doctor (3)
+
+- #842 git-prompt invalidation is Windows-only — unix cached git segment can go stale
+- #1049 niugit如何被外部使用？
+- #1052 随包 1.5.0 全新装 winuxcmd\bin 缺 git：打包清扫漏掉预装根 bin（#1049 分立单）
+
+#### CI & tests (11)
+
+- #827 [CI] 交互式 PTY 门禁：全平台必跑（现仅 Windows 跑全量 test，Unix 仅 check+lib 信息项，Android 从不跑）
+- #953 [test] plugin-source fixture zoo: after-load call chains (bash-preexec hooks, fzf-git widgets, complete-alias wrapper)
+- #960 CI 基线红：host_contract alias 测试断言 stderr 恒空，与无 TTY 交互 shell 的 job-control 警告冲突（master 同红）
+- #965 [test] bash-preexec fixture never wires its preexec runner (upstream installs the invocation path at load)
+- #966 [test] fzf-git.sh / complete-alias fixtures are no-op stubs: chains can prove execution, never output
+- #978 test hygiene: lib test 目标 -D warnings 既有 11 处 lint 清零（基底 e6fc93f8）
+- #1028 [test] issue993 doc-content pin fails on Windows checkouts (CRLF vs \\n-spanning assert), masked by issue683 fail-fast
+- #1033 [CI] build-and-test 不跑 niubash-runtime lib 套件：14 个 doctor 单测只由 X299 腿覆盖
+- #1034 [test-gap] 「未设 + Git for Windows 在场」面须在有 Git for Windows 的真机上活体验证
+- #1035 [clippy] Linux-only drop_non_drop: ctrl_c.rs:926/:928 drop(watch) on ForegroundWatch without Drop
+- #1040 [test] shell::tests::bash_ps0_runs_before_interactive_command fails: PS0 expansion does not set STARSHIP_START_TIME
+
+#### Performance (3)
+
+- #839 resolve_dynamic values_from_command subprocess: silent None on every failure shape and no timeout — a hanging tool freezes the TAB keypath
+- #847 Windows wait_with_timeout treats WAIT_FAILED as finished — unbounded wait + permanently dead git-prompt refresh
+- #879 [perf-budget] 5 bash-it themes hard-fail by TIMEOUT (no completed rep) — adjudicate harness vs product hang before the gate's veto is restored
+
+#### Documentation (2)
+
+- #963 [docs] pointer from niu test docs to the eco manual-run list (companion to rubash#2910)
+- #1031 Claude Code silently runs Git Bash instead of niu when CLAUDE_CODE_GIT_BASH_PATH names no file or Git for Windows is installed (backslash collapse, path conversion); doctor row + docs fix
+
+#### Build, packaging & updates (4)
+
+- #997 能否支持scoop安装？
+- #999 [build][windows-gnu] Cross-compile link of niu.exe fails: mingw ld export ordinal too large: 87895 (--export-all-symbols)
+- #1008 [build] main() comment still says non-Windows cross-build is unsupported after #1007
+- #1013 self-update 闪退
+
+#### Other (6)
+
+- #792 关于落实修复全部Bug工作并统筹推进v1.5.0超大杯牙膏挤爆超级无敌版本发布前各项准备事宜的最终确认与进度追踪综合议题
+- #863 [1.5.1 charter] 换用 rubash 新 API + 清除 niu 侧手接线/桥接
+- #984 Similar problems as gash
+- #988 编辑器路执行期形：命令执行中收到 SIGHUP 不信号死，命令跑完后以命令状态平直退出（GNU 等待中即信号死）
+- #995 反斜杠被吞掉
+- #1060 [bug] 单引号包裹的数组元素仍被花括号展开拆分：'X{16,}Y' → X16Y / XY
 
 ## [1.5.0] - 2026-11-03
 
