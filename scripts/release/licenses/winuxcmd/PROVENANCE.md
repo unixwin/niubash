@@ -1,11 +1,11 @@
 # WinuxCmd -- provenance
 
-- Component: WinuxCmd v1.1.20 -- the C++ toolchain providing the
+- Component: WinuxCmd v1.2.2 -- the C++ toolchain providing the
   GNU-compatible external command applets (`sed`, `cp`, `grep`, `awk`
   forwarder, ...). Bundled into every Windows release per
   `scripts/release/winuxcmd-pin.json`
-  (SHA-256 `790d1f6eef3a555fd2c043866d32c6edbf936a8a70d25e554b3383e67b36ad43`
-  windows-x64, `205edb87a06b8b5b3c6fb731884d2b91b60fe406b9e7f3dbe625326489bb89df`
+  (SHA-256 `3f5f02905744598f8b307e6f32d2688c928b82845764876bba3f8127aa875995`
+  windows-x64, `abcf7e894544273fe2ec6db5b9b0da4ba36d5f764ae918f4e7e666bfb241117b`
   windows-arm64, over the `WinuxCmd-*-win-<arch>.zip` release assets).
 - Status: original MIT C++ software of the unixwin team -- not a port or
   redistribution of another codebase. The bundled `LICENSE` is copied
@@ -15,7 +15,7 @@
   assertion of WinuxCmd's MIT/original status was a planning note; the
   license text here is the durable record.
 - Binary origin: the WinuxCmd GitHub release matching the pin tag --
-  `https://github.com/unixwin/WinuxCmd/releases/tag/v1.1.20`, downloaded
+  `https://github.com/unixwin/WinuxCmd/releases/tag/v1.2.2`, downloaded
   and verified by the release workflow (sha256 per winuxcmd-pin.json).
 - Corresponding Source: the WinuxCmd repository itself at the pinned tag
   (public GitHub repository; MIT does not impose a source-delivery
