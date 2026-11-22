@@ -3546,24 +3546,20 @@ impl Shell {
         let interrupted = outcome.interrupted;
 
         // Read-back semantics (bashline.c:4692-4703).
-        let Some(new_line) = outcome.line else {
-            // Command unset READLINE_LINE: keep the editor as it stood.
-            return WidgetOutcome {
-                interrupted,
-                ..Default::default()
-            };
+        let (buffer_out, base) = match outcome.line {
+            Some(new_line) if new_line != buffer => (Some(new_line), None),
+            _ => (None, Some(buffer)),
         };
-        let line_changed = new_line != buffer;
-        let base = if line_changed { &new_line } else { buffer };
-        // An unchanged READLINE_POINT holds the point we set before the
-        // command ran, which is exactly GNU's final cursor after
-        // maybe_make_readline_line + the point override.
-        let point_chars = outcome.point.unwrap_or(old_point);
-        let clamped = point_chars.min(base.chars().count());
-        let cursor_byte = crate::repl::char_offset_to_byte(base, clamped);
+        let base_str = buffer_out.as_deref().unwrap_or_else(|| base.unwrap());
+        // GNU applies READLINE_POINT even when READLINE_LINE was unset
+        // (maybe_make_readline_line(0) is a no-op, then bashline.c:4695 runs).
+        let cursor = outcome.point.map(|point_chars| {
+            let clamped = point_chars.min(base_str.chars().count());
+            crate::repl::char_offset_to_byte(base_str, clamped)
+        });
         WidgetOutcome {
-            buffer: line_changed.then_some(new_line),
-            cursor: Some(cursor_byte),
+            buffer: buffer_out,
+            cursor,
             accept: false,
             interrupted,
         }
@@ -8349,6 +8345,25 @@ __fzf_history_stub() {
         assert!(shell.engine_bind_generation > 0);
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn bind_x_point_update_without_line_change_and_unset_line_keep_buffer() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = Shell::new().unwrap();
+        shell
+            .execute_interactive_line(r#"bind -x '"\C-t": READLINE_POINT=2'"#)
+            .unwrap();
+        shell
+            .execute_interactive_line(r#"bind -x '"\C-y": unset READLINE_LINE'"#)
+            .unwrap();
+        shell.load_engine_bindings();
+        let outcome = shell.run_bind_x_command(0, "hello", 5);
+        assert_eq!(outcome.buffer, None);
+        assert_eq!(outcome.cursor, Some(2));
+        let unset_outcome = shell.run_bind_x_command(1, "hello", 5);
+        assert_eq!(unset_outcome.buffer, None);
     }
 
     /// GNU's readline order: the rc runs first, then `$INPUTRC` /
