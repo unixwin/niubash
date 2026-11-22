@@ -1,0 +1,5 @@
+[profile.ci]
+# niubash#955: a hung test fails fast and by name instead of stalling the
+# runner until the job timeout. Slow tests log after 30s and are terminated
+# at 90s (matching rubash#3600).
+slow-timeout = { period = "30s", terminate-after = 3, grace-period = "10s" }
