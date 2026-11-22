@@ -10,6 +10,11 @@ pub fn stdio_is_interactive() -> bool {
         && platform::stderr_is_terminal()
 }
 
+/// Return true only when stdin is attached to a real terminal.
+pub fn stdin_is_terminal() -> bool {
+    platform::stdin_is_terminal()
+}
+
 /// Return true only when stdout is attached to a real terminal.
 ///
 /// Full-screen easter eggs must refuse to draw when stdout is a pipe or a
