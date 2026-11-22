@@ -823,8 +823,8 @@ jobs:
               try {
                 $env:PATH = "$(Resolve-Path $envDir);$savedPath"
                 $envOut = (& $envPath bash -c 'echo "$0:$1"' _ env-ok 2>&1 | Out-String).Trim()
-                if ($LASTEXITCODE -ne 0 -or $envOut -ne "bash:env-ok") {
-                  throw "$envRel bash -c probe printed '$envOut' (exit $LASTEXITCODE), expected 'bash:env-ok'"
+                if ($LASTEXITCODE -ne 0 -or $envOut -ne "_:env-ok") {
+                  throw "$envRel bash -c probe printed '$envOut' (exit $LASTEXITCODE), expected '_:env-ok'"
                 }
               }
               finally {
