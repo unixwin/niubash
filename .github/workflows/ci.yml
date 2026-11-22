@@ -21,6 +21,7 @@ env:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -101,6 +102,7 @@ jobs:
   cross-check:
     name: cross-check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -156,6 +158,12 @@ jobs:
         continue-on-error: true
         run: cargo test --workspace --lib --locked
 
+      # niubash#955: run niubash-runtime integration tests on unix too
+      # (informational alongside --lib until wave-2 unix runtime lands).
+      - name: cargo test -p niubash-runtime --tests (informational)
+        continue-on-error: true
+        run: cargo test -p niubash-runtime --tests --locked --no-fail-fast
+
   # Cross-target gating gate: the two `runs-on` platforms above only ever
   # exercise x86_64 glibc. Neither the musl libc (Alpine / static builds) nor
   # the OpenHarmony target (`aarch64-unknown-linux-ohos`, HarmonyOS PC) is
@@ -175,6 +183,7 @@ jobs:
   cross-target-check:
     name: cross-target-check (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -259,6 +268,7 @@ jobs:
   cross-target-smoke:
     name: cross-target-smoke (x86_64-unknown-linux-musl)
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -510,3 +520,70 @@ jobs:
           path: perfbudget-trend
           if-no-files-found: error
           retention-days: 90
+
+  # niubash#955: nightly / manual integration sweep with per-test hard-kill
+  # (.config/nextest.toml: 90s) on Windows and full unix-only integration
+  # target census on Ubuntu (see docs/test-tiers.md).
+  integration-sweep-windows:
+    name: integration sweep (nightly, windows)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo build (workspace)
+        run: cargo build --locked
+
+      - name: cargo nextest run (workspace, bounded 90s per-test)
+        run: cargo nextest run --workspace --locked --no-fail-fast --profile ci
+
+  integration-sweep-unix:
+    name: integration sweep (nightly, unix)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: cargo build (workspace)
+        run: cargo build --locked
+
+      - name: Run niubash-runtime integration tests (informational)
+        continue-on-error: true
+        run: cargo test -p niubash-runtime --tests --locked --no-fail-fast
+
+      - name: Run unix-only integration targets (informational)
+        continue-on-error: true
+        env:
+          NIU_INTERACTIVE_TESTS: "1"
+        run: >-
+          cargo test --locked --no-fail-fast
+          --test issue351_tput_oneshot_regressions
+          --test issue3605_exec_a_argv0
+          --test issue727_ffi_removed
+          --test issue769_suspend_cycle
+          --test issue974_unix_hangup
+          --test issue985_noediting_hangup
+          --test issue988_editor_hangup
