@@ -2724,15 +2724,25 @@ def journey(exe: Path, root: Path, verdict: Verdict,
     # Where the note lands depends on the rc slot (niubash#359
     # create-only, setup_wizard.rs write_primary_rc): a fresh slot is
     # created WITH the note; an occupied slot is never touched and the
-    # generated text — note included — parks as the candidates sample
-    # the journal's rc_sample names. In this sandbox the slot is
-    # occupied by the time the wizard applies (the J1 session precedes
-    # it), so the note verifiably lands in the sample (first J2
-    # alignment pass, driven end-to-end). Assert the note in the file
-    # the journal says received the generated rc — and that the user's
-    # rc itself carries no theme line either way.
+    # generated text — note included — parks as the candidates
+    # sample. The journal's rc_sample names that sample only when the
+    # FIRST write parked it: the journal binds the first write's
+    # outcome, so on the fresh-install path — slot free at Apply,
+    # occupied by the post-install pick's second write — the journal
+    # names no sample even though the pick's text parked at the fixed
+    # candidates path (setup_rc_sample_path). Assert the note in the
+    # journal's sample when it names one, else in the fixed-path
+    # sample when it exists, else in the rc — and that the user's rc
+    # itself carries no theme line either way.
     sample_rel = journal_value(journal, "rc_sample")
-    note_carrier = Path(sample_rel) if sample_rel else rc_path
+    if sample_rel:
+        note_carrier = Path(sample_rel)
+    elif (home / ".niubash" / "candidates"
+          / "setup-proposed.niubashrc").is_file():
+        note_carrier = (home / ".niubash" / "candidates"
+                        / "setup-proposed.niubashrc")
+    else:
+        note_carrier = rc_path
     note_text = (note_carrier.read_text(encoding="utf-8")
                  if note_carrier.is_file() else "")
     step.check("the generated rc carries the pick's ownership note "
