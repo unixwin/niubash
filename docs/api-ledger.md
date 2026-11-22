@@ -798,6 +798,33 @@
 > pairing job (and on master itself, once niu #1020 merged) is
 > what surfaced the gap. §6 grows 287 → 288 (one item).
 >
+> Addendum (cooperative cancellation family, 2026-11-22,
+> rubash#2810): the host escape hatch — the session carries a
+> cooperative cancellation token the host holds the write end
+> of: `CancelToken` (with methods `cancel` / `reset` /
+> `is_cancelled`), the `Flow::Cancelled` variant, the read
+> face `Session::cancellation_token`, the builder face
+> `SessionBuilder::cancel_token` installing a host-supplied
+> token at construction, and the `RunClassification::cancelled`
+> field — is recorded (§2.1 row, §2.3 row, §4 row, §6 entries
+> for the first four faces). The engine polls the token at
+> statement boundaries and in its own blocking wait loops
+> (the in-process `sleep` emulation, the `read` acquisition,
+> `select`'s query); a set token unwinds the unit as
+> `Flow::Cancelled` with `RunClassification::cancelled`,
+> never a spoofed SIGINT 130 and never a `trap INT` fire.
+> A blocked external child is deliberately not a safe point
+> (the issue's non-goal: preempting one is the host/process
+> layer's business), so a cancel landing mid-`sleep` leaves
+> the child to finish and the run to complete. The
+> `RunClassification::cancelled` field rides inside
+> `RunOutcome`'s recorded entry and stays unlisted as its
+> own §6 symbol, per the rubash#2794 field precedent — this
+> addendum is its record. Recorded staged ahead of host
+> adoption; consumed in-repo by the rubash#2810 consumer
+> pins. §6 grows 290 → 297 (one item, one variant, five
+> methods).
+>
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -980,7 +1007,7 @@ the 1.5.0 tiers exist to fix.
 
 | Family | Items (occurrences) |
 | --- | --- |
-| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); GAP-12 (niubash#863) pairs the declaration with the post-build apply/read faces (`Session::apply_invocation_before_startup` / `finish_invocation_startup` / `applied_invocation_shape`, with `Session::remove_env` / `mark_login_shell` beside them — §2.3 rows, staged 0; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro` / `Keymap`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum); plus the `&self` variable read faces `Session::environment_full` / `Session::variable_value` — the niubash#863 GAP-6 full-table snapshot and single-value stored-value probe (recorded staged ahead of host adoption; see the header addendum); plus the completion-attempt guard family `CompletionAttempt` (+ methods `complete` / `complete_detailed` / `call_function_with_env` / `session`), with the opener `Session::begin_completion_attempt` — the niubash#863 GAP-7 reentrancy-aware attempt object replacing the host's thread-local shell lend (recorded staged ahead of host adoption; see the header addendum); plus the finish guard family `Finish` (+ methods `run_exit_trap` / `final_cwd` / `run_stream_end_duties` / `finish_all`) / `FinishOutcome` / `FinishDuties` / `SessionHistoryWrite`, with the opener `Session::begin_finish` and the report face `Session::close_with_report` — the niubash#863 GAP-8 step-decomposed finish object replacing the host's hand-composed finish funnels (recorded staged ahead of host adoption; see the header addendum); plus the token view family `TokenView` (+ methods `word_at` / `segment_words_before` / `last_separator_before`) / `TokenSpan` / `TokenKindView` / `TokenRole`, with the read face `Session::token_view` and the completeness face `Session::needs_more_input` — the niubash#863 GAP-9 lexer projection onto caller-fed text and the session completeness query (recorded staged ahead of host adoption; see the header addendum) |
+| `api` | `Session` (+ §2.3 methods), `SessionBuilder` (+ §2.3 methods), `RunOptions`, `RunOutcome`, `Flow` (+ variant `ExitRequested`), `PreparedLine` (+ variants `Execute`, `Discard`) — the Tier A contract surface niubash's host drives since the Ledger v4 migration; plus the invocation-shape family `InvocationShape` (+ constructors `new` / `interactive` / `login_interactive`) / `RespawnSource` (+ variants `Fresh`, `EngineChild`), with the builder face `SessionBuilder::invocation_shape` and the readback `Session::invocation_shape` — the rubash#2130 construction-time shape declaration (recorded staged ahead of host adoption; see the header addendum); GAP-12 (niubash#863) pairs the declaration with the post-build apply/read faces (`Session::apply_invocation_before_startup` / `finish_invocation_startup` / `applied_invocation_shape`, with `Session::remove_env` / `mark_login_shell` beside them — §2.3 rows, staged 0; see the header addendum); plus the bind view family `BindView` / `BindEntryView` / `BindKindView` (+ variants `Execute` / `Function` / `Macro` / `Keymap`) / `BindRemovalView`, with the read face `Session::bind_view` — the niubash#863 GAP-3 registry snapshot (recorded staged ahead of host adoption; see the header addendum); plus the completion view family `CompletionView`, with the read faces `Session::completion_view` / `Session::has_function` — the niubash#863 GAP-4 completer-state snapshot and `&self` function probe (recorded staged ahead of host adoption; see the header addendum); plus the path-resolution faces `Session::resolve_shell_path` / `Session::resolve_shell_path_from_env` / `Session::resolve_shell_path_process_entries_from_env` / `Session::shell_pwd_display_path` — the niubash#863 GAP-5 same-source tier-A forms of the `executor::path` resolver (recorded staged ahead of host adoption; see the header addendum); plus the `&self` variable read faces `Session::environment_full` / `Session::variable_value` — the niubash#863 GAP-6 full-table snapshot and single-value stored-value probe (recorded staged ahead of host adoption; see the header addendum); plus the completion-attempt guard family `CompletionAttempt` (+ methods `complete` / `complete_detailed` / `call_function_with_env` / `session`), with the opener `Session::begin_completion_attempt` — the niubash#863 GAP-7 reentrancy-aware attempt object replacing the host's thread-local shell lend (recorded staged ahead of host adoption; see the header addendum); plus the finish guard family `Finish` (+ methods `run_exit_trap` / `final_cwd` / `run_stream_end_duties` / `finish_all`) / `FinishOutcome` / `FinishDuties` / `SessionHistoryWrite`, with the opener `Session::begin_finish` and the report face `Session::close_with_report` — the niubash#863 GAP-8 step-decomposed finish object replacing the host's hand-composed finish funnels (recorded staged ahead of host adoption; see the header addendum); plus the token view family `TokenView` (+ methods `word_at` / `segment_words_before` / `last_separator_before`) / `TokenSpan` / `TokenKindView` / `TokenRole`, with the read face `Session::token_view` and the completeness face `Session::needs_more_input` — the niubash#863 GAP-9 lexer projection onto caller-fed text and the session completeness query (recorded staged ahead of host adoption; see the header addendum); plus the cooperative-cancellation family `CancelToken` (+ methods `cancel` / `reset` / `is_cancelled`) / `Flow` (+ variant `Cancelled`) / `RunClassification::cancelled`, with the read face `Session::cancellation_token` and the builder face `SessionBuilder::cancel_token` — the rubash#2810 host escape hatch (recorded staged ahead of host adoption; see the header addendum) |
 | `executor` | `Executor` (type; +§2.2 methods), `ExecuteError` (2) + variants `ExitCode` (6), `Return` (4), `CommandNotFound` (3), `ExpansionFailure` (3), `FatalFunctionError` (3), `IoError` (1); `shell_pwd_display_path` (0) |
 | root re-exports | `Executor` (1) + constructor path `Executor::new` (1; recorded in the 2026-10-29 backfill, see §0), `Token` (1), `TokenKind` (1) + variants `Word`, `Assignment`, `BraceExpand`, `CommandSubst` (1 each), `Ast` (use-list), `decode_to_visible_text` (1) |
 | debugger front doors | `run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset` — root re-exports consumed by niubash's `--dap` / `--debug` entry points (missed by the v2 census; recorded in v3) |
@@ -1318,6 +1345,7 @@ its test-module reads named separately in the row):
 | `Session::has_special_compspec` | 0 | B5-11 residual (niubash#863, rubash#2738): ENTERS the ledger with this record — the selective special-compspec query: whether the one special slot named by `SpecialCompspecKind` (`Default` = `-D`, `Empty` = `-E`, `Initial` = `-I`) is registered. The name form `has_compspec` ORs the command's own registration and all three slots together, so a host gate cannot open for exactly the governing class — and the `-E`/`-I` positions are the ones with no command name to ask about. A pure registration query like the name form; position governance stays `has_compspec_at`'s answer. Recorded staged ahead of the host adoption (the host gate rewire is the niubash side of B5-11), so the count is 0; consumed in-repo by the rubash#2738 consumer pins |
 | `Session::background_job_count` | 1 | GAP queue (niubash#863, rubash#2859): ENTERS the ledger with this record — the background-jobs count as a contract face: the number of table entries with `background == true` and state in {Running, Stopped} after the `cleanup_dead_jobs` liveness pass, exactly the set bare `jobs` lists (GNU builtins/jobs.def:83 `list_all_jobs`, jobs.c:2254-2257). A ^Z-stopped foreground job counts (the stop path flips it to `background = true`); process-substitution children are not table entries and never count; a completed job never counts. Adopted by the host adoption (niu #946, merge `28720f2f`): the host prompt segment (`BackgroundJobs`) reads through this face — one production call, in `prompt_for_display` — instead of its `NIU_BACKGROUND_JOBS` environment variable, which had no honest producer (niu #846 residual), so the count is 1. Consumed in-repo by the #2859 consumer pins (one/two Running, reaped, disowned, Stopped, procsub) |
 | `Session::cwd` | 1 | Session-method census backfill (niubash#1020, merge `2dd426c5`): ENTERS the ledger with this record — the session cwd as a contract face: the session's working directory as a `&self` read (`Executor::session_cwd` under a `Session` name). The host's `spell-correct-word` readline command (`run_spell_correct_word`, GNU bashline.c `bash_spell_correct_word` → spell.c `dirspell`) reads it to spell-correct the word at point (`repl.rs:1953`, `spell_correct_path(&word, session().cwd())`), so the count is 1 — the face's single production call. Recorded nowhere before — caught by the Session-method census (§5.5) itself, the same blind-spot class as the GAP-13 `environment` face. |
+| `Session::cancellation_token` | 0 | rubash#2810: ENTERS the ledger with this record — the session's cancellation token as a contract face: the `CancelToken` the host clones for its write end, read back from the built session (the builder face `SessionBuilder::cancel_token` installs a host-supplied token at construction; otherwise the session carries its own). Recorded staged ahead of host adoption, so the count is 0; consumed in-repo by the rubash#2810 consumer pins (each pin clones the token onto a helper thread that cancels it mid-run) |
 | `Session::executor` / `executor_mut` | seam door | every §2.2 call goes through these |
 
 Deliberate non-adoptions, adjudicated during the migration:
@@ -1413,6 +1441,7 @@ to the split core crate without changing its shape.
 | history provider install face (`Session::set_history_provider`) | A | the post-build history-provider install as a `Session` setter in `rubash::api`, beside the §5.3 state views: a pure lift of the executor setter (replace-always, unguarded — install-once remains the host's guard), so the interactive single-stream discipline installs through the contract instead of the tier-C seam; builder injection is the same install at build time. It supersedes the host's seam install when the host lane lands (niubash#863 GAP-10; recorded staged ahead of host adoption; see the header addendum) |
 | driver path resolution (`resolve_shell_path`, `resolve_shell_path_from_env`, `resolve_shell_path_process_entries_from_env`, `find_script_on_path`, `shell_pwd_display_path`) | B (row-11 ruling) | driver helpers beside `script_driver`: the host/driver layer's path machinery, consumed identically by both binaries' startup and script lookup; the resolver faces' `Session` consumption forms are tier A — see the path-resolution faces row above — and `find_script_on_path` has no Session form |
 | signal/run state accessors (`take_signal_discard_pending`, `last_command_inverted`, `ExecuteError::SigintUnwind`) | A (row-11 ruling) | part of the run path's outcome surface (`Session::run` + `RunOutcome`): the host must be able to read how a run ended and service the engine's signal bookkeeping |
+| cooperative cancellation (`CancelToken`, `Flow::Cancelled`, `Session::cancellation_token`, `SessionBuilder::cancel_token`, `RunClassification::cancelled`) | A | the host escape hatch in `rubash::api` (rubash#2810): the session polls the host-held token at statement boundaries and in the engine's own blocking wait loops; a set token unwinds the unit as `Flow::Cancelled` with `RunClassification::cancelled`, never a spoofed SIGINT 130 and never a `trap INT` fire; a blocked external child is deliberately not a safe point. Recorded staged ahead of host adoption (see the header addendum) |
 | snapshots & misc accessors (`aliases_snapshot`, `alias_expansion_enabled`) | C (case-by-case) | promote only if a later census shows a second consumer; otherwise internals. `bind_registry_generation` rides the gated bind surface (§4's bind row), not this one; `bind_registry_snapshot` was demoted to crate-internal with #2853 and rides no surface (see header addendum) |
 | tier-C executor seam (`Session::executor` / `executor_mut`) | C (Ledger v4) | the recorded door for the retained direct faces (§2.2's set): the bind registry, the design-§3.2 AST routes, the run-classification plumbing of the retained direct routes, the full-table snapshots, and the `&self` probe reads the `&mut`-shaped views cannot serve. (The post-build provider install left this set with GAP-10: it is the `Session::set_history_provider` face.) (The post-build invocation faces left this set with GAP-12: the apply/read pair plus the removal and login companions are `Session` faces now.) Added with the migration's companion change; its consumer set is expected to shrink, never grow |
 | debugger front doors (`run_dap_stdio`, `run_debug_cli`, `DapLaunchPreset`, `DebugCliPreset`) | B | driver-layer front doors at the crate root — the design's §10 forms of the one debug session; they stay driver surface, not `Session` methods, and move with the driver layer at the split |
@@ -1541,6 +1570,7 @@ item rubash::api::BindEntryView
 item rubash::api::BindKindView
 item rubash::api::BindRemovalView
 item rubash::api::BindView
+item rubash::api::CancelToken
 item rubash::api::CandidateKind
 item rubash::api::CompletionAttempt
 item rubash::api::CompletionOutcome
@@ -1643,6 +1673,7 @@ variant rubash::api::CandidateKind::Directory
 variant rubash::api::CandidateKind::Executable
 variant rubash::api::CandidateKind::File
 variant rubash::api::CandidateKind::Symlink
+variant rubash::api::Flow::Cancelled
 variant rubash::api::Flow::ExitRequested
 variant rubash::api::PreparedLine::Discard
 variant rubash::api::PreparedLine::Execute
@@ -1691,6 +1722,9 @@ variant rubash::executor::ExecuteError::Return
 variant rubash::executor::ExecuteError::SigintUnwind
 variant rubash::special_paths::SpecialPathClass::Filesystem
 method rubash::Executor::new
+method rubash::api::CancelToken::cancel
+method rubash::api::CancelToken::is_cancelled
+method rubash::api::CancelToken::reset
 method rubash::api::CompletionAttempt::call_function_with_env
 method rubash::api::CompletionAttempt::complete
 method rubash::api::CompletionAttempt::complete_detailed
@@ -1713,6 +1747,7 @@ method rubash::api::Session::begin_finish
 method rubash::api::Session::bind_view
 method rubash::api::Session::builder
 method rubash::api::Session::call_function_with_env
+method rubash::api::Session::cancellation_token
 method rubash::api::Session::close
 method rubash::api::Session::close_with_report
 method rubash::api::Session::complete
@@ -1764,6 +1799,7 @@ method rubash::api::Session::variables
 method rubash::api::Session::variable_value
 method rubash::api::SessionBuilder::argv0
 method rubash::api::SessionBuilder::build
+method rubash::api::SessionBuilder::cancel_token
 method rubash::api::SessionBuilder::compatible_shell_path
 method rubash::api::SessionBuilder::disable_builtin
 method rubash::api::SessionBuilder::env
