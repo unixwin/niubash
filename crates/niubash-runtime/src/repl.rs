@@ -3001,10 +3001,24 @@ type Unread = Box<dyn FnMut(&[crossterm29::event::Event]) + Send>;
 /// event and read it. A non-console stdin (pipes, tests) makes `poll` fail —
 /// that is "no paste partner" for every caller here, so map it to silence.
 fn live_lookahead(budget: Duration) -> Option<crossterm29::event::Event> {
-    if crossterm29::event::poll(budget).unwrap_or(false) {
-        crossterm29::event::read().ok()
-    } else {
-        None
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if !crossterm29::event::poll(remaining).unwrap_or(false) {
+            return None;
+        }
+        let event = crossterm29::event::read().ok()?;
+        // Windows conhost delivers KeyEventKind::Release after every press;
+        // ReedlineRawEvent drops Release, so skip it here instead of letting
+        // an Esc-Release abort the Esc+key meta lookahead (niubash#1063).
+        if matches!(
+            event,
+            crossterm29::event::Event::Key(k)
+                if k.kind == crossterm29::event::KeyEventKind::Release
+        ) {
+            continue;
+        }
+        return Some(event);
     }
 }
 
@@ -6064,7 +6078,7 @@ impl ChordEditMode {
 fn chord_key(event: &crossterm29::event::Event) -> Option<(KeyModifiers, KeyCode)> {
     match event {
         crossterm29::event::Event::Key(key)
-            if key.kind == crossterm29::event::KeyEventKind::Press =>
+            if key.kind != crossterm29::event::KeyEventKind::Release =>
         {
             Some((key.modifiers, key.code))
         }
@@ -6226,6 +6240,21 @@ impl ChordEditMode {
                         code, modifiers,
                     ));
                     key = (modifiers, code);
+                }
+            }
+        } else if key.0.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && !key.0.contains(KeyModifiers::SHIFT)
+        {
+            // On Windows conhost with CapsLock active, crossterm's ToUnicodeEx
+            // reports uppercase Char('X') with CONTROL/ALT and no SHIFT;
+            // normalize to lowercase to match ChordIndex slots (niubash#1063).
+            if let KeyCode::Char(c) = key.1 {
+                if c.is_ascii_uppercase() {
+                    let code = KeyCode::Char(c.to_ascii_lowercase());
+                    raw = crossterm29::event::Event::Key(crossterm29::event::KeyEvent::new(
+                        code, key.0,
+                    ));
+                    key = (key.0, code);
                 }
             }
         }
@@ -11450,6 +11479,35 @@ mod tests {
             event,
             edit_event(EditCommand::InsertString("QUICK".to_string())),
             "the configured 40 ms window must expire before 80 ms"
+        );
+    }
+
+    #[test]
+    fn chord_edit_mode_normalizes_capslock_control_and_alt_chars() {
+        let inner = Emacs::new(default_emacs_keybindings());
+        let chords = vec![ChordBinding {
+            keys: vec![
+                (KeyModifiers::CONTROL, KeyCode::Char('x')),
+                (KeyModifiers::CONTROL, KeyCode::Char('t')),
+            ],
+            event: ReedlineEvent::ExecuteHostCommand("__niu_bindx 0".to_string()),
+        }];
+        let mut mode = ChordEditMode::new(
+            Box::new(inner),
+            chords,
+            HashSet::new(),
+            None,
+            TEST_KEYSEQ_TIMEOUT,
+        );
+        // CapsLock on Windows conhost delivers uppercase Char('X')/Char('T')
+        // with CONTROL and no SHIFT; both must match the lowercase chord.
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('X'), KeyModifiers::CONTROL)),
+            ReedlineEvent::Pending
+        );
+        assert_eq!(
+            mode.parse_event(chord_test_key(KeyCode::Char('T'), KeyModifiers::CONTROL)),
+            ReedlineEvent::ExecuteHostCommand("__niu_bindx 0".to_string())
         );
     }
 
