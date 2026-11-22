@@ -647,7 +647,7 @@ jobs:
           # never per package name, so the assertion targets each package's
           # `commands` from the manifest (mirroring the wpm index), with the
           # package name as the fallback for entries that carry none.
-          function Assert-StagedShim([string]$name, [string]$packageName) {
+          function Assert-StagedShim([string]$name, [string]$packageName, [switch]$ManifestShim) {
             $exe = Join-Path $binDir "$name.exe"
             if (-not (Test-Path -LiteralPath $exe)) {
               throw "pre-install reported '$packageName' installed but $exe is missing from the staged package"
@@ -657,6 +657,11 @@ jobs:
               throw "$name --version failed inside the staged package (exit $LASTEXITCODE)"
             }
             Write-Host "$name --version: $($out | Select-Object -First 1)"
+            # Manifest shims (preinstall.json `shims`) are materialized by
+            # the release step itself as usr\bin hardlinks only; they are
+            # not wpm-recorded package commands, so the #1052 PATH entry
+            # assertion below does not apply to them.
+            if ($ManifestShim) { return }
             # niubash#1052 — the PATH entry directory must carry the command
             # too: <root>\winuxcmd\bin is the ONLY directory of the install
             # on the process PATH (docs/src/installer.md "The PATH Entry
@@ -681,7 +686,7 @@ jobs:
             # A manifest shim exists only when its target package installed
             # (the pre-install step materializes it under exactly that rule).
             if ($installed -notcontains $shim.target) { continue }
-            Assert-StagedShim $shim.name $shim.target
+            Assert-StagedShim $shim.name $shim.target -ManifestShim
           }
 
           if ($installed -contains "gawk") {
