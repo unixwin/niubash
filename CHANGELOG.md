@@ -4,10 +4,13 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-22
+
 ### Fixed
 
 - **Deep-audit host fix wave (1.5.1-bound, 2026-11-04)**: seven non-interactive host findings fixed (#886) — including corrupt plugin-spec errors now naming the file and the cause; `$BASH_ARGV0` seed no longer clobbered by host startup and `NIU_COMP_WORDS` no longer duplicated (#887, with the engine-side compspec fixes in rubash #2756); frozen interactive config specs (`NIU_BINDKEYS`/`NIU_COMPDEFS`) re-applied on setup re-run (#891, closing #889/#890). The remaining host finding (#888, exported HISTFILE) is a recorded owner decision. Engine-side counterparts landed in rubash's deep-audit wave (see the rubash changelog).
 - **Windows interactive login shells read `~/.niubashrc` again** (niubash#1057): `--login`/`-l` (and the argv[0] `-` seed) no longer divert the interactive startup face onto the GNU profile chain — `niu --login -i` now sources the generated plugin loader and `~/.niubashrc` exactly like `niu -i` (`--rcfile` and `NIU_RC_POLICY` apply unchanged), restoring the standing contract "Windows accepts the flags with unchanged behavior (no login concept)". GNU shell.c:1833's "the login profile chain replaces the interactive-RC alternative" is a deliberate product fork on this face, not a GNU-alignment gap: on a bare Windows home none of the chain's files exists, so `--login -i` used to source nothing at all. Deliberate side effects: ① a staged GNU profile file (`.bash_profile`/`.bash_login`/`.profile`) no longer runs on the Windows interactive face; ② the #590 expectation flips on Windows — an interactive login shell loads loader + rc and no chain; ③ the non-interactive `-c` face is unchanged — `-l -c` still sources the GNU chain (niubash#399/#587/#602) — and POSIX mode keeps the chain on every platform.
+- **Engine and bundled-commands line rises to 1.5.1**: the rubash pin takes rubash master `67189af0` (v1.5.1 — the 457-issue GNU Bash 5.3.20 differential wave, see the rubash changelog), the ruline pin takes ruline main `4d0aefa8`, and the bundled WinuxCmd line is 1.2.2. Also in this wave: bind -x conhost chord dispatch and READLINE_POINT restore (#1065, closing #1063) and the env.exe distribution fix through the winuxcmd bundle (#1062).
 
 ## [1.5.0] - 2026-11-03
 
