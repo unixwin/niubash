@@ -1,18 +1,18 @@
 {
-    "version": "1.5.0",
+    "version": "1.5.1",
     "description": "AI-native bash for humans and AI agents: real bash syntax and Unix commands on native Windows, no WSL and no MSYS",
     "homepage": "https://github.com/unixwin/niubash",
     "license": "MIT",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/unixwin/niubash/releases/download/v1.5.0/niubash-win-x64.zip",
-            "hash": "bb2e142ec617e91cb48bde8c0fa2b9cce2dc95bfc00857c82cef6a7ad4e12bcc",
-            "extract_dir": "niubash-v1.5.0-win-x64"
+            "url": "https://github.com/unixwin/niubash/releases/download/v1.5.1/niubash-win-x64.zip",
+            "hash": "ece95fc93c5c92f4ddee087d98d5d8ed51aa3705200177a088b403636532accc",
+            "extract_dir": "niubash-v1.5.1-win-x64"
         },
         "arm64": {
-            "url": "https://github.com/unixwin/niubash/releases/download/v1.5.0/niubash-win-arm64.zip",
-            "hash": "f4b0fab55bd2f3e894bd2aea2f2bf8e02b6661d3d67aa15483ed5cc865d49bb3",
-            "extract_dir": "niubash-v1.5.0-win-arm64"
+            "url": "https://github.com/unixwin/niubash/releases/download/v1.5.1/niubash-win-arm64.zip",
+            "hash": "7977cd44dc0ede0aedd20fa1c19fa721c655d36fda277c6ba3830d9e1d774025",
+            "extract_dir": "niubash-v1.5.1-win-arm64"
         }
     },
     "bin": "niu.exe",
