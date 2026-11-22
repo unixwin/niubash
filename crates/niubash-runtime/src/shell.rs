@@ -956,6 +956,7 @@ impl Shell {
         normalize_executor_home_env(&mut session, &home_dir);
         ensure_windows_profile_env(&mut session, &home_dir);
         ensure_prompt_terminal_env(&mut session);
+        ensure_git_terminal_prompt_env(&mut session);
         let history_path = resolve_history_path(
             config.history.path.clone(),
             std::env::var("HISTFILE").ok(),
@@ -6492,6 +6493,48 @@ fn ensure_prompt_terminal_env(session: &mut Session) {
     {
         session.variables().set("COLUMNS", "80");
     }
+}
+
+/// niubash#1061: When stdin is not a terminal (piped / redirected / headless
+/// invocation), bundled `niu-git` (and Windows Git in general) has no
+/// interactive terminal on stdin; without a credential helper or
+/// `GIT_TERMINAL_PROMPT=0`, HTTPS auth falls back to reading `CONIN$` and
+/// hangs indefinitely instead of failing fast.
+///
+/// Seed `GIT_TERMINAL_PROMPT=0` as an exported session variable only when:
+/// 1. stdin is NOT a terminal (`!stdin_is_tty`),
+/// 2. `GIT_TERMINAL_PROMPT` is not already set (so explicit `0` or `1` is honored), and
+/// 3. `GIT_ASKPASS` is not already set and non-empty (so askpass helpers are not suppressed).
+///
+/// Configured `credential.helper`s (e.g. `~/.gitconfig`, `gh`, GCM) still run
+/// first in git; `GIT_TERMINAL_PROMPT=0` only disables the interactive
+/// terminal fallback when no helper supplies credentials.
+fn ensure_git_terminal_prompt_env(session: &mut Session) {
+    ensure_git_terminal_prompt_env_with_tty(session, crate::terminal::stdin_is_terminal());
+}
+
+fn ensure_git_terminal_prompt_env_with_tty(session: &mut Session, stdin_is_tty: bool) {
+    if stdin_is_tty {
+        return;
+    }
+    if session
+        .variables()
+        .resolved_value("GIT_TERMINAL_PROMPT")
+        .is_some_and(|current| !current.trim().is_empty())
+    {
+        return;
+    }
+    if session
+        .variables()
+        .resolved_value("GIT_ASKPASS")
+        .is_some_and(|current| !current.trim().is_empty())
+    {
+        return;
+    }
+    session.variables().set("GIT_TERMINAL_PROMPT", "0");
+    session
+        .variables()
+        .set_exported("GIT_TERMINAL_PROMPT", true);
 }
 
 fn set_executor_env_if_missing_or_empty(session: &mut Session, name: &str, value: &str) {
@@ -13363,5 +13406,50 @@ gap7_widget() {
         // it is a builder-seeded exported var, and exported session
         // vars mirror into the process env by design.)
         assert!(std::env::var("NIU_GAP6_PROBE_VAR").is_err());
+    }
+
+    #[test]
+    fn issue1061_git_terminal_prompt_seeded_only_when_non_tty_and_unset() {
+        let mut session = rubash::api::Session::builder()
+            .build()
+            .expect("test session builds");
+        session.remove_env("GIT_TERMINAL_PROMPT");
+        session.remove_env("GIT_ASKPASS");
+
+        // When stdin is a terminal, never force GIT_TERMINAL_PROMPT=0.
+        super::ensure_git_terminal_prompt_env_with_tty(&mut session, true);
+        assert_eq!(
+            session.variables().resolved_value("GIT_TERMINAL_PROMPT"),
+            None
+        );
+
+        // When stdin is not a terminal and neither GIT_TERMINAL_PROMPT nor
+        // GIT_ASKPASS is set, seed GIT_TERMINAL_PROMPT=0 as exported.
+        super::ensure_git_terminal_prompt_env_with_tty(&mut session, false);
+        assert_eq!(
+            session.variables().resolved_value("GIT_TERMINAL_PROMPT"),
+            Some("0".to_string())
+        );
+        assert!(session
+            .environment_full()
+            .iter()
+            .any(|(name, value)| name == "GIT_TERMINAL_PROMPT" && value == "0"));
+
+        // Explicit GIT_TERMINAL_PROMPT=1 must not be overwritten.
+        session.variables().set("GIT_TERMINAL_PROMPT", "1");
+        super::ensure_git_terminal_prompt_env_with_tty(&mut session, false);
+        assert_eq!(
+            session.variables().resolved_value("GIT_TERMINAL_PROMPT"),
+            Some("1".to_string())
+        );
+
+        // When GIT_ASKPASS is set, leave GIT_TERMINAL_PROMPT untouched.
+        session.remove_env("GIT_TERMINAL_PROMPT");
+        session.variables().set("GIT_ASKPASS", "custom-askpass");
+        super::ensure_git_terminal_prompt_env_with_tty(&mut session, false);
+        assert_eq!(
+            session.variables().resolved_value("GIT_TERMINAL_PROMPT"),
+            None
+        );
     }
 }
