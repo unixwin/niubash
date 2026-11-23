@@ -41,11 +41,32 @@
 //! policy IS the GNU child-SIGPIPE shape), `niu -i`, or when stdout is not a
 //! pipe at all. Non-Windows targets keep the engine-side #455 semantics (no
 //! pump): this guard is the Windows pipe-death analogue of SIGPIPE.
+//!
+//! One install case carries a different broken-write POLICY (niubash#1079):
+//! a provenance-validated respawned child — a process-substitution or coproc
+//! body the engine respawned as a plain `niu -c '<body>'` with its stdout on
+//! the substitution pipe. In GNU that body is a forked subshell, so a reader
+//! that stops early kills it with SIGPIPE: no diagnostic, and the parent
+//! shell's `wait` reports 141. The pump still installs (the child's writers
+//! need the same single FIFO), but when the downstream write fails the pump
+//! exits quietly with 141 instead of the #245 diagnostic + status 1. The
+//! claim is read in `install_for_argv`, before the engine imports and scrubs
+//! the provenance keys, via rubash's own parentage validation — a user-run
+//! `niu -c '…' | head -1` carries no validated claim and keeps the #245
+//! behavior exactly.
 
 /// Exit status used when the process stdout dies: rubash#455 semantics — a
 /// failed write is an ordinary command failure (status 1), reported once.
 #[cfg(windows)]
 const BROKEN_STDOUT_EXIT_CODE: i32 = 1;
+
+/// Exit status for a provenance-validated respawned child (niubash#1079)
+/// whose downstream reader went away: the GNU SIGPIPE death status,
+/// 128 + 13. rubash already reports 141 for a producer cut off by its
+/// reader (`yes | head -1` gives PIPESTATUS[0] 141), so the parent shell's
+/// `wait` on a procsub/coproc child must see the same value.
+#[cfg(windows)]
+const RESPAWNED_BROKEN_PIPE_EXIT_CODE: i32 = 141;
 
 /// Diagnosed once, by the pump, when the downstream reader is gone. The
 /// wording deliberately avoids the raw OS surfaces ("Broken pipe",
@@ -59,8 +80,14 @@ const BROKEN_STDOUT_DIAGNOSTIC: &str =
 /// covers. Called before anything in the process has written to stdout.
 pub fn install_for_argv(args: &[String]) {
     if execution_flow_argv(args) {
+        // niubash#1079: read the respawn claim NOW, before the engine
+        // imports the environment and scrubs the provenance keys — this is
+        // the same pre-`Executor::new` read rubash's own main performs for
+        // its async-child entry face. The verdict rides parentage
+        // validation, not the raw env strings, so a user shell that merely
+        // inherits lookalike keys does not qualify.
         #[cfg(windows)]
-        imp::install();
+        imp::install(rubash::executor::respawn_provenance_validated_from_process_env());
     }
 }
 
@@ -110,7 +137,9 @@ fn execution_flow_argv(args: &[String]) -> bool {
 
 #[cfg(windows)]
 mod imp {
-    use super::{BROKEN_STDOUT_DIAGNOSTIC, BROKEN_STDOUT_EXIT_CODE};
+    use super::{
+        BROKEN_STDOUT_DIAGNOSTIC, BROKEN_STDOUT_EXIT_CODE, RESPAWNED_BROKEN_PIPE_EXIT_CODE,
+    };
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::os::windows::io::{FromRawHandle, RawHandle};
@@ -149,7 +178,7 @@ mod imp {
     /// can vanish and loop the engine). Must run before the first
     /// `std::io::stdout()` use so Rust's cached stdio handle resolves to the
     /// wrapper, keeping every writer on the same FIFO.
-    pub(super) fn install() {
+    pub(super) fn install(respawned_child: bool) {
         unsafe {
             let real: Handle = GetStdHandle(STD_OUTPUT_HANDLE);
             if real.is_null() || real == INVALID_HANDLE_VALUE {
@@ -187,7 +216,7 @@ mod imp {
             let real_handle = real as isize;
             let spawned = std::thread::Builder::new()
                 .name("niu-stdout-pump".to_string())
-                .spawn(move || pump_loop(read_file, real_handle, done_sender));
+                .spawn(move || pump_loop(read_file, real_handle, done_sender, respawned_child));
             match spawned {
                 Ok(_join) => {
                     *PUMP.lock().expect("pump state mutex") = Some(PumpState {
@@ -210,8 +239,15 @@ mod imp {
     /// downstream write failure is the reader-gone condition: report ONCE
     /// and kill the process (status 1) — the anti-loop guarantee that the
     /// engine alone cannot provide when the shell's own stdout is the pipe
-    /// that closed.
-    fn pump_loop(mut read: std::mem::ManuallyDrop<File>, real_handle: isize, done: Sender<()>) {
+    /// that closed. A provenance-validated respawned child (niubash#1079)
+    /// takes the GNU child-SIGPIPE shape instead: no diagnostic, exit 141 —
+    /// in GNU that child is a forked subshell and dies by the signal.
+    fn pump_loop(
+        mut read: std::mem::ManuallyDrop<File>,
+        real_handle: isize,
+        done: Sender<()>,
+        respawned_child: bool,
+    ) {
         let mut real: std::mem::ManuallyDrop<File> =
             unsafe { std::mem::ManuallyDrop::new(File::from_raw_handle(real_handle as RawHandle)) };
         let mut buffer = vec![0_u8; PUMP_CHUNK_BYTES];
@@ -220,6 +256,9 @@ mod imp {
                 Ok(0) => break, // EOF: every writer closed — fully drained
                 Ok(size) => {
                     if write_all(&mut real, &buffer[..size]).is_err() {
+                        if respawned_child {
+                            std::process::exit(RESPAWNED_BROKEN_PIPE_EXIT_CODE);
+                        }
                         report_and_exit();
                     }
                 }
