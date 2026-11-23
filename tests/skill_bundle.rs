@@ -63,6 +63,45 @@ fn install_writes_bundle_and_status_reports_current() {
     assert_eq!(code, Some(0), "status failed: {stderr}");
     assert!(stdout.contains("current"), "stdout: {stdout}");
     assert!(stdout.contains("sha256 "), "digest line missing: {stdout}");
+    // Status names the bundle's own version beside the digest (#1083):
+    // the stamp the generator wrote into SKILL.md from the package version.
+    let version_line = format!(
+        "bundle: niubash skill {}, sha256 ",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(
+        stdout.contains(&version_line),
+        "bundle version missing from status: {stdout}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn skill_md_prose_carries_no_stale_self_descriptions() {
+    // #1083: the hand-written debugging section called 1.4.4 "this
+    // bundle's version" long after the bundle moved on — the false
+    // self-description must not come back.
+    // #996: the identity check taught `uname -s`, which under real niu
+    // always answers with the MSYS persona and so always cried "fell
+    // back to Git Bash"; the probe is $NIU_SHELL now.
+    let root = temp_skills_root("prose");
+    let target = root.to_string_lossy().replace('\\', "/");
+    let (stdout, stderr, code) = run_skill(&["skill", "install", "--target", &target]);
+    assert_eq!(code, Some(0), "install failed: {stderr}");
+    assert!(stdout.contains("installed"), "stdout: {stdout}");
+    let skill = fs::read_to_string(root.join("niubash").join("SKILL.md")).unwrap();
+    assert!(
+        !skill.contains("(this bundle's version)"),
+        "stale 1.4.4 self-description is back in SKILL.md"
+    );
+    assert!(
+        !skill.contains("check it once per session with `uname -s`"),
+        "the uname -s fallback probe is back in SKILL.md"
+    );
+    assert!(
+        skill.contains("check it once per session with `$NIU_SHELL`"),
+        "the $NIU_SHELL identity probe is missing from SKILL.md"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 

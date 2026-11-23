@@ -11,7 +11,8 @@
 //! - `niu skill install [--target codex|claude|zcode|cursor|all|<dir>]` — write the
 //!   bundle into agent skill dirs (default: claude).
 //! - `niu skill status [--target ...]` — installed/outdated per target,
-//!   decided by per-file content comparison, with a sha256 bundle digest.
+//!   decided by per-file content comparison, with the bundle version and
+//!   a sha256 bundle digest.
 
 use niubash_runtime::skill::{self, SkillFile, TargetSpec};
 
@@ -79,7 +80,8 @@ fn print_skill_usage() {
     println!("        Same structure as the released niubash-skill-v*.zip.");
     println!("Usage:  niu skill status [--target ...]");
     println!("        Show installed/outdated state per target (content compared");
-    println!("        against this binary's embedded bundle; sha256 digest printed).");
+    println!("        against this binary's embedded bundle; bundle version and");
+    println!("        sha256 digest printed).");
 }
 
 fn resolve_targets(args: &[String]) -> anyhow::Result<Vec<(String, std::path::PathBuf)>> {
@@ -145,7 +147,10 @@ fn run_skill_install(args: &[String]) -> anyhow::Result<()> {
 fn run_skill_status(args: &[String]) -> anyhow::Result<()> {
     let targets = resolve_targets(args)?;
     let digest = skill::skill_digest(SKILL_FILES).unwrap_or_default();
-    println!("bundle: niubash skill, sha256 {digest}");
+    match skill::bundle_version(SKILL_FILES) {
+        Some(version) => println!("bundle: niubash skill {version}, sha256 {digest}"),
+        None => println!("bundle: niubash skill, sha256 {digest}"),
+    }
     for (name, dir) in &targets {
         let status = skill::check_target(SKILL_FILES, dir);
         let state = if status.up_to_date {
