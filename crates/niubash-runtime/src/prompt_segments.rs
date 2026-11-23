@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
-use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
+use ruline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
 use crate::idle_repaint::LiveVcsCell;
 use crate::path_utils::shell_home_dir;
@@ -763,7 +763,7 @@ fn render_separator(next: &RenderedSegment, prev_bg: Option<Color>, separator: &
 
 // ---- reedline adapter ----
 
-/// Wraps `SegmentPrompt` into the `reedline::Prompt` trait.
+/// Wraps `SegmentPrompt` into the `ruline::Prompt` trait.
 #[derive(Clone)]
 pub struct SegmentPromptAdapter {
     pub inner: SegmentPrompt,

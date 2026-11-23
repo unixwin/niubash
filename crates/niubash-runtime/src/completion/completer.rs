@@ -11,7 +11,7 @@ use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
 };
-use reedline::{Completer, CompletionResult as ReedlineCompletionResult, Span, Suggestion};
+use ruline::{Completer, CompletionResult as ReedlineCompletionResult, Span, Suggestion};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

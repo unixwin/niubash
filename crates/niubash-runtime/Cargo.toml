@@ -27,14 +27,14 @@ rubash = { version = "1.5.1", git = "https://github.com/unixwin/rubash.git", bra
 # registrations to the process-wide GNU readline ABI (`rl_line_buffer`,
 # `rl_point`, the exported keymaps). Same pinned rev as the `niu` binary's
 # dependency, so both name one linked crate instance.
-readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "4d0aefa8928039de1be2f63515e688cdc43928a5" }
+readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "36d875ac2ba058094a6b988779ff028f577ec868" }
 # niubash#373: the 0.52-era prompt anchors without turning a missing
 # cursor-position reply into a read_line abort — a DSR-silent terminal
 # (dumb terminals, script(1) recordings, some serial/tmux links) gets its
 # prompt painted instead of paying a ~2.6 s stall, a line-editor error, and
 # a dead session on every startup (niubash#355 finding 3). 0.50 aborted.
 # ruline is on its own 0.1.x version line; keep this semver floor in sync.
-reedline = { version = "=0.1.0" }
+ruline = { version = "=0.1.0" }
 fd-lock = "4.0"
 anyhow = "1.0"
 thiserror = "1.0"
@@ -89,13 +89,13 @@ signal-hook = "0.3"
 # the COM free functions only, the shell-link vtables live in src/shortcut.rs.
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Security_Authorization", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Registry", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
-# reedline's system_clipboard pulls arboard, which has no android backend and
+# ruline's system_clipboard pulls arboard, which has no android backend and
 # does not compile for aarch64-linux-android / armv7-linux-androideapi. Gate
 # the feature to non-android targets so the cross-target-check leg stays
 # honest (niubash#207 step 1); EditCommand::PasteSystem stays wired up and
 # simply has no system clipboard behind it on android.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-reedline = { version = "=0.1.0", features = ["system_clipboard"] }
+ruline = { version = "=0.1.0", features = ["system_clipboard"] }
 
 [dev-dependencies]
 tempfile = "3"

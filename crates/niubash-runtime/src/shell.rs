@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use reedline::Reedline;
+use ruline::Reedline;
 use rubash::api::{
     BindEntryView, BindKindView, FinishDuties, PreparedLine, RunOptions, Session,
     SessionHistoryWrite,
@@ -4109,7 +4109,7 @@ impl Shell {
         completer: &mut NiubashCompleter,
         input: &str,
         cursor_pos: usize,
-    ) -> Vec<reedline::Suggestion> {
+    ) -> Vec<ruline::Suggestion> {
         let faces = self.completion_host_faces();
         let drive_scope = self.install_drive_wordbreak_scope(input, cursor_pos);
         let suggestions = {
@@ -4132,7 +4132,7 @@ impl Shell {
         mode: crate::completion::SpecificCompletion,
         input: &str,
         cursor_pos: usize,
-    ) -> Vec<reedline::Suggestion> {
+    ) -> Vec<ruline::Suggestion> {
         let faces = self.completion_host_faces();
         let drive_scope = self.install_drive_wordbreak_scope(input, cursor_pos);
         let suggestions = {
@@ -6938,7 +6938,7 @@ fn shell_channel_write(channel: ShellChannel, bytes: &[u8]) {
 mod tests {
     use super::*;
     use crate::test_support::PROCESS_STATE_LOCK;
-    use reedline::Prompt;
+    use ruline::Prompt;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7145,7 +7145,7 @@ mod tests {
 
         // The editor twin over the shell's shared state, gated the
         // way build_line_editor gates the instance it hands reedline.
-        use reedline::History as _;
+        use ruline::History as _;
         let mut editor = crate::history::LiveFileBackedHistory::with_shared_state(
             shell.history_max_size,
             shell.history_state().unwrap(),
@@ -7154,17 +7154,17 @@ mod tests {
         editor.set_history_option_gate();
 
         editor
-            .save(reedline::HistoryItem::from_command_line("before-off"))
+            .save(ruline::HistoryItem::from_command_line("before-off"))
             .unwrap();
         shell.execute_line("set +o history").unwrap();
         shell.refresh_history_settings();
         editor
-            .save(reedline::HistoryItem::from_command_line("secret-while-off"))
+            .save(ruline::HistoryItem::from_command_line("secret-while-off"))
             .unwrap();
         shell.execute_line("set -o history").unwrap();
         shell.refresh_history_settings();
         editor
-            .save(reedline::HistoryItem::from_command_line("after-on"))
+            .save(ruline::HistoryItem::from_command_line("after-on"))
             .unwrap();
 
         // niubash#773: recording is memory-only; the file is written
@@ -7824,7 +7824,7 @@ mod tests {
         let _cwd_guard = CwdGuard::capture();
         let mut shell = Shell::new().unwrap();
         shell.run_precmd_hooks();
-        let rendered = reedline::Prompt::render_prompt_left(&shell.prompt).into_owned();
+        let rendered = ruline::Prompt::render_prompt_left(&shell.prompt).into_owned();
 
         assert!(
             !rendered
@@ -10744,7 +10744,7 @@ complete -F _envtooldyn_hook envtooldyn
         shell.run_precmd_hooks();
         match &shell.prompt {
             PromptBackend::Template(floor) => {
-                let left = reedline::Prompt::render_prompt_left(floor).into_owned();
+                let left = ruline::Prompt::render_prompt_left(floor).into_owned();
                 assert!(!left.contains("claimed-face"), "{left}");
             }
             _ => panic!("expected the product floor after release"),
@@ -10875,7 +10875,7 @@ complete -F _envtooldyn_hook envtooldyn
 
     #[cfg(windows)]
     fn render_left_of(prompt: &PromptBackend) -> String {
-        reedline::Prompt::render_prompt_left(prompt).into_owned()
+        ruline::Prompt::render_prompt_left(prompt).into_owned()
     }
 
     /// rubash#2859 host adoption chain: a Shell whose prompt draws
@@ -10901,7 +10901,7 @@ complete -F _envtooldyn_hook envtooldyn
             },
         )));
         let render = |shell: &mut Shell| {
-            reedline::Prompt::render_prompt_left(&shell.prompt_for_display()).into_owned()
+            ruline::Prompt::render_prompt_left(&shell.prompt_for_display()).into_owned()
         };
         // No jobs: no segment.
         assert!(
@@ -11071,7 +11071,7 @@ complete -F _envtooldyn_hook envtooldyn
         assert!(!shell.gitbash_prompt_active);
 
         let render = |shell: &mut Shell| {
-            reedline::Prompt::render_prompt_left(&shell.prompt_for_display()).into_owned()
+            ruline::Prompt::render_prompt_left(&shell.prompt_for_display()).into_owned()
         };
         assert!(!render(&mut shell).contains("1&"), "no jobs → no segment");
         shell
@@ -11267,7 +11267,7 @@ complete -F _envtooldyn_hook envtooldyn
         );
         for _ in 0..10 {
             let _ = render_left_of(&prompt);
-            let _ = reedline::Prompt::render_prompt_right(&prompt);
+            let _ = ruline::Prompt::render_prompt_right(&prompt);
         }
         assert!(crate::git_prompt_cache::wait_for_segment_cache_idle(
             std::time::Duration::from_secs(30)

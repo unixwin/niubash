@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use nu_ansi_term::{Color, Style};
-use reedline::{Hinter, History, SearchQuery};
+use ruline::{Hinter, History, SearchQuery};
 
 use crate::config::AutosuggestConfig;
 
@@ -188,7 +188,7 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 mod tests {
     use super::*;
     use crate::history::LiveFileBackedHistory;
-    use reedline::{FileBackedHistory, HistoryItem};
+    use ruline::{FileBackedHistory, HistoryItem};
 
     #[test]
     fn returns_history_suffix_for_prefix() {

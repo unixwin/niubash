@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
-use reedline::{Highlighter, StyledText};
+use ruline::{Highlighter, StyledText};
 use rubash::api::Session;
 
 use crate::autosuggest::parse_style;

@@ -39,8 +39,8 @@
 //! `invalidate_anchor_if_host_completer_runs` exists for) for no behavioral
 //! gain, so the interactive semantics win and the anchor stays intact.
 
-use reedline::menu_functions::{completer_input, CompletionDisplay};
-use reedline::{Completer, Editor, InputMode, Menu, MenuEvent, MenuSettings, Painter, Suggestion};
+use ruline::menu_functions::{completer_input, CompletionDisplay};
+use ruline::{Completer, Editor, InputMode, Menu, MenuEvent, MenuSettings, Painter, Suggestion};
 use unicode_width::UnicodeWidthChar;
 
 /// Two-space gutter between completion columns — GNU readline separates
@@ -883,7 +883,7 @@ impl Menu for GnuMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reedline::{CompletionResult, Span, UndoBehavior};
+    use ruline::{CompletionResult, Span, UndoBehavior};
     use unicode_width::UnicodeWidthStr;
 
     /// A prefix completer that INCLUDES the exact typed word among its

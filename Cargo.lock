@@ -658,8 +658,8 @@ dependencies = [
  "nu-ansi-term",
  "png",
  "readline-abi",
- "reedline",
  "rubash",
+ "ruline",
  "serde",
  "serde_json",
  "sha2",
@@ -931,10 +931,10 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "readline-abi"
 version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=4d0aefa8928039de1be2f63515e688cdc43928a5#4d0aefa8928039de1be2f63515e688cdc43928a5"
+source = "git+https://github.com/unixwin/ruline?rev=36d875ac2ba058094a6b988779ff028f577ec868#36d875ac2ba058094a6b988779ff028f577ec868"
 dependencies = [
  "libc",
- "reedline",
+ "ruline",
 ]
 
 [[package]]
@@ -955,24 +955,6 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "reedline"
-version = "0.1.0"
-source = "git+https://github.com/unixwin/ruline?rev=4d0aefa8928039de1be2f63515e688cdc43928a5#4d0aefa8928039de1be2f63515e688cdc43928a5"
-dependencies = [
- "arboard",
- "crossterm 0.29.0",
- "crossterm_winapi",
- "fd-lock",
- "nu-ansi-term",
- "rustix",
- "serde",
- "strip-ansi-escapes",
- "strum",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]
@@ -1015,6 +997,24 @@ dependencies = [
  "signal-hook",
  "stacker",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ruline"
+version = "0.1.0"
+source = "git+https://github.com/unixwin/ruline?rev=36d875ac2ba058094a6b988779ff028f577ec868#36d875ac2ba058094a6b988779ff028f577ec868"
+dependencies = [
+ "arboard",
+ "crossterm 0.29.0",
+ "crossterm_winapi",
+ "fd-lock",
+ "nu-ansi-term",
+ "rustix",
+ "serde",
+ "strip-ansi-escapes",
+ "strum",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

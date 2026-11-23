@@ -25,7 +25,7 @@ use std::sync::{
     Arc,
 };
 
-use reedline::{Completer, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion};
+use ruline::{Completer, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion};
 
 /// A menu that mirrors its wrapped menu's active state into the
 /// shared menu-open flag the autosuggest hinter consults.
@@ -170,7 +170,7 @@ impl Menu for MenuOpenFlagMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reedline::{IdeMenu, ListMenu, MenuBuilder};
+    use ruline::{IdeMenu, ListMenu, MenuBuilder};
 
     fn flag() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))

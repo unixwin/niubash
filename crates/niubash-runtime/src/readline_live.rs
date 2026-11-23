@@ -50,7 +50,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use reedline::{EditCommand, KeyCode, KeyModifiers, Reedline, ReedlineEvent};
+use ruline::{EditCommand, KeyCode, KeyModifiers, Reedline, ReedlineEvent};
 
 use crate::keymap_registry::KeymapMode;
 use crate::repl::NativeKeymapTarget;
