@@ -46,9 +46,12 @@ Glance"](https://github.com/unixwin/rubash#compatibility-at-a-glance)). What it 
 - The current session already **is** Niubash. Run commands directly; do not
   nest `niu -c`, and do not route work through `pwsh`, `powershell`,
   `cmd /c`, `wsl`, or `bash` wrappers. That holds only if the host actually
-  launched niu: check it once per session with `uname -s` — `MSYS_NT` or
-  `MINGW64_NT` means the host silently fell back to Git Bash (niubash#1031),
-  so report the host setting instead of working around it.
+  launched niu: check it once per session with `$NIU_SHELL` — niu sets
+  it to its own path, so `"$NIU_SHELL" --version` reports the real
+  niubash version; if it is unset, the host silently fell back to Git
+  Bash (niubash#1031), so report the host setting instead of working
+  around it. (`uname -s` cannot tell the two apart: niu's own `uname`
+  answers with the MSYS persona by design.)
 - Write bash syntax normally: functions, arrays, `$(...)`, pipes, heredocs,
   globs. For deep bash-isms (`coproc`, exotic redirects, `mapfile` edge
   cases, `compgen`/`complete`), test the exact form in-session before
@@ -91,7 +94,7 @@ line per command). Launcher verbs and the plugin verb table:
 ## Debugging scripts (new in niubash 1.5.0)
 
 The debugger front ends below ship with niubash **1.5.0**; they are not
-in 1.4.4 (this bundle's version). On 1.4.4, `--debug` keeps the legacy
+in 1.4.4. On 1.4.4, `--debug` keeps the legacy
 extdebug-arming behavior described in the last bullet, and `--debugger`
 is the GNU bashdb starter path.
 

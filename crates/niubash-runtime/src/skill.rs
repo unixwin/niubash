@@ -192,6 +192,32 @@ pub fn skill_digest(files: &[SkillFile]) -> Option<String> {
     )
 }
 
+/// The bundle's own version, read from the generated `Bundle version`
+/// line in SKILL.md (scripts/generate-skill.py stamps it from the root
+/// package version). `skill status` prints it beside the digest so a
+/// reader can tell *which* release a bundle is, not only *that* two
+/// bundles differ (niubash#1083). Read from the bundle itself rather
+/// than the binary's version: if the two ever disagree, the bundle's
+/// own stamp is the one describing the bytes being installed.
+pub fn bundle_version(files: &[SkillFile]) -> Option<String> {
+    let content = files
+        .iter()
+        .find(|file| file.rel == "SKILL.md")
+        .map(|file| file.content)?;
+    const MARKER: &str = "**Bundle version**: niubash ";
+    let start = content.find(MARKER)? + MARKER.len();
+    let rest = &content[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .unwrap_or(rest.len());
+    let version = &rest[..end];
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +337,17 @@ mod tests {
         assert_eq!(digest.len(), 64);
         let again = skill_digest(FILES).unwrap();
         assert_eq!(digest, again);
+    }
+
+    #[test]
+    fn bundle_version_reads_the_generated_stamp() {
+        const STAMPED: &[SkillFile] = &[SkillFile {
+            rel: "SKILL.md",
+            content: "# bundle\n- **Bundle version**: niubash 1.5.1 (generated; see scripts/generate-skill.py).\n",
+        }];
+        assert_eq!(bundle_version(STAMPED).as_deref(), Some("1.5.1"));
+        // No stamp line, and no SKILL.md at all, both read as unknown.
+        assert_eq!(bundle_version(FILES), None);
+        assert_eq!(bundle_version(&[]), None);
     }
 }
