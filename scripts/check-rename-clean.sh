@@ -198,18 +198,34 @@ check 'runtime crate is named niubash-runtime' grep -q '^name = "niubash-runtime
 check "Cargo.lock pins niubash $root_version" lock_pins niubash "$root_version"
 check "Cargo.lock pins niubash-runtime $runtime_version" lock_pins niubash-runtime "$runtime_version"
 
-rubash_pinned=no
-for version in 0.1.0 1.0.0 1.0.1 1.0.2 1.1.0 1.2.0 1.2.1 1.2.2 1.2.3 1.2.4 1.2.5 1.3.0 1.3.1 1.3.2 1.3.3 1.3.4 1.4.0 1.4.1 1.4.2 1.4.3 1.5.0 2.0.0; do
-    if lock_pins rubash "$version"; then
-        rubash_pinned=$version
-        break
-    fi
-done
-if [ "$rubash_pinned" = no ]; then
-    echo "FAIL: Cargo.lock does not record a rubash version"
-    exit 1
-fi
+# lock_version <package>: the version Cargo.lock records for <package>
+# (the `version = "..."` line immediately below its `name = "..."` line),
+# CR-free; empty when the package is absent from the lock.
+lock_version() {
+    version=$(awk -v want_name="$1" -F'\042' '
+        $1 == "name = " && $2 == want_name {
+            getline
+            if ($1 == "version = ") print $2
+            exit
+        }
+    ' Cargo.lock)
+    printf '%s' "${version%"$cr"}"
+}
 
-echo "cargo metadata OK (niubash $root_version, rubash $rubash_pinned)"
+# The rubash pin is checked for presence and version shape only, never
+# against an enumerated list of known versions: the list rotted on every
+# release (hand-chased to 1.2.5, then to 1.3.x, then missing 1.5.1) and
+# turned this gate false-red on pristine master each time. What the gate
+# actually guards is that rubash cannot silently disappear from the lock.
+rubash_version=$(lock_version rubash)
+case $rubash_version in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *)
+        echo "FAIL: Cargo.lock does not record a rubash version"
+        exit 1
+        ;;
+esac
+
+echo "cargo metadata OK (niubash $root_version, rubash $rubash_version)"
 
 echo "rename acceptance: ALL CHECKS PASSED"
