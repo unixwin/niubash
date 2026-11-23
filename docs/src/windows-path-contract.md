@@ -174,6 +174,21 @@ paths — never both, and never a guess about the child's capabilities:
   [PowerShell/Win32-OpenSSH#2478](https://github.com/PowerShell/Win32-OpenSSH/issues/2478),
   the `ssh -t` pty branch.)
 
+- **Environment variable values follow the same boundary** (niubash#1001,
+  rubash#4154). When the shell spawns a child of the second class (a native
+  Windows program, or a foreign POSIX runtime), an exported value that is a
+  path-dialect spelling — `/d/repo`, or a colon-separated list of such
+  spellings — is folded to native form (`D:\repo`; list entries join with
+  `;`), exactly like an argv operand. Every other value — URLs, relative
+  spellings, non-path data — reaches the child byte-for-byte, and the
+  contract-verbatim variables (`PWD`, `OLDPWD`, `PATH`, `TMPDIR`,
+  `__RUBASH_*`) are never folded. A user who needs a path-shaped value
+  delivered verbatim names the variable in `__RUBASH_ENV_CONV_EXCL`: a
+  `;`-separated list of variable-name prefixes (`*` exempts every variable;
+  a trailing `=` means the exact name). The MSYS2 conversion variable names
+  (`MSYS2_ENV_CONV_EXCL`, `MSYS2_ARG_CONV_EXCL`, `MSYS_NO_PATHCONV`) are not
+  honored: niu has no MSYS conversion layer for a variable to switch off.
+
 The boundary is structural rather than a rename of the "MSYS NO CONV"
 problem: the shell never asks a child what it can understand. The shipped
 toolchain's own resolution decides, and the engine compensates only for the

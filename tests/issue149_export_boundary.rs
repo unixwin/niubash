@@ -9,9 +9,12 @@
 //! Measured boundary behavior of the niubash session shell (niubash a616bc4 +
 //! rubash master, 2026-09-28):
 //!
-//! - Arbitrary exported variables (`NVM_DIR`, ...): already verbatim. The
-//!   `exported_posix_path_variables_reach_children_verbatim` test pins this
-//!   so the class cannot silently regress.
+//! - Arbitrary exported variables (`NVM_DIR`, ...): path-shaped dialect
+//!   values fold to native form for native children (niubash#1001,
+//!   rubash#4064) — a deliberate divergence from the GNU verbatim rule
+//!   above, recorded in the Windows Path Contract. Variables named in
+//!   `__RUBASH_ENV_CONV_EXCL` stay verbatim (rubash#4154). The two tests
+//!   below pin both sides of that boundary.
 //! - The HOME family: NOT verbatim. rubash
 //!   `src/executor/path.rs` `apply_required_windows_child_environment()`
 //!   unconditionally overwrites the child's HOME/USERPROFILE/HOMEDRIVE/
@@ -60,15 +63,33 @@ fn run_script(body: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// GNU contract, already honored: an arbitrary exported POSIX-style path
-/// value reaches a Windows child byte-for-byte (no drive-form rewrite, no
-/// path-shape heuristic). cmd.exe is the observer so the test needs no
-/// winuxcmd command links.
+/// Windows boundary contract (niubash#1001, rubash#4154): an exported
+/// path-shaped dialect value folds to native form when the child is a
+/// native Windows program, so cmd.exe observes `D:\some\nvm-149`. GNU
+/// copies exported bytes verbatim (see the file header); the fold is
+/// niubash's documented Windows adaptation for native children, not a
+/// GNU behavior. cmd.exe is the observer so the test needs no winuxcmd
+/// command links.
 #[test]
 #[cfg(windows)]
-fn exported_posix_path_variables_reach_children_verbatim() {
+fn exported_posix_path_variables_fold_for_native_children() {
     let out = run_script(
         "export NVM_DIR=/d/some/nvm-149\n\
+         cmd /c \"echo %NVM_DIR%\"",
+    );
+    assert_eq!(out, r"D:\some\nvm-149");
+}
+
+/// The verbatim side of the same boundary: a variable named in
+/// `__RUBASH_ENV_CONV_EXCL` (a `;`-separated prefix list) is exempt from
+/// the fold and reaches the native child byte-for-byte (rubash#4154).
+/// The MSYS2 conversion variable names are not honored.
+#[test]
+#[cfg(windows)]
+fn exported_posix_path_variables_stay_verbatim_under_rubash_env_conv_excl() {
+    let out = run_script(
+        "export NVM_DIR=/d/some/nvm-149\n\
+         export __RUBASH_ENV_CONV_EXCL=NVM_DIR\n\
          cmd /c \"echo %NVM_DIR%\"",
     );
     assert_eq!(out, "/d/some/nvm-149");
