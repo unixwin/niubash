@@ -1395,11 +1395,13 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     // shared journal.theme entry). Asked only when the apply installed a
     // theme-bearing source; minimal/Skip collections ask nothing.
     let fresh_themes = post_install_theme_candidates(collection_journal.as_ref());
+    let mut parked_sample: Option<PathBuf> = None;
     if !fresh_themes.is_empty() {
-        if let Some((name, source_id)) =
+        if let Some((name, source_id, sample)) =
             run_post_install_theme_pick(&mut io, lang, &home, &fresh_themes, &mut cfg)
         {
             theme_pick = ThemePick::External { name, source_id };
+            parked_sample = sample;
         }
     }
 
@@ -1417,11 +1419,16 @@ fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
     }
 
     // Setup journal + per-entry undo (iron law 3: 失败可回滚). A theme
-    // picked either at Q1 or post-install lands in the same field.
+    // picked either at Q1 or post-install lands in the same field. The
+    // rc_sample likewise covers BOTH writes of the run: the Apply
+    // write's parked sample when the slot was already occupied, else
+    // the post-install pick's parked sample (niubash#1077 — the pick's
+    // write runs against the slot the Apply write just created, so its
+    // proposal parks too, and the receipt must name it).
     let journal = SetupJournal {
         rc_sample: match &outcome {
             RcWrite::ExistingKept(sample) => Some(sample.clone()),
-            RcWrite::Created => None,
+            RcWrite::Created => parked_sample,
         },
         // Created (no previous rc): the receipt must cover the write itself
         // (niubash#179 L02-1). An existing rc was never touched
@@ -1575,10 +1582,12 @@ fn post_install_theme_candidates(collection: Option<&CollectionJournal>) -> Vec<
 
 /// Run the post-install flow: the theme gallery built from the freshly
 /// installed sources. On a pick the rc is rewritten through the same
-/// [`write_rc_and_mark_done`] path as a Q1 pick (the intermediate backup
-/// of the theme-less rc is additive history; the journal keeps pointing
-/// at the pre-run backup) and the caller folds the returned
-/// `(name, source_id)` into the journal.
+/// [`write_rc_and_mark_done`] path as a Q1 pick — under create-only the
+/// slot is occupied by then (the Apply write just created the rc, or it
+/// pre-existed), so the theme-ful proposal parks as the candidates
+/// sample, and the caller folds the returned `(name, source_id, parked
+/// sample)` into the journal so the undo receipt covers that sample
+/// too (niubash#1077).
 ///
 /// Returns `None` when nothing changed (skipped, no gallery). Ctrl-C
 /// after Apply does NOT cancel the wizard: state was already written, so
@@ -1590,7 +1599,7 @@ fn run_post_install_theme_pick(
     home: &std::path::Path,
     fresh_ids: &[String],
     cfg: &mut WizardConfig,
-) -> Option<(String, String)> {
+) -> Option<(String, String, Option<PathBuf>)> {
     let t = lang;
     let gallery = theme_gallery();
     if gallery.entries.is_empty() {
@@ -1613,8 +1622,15 @@ fn run_post_install_theme_pick(
             cfg.theme_source_id = Some(source_id.clone());
             // Same write path as a Q1 pick: the guarded activation block
             // lands through generate_rc/write_rc_and_mark_done, so undo
-            // (`niu plugin disable <theme>`) and rollback cover it.
-            let _ = write_rc_and_mark_done(home, cfg, lang);
+            // (`niu plugin disable <theme>`) and rollback cover it. The
+            // write's outcome is NOT discarded (niubash#1077): against
+            // the now-occupied slot it parks the theme-ful proposal as
+            // the candidates sample, and that sample is part of this
+            // run's writes — the caller folds it into the journal.
+            let parked_sample = match write_rc_and_mark_done(home, cfg, lang) {
+                Ok(RcWrite::ExistingKept(sample)) => Some(sample),
+                _ => None,
+            };
             // And the spec claim moves with it (niubash#168) — same reason
             // as the Q1 path: rc and spec must not disagree about who owns
             // the theme.
@@ -1622,7 +1638,7 @@ fn run_post_install_theme_pick(
                 name: name.clone(),
                 source_id: source_id.clone(),
             });
-            Some((name, source_id))
+            Some((name, source_id, parked_sample))
         }
         Some(ThemePick::Keep) => None,
         None => {
@@ -4494,11 +4510,22 @@ mod tests {
         // robbyrussell sorted, so Skip=0, agnoster=1.
         let mut io = WizardIo::scripted(&[1]);
         let picked = run_post_install_theme_pick(&mut io, Lang::En, &home, &candidates, &mut cfg);
+        // niubash#1077: the pick's rewrite parks the theme-ful proposal
+        // (the rc slot is occupied by the Apply write), and the pick
+        // hands that parked sample back for the journal — before the
+        // fix the outcome was discarded (`let _ =`) and the journal
+        // never named the sample.
+        let expected_sample = setup_rc_sample_path(&home);
         assert_eq!(
             picked,
-            Some(("agnoster".to_string(), "oh-my-bash".to_string())),
+            Some((
+                "agnoster".to_string(),
+                "oh-my-bash".to_string(),
+                Some(expected_sample.clone())
+            )),
             "{picked:?}"
         );
+        let (picked_name, picked_source, parked_sample) = picked.unwrap();
         assert_eq!(cfg.theme, "agnoster");
         assert_eq!(cfg.theme_source_id.as_deref(), Some("oh-my-bash"));
 
@@ -4545,10 +4572,13 @@ mod tests {
         }
 
         // One journal + undo lines for both the collection and the pick.
+        // The journal folds the way run_wizard_inner does: the Apply
+        // write created the rc (rc_created), so the journal's rc_sample
+        // is the post-install pick's parked sample (niubash#1077).
         let journal = SetupJournal {
-            rc_sample: None,
+            rc_sample: parked_sample,
             rc_created: true,
-            theme: picked,
+            theme: Some((picked_name, picked_source)),
             preset: None,
             niu_git: None,
             collection: Some(CollectionJournal {
@@ -4557,7 +4587,22 @@ mod tests {
                 failed: Vec::new(),
             }),
         };
+        write_setup_journal(&home, &journal);
+        let journal_text = std::fs::read_to_string(setup_journal_path(&home)).unwrap();
+        assert!(
+            journal_text.contains("\"rc_sample\":"),
+            "the journal must name the parked sample: {journal_text}"
+        );
+        assert!(
+            journal_text.contains("setup-proposed.niubashrc"),
+            "the journal's rc_sample is the candidates sample: {journal_text}"
+        );
         let undo = setup_undo_lines(&home, &journal);
+        assert!(
+            undo.iter()
+                .any(|line| line.contains("setup-proposed.niubashrc")),
+            "the undo receipt must cover the parked sample: {undo:?}"
+        );
         assert!(
             undo.iter()
                 .any(|line| line.contains("niu plugin disable agnoster")),
