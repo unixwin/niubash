@@ -35,7 +35,7 @@ rubash = { version = "1.5.1", git = "https://github.com/unixwin/rubash.git", bra
 # `history_*` against this executable; build.rs anchors every exported symbol
 # in scripts/readline-abi-exports.txt. The lib name is `readline`
 # (readline_abi is the package name).
-readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "4d0aefa8928039de1be2f63515e688cdc43928a5" }
+readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "36d875ac2ba058094a6b988779ff028f577ec868" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
@@ -101,11 +101,12 @@ rubash = { path = "../rubash" }
 
 # The line editor is unixwin/ruline — an independent GNU-readline-compatible
 # editor based on reedline 0.52.1 (MIT). It starts its own version line at
-# 0.1.0; the package keeps the `reedline` name during the ABI transition so
-# the source and this patch entry stay stable (rename tracked in ruline#9).
+# 0.1.0. The package and import name are `ruline`: the transition-period
+# `reedline` package name was retired by the rename in ruline#9, and this
+# patch entry now redirects the crates.io name `ruline` to the pinned rev.
 # The rev is pinned and bumped on demand only.
 [patch.crates-io]
 # Same rev as the `readline-abi` dependency above: the ABI adapter's path
-# dependency on its workspace-root `reedline` must resolve to the copy niu
+# dependency on its workspace-root `ruline` must resolve to the copy niu
 # already links, or the graph carries two editors.
-reedline = { git = "https://github.com/unixwin/ruline", rev = "4d0aefa8928039de1be2f63515e688cdc43928a5" }
+ruline = { git = "https://github.com/unixwin/ruline", rev = "36d875ac2ba058094a6b988779ff028f577ec868" }

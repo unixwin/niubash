@@ -9,7 +9,7 @@ use std::{
     time::SystemTime,
 };
 
-use reedline::{
+use ruline::{
     CommandLineSearch, History, HistoryItem, HistoryItemId, HistorySessionId, ReedlineError,
     ReedlineErrorVariants, Result, SearchDirection, SearchQuery,
 };
@@ -2260,7 +2260,7 @@ impl LiveFileBackedHistory {
         let last_is_same = state
             .history
             .search(SearchQuery::last_with_search(
-                reedline::SearchFilter::anything(None),
+                ruline::SearchFilter::anything(None),
             ))
             .ok()
             .and_then(|mut items| items.pop())
@@ -2287,7 +2287,7 @@ impl LiveFileBackedHistory {
             let saved = state
                 .history
                 .search(SearchQuery::last_with_search(
-                    reedline::SearchFilter::anything(None),
+                    ruline::SearchFilter::anything(None),
                 ))
                 .ok()
                 .and_then(|mut items| items.pop())
@@ -3453,7 +3453,7 @@ impl Drop for LiveFileBackedHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reedline::{HistoryItem, SearchQuery};
+    use ruline::{HistoryItem, SearchQuery};
     use rubash::history::HistoryProvider;
 
     #[test]
@@ -3550,7 +3550,7 @@ mod tests {
             start_id: Some(HistoryItemId::new(2)),
             end_id: None,
             limit: Some(1),
-            filter: reedline::SearchFilter::anything(None),
+            filter: ruline::SearchFilter::anything(None),
         };
         let found = history.search(query).unwrap();
         assert_eq!(found.len(), 1);
@@ -3859,7 +3859,7 @@ mod tests {
 
         let commands = first
             .search(SearchQuery::everything(
-                reedline::SearchDirection::Forward,
+                ruline::SearchDirection::Forward,
                 None,
             ))
             .unwrap()
@@ -3874,7 +3874,7 @@ mod tests {
         let fresh = LiveFileBackedHistory::with_file(100, path.clone());
         let commands = fresh
             .search(SearchQuery::everything(
-                reedline::SearchDirection::Forward,
+                ruline::SearchDirection::Forward,
                 None,
             ))
             .unwrap()
@@ -4583,7 +4583,7 @@ mod tests {
         // The editor twin's own view (navigation) agrees.
         let editor_view = editor
             .search(SearchQuery::everything(
-                reedline::SearchDirection::Forward,
+                ruline::SearchDirection::Forward,
                 None,
             ))
             .unwrap()
@@ -5070,7 +5070,7 @@ mod tests {
         editor.set_history_option_gate();
         provider.settings().lock().unwrap().history_enabled = false;
 
-        use reedline::History as _;
+        use ruline::History as _;
         editor
             .save(HistoryItem::from_command_line("secret-while-off"))
             .unwrap();

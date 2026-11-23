@@ -22,8 +22,8 @@
 //! only the first-TAB stop is added here. `cycle`/`select` never construct
 //! this wrapper.
 
-use reedline::menu_functions::completer_input;
-use reedline::{
+use ruline::menu_functions::completer_input;
+use ruline::{
     Completer, CompletionResult, Editor, InputMode, Menu, MenuEvent, MenuSettings, Painter,
     Suggestion, UndoBehavior,
 };
@@ -257,7 +257,7 @@ impl Menu for InsertStopMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reedline::Span;
+    use ruline::Span;
 
     fn suggestion(value: &str, start: usize, end: usize) -> Suggestion {
         Suggestion {

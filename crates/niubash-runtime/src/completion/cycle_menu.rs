@@ -70,8 +70,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use reedline::menu_functions::completer_input;
-use reedline::{
+use ruline::menu_functions::completer_input;
+use ruline::{
     Completer, CompletionResult, EditCommand, Editor, InputMode, Menu, MenuEvent, MenuSettings,
     Painter, Suggestion, UndoBehavior,
 };
@@ -1447,7 +1447,7 @@ impl Menu for CycleMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reedline::{CompletionResult, Span};
+    use ruline::{CompletionResult, Span};
 
     /// The GnuMenu harness completer: candidates INCLUDE the exact
     /// typed word, the shape niubash's real completer produces.

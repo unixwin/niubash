@@ -19,7 +19,7 @@ use crate::config::{
 use crate::history::LiveFileBackedHistory;
 use crate::shell::Shell;
 use crate::syntax_highlighting::NiubashSyntaxHighlighter;
-use reedline::{
+use ruline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
     default_vi_visual_keybindings, ColumnarMenu, Direction, EditCommand, EditMode, Emacs, KeyCode,
     KeyCombination, KeyModifiers, Keybindings, ListMenu, MenuBuilder, Prompt, PromptEditMode,
@@ -795,7 +795,7 @@ fn configured_completion_menu(
     gnu_indicator: &str,
     menu_open: Arc<AtomicBool>,
     cycle_session: Option<SharedCycleSession>,
-) -> Box<dyn reedline::Menu> {
+) -> Box<dyn ruline::Menu> {
     // niubash#631: under the cycle interaction the CycleMenu serves
     // every non-GNU style — it renders its own candidate grid and
     // splices candidates into the line itself, which no stock menu
@@ -835,13 +835,13 @@ fn configured_completion_menu(
             // Multi-column popup with descriptions (VS Code style). Column
             // count adapts to the terminal width; descriptions render to the
             // right of (or under) the value column.
-            let menu = reedline::IdeMenu::default()
+            let menu = ruline::IdeMenu::default()
                 .with_name(name)
                 .with_min_completion_width(20)
                 .with_max_completion_width(48)
                 .with_max_completion_height(config.completion_page_size.min(20) as u16)
                 .with_padding(1)
-                .with_description_mode(reedline::DescriptionMode::PreferRight);
+                .with_description_mode(ruline::DescriptionMode::PreferRight);
             // insert interaction: first TAB splices the common prefix and
             // stops; TAB #2 opens the popup (niubash#778 follow-up).
             // niubash#832: the flag wrapper sits OUTSIDE the insert-stop
@@ -1176,8 +1176,8 @@ struct DabbrevState {
 fn editor_history_entries(line_editor: &Reedline) -> Result<Vec<String>, String> {
     line_editor
         .history()
-        .search(reedline::SearchQuery::everything(
-            reedline::SearchDirection::Forward,
+        .search(ruline::SearchQuery::everything(
+            ruline::SearchDirection::Forward,
             None,
         ))
         .map(|items| items.into_iter().map(|item| item.command_line).collect())
@@ -3667,7 +3667,7 @@ impl EditMode for PasteChunkEditMode {
     /// mode-specific event — in particular `ReedlineEvent::SwitchMode`,
     /// which is how the engine asks a machine to become the vi/emacs
     /// machine a `bind` target names — belongs to the wrapped machine.
-    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> ruline::EventStatus {
         self.inner.handle_mode_specific_event(event)
     }
 
@@ -5519,7 +5519,7 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // then the command keymap — the same repair the vi machine's
         // own Esc emits when leaving insert.
         "vi-movement-mode" => Some(ReedlineEvent::Multiple(vec![
-            edit_event(EditCommand::Move(reedline::MotionTarget::Grapheme(
+            edit_event(EditCommand::Move(ruline::MotionTarget::Grapheme(
                 Direction::Backward,
             ))),
             ReedlineEvent::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
@@ -5554,10 +5554,10 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         // cursor position; `rl_arrow_keys`/`rl_skip_csi_sequence`
         // consume follow-on input through ruline's pending-consumer
         // seam.
-        "forward-byte" => Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+        "forward-byte" => Some(edit_event(EditCommand::Move(ruline::MotionTarget::Byte(
             Direction::Forward,
         )))),
-        "backward-byte" => Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+        "backward-byte" => Some(edit_event(EditCommand::Move(ruline::MotionTarget::Byte(
             Direction::Backward,
         )))),
         "forward-backward-delete-char" => Some(edit_event(EditCommand::RuboutOrDelete)),
@@ -5667,7 +5667,7 @@ fn add_gnu_command_default_keybindings<S: KeybindingSink + ?Sized>(
         // fact, not a version string — so the layer flips on its own
         // the moment the pin carries ruline#15.
         if *name == "abort"
-            && reedline::default_emacs_keybindings()
+            && ruline::default_emacs_keybindings()
                 .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
                 .is_some_and(|event| event == ReedlineEvent::Esc)
         {
@@ -6128,7 +6128,7 @@ impl EditMode for ChordEditMode {
         self.inner.edit_mode()
     }
 
-    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> reedline::EventStatus {
+    fn handle_mode_specific_event(&mut self, event: ReedlineEvent) -> ruline::EventStatus {
         self.inner.handle_mode_specific_event(event)
     }
 
@@ -8267,7 +8267,7 @@ fn flush_repl_output() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reedline::Menu;
+    use ruline::Menu;
     use std::collections::HashSet;
 
     #[test]
@@ -8409,7 +8409,7 @@ mod tests {
                     !flag.load(Ordering::Relaxed),
                     "{style:?}/{interaction:?}: the flag must start down"
                 );
-                menu.menu_event(reedline::MenuEvent::Activate(false));
+                menu.menu_event(ruline::MenuEvent::Activate(false));
                 assert!(
                     menu.is_active(),
                     "{style:?}/{interaction:?}: the menu must be active"
@@ -8418,7 +8418,7 @@ mod tests {
                     flag.load(Ordering::Relaxed),
                     "{style:?}/{interaction:?}: an open menu must raise the flag"
                 );
-                menu.menu_event(reedline::MenuEvent::Deactivate);
+                menu.menu_event(ruline::MenuEvent::Deactivate);
                 assert!(
                     !flag.load(Ordering::Relaxed),
                     "{style:?}/{interaction:?}: the flag must fall with the menu"
@@ -9566,7 +9566,7 @@ mod tests {
         // Seeded from the editor defaults, mirroring production
         // (`build_keymap_for_target` layers over the reedline defaults):
         // the C-g expectation below follows the editor's own table.
-        let mut keybindings = reedline::default_emacs_keybindings();
+        let mut keybindings = ruline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let tilde_event = ReedlineEvent::ExecuteHostCommand(format!(
             "{}tilde-expand",
@@ -9595,7 +9595,7 @@ mod tests {
         // default (ruline#15 shape, C-g bound to the editor's abort
         // event) the native binding survives; under older pins the
         // host-command override is the abort surface.
-        if reedline::default_emacs_keybindings()
+        if ruline::default_emacs_keybindings()
             .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
             .is_some_and(|event| event == ReedlineEvent::Esc)
         {
@@ -9710,10 +9710,10 @@ mod tests {
     /// editor defaults rather than empty.
     #[test]
     fn issue811_c_g_abort_binding_follows_the_editor_default() {
-        let native_abort = reedline::default_emacs_keybindings()
+        let native_abort = ruline::default_emacs_keybindings()
             .find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'))
             .is_some_and(|event| event == ReedlineEvent::Esc);
-        let mut keybindings = reedline::default_emacs_keybindings();
+        let mut keybindings = ruline::default_emacs_keybindings();
         add_gnu_command_default_keybindings(&mut keybindings, NativeKeymapTarget::Emacs);
         let bound = keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('g'));
         if native_abort {
@@ -10165,7 +10165,7 @@ mod tests {
         assert_eq!(
             native_widget_event("vi-movement-mode"),
             Some(ReedlineEvent::Multiple(vec![
-                edit_event(EditCommand::Move(reedline::MotionTarget::Grapheme(
+                edit_event(EditCommand::Move(ruline::MotionTarget::Grapheme(
                     Direction::Backward,
                 ))),
                 ReedlineEvent::SwitchMode(PromptEditMode::Vi(PromptViMode::Normal)),
@@ -10262,13 +10262,13 @@ mod tests {
     fn issue731_batch2_names_deliver() {
         assert_eq!(
             native_widget_event("forward-byte"),
-            Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+            Some(edit_event(EditCommand::Move(ruline::MotionTarget::Byte(
                 Direction::Forward
             ))))
         );
         assert_eq!(
             native_widget_event("backward-byte"),
-            Some(edit_event(EditCommand::Move(reedline::MotionTarget::Byte(
+            Some(edit_event(EditCommand::Move(ruline::MotionTarget::Byte(
                 Direction::Backward
             ))))
         );

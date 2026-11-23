@@ -38,7 +38,7 @@ use std::sync::Mutex;
 // alias); the key types below are the ones reedline's combinations
 // actually carry, not the crate's direct 0.27 dependency.
 use crossterm29::event::{KeyCode, KeyModifiers};
-use reedline::{EditCommand, ReedlineEvent};
+use ruline::{EditCommand, ReedlineEvent};
 use serde::{Deserialize, Serialize};
 
 /// The one help topic this layer registers (DESIGN §8.4). The topic

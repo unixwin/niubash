@@ -31,7 +31,7 @@ use std::sync::{
     Arc,
 };
 
-use reedline::{
+use ruline::{
     ColumnarMenu, Completer, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion,
 };
 
@@ -184,7 +184,7 @@ impl Menu for ColumnMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reedline::{Completer, CompletionResult, LineBuffer, Span, Suggestion, UndoBehavior};
+    use ruline::{Completer, CompletionResult, LineBuffer, Span, Suggestion, UndoBehavior};
     use std::sync::{atomic::AtomicBool, Arc};
 
     fn fresh_menu() -> ColumnMenu {

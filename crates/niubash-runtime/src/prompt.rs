@@ -1,6 +1,6 @@
 //! Prompt rendering for niubash
 //!
-//! Implements the `reedline::Prompt` trait using a template string
+//! Implements the `ruline::Prompt` trait using a template string
 //! with substitutions: {user}, {host}, {cwd}, {symbol}.
 
 use std::borrow::Cow;
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use crate::idle_repaint::LiveVcsCell;
 use crate::prompt_segments::SegmentPromptAdapter;
 use nu_ansi_term::{Color, Style};
-use reedline::{
+use ruline::{
     Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode,
 };
 
