@@ -19,6 +19,7 @@ use crate::config::{
 use crate::history::LiveFileBackedHistory;
 use crate::shell::Shell;
 use crate::syntax_highlighting::NiubashSyntaxHighlighter;
+use rubash::api::{Session, SessionHistoryWrite};
 use ruline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
     default_vi_visual_keybindings, ColumnarMenu, Direction, EditCommand, EditMode, Emacs, KeyCode,
@@ -26,7 +27,6 @@ use ruline::{
     PromptHistorySearch, PromptViMode, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
     Signal, ValidationResult, Validator, Vi,
 };
-use rubash::api::{Session, SessionHistoryWrite};
 
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";

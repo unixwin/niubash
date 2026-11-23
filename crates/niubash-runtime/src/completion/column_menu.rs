@@ -31,9 +31,7 @@ use std::sync::{
     Arc,
 };
 
-use ruline::{
-    ColumnarMenu, Completer, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion,
-};
+use ruline::{ColumnarMenu, Completer, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion};
 
 /// [`ColumnarMenu`] wrapper enforcing the stop-after-splice rule.
 pub struct ColumnMenu {

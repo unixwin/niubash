@@ -3453,8 +3453,8 @@ impl Drop for LiveFileBackedHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ruline::{HistoryItem, SearchQuery};
     use rubash::history::HistoryProvider;
+    use ruline::{HistoryItem, SearchQuery};
 
     #[test]
     fn unavailable_history_file_falls_back_to_memory() {

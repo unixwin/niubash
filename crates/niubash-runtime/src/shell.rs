@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use ruline::Reedline;
 use rubash::api::{
     BindEntryView, BindKindView, FinishDuties, PreparedLine, RunOptions, Session,
     SessionHistoryWrite,
@@ -25,6 +24,7 @@ use rubash::{
     decode_to_visible_text, executor::Executor, lexer::tokenize, parser::parse, Ast, Token,
     TokenKind,
 };
+use ruline::Reedline;
 
 use crate::completion::{
     CompletionBehavior, CompletionHostFaces, CompletionState, NiubashCompleter,
