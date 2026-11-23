@@ -15,6 +15,10 @@
 //!   hatch for hosts this product does not name. Only path-shaped values
 //!   (or the explicit `dir:<path>` form) are directories; an unknown bare
 //!   word is an error, never a silent relative directory (niubash#579).
+//!   A directory value spelled as a POSIX path (leading `/`) is resolved
+//!   through the shell's own path classifier before it is used, so the
+//!   spelling means what `cd` would mean by it from any cwd
+//!   (niubash#1084).
 //! - "Outdated" means drifted bytes, decided per file; there is no manifest
 //!   file to get out of sync with the tree.
 
@@ -81,10 +85,10 @@ pub fn resolve_target(spec: &str) -> anyhow::Result<TargetSpec> {
         if path.is_empty() {
             anyhow::bail!("--target dir: requires a directory path after 'dir:'");
         }
-        return Ok(TargetSpec::Dir(PathBuf::from(path)));
+        return Ok(TargetSpec::Dir(resolve_dir_path(path)?));
     }
     if is_path_shaped(spec) {
-        return Ok(TargetSpec::Dir(PathBuf::from(spec)));
+        return Ok(TargetSpec::Dir(resolve_dir_path(spec)?));
     }
     anyhow::bail!(
         "unknown --target '{spec}': not a named target ({}, all); \
@@ -103,6 +107,84 @@ fn is_path_shaped(spec: &str) -> bool {
         || spec.starts_with('.')
         || spec.starts_with('~')
         || Path::new(spec).is_absolute()
+}
+
+/// Resolve a `--target` directory value to the host path it names.
+///
+/// Native Windows spellings (`C:/...`, `C:\...`, UNC) and relative
+/// spellings keep the meaning they have always had here. A POSIX
+/// spelling — one leading with `/` — is a shell dialect spelling, so
+/// on Windows it goes through the shell's own path classifier
+/// ([`Session::resolve_shell_path_from_env`], the one resolver the
+/// engine's sessions resolve with), fed this process's environment
+/// with the shell root configured the way the host publishes it.
+/// The verbatim pass-through this replaces let Win32 read the leading
+/// `/` as "root of the current drive": `dir:/tmp/x` landed on
+/// whichever drive the process happened to sit on, and install and
+/// status disagreed across drives (niubash#1084).
+///
+/// A leading-`/` spelling the classifier has no ruling for comes back
+/// rooted-relative (rooted, but no drive — not absolute); that
+/// residue is rejected outright instead of being silently
+/// reinterpreted against the current drive.
+fn resolve_dir_path(value: &str) -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
+    if value.starts_with('/') {
+        let resolved =
+            rubash::api::Session::resolve_shell_path_from_env(value, &target_env_snapshot());
+        if resolved.is_absolute() {
+            return Ok(resolved);
+        }
+        anyhow::bail!(
+            "--target '{value}' leads with '/' but is not a shell path dialect \
+             (drive form /c/..., /tmp, /var/tmp, /home, or a path under the \
+             shell root); pass a native Windows path (e.g. C:/...) instead"
+        );
+    }
+    Ok(PathBuf::from(value))
+}
+
+/// The process environment as the env map the shell path classifier
+/// reads, with the shell root configured under a name the engine's
+/// root lookup reads. The host publishes the root as `NIU_ROOT`
+/// (`prepare_shell_root` takes it as the root, and
+/// `publish_process_shell_root` writes it back, both in shell.rs);
+/// the engine looks up `__RUBASH_SHELL_ROOT`, then `RUBASH_ROOT`, so
+/// the published value is mirrored into the second name when neither
+/// lookup name is already set. With no published root, the bundled
+/// WinuxCmd installation root is the same fallback
+/// `prepare_shell_root` itself uses. A rootless snapshot still
+/// resolves every root-free dialect (the drive forms, /tmp, /var/tmp,
+/// /home); only the install-tree spellings need the root.
+#[cfg(windows)]
+fn target_env_snapshot() -> std::collections::HashMap<String, String> {
+    let mut env: std::collections::HashMap<String, String> = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            Some((
+                name.into_string().ok()?,
+                value.to_string_lossy().into_owned(),
+            ))
+        })
+        .collect();
+    let root_configured = ["__RUBASH_SHELL_ROOT", "RUBASH_ROOT"]
+        .iter()
+        .any(|name| env.get(*name).is_some_and(|value| !value.is_empty()));
+    if !root_configured {
+        let root = env
+            .get("NIU_ROOT")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                crate::winuxcmd::find_winuxcmd().map(|exe| crate::winuxcmd::installation_root(&exe))
+            });
+        if let Some(root) = root {
+            env.insert(
+                "RUBASH_ROOT".to_string(),
+                root.to_string_lossy().into_owned(),
+            );
+        }
+    }
+    env
 }
 
 /// Comma-separated named targets for usage text.
@@ -275,12 +357,16 @@ mod tests {
 
     #[test]
     fn issue579_path_shaped_and_explicit_dir_forms_stay_directories() {
+        // "/abs/skills" is not in this list anymore: a leading-`/`
+        // spelling is a shell dialect spelling since niubash#1084 and
+        // resolves under the shell root — it is pinned, with the root
+        // under the test's control, in
+        // issue1084_root_spellings_resolve_under_the_shell_root.
         for spec in [
             "./skills",
             "../skills",
             "a/b",
             "a\\b",
-            "/abs/skills",
             "C:\\skills",
             "~/skills",
             ".hidden/skills",
@@ -349,5 +435,162 @@ mod tests {
         // No stamp line, and no SKILL.md at all, both read as unknown.
         assert_eq!(bundle_version(FILES), None);
         assert_eq!(bundle_version(&[]), None);
+    }
+
+    /// niubash#1084: native and relative spellings are not dialect
+    /// spellings — they pass through byte-for-byte on every platform,
+    /// exactly as before the classifier routing.
+    #[test]
+    fn issue1084_native_and_relative_spellings_are_untouched() {
+        for (spec, want) in [
+            ("dir:F:/ext-build/probe", "F:/ext-build/probe"),
+            ("dir:F:\\ext-build\\probe", "F:\\ext-build\\probe"),
+            ("dir:skills", "skills"),
+            ("./skills", "./skills"),
+        ] {
+            match resolve_target(spec).unwrap() {
+                TargetSpec::Dir(dir) => assert_eq!(dir, PathBuf::from(want), "{spec}"),
+                _ => panic!("{spec} must be a directory target"),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "niu-skill-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(windows)]
+    fn clear_root_env() {
+        for name in ["NIU_ROOT", "RUBASH_ROOT", "__RUBASH_SHELL_ROOT"] {
+            std::env::remove_var(name);
+        }
+    }
+
+    /// niubash#1084: `/tmp/...` names the per-user temp namespace the
+    /// shell resolves, anchored at TMPDIR — never the root of
+    /// whichever drive the process cwd sits on. The resolved path is
+    /// absolute, which is what makes install and status agree from
+    /// any cwd on any drive.
+    #[cfg(windows)]
+    #[test]
+    fn issue1084_tmp_spelling_resolves_to_the_temp_base() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = crate::test_support::ProcessEnvRestore::new(&[
+            "TMPDIR",
+            "NIU_ROOT",
+            "RUBASH_ROOT",
+            "__RUBASH_SHELL_ROOT",
+        ]);
+        let tmp_base = unique_temp_dir("tmp-base");
+        std::env::set_var("TMPDIR", &tmp_base);
+        clear_root_env();
+
+        for spec in ["dir:/tmp/issue1084-probe", "/tmp/issue1084-probe"] {
+            match resolve_target(spec).unwrap() {
+                TargetSpec::Dir(dir) => {
+                    assert_eq!(dir, tmp_base.join("issue1084-probe"), "{spec}");
+                    assert!(dir.is_absolute(), "{spec}");
+                }
+                _ => panic!("{spec} must be a directory target"),
+            }
+        }
+        let _ = fs::remove_dir_all(tmp_base);
+    }
+
+    /// niubash#1084: the POSIX drive form names that drive from any
+    /// cwd — `/f/...` issued on C: is `F:\...`, not `C:\f\...`.
+    #[cfg(windows)]
+    #[test]
+    fn issue1084_drive_spelling_resolves_to_that_drive() {
+        for (spec, want) in [
+            ("dir:/f/ext-build/probe", "F:/ext-build/probe"),
+            ("dir:/c", "C:/"),
+        ] {
+            match resolve_target(spec).unwrap() {
+                TargetSpec::Dir(dir) => assert_eq!(dir, PathBuf::from(want), "{spec}"),
+                _ => panic!("{spec} must be a directory target"),
+            }
+        }
+    }
+
+    /// niubash#1084: install-tree spellings resolve under the shell
+    /// root the host published as NIU_ROOT (the snapshot mirrors it
+    /// into the engine's lookup name), and `/home` names the users
+    /// directory — the same answers `cd` gives.
+    #[cfg(windows)]
+    #[test]
+    fn issue1084_root_spellings_resolve_under_the_shell_root() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = crate::test_support::ProcessEnvRestore::new(&[
+            "HOME",
+            "NIU_ROOT",
+            "RUBASH_ROOT",
+            "__RUBASH_SHELL_ROOT",
+        ]);
+        let root = unique_temp_dir("shell-root");
+        std::env::set_var("NIU_ROOT", &root);
+        std::env::remove_var("RUBASH_ROOT");
+        std::env::remove_var("__RUBASH_SHELL_ROOT");
+
+        for (spec, want) in [
+            ("dir:/etc/probe", root.join("etc").join("probe")),
+            ("dir:/", root.clone()),
+            ("/abs/skills", root.join("abs").join("skills")),
+        ] {
+            match resolve_target(spec).unwrap() {
+                TargetSpec::Dir(dir) => assert_eq!(dir, want, "{spec}"),
+                _ => panic!("{spec} must be a directory target"),
+            }
+        }
+
+        let users = unique_temp_dir("users");
+        let home = users.join("testuser");
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        match resolve_target("dir:/home/other").unwrap() {
+            TargetSpec::Dir(dir) => assert_eq!(dir, users.join("other")),
+            _ => panic!("dir:/home/other must be a directory target"),
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(users);
+    }
+
+    /// niubash#1084: a leading-`/` spelling the classifier has no
+    /// ruling for is an error, never a silent landing on the current
+    /// drive. `/dev/null` is the deterministic case: the classifier
+    /// maps it to the NUL device in every environment, root or not,
+    /// and a device is not a directory.
+    #[cfg(windows)]
+    #[test]
+    fn issue1084_unclassifiable_spelling_is_rejected() {
+        let _env_lock = crate::test_support::PROCESS_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = crate::test_support::ProcessEnvRestore::new(&[
+            "NIU_ROOT",
+            "RUBASH_ROOT",
+            "__RUBASH_SHELL_ROOT",
+        ]);
+        clear_root_env();
+        let err = match resolve_target("dir:/dev/null") {
+            Ok(_) => panic!("dir:/dev/null must be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("/dev/null"), "{err}");
     }
 }
