@@ -28,14 +28,14 @@ members = [".", "crates/niubash-runtime"]
 resolver = "2"
 
 [dependencies]
-niubash-runtime = { path = "crates/niubash-runtime", version = "1.4.3" }
+niubash-runtime = { path = "crates/niubash-runtime", version = "1.5.1" }
 rubash = { version = "1.5.1", git = "https://github.com/unixwin/rubash.git", branch = "master" }
 # niubash#775 / ruline#8: the full GNU readline 8.x C ABI, implemented by
 # ruline. Linked into niu so `enable -f` loadable builtins resolve `rl_*` /
 # `history_*` against this executable; build.rs anchors every exported symbol
 # in scripts/readline-abi-exports.txt. The lib name is `readline`
 # (readline_abi is the package name).
-readline-abi = { git = "https://github.com/unixwin/ruline", rev = "4d0aefa8928039de1be2f63515e688cdc43928a5" }
+readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "4d0aefa8928039de1be2f63515e688cdc43928a5" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
