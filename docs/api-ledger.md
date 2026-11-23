@@ -824,6 +824,23 @@
 > adoption; consumed in-repo by the rubash#2810 consumer
 > pins. §6 grows 290 → 297 (one item, one variant, five
 > methods).
+
+> Addendum (respawn provenance entry face, 2026-11-23,
+> niubash#1079): the module function
+> `respawn_provenance_validated_from_process_env` in
+> `rubash::executor` (a `pub use` of `executor::init` — the
+> rubash#2134 async-child entry face over the #2136
+> provenance validation, read against the live process
+> environment) is recorded (§6 entry) after niubash#1091
+> began consuming it: the host's stdout-pump installer
+> (`src/piped_stdout.rs`) asks it, before any `Executor::new`
+> can import the environment, whether this process is a
+> validated engine respawn, so a procsub/coproc producer
+> whose reader closed early exits silently with SIGPIPE's
+> 141 instead of surfacing a user-facing write error — but
+> no census ever registered the face. The canary red this
+> raised on the pairing job is what surfaced the gap. §6
+> grows 298 → 299 (one item).
 >
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
@@ -1610,6 +1627,7 @@ item rubash::decode_to_visible_text
 item rubash::executor::ExecuteError
 item rubash::executor::bytes_to_shell_text
 item rubash::executor::read_process_stdin_bytes
+item rubash::executor::respawn_provenance_validated_from_process_env
 item rubash::executor::Executor
 item rubash::executor::shell_pwd_display_path
 item rubash::expand::tilde::tilde::expand_word_prefix
