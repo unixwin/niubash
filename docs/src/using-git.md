@@ -5,41 +5,54 @@ git-for-windows C source rebuilt with MSVC — so a fresh machine has a working
 `git` with zero setup. Two questions come up once you already have another git
 (Git for Windows, a scoop git) or want niu's git from outside the shell:
 
-- [Which git does niu use?](#which-git-does-niu-use) — yours, when you have one.
+- [Which git does niu use?](#which-git-does-niu-use) — the bundled one by
+  default; yours, with one switch.
 - [How do I use niu's git from other programs?](#how-do-i-use-nius-git-from-other-programs)
   — one PATH entry, never `usr\bin`.
 
 ## Which git does niu use?
 
-`git` inside niu resolves through `PATH`, like every external command. The
-resolution order is:
+`git` inside niu resolves through `PATH`, like every external command —
+and so does the prompt's git segment, which spawns `git` by name, so both
+always agree. The resolution order is:
 
-1. **Your own git wins.** At startup niu injects the bundled command
-   directories ahead of the `PATH` it inherited, then promotes the directory of
-   the first git that came from *your* `PATH` — a scoop shims dir, Git for
-   Windows' `bin`, a custom install — back to the front. `which git` inside niu
-   therefore names the same git you installed, with its own configuration
-   (`credential.helper`, `core.editor`, GPG, SSH keys all behave as outside).
-   niubash#1050. Promotion is whole-directory: only the first user git
-   directory in your own `PATH` order is moved, the relative order of
-   everything else is unchanged, and directories inside the niubash
-   installation never count as "your" git.
-2. **The bundled niugit is the fallback.** On a machine with no other git on
-   `PATH`, `git` resolves to `<root>\winuxcmd\usr\bin\git.exe` (niu-git) and
-   everything works out of the box — that is the point of bundling it
-   (niubash#209).
+1. **The bundled niugit wins by default.** At startup niu injects the
+   bundled command directories ahead of the `PATH` it inherited, and
+   nothing is moved back in front of them: the bundled commands — git
+   included — are the highest-priority commands in the shell, ahead of
+   `System32` and of anything else on your `PATH`. That is deliberate:
+   the bundled commands are built for niu's POSIX argument handling, and
+   a same-named program elsewhere on `PATH` silently taking over has
+   caused real breakage before. `git` therefore resolves to
+   `<root>\winuxcmd\usr\bin\git.exe` (niu-git), and on a machine with no
+   other git everything works out of the box — that is the point of
+   bundling it (niubash#209).
+2. **Your own git wins with one switch.** Set `NIU_USER_PATH_FIRST=1`
+   in the environment niu starts with, and the bundled directories are
+   *appended behind* your inherited `PATH` instead of prepended. Your
+   `PATH` order then wins wholesale: your git — with its own
+   configuration (`credential.helper`, `core.editor`, GPG, SSH keys all
+   behave as outside) — and equally your own `bash`, `grep`, and
+   everything else you placed ahead. The bundled commands stay on `PATH`
+   as a fallback for names you don't provide. This is a whole-`PATH`
+   decision, not a per-command one: niu never promotes a single
+   command's directory, because a directory that holds your git often
+   holds other programs too — a scoop shims directory carries `bash`/`sh`
+   alongside `git` — and promoting it for git's sake once shadowed niu's
+   own `bash`/`sh` with Git for Windows' (niubash#1050).
 
 Check which one you are on:
 
 ```sh
-which git          # your install's path, or ...\winuxcmd\usr\bin\git.exe
+which git          # ...\winuxcmd\usr\bin\git.exe, or your install's path
 git --version      # niugit builds self-identify as ...windows.N.niugit
 ```
 
-There is nothing to configure and no setting to flip: to use your own git,
-have it on `PATH` before niu starts, as you already would. To use the bundled
-one on a machine where another git exists, run that session with the other
-git's directory removed from `PATH`.
+To use your own git, have it on `PATH` before niu starts, as you already
+would, and set `NIU_USER_PATH_FIRST=1` in the environment niu starts
+with (your user environment variables, or your terminal's profile) —
+the switch is read once, at startup, when the bundled directories are
+injected.
 
 ## How do I use niu's git from other programs?
 

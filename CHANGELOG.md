@@ -4,6 +4,10 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **PATH priority is bundled-first again, with one escape switch (#1050)**: the 1.5.1 directory promotion — the directory holding your git moved ahead of the bundled directories — is removed. Where that directory also carries other programs (a scoop shims directory holds `bash`/`sh` next to `git`), those programs silently shadowed niu's own bundled commands. By default the bundled directories now stay first. Set `NIU_USER_PATH_FIRST=1` to make your inherited `PATH` order win wholesale instead — your git, bash, grep, everything — with the bundled directories appended behind as a fallback.
+
 ## [1.5.2] - 2026-11-24
 
 ### Fixed
