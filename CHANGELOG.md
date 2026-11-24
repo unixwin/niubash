@@ -4,6 +4,38 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-24
+
+### Fixed
+
+- **Engine and bundled-commands line rises to 1.5.2**: the rubash pin takes rubash master `86ce7911` (v1.5.2 — the 40-issue GNU Bash 5.3.20 differential wave, see the rubash changelog), the ruline pin takes ruline main `ff34aee5` (the ruline#67 rename merge; its tree is identical to the previously pinned `36d875ac`, so the editor code itself is unchanged), and the bundled WinuxCmd line is 1.2.3 (the winuxcmd-pin tag/digest backfill lands in the ignition sequence, after the WinuxCmd v1.2.3 publish). Also in this window: the crates.io rename chain completed on the code side (ruline#67, #1081, #1085 — the editor is now the `ruline` package and `readline-abi` carries a crates.io version), and the rename-clean lock check is version-agnostic (#1089).
+- **Field reports from the shipped 1.5.1 closed**: the drive-root `ls` failure (#1082, fixed on the WinuxCmd side as #1862), the skill bundle's stale version strings (#1083), the launcher's drive-root resolution of leading-`/` arguments (#1084), and the procsub/coproc early-reader write-error noise (#1079).
+
+### Full list
+
+All 6 issues closed in the window (2026-11-22 – 11-24) that are new to this release (one further closure, #1063, was already listed under 1.5.1), grouped by theme (mechanical classification, one group per issue; titles verbatim):
+
+#### Startup & configuration (1)
+
+- #1077 [setup wizard] journal/undo list omits the parked rc_sample when the rc slot was occupied
+
+#### CI & tests (1)
+
+- #1089 check-rename-clean.sh: rubash version allowlist rots every release — make the lock check version-agnostic
+
+#### Documentation (1)
+
+- #1083 [docs][skill] The skill bundle shipped with 1.5.1 still reports niubash 1.5.0 and also claims 1.4.4
+
+#### Build, packaging & updates (1)
+
+- #1084 [skill] --target dir:<path> resolves POSIX paths against the current drive root, and installed state follows the cwd
+
+#### Other (2)
+
+- #1079 A process substitution or coproc whose reader stops early prints `niu: stdout: write error: pipe closed by downstream reader`
+- #1082 [BUG] `ls: cannot access '.': No such file or directory` on `/c` root drive path
+
 ## [1.5.1] - 2026-11-22
 
 ### Fixed
