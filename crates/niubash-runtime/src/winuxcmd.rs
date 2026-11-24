@@ -552,7 +552,7 @@ fn bundled_git_is_first_on_path(root: &Path, exe: &Path) -> bool {
 /// resolves, so there is no bundled git to seed for).
 #[cfg(any(windows, test))]
 fn first_git_dir_is_bundled(entries: &[&str], bundled_dirs: &[PathBuf]) -> bool {
-    let git_name = user_git_file_name();
+    let git_name = if cfg!(windows) { "git.exe" } else { "git" };
     for entry in entries {
         let entry = entry.trim();
         if entry.is_empty() {
@@ -560,9 +560,13 @@ fn first_git_dir_is_bundled(entries: &[&str], bundled_dirs: &[PathBuf]) -> bool 
         }
         let dir = PathBuf::from(entry.trim_matches('"'));
         if dir.join(git_name).is_file() {
-            return bundled_dirs
-                .iter()
-                .any(|bundled| path_is_within_or_equal(entry, bundled));
+            return bundled_dirs.iter().any(|bundled| {
+                let entry_cmp = comparable_path_entry(entry);
+                let ancestor_cmp = comparable_path_entry(&bundled.to_string_lossy());
+                !ancestor_cmp.is_empty()
+                    && (entry_cmp == ancestor_cmp
+                        || entry_cmp.starts_with(&format!("{ancestor_cmp}/")))
+            });
         }
     }
     false
@@ -775,28 +779,6 @@ fn host_gcm_candidates_from_env(
         }
     }
     candidates
-}
-
-/// The git executable a directory contributes to PATH resolution:
-/// `git.exe` on Windows, the bare `git` elsewhere.
-fn user_git_file_name() -> &'static str {
-    if cfg!(windows) {
-        "git.exe"
-    } else {
-        "git"
-    }
-}
-
-/// Whether `dir` is the same directory as, or lives below, `ancestor`
-/// (separator- and — on Windows — case-normalized, via
-/// `comparable_path_entry`).
-fn path_is_within_or_equal(dir: &str, ancestor: &Path) -> bool {
-    let dir = comparable_path_entry(dir);
-    let ancestor = comparable_path_entry(&ancestor.to_string_lossy());
-    if ancestor.is_empty() {
-        return false;
-    }
-    dir == ancestor || dir.starts_with(&format!("{ancestor}/"))
 }
 
 /// `current_path` with `dirs` appended behind it, in order. Existing
