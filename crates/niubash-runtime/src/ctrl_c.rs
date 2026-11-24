@@ -697,7 +697,7 @@ mod watch_imp {
         ReadConsoleInputW, WriteConsoleInputW, CTRL_C_EVENT, ENABLE_PROCESSED_INPUT, INPUT_RECORD,
         KEY_EVENT,
     };
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::System::Threading::{Sleep, WaitForSingleObject};
 
     use super::{is_ctrl_c_key_record, mark_self_forwarded_ctrl_c};
     use crate::typeahead_guard::stdin_console_handle;
@@ -775,6 +775,18 @@ mod watch_imp {
                 deliver(conin);
                 return; // one-shot
             }
+            // niubash#1094: the input handle is level-triggered — a
+            // non-empty queue makes the wait above return at once, so
+            // without this yield a peek that earns no delivery fell
+            // straight back into the wait and spun wait -> peek (up to
+            // 128 records) -> GetConsoleMode at full speed, one console
+            // server round trip per iteration (~1 core while typeahead
+            // sat queued). Yield one cadence instead: a later Ctrl+C
+            // waits at most POLL_MS longer, and no record is consumed
+            // here — the queue belongs to the foreground program / the
+            // next prompt. The delivery arm above is untouched, so the
+            // one-shot path keeps its latency.
+            unsafe { Sleep(POLL_MS) };
         }
     }
 
