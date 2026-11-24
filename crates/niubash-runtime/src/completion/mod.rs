@@ -412,6 +412,11 @@ pub struct CompletionResult {
     /// None = unstyled). Filesystem producers fill this from the
     /// session's `LS_COLORS` table (niubash#743).
     pub styles: Vec<Option<nu_ansi_term::Style>>,
+    /// Per-completion menu label (parallel to `completions`; None = the
+    /// completion text itself). Path producers set the last path
+    /// component so menus list `file`, not `dir/file`, as readline does;
+    /// the inserted text stays the full word.
+    pub displays: Vec<Option<String>>,
     /// Common prefix (for partial completion)
     pub common_prefix: Option<String>,
     /// The governing compspec asked for no trailing space after an
@@ -430,6 +435,7 @@ impl CompletionResult {
             completions,
             descriptions: vec![None; len],
             styles: vec![None; len],
+            displays: vec![None; len],
             common_prefix,
             suppress_append: false,
         }
@@ -442,6 +448,7 @@ impl CompletionResult {
             completions,
             descriptions,
             styles: vec![None; len],
+            displays: vec![None; len],
             common_prefix,
             suppress_append: false,
         }
@@ -456,6 +463,7 @@ impl CompletionResult {
             completions,
             descriptions: vec![None; len],
             styles,
+            displays: vec![None; len],
             common_prefix,
             suppress_append: false,
         }

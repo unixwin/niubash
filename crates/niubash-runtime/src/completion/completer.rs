@@ -1038,7 +1038,7 @@ impl NiubashCompleter {
 
             suggestions.push(Suggestion {
                 value: completion.clone(),
-                display_override: None,
+                display_override: result.displays.get(i).cloned().flatten(),
                 description: description.map(|s| s.to_string()),
                 style,
                 extra: None,

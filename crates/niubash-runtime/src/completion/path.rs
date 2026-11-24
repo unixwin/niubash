@@ -643,6 +643,10 @@ struct PathCandidate {
     name: String,
     sort_key: String,
     completion: String,
+    /// The menu label: the last path component (plus `/` for a
+    /// directory), without the typed directory prefix; not part of
+    /// ordering.
+    label: String,
     /// The LS_COLORS style this candidate paints with (niubash#743);
     /// None when no table is in play or it has no rule for the kind.
     style: Option<nu_ansi_term::Style>,
@@ -654,6 +658,7 @@ impl PathCandidate {
     /// its symlink styling) is unchanged.
     fn mark_directory(&mut self, display_prefix: &str, quote: Option<char>) {
         self.is_dir = true;
+        self.label.push('/');
         self.completion = format_shell_path(&format!("{display_prefix}{}/", self.name), quote);
     }
 
@@ -676,6 +681,11 @@ impl PathCandidate {
             name: file_name.to_string(),
             sort_key: file_name.to_lowercase(),
             completion,
+            label: if is_dir {
+                format!("{file_name}/")
+            } else {
+                file_name.to_string()
+            },
             style,
         }
     }
@@ -684,16 +694,18 @@ impl PathCandidate {
 /// Fold a sorted candidate list into the completion result, carrying
 /// each candidate's display style (niubash#743).
 fn candidates_result(candidates: Vec<PathCandidate>) -> CompletionResult {
-    CompletionResult::with_styles(
+    let mut result = CompletionResult::with_styles(
         candidates
             .iter()
             .map(|candidate| candidate.completion.clone())
             .collect(),
-        candidates
-            .into_iter()
-            .map(|candidate| candidate.style)
-            .collect(),
-    )
+        candidates.iter().map(|candidate| candidate.style).collect(),
+    );
+    result.displays = candidates
+        .into_iter()
+        .map(|candidate| Some(candidate.label))
+        .collect();
+    result
 }
 
 /// Windows executable-name check: the extension appears in PATHEXT —
