@@ -1,6 +1,6 @@
 [package]
 name = "niubash"
-version = "1.5.1"
+version = "1.5.2"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
@@ -29,13 +29,13 @@ resolver = "2"
 
 [dependencies]
 niubash-runtime = { path = "crates/niubash-runtime", version = "1.5.1" }
-rubash = { version = "1.5.1", git = "https://github.com/unixwin/rubash.git", branch = "master" }
+rubash = { version = "1.5.2", git = "https://github.com/unixwin/rubash.git", branch = "master" }
 # niubash#775 / ruline#8: the full GNU readline 8.x C ABI, implemented by
 # ruline. Linked into niu so `enable -f` loadable builtins resolve `rl_*` /
 # `history_*` against this executable; build.rs anchors every exported symbol
 # in scripts/readline-abi-exports.txt. The lib name is `readline`
 # (readline_abi is the package name).
-readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "36d875ac2ba058094a6b988779ff028f577ec868" }
+readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "ff34aee5504e490842b813bab2f2c32570d76610" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
@@ -109,4 +109,4 @@ rubash = { path = "../rubash" }
 # Same rev as the `readline-abi` dependency above: the ABI adapter's path
 # dependency on its workspace-root `ruline` must resolve to the copy niu
 # already links, or the graph carries two editors.
-ruline = { git = "https://github.com/unixwin/ruline", rev = "36d875ac2ba058094a6b988779ff028f577ec868" }
+ruline = { git = "https://github.com/unixwin/ruline", rev = "ff34aee5504e490842b813bab2f2c32570d76610" }

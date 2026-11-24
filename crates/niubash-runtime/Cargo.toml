@@ -1,6 +1,6 @@
 [package]
 name = "niubash-runtime"
-version = "1.5.1"
+version = "1.5.2"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
@@ -22,12 +22,12 @@ default = ["internals"]
 internals = []
 
 [dependencies]
-rubash = { version = "1.5.1", git = "https://github.com/unixwin/rubash.git", branch = "master" }
+rubash = { version = "1.5.2", git = "https://github.com/unixwin/rubash.git", branch = "master" }
 # niubash#775: the REPL bridges its live Reedline buffer/point and plugin key
 # registrations to the process-wide GNU readline ABI (`rl_line_buffer`,
 # `rl_point`, the exported keymaps). Same pinned rev as the `niu` binary's
 # dependency, so both name one linked crate instance.
-readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "36d875ac2ba058094a6b988779ff028f577ec868" }
+readline-abi = { version = "0.1.0", git = "https://github.com/unixwin/ruline", rev = "ff34aee5504e490842b813bab2f2c32570d76610" }
 # niubash#373: the 0.52-era prompt anchors without turning a missing
 # cursor-position reply into a read_line abort — a DSR-silent terminal
 # (dumb terminals, script(1) recordings, some serial/tmux links) gets its
