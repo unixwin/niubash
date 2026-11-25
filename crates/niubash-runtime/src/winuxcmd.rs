@@ -578,7 +578,11 @@ fn first_git_verdict(entries: &[&str], bundled_dirs: &[PathBuf]) -> FirstGitVerd
 /// `true` when the first git on the scanned entries is the bundled one;
 /// `false` when it is a foreign directory — or when no entry holds a
 /// git at all (no git resolves, so there is no bundled git to name).
-#[cfg(any(windows, test))]
+/// Production judges through `first_git_verdict` directly (niubash#1100);
+/// this boolean projection survives only as the surface the #1067 lib
+/// pins assert against, so it is test-only — widening its cfg back to
+/// `any(windows, test)` makes it dead code in the production build.
+#[cfg(test)]
 fn first_git_dir_is_bundled(entries: &[&str], bundled_dirs: &[PathBuf]) -> bool {
     first_git_verdict(entries, bundled_dirs) == FirstGitVerdict::Bundled
 }
