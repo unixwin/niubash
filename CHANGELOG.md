@@ -4,28 +4,29 @@ All notable changes to Niubash are documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-
-- **PATH priority is bundled-first again, with one escape switch (#1050)**: the 1.5.1 directory promotion — the directory holding your git moved ahead of the bundled directories — is removed. Where that directory also carries other programs (a scoop shims directory holds `bash`/`sh` next to `git`), those programs silently shadowed niu's own bundled commands. By default the bundled directories now stay first. Set `NIU_USER_PATH_FIRST=1` to make your inherited `PATH` order win wholesale instead — your git, bash, grep, everything — with the bundled directories appended behind as a fallback.
-
 ## [1.5.2] - 2026-11-24
 
 ### Fixed
 
-- **Engine and bundled-commands line rises to 1.5.2**: the rubash pin takes rubash master `86ce7911` (v1.5.2 — the 40-issue GNU Bash 5.3.20 differential wave, see the rubash changelog), the ruline pin takes ruline main `ff34aee5` (the ruline#67 rename merge; its tree is identical to the previously pinned `36d875ac`, so the editor code itself is unchanged), and the bundled WinuxCmd line is 1.2.3 (the winuxcmd-pin tag/digest backfill lands in the ignition sequence, after the WinuxCmd v1.2.3 publish). Also in this window: the crates.io rename chain completed on the code side (ruline#67, #1081, #1085 — the editor is now the `ruline` package and `readline-abi` carries a crates.io version), and the rename-clean lock check is version-agnostic (#1089).
+- **Engine and bundled-commands line rises to 1.5.2**: the rubash pin takes rubash master `d6328755` (v1.5.2 — the 40-issue GNU Bash 5.3.20 differential wave, see the rubash changelog), the ruline pin takes ruline main `ff34aee5` (the ruline#67 rename merge; its tree is identical to the previously pinned `36d875ac`, so the editor code itself is unchanged), and the bundled WinuxCmd line is 1.2.3 (the winuxcmd-pin tag/digest backfill lands in the ignition sequence, after the WinuxCmd v1.2.3 publish). Also in this window: the crates.io rename chain completed on the code side (ruline#67, #1081, #1085 — the editor is now the `ruline` package and `readline-abi` carries a crates.io version), and the rename-clean lock check is version-agnostic (#1089).
 - **Field reports from the shipped 1.5.1 closed**: the drive-root `ls` failure (#1082, fixed on the WinuxCmd side as #1862), the skill bundle's stale version strings (#1083), the launcher's drive-root resolution of leading-`/` arguments (#1084), and the procsub/coproc early-reader write-error noise (#1079).
+- **PATH priority is bundled-first again, with one escape switch (#1050)**: the 1.5.1 directory promotion — the directory holding your git moved ahead of the bundled directories — is removed. Where that directory also carries other programs (a scoop shims directory holds `bash`/`sh` next to `git`), those programs silently shadowed niu's own bundled commands. By default the bundled directories now stay first. Set `NIU_USER_PATH_FIRST=1` to make your inherited `PATH` order win wholesale instead — your git, bash, grep, everything — with the bundled directories appended behind as a fallback.
 
 ### Full list
 
-All 6 issues closed in the window (2026-11-22 – 11-24) that are new to this release (one further closure, #1063, was already listed under 1.5.1), grouped by theme (mechanical classification, one group per issue; titles verbatim):
+All 11 issues closed in the window (2026-11-22 – 11-25) that are new to this release (one further closure, #1063, was already listed under 1.5.1), grouped by theme (mechanical classification, one group per issue; titles verbatim):
 
-#### Startup & configuration (1)
+#### Startup & configuration (4)
 
+- #1050 如何配置NiuBash使用已经安装的Git命令（比如 Git for Windows 或 scoop git）？
+- #1061 [bug][winuxcmd] 随包 niu-git 无 credential.helper，非交互 HTTPS 凭据询问无限挂起
+- #1067 #1061 B 面：随包 niu-git 无 credential.helper、也不继承宿主 GCM（私有仓凭据无来源）
 - #1077 [setup wizard] journal/undo list omits the parked rc_sample when the rc slot was occupied
 
-#### CI & tests (1)
+#### CI & tests (2)
 
 - #1089 check-rename-clean.sh: rubash version allowlist rots every release — make the lock check version-agnostic
+- #1104 [bug][ci] issue1067 integration pins never actually run in CI — staging absent, six pins early-return green
 
 #### Documentation (1)
 
@@ -35,10 +36,11 @@ All 6 issues closed in the window (2026-11-22 – 11-24) that are new to this re
 
 - #1084 [skill] --target dir:<path> resolves POSIX paths against the current drive root, and installed state follows the cwd
 
-#### Other (2)
+#### Other (3)
 
 - #1079 A process substitution or coproc whose reader stops early prints `niu: stdout: write error: pipe closed by downstream reader`
 - #1082 [BUG] `ls: cannot access '.': No such file or directory` on `/c` root drive path
+- #1094 [Windowsl `niu-ctrlc-watch` busy-loops on queued non-Ctrl+C input while a foreground process sleeps
 
 ## [1.5.1] - 2026-11-22
 
