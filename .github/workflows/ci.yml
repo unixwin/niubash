@@ -67,6 +67,34 @@ jobs:
       - name: cargo build
         run: cargo build --locked
 
+      # niubash#1104: stage a real winuxcmd.exe so the staging-gated pins
+      # (tests/issue1067_niugit_credential_helper.rs,
+      # tests/issue1002_usr_bin_env.rs) actually execute in this job.
+      # WINUXCMD_PATH was never set here and stock runners carry no
+      # winuxcmd.exe, so every one of those pins early-returned green
+      # without running -- that is how #1100's host-only red escaped CI.
+      # Route: the pinned published artifact, not a from-source build.
+      # WinuxCmd's own Windows CI build runs ~40 minutes, which alone
+      # would consume this job's whole budget, and the pins stage the
+      # shipped binary's layout, which is exactly what the release zip
+      # carries. Pin = version + SHA-256; bump both together.
+      - name: Stage winuxcmd.exe (pinned WinuxCmd v1.2.2 release)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'WinuxCmd-1.2.2-win-x64.zip'
+          curl.exe -sSfL -o $zip 'https://github.com/unixwin/WinuxCmd/releases/download/v1.2.2/WinuxCmd-1.2.2-win-x64.zip'
+          $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '3f5f02905744598f8b307e6f32d2688c928b82845764876bba3f8127aa875995') {
+            throw "WinuxCmd v1.2.2 zip SHA-256 mismatch: $hash"
+          }
+          $dest = Join-Path $env:RUNNER_TEMP 'winuxcmd-1.2.2'
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $exe = Join-Path $dest 'WinuxCmd-1.2.2-win-x64\usr\bin\winuxcmd.exe'
+          if (-not (Test-Path $exe)) {
+            throw "staged winuxcmd.exe missing at $exe"
+          }
+          echo "WINUXCMD_PATH=$exe" >> $env:GITHUB_ENV
+
       # niubash#1033: `cargo test` defaults to fail-fast -- the first failing
       # target aborts the run, so everything queued after it never executes.
       # build-and-test carries the known issue683 baseline red, which sits
@@ -79,6 +107,23 @@ jobs:
       # informational -- it does not cover windows-latest.)
       - name: cargo test (workspace)
         run: cargo test --workspace --locked --no-fail-fast
+
+      # niubash#1104 acceptance evidence: an early-returned pin also
+      # reports "ok", so the workspace run above cannot by itself prove
+      # the staging-gated pins executed. Each staged pin prints a
+      # `winuxcmd staging:` line as it stages; --nocapture surfaces them,
+      # and this step fails unless every gated pin (6 in issue1067 + 1 in
+      # issue1002) left its line in the log.
+      - name: Verify winuxcmd-staged pins executed (niubash#1104)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="staged-pins.log"
+          cargo test --locked --test issue1067_niugit_credential_helper --test issue1002_usr_bin_env -- --nocapture 2>&1 | tee "$log"
+          staged="$(grep -c 'winuxcmd staging:' "$log" || true)"
+          echo "winuxcmd-staged pin executions: $staged"
+          test "$staged" -eq 7
 
       # Skill bundle golden check (niubash#188): the generated regions in
       # skills/niubash/ must match the corpus transcripts + applet inventory,
@@ -544,6 +589,28 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+
+      # niubash#1104: same winuxcmd staging as build-and-test (see that
+      # job for the route rationale). The workspace nextest run below
+      # includes the staging-gated pins, which hard-fail in CI when
+      # staging is absent -- without this step the sweep would red on
+      # the floor instead of on real results.
+      - name: Stage winuxcmd.exe (pinned WinuxCmd v1.2.2 release)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'WinuxCmd-1.2.2-win-x64.zip'
+          curl.exe -sSfL -o $zip 'https://github.com/unixwin/WinuxCmd/releases/download/v1.2.2/WinuxCmd-1.2.2-win-x64.zip'
+          $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '3f5f02905744598f8b307e6f32d2688c928b82845764876bba3f8127aa875995') {
+            throw "WinuxCmd v1.2.2 zip SHA-256 mismatch: $hash"
+          }
+          $dest = Join-Path $env:RUNNER_TEMP 'winuxcmd-1.2.2'
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $exe = Join-Path $dest 'WinuxCmd-1.2.2-win-x64\usr\bin\winuxcmd.exe'
+          if (-not (Test-Path $exe)) {
+            throw "staged winuxcmd.exe missing at $exe"
+          }
+          echo "WINUXCMD_PATH=$exe" >> $env:GITHUB_ENV
 
       - name: cargo build (workspace)
         run: cargo build --locked

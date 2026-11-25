@@ -32,6 +32,46 @@ fn find_real_winuxcmd() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Environment variable that explicitly opts out of the winuxcmd staging
+/// requirement for a local run (niubash#1104). CI never honors it: a CI
+/// run without staging is a hard failure, so this pin can never again
+/// pass without executing.
+const SKIP_STAGING_ENV: &str = "NIU_TEST_SKIP_WINUXCMD_STAGING";
+
+fn ci_env_is_truthy() -> bool {
+    std::env::var("CI").is_ok_and(|v| !v.is_empty() && v != "false")
+}
+
+/// `find_real_winuxcmd` with the niubash#1104 floor applied: missing
+/// staging is a hard failure in CI and by default locally; the only skip
+/// is the explicit, visible opt-out in `SKIP_STAGING_ENV`. On success the
+/// staged path is printed so CI logs can prove the pin executed instead
+/// of early-returning (an early return also reports `ok`).
+fn require_real_winuxcmd() -> Option<PathBuf> {
+    if let Some(path) = find_real_winuxcmd() {
+        eprintln!("winuxcmd staging: {}", path.display());
+        return Some(path);
+    }
+    if ci_env_is_truthy() {
+        panic!(
+            "winuxcmd staging is required in CI but no winuxcmd.exe was found \
+             (WINUXCMD_PATH unset and `where.exe winuxcmd.exe` found nothing); \
+             refusing to let this pin pass without executing (niubash#1104)"
+        );
+    }
+    if std::env::var_os(SKIP_STAGING_ENV).is_some() {
+        eprintln!(
+            "SKIP: {SKIP_STAGING_ENV} is set and no winuxcmd.exe staging was found; \
+             this pin did not execute (niubash#1104)"
+        );
+        return None;
+    }
+    panic!(
+        "no winuxcmd.exe staging found (set WINUXCMD_PATH or put winuxcmd.exe on PATH); \
+         to skip this pin explicitly on a local run, set {SKIP_STAGING_ENV}=1 (niubash#1104)"
+    );
+}
+
 fn niu_binary() -> PathBuf {
     let p = PathBuf::from(env!("CARGO_BIN_EXE_niu"));
     if p.exists() {
@@ -115,8 +155,9 @@ fn env_exe_executes_bash_c_and_shebang_script_with_args() {
     if !cfg!(windows) {
         return;
     }
-    let Some(winuxcmd_src) = find_real_winuxcmd() else {
-        eprintln!("skipping live env.exe execution test: winuxcmd.exe not found");
+    // niubash#1104: missing staging used to skip this pin with only an
+    // eprintln; it now goes through the same hard floor as issue1067.
+    let Some(winuxcmd_src) = require_real_winuxcmd() else {
         return;
     };
 
