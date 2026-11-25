@@ -215,11 +215,16 @@ pub fn prepare_winuxcmd_with_override(override_path: Option<&Path>) -> Result<Pa
         .root
         .clone()
         .unwrap_or_else(|| installation_root(&exe));
+    // niubash#1100: capture the PATH this session inherited before the
+    // injection below rewrites it — the #1067 credential seed's gate
+    // judges that PATH, not the post-injection one.
+    #[cfg(windows)]
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
     auto_activate_bundled_winuxcmd(&exe);
     prepend_root_dirs_to_path(&root, &exe)?;
     prepend_session_link_dirs(&exe);
     #[cfg(windows)]
-    seed_niugit_credential_helper(&root, &exe);
+    seed_niugit_credential_helper(&root, &exe, &inherited_path);
     Ok(exe)
 }
 
@@ -474,14 +479,17 @@ fn user_path_first() -> bool {
 /// (`niubash#1067`).
 ///
 /// Precedence & safety:
-/// - Skips when the first `git` on the effective PATH is not the bundled
-///   one (see `bundled_git_is_first_on_path`): a user git ahead of the
-///   bundled dirs already carries its own `etc/gitconfig` and helper.
-///   The verdict is read off the PATH itself, not off the `#1050`
-///   directory promotion that used to produce that order — the #1050
-///   adjudication (2026-11-24) deletes the promotion, and the scan stays
-///   correct under the restored bundled-first default and under the
-///   `NIU_USER_PATH_FIRST` escape alike.
+/// - Skips when the first `git` on the PATH the session inherited is a
+///   foreign one (see `credential_seed_allowed`): a user git ahead of
+///   the bundled dirs already carries its own `etc/gitconfig` and
+///   helper. The verdict is read off the inherited PATH — captured
+///   before niu's own injection rewrote it — not off the post-injection
+///   PATH: under the `#1050` bundled-first default the injected dirs
+///   always lead, so a post-injection scan could never see the user's
+///   git first and the skip could never fire (niubash#1100). The scan
+///   stays correct under the bundled-first default and under the
+///   `NIU_USER_PATH_FIRST` escape alike, because both leave the
+///   inherited order the user presented untouched.
 /// - Skips when `GIT_ASKPASS`, `GIT_CONFIG_NOSYSTEM`, or
 ///   `GIT_CONFIG_GLOBAL=NUL|/dev/null` is set, or when `GIT_CONFIG_PARAMETERS`
 ///   or `GIT_CONFIG_COUNT` already sets `credential.helper`.
@@ -494,8 +502,10 @@ fn user_path_first() -> bool {
 ///   `git-credential-manager-core.exe`) on `PATH` or in standard Windows
 ///   install paths, falling back to bundled `wincred` when present.
 #[cfg(windows)]
-fn seed_niugit_credential_helper(root: &Path, exe: &Path) {
-    if !has_bundled_niugit(root) || !bundled_git_is_first_on_path(root, exe) {
+fn seed_niugit_credential_helper(root: &Path, exe: &Path, inherited_path: &str) {
+    if !has_bundled_niugit(root)
+        || !credential_seed_allowed_on_inherited_path(root, exe, inherited_path)
+    {
         return;
     }
     if env_blocks_credential_helper_seeding() {
@@ -523,35 +533,23 @@ fn seed_niugit_credential_helper(root: &Path, exe: &Path) {
     log::debug!("seeded niu-git fallback credential.helper={helper} (niubash#1067)");
 }
 
-/// Whether the first `git` on the effective PATH is the bundled one.
-///
-/// The `#1067` credential seed exists for bundled niu-git, which ships no
-/// system gitconfig of its own; a user git ahead of it on PATH carries its
-/// own and must not be seeded over. The verdict is read off the PATH as it
-/// stands at seed time — after injection (and, today, after the `#1050`
-/// directory promotion) — instead of being coupled to any one mechanism
-/// that produced that order: the #1050 adjudication (2026-11-24) deletes
-/// the promotion and restores the bundled-first default with a
-/// `NIU_USER_PATH_FIRST` escape, and this scan gives the right answer
-/// under both orders.
-#[cfg(windows)]
-fn bundled_git_is_first_on_path(root: &Path, exe: &Path) -> bool {
-    let mut bundled_dirs = injected_path_dirs(root, exe);
-    if let Some(links_root) = crate::msix::session_writable_root() {
-        bundled_dirs.extend(injected_path_dirs(&links_root, exe));
-    }
-    let current = std::env::var("PATH").unwrap_or_default();
-    let entries: Vec<&str> = current.split(path_list_separator()).collect();
-    first_git_dir_is_bundled(&entries, &bundled_dirs)
+/// Which git an ordered PATH scan meets first, if any.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstGitVerdict {
+    /// The first git-bearing entry lies within the bundled tree.
+    Bundled,
+    /// The first git-bearing entry is a foreign directory — a user git,
+    /// or another installation's tree.
+    Foreign,
+    /// No entry holds a git at all.
+    Absent,
 }
 
 /// First-hit scan over the PATH entries, walked in order; the first
 /// entry holding a git decides the verdict.
-/// `true` when that entry lies within the bundled tree, `false` when it
-/// is a foreign directory — or when no entry holds a git at all (no git
-/// resolves, so there is no bundled git to seed for).
 #[cfg(any(windows, test))]
-fn first_git_dir_is_bundled(entries: &[&str], bundled_dirs: &[PathBuf]) -> bool {
+fn first_git_verdict(entries: &[&str], bundled_dirs: &[PathBuf]) -> FirstGitVerdict {
     let git_name = if cfg!(windows) { "git.exe" } else { "git" };
     for entry in entries {
         let entry = entry.trim();
@@ -560,16 +558,61 @@ fn first_git_dir_is_bundled(entries: &[&str], bundled_dirs: &[PathBuf]) -> bool 
         }
         let dir = PathBuf::from(entry.trim_matches('"'));
         if dir.join(git_name).is_file() {
-            return bundled_dirs.iter().any(|bundled| {
+            let in_bundled = bundled_dirs.iter().any(|bundled| {
                 let entry_cmp = comparable_path_entry(entry);
                 let ancestor_cmp = comparable_path_entry(&bundled.to_string_lossy());
                 !ancestor_cmp.is_empty()
                     && (entry_cmp == ancestor_cmp
                         || entry_cmp.starts_with(&format!("{ancestor_cmp}/")))
             });
+            return if in_bundled {
+                FirstGitVerdict::Bundled
+            } else {
+                FirstGitVerdict::Foreign
+            };
         }
     }
-    false
+    FirstGitVerdict::Absent
+}
+
+/// `true` when the first git on the scanned entries is the bundled one;
+/// `false` when it is a foreign directory — or when no entry holds a
+/// git at all (no git resolves, so there is no bundled git to name).
+/// Production judges through `first_git_verdict` directly (niubash#1100);
+/// this boolean projection survives only as the surface the #1067 lib
+/// pins assert against, so it is test-only — widening its cfg back to
+/// `any(windows, test)` makes it dead code in the production build.
+#[cfg(test)]
+fn first_git_dir_is_bundled(entries: &[&str], bundled_dirs: &[PathBuf]) -> bool {
+    first_git_verdict(entries, bundled_dirs) == FirstGitVerdict::Bundled
+}
+
+/// Whether the `#1067` credential seed may be planted, judged on the
+/// PATH entries of the PATH the session inherited — before niu's own
+/// injection rewrote it (niubash#1100). Only a foreign first git
+/// vetoes the seed: it is the user's git, with its own `etc/gitconfig`
+/// and helper. A bundled first git (a nested session that inherited
+/// the bundled dirs) and no git at all (the bundled git niu injects is
+/// about to be the only one) both allow it.
+#[cfg(any(windows, test))]
+fn credential_seed_allowed(entries: &[&str], bundled_dirs: &[PathBuf]) -> bool {
+    first_git_verdict(entries, bundled_dirs) != FirstGitVerdict::Foreign
+}
+
+/// The seed gate for one session: the bundled dirs of the selected
+/// installation, judged against the PATH the session inherited.
+#[cfg(windows)]
+fn credential_seed_allowed_on_inherited_path(
+    root: &Path,
+    exe: &Path,
+    inherited_path: &str,
+) -> bool {
+    let mut bundled_dirs = injected_path_dirs(root, exe);
+    if let Some(links_root) = crate::msix::session_writable_root() {
+        bundled_dirs.extend(injected_path_dirs(&links_root, exe));
+    }
+    let entries: Vec<&str> = inherited_path.split(path_list_separator()).collect();
+    credential_seed_allowed(&entries, &bundled_dirs)
 }
 
 #[cfg(windows)]
@@ -2809,6 +2852,42 @@ mod path_order_tests {
         assert!(
             !first_git_dir_is_bundled(&entries, &bundled),
             "no git on PATH={bundled_first}"
+        );
+    }
+
+    /// niubash#1100: the credential seed's gate judges the PATH the
+    /// session inherited, and only a foreign first git vetoes the
+    /// seed — the host-failing shape is an inherited PATH whose only
+    /// git is the user's. A bundled first git (nested session) and no
+    /// git at all (the bundled git is about to be the only one) both
+    /// allow the seed.
+    #[test]
+    fn issue1100_seed_gate_vetoes_only_a_foreign_first_git() {
+        let stage = promotion_stage("winuxcmd-1100-seed-gate");
+        let bundled = injected_dirs(&stage);
+        let sep = path_list_separator();
+        let user_only = stage.user_git_dir.display().to_string();
+        let entries: Vec<&str> = user_only.split(sep).collect();
+        assert!(
+            !credential_seed_allowed(&entries, &bundled),
+            "user git alone on inherited PATH={user_only} must veto the seed"
+        );
+        let bundled_first = format!(
+            "{}{}{}",
+            stage.bundled_bin.display(),
+            sep,
+            stage.user_git_dir.display()
+        );
+        let entries: Vec<&str> = bundled_first.split(sep).collect();
+        assert!(
+            credential_seed_allowed(&entries, &bundled),
+            "bundled git first on inherited PATH={bundled_first} must allow the seed"
+        );
+        let no_git = stage.other_dir.display().to_string();
+        let entries: Vec<&str> = no_git.split(sep).collect();
+        assert!(
+            credential_seed_allowed(&entries, &bundled),
+            "no git on inherited PATH={no_git} must allow the seed"
         );
     }
 
