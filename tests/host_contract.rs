@@ -1073,6 +1073,11 @@ fn winuxcmd_ls_preserves_unicode_filenames() {
     }
 
     let Some(winuxcmd) = real_winuxcmd_for_test() else {
+        // niubash#1104: loud skip, not a silent pass. This suite's staging
+        // class (a winuxcmd tree with generated command links) is exempt
+        // from the CI hard floor applied to the single-exe pins; see the
+        // host-contract setup in AGENTS.md.
+        eprintln!("SKIP winuxcmd_ls_preserves_unicode_filenames: no winuxcmd.exe with command links found (WINUXCMD_PATH / sibling WinuxCmd build / PATH)");
         return;
     };
 
@@ -1107,6 +1112,9 @@ fn installed_layout_publishes_the_derived_shell_root_to_children() {
     }
 
     let Some(winuxcmd) = real_winuxcmd_for_test() else {
+        // niubash#1104: loud skip, not a silent pass (see the note in
+        // winuxcmd_ls_preserves_unicode_filenames).
+        eprintln!("SKIP installed_layout_publishes_the_derived_shell_root_to_children: no winuxcmd.exe with command links found (WINUXCMD_PATH / sibling WinuxCmd build / PATH)");
         return;
     };
     let Some(winuxcmd_dir) = winuxcmd.parent() else {
@@ -1185,12 +1193,17 @@ fn installed_winuxcmd_links_back_logical_bin_namespaces_without_root_copies() {
     }
 
     let Some(winuxcmd) = real_winuxcmd_for_test() else {
+        // niubash#1104: loud skip, not a silent pass (see the note in
+        // winuxcmd_ls_preserves_unicode_filenames).
+        eprintln!("SKIP installed_winuxcmd_links_back_logical_bin_namespaces_without_root_copies: no winuxcmd.exe with command links found (WINUXCMD_PATH / sibling WinuxCmd build / PATH)");
         return;
     };
     let Some(winuxcmd_dir) = winuxcmd.parent() else {
         return;
     };
     if !winuxcmd_dir.join("ls.exe").is_file() {
+        // niubash#1104: loud skip, not a silent pass.
+        eprintln!("SKIP installed_winuxcmd_links_back_logical_bin_namespaces_without_root_copies: no ls.exe command link beside {}", winuxcmd_dir.display());
         return;
     }
 
