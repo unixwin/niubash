@@ -2759,6 +2759,15 @@ fn glob_match_at(pattern: &[char], mut pi: usize, text: &[char], mut ti: usize) 
     ti == text.len()
 }
 
+fn next_class_char(pattern: &[char], index: usize) -> Option<(char, usize)> {
+    let ch = *pattern.get(index)?;
+    if ch == '\\' {
+        pattern.get(index + 1).map(|&escaped| (escaped, index + 2))
+    } else {
+        Some((ch, index + 1))
+    }
+}
+
 /// Match one character against a `[...]` class starting at
 /// `pattern[start]`. Returns `(matched, index just past ']'`), or
 /// `None` when the class is unterminated (the `[` is literal then).
@@ -2772,16 +2781,19 @@ fn glob_class_match(pattern: &[char], start: usize, c: char) -> Option<(bool, us
     let mut first = true;
     while i < pattern.len() && (pattern[i] != ']' || first) {
         first = false;
-        if i + 2 < pattern.len() && pattern[i + 1] == '-' && pattern[i + 2] != ']' {
-            if pattern[i] <= c && c <= pattern[i + 2] {
+        let (lo, after_lo) = next_class_char(pattern, i)?;
+        if after_lo + 1 < pattern.len() && pattern[after_lo] == '-' && pattern[after_lo + 1] != ']'
+        {
+            let (hi, after_hi) = next_class_char(pattern, after_lo + 1)?;
+            if lo <= c && c <= hi {
                 matched = true;
             }
-            i += 3;
+            i = after_hi;
         } else {
-            if pattern[i] == c {
+            if lo == c {
                 matched = true;
             }
-            i += 1;
+            i = after_lo;
         }
     }
     if i >= pattern.len() {
@@ -5502,5 +5514,14 @@ mod tests {
             "echo synced\necho lost\n",
             "unarmed, the exit flush appends the plain line"
         );
+    }
+
+    #[test]
+    fn histignore_bracket_classes_honor_backslash_escapes() {
+        assert!(history_should_ignore("echo ]", "", r"echo [\]]"));
+        assert!(!history_should_ignore(r"echo \]", "", r"echo [\]]"));
+        assert!(history_should_ignore("echo -", "", r"echo [a\-z]"));
+        assert!(!history_should_ignore("echo _", "", r"echo [a\-z]"));
+        assert!(!history_should_ignore("echo m", "", r"echo [a\-z]"));
     }
 }
