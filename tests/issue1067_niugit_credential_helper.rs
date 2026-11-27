@@ -246,8 +246,13 @@ fn scoped_host_helper_does_not_suppress_fallback_helper() {
     assert_eq!(out, "1|credential.helper|wincred");
 }
 
+/// niubash#1100 as re-scoped by #1110 (captain ruling): the seed is
+/// vetoed only when the user's git leads the session's *effective*
+/// PATH. A foreign git alone on the inherited PATH leads the session
+/// only under `NIU_USER_PATH_FIRST=1`, where the bundled dirs append
+/// behind it.
 #[test]
-fn does_not_seed_when_user_git_is_first_on_path() {
+fn does_not_seed_when_user_git_leads_under_user_path_first() {
     let Some(stage) = stage_niu_with_niugit("niubash-1067-user-git", true) else {
         return;
     };
@@ -257,8 +262,32 @@ fn does_not_seed_when_user_git_is_first_on_path() {
 
     let mut cmd = base_niu_command(&stage, r#"printf '%s\n' "${GIT_CONFIG_COUNT:-UNSET}""#);
     cmd.env("PATH", &user_git_dir);
+    cmd.env("NIU_USER_PATH_FIRST", "1");
     let out = run_stdout(&mut cmd);
     assert_eq!(out, "UNSET");
+}
+
+/// niubash#1110: in the default (bundled-first) mode the same
+/// inherited PATH — a foreign git as its only entry — must NOT veto
+/// the seed: the bundled dirs prepend, so the bundled niugit is the
+/// session's git and gets the fallback helper.
+#[test]
+fn seeds_when_foreign_git_on_inherited_path_but_bundled_first() {
+    let Some(stage) = stage_niu_with_niugit("niubash-1110-bundled-first", true) else {
+        return;
+    };
+    let user_git_dir = stage.root.join("user-git");
+    std::fs::create_dir_all(&user_git_dir).unwrap();
+    std::fs::write(user_git_dir.join("git.exe"), b"user-git").unwrap();
+
+    let mut cmd = base_niu_command(
+        &stage,
+        r#"printf '%s|%s|%s\n' "${GIT_CONFIG_COUNT:-}" "${GIT_CONFIG_KEY_0:-}" "${GIT_CONFIG_VALUE_0:-}""#,
+    );
+    cmd.env("PATH", &user_git_dir);
+    cmd.env_remove("NIU_USER_PATH_FIRST");
+    let out = run_stdout(&mut cmd);
+    assert_eq!(out, "1|credential.helper|wincred");
 }
 
 #[test]
