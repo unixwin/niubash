@@ -223,7 +223,9 @@ pub fn parse_sections(text: &str) -> Vec<LoaderSection> {
         );
         if is_begin || is_end {
             let prefix = if is_begin { BEGIN_PREFIX } else { END_PREFIX };
-            let id = trimmed[prefix.len()..trimmed.len() - WRAPPER_SUFFIX.len()]
+            let id = trimmed
+                .get(prefix.len()..trimmed.len() - WRAPPER_SUFFIX.len())
+                .unwrap_or("")
                 .trim()
                 .to_string();
             let mut body: Vec<String> = Vec::new();
@@ -1172,5 +1174,14 @@ mod tests {
         }
         std::env::remove_var("NIU_PLUGIN_LOADER");
         assert!(loader_enabled_by_switch());
+    }
+
+    #[test]
+    fn malformed_empty_wrapper_lines_fail_validation_without_panicking() {
+        let malformed = "# --- niu plugin source: ---\n\
+                         export BAD=1\n\
+                         # --- end niu plugin source: ---\n";
+        assert!(parse_sections(malformed).is_empty());
+        assert!(validate(malformed).is_err());
     }
 }
