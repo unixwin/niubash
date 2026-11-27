@@ -175,7 +175,7 @@ fn parse_color(value: &str) -> Option<Color> {
 }
 
 fn parse_hex_color(hex: &str) -> Option<Color> {
-    if hex.len() != 6 {
+    if hex.len() != 6 || !hex.is_ascii() {
         return None;
     }
     let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
@@ -329,5 +329,15 @@ mod tests {
             hinter.handle("git", 3, &history, false, ""),
             " status --short"
         );
+    }
+
+    #[test]
+    fn parse_highlight_style_ignores_multibyte_utf8_in_hex_color() {
+        let default_fg = parse_highlight_style("").foreground;
+        assert_eq!(parse_highlight_style("fg=#中文").foreground, default_fg);
+        assert_eq!(parse_highlight_style("fg=#aé123").foreground, default_fg);
+        let style = parse_highlight_style("fg=#中文,bold");
+        assert_eq!(style.foreground, default_fg);
+        assert!(style.is_bold);
     }
 }
