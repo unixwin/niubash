@@ -330,8 +330,13 @@ fn short_dir(path: &Path) -> String {
             if rest.is_empty() {
                 return "~".to_string();
             }
-            let rest = rest.trim_start_matches('\\').trim_start_matches('/');
-            return format!("~{}{}", std::path::MAIN_SEPARATOR, rest);
+            if home_str.ends_with(['/', '\\']) || rest.starts_with(['/', '\\']) {
+                let rest = rest.trim_start_matches(['\\', '/']);
+                if rest.is_empty() {
+                    return "~".to_string();
+                }
+                return format!("~{}{}", std::path::MAIN_SEPARATOR, rest);
+            }
         }
     }
     path_str.to_string()
@@ -1762,5 +1767,46 @@ separator = " "
         assert!(lean_left.contains(&git_name.to_string()));
         let bundle_id = value["segments"][git_name]["id"].as_str().unwrap();
         assert_eq!(SegmentId::from_name(bundle_id), Some(SegmentId::Vcs));
+    }
+
+    #[test]
+    fn short_dir_does_not_abbreviate_sibling_sharing_home_prefix() {
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "niubash-short-dir-sibling-{}-{nanos}",
+            std::process::id()
+        ));
+        let home = base.join("me");
+        let sibling = base.join("melon").join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_profile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+
+        let resolved_home = shell_home_dir().unwrap();
+        let resolved_sibling = resolved_home.parent().unwrap().join("melon").join("repo");
+        let resolved_child = resolved_home.join("work");
+        let sibling_short = short_dir(&resolved_sibling);
+        let child_short = short_dir(&resolved_child);
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_profile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(sibling_short, resolved_sibling.to_string_lossy());
+        assert_eq!(child_short, format!("~{}work", std::path::MAIN_SEPARATOR));
     }
 }
