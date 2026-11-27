@@ -561,13 +561,17 @@ jobs:
       - name: Checkout pinned asset sources
         shell: pwsh
         run: |
+          # Fetch-by-SHA needs the full 40-char OID: an abbreviated SHA is
+          # treated as a ref name and the fetch fails with "couldn't find
+          # remote ref" (nightly run#1999, 11-25/11-26 two rounds). Same
+          # full SHAs as release.yml Fetch-Pinned.
           git init ..\oh-my-bash
           git -C ..\oh-my-bash remote add origin https://github.com/ohmybash/oh-my-bash
-          git -C ..\oh-my-bash fetch --depth 1 origin abf8461
+          git -C ..\oh-my-bash fetch --depth 1 origin abf846186ab0a8a41ec5888e827ece6277dfe446
           git -C ..\oh-my-bash checkout --quiet FETCH_HEAD
           git init ..\bash-it
           git -C ..\bash-it remote add origin https://github.com/Bash-it/bash-it
-          git -C ..\bash-it fetch --depth 1 origin 4725d29
+          git -C ..\bash-it fetch --depth 1 origin 4725d29db8c0ac8c21df47664b28539f3b8fce94
           git -C ..\bash-it checkout --quiet FETCH_HEAD
 
       - name: Run the per-asset timing budget gate
