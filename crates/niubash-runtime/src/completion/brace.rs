@@ -100,12 +100,13 @@ fn really_munge_braces(
 }
 
 /// `string_gcd` (bracecomp.c:53): the byte length of the greatest common
-/// prefix of S1 and S2.
+/// character prefix of S1 and S2.
 fn string_gcd(s1: &str, s2: &str) -> usize {
-    s1.bytes()
-        .zip(s2.bytes())
+    s1.chars()
+        .zip(s2.chars())
         .take_while(|(a, b)| a == b)
-        .count()
+        .map(|(a, _)| a.len_utf8())
+        .sum()
 }
 
 /// `sh_backslash_quote(string, NULL, 0)` (lib/sh/shquote.c:258): quote the
@@ -204,5 +205,12 @@ mod tests {
         assert_eq!(sh_backslash_quote("#tag"), "\\#tag");
         assert_eq!(sh_backslash_quote("a\\b"), "a\\\\b");
         assert_eq!(sh_backslash_quote("héllo"), "héllo");
+    }
+
+    #[test]
+    fn brace_compression_respects_utf8_char_boundaries() {
+        assert_eq!(compress(&["è", "é"]), "{è,é}");
+        assert_eq!(compress(&["世.txt", "中.txt"]), "{世.txt,中.txt}");
+        assert_eq!(compress(&["dir/中文", "dir/中国"]), "dir/中{国,文}");
     }
 }
