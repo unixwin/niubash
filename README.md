@@ -272,7 +272,7 @@ Everyone who has landed code is listed under [Contributors](#contributors).
 ## Contributors
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-13-orange.svg?style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-21-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
 Thanks to everyone building niubash — issues, fixes, plugins, adapted work, and engine work upstream ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
@@ -298,6 +298,16 @@ Thanks to everyone building niubash — issues, fixes, plugins, adapted work, an
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/cmx"><img src="https://avatars.githubusercontent.com/u/42783691?v=4&size=100" width="100px" height="100px" alt="cmx"/><br /><sub><b>cmx</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=cmx" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/apps/github-actions"><img src="https://avatars.githubusercontent.com/u/41898282?v=4&size=100" width="100px" height="100px" alt="github-actions[bot]"/><br /><sub><b>github-actions[bot]</b></sub></a><br /><a href="#tool-github-actions[bot]" title="Tools">🔧</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/arookieofc-ai"><img src="https://avatars.githubusercontent.com/u/282213208?v=4&size=100" width="100px" height="100px" alt="arookieofc-ai"/><br /><sub><b>arookieofc-ai</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=arookieofc-ai" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/dingyi580"><img src="https://avatars.githubusercontent.com/u/63770542?v=4&size=100" width="100px" height="100px" alt="dingyi580"/><br /><sub><b>dingyi580</b></sub></a><br /><a href="https://github.com/unixwin/niubash/commits?author=dingyi580" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ShiomiHC"><img src="https://avatars.githubusercontent.com/u/136112345?v=4&size=100" width="100px" height="100px" alt="shiomi"/><br /><sub><b>shiomi</b></sub></a><br /><a href="https://github.com/unixwin/niubash/issues?q=author%3AShiomiHC" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/qwased"><img src="https://avatars.githubusercontent.com/u/35343489?v=4&size=100" width="100px" height="100px" alt="qwased"/><br /><sub><b>qwased</b></sub></a><br /><a href="https://github.com/unixwin/niubash/issues?q=author%3Aqwased" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/kite12580"><img src="https://avatars.githubusercontent.com/u/93443965?v=4&size=100" width="100px" height="100px" alt="kite12580"/><br /><sub><b>kite12580</b></sub></a><br /><a href="https://github.com/unixwin/niubash/issues?q=author%3Akite12580" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/xuangeyouneihan"><img src="https://avatars.githubusercontent.com/u/50788434?v=4&size=100" width="100px" height="100px" alt="轩哥有内涵"/><br /><sub><b>轩哥有内涵</b></sub></a><br /><a href="https://github.com/unixwin/niubash/issues?q=author%3Axuangeyouneihan" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/jay-waves"><img src="https://avatars.githubusercontent.com/u/88886108?v=4&size=100" width="100px" height="100px" alt="jay-waves"/><br /><sub><b>jay-waves</b></sub></a><br /><a href="https://github.com/unixwin/niubash/issues?q=author%3Ajay-waves" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/whq12520"><img src="https://avatars.githubusercontent.com/u/113580774?v=4&size=100" width="100px" height="100px" alt="whq12520"/><br /><sub><b>whq12520</b></sub></a><br /><a href="https://github.com/unixwin/niubash/issues?q=author%3Awhq12520" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/YMRwithNoworry"><img src="https://avatars.githubusercontent.com/u/168279861?v=4&size=100" width="100px" height="100px" alt="Paojiao134"/><br /><sub><b>Paojiao134</b></sub></a><br /><a href="https://github.com/unixwin/niubash/issues?q=author%3AYMRwithNoworry" title="Bug reports">🐛</a></td>
     </tr>
   </tbody>
 </table>
