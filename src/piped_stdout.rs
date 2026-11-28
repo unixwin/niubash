@@ -28,11 +28,18 @@
 //! reader lives, the pump is transparent: same bytes, same order, and
 //! backpressure flows through the pipe buffer exactly as before.
 //!
-//! `finish` drains before process exit: it closes niu's pipe-write handle so
-//! the pump reads EOF, then joins it, so normal runs never lose output. The
-//! post-execution exit funnels route through `finish_and_exit`; a blocking
-//! drain at that point matches GNU (`bash -c 'seq 1000000' | slow-reader`
-//! waits for the pipe just like the pre-change niu blocked in write).
+//! `finish` drains before process exit: it flags the pump as draining and
+//! closes niu's pipe-write handle; the pump forwards everything written up
+//! to that point, then stops. It deliberately does NOT wait for EOF:
+//! background descendants inherit the write end and can postpone EOF
+//! forever (niubash#1122 — a long-lived daemon made `niu -c` never exit).
+//! The post-execution exit funnels route through `finish_and_exit`; a
+//! live-but-slow reader still holds the drain exactly as GNU
+//! (`bash -c 'seq 1000000' | slow-reader` waits for the pipe just like the
+//! pre-change niu blocked in write), but a lingering background writer no
+//! longer does. The price is that bytes a background descendant writes
+//! only after `finish` has run may be lost; GNU delivers them because its
+//! children write to the real pipe directly.
 //!
 //! The wrapper is never installed for the interactive REPL (console stdout —
 //! a console cannot break), the launcher word paths (`--version`/`--help`
@@ -143,16 +150,18 @@ mod imp {
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::os::windows::io::{FromRawHandle, RawHandle};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver, Sender};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        CloseHandle, SetHandleInformation, ERROR_NO_DATA, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
     use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_OUTPUT_HANDLE};
-    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Pipes::{CreatePipe, SetNamedPipeHandleState, PIPE_NOWAIT};
 
     type Handle = windows_sys::Win32::Foundation::HANDLE;
 
@@ -169,6 +178,12 @@ mod imp {
         write_handle: isize,
         /// Signaled by the pump after it forwarded everything (EOF).
         done: Receiver<()>,
+        /// Set by `finish` when the exit drain starts. Once set, the pump
+        /// stops at the first empty read instead of waiting for EOF:
+        /// background descendants may hold the inheritable write end open
+        /// forever (niubash#1122), so EOF is not a drain condition niu
+        /// controls.
+        draining: Arc<AtomicBool>,
     }
 
     static PUMP: Mutex<Option<PumpState>> = Mutex::new(None);
@@ -205,6 +220,15 @@ mod imp {
             // children so a lingering child cannot hold the drain open in
             // reverse (only write ends matter for EOF).
             SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+            // The pump must be able to poll the wrapper pipe. With a
+            // blocking read it could only stop at EOF, and EOF requires
+            // EVERY inheritable write end to close — including the ones
+            // background descendants carry away (niubash#1122). NOWAIT
+            // makes an empty pipe report an empty read instead, which is
+            // what lets `finish` drain only what is already written. If
+            // the call fails the pump keeps the pre-#1122 blocking drain.
+            let mode = PIPE_NOWAIT;
+            let _ = SetNamedPipeHandleState(read_end, &mode, std::ptr::null(), std::ptr::null());
             if SetStdHandle(STD_OUTPUT_HANDLE, write_end) == 0 {
                 CloseHandle(read_end);
                 CloseHandle(write_end);
@@ -214,14 +238,25 @@ mod imp {
             let (done_sender, done_receiver) = mpsc::channel::<()>();
             let read_file = std::mem::ManuallyDrop::new(File::from_raw_handle(read_end));
             let real_handle = real as isize;
+            let draining = Arc::new(AtomicBool::new(false));
+            let pump_draining = Arc::clone(&draining);
             let spawned = std::thread::Builder::new()
                 .name("niu-stdout-pump".to_string())
-                .spawn(move || pump_loop(read_file, real_handle, done_sender, respawned_child));
+                .spawn(move || {
+                    pump_loop(
+                        read_file,
+                        real_handle,
+                        done_sender,
+                        respawned_child,
+                        pump_draining,
+                    )
+                });
             match spawned {
                 Ok(_join) => {
                     *PUMP.lock().expect("pump state mutex") = Some(PumpState {
                         write_handle: write_end as isize,
                         done: done_receiver,
+                        draining,
                     });
                 }
                 Err(_) => {
@@ -247,13 +282,28 @@ mod imp {
         real_handle: isize,
         done: Sender<()>,
         respawned_child: bool,
+        draining: Arc<AtomicBool>,
     ) {
         let mut real: std::mem::ManuallyDrop<File> =
             unsafe { std::mem::ManuallyDrop::new(File::from_raw_handle(real_handle as RawHandle)) };
         let mut buffer = vec![0_u8; PUMP_CHUNK_BYTES];
         loop {
             match read.read(&mut buffer) {
-                Ok(0) => break, // EOF: every writer closed — fully drained
+                // A NOWAIT read on a momentarily empty pipe surfaces as
+                // Ok(0) — std maps ERROR_NO_DATA to a zero-length read —
+                // NOT as an EOF signal. Only `draining` distinguishes
+                // "empty for now" from "empty for good": before
+                // `finish`, poll again (a live writer — at minimum the
+                // shell itself — always exists then); once draining,
+                // empty means every byte written before `finish` has
+                // been forwarded, so stop (the error-form arm below is
+                // the same condition kept defensively).
+                Ok(0) => {
+                    if draining.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 Ok(size) => {
                     if write_all(&mut real, &buffer[..size]).is_err() {
                         if respawned_child {
@@ -263,10 +313,34 @@ mod imp {
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if is_would_block(&error) => {
+                    // NOWAIT read on a momentarily empty pipe (error
+                    // form of the Ok(0) case above). Before
+                    // `finish`, just poll again — more output may come.
+                    // Once draining, empty means every byte written
+                    // before `finish` has been forwarded (foreground
+                    // writers are all awaited by then, so their bytes
+                    // are already in the pipe): stop instead of waiting
+                    // for an EOF that background descendants may
+                    // postpone forever (niubash#1122).
+                    if draining.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 Err(_) => break,
             }
         }
         let _ = done.send(());
+    }
+
+    /// A NOWAIT pipe read with no data available reports ERROR_NO_DATA.
+    /// In practice std surfaces that condition as a zero-length Ok(0)
+    /// read (handled by the Ok(0) arm in `pump_loop`); this error-form
+    /// check is kept defensively for paths that report it as an error.
+    fn is_would_block(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::WouldBlock
+            || error.raw_os_error() == Some(ERROR_NO_DATA as i32)
     }
 
     fn write_all(real: &mut File, mut data: &[u8]) -> io::Result<()> {
@@ -295,16 +369,23 @@ mod imp {
         std::process::exit(BROKEN_STDOUT_EXIT_CODE)
     }
 
-    /// Drain: close niu's wrapper write end so the pump reads EOF once every
-    /// other writer (background children) is gone, then wait for the pump to
-    /// forward the remainder. Blocking here matches GNU — a live-but-slow
-    /// reader holds the exit exactly as the pre-change niu blocked writing;
-    /// a GONE reader can never block it because the pump fails its write and
-    /// exits the process first.
+    /// Drain (niubash#1122): flag the pump as draining, close niu's
+    /// wrapper write end, then wait for the pump to forward everything
+    /// written BEFORE this call. The drain deliberately does not wait
+    /// for EOF: background descendants inherit the wrapper write end, so
+    /// EOF can be postponed indefinitely by a daemon that outlives the
+    /// script — the pre-#1122 behavior, which made `niu -c 'gradle …'`
+    /// never exit. Bytes a background descendant writes only after this
+    /// point may therefore be lost; GNU delivers them because its
+    /// children write to the real pipe directly. A live-but-slow reader
+    /// still holds the exit (the pump blocks forwarding, exactly as GNU
+    /// blocks in write), and a GONE reader can never block it because
+    /// the pump fails its write and exits the process first.
     pub fn finish() {
         let Some(state) = PUMP.lock().ok().and_then(|mut slot| slot.take()) else {
             return;
         };
+        state.draining.store(true, Ordering::SeqCst);
         unsafe {
             CloseHandle(state.write_handle as Handle);
         }
